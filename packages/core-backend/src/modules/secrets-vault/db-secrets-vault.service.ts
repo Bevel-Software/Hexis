@@ -11,6 +11,7 @@ import {
   type ISecretsVaultService,
   type SecretSummary,
   type SecretConfigStatus,
+  type SecretKind,
   type PutStaticSecretInput,
   type PutSharedStaticSecretInput,
   type CreateOAuthSecretInput,
@@ -29,6 +30,16 @@ const MAX_VALUE_LEN = 100_000;
 const REFRESH_SKEW_MS = 60_000;
 /** Upper bound on a token-endpoint round-trip, so a hung provider can't block callers. */
 const TOKEN_REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * How a row is stored, or `null` when there is no row — the column is a plain
+ * string, and anything that is not `oauth` is a stored value (`toSummary` reads
+ * it the same way).
+ */
+function kindOf(row: { kind: string } | undefined): SecretKind | null {
+  if (!row) return null;
+  return row.kind === 'oauth' ? 'oauth' : 'static';
+}
 
 /** The token material stored (encrypted) for an `oauth` secret. */
 interface OAuthTokenSet {
@@ -259,12 +270,17 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       .where(and(inArray(secrets.key, keys), or(isNull(secrets.userId), eq(secrets.userId, userId))));
     return keys.map((key) => {
       const userRow = rows.find((r) => r.key === key && r.userId === userId);
+      const adminRow = rows.find((r) => r.key === key && r.userId === null);
       // Decrypt+parse the oauth row's token set once, then derive both fields from it.
       const tokens = userRow?.kind === 'oauth' ? this.readTokensSafe(userRow.valueEncrypted) : undefined;
       return {
         key,
-        adminConfigured: rows.some((r) => r.key === key && r.userId === null),
+        adminConfigured: !!adminRow,
         userConfigured: !!userRow,
+        // How each row is stored, so a caller can tell a row that backs the kind
+        // the manual NOW declares from one left behind by an earlier edit.
+        adminKind: kindOf(adminRow),
+        userKind: kindOf(userRow),
         // Only meaningful for an oauth row: has the caller completed sign-in?
         userAuthorized: userRow?.kind === 'oauth' ? Boolean(tokens?.access_token) : undefined,
         // Only meaningful for an oauth row: the scopes the caller's token was granted,

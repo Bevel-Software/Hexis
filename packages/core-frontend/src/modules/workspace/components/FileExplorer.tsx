@@ -63,6 +63,7 @@ import { cn } from '../../../lib/utils';
 import { Banner, MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
 import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
+import { AdminContext } from '../../admin/state/admin.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { offersManageAccess } from '../../access/manage-access-affordance';
 import { useAppRegistry } from '../../../core/registry';
@@ -74,7 +75,13 @@ import {
   type MoveAccessChange,
   type TreeConfirmRequest,
 } from './TreeActionConfirm';
-import { ACCESS_LOOKUP_TIMEOUT_MS, accessChangeOf, moveWarnings } from '../utils/treeConfirm';
+import {
+  ACCESS_LOOKUP_TIMEOUT_MS,
+  accessChangeOf,
+  moveWarnings,
+  platformFileDragRefusal,
+  platformFileMoveRefusal,
+} from '../utils/treeConfirm';
 import { UnreadableCreateDialog } from './UnreadableCreateConfirm';
 import {
   UnreadableCreateContext,
@@ -391,6 +398,7 @@ function ContextMenu({
   onCreateFile,
   onCreateFolder,
   onRename,
+  renameRefusal = null,
   onDownload,
   onWithdraw,
   returnFocusTo,
@@ -414,6 +422,12 @@ function ContextMenu({
   onCreateFile?: () => void;
   onCreateFolder?: () => void;
   onRename?: () => void;
+  /**
+   * Why Rename is not on offer for this row — a platform file stays in its
+   * folder, and a rename is a move. The item is still drawn and still
+   * reachable: an affordance that vanishes teaches nobody why.
+   */
+  renameRefusal?: string | null;
   onDownload?: () => void;
   /**
    * Take this suggestion back. Supplied ONLY by a proposed row whose change
@@ -649,7 +663,19 @@ function ContextMenu({
         </MenuItem>
       )}
       {!isRoot && onRename && (
-        <MenuItem role="menuitem" onClick={() => { onRename(); onClose(); }}>
+        <MenuItem
+          role="menuitem"
+          // Same shape as a denied Download: `aria-disabled`, so the reason
+          // stays reachable by mouse AND keyboard, with activation refused
+          // here rather than by taking the item out of the tab order.
+          aria-disabled={renameRefusal ? true : undefined}
+          title={renameRefusal ?? undefined}
+          onClick={() => {
+            if (renameRefusal) return;
+            onRename();
+            onClose();
+          }}
+        >
           <span className="flex items-center gap-2"><Pencil size={14} />Rename</span>
         </MenuItem>
       )}
@@ -718,6 +744,16 @@ function InlineInput({
 
 // ── Rename Input ──
 
+/**
+ * `onSubmit` answers with the refusal to show, or null once the rename
+ * landed. A refused rename KEEPS THE BOX OPEN with the sentence under it —
+ * the name the user typed is still there to fix, which is the whole point of
+ * being told "A file named Notes.md already exists in Sales." The box used to
+ * close first and report through `alert()`, which was the only way to avoid
+ * the create flow's popup loop (the alert blurs the still-mounted input,
+ * whose onBlur re-submits); an inline sentence steals no focus, so the loop
+ * cannot start.
+ */
 function RenameInput({
   currentName,
   isFile,
@@ -726,17 +762,34 @@ function RenameInput({
 }: {
   currentName: string;
   isFile: boolean;
-  onSubmit: (value: string) => void;
+  onSubmit: (value: string) => Promise<string | null>;
   onCancel: () => void;
 }) {
   const [value, setValue] = useState(currentName);
+  // The server's answer to the last name submitted. Cleared on every edit, so
+  // a name that has been changed since is submitted again rather than read as
+  // still-refused.
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const trimmed = value.trim();
-  const error = trimmed.length === 0 ? null : validateFilename(trimmed);
-  const valid = trimmed.length > 0 && error === null;
+  const nameError = trimmed.length === 0 ? null : validateFilename(trimmed);
+  const error = nameError ?? refusal;
+  const valid = trimmed.length > 0 && nameError === null;
 
   const submit = () => {
-    if (valid && trimmed !== currentName) onSubmit(trimmed);
-    else onCancel();
+    if (submitting) return;
+    if (!valid || trimmed === currentName) { onCancel(); return; }
+    setSubmitting(true);
+    void onSubmit(trimmed)
+      // `onSubmit` answers rather than throws; a rejection anyway must still
+      // free the box, or it would be stuck refusing to submit again.
+      .catch((err: unknown) => (err instanceof Error ? err.message : String(err)))
+      .then((answer) => {
+        setSubmitting(false);
+        // On success the row unmounts this input; only a refusal has anywhere
+        // to land.
+        setRefusal(answer);
+      });
   };
 
   return (
@@ -747,12 +800,24 @@ function RenameInput({
         value={value}
         onClick={(e) => e.stopPropagation()}
         onMouseDown={(e) => e.stopPropagation()}
-        onChange={(e) => setValue(e.target.value)}
+        // Frozen while the rename is in flight: an edit made in that window
+        // would be discarded by the row unmounting on success, and a refusal
+        // coming back would land under a name it was never about. `readOnly`
+        // rather than `disabled` so the box keeps focus and the caret.
+        readOnly={submitting}
+        onChange={(e) => {
+          if (submitting) return;
+          setValue(e.target.value);
+          setRefusal(null);
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter') submit();
           if (e.key === 'Escape') onCancel();
         }}
-        onBlur={submit}
+        // A name the server has already refused is not sent again on the way
+        // out: clicking away from a refusal closes the box, it does not retry
+        // a rename that cannot land.
+        onBlur={() => { if (refusal !== null) onCancel(); else submit(); }}
         onFocus={(e) => {
           if (isFile) {
             // Select name without extension for files
@@ -766,8 +831,52 @@ function RenameInput({
         title={error ?? undefined}
         aria-invalid={error ? true : undefined}
       />
-      {error && <div className="mt-0.5 px-1 text-meta text-danger">{error}</div>}
+      {error && (
+        <div role="alert" data-testid="rename-error" className="mt-0.5 px-1 text-meta text-danger">
+          {error}
+        </div>
+      )}
     </div>
+  );
+}
+
+// ── Row Notice ──
+
+/**
+ * One row's own bad news — a refused download, a refused drop — drawn under
+ * the row at the row's indent, with a Dismiss. Never an `alert()`: a modal
+ * popup stops the whole app to say something the tree can say in place, and
+ * (the create flow learned this the hard way) it steals focus from whatever
+ * input is still mounted.
+ */
+function RowNotice({
+  message,
+  testId,
+  dismissLabel,
+  paddingLeft,
+  onDismiss,
+}: {
+  message: string;
+  testId: string;
+  dismissLabel: string;
+  paddingLeft: number;
+  onDismiss: () => void;
+}) {
+  return (
+    <Banner
+      role="alert"
+      tone="danger"
+      data-testid={testId}
+      className="items-center gap-1 rounded-none px-2 py-1 text-xs"
+      style={{ paddingLeft }}
+    >
+      <span className="flex items-start gap-1">
+        <span className="flex-1">{message}</span>
+        <IconButton size={18} tone="danger" title="Dismiss" aria-label={dismissLabel} onClick={onDismiss}>
+          <X size={12} />
+        </IconButton>
+      </span>
+    </Banner>
   );
 }
 
@@ -814,8 +923,23 @@ export function FileTreeNode({
    */
   absent?: boolean;
 }) {
-  const { createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, pendingUploads } = useWorkspace();
+  const { createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, kbDirName, pendingUploads } = useWorkspace();
   const nav = useTreeNav();
+  /**
+   * Why this row cannot be renamed, or null when it can. A platform file is
+   * refused here with the sentence the server refuses with — the tree says it
+   * without a round trip, and says the same thing.
+   */
+  const platformRefusal = platformFileMoveRefusal(entry.relativePath, kbDirName);
+  /**
+   * Why it cannot be DRAGGED — the same, minus an admin's one repair (see
+   * `platformFileDragRefusal`). Read through the context rather than
+   * `useAdmin()` so a tree rendered without an `AdminProvider` — a host app's,
+   * a test's — still draws: no provider is simply nobody's admin, which is the
+   * refusal this row had before the exception existed.
+   */
+  const isAdmin = useContext(AdminContext)?.isAdmin ?? false;
+  const dragRefusal = platformFileDragRefusal(entry.relativePath, kbDirName, isAdmin);
   const confirm = useTreeConfirm();
   // Which tree this row belongs to, so an upload's banners land here and not
   // in the other tree on the same page.
@@ -835,6 +959,14 @@ export function FileTreeNode({
    * something the row itself can say.
    */
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  /**
+   * A refused drop, said in place under the row it was dropped on — the same
+   * treatment a refused download gets, and for the same reason. It used to be
+   * an `alert()`, which stops the app to report something the tree can say;
+   * the sentence the server sends ("A file named Notes.md already exists in
+   * Sales.") is the whole message, so it is shown verbatim.
+   */
+  const [moveError, setMoveError] = useState<string | null>(null);
   /**
    * Which download the notice is allowed to speak for. The menu closes on
    * click but the ROW does not, so a second Download can be started (reopen,
@@ -995,36 +1127,53 @@ export function FileTreeNode({
   // so the failure is attached to the file it is about — the sidebar shows
   // many rows and a banner at the top would name one of them in prose.
   const downloadNotice = downloadError && (
-    <Banner
-      role="alert"
-      tone="danger"
-      data-testid="tree-download-error"
-      className="items-center gap-1 rounded-none px-2 py-1 text-xs"
-      style={{ paddingLeft }}
-    >
-      <span className="flex items-start gap-1">
-        <span className="flex-1">{downloadError}</span>
-        <IconButton
-          size={18}
-          tone="danger"
-          title="Dismiss"
-          aria-label="Dismiss download error"
-          onClick={() => setDownloadError(null)}
-        >
-          <X size={12} />
-        </IconButton>
-      </span>
-    </Banner>
+    <RowNotice
+      message={downloadError}
+      testId="tree-download-error"
+      dismissLabel="Dismiss download error"
+      paddingLeft={paddingLeft}
+      onDismiss={() => setDownloadError(null)}
+    />
   );
+  const moveNotice = moveError && (
+    <RowNotice
+      message={moveError}
+      testId="tree-move-error"
+      dismissLabel="Dismiss move error"
+      paddingLeft={paddingLeft}
+      onDismiss={() => setMoveError(null)}
+    />
+  );
+
+  /**
+   * The rename box's submit: move this entry to `newName` beside itself.
+   * Answers with the sentence to show IN the box — "A file named Notes.md
+   * already exists in Sales." — or null once the rename landed, which is the
+   * only case that closes the box. A refused rename leaves the name the user
+   * typed on screen to fix; it is never reported through `alert()`, which
+   * would say it somewhere the user has to dismiss and, by stealing focus
+   * from the still-mounted input, re-submit the same doomed rename.
+   */
+  const renameTo = useCallback(async (newName: string): Promise<string | null> => {
+    const parentDir = entry.relativePath.substring(0, entry.relativePath.lastIndexOf('/'));
+    const newPath = parentDir ? `${parentDir}/${newName}` : newName;
+    try {
+      await moveEntry(entry.relativePath, newPath);
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+    setRenaming(false);
+    return null;
+  }, [entry.relativePath, moveEntry]);
 
   // ── Drag source (internal reorder) ──
   const handleDragStart = useCallback((e: React.DragEvent) => {
-    if (isRoot || reserved) { e.preventDefault(); return; }
+    if (isRoot || reserved || dragRefusal) { e.preventDefault(); return; }
     e.dataTransfer.setData(DRAG_MIME, entry.relativePath);
     e.dataTransfer.setData(DRAG_KIND_MIME, entry.type);
     e.dataTransfer.effectAllowed = 'move';
     setDragging(true);
-  }, [entry.relativePath, entry.type, isRoot, reserved]);
+  }, [entry.relativePath, entry.type, isRoot, reserved, dragRefusal]);
 
   const handleDragEnd = useCallback(() => {
     setDragging(false);
@@ -1040,9 +1189,23 @@ export function FileTreeNode({
       // Internal move (reorder)
       const sourcePath = e.dataTransfer.getData(DRAG_MIME);
       if (sourcePath) {
-        const targetDir = entry.type === 'directory'
+        const droppedOn = entry.type === 'directory'
           ? (isRoot ? '' : entry.relativePath)
           : '';
+        // "The top level" is the top of the tree the dragged row lives in —
+        // the KB clone's own root — not the workspace folder the clone sits
+        // in. The explorer draws the clone's roots (Knowledge, Data, …) and
+        // its loose files, never a row for the clone itself, so a drop that
+        // resolves to no folder is how the clone's root is reached at all:
+        // it is where an admin drops a misplaced `roles.yaml` to put it back.
+        // Left bare, that move would send the file to `roles.yaml` BESIDE the
+        // clone — out of the repository, where nothing reads it and git never
+        // sees it again.
+        const kbPrefix = kbDirName ? `${kbDirName}/` : null;
+        const targetDir =
+          droppedOn === '' && kbPrefix !== null && sourcePath.startsWith(kbPrefix)
+            ? kbDirName!
+            : droppedOn;
         const name = sourcePath.split('/').pop()!;
         const newPath = targetDir ? `${targetDir}/${name}` : name;
         // Skip no-op or nesting a directory inside itself
@@ -1053,6 +1216,15 @@ export function FileTreeNode({
         ) {
           return;
         }
+        // The dragged row is a platform file: refused here, with the server's
+        // sentence, and nothing is sent. The row itself is not draggable, so
+        // this catches a drag begun before the tree knew the path's shape
+        // (a drop is the last moment the answer is still cheap).
+        const refusal = platformFileDragRefusal(sourcePath, kbDirName, isAdmin);
+        if (refusal) {
+          alert(refusal);
+          return;
+        }
         // Every cross-folder move is an access change, so it asks first;
         // nothing is sent until Confirm.
         confirm({
@@ -1060,18 +1232,23 @@ export function FileTreeNode({
           sourcePath,
           sourceIsDirectory: e.dataTransfer.getData(DRAG_KIND_MIME) === 'directory',
           targetDir,
-          destinationLabel: targetDir ? entry.name : 'the top level',
+          // Named after the row that was dropped on, so a drop that resolved
+          // to the clone's root still reads as "the top level".
+          destinationLabel: droppedOn ? entry.name : 'the top level',
           returnFocusTo: () => rowForPath(sourcePath),
           // The row it was dropped on stays put; the source row moves away.
           focusAfterRun: () => rowForPath(entry.relativePath),
           run: async () => {
             try {
+              setMoveError(null);
               await moveEntry(sourcePath, newPath);
             } catch (err) {
-              // Same surfacing as rename — a refused move (a folder the caller
-              // may not write) must not read as one that silently reverted.
+              // Same surfacing as rename — a refused move (a name already
+              // taken here, a folder the caller may not write) must not read
+              // as one that silently reverted. Both entries stay where they
+              // are: the server moved nothing.
               const msg = err instanceof Error ? err.message : String(err);
-              alert(`Failed to move ${name}:\n${msg}`);
+              setMoveError(msg);
             }
           },
         });
@@ -1093,7 +1270,7 @@ export function FileTreeNode({
       if (files.length === 0) return;
       uploadAfterGate({ kind: 'files', files }, targetDir);
     },
-    [entry, isRoot, uploadAfterGate, moveEntry, confirm],
+    [entry, isRoot, uploadAfterGate, moveEntry, confirm, kbDirName, isAdmin],
   );
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -1192,7 +1369,7 @@ export function FileTreeNode({
             dragOver && 'bg-hover text-ink ring-1 ring-accent/40',
           )}
           style={{ paddingLeft, opacity: dragging ? 0.5 : isPending ? 0.6 : 1 }}
-          draggable={!isRoot && !reserved && !renaming && !isPending}
+          draggable={!isRoot && !reserved && !renaming && !isPending && !dragRefusal}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
           onDrop={handleDrop}
@@ -1213,22 +1390,7 @@ export function FileTreeNode({
               <RenameInput
                 currentName={entry.name}
                 isFile={false}
-                onSubmit={async (newName) => {
-                  const parentDir = entry.relativePath.substring(0, entry.relativePath.lastIndexOf('/'));
-                  const newPath = parentDir ? `${parentDir}/${newName}` : newName;
-                  // Close the input BEFORE the fallible move — see the create
-                  // flow: on error the alert() blurs the still-mounted input,
-                  // whose onBlur re-fires this onSubmit, looping the popup.
-                  setRenaming(false);
-                  try {
-                    await moveEntry(entry.relativePath, newPath);
-                  } catch (err) {
-                    // Same surfacing as the create flow above — a silent failure
-                    // reads as the rename being accepted and then reverting.
-                    const msg = err instanceof Error ? err.message : String(err);
-                    alert(`Failed to rename ${entry.name}:\n${msg}`);
-                  }
-                }}
+                onSubmit={renameTo}
                 onCancel={() => setRenaming(false)}
               />
             ) : (
@@ -1241,6 +1403,7 @@ export function FileTreeNode({
           {isRoot && pickerButtons}
         </div>
         {downloadNotice}
+        {moveNotice}
         {isExpanded && (
           <div>
             {creating && (
@@ -1323,6 +1486,11 @@ export function FileTreeNode({
             // either, but that needs no gate: only the Knowledge explorer
             // offers pinning, and its roots are not reserved.)
             onRename={reserved ? undefined : () => setRenaming(true)}
+            // A folder NAMED like a platform file (`access.md/`) meets the same
+            // rule: the server reads the path, not the kind, and refuses to
+            // move it. Without this the row refused the drag and offered the
+            // rename, which opened an editor only to fail on the round trip.
+            renameRefusal={platformRefusal}
             deletable={!reserved}
             onDownload={absent ? undefined : handleDownload}
             extraItems={nav.menuItems?.(entry)}
@@ -1437,7 +1605,7 @@ export function FileTreeNode({
           isPending && 'cursor-progress',
         )}
         style={{ paddingLeft, opacity: dragging ? 0.5 : isPending ? 0.6 : 1 }}
-        draggable={!renaming && !isPending}
+        draggable={!renaming && !isPending && !dragRefusal}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
         onClick={() => { if (!renaming && !isPending) nav.open(entry.relativePath); }}
@@ -1458,22 +1626,7 @@ export function FileTreeNode({
           <RenameInput
             currentName={entry.name}
             isFile={true}
-            onSubmit={async (newName) => {
-              const parentDir = entry.relativePath.substring(0, entry.relativePath.lastIndexOf('/'));
-              const newPath = parentDir ? `${parentDir}/${newName}` : newName;
-              // Close the input BEFORE the fallible move — see the create
-              // flow: on error the alert() blurs the still-mounted input,
-              // whose onBlur re-fires this onSubmit, looping the popup.
-              setRenaming(false);
-              try {
-                await moveEntry(entry.relativePath, newPath);
-              } catch (err) {
-                // Same surfacing as the create flow — a silent failure reads
-                // as the rename being accepted and then reverting.
-                const msg = err instanceof Error ? err.message : String(err);
-                alert(`Failed to rename ${entry.name}:\n${msg}`);
-              }
-            }}
+            onSubmit={renameTo}
             onCancel={() => setRenaming(false)}
           />
         ) : (
@@ -1490,6 +1643,7 @@ export function FileTreeNode({
         )}
       </button>
       {downloadNotice}
+      {moveNotice}
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}
@@ -1498,6 +1652,7 @@ export function FileTreeNode({
           isRoot={false}
           onClose={() => setContextMenu(null)}
           onRename={() => setRenaming(true)}
+          renameRefusal={platformRefusal}
           onDownload={handleDownload}
           extraItems={nav.menuItems?.(entry)}
           returnFocusTo={rowRef}
@@ -1538,6 +1693,12 @@ export function TreeChrome({
 }) {
   const openChangeRequests = useOpenChangeRequests();
   const { workspaceId, kbDirName } = useWorkspace();
+  // The move dialog's denied-destination warning reads this: the one move a
+  // denied destination still takes is an admin's platform-file restore, and
+  // for anyone else the refusal it predicts is the right prediction. Read
+  // through the context so a tree drawn without an `AdminProvider` still
+  // draws — see `FileTreeNode`.
+  const isAdmin = useContext(AdminContext)?.isAdmin ?? false;
   /**
    * A clicked suggestion row opens the SHARED change-request dialog on the
    * request the path belongs to, AT that file — the row is a link to the
@@ -1845,7 +2006,7 @@ export function TreeChrome({
           request={confirmRequest}
           warnings={
             confirmRequest.kind === 'move'
-              ? moveWarnings({ ...confirmRequest, kbDirName, canWrite: destinationWritable })
+              ? moveWarnings({ ...confirmRequest, kbDirName, canWrite: destinationWritable, isAdmin })
               : []
           }
           accessChange={moveAccessChange}

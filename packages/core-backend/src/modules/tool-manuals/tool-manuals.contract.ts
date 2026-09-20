@@ -175,6 +175,21 @@ export interface ToolManualDescriptorBase {
   path: string;
   type: ToolManualType;
   /**
+   * A digest of the SOURCE this descriptor was parsed from — the `.tool`
+   * file's bytes, or the `mcp.json` (plus its `plugin.json`) the server entry
+   * came out of. Stamped by the scan, before any network decoration touches
+   * the descriptor, so it moves when and only when the author's file moved.
+   *
+   * It exists for {@link IToolManualService.catalogFingerprints}: a manual can
+   * change everything about what it CALLS — its `url`, its `headers`, an
+   * inline manual's embedded tool list — while its name, path, type and
+   * description stay exactly as they were, and a fingerprint built from those
+   * alone would report no change to a client whose registered copy is now
+   * wrong. INTERNAL: never on {@link ToolManualSummary}, which is serialized
+   * to the browser.
+   */
+  sourceRevision?: string;
+  /**
    * Optional one-line prose from the frontmatter, for humans browsing the
    * catalog. PURELY COSMETIC — a malformed value is ignored rather than
    * skipping the file (see `normalizeToolManual`), because a bad sentence must
@@ -263,6 +278,39 @@ export interface ToolManualSummary {
   // The server reads probe config through `IToolManualService.probeTargetFor`.
 }
 
+/**
+ * A `.tool` file the scan REFUSED — reported instead of silently dropped.
+ *
+ * One unparseable manual is a finding about that file, never an outage for the
+ * catalog: every other manual is listed and callable, and the refused one comes
+ * back here so the listing can say which file and why. Nothing is cached about
+ * it beyond the scan's own TTL, so fixing (or deleting) the file restores it on
+ * the next listing — no reconnect, no restart.
+ *
+ * `reason` is the validation message with its LOCATION where the parser gave
+ * one (`line N, column M` for a YAML fault, the field name for a schema one),
+ * scrubbed of anything that could be a credential — see `describeManualFault`.
+ * A `.tool` is knowledge-base content an author may have pasted a literal token
+ * into, and this string reaches an agent transcript, a browser and a log.
+ */
+export interface InvalidToolManual {
+  /** KB-relative path of the refused file, spelled as the catalog spells a manual's `path`. */
+  path: string;
+  /** Why it was refused: the validation message + location, with no credential values. */
+  reason: string;
+}
+
+/**
+ * What one caller may see of the catalog: the manuals that parsed, and the
+ * files the scan refused. Produced together by
+ * {@link IToolManualService.listAccessibleCatalog} — see there for why the two
+ * halves are never fetched apart.
+ */
+export interface AccessibleCatalog {
+  tools: ToolManualSummary[];
+  invalid: InvalidToolManual[];
+}
+
 /** One thing an `inline` manual's embedded tool list says the assistant can do. */
 export interface ToolCapability {
   name: string;
@@ -290,6 +338,25 @@ export interface IToolManualService {
   /** The `.tool` manuals the user can read, as summaries. */
   listAccessible(userEmail: string): Promise<ToolManualSummary[]>;
   /**
+   * BOTH halves of what this caller may see — the manuals that parsed and the
+   * files the scan refused — from ONE scan and ONE access pass.
+   *
+   * One method rather than a `listAccessible` + `listInvalid` pair, because the
+   * two halves are one answer and asking for them separately is a way to get it
+   * wrong twice: on a cold cache two calls are two disk walks and two MCP
+   * discovery passes, and if a `.tool` is written between them the response
+   * describes two different snapshots — a tool that is in neither half, or in
+   * both. Every surface that reports refusals wants both, so both is what there
+   * is to ask for.
+   *
+   * `invalid` is access-filtered for the same reason the listing is: a path is
+   * a fact about the knowledge base, and a caller who may not read the file may
+   * not learn it exists. The refused file's own frontmatter verbs are
+   * unparseable by definition, so the verdict comes from its folder's
+   * `access.md` chain — default-deny, as everywhere else.
+   */
+  listAccessibleCatalog(userEmail: string): Promise<AccessibleCatalog>;
+  /**
    * One readable `.tool` by slug, with its description + capabilities, for the
    * browser tool page. `null` when no such slug exists OR the caller can't read
    * it — the two are deliberately indistinguishable (fail-closed: a 404 must not
@@ -297,6 +364,19 @@ export interface IToolManualService {
    */
   getDetail(userEmail: string, slug: string): Promise<ToolManualDetail | null>;
 
+  /**
+   * One line per manual the caller can read, each carrying the manual's
+   * identity AND a digest of the file it was parsed from — the input the
+   * catalog fingerprint (`GET /api/agent/catalog-revision`) is built out of.
+   *
+   * Its own accessor rather than a projection of {@link listAccessible},
+   * because the two answer different questions. A summary is what a person
+   * browsing the catalog sees; this is whether a registered copy of the
+   * catalog is still correct, which a change to a manual's `url` or an inline
+   * manual's embedded tools breaks without touching anything a summary shows.
+   * Opaque to callers: only equality is ever asked of these lines.
+   */
+  catalogFingerprints(userEmail: string): Promise<string[]>;
   /**
    * Every manual in the catalog, UNFILTERED by access — the mirror of
    * `skillService.listSkills(undefined)`. For caller-INDEPENDENT counting only

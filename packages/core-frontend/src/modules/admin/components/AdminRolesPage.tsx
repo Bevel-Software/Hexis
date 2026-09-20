@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { Loader2, UsersRound, X } from 'lucide-react';
+import { Loader2, Lock, UsersRound, X } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { useLatestRef } from '../../../shared/components/useLatestRef';
 import { useAdmin } from '../state/admin.context';
@@ -26,6 +26,15 @@ interface SelfRemoveTarget {
   canonical: string;
   email: string;
 }
+
+/**
+ * The note beside a fixed Admin member, and the refusal shown when someone
+ * tries to add that address as a regular member. Word-for-word the sentence
+ * the backend's 422 leads with (`roles-admin.service.ts`), so the two
+ * surfaces say the same thing.
+ */
+const FIXED_ADMIN_NOTE =
+  'Deployment admin, set in the server configuration; cannot be removed here';
 
 /**
  * App roles (formerly Roles & Members), routed standalone at `/roles-and-members` (below the
@@ -174,12 +183,28 @@ function RoleCard({
   // Assign-group input (roles with a group-assignable capability only).
   const [groupName, setGroupName] = useState('');
 
+  // Ties the "why there is no X" note to the fixed chips it explains.
+  const fixedNoteId = useId();
+
+  // Members the SERVER CONFIGURATION fixes (deployment admins on Admin). They
+  // get their own chips — badged, no remove control — and are dropped from the
+  // editable list below so an address named in both `roles.yaml` and
+  // `ADMIN_EMAIL` renders once.
+  const fixedMembers = role.fixedMembers ?? [];
+  const fixedLower = new Set(fixedMembers.map((m) => m.toLowerCase()));
+
   // Members shown in the UI = server members minus any optimistically-removed,
   // plus any optimistically-added not yet reflected in the server roster.
-  const serverMembers = role.members.filter((m) => !pendingRemovals.has(m.toLowerCase()));
+  const serverMembers = role.members.filter(
+    (m) => !pendingRemovals.has(m.toLowerCase()) && !fixedLower.has(m.toLowerCase()),
+  );
   const serverLower = new Set(role.members.map((m) => m.toLowerCase()));
   const extraAdds = pendingAdds.filter((e) => !serverLower.has(e.toLowerCase()));
   const visibleMembers = [...serverMembers, ...extraAdds];
+  // The Admin ≥1-direct-email invariant counts what is in the FILE, so the
+  // fixed members hidden from `visibleMembers` still count towards it — but a
+  // fixed member the file does NOT name contributes nothing.
+  const hiddenFixedCount = role.members.filter((m) => fixedLower.has(m.toLowerCase())).length;
 
   // Self-heal the optimistic set against the authoritative roster: once the
   // server confirms (member gone) OR a removal was a no-op (member never there),
@@ -238,6 +263,14 @@ function RoleCard({
       return;
     }
     const lower = email.toLowerCase();
+    // Already a fixed member: the backend refuses this with the same sentence
+    // (422 `fixed-deployment-admin`). Mirrored here so the refusal is instant
+    // and no optimistic chip flashes for a write that can never land.
+    if (fixedLower.has(lower)) {
+      setError(`${FIXED_ADMIN_NOTE}. ${email} is already an Admin.`);
+      setMemberEmail('');
+      return;
+    }
     // Already a member (or already pending) — clear the input and do nothing.
     if (
       role.members.some((m) => m.toLowerCase() === lower) ||
@@ -382,13 +415,32 @@ function RoleCard({
         <p className="mt-1 text-xs text-ink-muted">{role.capability.description}</p>
       )}
 
-      {/* Member chips — optimistically hides members pending removal. */}
+      {/* Member chips — fixed members first (no remove control), then the
+          editable ones, optimistically hiding any pending removal. */}
       <div className="mt-3 flex flex-wrap gap-2">
-        {visibleMembers.length === 0 ? (
+        {fixedMembers.map((email) => (
+          <span
+            key={`fixed:${email}`}
+            // No remove control, deliberately: the server configuration owns
+            // this membership. The note below the row says so, and
+            // `aria-describedby` ties it to every fixed chip.
+            aria-describedby={fixedNoteId}
+            className="inline-flex max-w-full items-center gap-1.5 pl-1 pr-2 py-1 bg-sunken border border-line rounded-full text-xs text-ink"
+            title={FIXED_ADMIN_NOTE}
+          >
+            <span className="w-5 h-5 shrink-0 rounded-full bg-ink-muted text-white text-[9px] font-semibold flex items-center justify-center">
+              {initials(email)}
+            </span>
+            <span className="min-w-0 truncate max-w-[14rem]">{email}</span>
+            <Lock size={11} className="shrink-0 text-ink-faint" aria-hidden="true" />
+          </span>
+        ))}
+        {visibleMembers.length === 0 && fixedMembers.length === 0 ? (
           <span className="text-xs text-ink-faint">No members.</span>
         ) : (
           visibleMembers.map((email) => {
-            const isLastAdminMember = role.isAdmin && visibleMembers.length === 1;
+            const isLastAdminMember =
+              role.isAdmin && visibleMembers.length + hiddenFixedCount === 1;
             return (
               <span
                 key={email}
@@ -418,14 +470,22 @@ function RoleCard({
         )}
       </div>
 
+      {/* Why those chips have no X. Rendered once for the row, not per chip. */}
+      {fixedMembers.length > 0 && (
+        <p id={fixedNoteId} className="mt-1.5 text-xs text-ink-muted">
+          {FIXED_ADMIN_NOTE}.
+        </p>
+      )}
+
       {/* Add member — with people autocomplete (Manage Access suggest source).
           Members already on the role, optimistic ones included, are excluded
-          from the suggestions: offering them would be offering a no-op. */}
+          from the suggestions: offering them would be offering a no-op — and
+          a fixed member would be offering a refusal. */}
       <AddMemberInput
         value={memberEmail}
         onValueChange={setMemberEmail}
         onSubmit={submitAddMember}
-        exclude={[...role.members, ...pendingAdds]}
+        exclude={[...role.members, ...fixedMembers, ...pendingAdds]}
         inputLabel="Member email"
         busy={busy}
         className="mt-3"
