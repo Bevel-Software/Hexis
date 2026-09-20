@@ -5,6 +5,7 @@ import {
   SIDEBAR_DRAWER_WIDTH,
   SidebarFrame,
 } from '../components/SidebarFrame';
+import { SIDEBAR_HEADER_TESTID } from '../../../shared/theme/header';
 import {
   SIDEBAR_DEFAULT_WIDTH,
   setSidebarCollapsed,
@@ -72,11 +73,50 @@ describe('SidebarFrame: slots', () => {
     const dock = screen.getByText('dock');
     expect(aside).toContainElement(pill);
     expect(aside).toContainElement(dock);
-    // One column: the three slots are siblings, not each in a wrapper of its own.
-    expect(pill.parentElement).toBe(row.parentElement);
-    expect(row.parentElement).toBe(dock.parentElement);
+    // One column, three siblings in it: the header band, the contents, the
+    // footer group. Each end slot has exactly one wrapper and for its own
+    // reason — the header's is the shared band, the row that has to be the
+    // same height as the page's title bar beside it; the footer's is the one
+    // slot holding more than one row, so something has to space them. The
+    // contents sit between them with no wrapper at all, and all three line up
+    // because they are siblings in the same column.
+    const band = screen.getByTestId(SIDEBAR_HEADER_TESTID);
+    expect(band).toContainElement(pill);
+    expect(band.parentElement).toBe(row.parentElement);
+    const group = dock.parentElement as HTMLElement;
+    expect(group).toHaveAttribute('data-sidebar-footer');
+    expect(group.parentElement).toBe(row.parentElement);
     expect(pill.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(row.compareDocumentPosition(dock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('mounts no footer group for a surface that passes no footer', () => {
+    const { container } = render(
+      <SidebarFrame label="Settings">
+        <button type="button">General</button>
+      </SidebarFrame>,
+    );
+    expect(container.querySelector('[data-sidebar-footer]')).toBeNull();
+  });
+
+  /**
+   * Both footer rows decide for themselves whether they have anything to say,
+   * and on the ordinary day neither does. The group cannot learn that from
+   * React — an element that renders null is still an element — so it is read
+   * off the DOM, and `empty:hidden` is what turns "no children" into no rule
+   * and no space. Without it every sidebar in the app carries a stray
+   * hairline and 16px of dead air at the bottom.
+   */
+  it('hides the footer group, rule and all, once its rows render nothing', () => {
+    const Nothing = () => null;
+    const { container } = render(
+      <SidebarFrame label="Library plugins" footer={<Nothing />}>
+        <button type="button">Engineering</button>
+      </SidebarFrame>,
+    );
+    const group = container.querySelector('[data-sidebar-footer]') as HTMLElement;
+    expect(group).toBeEmptyDOMElement();
+    expect(group).toHaveClass('empty:hidden');
   });
 });
 
