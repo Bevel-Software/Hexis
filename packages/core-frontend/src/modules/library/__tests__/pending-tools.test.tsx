@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import {
   WorkspaceContext,
@@ -218,18 +218,41 @@ describe('a tool proposed on an open change request', () => {
   });
 
   /**
-   * The card says which FILE the request adds, because that is what an
-   * approver is about to decide on — and a proposed `mcp.json` server and a
-   * proposed `.tool` manual are two different decisions.
+   * A proposal spends its one badge on `In review` and keeps its name legible.
+   *
+   * The card sits in a fixed 260px grid track beside a monogram, and every
+   * badge is `shrink-0` — so drawing the flavour badge as well left the
+   * truncating name 25px of the 141px `prometheus_metrics` needs, and the card
+   * read `p…`. The flavour answers "which file do I edit", a question about a
+   * released tool; the reviewer clicking through is shown that file and its
+   * diff by the change request itself.
    */
-  it('says how the proposed tool is declared', async () => {
+  it('keeps a long proposed tool’s name legible rather than spending the row on badges', async () => {
     dataMock.useLibraryData.mockReturnValue({
       ...emptyCatalog,
-      pendingTools: [pendingTool({ slug: 'tickets', name: 'tickets', path: 'Plugins/Ops/mcp.json', type: 'mcp' })],
+      pendingTools: [
+        pendingTool({
+          slug: 'prometheus_metrics',
+          name: 'prometheus_metrics',
+          path: 'Plugins/Ops/mcp.json',
+          type: 'mcp',
+        }),
+      ],
     });
     renderOps();
-    expect(await screen.findByTestId('library-card-integration-tickets')).toHaveTextContent(
-      'MCP server',
+
+    const card = await screen.findByTestId('library-card-integration-prometheus_metrics');
+    expect(card).toHaveTextContent('In review');
+    expect(card).not.toHaveTextContent('MCP server');
+    // The row's only flexible item is the name; one badge is what it fits.
+    // Badges are the round chips — the monogram beside them is a rounded
+    // square, and rigid in just the same way.
+    const title = within(card).getByText('prometheus_metrics').parentElement!;
+    expect([...title.children].filter((el) => el.className.includes('rounded-full'))).toHaveLength(1);
+    // Clipped or not, the whole name is one hover away.
+    expect(within(card).getByText('prometheus_metrics')).toHaveAttribute(
+      'title',
+      'prometheus_metrics',
     );
   });
 

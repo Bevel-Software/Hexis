@@ -30,6 +30,16 @@ function card(over: Partial<LibraryCardProps> = {}) {
   render(<LibraryCard {...props} />);
 }
 
+/**
+ * The badges in a card's title row — the round chips, which is what separates
+ * them from the monogram's rounded square sitting in the same row. Both are
+ * `shrink-0`, and how many of them share the row is exactly what decides how
+ * much width is left for the one item that can shrink: the name.
+ */
+function badgesIn(titleRow: Element): Element[] {
+  return [...titleRow.children].filter((el) => el.className.includes('rounded-full'));
+}
+
 describe('LibraryCard', () => {
   it('never labels its own kind', () => {
     card({ kind: 'skill' });
@@ -163,13 +173,67 @@ describe('LibraryCard', () => {
       pending: { authorName: 'Ali Raza', mine: false },
     });
     expect(screen.getByText('In review')).toBeInTheDocument();
-    expect(screen.getByText('MCP server')).toBeInTheDocument();
     expect(screen.getByText(/From Ali Raza: waiting on you/)).toBeInTheDocument();
     expect(screen.queryByText('Needs setup')).not.toBeInTheDocument();
     // Dashed: the card is an outline of a tool rather than one, and that reads
     // before any text does.
     expect(screen.getByTestId('library-card-integration-tickets').className).toContain(
       'border-dashed',
+    );
+  });
+
+  /**
+   * The title row of a tool card fits ONE badge, and this is the regression
+   * that proved it: a proposal drew the flavour badge and `In review` side by
+   * side, and since both are `shrink-0` beside a `shrink-0` monogram, the
+   * truncating name absorbed the whole deficit — `prometheus_metrics` rendered
+   * as `p…` in a 260px grid track.
+   *
+   * jsdom has no layout, so this cannot be asserted in pixels. The structural
+   * cause can be: how many things in that row refuse to shrink. That is the
+   * invariant worth holding, because it is the one that was broken.
+   */
+  it('spends only one badge on a proposed tool’s title row', () => {
+    card({
+      kind: 'integration',
+      flavor: 'utcp',
+      id: 'prometheus_metrics',
+      name: 'prometheus_metrics',
+      status: { state: 'ok', text: 'Connected' },
+      pending: { authorName: 'Ali Raza', mine: true },
+    });
+    // Badges are the round chips (`rounded-full`); the monogram beside them is
+    // a rounded SQUARE, and it is `shrink-0` too — so counting badges, not
+    // every rigid child, is what names the thing that overflowed.
+    expect(badgesIn(screen.getByText('prometheus_metrics').parentElement!)).toHaveLength(1);
+    // And it is the badge that says the tool is not here yet — the flavour
+    // names which file an owner edits, which is a question about a released
+    // tool; a reviewer is shown that file by the change request itself.
+    expect(screen.getByText('In review')).toBeInTheDocument();
+    expect(screen.queryByText('UTCP manual')).not.toBeInTheDocument();
+
+    // A RELEASED tool keeps its flavour badge — this is the proposal's
+    // arrangement, not a retreat from saying how a tool is declared.
+    cleanup();
+    card({
+      kind: 'integration',
+      flavor: 'utcp',
+      id: 'prometheus_metrics',
+      name: 'prometheus_metrics',
+      status: { state: 'ok', text: 'Connected' },
+    });
+    expect(screen.getByText('UTCP manual')).toBeInTheDocument();
+  });
+
+  /**
+   * A name the row had to clip is still readable on hover. Truncation is the
+   * intended outcome in a fixed grid track; an unreadable card is not.
+   */
+  it('carries the full name as a tooltip, however the row clips it', () => {
+    card({ id: 'prometheus_metrics', name: 'prometheus_metrics' });
+    expect(screen.getByText('prometheus_metrics')).toHaveAttribute(
+      'title',
+      'prometheus_metrics',
     );
   });
 

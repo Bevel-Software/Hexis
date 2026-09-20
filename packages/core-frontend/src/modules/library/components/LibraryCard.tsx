@@ -31,6 +31,12 @@ export type LibraryCardProps = LibraryCardCommonProps &
          * How the integration is declared: an `mcp.json` server or a `.tool`
          * UTCP manual. Two different files to edit and two different
          * capability sets, so the card says which one this is.
+         *
+         * Still REQUIRED on a proposal even though the badge is not drawn
+         * there (see the render): what a caller knows about the item should
+         * not depend on how the card happens to lay out this week, and an
+         * optional here is what shipped cards silently missing the badge in
+         * the first place.
          */
         flavor: 'mcp' | 'utcp';
         /**
@@ -170,8 +176,24 @@ export function LibraryCard({
             name IS the thing — and a monogram beside every skill would add a
             column of coloured squares that distinguish nothing. */}
         {kind === 'integration' && <ToolLogo slug={id} name={name} />}
-        <span className="truncate text-lede font-semibold text-ink">{name}</span>
-        {kind === 'integration' && flavor && (
+        {/* `title`, because this row's only flexible item is the name: the
+            monogram and every badge beside it are `shrink-0`, so all of a
+            narrow track's deficit lands here. Truncation is the intended
+            outcome; a truncation you cannot read at all is not, and the
+            tooltip is what keeps a clipped name recoverable. */}
+        <span className="truncate text-lede font-semibold text-ink" title={name}>
+          {name}
+        </span>
+        {/* How the integration is declared — but NOT on a proposal. The name
+            is the row's only flexible item, and a tool card already spends a
+            monogram plus this badge before reaching it; adding `In review`
+            beside them left an 18-character name 25px of the 141px it needed
+            and rendered it as `p…`. One badge is what this row fits, and on a
+            proposal the one worth keeping is the one that says the tool is
+            not here yet. Nothing is lost: the flavour answers "which file do I
+            edit", a question about a released tool, and a reviewer opening the
+            change request is shown that file and its diff outright. */}
+        {kind === 'integration' && flavor && !pending && (
           <Badge tone="outline" size="xs" className="shrink-0 uppercase">
             {flavor === 'mcp' ? 'MCP server' : 'UTCP manual'}
           </Badge>
