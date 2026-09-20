@@ -48,11 +48,32 @@ describe('toolStatus: stored vs working', () => {
     expect(s.hint).toMatch(/not verified/i);
   });
 
-  it('says Key saved when the probe could not reach a verdict', () => {
+  // `Key saved` and `Unverified` are not the same claim, and which one is true
+  // turns on whether anybody ASKED. With no verdict (above) nothing was
+  // attempted, so "a value is stored" is the whole of what is known. Here a
+  // probe ran and came back without an answer — the reader's question has been
+  // put to the provider and gone unanswered, and a row still saying "Key
+  // saved" would be reporting the storage rather than the attempt.
+  it('says Unverified — not Key saved — once a probe has run and reached no verdict', () => {
     const s = toolStatus(withKey(), { status: 'unverifiable', detail: 'Provider timed out.', checkedAt: new Date().toISOString() });
+    // Still green: the key is saved, nothing is broken, nobody has to act.
     expect(s.state).toBe('ok');
-    expect(s.text).toBe('Key saved');
+    expect(s.text).toBe('Unverified');
+    // And it carries WHY, which is the whole difference from the untested case.
     expect(s.hint).toBe('Provider timed out.');
+  });
+
+  // The commonest reason a probe reaches no verdict: the manual defines no
+  // health check, so there was never anything to call.
+  it('says Unverified with the reason when the manual defines no health check', () => {
+    const s = toolStatus(withKey(), {
+      status: 'unverifiable',
+      detail: "This tool doesn't offer a way to test its connection.",
+      checkedAt: new Date().toISOString(),
+    });
+    expect(s.state).toBe('ok');
+    expect(s.text).toBe('Unverified');
+    expect(s.hint).toBe("This tool doesn't offer a way to test its connection.");
   });
 
   it('earns Connected only from a passing probe, and shows when it was checked', () => {
