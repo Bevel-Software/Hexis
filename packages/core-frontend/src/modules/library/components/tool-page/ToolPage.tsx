@@ -20,6 +20,7 @@ import { PageActions } from '../PageActions';
 import { DeleteToolDialog } from './DeleteToolDialog';
 import { copyToClipboard } from '../../utils/clipboard';
 import { useLibraryToast } from '../../state/toast.context';
+import { NameWithBadges } from '../NameWithBadges';
 
 /**
  * One tool, as a page.
@@ -170,10 +171,36 @@ export function ToolPage({
             to hold a line with.) */}
         <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-4')}>
           <div className={HEADER_BAND_LEAD}>{backLink}</div>
-          <ToolLogo slug={tool.slug} name={tool.name} size="lg" className="flex-none" />
-          <h1 className="min-w-0 truncate text-display font-semibold text-ink" title={tool.name}>
-            {tool.name}
-          </h1>
+          {/* The mark and the title through `NameWithBadges`, so this page
+              states its name the way a card and a plugin row do: truncated
+              with an ellipsis, whole in the DOM, whole in `title`.
+
+              What it does NOT take is the floor, and the reason is the band.
+              A floor is only worth having where something can give the space
+              back, and the only thing that can is a badge taking a second
+              line. This header has no badges, and it could not wrap them if
+              it had: `HEADER_BAND` is one row tall, exactly as tall as the
+              sidebar's header row beside it, so a second line here hangs out
+              of the band rather than growing it. A floor granted against the
+              back link — which is not even inside this component — bought
+              nothing and cost the title its place on the band at every phone
+              width. `wrap={false}` says that out loud, so the day somebody
+              adds a badge the band clips instead of quietly growing.
+
+              `overflow-hidden` is the other half of a row that cannot wrap,
+              exactly as on the plugin page: with nowhere to go, anything
+              past the width goes across the way back unless it is clipped.
+              Clipped, the title gives way first and the way back stays
+              clickable. */}
+          <NameWithBadges
+            as="h1"
+            wrap={false}
+            className="min-w-0 flex-1 overflow-hidden"
+            gap="gap-4"
+            leading={<ToolLogo slug={tool.slug} name={tool.name} size="lg" />}
+            name={tool.name}
+            nameClassName="text-display font-semibold text-ink"
+          />
         </div>
         {page.detail?.description && (
           <p className="mt-1.5 max-w-[56ch] text-lede text-ink-muted">

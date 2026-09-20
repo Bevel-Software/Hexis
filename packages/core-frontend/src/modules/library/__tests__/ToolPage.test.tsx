@@ -60,6 +60,7 @@ vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolPage } from '../components/tool-page/ToolPage';
+import { NAME_MIN_WIDTH } from '../components/NameWithBadges';
 import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 
 const GITHUB: ToolSecrets = {
@@ -185,6 +186,32 @@ describe('ToolPage: frame', () => {
     expect(screen.queryByText(/Tool · /)).toBeNull();
     expect(await screen.findByText('Runs LinkedIn outreach campaigns.')).toBeInTheDocument();
     expect(screen.getByText('Managed by the Admins.')).toBeInTheDocument();
+  });
+
+  it('holds a long tool name to a readable width, and says the rest on hover', async () => {
+    // The card's rule, on the page header — the half of it a one-row band
+    // can keep. The name truncates and says the rest on hover; it does not
+    // take a floor, because the band has no second line to hand anything.
+    const long = 'disposable-weather-lookup-for-the-northern-hemisphere-v2beta';
+    secretsMock.listToolSecrets.mockResolvedValue([{ ...GITHUB, name: long }]);
+    toolsMock.getToolDetail.mockResolvedValue({ ...DETAIL, name: long });
+    renderPage();
+
+    // Whole in the DOM, so a screen reader reads all of it; whole in `title`,
+    // so the reader who only has the ellipsis can finish it.
+    const title = await screen.findByRole('heading', { name: long, level: 1 });
+    expect(title).toHaveAttribute('title', long);
+    expect(title.className).toContain('truncate');
+
+    // And NOT the floor. The band is one row tall, the same row the sidebar's
+    // header holds, so there is no second line for a floor to push anything
+    // onto — a floor here only made the title wider than the band and sent it
+    // out of the bottom of it at every phone width. The row says so itself:
+    // it cannot wrap, and it clips.
+    expect(title.className).not.toContain(NAME_MIN_WIDTH);
+    const row = title.parentElement as HTMLElement;
+    expect(row.className).toContain('flex-nowrap');
+    expect(row.className).toContain('overflow-hidden');
   });
 
   it('shows no kicker for a legacy ungrouped path either', async () => {

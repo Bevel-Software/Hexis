@@ -45,6 +45,20 @@ export interface SecretConfigStatus {
   adminConfigured: boolean;
   userConfigured: boolean;
   /**
+   * How the SHARED row is stored, or `null` when there is none. A `.tool` can be
+   * edited to turn a plain key into an OAuth variable (or back) while the old row
+   * survives, and the two kinds are not interchangeable: an OAuth flow reads the
+   * client secret off an `oauth` row and `resolve` reads a value off a `static`
+   * one. A caller that asks "is this set up?" has to mean "set up AS THE KIND THE
+   * MANUAL NOW DECLARES", or it offers an Authorize the flow will refuse.
+   *
+   * Required, not optional: "the field was left out" and "there is no row" have
+   * to be the same answer, or a caller that trusts it cannot be strict.
+   */
+  adminKind: SecretKind | null;
+  /** How the CALLER's own row is stored, or `null` when they have none. Same reason. */
+  userKind: SecretKind | null;
+  /**
    * For an OAuth-backed per-user row: whether the caller has completed sign-in (a
    * token exists). `undefined` for static rows / when the caller has no row. Lets
    * the pre-check treat "row present but not authorized" as still-missing.
@@ -300,4 +314,24 @@ export function missingScopes(required: string[] | undefined, granted: string | 
 
 export function scopesCovered(required: string[] | undefined, granted: string | undefined): boolean {
   return missingScopes(required, granted).length === 0;
+}
+
+/**
+ * Is the stored row the KIND the manual now declares — i.e. would the thing the
+ * UI is about to offer actually work?
+ *
+ * A `.tool` can be edited to turn a plain key into an OAuth variable, or back,
+ * and the row set for the previous shape survives the edit. The two are not
+ * interchangeable: `beginToolOAuthByKey` refuses a `static` shared row, and
+ * `resolve` hands an OAuth row's ACCESS TOKEN to a variable whose consumer
+ * wants the value. So "a row exists" is never "this variable is set up", and
+ * every surface that asks the second question pairs the presence flag with the
+ * kind rather than re-deriving the rule.
+ */
+export function configuredAs(
+  want: SecretKind,
+  present: boolean | undefined,
+  stored: SecretKind | null | undefined,
+): boolean {
+  return present === true && stored === want;
 }

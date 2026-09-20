@@ -11,6 +11,7 @@ import {
 import '../../library.css';
 import {
   Badge,
+  Banner,
   Button,
   IconButton,
   Surface,
@@ -30,7 +31,11 @@ import { useWorkspaceImageResolver } from '../../../workspace/hooks/useWorkspace
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
 import { useFileAccess } from '../../../access/hooks/useFileAccess';
 import { proposeChange, suggestionBranchFor } from '../../services/library.api';
-import { getOrCreateWorkspace, writeFile } from '../../../workspace/services/workspace.api';
+import {
+  getOrCreateWorkspace,
+  writeFile,
+  type SkillToolWarning,
+} from '../../../workspace/services/workspace.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
 import {
   refusalLine,
@@ -289,6 +294,20 @@ export function SkillPage({
     Boolean((location.state as { startEditing?: boolean } | null)?.startEditing),
   );
   const [busyCr, setBusyCr] = useState<number | null>(null);
+  /**
+   * What the last save on this page said about the skill's `allowed-tools`
+   * (entries that look like platform tools but name none the saver can see),
+   * or `null` while nothing has been saved here — then the banner speaks from
+   * the loaded skill's own `warnings`, so a skill left pointing at a manual
+   * that was since retired says so on open. Advisory either way: a save has
+   * already landed. A save's answer wins over the load's because a proposal's
+   * content lives on another branch than the skill on screen; an approval
+   * rewrites the skill underneath (see `onApplied`) and hands the word back to
+   * the reload. Per-page state, and the route mounts this component with
+   * `key={name}`, so moving to another skill starts from that skill's own.
+   */
+  const [savedWarnings, setSavedWarnings] = useState<SkillToolWarning[] | null>(null);
+  const toolWarnings = savedWarnings ?? skill?.warnings ?? [];
 
   /**
    * The file on screen as a workspace path, `<kbDirName>/<skill>/<file>`: the
@@ -395,6 +414,10 @@ export function SkillPage({
     onApplied() {
       toast('Approved: the skill now reads with that change.');
       setRevision((r) => r + 1);
+      // The merge just rewrote the skill, `allowed-tools` included, so the
+      // advisory from this page's last save is about text that is no longer
+      // there. The reload below answers for the merged skill instead.
+      setSavedWarnings(null);
       data.reload();
       // The pane renders `skill.body`, which this hook holds and the merge just
       // changed. Without re-reading it the page keeps showing the pre-merge
@@ -521,7 +544,10 @@ export function SkillPage({
    */
   async function saveDirect(content: string) {
     const { workspace } = await getOrCreateWorkspace(DEFAULT_BRANCH);
-    await writeFile(workspace.id, `${workspace.kbDirName}/${fileRepoPath}`, content);
+    const saved = await writeFile(workspace.id, `${workspace.kbDirName}/${fileRepoPath}`, content);
+    // Only a SKILL.md save has a say: a bundled file's answer carries no
+    // warnings, and taking it as "none" would hide the loaded skill's.
+    if (active === 'SKILL.md') setSavedWarnings(saved?.warnings ?? []);
     setEditing(false);
     setRevision((r) => r + 1);
     toast('Saved: the skill now reads with your change.');
@@ -530,7 +556,7 @@ export function SkillPage({
 
   async function submitProposal(content: string) {
     if (!user) throw new Error('Sign in to propose a change.');
-    await proposeChange({
+    const proposed = await proposeChange({
       skillName: name,
       repoRelativePath: fileRepoPath,
       content,
@@ -538,6 +564,7 @@ export function SkillPage({
       userName: user.name,
       existingCr: ownCr,
     });
+    if (active === 'SKILL.md') setSavedWarnings(proposed?.warnings ?? []);
     setEditing(false);
     setRevision((r) => r + 1);
     toast(`Sent to ${ownerName}: nothing changes until they approve it.`);
@@ -676,6 +703,8 @@ export function SkillPage({
             Repeating it above the pane said the same sentence twice on the
             first screenful. */}
       </header>
+
+      <ToolWarningsBanner warnings={toolWarnings} />
 
       {/* Not before the folder is known: Accept grants ON the folder and
           Manage access opens it, and both are no-ops against ''. */}
@@ -1020,6 +1049,26 @@ function IntegrationsSection({
         })}
       </div>
     </section>
+  );
+}
+
+/**
+ * The skill page's status line for `allowed-tools` entries the platform could
+ * not resolve. A warning, never a block: the list also names the client's own
+ * tools, which the server cannot know, so it only speaks about names that look
+ * like its own.
+ */
+function ToolWarningsBanner({ warnings }: { warnings: SkillToolWarning[] }) {
+  if (warnings.length === 0) return null;
+  return (
+    <Banner tone="wait" role="status" className="mt-4">
+      <p className="font-semibold">Some tools this skill lists are not available</p>
+      <ul className="mt-1 list-disc pl-5">
+        {warnings.map((w) => (
+          <li key={w.entry}>{w.message}</li>
+        ))}
+      </ul>
+    </Banner>
   );
 }
 

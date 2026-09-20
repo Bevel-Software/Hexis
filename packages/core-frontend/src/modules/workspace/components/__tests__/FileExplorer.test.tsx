@@ -16,6 +16,7 @@ import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
+import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
 import { PR_STALE_EVENT } from '../../../../core/events';
 
 // authFetch is the bearer-token wrapper around window.fetch. The Download
@@ -126,6 +127,13 @@ interface RenderOptions {
   /** The caller's own open requests: workspace-relative path → CR number. */
   minePaths?: Map<string, number>;
   /**
+   * Whether the signed-in person is an admin. Only the platform-file rows
+   * read it: an admin may drag a MISPLACED one back where the platform reads
+   * it, so the row lets that drag start and the server decides the rest.
+   * Omitted means no `AdminProvider` at all, which is nobody's admin.
+   */
+  isAdmin?: boolean;
+  /**
    * Which of those requests the caller AUTHORED. Defaults to all of them,
    * which is the real shape today — suggestion rows are synthesized from
    * `/mine`. A test wanting an owner's view of SOMEONE ELSE'S proposal passes
@@ -175,6 +183,7 @@ function renderExplorer(opts: RenderOptions = {}) {
   const ui = (ws: WorkspaceContextValue, mine: Map<string, number>) => (
       <MemoryRouter initialEntries={opts.initialEntries ?? ['/']}>
         <AuthContext.Provider value={makeAuth()}>
+          <AdminContext.Provider value={{ isAdmin: opts.isAdmin === true } as AdminContextValue}>
           <WorkspaceContext.Provider value={ws}>
             <GitContext.Provider value={makeGit()}>
                 <OpenChangeRequestsContext.Provider
@@ -211,6 +220,7 @@ function renderExplorer(opts: RenderOptions = {}) {
                 </OpenChangeRequestsContext.Provider>
             </GitContext.Provider>
           </WorkspaceContext.Provider>
+          </AdminContext.Provider>
         </AuthContext.Provider>
       </MemoryRouter>
   );
@@ -2057,12 +2067,20 @@ describe('FileExplorer: delete and move ask first', () => {
       expect(moveEntry).not.toHaveBeenCalled();
     });
 
-    it('warns that a platform-managed file is read differently once moved', async () => {
-      renderExplorer({ fileTree: TREE });
-      await openMoveDialog('Sales', `${KB}/KnowledgeBase/Legal/access.md`);
-      expect(screen.getByRole('note')).toHaveTextContent(
-        'access.md is a platform-managed file; moving it changes how the platform reads it.',
-      );
+    it('never asks about a platform file: the move is refused, not confirmed', async () => {
+      // There used to be a warning here ("moving it changes how the platform
+      // reads it") on a move the dialog then went ahead with. Moving one out
+      // of its folder breaks the workspace, so it is not a choice to confirm.
+      const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+      try {
+        const { moveEntry } = renderExplorer({ fileTree: TREE });
+        await dropOn('Sales', `${KB}/KnowledgeBase/Legal/access.md`);
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+        expect(moveEntry).not.toHaveBeenCalled();
+        expect(alertSpy).toHaveBeenCalledWith('access.md is a platform file and stays in its folder.');
+      } finally {
+        alertSpy.mockRestore();
+      }
     });
 
     it('warns when the move crosses from one root into another', async () => {
@@ -2095,6 +2113,161 @@ describe('FileExplorer: delete and move ask first', () => {
       renderExplorer({ fileTree: TREE, workspaceId: 'main' });
       await openMoveDialog('Sales', CONTRACT);
       expect(screen.queryAllByRole('note')).toHaveLength(0);
+    });
+  });
+
+  /**
+   * A rename or a drop onto a name that is taken is refused by the server —
+   * nothing is overwritten — and the sentence it sends ("A file named X
+   * already exists in Y.") is what the sidebar shows, where the action was.
+   * Neither refusal goes through `window.alert`, and neither moves a row.
+   */
+  describe('a destination that is already taken', () => {
+    const TAKEN = 'A file named nda.md already exists in Legal.';
+
+    async function startRename(rowName: string) {
+      fireEvent.contextMenu(screen.getByText(rowName));
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: /Rename/i }));
+      });
+      return screen.getByRole('textbox') as HTMLInputElement;
+    }
+
+    async function typeAndSubmit(input: HTMLInputElement, name: string) {
+      await act(async () => {
+        fireEvent.change(input, { target: { value: name } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+      });
+    }
+
+    it('shows the refusal in the rename box and keeps the box open on the name that was typed', async () => {
+      const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+      try {
+        const moveEntry = vi.fn().mockRejectedValue(new Error(TAKEN));
+        renderExplorer({ fileTree: TREE, moveEntry });
+        openLegal();
+
+        const input = await startRename('contract.pdf');
+        await typeAndSubmit(input, 'nda.md');
+
+        expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/nda.md`);
+        expect(screen.getByTestId('rename-error')).toHaveTextContent(TAKEN);
+        // Still open, still holding what was typed: the name is there to fix.
+        expect(screen.getByRole('textbox')).toHaveValue('nda.md');
+        expect(alertSpy).not.toHaveBeenCalled();
+      } finally {
+        alertSpy.mockRestore();
+      }
+    });
+
+    it('sends the rename once more after the name is changed, and closes the box when it lands', async () => {
+      const moveEntry = vi.fn()
+        .mockRejectedValueOnce(new Error(TAKEN))
+        .mockResolvedValueOnce(undefined);
+      renderExplorer({ fileTree: TREE, moveEntry });
+      openLegal();
+
+      const input = await startRename('contract.pdf');
+      await typeAndSubmit(input, 'nda.md');
+      expect(screen.getByTestId('rename-error')).toBeInTheDocument();
+
+      // Editing clears the refusal — the new name has not been refused.
+      await act(async () => {
+        fireEvent.change(screen.getByRole('textbox'), { target: { value: 'deal.pdf' } });
+      });
+      expect(screen.queryByTestId('rename-error')).not.toBeInTheDocument();
+
+      await act(async () => {
+        fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+      });
+      expect(moveEntry).toHaveBeenLastCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/deal.pdf`);
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    });
+
+    it('ignores edits made while the rename is in flight, so the answer lands on the name it was about', async () => {
+      // A name typed while the request is out would be thrown away by the row
+      // unmounting on success, and a refusal coming back would appear under a
+      // name it was never about. The box is frozen for that window instead.
+      let land: (() => void) | undefined;
+      const moveEntry = vi.fn().mockImplementation(
+        () => new Promise<void>((resolve) => { land = resolve; }),
+      );
+      renderExplorer({ fileTree: TREE, moveEntry });
+      openLegal();
+
+      const input = await startRename('contract.pdf');
+      await typeAndSubmit(input, 'nda.md');
+      expect(moveEntry).toHaveBeenCalledTimes(1);
+
+      const inFlight = screen.getByRole('textbox') as HTMLInputElement;
+      expect(inFlight).toHaveAttribute('readonly');
+      await act(async () => {
+        fireEvent.change(inFlight, { target: { value: 'something-else.md' } });
+        fireEvent.keyDown(inFlight, { key: 'Enter' });
+      });
+      // Neither the edit nor the second Enter took: one request, one name.
+      expect(screen.getByRole('textbox')).toHaveValue('nda.md');
+      expect(moveEntry).toHaveBeenCalledTimes(1);
+
+      await act(async () => { land?.(); });
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+      expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/nda.md`);
+    });
+
+    it('an ordinary rename closes the box and moves the file, as before', async () => {
+      const moveEntry = vi.fn().mockResolvedValue(undefined);
+      renderExplorer({ fileTree: TREE, moveEntry });
+      openLegal();
+
+      const input = await startRename('contract.pdf');
+      await typeAndSubmit(input, 'agreement.pdf');
+
+      expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/agreement.pdf`);
+      expect(screen.queryByTestId('rename-error')).not.toBeInTheDocument();
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    });
+
+    it('a refused drop says so under the row and leaves both entries where they were', async () => {
+      const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+      try {
+        const clash = 'A file named contract.pdf already exists in Sales.';
+        const moveEntry = vi.fn().mockRejectedValue(new Error(clash));
+        renderExplorer({ fileTree: TREE, moveEntry });
+        openLegal();
+
+        await dropOn('Sales', CONTRACT);
+        await act(async () => {
+          fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+        });
+
+        expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Sales/contract.pdf`);
+        const notice = screen.getByTestId('tree-move-error');
+        expect(notice).toHaveTextContent(clash);
+        expect(notice).toHaveAttribute('role', 'alert');
+        expect(alertSpy).not.toHaveBeenCalled();
+        // The dragged row and the row it was dropped on both stayed.
+        expect(screen.getByText('contract.pdf')).toBeInTheDocument();
+        expect(screen.getByText('Sales')).toBeInTheDocument();
+
+        await act(async () => {
+          fireEvent.click(screen.getByRole('button', { name: 'Dismiss move error' }));
+        });
+        expect(screen.queryByTestId('tree-move-error')).not.toBeInTheDocument();
+      } finally {
+        alertSpy.mockRestore();
+      }
+    });
+
+    it('a drop that lands says nothing', async () => {
+      renderExplorer({ fileTree: TREE });
+      openLegal();
+
+      await dropOn('Sales', CONTRACT);
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+
+      expect(screen.queryByTestId('tree-move-error')).not.toBeInTheDocument();
     });
   });
 
@@ -2722,6 +2895,258 @@ describe('FileExplorer: an empty tree says why', () => {
   it('shows nothing while the tree is still loading', () => {
     renderExplorer({ fileTree: null });
     expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+  });
+});
+
+// The sidebar refuses a platform file's drag and its rename itself, with the
+// sentence the server refuses with. It is not a second opinion: the same
+// predicate decides on both sides (`@bevel-software/platform-shared`), so the
+// tree can answer without a round trip and cannot answer differently.
+describe('FileExplorer: platform files stay put', () => {
+  const DRAG_MIME = 'application/x-workspace-path';
+  const KB = 'knowledge-base';
+  const sentence = (name: string) => `${name} is a platform file and stays in its folder.`;
+
+  const file = (p: string): FileTreeEntry => ({
+    name: p.slice(p.lastIndexOf('/') + 1),
+    relativePath: p,
+    type: 'file',
+  });
+
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: KB,
+        relativePath: KB,
+        type: 'directory',
+        children: [
+          file(`${KB}/access.md`),
+          file(`${KB}/roles.yaml`),
+          file(`${KB}/.bevelignore`),
+          file(`${KB}/AGENTS.md`),
+          // Read from the repository root and nowhere else, so a nested one
+          // is ordinary content — the server says the same.
+          file(`${KB}/Handbook/AGENTS.md`),
+          file(`${KB}/Handbook/notes.md`),
+          { name: 'Sales', relativePath: `${KB}/Sales`, type: 'directory', children: [] },
+        ],
+      },
+    ],
+  };
+
+  const PLATFORM = ['access.md', 'roles.yaml', '.bevelignore', 'AGENTS.md'];
+
+  let alertSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+    alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    alertSpy.mockRestore();
+  });
+
+  function row(name: string): HTMLElement {
+    return screen.getAllByText(name)[0].closest('button')!;
+  }
+
+  it.each(PLATFORM)('%s cannot be dragged: the row refuses to start one', (name) => {
+    renderExplorer({ fileTree: TREE });
+    expect(row(name)).toHaveAttribute('draggable', 'false');
+  });
+
+  it.each(PLATFORM)('a drop carrying %s is refused with the sentence, and nothing is sent', async (name) => {
+    const { moveEntry } = renderExplorer({ fileTree: TREE });
+    await act(async () => {
+      fireEvent.drop(screen.getByText('Sales'), {
+        dataTransfer: {
+          getData: (t: string) => (t === DRAG_MIME ? `${KB}/${name}` : ''),
+          files: [],
+        },
+      });
+    });
+    expect(alertSpy).toHaveBeenCalledWith(sentence(name));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(moveEntry).not.toHaveBeenCalled();
+  });
+
+  it.each(PLATFORM)('the Rename action on %s says the sentence and opens nothing', async (name) => {
+    const { moveEntry } = renderExplorer({ fileTree: TREE });
+    fireEvent.contextMenu(row(name));
+    const rename = screen.getByRole('menuitem', { name: /Rename/i });
+    expect(rename).toHaveAttribute('aria-disabled', 'true');
+    expect(rename).toHaveAttribute('title', sentence(name));
+    await act(async () => {
+      fireEvent.click(rename);
+    });
+    // No rename box: the row still shows its name, and nothing was sent.
+    expect(screen.getAllByText(name)[0]).toBeInTheDocument();
+    expect(moveEntry).not.toHaveBeenCalled();
+  });
+
+  it('an ordinary file is untouched: it drags, and Rename is on offer', async () => {
+    const { moveEntry } = renderExplorer({ fileTree: TREE });
+    expect(row('notes.md')).toHaveAttribute('draggable', 'true');
+    fireEvent.contextMenu(row('notes.md'));
+    const rename = screen.getByRole('menuitem', { name: /Rename/i });
+    expect(rename).not.toHaveAttribute('aria-disabled');
+    await act(async () => {
+      fireEvent.drop(screen.getByText('Sales'), {
+        dataTransfer: {
+          getData: (t: string) => (t === DRAG_MIME ? `${KB}/Handbook/notes.md` : ''),
+          files: [],
+        },
+      });
+    });
+    expect(alertSpy).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toHaveTextContent('Move notes.md to Sales?');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+    });
+    expect(moveEntry).toHaveBeenCalledWith(`${KB}/Handbook/notes.md`, `${KB}/Sales/notes.md`);
+  });
+
+  // The recovery the refusal must not swallow: an admin putting a MISPLACED
+  // platform file back where the platform reads it. The row cannot know the
+  // destination, so it keeps only what it is sure of — the root's own copy
+  // never moves, and nobody but an admin moves any of them — and lets the
+  // server answer the rest, which is the only place the answer lives.
+  describe('an admin may drag a misplaced one back', () => {
+    const MISPLACED: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [
+        {
+          name: KB,
+          relativePath: KB,
+          type: 'directory',
+          children: [
+            file(`${KB}/access.md`),
+            file(`${KB}/Misplaced/.bevelignore`),
+            { name: 'Sales', relativePath: `${KB}/Sales`, type: 'directory', children: [] },
+          ],
+        },
+      ],
+    };
+
+    function misplacedRow(): HTMLElement {
+      return screen.getAllByText('.bevelignore')[0].closest('button')!;
+    }
+
+    it('the misplaced row drags, and the drop asks rather than refusing', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: MISPLACED, isAdmin: true });
+      expect(misplacedRow()).toHaveAttribute('draggable', 'true');
+      await act(async () => {
+        fireEvent.drop(screen.getByText('Sales'), {
+          dataTransfer: {
+            getData: (t: string) => (t === DRAG_MIME ? `${KB}/Misplaced/.bevelignore` : ''),
+            files: [],
+          },
+        });
+      });
+      expect(alertSpy).not.toHaveBeenCalled();
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+      expect(moveEntry).toHaveBeenCalledWith(
+        `${KB}/Misplaced/.bevelignore`,
+        `${KB}/Sales/.bevelignore`,
+      );
+    });
+
+    it('a drop that means the top level lands in the clone, not beside it', async () => {
+      // The restore the root-only names need: a drop on the tree's own root
+      // row, which resolves to no folder. Sent bare, that move would put
+      // `.bevelignore` BESIDE the clone — out of the repository, where nothing
+      // reads it and git never sees it again — so it resolves to the clone's
+      // root instead. (The split explorer draws the clone's roots and its
+      // loose files but no row for the clone itself, so there the repository
+      // root is reached from the API and the agent's tool, not by dragging.)
+      const { moveEntry } = renderExplorer({ fileTree: MISPLACED, isAdmin: true });
+      await act(async () => {
+        fireEvent.drop(screen.getByRole('button', { name: '.' }), {
+          dataTransfer: {
+            getData: (t: string) => (t === DRAG_MIME ? `${KB}/Misplaced/.bevelignore` : ''),
+            files: [],
+          },
+        });
+      });
+      expect(alertSpy).not.toHaveBeenCalled();
+      expect(screen.getByRole('dialog')).toHaveTextContent('to the top level');
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+      expect(moveEntry).toHaveBeenCalledWith(`${KB}/Misplaced/.bevelignore`, `${KB}/.bevelignore`);
+    });
+
+    it("the root's own copy still cannot be dragged, admin or not", () => {
+      renderExplorer({ fileTree: MISPLACED, isAdmin: true });
+      expect(row('access.md')).toHaveAttribute('draggable', 'false');
+    });
+
+    it('a non-admin gets no exception: the misplaced row is refused like any other', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: MISPLACED, isAdmin: false });
+      expect(misplacedRow()).toHaveAttribute('draggable', 'false');
+      await act(async () => {
+        fireEvent.drop(screen.getByText('Sales'), {
+          dataTransfer: {
+            getData: (t: string) => (t === DRAG_MIME ? `${KB}/Misplaced/.bevelignore` : ''),
+            files: [],
+          },
+        });
+      });
+      expect(alertSpy).toHaveBeenCalledWith(sentence('.bevelignore'));
+      expect(moveEntry).not.toHaveBeenCalled();
+    });
+
+    it('a rename is never the recovery, so an admin is refused it', async () => {
+      renderExplorer({ fileTree: MISPLACED, isAdmin: true });
+      fireEvent.contextMenu(misplacedRow());
+      const rename = screen.getByRole('menuitem', { name: /Rename/i });
+      expect(rename).toHaveAttribute('aria-disabled', 'true');
+      expect(rename).toHaveAttribute('title', sentence('.bevelignore'));
+    });
+  });
+
+  it('a FOLDER named like a platform file refuses the rename too, not just the drag', () => {
+    // The server reads the path, not the kind. Offering Rename here opened an
+    // editor that could only fail on the round trip.
+    const WITH_FOLDER: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [
+        {
+          name: KB,
+          relativePath: KB,
+          type: 'directory',
+          children: [
+            { name: 'access.md', relativePath: `${KB}/access.md`, type: 'directory', children: [] },
+          ],
+        },
+      ],
+    };
+    renderExplorer({ fileTree: WITH_FOLDER });
+    // The folder row's draggable sits on the wrapper around the name button.
+    expect(screen.getByText('access.md').closest('[draggable]')).toHaveAttribute('draggable', 'false');
+    fireEvent.contextMenu(row('access.md'));
+    const rename = screen.getByRole('menuitem', { name: /Rename/i });
+    expect(rename).toHaveAttribute('aria-disabled', 'true');
+    expect(rename).toHaveAttribute('title', sentence('access.md'));
+  });
+
+  it('a nested AGENTS.md is content, not a platform file: it drags like any other row', () => {
+    renderExplorer({ fileTree: TREE });
+    // Both rows are named AGENTS.md; the nested one is the second.
+    const rows = screen.getAllByText('AGENTS.md').map((n) => n.closest('button')!);
+    const nested = rows.find((r) => r.getAttribute('data-tree-path') === `${KB}/Handbook/AGENTS.md`);
+    expect(nested).toHaveAttribute('draggable', 'true');
   });
 });
 
