@@ -3,6 +3,7 @@ import type { WorkspaceService } from '../modules/workspace/workspace.service.js
 import { workspaceIdForBranch } from './workspace-id.js';
 import type { IAccessControl } from '../modules/access/access-control.interface.js';
 import { canonicalEmail, hashEmail } from './email-identity.js';
+import { printable } from './printable.js';
 import { logger } from './logging.js';
 
 const log = logger('pending-proposals');
@@ -147,9 +148,13 @@ export async function readAt(
   try {
     return await workspaceService.readFileAtRef(wsId, `origin/${branch}`, repoRelPath);
   } catch (err) {
+    // Every interpolated value is attacker-shaped: the path and the branch come
+    // off a change request somebody else opened, and the reason comes off git.
+    // A raw newline or an escape sequence in any of them forges a log line or
+    // steers the operator's terminal, so all three go through `printable`.
     log.warn(
-      `could not read "${repoRelPath}" at origin/${branch} in ${wsId}; ` +
-        `dropping it from the review shelf: ${err instanceof Error ? err.message : String(err)}`,
+      `could not read ${printable(repoRelPath)} at origin/${printable(branch)} in ${printable(wsId)}; ` +
+        `dropping it from the review shelf: ${printable(err instanceof Error ? err.message : String(err))}`,
     );
     return null;
   }

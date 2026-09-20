@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import {
@@ -184,11 +184,24 @@ function renderYours() {
 const href = () => screen.getByLabelText('href').textContent;
 
 describe('a tool proposed on an open change request', () => {
+  /** The `console.error` spy in flight, so `afterEach` can take it off again. */
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn> | null = null;
+
   beforeEach(() => {
     dataMock.useLibraryData.mockReturnValue(emptyCatalog);
     pluginsMock.listPlugins.mockResolvedValue([ops()]);
     pluginsMock.listJoinRequests.mockResolvedValue([]);
     pluginsMock.reconcileJoinRequest.mockResolvedValue(false);
+  });
+
+  // The spy a test installs on `console.error` comes off here, pass or fail:
+  // an assertion that throws mid-test would otherwise leave it swallowed for
+  // every later test in the file, hiding the next real failure behind this
+  // one. Scoped to this one spy — `restoreAllMocks` would also tear down the
+  // module mocks `beforeEach` depends on.
+  afterEach(() => {
+    consoleErrorSpy?.mockRestore();
+    consoleErrorSpy = null;
   });
 
   it('shows in the plugin it targets, marked in review and named by its proposer', async () => {
@@ -320,7 +333,11 @@ describe('a tool proposed on an open change request', () => {
         pendingTool({ path: 'Plugins/Ops/Field/weather.tool' }),
       ],
     });
+    // Restored by the suite's `afterEach`, never here: an assertion below
+    // that throws would otherwise leave `console.error` swallowed for every
+    // later test in the file, hiding the next real failure behind this one.
     const complaints = vi.spyOn(console, 'error').mockImplementation(() => {});
+    consoleErrorSpy = complaints;
     renderOps();
     expect(await screen.findAllByTestId('library-card-integration-weather')).toHaveLength(2);
     // Two same-keyed siblings still PAINT — React only warns — so the render
@@ -328,7 +345,6 @@ describe('a tool proposed on an open change request', () => {
     expect(
       complaints.mock.calls.map((c) => String(c[0])).join('\n'),
     ).not.toMatch(/same key/i);
-    complaints.mockRestore();
   });
 
   /**
