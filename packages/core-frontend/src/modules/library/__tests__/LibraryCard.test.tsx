@@ -157,8 +157,13 @@ describe('LibraryCard', () => {
    * A proposed TOOL — a `.tool` manual or an `mcp.json` server that exists only
    * on an open change request, the same hole the skill card above fixed. It
    * wears the same review badge and the same dashed outline, because it is the
-   * same fact, and it still says how it is declared: which file the request
-   * adds is exactly what an approver is about to decide on.
+   * same fact.
+   *
+   * What it does NOT wear is the flavour badge. A released card carries it to
+   * answer "which file do I edit", and a proposal has no file to edit yet —
+   * the change request the card opens shows the reviewer the declaration
+   * itself. Drawing both cost the name its room (see the badge-count test
+   * below), so the row spends its one badge on the fact that matters here.
    */
   it('marks a proposed tool in review without claiming it is connected', () => {
     card({
@@ -175,6 +180,10 @@ describe('LibraryCard', () => {
     expect(screen.getByText('In review')).toBeInTheDocument();
     expect(screen.getByText(/From Ali Raza: waiting on you/)).toBeInTheDocument();
     expect(screen.queryByText('Needs setup')).not.toBeInTheDocument();
+    // The flavour badge stays off, on the mcp side as on the utcp side the
+    // badge-count test below covers — so the comment above is checked here
+    // rather than merely asserted in prose.
+    expect(screen.queryByText('MCP server')).not.toBeInTheDocument();
     // Dashed: the card is an outline of a tool rather than one, and that reads
     // before any text does.
     expect(screen.getByTestId('library-card-integration-tickets').className).toContain(
