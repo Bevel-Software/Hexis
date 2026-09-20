@@ -13,11 +13,15 @@ import {
   KNOWLEDGE_DIR,
   canonicalRelativePath,
   folderPlaceholderPath,
+  isPlatformFile,
+  isPlatformRestoreShape,
+  platformFileCreationRefusal,
+  platformFileRefusal,
   reservedRootDirNames,
 } from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
-import type { WorkspaceService } from './workspace.service.js';
+import { EntryExistsError, type WorkspaceService } from './workspace.service.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { canReadWorkspacePath, resolveReadableMap, toKbRelative } from '../access-model/kb-read-filter.js';
@@ -137,6 +141,43 @@ export function createWorkspaceRoutes(
   }
 
   /**
+   * Whether a failed op is one that provably touched no bytes, so its lock
+   * may be released with the disk and the commit queue left exactly as they
+   * are (`releaseLockUntouched`) rather than reset to HEAD.
+   *
+   * This is not tidiness. A release that discards resets the PATH, not "this
+   * request's changes" — git has no notion of the latter — so when the path
+   * holds a landed save whose commit is still queued (commits run out of band
+   * in the pending-commits worker), the discard destroys that save. Two moves
+   * racing onto the same free name are exactly that situation: the winner
+   * lands and enqueues, the loser then takes the same destination lock, is
+   * refused because the name is now taken, and its unwind would throw the
+   * winner's file away. One refusal, two lost files.
+   *
+   * A destination-taken refusal qualifies because nothing it can do writes:
+   * the preflight throws before the move is attempted, and the move's own
+   * no-clobber calls (`link`, `mkdir`, `open` with `O_EXCL` — see
+   * `shared/rename-no-replace.ts`) fail without creating anything, with the
+   * folder claim rolling itself back. `LockingFilesystem.withLock` draws the
+   * same line for its `CheckRefusal`, in the same words: a refusal that wrote
+   * nothing releases untouched.
+   *
+   * Deliberately a closed list of refusal TYPES rather than a guess at what
+   * an op did. An unrecognised failure keeps the discarding release, which is
+   * the fail-closed side: at worst it throws away bytes nobody promised to
+   * keep, where the other mistake throws away bytes someone was told were
+   * saved.
+   *
+   * One type, not two: the move's lower-level `DestinationTakenError` never
+   * reaches this layer — `moveEntry` converts it into `EntryExistsError`, the
+   * refusal this surface answers 409 with — so recognising it here as well
+   * would be a branch nothing can take.
+   */
+  function wroteNothing(err: unknown): boolean {
+    return err instanceof EntryExistsError;
+  }
+
+  /**
    * Acquire the workflow lock for `(workspaceId, branch, targetPath)`, run
    * `op`, then release. Release commits + pushes the file as a one-file
    * change attributed to `user` — same pipeline the lock-aware filesystem
@@ -163,7 +204,17 @@ export function createWorkspaceRoutes(
      * `skipPush` option is gone — under the queue model commits +
      * pushes happen out of band in the worker, not inline here.)
      */
-    options?: { skipFsTreeEvent?: boolean },
+    options?: {
+      skipFsTreeEvent?: boolean;
+      /**
+       * This acquire is the destination side of an admin putting a misplaced
+       * platform file back, coming from `source`. Passed straight to
+       * `acquireLock`, which VERIFIES both halves — that the move is a restore
+       * at all, and that this caller may make it — rather than believing
+       * either. See the `IWorkflowService.acquireLock` contract.
+       */
+      platformRestore?: { source: string };
+    },
   ): Promise<T> {
     const branch = branchForWorkspaceId(workspaceId);
     // If the caller already holds the lock, do NOT acquire-and-release
@@ -199,7 +250,9 @@ export function createWorkspaceRoutes(
       eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
       return result;
     }
-    const acquired = await workflowService.acquireLock(workspaceId, branch, targetPath, user);
+    const acquired = await workflowService.acquireLock(workspaceId, branch, targetPath, user, {
+      platformRestore: options?.platformRestore,
+    });
     if (!acquired.acquired) {
       const holder = acquired.lock.holderName || 'another user';
       const err: Error & { status?: number } = new Error(
@@ -208,16 +261,22 @@ export function createWorkspaceRoutes(
       err.status = 409;
       throw err;
     }
-    // Two release modes, depending on whether the op succeeded:
+    // Three release modes, the same three `LockingFilesystem.withLock` uses,
+    // depending on what the op did:
     //
-    //   - op() FAILED  → drop the lock WITHOUT enqueueing a commit. The
-    //     op may have written partial bytes to disk before throwing
-    //     (write that errored mid-stream, etc.). A normal `releaseLock`
-    //     would enqueue a commit for whatever's on disk and the worker
-    //     would silently persist that partial state as a real committed
-    //     change. `releaseLockNoCommit` drops the lock row only —
-    //     partial disk state stays where it is but never becomes a
-    //     committed change with the user's name on it.
+    //   - op() FAILED having possibly WRITTEN → drop the lock WITHOUT
+    //     enqueueing a commit. The op may have written partial bytes to disk
+    //     before throwing (write that errored mid-stream, etc.). A normal
+    //     `releaseLock` would enqueue a commit for whatever's on disk and the
+    //     worker would silently persist that partial state as a real
+    //     committed change. `releaseLockNoCommit` resets the path to HEAD, so
+    //     partial bytes never become a committed change with the user's name
+    //     on it.
+    //
+    //   - op() FAILED having written NOTHING → `releaseLockUntouched`: drop
+    //     the lock row and leave both the disk and the commit queue exactly
+    //     as they are. See `wroteNothing` for which refusals qualify and why
+    //     the distinction is load-bearing rather than tidy.
     //
     //   - op() SUCCEEDED → release. The new releaseLock enqueues a
     //     pending-commit row (the actual `commitFile + push` runs out
@@ -231,10 +290,18 @@ export function createWorkspaceRoutes(
       result = await op();
       opSucceeded = true;
     } catch (err) {
+      const untouched = wroteNothing(err);
       try {
-        await workflowService.releaseLockNoCommit(workspaceId, branch, targetPath, user);
+        if (untouched) {
+          await workflowService.releaseLockUntouched(workspaceId, branch, targetPath, user);
+        } else {
+          await workflowService.releaseLockNoCommit(workspaceId, branch, targetPath, user);
+        }
       } catch (releaseErr) {
-        log.warn(`releaseLockNoCommit failed after op error for "${targetPath}":`, { err: releaseErr });
+        log.warn(
+          `${untouched ? 'releaseLockUntouched' : 'releaseLockNoCommit'} failed after op error for "${targetPath}":`,
+          { err: releaseErr },
+        );
       }
       throw err;
     }
@@ -977,6 +1044,43 @@ export function createWorkspaceRoutes(
     const user = await requireUser(req, res);
     if (!user) return;
     try {
+      // A platform file stays in the folder the platform reads it from —
+      // rename, move and drag all arrive here, and all three are refused.
+      // Moving one out is not a choice to confirm: once the root has no
+      // `access.md`, write on the root denies everyone and the move that
+      // would undo it is the move the gate refuses.
+      //
+      // The single exception is that repair: an admin putting a misplaced
+      // copy BACK. `isPlatformRestoreShape` says whether the MOVE is that
+      // repair — it is judged on the source's name and the destination, not
+      // on the source being a platform file where it currently sits, because
+      // a stray `roles.yaml` in a folder is ordinary content there and is
+      // still the copy the root is missing. `canRestorePlatformFile` then
+      // decides who may make it, and whether the disk agrees.
+      const oldRel = toKbRelative(oldPath, kbDirName);
+      const newRel = toKbRelative(newPath, kbDirName);
+      let platformRestore = false;
+      if (oldRel !== null && newRel !== null && isPlatformRestoreShape(oldRel, newRel)) {
+        platformRestore = await accessControl.canRestorePlatformFile(id, user.email, newRel);
+      }
+      // A platform file stays where the platform reads it …
+      if (oldRel !== null && isPlatformFile(oldRel) && !platformRestore) {
+        res.status(409).json({ error: platformFileRefusal(oldRel) });
+        return;
+      }
+      // … and nothing else becomes one. `moveEntry` is a plain rename, so
+      // without this a note renamed to `access.md` would come back as the
+      // folder's rules, and a note dragged ONTO the root's `access.md` would
+      // replace the rules that are there — neither of which the rule above,
+      // which reads only the SOURCE, says anything about. The agent's move
+      // tool has refused both since it shipped; this is the same sentence,
+      // from the same place. Only the restore lands on a platform path, and
+      // only where the file is missing (`canRestorePlatformFile` checked the
+      // disk; the destination lock below checks it again, under the lock).
+      if (newRel !== null && isPlatformFile(newRel) && !platformRestore) {
+        res.status(409).json({ error: platformFileCreationRefusal(newRel) });
+        return;
+      }
       // Move = rename on disk + commit on both sides. We lock-and-release
       // the destination first (commits the new file's appearance), then
       // lock-and-release the source path (commits its deletion). Two
@@ -997,10 +1101,45 @@ export function createWorkspaceRoutes(
       // not a single merge-style rename commit, but git's log/blame
       // rename detection still groups them visually after the fact.
       const [firstLock, secondLock] = oldPath < newPath ? [oldPath, newPath] : [newPath, oldPath];
-      await withLock(id, user, firstLock, () =>
-        withLock(id, user, secondLock, () =>
-          workspaceService.moveEntry(id, oldPath, newPath),
-        ),
+      // Only the DESTINATION side carries the restore claim. The source is an
+      // ordinary write the caller must already hold: the exception exists so a
+      // file can land where the platform reads it, not so an admin can take
+      // one out of a folder that denies them.
+      const restoreAt = (p: string) => ({
+        platformRestore: platformRestore && p === newPath ? { source: oldPath } : undefined,
+      });
+      // The restore was authorised against a destination that was missing when
+      // the access module looked. Both locks are in hand by the time this runs,
+      // so nothing else can take that path from under the rename — but between
+      // the two a writer still could, and a restore that lands on a platform
+      // file replaces the rules it came to bring back. So the last thing the
+      // move does before renaming is look again, inside the window it holds.
+      const move = async () => {
+        if (platformRestore) {
+          const workspaceDir = await workspaceService.getWorkspacePath(id);
+          const absoluteNew = path.resolve(workspaceDir, newPath);
+          assertWithinDirectory(absoluteNew, workspaceDir);
+          const taken = await fs.stat(absoluteNew).then(
+            () => true,
+            // Genuine absence is the only "free": anything else is not an
+            // answer, and an unanswered question does not clear the way onto
+            // a platform file.
+            (err: unknown) => !isAbsence(err),
+          );
+          if (taken) {
+            const err: Error & { status?: number } = new Error(platformFileRefusal(newPath));
+            err.status = 409;
+            throw err;
+          }
+        }
+        return workspaceService.moveEntry(id, oldPath, newPath);
+      };
+      await withLock(
+        id,
+        user,
+        firstLock,
+        () => withLock(id, user, secondLock, move, restoreAt(secondLock)),
+        restoreAt(firstLock),
       );
       // Moving the last entry out leaves its folder in place, like a delete.
       await keepFolderOf(id, user, oldPath);

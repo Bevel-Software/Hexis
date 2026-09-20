@@ -1,6 +1,7 @@
 import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
 import type { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
 import type { WorkflowEventBus } from '../modules/workflow/event-bus.js';
+import { workspaceIdForBranch } from '../shared/workspace-id.js';
 
 /**
  * A catalog that scans the DEFAULT branch's working tree and caches the result
@@ -28,10 +29,28 @@ export function registerCatalogCacheInvalidation(deps: {
   /** The KB folder inside the workspace — `paths` are workspace-relative. */
   kbDirName: string;
   catalogs: InvalidatableCatalog[];
+  /**
+   * The read gate every one of those catalogs is FILTERED through, dropped on
+   * the same signal and for the same reason.
+   *
+   * A skill's or a manual's own `read:` frontmatter lives in the file the
+   * commit just rewrote, and the batch gate memoizes those own-entry rules per
+   * workspace for five minutes. Dropping the catalog without dropping that
+   * memo answers the NEW listing through the OLD verdicts — a revoked skill
+   * still loadable by name, a just-granted one still missing from the listing
+   * — for the rest of the memo's life. The two have to go stale together or
+   * the pair disagrees, which is exactly what `getSkill` and `list_skills`
+   * were unified to prevent.
+   */
+  accessControl: { invalidate(workspaceId: string): void };
 }): () => void {
-  const { eventBus, fileChangeNotifier, kbDirName, catalogs } = deps;
+  const { eventBus, fileChangeNotifier, kbDirName, catalogs, accessControl } = deps;
   const invalidateAll = () => {
     for (const c of catalogs) c.invalidate();
+    // Scoped to the branch the catalogs read, and no wider: a drop here costs
+    // the next reader one model load, so it must not reach workspaces this
+    // event says nothing about.
+    accessControl.invalidate(workspaceIdForBranch(DEFAULT_BRANCH));
   };
 
   // Subscriber A — COMMIT-time freshness: a committed change drops the affected

@@ -11,7 +11,20 @@ import { renewConnectionKeyNow } from './renewal.js';
 /** Bounded so a wedged deployment fails startup with a message instead of hanging a client. */
 const FETCH_TIMEOUT_MS = 15_000;
 
-export class DeploymentError extends Error {}
+export class DeploymentError extends Error {
+  /**
+   * The HTTP status, when the deployment answered with one. Carried so a
+   * caller can tell "this deployment does not have that endpoint" (404) from
+   * "the network is having a moment" — the catalog poller stops for the first
+   * and keeps trying through the second.
+   */
+  constructor(
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+  }
+}
 
 /**
  * A key-mode 401: the deployment refused the connection key itself. Stated
@@ -96,7 +109,12 @@ async function getJson(
     );
   }
   if (!res.ok) {
-    throw new DeploymentError(`${label} returned HTTP ${res.status} from ${url}.`);
+    // Drained before it is thrown away, exactly as the 401 paths above do. The
+    // catalog check asks again on every call while it fails, so a deployment that is
+    // 502-ing through a redeploy would otherwise leave one undrained body —
+    // and the connection it pins — behind on every poll for the duration.
+    await res.body?.cancel().catch(() => {});
+    throw new DeploymentError(`${label} returned HTTP ${res.status} from ${url}.`, res.status);
   }
   // A 200 that is not JSON is a proxy or SPA fallback answering in the
   // deployment's place (a login page, a catch-all index.html). That is a
@@ -138,6 +156,15 @@ export interface ResolvedDeployment {
    * `getJson` reads a 401 as an expired sign-in.
    */
   agentInstructions: boolean;
+  /**
+   * Whether the deployment serves `GET /api/agent/catalog-revision`, so this
+   * process can notice a manual or a skill changing under a live connection.
+   * Absent on an older deployment, and — like `agentInstructions` — absence is
+   * the ONLY signal: probing the route instead would hit the JWT mounts an
+   * unknown `/api/*` path falls through to, which answer 401, and a poller
+   * would report a dead credential for a route that is merely not there.
+   */
+  catalogRevision: boolean;
 }
 
 /**
@@ -148,10 +175,11 @@ export interface ResolvedDeployment {
 export async function resolveDeployment(config: HexisMcpConfig): Promise<ResolvedDeployment> {
   const body = (await getJson(`${config.baseUrl}/api/config`, {
     label: 'the deployment config',
-  })) as { mcpUrl?: unknown; agentInstructions?: unknown };
+  })) as { mcpUrl?: unknown; agentInstructions?: unknown; catalogRevision?: unknown };
   return {
     mcpUrl: mcpUrlFromConfig(config, body),
     agentInstructions: body?.agentInstructions === true,
+    catalogRevision: body?.catalogRevision === true,
   };
 }
 
@@ -341,6 +369,52 @@ export async function fetchLocalOnlyManuals(config: HexisMcpConfig): Promise<Map
     }
   }
   return manuals;
+}
+
+/**
+ * A deployment that does not serve `GET /api/agent/catalog-revision` — an
+ * older build than this package. Thrown once, by the first poll, so the
+ * watcher can stop for good instead of asking every few seconds forever.
+ */
+export class CatalogRevisionUnsupportedError extends DeploymentError {}
+
+/**
+ * The fingerprint of THIS caller's released catalog: every tool manual and
+ * every skill the deployment's default branch serves them, as one opaque
+ * string. It changes exactly when that set changes, so two equal readings mean
+ * there is nothing to re-register.
+ *
+ * Opaque on purpose: what goes into it is the deployment's business, and this
+ * process compares it for equality and nothing else.
+ */
+export async function fetchCatalogRevision(config: HexisMcpConfig): Promise<string> {
+  let body: unknown;
+  try {
+    body = await getJson(`${config.baseUrl}/api/agent/catalog-revision`, {
+      label: 'the catalog revision',
+      headers: { Authorization: `Bearer ${config.connectionKey}` },
+      renew: renewer(config),
+    });
+  } catch (err) {
+    // A 404 is the one answer that will not change on the next try: this
+    // deployment predates the route. Everything else — a blip, a 502, a
+    // restart — is worth asking again for.
+    if (err instanceof DeploymentError && err.status === 404) {
+      throw new CatalogRevisionUnsupportedError(
+        'This deployment does not report a catalog revision, so tools and skills added to it ' +
+          'will not appear here until this server is restarted.',
+        404,
+      );
+    }
+    throw err;
+  }
+  const revision = (body as { revision?: unknown })?.revision;
+  if (typeof revision !== 'string' || revision.length === 0) {
+    // Shape drift is not a change: a poller that read an absent field as a new
+    // revision would re-register the remote manual on every single poll.
+    throw new DeploymentError('The catalog revision response carried no "revision" string.');
+  }
+  return revision;
 }
 
 /** What a resolution attempt produced, and whether it actually succeeded. */
