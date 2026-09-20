@@ -900,7 +900,14 @@ export class McpService {
     try {
       keys = (await this.toolManuals.userScopedKeysForManual(manualName)).filter((v) => v.oauth).map((v) => v.key);
     } catch (err) {
-      log.warn(`downstream token refresh: could not read the variables of manual=${printable(manualName)}:`, { err });
+      // The error's own message is caller-controlled as well (it quotes the
+      // manual, and may quote a provider's reply), and a raw Error handed to
+      // the logger renders its message and stack verbatim — so it goes through
+      // the same escaper rather than travelling as an object.
+      log.warn(
+        `downstream token refresh: could not read the variables of manual=${printable(manualName)}: ` +
+          printable(err instanceof Error ? err.message : String(err)),
+      );
       return undefined;
     }
     if (keys.length === 0) return undefined;

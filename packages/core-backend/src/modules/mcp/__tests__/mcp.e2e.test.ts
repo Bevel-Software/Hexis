@@ -24,6 +24,7 @@ import type { IToolManualService } from '../../tool-manuals/tool-manuals.contrac
 import { setLogger } from '../../../shared/logging.js';
 import type { ILogger } from '../../../shared/logger.contract.js';
 import { formatProbeReport, probeFirstCall } from '../first-call-probe.js';
+import { printable } from '../../../shared/printable.js';
 
 /**
  * True end-to-end test over the REAL Streamable-HTTP MCP transport. Real MCP
@@ -41,8 +42,15 @@ import { formatProbeReport, probeFirstCall } from '../first-call-probe.js';
 const KEY_A = 'bevel_key_user_a';
 const KEY_B = 'bevel_key_user_b';
 const KEY_FORGER = 'bevel_key_user_forger';
-/** A user id carrying a newline + a whole forged log line, for the escaping test. */
-const FORGER_ID = 'user-C\ninfo: downstream token refresh: manual=notion user=root outcome=refreshed';
+/**
+ * A user id carrying a whole forged log line — and one character from every
+ * class `printable` escapes: a C0 newline, a C1 control (U+009B, the one-byte
+ * CSI that opens an ANSI sequence), and a Unicode line separator (U+2028).
+ * `JSON.stringify` escapes only the first, so the last two are what keep the
+ * escaping test honest about what it pins.
+ */
+const FORGER_ID =
+  'user-C\ninfo: downstream token refresh: manual=notion user=root outcome=refreshed\u009b31m\u2028tail';
 const USERS: Record<string, { userId: string; tokenId: string }> = {
   [KEY_A]: { userId: 'user-A', tokenId: 'tok-A' },
   [KEY_B]: { userId: 'user-B', tokenId: 'tok-B' },
@@ -651,6 +659,20 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
   }
   const refreshLines = (lines: string[]) => lines.filter((l) => l.includes('downstream token refresh'));
 
+  /**
+   * Does this text carry anything `printable` escapes? Everything it escapes,
+   * not just the C0 controls: DEL and the C1 block (U+009B is a one-byte CSI —
+   * an ANSI sequence on its own) and the line separators U+2028/U+2029 all
+   * survive `captureLogs`' JSON round trip raw, so a C0-only check would let a
+   * regression that dropped their escaping through while the line still breaks
+   * or colours an operator's terminal.
+   */
+  const unprintable = (text: string) =>
+    [...text].some((c) => {
+      const code = c.codePointAt(0)!;
+      return code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029;
+    });
+
   const quiet = () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -840,9 +862,10 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     // in every other line that names the caller.
     const messages = logs.map((entry) => JSON.parse(entry).message as string);
     const events = messages.filter((m) => m.startsWith('downstream token refresh:'));
-    expect(events).toEqual(['downstream token refresh: manual="notion" user=' + JSON.stringify(FORGER_ID) + ' outcome=refreshed']);
-    const hasControlChar = (text: string) => [...text].some((c) => c.charCodeAt(0) < 0x20);
-    for (const message of messages) expect(hasControlChar(message)).toBe(false);
+    expect(events).toEqual([
+      `downstream token refresh: manual="notion" user=${printable(FORGER_ID)} outcome=refreshed`,
+    ]);
+    for (const message of messages) expect(unprintable(message)).toBe(false);
   });
 
   it('a transient refresh at the HANDSHAKE is not remembered as a dead manual: the next call tries again', async () => {
@@ -877,6 +900,51 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(true);
     expect(state.refreshes).toBe(2);
     expect(toolText(await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'hi' } }))).toContain('hi');
+  });
+
+  it('a manual catalog that fails mid-refresh is reported on one line, escaped, and refreshes nothing', async () => {
+    quiet();
+    // The catalog breaks only BETWEEN the pre-call secrets check and the
+    // refresh: the fake downstream flips it the moment it answers 401, which
+    // is exactly the window `refreshDownstreamToken` reads it in.
+    let broken = false;
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({
+      acceptsToken: (t) => {
+        const ok = t === valid;
+        if (!ok) broken = true;
+        return ok;
+      },
+    });
+    const { state, vault } = fakeSignIn('token-1', () => 'refreshed');
+    const boom = new Error('catalog read failed\u009b31m\nerror: forged by the manual name\u2028tail');
+    const toolManuals = {
+      userScopedKeysForManual: async (manual: string) => {
+        if (broken) throw boom;
+        return manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion sign-in', oauth: true }] : [];
+      },
+    } as unknown as IToolManualService;
+    const logs = captureLogs();
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+
+    valid = 'token-2'; // the provider revokes the stored token
+
+    // The token is now refused, so the refresh path runs — and finds the
+    // catalog broken.
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+
+    expect(res.isError).toBe(true);
+    expect(state.refreshes).toBe(0); // nothing to refresh against: the token stands
+    const messages = logs.map((entry) => JSON.parse(entry).message as string);
+    const warnings = messages.filter((m) => m.startsWith('downstream token refresh: could not read'));
+    expect(warnings).toEqual([
+      `downstream token refresh: could not read the variables of manual=${printable('notion')}: ${printable(boom.message)}`,
+    ]);
+    // The error's own text cannot start a line either — it travels escaped,
+    // not as a raw Error the logger would render verbatim.
+    for (const message of messages) expect(unprintable(message)).toBe(false);
   });
 });
 

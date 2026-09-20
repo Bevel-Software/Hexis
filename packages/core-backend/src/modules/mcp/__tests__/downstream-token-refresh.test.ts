@@ -118,4 +118,33 @@ describe('DownstreamRefreshGuard — at most once per (user, manual) per minute'
     expect(guard.run('u1\0linear', async () => 'again')).toBeUndefined();
     expect(guard.run('u2\0notion', async () => 'again')).toBeUndefined();
   });
+
+  it('a refresh still in flight is not cleared by the predicate the proxy uses', async () => {
+    const guard = new DownstreamRefreshGuard<string>(60_000, () => 0);
+    let runs = 0;
+    let release!: (v: string) => void;
+    const refresh = () => {
+      runs += 1;
+      return new Promise<string>((r) => (release = r));
+    };
+    const first = guard.run('u1\0notion', refresh);
+
+    // Exactly what `forgetStaleRefreshWindows` passes. A refresh of our own is
+    // itself a secrets mutation, and it notifies BEFORE it settles — so an
+    // in-flight window (outcome still undefined) must survive this, or the
+    // guard would be reset by the very refresh it issued and a provider that
+    // keeps minting refused tokens would get one refresh per call.
+    guard.clearWhere((key, outcome) => key.startsWith('u1\0') && outcome !== undefined && outcome !== 'refreshed');
+
+    // Still the same attempt: shared, not re-run, and not refused either.
+    const second = guard.run('u1\0notion', refresh);
+    expect(second).toBeDefined();
+    release('refreshed');
+    await expect(Promise.all([first, second])).resolves.toEqual(['refreshed', 'refreshed']);
+    expect(runs).toBe(1);
+    // And once it HAS settled as 'refreshed', the window still stands.
+    guard.clearWhere((key, outcome) => key.startsWith('u1\0') && outcome !== undefined && outcome !== 'refreshed');
+    expect(guard.run('u1\0notion', refresh)).toBeUndefined();
+    expect(runs).toBe(1);
+  });
 });
