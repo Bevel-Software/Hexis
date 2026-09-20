@@ -217,78 +217,131 @@ describe('ToolConnectionSection', () => {
     expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
   });
 
-  it('keeps the banner about configuration: a missing key is named, a pending sign-in is not', () => {
-    renderSection(
-      tool({
-        variables: [
-          {
-            name: 'API_KEY',
-            scope: 'user',
-            label: 'HeyReach API key',
-            key: 'heyreach_API_KEY',
-            adminConfigured: false,
-            userConfigured: false,
-          },
-          {
-            name: 'SIGNIN',
-            scope: 'user',
-            label: null,
-            key: 'heyreach_SIGNIN',
-            adminConfigured: true,
-            userConfigured: false,
-            oauth: true,
-            authorized: false,
-          },
-        ],
-      }),
-    );
-    const banner = screen.getByRole('status');
-    // One configuration gap → the singular headline, not "needs 2 things".
-    expect(banner).toHaveTextContent('This tool is not connected yet.');
-    expect(banner).toHaveTextContent('HeyReach API key: Needs a key from you');
-    expect(banner).not.toHaveTextContent('Needs your sign-in');
-  });
+  /**
+   * What used to be a banner listing every missing key above rows that already
+   * carried those keys. The rows kept the labels, the statuses and the buttons;
+   * what they gained is the colour, so "how many things does this need" is
+   * answered by counting amber rows instead of by a sentence that could drift
+   * out of step with them.
+   */
+  describe('the unset rows', () => {
+    /** The row element for a variable, found by the label it renders. */
+    function row(label: string): HTMLElement {
+      const found = screen.getByText(label).closest('[data-testid="tool-var-row"]');
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    }
 
-  it('says what a tool is missing, in amber, above the rows', () => {
-    renderSection(
-      tool({
-        variables: [
-          {
-            name: 'API_KEY',
-            scope: 'user',
-            label: 'HeyReach API key',
-            key: 'heyreach_API_KEY',
-            adminConfigured: false,
-            userConfigured: false,
-          },
-        ],
-      }),
-    );
-    // Named by its label, not its env var — and it says whose move it is.
-    expect(screen.getByRole('status')).toHaveTextContent(
-      'HeyReach API key: Needs a key from you',
-    );
-  });
+    /** Every row the section rendered, amber or not. */
+    const rows = () => screen.getAllByTestId('tool-var-row');
+    const amber = () => rows().filter((r) => r.className.split(' ').includes('bg-wait-soft'));
 
-  it("the banner's Add key opens the missing variable's editor, from a distance", () => {
-    renderSection(
-      tool({
-        variables: [
-          {
-            name: 'API_KEY',
-            scope: 'user',
-            label: 'HeyReach API key',
-            key: 'heyreach_API_KEY',
-            adminConfigured: false,
-            userConfigured: false,
-          },
-        ],
-      }),
-    );
-    expect(screen.queryByRole('textbox')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Add key: HeyReach API key' }));
-    // The same editor the row's own button opens — one path, two doors.
-    expect(screen.getByLabelText('Value for API_KEY')).toBeInTheDocument();
+    const userKey = (over: Partial<ToolSecrets['variables'][number]> = {}) => ({
+      name: 'API_KEY',
+      scope: 'user' as const,
+      label: 'HeyReach API key',
+      key: 'heyreach_API_KEY',
+      adminConfigured: false,
+      userConfigured: false,
+      ...over,
+    });
+
+    it('draws the one unset key amber, and says so without a banner', () => {
+      renderSection(tool({ variables: [userKey()] }));
+
+      expect(row('HeyReach API key')).toHaveClass('bg-wait-soft');
+      // The row still carries the action the banner used to duplicate.
+      expect(screen.getByRole('button', { name: 'Add key' })).toBeInTheDocument();
+      // And the sentence that named it is gone: nothing re-lists the row.
+      expect(screen.queryByRole('status')).toBeNull();
+      expect(screen.queryByText(/This tool is not connected yet/)).toBeNull();
+    });
+
+    it('draws several unset keys amber and leaves the set one alone', () => {
+      renderSection(
+        tool({
+          canWrite: true,
+          variables: [
+            userKey(),
+            userKey({ name: 'STORED', label: 'Stored key', userConfigured: true }),
+            {
+              name: 'TEAM_KEY',
+              scope: 'admin',
+              label: 'Team key',
+              key: 'heyreach_TEAM_KEY',
+              adminConfigured: false,
+              userConfigured: false,
+            },
+          ],
+        }),
+      );
+
+      // The count the banner used to state in prose IS the number of amber
+      // rows — the two that need a key, and not the one that has one.
+      expect(amber()).toHaveLength(2);
+      expect(row('HeyReach API key')).toHaveClass('bg-wait-soft');
+      expect(row('Team key')).toHaveClass('bg-wait-soft');
+      expect(row('Stored key')).not.toHaveClass('bg-wait-soft');
+      expect(screen.getByRole('button', { name: 'Add key' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Set key' })).toBeInTheDocument();
+      expect(screen.queryByRole('status')).toBeNull();
+    });
+
+    it('leaves every row in the normal tone when nothing is unset', () => {
+      renderSection(
+        tool({
+          variables: [
+            userKey({ userConfigured: true }),
+            userKey({ name: 'STORED', label: 'Stored key', userConfigured: true }),
+          ],
+        }),
+      );
+
+      expect(rows()).toHaveLength(2);
+      expect(amber()).toEqual([]);
+      expect(screen.queryByRole('status')).toBeNull();
+    });
+
+    it('tells a screen reader what the colour says, and only on the unset row', () => {
+      renderSection(
+        tool({
+          variables: [userKey(), userKey({ name: 'STORED', label: 'Stored key', userConfigured: true })],
+        }),
+      );
+
+      // The information the amber carries, in words: the row is required and
+      // has nothing in it. One row has it; the set row says nothing extra.
+      expect(screen.getAllByText('Required, not set')).toHaveLength(1);
+      expect(row('HeyReach API key')).toHaveTextContent('Required, not set');
+      expect(row('Stored key')).not.toHaveTextContent('Required, not set');
+    });
+
+    it('leaves a pending sign-in in the normal tone: it is a step, not a gap', () => {
+      // `adminConfigured` on an OAuth variable means the OWNER finished the
+      // provider setup, so nothing about this tool is unconfigured. Signing in
+      // is a step each person takes, and the row already offers the button —
+      // exactly the distinction the banner drew, kept now in the tone.
+      renderSection(
+        tool({
+          variables: [
+            {
+              name: 'SIGNIN',
+              scope: 'user',
+              label: 'Sign-in',
+              key: 'heyreach_SIGNIN',
+              adminConfigured: true,
+              userConfigured: false,
+              oauth: true,
+              authorized: false,
+            },
+          ],
+        }),
+      );
+
+      expect(amber()).toEqual([]);
+      expect(screen.queryByText('Required, not set')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
+    });
   });
 
   it('says nothing when every variable is set', () => {
@@ -880,7 +933,7 @@ describe('ToolConnectionSection', () => {
     });
 
     // Between them these cover every button the section can render: the header
-    // pair, the banner's action, and each branch of the row matrix.
+    // pair and each branch of the row matrix.
     it.each<[string, ToolSecrets, string[]]>([
       [
         'a settled tool an owner is looking at',
@@ -914,8 +967,9 @@ describe('ToolConnectionSection', () => {
             },
           ],
         }),
-        // The banner's Set key, plus the rows' own Set key and Add key.
-        ['Open Secrets', 'Set key', 'Set key: API_KEY', 'Add key'],
+        // One action per row and nothing above them: the banner that used to
+        // carry a duplicate Set key is gone, so the rows are the only offer.
+        ['Open Secrets', 'Set key', 'Add key'],
       ],
       ['a sign-in nobody has done yet', tool({ variables: [signIn()] }), ['Open Secrets', 'Sign in']],
       [

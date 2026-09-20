@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
@@ -15,13 +14,23 @@ import { ToolVarRow } from './ToolVarRow';
  * "Your connection" — what this tool still needs from you, and (if you own it)
  * from you on everyone's behalf.
  *
- * The setup banner above the rows exists because `oauth-manual` is the one
- * state the rows CANNOT explain on their own: the remote server wants a sign-in
- * through an app the OWNER registers, so every row underneath is stuck through
- * no fault of the person reading them. The banner names whose move it is — the
- * owner's — and what the move is: declare the sign-in (the server editor on
- * this page for an mcp.json server, the file itself for a `.tool`), then set
- * its client secret. Once declared, only the secret remains and it says so.
+ * A banner here names a CAUSE the rows cannot see; it never summarises them.
+ * There used to be a second one that did — "this tool needs 2 things before it
+ * works", then every missing label and status, sitting directly on top of rows
+ * that already carried those labels, those statuses and the buttons that fix
+ * them. What it really added was colour, so colour is what survived it: an
+ * unset row is drawn amber (see `ToolVarRow`'s `unset`), and the count is how
+ * many of them there are.
+ *
+ * The setup banner that remains passes that test, because `oauth-manual` is the
+ * one state the rows CANNOT explain on their own: the remote server wants a
+ * sign-in through an app the OWNER registers, so every row underneath is stuck
+ * through no fault of the person reading them. The banner names whose move it
+ * is — the owner's — and what the move is: declare the sign-in (the server
+ * editor on this page for an mcp.json server, the file itself for a `.tool`),
+ * then set its client secret. Once declared, only the secret remains and it
+ * says so. The rejected-credential banner passes it too: only a real call
+ * could know, so no row can.
  */
 
 export interface ToolConnectionSectionProps {
@@ -48,8 +57,6 @@ export function ToolConnectionSection({
 }: ToolConnectionSectionProps) {
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
-  /** `{varName, n}` — bumping `n` opens that variable's editor from the banner. */
-  const [edit, setEdit] = useState<{ name: string; n: number }>({ name: '', n: 0 });
 
   /**
    * The probe, and the ONLY place its answer exists.
@@ -82,59 +89,36 @@ export function ToolConnectionSection({
   const isMcpJsonServer = tool.path.endsWith('/mcp.json');
 
   /**
-   * The CONFIGURATION this tool is still missing, named.
+   * The CONFIGURATION this tool is still missing, by variable name.
    *
-   * Only configuration gaps earn the amber banner: keys nobody has entered,
-   * owner-side setup nobody has finished. A pending sign-in on a fully
-   * configured provider is deliberately NOT here — the row right below says
-   * "Needs your sign-in" with its own Sign in button, and a banner repeating
-   * both is the same sentence twice with two identical buttons. Configuration
-   * is the state of the TOOL; signing in is a step each PERSON takes, and the
-   * row is where personal steps live.
-   */
-  const missing = toolVariableStatuses(tool).filter(
-    ({ v, status }) => status.state !== 'ok' && !(v.oauth && v.adminConfigured),
-  );
-
-  /**
-   * The banner's one action — the first missing key the READER can enter.
+   * This list used to be prose in an amber banner above the rows — "needs 2
+   * things", then every label and status again — directly above rows already
+   * carrying the same labels, the same statuses and the buttons that fix
+   * them. The rows won: each one named here is drawn amber, and the count the
+   * banner gave is how many amber rows there are.
    *
-   * Saying "Needs a key from you" and making the reader hunt for where to put
-   * it is a treasure map; the banner carries the shovel: the button opens (and
-   * scrolls to) the row's editor. An admin-scope gap for a non-writer yields
-   * no button, because the honest button would be "go ask someone else" —
-   * and an unconfigured sign-in provider is exactly that case too.
+   * Only configuration gaps qualify: keys nobody has entered, owner-side setup
+   * nobody has finished. A pending sign-in on a fully configured provider is
+   * deliberately NOT here — configuration is the state of the TOOL, while
+   * signing in is a step each PERSON takes, and its row already offers the
+   * Sign in button without needing to be flagged as unfinished setup.
    */
-  const actionable = missing.find(
-    ({ v }) => !v.oauth && (v.scope === 'user' || tool.canWrite),
+  const unset = new Set(
+    toolVariableStatuses(tool)
+      .filter(({ v, status }) => status.state !== 'ok' && !(v.oauth && v.adminConfigured))
+      .map(({ v }) => v.name),
   );
-
-  // The aria-label carries the variable so the banner's button and the row's
-  // never share an accessible name — same words to the eye, distinct to a
-  // screen reader and to the tests.
-  const bannerAction = actionable ? (
-    <Button
-      variant="primary"
-      size="sm"
-      aria-label={`${actionable.v.scope === 'user' ? 'Add key' : 'Set key'}: ${
-        actionable.v.label ?? actionable.v.name
-      }`}
-      onClick={() => setEdit((e) => ({ name: actionable.v.name, n: e.n + 1 }))}
-    >
-      {actionable.v.scope === 'user' ? 'Add key' : 'Set key'}
-    </Button>
-  ) : null;
 
   /**
    * The health line, shown only once every variable is provided.
    *
-   * While something is still missing, the amber banner above already names it,
+   * While something is still missing, the amber rows below already name it,
    * and a second line saying the connection is untested would be answering a
    * question nobody has reached yet. Once nothing is missing, this is the only
    * remaining question — and the one the badge used to answer by guessing.
    */
   const health = toolStatus(tool, verdict);
-  // Every variable genuinely provided — NOT merely `missing.length === 0`, which
+  // Every variable genuinely provided — NOT merely `unset.size === 0`, which
   // excludes a pending sign-in on a configured provider. A tool nobody has
   // signed into yet has no credential to test, and saying so would put a health
   // line above a row that already says "Needs your sign-in".
@@ -150,8 +134,8 @@ export function ToolConnectionSection({
     !setupUnfinished && toolVariableStatuses(tool).every(({ status }) => status.state === 'ok');
 
   /**
-   * A credential write LANDED (save or delete, from the banner's editor or a
-   * row). Everything a pending probe could still say is about a credential
+   * A credential write LANDED (save or delete, from a row's editor).
+   * Everything a pending probe could still say is about a credential
    * that no longer exists in that form, so the write ORPHANS it outright —
    * the sequence bump takes its voice (a delete starts no replacement probe,
    * so nothing else would), the in-flight slot is released, and the old
@@ -278,28 +262,6 @@ export function ToolConnectionSection({
         </Banner>
       )}
 
-      {/* Suppressed while the sign-in setup banner is up: that one names a
-          cause, this one would only re-list its symptoms. */}
-      {missing.length > 0 && !setupUnfinished && (
-        <Banner tone="wait" role="status" className="mb-2.5">
-          <div className="flex items-center gap-3">
-            <span className="min-w-0 flex-1">
-              <span className="font-semibold">
-                {missing.length === 1
-                  ? 'This tool is not connected yet.'
-                  : `This tool needs ${missing.length} things before it works.`}
-              </span>{' '}
-              <span>
-                {missing
-                  .map(({ v, status }) => `${v.label ?? v.name}: ${status.text}`)
-                  .join(' · ')}
-              </span>
-            </span>
-            {bannerAction && <span className="shrink-0">{bannerAction}</span>}
-          </div>
-        </Banner>
-      )}
-
       {/* The one health state that needs a person: the provider tested this
           credential and refused it. Everything is configured, so no other
           banner covers it, and the row below cannot know — only a real call
@@ -328,7 +290,7 @@ export function ToolConnectionSection({
               canWrite={tool.canWrite}
               setupKind={setupKind}
               returnTo={pathForTool(tool.slug)}
-              editSignal={edit.name === variable.name ? edit.n : undefined}
+              unset={unset.has(variable.name)}
               onChanged={changed}
               // Test the moment a key is entered — while the user still has it
               // to hand, which is when a typo is cheapest to fix. Waiting for
