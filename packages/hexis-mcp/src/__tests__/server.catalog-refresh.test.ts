@@ -15,47 +15,55 @@ import type { HexisMcpConfig } from '../config.js';
 
 /**
  * INTEGRATION: a tool manual added to the deployment reaches a client that is
- * ALREADY CONNECTED here — no reconnect, no restart.
+ * ALREADY CONNECTED here — no reconnect, no restart — and it reaches it when
+ * that client next uses the connection, never on a timer.
  *
  * This is the half of the acceptance criteria the hosted endpoint gets for
  * free and this process does not. Hosted is stateless: every request rebuilds
  * its surface from the live registry. This process registered the deployment's
- * manual once, at startup, and the MCP session that registration created is
- * what its `tools/list` is built from — so without the watch, a `.tool`
+ * manuals once, at startup, and the sessions those registrations created are
+ * what its `tools/list` is built from — so without the check, a `.tool`
  * committed a minute ago is invisible here until someone restarts it. That was
  * the reported bug.
  *
  * The stub is a genuine stateless streamable-HTTP MCP endpoint (so
- * registration and re-registration are real), whose tool list and catalog
- * revision the test moves the way a commit would.
+ * registration and re-registration are real), whose tool list, local-only
+ * manuals and catalog revision the test moves the way a commit would.
  */
 
 let httpServer: http.Server | null = null;
 let base = '';
-/** The deployment's tool list, as a commit would change it. */
+/** The deployment's remote tool list, as a commit would change it. */
 let deploymentTools: string[] = [];
+/**
+ * The deployment's LOCAL-ONLY `.tool` manuals, by name — each served as the
+ * platform reference a real deployment hands over (`/api/tools/<slug>/manual`),
+ * whose manual the stub answers with one tool.
+ */
+let deploymentLocal: string[] = [];
 /**
  * Whether the stub deployment ADVERTISES the catalog-revision route. A
  * deployment older than this package does not, and must not be probed for it:
  * an unknown `/api/*` path falls through to its JWT mounts and answers 401,
- * which a poller would report as a dead connection key.
+ * which a checker would report as a dead connection key.
  */
 let advertisesCatalogRevision = true;
 /**
  * Whether the deployment's MCP endpoint is refusing — a redeploy, a proxy
- * blip. The catalog route keeps answering, so the watch sees the change and
+ * blip. The catalog route keeps answering, so the check sees the change and
  * the re-registration that follows it is what fails.
  */
 let mcpUnavailable = false;
-/** Its catalog fingerprint. Moves when — and only when — the list above does. */
+/** Its catalog fingerprint. Moves when — and only when — the lists above do. */
 let revision = 'rev-1';
-/** Every catalog-revision poll's bearer, so the poll's credential is checkable. */
-const revisionPolls: (string | undefined)[] = [];
+/** Every catalog-revision read's bearer, so the check's credential is checkable. */
+const revisionReads: (string | undefined)[] = [];
 
 /** Change what the deployment serves, exactly as a default-branch commit would. */
-function commit(tools: string[]): void {
+function commit(tools: string[], local: string[] = deploymentLocal): void {
   deploymentTools = tools;
-  revision = `rev-${tools.join('+')}`;
+  deploymentLocal = local;
+  revision = `rev-${tools.join('+')}|${local.join('+')}`;
 }
 
 beforeAll(async () => {
@@ -75,17 +83,53 @@ beforeAll(async () => {
             ...(advertisesCatalogRevision ? { catalogRevision: true } : {}),
           });
         }
-        if (pathname === '/api/agent/all-tools') return json(200, { manuals: [] });
-        if (pathname === '/api/agent/tools/list_local_tools') return json(200, { tools: [] });
+        if (pathname === '/api/agent/all-tools') {
+          // Read at request time: a refresh after a commit must see the new
+          // list, exactly as it would against a real deployment.
+          return json(200, {
+            manuals: deploymentLocal.map((name) => ({
+              name,
+              call_template_type: 'http',
+              http_method: 'GET',
+              url: `${base}/api/tools/${name}/manual`,
+            })),
+          });
+        }
+        if (pathname === '/api/agent/tools/list_local_tools') {
+          return json(200, {
+            tools: deploymentLocal.map((name) => ({ name, slug: name, path: `Plugins/Everyone/${name}.tool` })),
+          });
+        }
+        const manual = /^\/api\/tools\/([^/]+)\/manual$/.exec(pathname);
+        if (manual) {
+          const name = manual[1]!;
+          return json(200, {
+            utcp_version: '1.1.0',
+            manual_version: '1.0.0',
+            tools: [
+              {
+                name: 'ping',
+                description: `the ${name} local tool`,
+                inputs: { type: 'object', properties: {} },
+                outputs: { type: 'object', properties: {} },
+                tags: [],
+                tool_call_template: {
+                  call_template_type: 'http',
+                  http_method: 'POST',
+                  url: `${base}/api/never-dialed`,
+                  content_type: 'application/json',
+                },
+              },
+            ],
+          });
+        }
         if (pathname === '/api/agent/catalog-revision') {
-          revisionPolls.push(req.headers.authorization);
+          revisionReads.push(req.headers.authorization);
           return json(200, { revision, tools: deploymentTools.length, skills: 0 });
         }
         if (pathname === '/api/mcp') {
           if (mcpUnavailable) return json(503, { error: 'the deployment is restarting' });
           const parsed = body ? (JSON.parse(body) as unknown) : undefined;
-          // Read at request time: a re-registration after a commit must see
-          // the new list, exactly as it would against a real deployment.
           const served = [...deploymentTools];
           const mcp = new Server({ name: 'stub-deployment', version: '0.0.0' }, { capabilities: { tools: {} } });
           mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -127,21 +171,18 @@ afterAll(async () => {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  revisionPolls.length = 0;
+  revisionReads.length = 0;
   advertisesCatalogRevision = true;
   mcpUnavailable = false;
+  deploymentLocal = [];
 });
 
-async function waitFor(condition: () => boolean, what: string, timeoutMs = 20_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-}
+const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A connected client, its notification log, and the teardown for both. */
-async function start(catalogPollMs: number): Promise<{
+async function start(
+  catalogCheck: false | { minIntervalMs?: number } = { minIntervalMs: 0 },
+): Promise<{
   client: Client;
   notifications: string[];
   stderr: string[];
@@ -152,7 +193,7 @@ async function start(catalogPollMs: number): Promise<{
     stderr.push(args.map(String).join(' '));
   });
   const config: HexisMcpConfig = { baseUrl: base, connectionKey: 'bevel_test' };
-  const handle = await createHexisMcpServer(config, '0.0.0', { catalogPollMs });
+  const handle = await createHexisMcpServer(config, '0.0.0', { catalogCheck });
   await handle.ready;
 
   const notifications: string[] = [];
@@ -181,9 +222,9 @@ async function start(catalogPollMs: number): Promise<{
 const listed = async (client: Client): Promise<string[]> => (await client.listTools()).tools.map((t) => t.name);
 
 describe('a manual added on the deployment reaches an already-connected client', () => {
-  it('re-registers the catalog and sends tool-list-changed, on the same connection', { timeout: 60_000 }, async () => {
+  it('re-registers the catalog and sends tool-list-changed, on the same connection, when next listed', { timeout: 60_000 }, async () => {
     commit(['ping']);
-    const s = await start(50);
+    const s = await start();
     try {
       expect(await listed(s.client)).toContain('ping');
       expect(await listed(s.client)).not.toContain('serper_search');
@@ -191,18 +232,41 @@ describe('a manual added on the deployment reaches an already-connected client',
       // The commit: a `.tool` is added to the default branch.
       commit(['ping', 'serper_search']);
 
-      await waitFor(() => s.notifications.includes('tools/list_changed'), 'the tool-list-changed notification');
+      // The client's next listing is what notices it: the check runs on that
+      // listing and the answer already holds the new tool — no reconnect, no
+      // restart, same client object throughout.
+      const after = await listed(s.client);
+      expect(after).toContain('serper_search');
+      expect(after).toContain('ping');
       // The capability is DECLARED, which is what permits the notification at
       // all — a client reads it to decide whether it may trust the list it
       // holds between notifications.
       expect(s.client.getServerCapabilities()?.tools).toEqual({ listChanged: true });
+      // Both notifications went out with the refresh, before the list answered.
+      expect(s.notifications).toContain('tools/list_changed');
       expect(s.notifications).toContain('prompts/list_changed');
+    } finally {
+      await s.shutdown();
+    }
+  });
 
-      // And the list the connection actually answers with now holds it — no
-      // reconnect, no restart, same client object throughout.
-      const after = await listed(s.client);
-      expect(after).toContain('serper_search');
-      expect(after).toContain('ping');
+  it('notices the change when a tool CALL finishes, and tells the client', { timeout: 60_000 }, async () => {
+    commit(['ping']);
+    const s = await start();
+    try {
+      expect(await listed(s.client)).toContain('ping');
+      commit(['ping', 'serper_search']);
+
+      // No listing: a call. The check runs once the call has answered, and
+      // the client learns of the change through the notification.
+      const result = await s.client.callTool({ name: 'ping', arguments: {} });
+      expect(result.isError).not.toBe(true);
+      const deadline = Date.now() + 20_000;
+      while (!s.notifications.includes('tools/list_changed')) {
+        if (Date.now() > deadline) throw new Error('timed out waiting for the tool-list-changed notification');
+        await settle(20);
+      }
+      expect(await listed(s.client)).toContain('serper_search');
     } finally {
       await s.shutdown();
     }
@@ -210,15 +274,44 @@ describe('a manual added on the deployment reaches an already-connected client',
 
   it('drops a removed manual from the same connection', { timeout: 60_000 }, async () => {
     commit(['ping', 'retired_tool']);
-    const s = await start(50);
+    const s = await start();
     try {
       expect(await listed(s.client)).toContain('retired_tool');
 
       commit(['ping']);
-      await waitFor(() => s.notifications.includes('tools/list_changed'), 'the tool-list-changed notification');
-
       expect(await listed(s.client)).not.toContain('retired_tool');
       expect(await listed(s.client)).toContain('ping');
+      expect(s.notifications).toContain('tools/list_changed');
+    } finally {
+      await s.shutdown();
+    }
+  });
+
+  /**
+   * The local-only half — the manuals this process exists to add. A local
+   * `.tool` committed on the deployment is registered HERE, on the same
+   * connection, by the same refresh: nothing about it needs a restart.
+   */
+  it('registers a LOCAL-only manual added on the deployment, and drops one removed', { timeout: 60_000 }, async () => {
+    commit(['ping'], []);
+    const s = await start();
+    try {
+      expect(await listed(s.client)).not.toContain('localbox_ping');
+
+      // The commit: a `local: true` .tool lands on the default branch.
+      commit(['ping'], ['localbox']);
+      const after = await listed(s.client);
+      // Namespaced, as every local manual's tools are (`localbox.ping` →
+      // `localbox_ping`), beside the deployment's own bare `ping`.
+      expect(after).toContain('localbox_ping');
+      expect(after).toContain('ping');
+      expect(s.stderr.some((line) => line.includes('1 local-only manual(s) registered here'))).toBe(true);
+
+      // And gone again when the commit that removes it lands.
+      commit(['ping'], []);
+      const gone = await listed(s.client);
+      expect(gone).not.toContain('localbox_ping');
+      expect(gone).toContain('ping');
     } finally {
       await s.shutdown();
     }
@@ -234,32 +327,30 @@ describe('a manual added on the deployment reaches an already-connected client',
    * connection would never see another tool.)
    *
    * Nothing is committed between the failure and the recovery: the change is
-   * still OWED, and the watch is what remembers that.
+   * still OWED, and the checker is what remembers that.
    */
   it('restores the toolset by retrying a re-registration that failed', { timeout: 60_000 }, async () => {
     commit(['ping']);
-    const s = await start(50);
+    const s = await start();
     try {
       expect(await listed(s.client)).toContain('ping');
 
       // The deployment goes away, and the commit lands while it is away: the
-      // watch sees the new revision, deregisters, and cannot register again.
+      // check sees the new revision, deregisters, and cannot register again.
       mcpUnavailable = true;
       commit(['ping', 'serper_search']);
-      await waitFor(
-        () => s.stderr.some((line) => line.includes('refreshing the toolset after a workspace change failed')),
-        'the refresh failure notice',
-      );
+      await listed(s.client);
+      expect(s.stderr.some((line) => line.includes('refreshing the toolset after a workspace change failed'))).toBe(true);
       expect(s.notifications).toEqual([]); // nothing to tell a client yet
 
-      // It comes back. No new commit — the owed change is delivered by a retry.
+      // It comes back. No new commit — the owed change is delivered by the
+      // next check, which the next listing runs.
       mcpUnavailable = false;
-      await waitFor(() => s.notifications.includes('tools/list_changed'), 'the tool-list-changed notification');
-
       const after = await listed(s.client);
       expect(after).toContain('serper_search');
       expect(after).toContain('ping');
-      // One line for the streak, not one per poll.
+      expect(s.notifications).toContain('tools/list_changed');
+      // One line for the streak, not one per attempt.
       expect(
         s.stderr.filter((line) => line.includes('refreshing the toolset after a workspace change failed')),
       ).toHaveLength(1);
@@ -268,38 +359,70 @@ describe('a manual added on the deployment reaches an already-connected client',
     }
   });
 
-  it('stays quiet while the catalog does not move', { timeout: 60_000 }, async () => {
+  /**
+   * The whole point of checking on activity rather than on a timer: a laptop
+   * whose client nobody is using asks its deployment NOTHING.
+   */
+  it('asks the deployment nothing while the connection is idle', { timeout: 60_000 }, async () => {
     commit(['ping']);
-    const s = await start(20);
+    const s = await start();
     try {
-      // Long enough for many polls: the watch must not re-register an MCP
-      // session — closing whatever it held — for a deployment nobody edited.
-      await waitFor(() => revisionPolls.length > 10, 'several catalog polls');
+      // Discovery reads the revision once, before the manuals — that is the
+      // baseline, not a check.
+      const atStartup = revisionReads.length;
+      expect(atStartup).toBe(1);
+      await settle(400);
+      expect(revisionReads.length).toBe(atStartup);
       expect(s.notifications).toEqual([]);
-      expect(await listed(s.client)).toContain('ping');
     } finally {
       await s.shutdown();
     }
   });
 
-  it('polls with the connection key, and stops polling at shutdown', { timeout: 60_000 }, async () => {
+  it('stays quiet while the catalog does not move, however often it is used', { timeout: 60_000 }, async () => {
     commit(['ping']);
-    const s = await start(20);
-    // The same try/finally as every other case here, and for a reason specific
-    // to this file: `shutdown()` is what stops the watch, and a server leaked
-    // by an assertion that threw would keep polling the shared stub every 20ms
-    // for the rest of the run — feeding stray entries into `revisionPolls`,
-    // which the cases below assert exact lengths on. One failure would become
-    // several.
+    const s = await start();
     try {
-      await waitFor(() => revisionPolls.length > 0, 'a catalog poll');
-      expect(revisionPolls[0]).toBe('Bearer bevel_test');
+      for (let i = 0; i < 6; i += 1) expect(await listed(s.client)).toContain('ping');
+      // Used, so checked — and nothing moved, so no session was re-made and
+      // no client was told anything.
+      expect(revisionReads.length).toBeGreaterThan(1);
+      expect(s.notifications).toEqual([]);
     } finally {
       await s.shutdown();
     }
-    const afterShutdown = revisionPolls.length;
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(revisionPolls.length).toBe(afterShutdown);
+  });
+
+  /**
+   * The throttle, end to end: a burst of activity is one read, not one per
+   * event.
+   */
+  it('reads the revision at most once per interval however busy the connection is', { timeout: 60_000 }, async () => {
+    commit(['ping']);
+    const s = await start({ minIntervalMs: 60_000 });
+    try {
+      const atStartup = revisionReads.length;
+      for (let i = 0; i < 5; i += 1) await listed(s.client);
+      for (let i = 0; i < 5; i += 1) await s.client.callTool({ name: 'ping', arguments: {} });
+      await settle(100);
+      expect(revisionReads.length).toBe(atStartup + 1);
+    } finally {
+      await s.shutdown();
+    }
+  });
+
+  it('checks with the connection key, and checks nothing after shutdown', { timeout: 60_000 }, async () => {
+    commit(['ping']);
+    const s = await start();
+    try {
+      await listed(s.client);
+      expect(revisionReads.at(-1)).toBe('Bearer bevel_test');
+    } finally {
+      await s.shutdown();
+    }
+    const afterShutdown = revisionReads.length;
+    await settle(200);
+    expect(revisionReads.length).toBe(afterShutdown);
   });
 
   /**
@@ -313,15 +436,14 @@ describe('a manual added on the deployment reaches an already-connected client',
   it('never probes a deployment that does not advertise the route', { timeout: 60_000 }, async () => {
     advertisesCatalogRevision = false;
     commit(['ping']);
-    const s = await start(20);
+    const s = await start();
     try {
       commit(['ping', 'serper_search']);
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      expect(revisionPolls).toEqual([]);
-      expect(s.notifications).toEqual([]);
       // The toolset stays what discovery found — and the reader is told why,
       // rather than being left to wonder why a tool they added never showed up.
       expect(await listed(s.client)).not.toContain('serper_search');
+      expect(revisionReads).toEqual([]);
+      expect(s.notifications).toEqual([]);
       expect(s.stderr.some((line) => line.includes('predates catalog change detection'))).toBe(true);
     } finally {
       await s.shutdown();
@@ -329,22 +451,21 @@ describe('a manual added on the deployment reaches an already-connected client',
   });
 
   /**
-   * The watch is opt-out, so an embedding host that wants the old frozen-at-
+   * The check is opt-out, so an embedding host that wants the old frozen-at-
    * startup behaviour can have it — and so this suite can prove the refresh is
    * what makes the difference, rather than something else in the process.
    */
-  it('leaves the toolset frozen when the watch is turned off', { timeout: 60_000 }, async () => {
+  it('leaves the toolset frozen when the check is turned off', { timeout: 60_000 }, async () => {
     commit(['ping']);
-    const s = await start(0);
+    const s = await start(false);
     // Discovery still reads the revision once, before the manuals — that is
-    // the baseline, not a poll. What the off switch stops is everything after.
-    const atStartup = revisionPolls.length;
+    // the baseline, not a check. What the off switch stops is everything after.
+    const atStartup = revisionReads.length;
     try {
       commit(['ping', 'serper_search']);
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      expect(revisionPolls.length).toBe(atStartup);
-      expect(s.notifications).toEqual([]);
       expect(await listed(s.client)).not.toContain('serper_search');
+      expect(revisionReads.length).toBe(atStartup);
+      expect(s.notifications).toEqual([]);
     } finally {
       await s.shutdown();
     }

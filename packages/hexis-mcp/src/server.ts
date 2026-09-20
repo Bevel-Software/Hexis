@@ -48,7 +48,7 @@ import {
   fetchAgentInstructions,
   type LocalManualInfo,
 } from './deployment.js';
-import { watchCatalog, type CatalogWatch } from './catalog-watch.js';
+import { createCatalogCheck, type CatalogCheck } from './catalog-watch.js';
 import { materializePlugin, prepareStdioSpec, type StdioServerSpec } from './materialize.js';
 import { REMOTE_MANUAL_NAME, localManualTemplates, remoteManualTemplate } from './manuals.js';
 import {
@@ -383,15 +383,17 @@ export async function createHexisMcpServer(
   version: string,
   options: {
     /**
-     * How often to check whether the deployment's tools or skills changed.
-     * Defaults to `CATALOG_POLL_INTERVAL_MS` (see `catalog-watch.ts`); `0`
-     * turns the watch off,
-     * which freezes this server's toolset at what discovery found (what it
-     * did before the watch existed). Here for tests and embedding hosts — the
-     * CLI does not expose it, because the default is the contract the
-     * knowledge base's guide states.
+     * Whether, and how often at most, to check that the deployment's tools
+     * and skills are still the ones this server registered. The check runs on
+     * ACTIVITY — a tool call finishing, a `tools/list` arriving — never on a
+     * timer, and `minIntervalMs` (default `CATALOG_CHECK_MIN_INTERVAL_MS`, see
+     * `catalog-watch.ts`) is the least time between two of them. `false`
+     * turns it off, which freezes this server's toolset at what discovery
+     * found (what it did before the check existed). Here for tests and
+     * embedding hosts — the CLI does not expose it, because the default is
+     * the contract the knowledge base's guide states.
      */
-    catalogPollMs?: number;
+    catalogCheck?: false | { minIntervalMs?: number };
   } = {},
 ): Promise<HexisMcpHandle> {
   const { mcpUrl, agentInstructions, catalogRevision: catalogRevisionAdvertised } = await resolveDeployment(config);
@@ -468,8 +470,19 @@ export async function createHexisMcpServer(
    * before it would otherwise have nothing to reach.
    */
   let server: Server | null = null;
-  /** The running catalog watch, once discovery has a baseline to watch from. */
-  let catalogWatch: CatalogWatch | null = null;
+  /** The catalog checker, once discovery has a baseline to check against. */
+  let catalogCheck: CatalogCheck | null = null;
+  /**
+   * The local-only manuals this process CURRENTLY has registered, by UTCP
+   * name, and what the deployment says about each. Both are LIVE maps, mutated
+   * in place by a catalog refresh rather than replaced: the variable resolver
+   * binding holds `localOnly` by reference and session recovery reads
+   * `localByName` through a closure, and either one seeing yesterday's set
+   * would resolve a new local tool's secrets — or its session — against a
+   * manual that no longer exists.
+   */
+  const localOnly = new Map<string, LocalManualInfo>();
+  const localByName = new Map<string, CallTemplate>();
   const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
   /**
    * Run `body` as THE re-registration in flight. `parksACall` marks the waiter
@@ -515,25 +528,28 @@ export async function createHexisMcpServer(
    * Shared by the credential swap and the catalog refresh, which must not
    * disagree about what a failed cleanup means.
    */
-  const deregisterRemoteManual = async (live: CodeModeUtcpClient, why: string): Promise<boolean> => {
+  const deregisterManualNamed = async (live: CodeModeUtcpClient, name: string, why: string): Promise<boolean> => {
     try {
-      // Closes the manual's MCP sessions and drops its repository entries.
-      // Returns false for a manual that is not registered, which is exactly
-      // the state the caller wants and not a failure.
-      await live.deregisterManual(REMOTE_MANUAL_NAME);
+      // Closes the manual's MCP sessions — for a local stdio server, the child
+      // process it spawned — and drops its repository entries. Returns false
+      // for a manual that is not registered, which is exactly the state the
+      // caller wants and not a failure.
+      await live.deregisterManual(name);
       deregisterFailing = false;
       return false;
     } catch (err) {
       if (!deregisterFailing) {
         deregisterFailing = true;
         console.error(
-          `[hexis-mcp] deregistering the remote manual ${why} failed: ${printable(err instanceof Error ? err.message : String(err))} ` +
+          `[hexis-mcp] deregistering the manual "${name}" ${why} failed: ${printable(err instanceof Error ? err.message : String(err))} ` +
             'Leaving it registered and trying the cleanup again on the next attempt.',
         );
       }
       return true;
     }
   };
+  const deregisterRemoteManual = (live: CodeModeUtcpClient, why: string): Promise<boolean> =>
+    deregisterManualNamed(live, REMOTE_MANUAL_NAME, why);
 
   const swapRemoteCredential = async (token: string): Promise<void> => {
     // The manual is registered only once discovery got that far, so the guard
@@ -575,8 +591,9 @@ export async function createHexisMcpServer(
   }
 
   /**
-   * The deployment's catalog moved: re-register its manual so the toolset this
-   * process serves is the current one, then TELL the client.
+   * The deployment's catalog moved: re-register its manuals — the remote one
+   * and every local-only one — so the toolset this process serves is the
+   * current one, then TELL the client.
    *
    * Both halves matter and neither substitutes for the other. Re-registration
    * is what makes the new tool callable here — the registered MCP session is
@@ -589,18 +606,16 @@ export async function createHexisMcpServer(
    * three re-registration paths can never interleave, and with the same
    * bounded drain: a wedged call must not hold the catalog stale forever.
    *
-   * SCOPE: the REMOTE manual only. Local-only servers (`local: true`,
-   * `type: stdio`) are materialized to disk and spawned as child processes at
-   * startup, so one added, changed or removed on the workspace still needs a
-   * restart of this process, and the log line says so rather than leaving the
-   * reader to discover it. What this refresh leaves standing is what this
-   * process can still CALL: the child is running and its tools work, so
-   * listing them is the honest answer — rebuilding the local half here would
-   * mean killing and re-spawning children mid-session on a poll, and
-   * suppressing the notification would cost every REMOTE change its refresh
-   * because a local server happened to move in the same commit. Everything the
-   * deployment serves — every `.tool`, every remote `mcp.json` entry, and the
-   * KB tools themselves — arrives through the remote manual and is covered here.
+   * SCOPE: everything this process registered. The remote manual carries
+   * every `.tool`, every remote `mcp.json` entry and the KB tools themselves.
+   * The LOCAL-only manuals (`local: true`, `type: stdio`) are the ones this
+   * process exists to add, and they refresh the same way: each is
+   * deregistered — which closes the child process a stdio server spawned —
+   * the deployment's manual list is read again, a plugin whose files moved is
+   * materialized again from scratch, and the manuals are registered anew. A
+   * local server is therefore restarted by a change to it, on the connection
+   * the client already holds, rather than by a restart of this whole process.
+   * The drain above is what keeps that from interrupting a call in flight.
    *
    * BOTH notifications fire on any change, because one fingerprint covers both
    * catalogs: a `.tool` commit re-lists prompts that did not move, and a
@@ -608,7 +623,7 @@ export async function createHexisMcpServer(
    * on a client that honours them, against a second poll to tell the two
    * apart on every deployment that has neither.
    */
-  const refreshRemoteCatalog = async (): Promise<void> => {
+  const refreshCatalog = async (): Promise<void> => {
     if (closed || !remoteManualRegistered) return;
     const refreshed = await withReregisterGate(async (): Promise<boolean> => {
       if (closed) return false; // shutdown landed while awaiting the gate
@@ -616,35 +631,82 @@ export async function createHexisMcpServer(
       if (!live) return false; // discovery failed and released it while we queued
       const deadline = Date.now() + 15_000;
       while (inflightCalls - callsParkedForReregister > 0 && Date.now() < deadline) await sleep(50);
-      // THROWN on a cleanup that did not come off, not pressed through: the
-      // change stays owed, so the watch attempts the whole thing again on its
-      // next poll — cleanup included — rather than registering a second manual
-      // under a name the client may still hold.
+      // Every registration this process holds comes off before anything goes
+      // back on. THROWN on a cleanup that did not come off, not pressed
+      // through: the change stays owed, so the checker attempts the whole
+      // thing again on the next call — cleanup included — rather than
+      // registering a second manual under a name the client may still hold.
+      // A local manual comes out of `localByName` only once it is really
+      // gone, so a retry knows what is still there to remove.
       if (await deregisterRemoteManual(live, 'to pick up a catalog change')) {
         throw new Error('the remote manual could not be deregistered; it may still be registered');
       }
+      for (const name of [...localByName.keys()]) {
+        if (await deregisterManualNamed(live, name, 'to pick up a catalog change')) {
+          throw new Error(`the local manual "${name}" could not be deregistered; it may still be registered`);
+        }
+        localByName.delete(name);
+      }
+      // What the deployment serves NOW, read afresh — the manual list and
+      // which of them are local-only — prepared exactly as discovery prepares
+      // them. `materializePlugin` refreshes a plugin from scratch on every
+      // call, so a local server whose files were committed is spawned below
+      // from the committed files, in a root its old child no longer holds.
+      const [allManuals, localOnlyNow] = await Promise.all([
+        fetchAllManuals(config),
+        fetchLocalOnlyManuals(config),
+      ]);
+      const local = await prepareLocalManuals(
+        config,
+        localManualTemplates(allManuals, new Set(localOnlyNow.keys())),
+        localOnlyNow,
+      );
+      // In place: the variable-resolver binding holds this map by reference.
+      localOnly.clear();
+      for (const [name, info] of localOnlyNow) localOnly.set(name, info);
+      // A manual added since startup may need the loopback variables startup
+      // seeded for the ones it knew about (see `buildClient`). Merged, never
+      // replaced: nothing a running manual resolves through goes away.
+      const seeded = seedBevelHostedManualVars(
+        local as unknown as { name?: unknown; url?: unknown }[],
+        config.baseUrl,
+        config.connectionKey,
+      );
+      const variables = (live.config as { variables?: Record<string, string> }).variables;
+      if (variables) {
+        for (const [key, value] of Object.entries(seeded)) if (!(key in variables)) variables[key] = value;
+      }
       // The credential is read NOW, not captured: a renewal may have landed
-      // between this poll and the gate, exactly as it may around a recovery.
+      // between the check and the gate, exactly as it may around a recovery.
       const result = await registerManual(live, remoteManualTemplate(mcpUrl, config.connectionKey));
-      // THROWN, not logged and swallowed: the watcher treats a rejection as
-      // "this change is still owed" and tries again on its next poll. A
+      // THROWN, not logged and swallowed: the checker treats a rejection as
+      // "this change is still owed" and tries again on the next call. A
       // registration fails for the reasons everything else here fails — a
       // deployment mid-restart, a network that dropped — and swallowing it
       // would leave the remote manual deregistered, with no tools at all,
       // until some later commit happened to move the catalog again. The
-      // watcher owns the operator line, so this one only carries the reason.
+      // checker owns the operator line, so this one only carries the reason.
       if (!result.ok) throw new Error(`re-registering the remote manual failed: ${result.error}`);
       await removeRemoteMetaTools(live);
       noteManualReregistered(live, REMOTE_MANUAL_NAME);
-      // Re-flattened from the repository rather than re-running discovery:
-      // `getTools` already holds the local manuals registered at startup, so
-      // this replaces the remote half and leaves their spawned children alone.
+      // A local manual failing is isolated and logged, as at discovery: one
+      // unreachable local server must not cost the caller everything else.
+      for (const manual of local) {
+        const name = String(manual.name);
+        const registered = await registerManual(live, manual);
+        if (!registered.ok) {
+          console.error(`[hexis-mcp] skipping local tool "${name}": ${registered.error}`);
+          continue;
+        }
+        localByName.set(name, manual);
+        noteManualReregistered(live, name);
+      }
       tools = withoutRemoteMetaTools(
         (await live.getTools()).map((tool: UtcpTool) => flattenManualTool(tool, REMOTE_MANUAL_NAME)),
       );
       console.error(
-        `[hexis-mcp] the workspace's catalog changed — ${tools.length} tool(s) now served. ` +
-          'A local-only server added, changed or removed still needs a restart of this process.',
+        `[hexis-mcp] the workspace's catalog changed — ${tools.length} tool(s) now served ` +
+          `(${localByName.size} local-only manual(s) registered here, the rest served by the workspace).`,
       );
       return true;
     });
@@ -706,7 +768,7 @@ export async function createHexisMcpServer(
     // the unknown path through its JWT mounts with a 401, which reads as a
     // dead credential. Never fatal either way — a deployment that cannot
     // answer it is one whose tools still work, frozen at what discovery found,
-    // and an unknown baseline costs exactly one refresh (see `watchCatalog`).
+    // and an unknown baseline costs exactly one refresh (see `createCatalogCheck`).
     const baselineRevision = catalogRevisionAdvertised
       ? await fetchCatalogRevision(config).then(
           (r) => r,
@@ -714,16 +776,18 @@ export async function createHexisMcpServer(
         )
       : null;
     if (closed) return;
-    const [allManuals, localOnly] = await Promise.all([
+    const [allManuals, localOnlyFound] = await Promise.all([
       fetchAllManuals(config),
       fetchLocalOnlyManuals(config),
     ]);
     if (closed) return;
+    for (const [name, info] of localOnlyFound) localOnly.set(name, info);
     const local = await prepareLocalManuals(
       config,
       localManualTemplates(allManuals, new Set(localOnly.keys())),
       localOnly,
     );
+    for (const manual of local) localByName.set(String(manual.name), manual);
     if (closed) return;
     // Read at registration time, not at entry: a renewal during the fetches
     // above must be the credential the remote manual registers with.
@@ -753,7 +817,6 @@ export async function createHexisMcpServer(
      * that got in first is awaited by `shutdown` before the client is closed, so
      * a local manual can never be registered (spawning a child) after teardown.
      */
-    const localByName = new Map(local.map((m) => [String(m.name), m]));
     installSessionRecovery(built.client, {
       withReregister: (_name, run) => withReregisterGate(run, true),
       manualTemplate: (name) => {
@@ -799,11 +862,14 @@ export async function createHexisMcpServer(
       );
       return;
     }
-    catalogWatch = watchCatalog({
+    if (options.catalogCheck === false) return;
+    catalogCheck = createCatalogCheck({
       config,
       initialRevision: baselineRevision,
-      intervalMs: options.catalogPollMs,
-      onChanged: refreshRemoteCatalog,
+      ...(options.catalogCheck?.minIntervalMs !== undefined
+        ? { minIntervalMs: options.catalogCheck.minIntervalMs }
+        : {}),
+      onChanged: refreshCatalog,
     });
   };
 
@@ -846,8 +912,8 @@ export async function createHexisMcpServer(
     // First, because everything below tears down what a refresh would run
     // against. A poll already in flight finds `closed` at the gate and
     // registers nothing.
-    catalogWatch?.stop();
-    catalogWatch = null;
+    catalogCheck?.stop();
+    catalogCheck = null;
     // No further renewals or credential swaps once we are going down: the
     // renewal lifecycle is closed FOR GOOD (timer disarmed, and a renewal
     // starting after this point — a straggling 401-retry — is refused, not
@@ -905,7 +971,7 @@ export async function createHexisMcpServer(
       //
       // `listChanged` on both: a manual or a skill committed on the
       // deployment's default branch reaches this connection without a
-      // reconnect (see `refreshRemoteCatalog`), and declaring the capability
+      // reconnect (see `refreshCatalog`), and declaring the capability
       // is what permits the notification that says so.
       {
         capabilities: { tools: { listChanged: true }, prompts: { listChanged: true } },
@@ -915,6 +981,16 @@ export async function createHexisMcpServer(
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       await ready;
+      // A listing is the one moment a stale toolset is answered out loud, so
+      // the check is AWAITED here: the list handed back is the current one, a
+      // refresh included, rather than a notification's promise of a better
+      // one. Throttled inside, so a client re-listing after that very
+      // notification costs no second read. A plain `if`, not an optional
+      // call: with no checker (discovery still running, or an older
+      // deployment) or a server on its way out there is nothing to await, and
+      // an extra tick here would let a closing transport answer a parked
+      // listing before the guard below can say why.
+      if (catalogCheck && !closed) await catalogCheck.check();
       // The failure goes IN the listing, not into an empty one: an empty
       // toolset is what a tool-less workspace looks like, and a client that
       // shows one gives its reader nothing to act on.
@@ -974,6 +1050,12 @@ export async function createHexisMcpServer(
         );
       } finally {
         inflightCalls -= 1;
+        // The other moment: a call has just finished, so this connection is
+        // in use and its toolset is worth keeping current. Not awaited — the
+        // caller gets its result now, and a change found here arrives as a
+        // notification (and is in the next listing regardless). Throttled
+        // inside, so a chain fanning out into many calls costs one read.
+        if (catalogCheck && !closed) void catalogCheck.check();
       }
     });
 

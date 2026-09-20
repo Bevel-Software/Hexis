@@ -75,10 +75,10 @@ export {
   type HexisMcpHandle,
 } from './server.js';
 export {
-  watchCatalog,
-  CATALOG_POLL_INTERVAL_MS,
-  type CatalogWatch,
-  type CatalogWatchOptions,
+  createCatalogCheck,
+  CATALOG_CHECK_MIN_INTERVAL_MS,
+  type CatalogCheck,
+  type CatalogCheckOptions,
 } from './catalog-watch.js';
 export {
   SUPPORTED_NODE,

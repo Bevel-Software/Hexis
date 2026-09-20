@@ -1,17 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { HexisMcpConfig } from '../config.js';
 import { CatalogRevisionUnsupportedError, DeploymentError } from '../deployment.js';
-import { CATALOG_POLL_INTERVAL_MS, watchCatalog } from '../catalog-watch.js';
+import { CATALOG_CHECK_MIN_INTERVAL_MS, createCatalogCheck } from '../catalog-watch.js';
 
 /**
- * The poller that tells a long-lived local server its deployment's catalog
- * moved.
+ * The checker that tells a long-lived local server its deployment's catalog
+ * moved — when, and only when, that server is being used.
  *
- * Everything asserted here is about restraint. It must fire on a real change
- * and on nothing else — a spurious fire re-registers an MCP session (closing
- * whatever it held) on every connected laptop — and it must survive a
- * deployment that is briefly unreachable without either giving up or writing a
- * line every three seconds for the duration of the outage.
+ * Everything asserted here is about restraint. It asks nothing on its own: no
+ * timer, so an idle connection costs the deployment nothing. It fires on a
+ * real change and on nothing else — a spurious fire re-registers an MCP
+ * session (closing whatever it held) on every connected laptop. It collapses a
+ * burst of activity onto one read. And it survives a deployment that is
+ * briefly unreachable without either giving up or writing a line per call for
+ * the duration of the outage.
  */
 
 const { fetchCatalogRevision } = vi.hoisted(() => ({ fetchCatalogRevision: vi.fn() }));
@@ -23,77 +25,111 @@ vi.mock('../deployment.js', async (importOriginal) => ({
 const config = { baseUrl: 'http://workspace.test', connectionKey: 'k' } satisfies HexisMcpConfig;
 
 afterEach(() => {
-  vi.useRealTimers();
   fetchCatalogRevision.mockReset();
 });
 
-/**
- * Run `polls` polls to completion. The watch schedules the next poll only
- * after the current one settles, so each round is "advance the clock, then let
- * the microtasks the tick queued run".
- */
-async function poll(times = 1, intervalMs = 1_000): Promise<void> {
-  for (let i = 0; i < times; i += 1) {
-    await vi.advanceTimersByTimeAsync(intervalMs);
-  }
+/** A clock the tests move by hand, so the throttle is asserted exactly. */
+function clock(start = 1_000_000) {
+  let at = start;
+  return { now: () => at, advance: (ms: number) => void (at += ms) };
 }
 
-describe('watchCatalog', () => {
+describe('createCatalogCheck', () => {
+  it('asks nothing until it is asked to', async () => {
+    createCatalogCheck({ config, initialRevision: 'rev-1', onChanged: vi.fn() });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fetchCatalogRevision).not.toHaveBeenCalled();
+  });
+
   it('reports a change, once, when the revision moves', async () => {
-    vi.useFakeTimers();
+    const t = clock();
     fetchCatalogRevision.mockResolvedValueOnce('rev-1').mockResolvedValue('rev-2');
     const onChanged = vi.fn();
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged, now: t.now });
 
-    const watch = watchCatalog({ config, initialRevision: 'rev-1', intervalMs: 1_000, onChanged });
-    try {
-      await poll(1);
-      expect(onChanged).not.toHaveBeenCalled(); // unchanged: nothing is owed
+    await check.check();
+    expect(onChanged).not.toHaveBeenCalled(); // unchanged: nothing is owed
 
-      await poll(1);
-      expect(onChanged).toHaveBeenCalledExactlyOnceWith('rev-2');
+    await check.check();
+    expect(onChanged).toHaveBeenCalledExactlyOnceWith('rev-2');
 
-      // …and the same revision is not re-reported on every later poll.
-      await poll(3);
-      expect(onChanged).toHaveBeenCalledTimes(1);
-    } finally {
-      watch.stop();
-    }
+    // …and the same revision is not re-reported on every later check.
+    await check.check();
+    await check.check();
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The throttle. A `call_tool_chain` fanning out into a dozen calls, or a
+   * client re-listing right after the notification a refresh just sent, must
+   * cost the deployment one read, not one per event.
+   */
+  it('collapses checks inside the interval onto the last one', async () => {
+    const t = clock();
+    fetchCatalogRevision.mockResolvedValue('rev-1');
+    const check = createCatalogCheck({
+      config,
+      initialRevision: 'rev-1',
+      minIntervalMs: 5_000,
+      onChanged: vi.fn(),
+      now: t.now,
+    });
+
+    await check.check();
+    await check.check();
+    await check.check();
+    expect(fetchCatalogRevision).toHaveBeenCalledTimes(1);
+
+    t.advance(4_999);
+    await check.check();
+    expect(fetchCatalogRevision).toHaveBeenCalledTimes(1);
+
+    t.advance(1);
+    await check.check();
+    expect(fetchCatalogRevision).toHaveBeenCalledTimes(2);
+  });
+
+  it('joins a check already in flight rather than starting a second', async () => {
+    let release: (value: string) => void = () => {};
+    fetchCatalogRevision.mockImplementationOnce(() => new Promise<string>((resolve) => (release = resolve)));
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged: vi.fn() });
+
+    const first = check.check();
+    const second = check.check();
+    expect(second).toBe(first);
+    expect(fetchCatalogRevision).toHaveBeenCalledTimes(1);
+    release('rev-1');
+    await first;
   });
 
   /**
    * Startup could not read a baseline (a blip on the revision read). Nobody
-   * can then say whether a commit landed between discovery and the first poll,
-   * and the two possible mistakes are not equal: adopting the first reading as
-   * a baseline hides that commit's tool until someone restarts the server,
-   * while refreshing costs one re-registration of a catalog that may well be
-   * unchanged. So the first successful poll counts as a change — once.
+   * can then say whether a commit landed between discovery and the first
+   * check, and the two possible mistakes are not equal: adopting the first
+   * reading as a baseline hides that commit's tool until someone restarts the
+   * server, while refreshing costs one re-registration of a catalog that may
+   * well be unchanged. So the first successful check counts as a change — once.
    */
   it('refreshes once when startup could not read a baseline', async () => {
-    vi.useFakeTimers();
     fetchCatalogRevision.mockResolvedValue('rev-1');
     const onChanged = vi.fn();
+    const check = createCatalogCheck({ config, initialRevision: null, minIntervalMs: 0, onChanged });
 
-    const watch = watchCatalog({ config, initialRevision: null, intervalMs: 1_000, onChanged });
-    try {
-      await poll(1);
-      expect(onChanged).toHaveBeenCalledExactlyOnceWith('rev-1');
+    await check.check();
+    expect(onChanged).toHaveBeenCalledExactlyOnceWith('rev-1');
 
-      // …and that first poll IS the baseline from then on: an unchanged
-      // catalog is not re-reported on every later poll.
-      await poll(3);
-      expect(onChanged).toHaveBeenCalledTimes(1);
+    // …and that first check IS the baseline from then on.
+    await check.check();
+    await check.check();
+    expect(onChanged).toHaveBeenCalledTimes(1);
 
-      fetchCatalogRevision.mockResolvedValue('rev-2');
-      await poll(1);
-      expect(onChanged).toHaveBeenCalledTimes(2);
-      expect(onChanged).toHaveBeenLastCalledWith('rev-2');
-    } finally {
-      watch.stop();
-    }
+    fetchCatalogRevision.mockResolvedValue('rev-2');
+    await check.check();
+    expect(onChanged).toHaveBeenCalledTimes(2);
+    expect(onChanged).toHaveBeenLastCalledWith('rev-2');
   });
 
-  it('keeps polling through an unreachable deployment, and says so once', async () => {
-    vi.useFakeTimers();
+  it('keeps checking through an unreachable deployment, and says so once', async () => {
     const log = vi.fn();
     fetchCatalogRevision
       .mockResolvedValueOnce('rev-1')
@@ -101,51 +137,43 @@ describe('watchCatalog', () => {
       .mockRejectedValueOnce(new DeploymentError('Could not reach the catalog revision', undefined))
       .mockResolvedValue('rev-2');
     const onChanged = vi.fn();
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged, log });
 
-    const watch = watchCatalog({ config, initialRevision: 'rev-1', intervalMs: 1_000, onChanged, log });
-    try {
-      await poll(3);
-      // Two failures, ONE line — an outage that lasts an hour must not fill
-      // the operator's log with 1200 copies of itself.
-      expect(log.mock.calls.filter(([m]) => String(m).includes('could not check'))).toHaveLength(1);
+    await check.check();
+    await check.check();
+    await check.check();
+    // Two failures, ONE line — an outage spanning a hundred calls must not
+    // fill the operator's log with a hundred copies of itself.
+    expect(log.mock.calls.filter(([m]) => String(m).includes('could not check'))).toHaveLength(1);
 
-      // It recovered on its own, and the change it missed is reported now.
-      await poll(1);
-      expect(onChanged).toHaveBeenCalledExactlyOnceWith('rev-2');
-      expect(log).toHaveBeenCalledWith(expect.stringContaining('answering again'));
-    } finally {
-      watch.stop();
-    }
+    // It recovered on the next call, and the change it missed is reported now.
+    await check.check();
+    expect(onChanged).toHaveBeenCalledExactlyOnceWith('rev-2');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('answering again'));
   });
 
   it('stops for good against a deployment that does not serve the route', async () => {
-    vi.useFakeTimers();
     const log = vi.fn();
     fetchCatalogRevision.mockRejectedValue(
       new CatalogRevisionUnsupportedError('This deployment does not report a catalog revision', 404),
     );
+    const check = createCatalogCheck({ config, initialRevision: null, minIntervalMs: 0, onChanged: vi.fn(), log });
 
-    const watch = watchCatalog({ config, initialRevision: null, intervalMs: 1_000, onChanged: vi.fn(), log });
-    try {
-      await poll(5);
-      // Asked once, told the reader what it means, and never asked again.
-      expect(fetchCatalogRevision).toHaveBeenCalledTimes(1);
-      expect(log).toHaveBeenCalledWith(expect.stringContaining('does not report a catalog revision'));
-    } finally {
-      watch.stop();
-    }
+    for (let i = 0; i < 5; i += 1) await check.check();
+    // Asked once, told the reader what it means, and never asked again.
+    expect(fetchCatalogRevision).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('does not report a catalog revision'));
   });
 
   /**
-   * A refresh that fails must not wedge the watch — and must not be written
+   * A refresh that fails must not wedge the checker — and must not be written
    * off either. Re-registration fails for the reasons every other request here
    * fails (a deployment mid-restart, a network that dropped), so the change is
-   * still OWED: the watch keeps attempting it until one succeeds, rather than
-   * leaving the toolset stale until some later commit happens to move the
-   * catalog again. Once per failure streak in the log, like an outage.
+   * still OWED: the checker keeps attempting it on later calls until one
+   * succeeds, rather than leaving the toolset stale until some later commit
+   * happens to move the catalog again. Once per failure streak in the log.
    */
   it('retries a refresh that failed, and says so once', async () => {
-    vi.useFakeTimers();
     const log = vi.fn();
     fetchCatalogRevision.mockResolvedValueOnce('rev-1').mockResolvedValue('rev-2');
     const onChanged = vi
@@ -153,92 +181,75 @@ describe('watchCatalog', () => {
       .mockRejectedValueOnce(new Error('re-registration failed'))
       .mockRejectedValueOnce(new Error('re-registration failed'))
       .mockResolvedValue(undefined);
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged, log });
 
-    const watch = watchCatalog({ config, initialRevision: 'rev-1', intervalMs: 1_000, onChanged, log });
-    try {
-      await poll(4); // one unchanged poll, then two failures and the success
-      expect(onChanged).toHaveBeenCalledTimes(3);
-      expect(onChanged).toHaveBeenLastCalledWith('rev-2');
-      expect(log.mock.calls.filter(([m]) => String(m).includes('refreshing the toolset'))).toHaveLength(1);
+    for (let i = 0; i < 4; i += 1) await check.check(); // one unchanged, two failures, the success
+    expect(onChanged).toHaveBeenCalledTimes(3);
+    expect(onChanged).toHaveBeenLastCalledWith('rev-2');
+    expect(log.mock.calls.filter(([m]) => String(m).includes('refreshing the toolset'))).toHaveLength(1);
 
-      // Applied at last, and not replayed on the polls that follow.
-      await poll(3);
-      expect(onChanged).toHaveBeenCalledTimes(3);
-    } finally {
-      watch.stop();
-    }
+    // Applied at last, and not replayed on the checks that follow.
+    await check.check();
+    await check.check();
+    expect(onChanged).toHaveBeenCalledTimes(3);
   });
 
-  /**
-   * The budget is five seconds from commit to visible and the interval already
-   * spends three, so the request's own latency cannot be spent on top of it:
-   * the next poll is due one interval after this one STARTED, not after it
-   * finished. A deployment answering in 800ms otherwise turns a 3s cadence
-   * into 3.8s, and a refresh that drains a call turns it into 15s more.
-   */
-  it('holds its cadence when the deployment answers slowly', async () => {
-    vi.useFakeTimers();
-    fetchCatalogRevision.mockImplementation(async () => {
-      vi.setSystemTime(Date.now() + 800); // the round trip, without the timers moving
-      return 'rev-1';
-    });
-
-    const watch = watchCatalog({ config, initialRevision: 'rev-1', intervalMs: 1_000, onChanged: vi.fn() });
-    try {
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(fetchCatalogRevision).toHaveBeenCalledTimes(1);
-
-      // 200ms, not 1000: the 800 the answer took counts against the interval.
-      await vi.advanceTimersByTimeAsync(200);
-      expect(fetchCatalogRevision).toHaveBeenCalledTimes(2);
-    } finally {
-      watch.stop();
-    }
+  /** A caller awaiting a check must never be handed a rejection. */
+  it('never rejects, whatever the deployment or the refresh does', async () => {
+    fetchCatalogRevision.mockRejectedValue(new Error('boom'));
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged: vi.fn(), log: vi.fn() });
+    await expect(check.check()).resolves.toBeUndefined();
   });
 
   /** Untrusted text — a deployment's error string — can never forge a log line. */
   it('escapes what a deployment put in an error message', async () => {
-    vi.useFakeTimers();
     const log = vi.fn();
     fetchCatalogRevision.mockRejectedValue(new DeploymentError('boom\n[hexis-mcp] forged', undefined));
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged: vi.fn(), log });
 
-    const watch = watchCatalog({ config, initialRevision: 'rev-1', intervalMs: 1_000, onChanged: vi.fn(), log });
-    try {
-      await poll(1);
-      const line = String(log.mock.calls[0][0]);
-      expect(line).toContain('boom\\n[hexis-mcp] forged');
-      expect(line.split('\n')).toHaveLength(1);
-    } finally {
-      watch.stop();
-    }
+    await check.check();
+    const line = String(log.mock.calls[0][0]);
+    expect(line).toContain('boom\\n[hexis-mcp] forged');
+    expect(line.split('\n')).toHaveLength(1);
   });
 
   it('asks nothing more once stopped', async () => {
-    vi.useFakeTimers();
     fetchCatalogRevision.mockResolvedValue('rev-1');
-    const watch = watchCatalog({ config, initialRevision: 'rev-1', intervalMs: 1_000, onChanged: vi.fn() });
-    await poll(1);
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged: vi.fn() });
+    await check.check();
     const asked = fetchCatalogRevision.mock.calls.length;
 
-    watch.stop();
-    watch.stop(); // idempotent
-    await poll(5);
+    check.stop();
+    check.stop(); // idempotent
+    await check.check();
+    await check.check();
     expect(fetchCatalogRevision).toHaveBeenCalledTimes(asked);
   });
 
-  it('never polls at all when the interval is zero', async () => {
-    vi.useFakeTimers();
-    watchCatalog({ config, intervalMs: 0, onChanged: vi.fn() }).stop();
-    await poll(5);
-    expect(fetchCatalogRevision).not.toHaveBeenCalled();
+  /**
+   * A stop that lands while a check is in flight — teardown is exactly when it
+   * does — must not run the refresh against a server that is closing.
+   */
+  it('does not refresh when stopped mid-check', async () => {
+    let release: (value: string) => void = () => {};
+    fetchCatalogRevision.mockImplementationOnce(() => new Promise<string>((resolve) => (release = resolve)));
+    const onChanged = vi.fn();
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged });
+
+    const pending = check.check();
+    check.stop();
+    release('rev-2');
+    await pending;
+    expect(onChanged).not.toHaveBeenCalled();
   });
 
   /**
-   * The guide states five seconds from commit to visible. The poll is the only
-   * delay in that budget that this package chooses — the rest is one HTTP
-   * round trip — so it has to leave room for one.
+   * The interval is a throttle on a BUSY connection, not a delay a person
+   * notices: someone who commits a manual and then calls a tool sees the new
+   * one on their next listing within a handful of seconds.
    */
-  it('polls well inside the five seconds the guide promises', () => {
-    expect(CATALOG_POLL_INTERVAL_MS).toBeLessThan(5_000);
+  it('throttles well inside what a person would call "right away"', () => {
+    expect(CATALOG_CHECK_MIN_INTERVAL_MS).toBeLessThanOrEqual(10_000);
+    expect(CATALOG_CHECK_MIN_INTERVAL_MS).toBeGreaterThan(0);
   });
 });

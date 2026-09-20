@@ -110,7 +110,7 @@ async function getJson(
   }
   if (!res.ok) {
     // Drained before it is thrown away, exactly as the 401 paths above do. The
-    // catalog poller asks again every three seconds, so a deployment that is
+    // catalog check asks again on every call while it fails, so a deployment that is
     // 502-ing through a redeploy would otherwise leave one undrained body —
     // and the connection it pins — behind on every poll for the duration.
     await res.body?.cancel().catch(() => {});
