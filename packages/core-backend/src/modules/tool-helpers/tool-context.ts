@@ -9,6 +9,7 @@ import {
   ROLES_YAML_BASENAME,
 } from '../access-model/roles-yaml-guard.js';
 import type { ICreatorAccess } from '../access-model/creator.js';
+import type { GroupsIndex } from '../access-model/group-files.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
@@ -30,6 +31,15 @@ export interface ToolContextDeps {
    * `modules/access/creator-access`).
    */
   creatorAccess: ICreatorAccess;
+  /**
+   * The resolver's active-group-source loader (`loadActiveGroups` in
+   * `modules/access`), injected so an agent's `roles.yaml` write adding a
+   * `- group:<Name>` entry is checked against the groups on that branch.
+   * Absent → group entries go unchecked.
+   */
+  loadActiveGroups?: (
+    read: (filename: string) => Promise<string | null>,
+  ) => Promise<{ groups: GroupsIndex; sourceFile: string; health: { ok: boolean } }>;
 }
 
 /** A file's text, or null when it does not exist. Any other failure throws. */
@@ -64,6 +74,7 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
     const user = await deps.authService.getUserById(auth.userId);
     if (!user) throw new ToolError('Your account is no longer available.', 401);
 
+    const { loadActiveGroups } = deps;
     const fsCache = new Map<string, LocalFilesystem>();
     const getFilesystem = async (branch: string): Promise<LocalFilesystem> => {
       const cached = fsCache.get(branch);
@@ -83,10 +94,21 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
                 kbDirName: deps.kbDirName,
                 // Reject an agent write that would leave roles.yaml unparseable
                 // (app-wide admin lockout) or that creates a role before it
-                // reaches disk — the agent gets a tool error and the file is
-                // untouched. Agents manage membership; roles are pre-set.
-                validateWrite: makeAgentRolesYamlWriteValidator(deps.kbDirName, () =>
-                  readTextIfExists(path.join(basePath, deps.kbDirName, ROLES_YAML_BASENAME)),
+                // reaches disk, or that adds a `- group:` entry naming no group
+                // — the agent gets a tool error and the file is untouched.
+                // Agents manage membership; roles are pre-set.
+                validateWrite: makeAgentRolesYamlWriteValidator(
+                  deps.kbDirName,
+                  () => readTextIfExists(path.join(basePath, deps.kbDirName, ROLES_YAML_BASENAME)),
+                  loadActiveGroups &&
+                    (async () => {
+                      // A source that exists but cannot be read leaves group
+                      // entries unchecked rather than refusing every one.
+                      const active = await loadActiveGroups((file) =>
+                        readTextIfExists(path.join(basePath, deps.kbDirName, file)),
+                      );
+                      return active.health.ok ? active : null;
+                    }),
                 ),
                 creatorAccess: deps.creatorAccess,
               },

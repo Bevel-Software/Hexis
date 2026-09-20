@@ -2,6 +2,7 @@ import { PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import type { IToolRegistry } from '../tool-registry/tool.contract.js';
 import { EXTERNAL_KB_MANUAL_NAME, type IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
+import { MAX_CAPABILITIES } from '../tool-manuals/tool-manuals.service.js';
 import { parseSkillFrontmatter } from './skills.service.js';
 
 const log = logger('skills');
@@ -29,7 +30,12 @@ const log = logger('skills');
 
 /** One entry the platform could not resolve. */
 export interface AllowedToolWarning {
-  /** The `allowed-tools` entry, verbatim. */
+  /**
+   * The `allowed-tools` entry as written, with surrounding whitespace
+   * removed — the only normalization applied. A YAML list may quote an entry
+   * with padding (`- " hubspot.search "`); the padding is not part of the
+   * name, and echoing it back would name an entry the author cannot find.
+   */
   entry: string;
   /** A sentence naming the entry, and the suggestion when there is one. */
   message: string;
@@ -214,7 +220,12 @@ export class AllowedToolsChecker implements IAllowedToolsChecker {
     private readonly registry: Pick<IToolRegistry, 'listExternal'>,
     private readonly manuals: Pick<IToolManualService, 'listAccessible' | 'getDetail'>,
     private readonly kbDirName: string,
-    private readonly maxCapabilities = 100,
+    /**
+     * The cap `getDetail` applies to a manual's capabilities. Taken from the
+     * projection itself: a copy of the number here would silently start
+     * reporting real tools missing the day the projection's cap grew.
+     */
+    private readonly maxCapabilities = MAX_CAPABILITIES,
   ) {}
 
   async check(userEmail: string, allowedTools: readonly string[] | undefined): Promise<AllowedToolWarning[]> {

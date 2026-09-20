@@ -128,10 +128,15 @@ describe('SkillsTree', () => {
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(createDirectory).toHaveBeenCalledWith(`${KB}/Skills/Marketing`);
 
-    // So does a drop.
+    // So does a drop — stamped with the tree that took it, so the upload's
+    // banners appear here and not in the Plugins tree below.
     const dropped = new File(['x'], 'SKILL.md');
     fireEvent.drop(skills, { dataTransfer: { getData: () => '', items: undefined, files: [dropped] } });
-    expect(dispatchUpload).toHaveBeenCalledWith({ kind: 'files', files: [dropped] }, `${KB}/Skills`);
+    expect(dispatchUpload).toHaveBeenCalledWith(
+      { kind: 'files', files: [dropped] },
+      `${KB}/Skills`,
+      'library:Skills',
+    );
   });
 
   it('renders nothing while the tree has not loaded', () => {
@@ -146,7 +151,11 @@ describe('SkillsTree', () => {
     fireEvent.drop(row('Skills'), {
       dataTransfer: { getData: () => '', items: undefined, files: [dropped] },
     });
-    expect(dispatchUpload).toHaveBeenCalledWith({ kind: 'files', files: [dropped] }, `${KB}/Skills`);
+    expect(dispatchUpload).toHaveBeenCalledWith(
+      { kind: 'files', files: [dropped] },
+      `${KB}/Skills`,
+      'library:Skills',
+    );
   });
 
   it('cannot be dragged away — a reserved root stays where the platform put it', () => {

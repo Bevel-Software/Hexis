@@ -25,8 +25,6 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
       { name: 'Engineering', count: 4, urgent: 0 },
       { name: 'GTM', count: 3, urgent: 2 },
     ],
-    attentionCount: 2,
-    onFinishSetup: vi.fn(),
     onCreatePlugin: vi.fn(),
     canCreatePlugin: true,
     onContextMenu,

@@ -1,4 +1,4 @@
-import { describe, test, expect } from 'vitest';
+import { describe, test, expect, vi } from 'vitest';
 import {
   AllowedToolsChecker,
   checkAllowedTools,
@@ -156,5 +156,22 @@ describe('AllowedToolsChecker', () => {
   test('a capped capability list is treated as unknown, never as proof of absence', async () => {
     const capped = new AllowedToolsChecker(registry, manuals, 'knowledge-base', 1);
     expect(await capped.check('a@x.com', ['hubspot.whatever'])).toEqual([]);
+  });
+
+  test('the catalog is read AS THE CALLER, so the answer is about tools they can see', async () => {
+    // Spies, not plain stubs: the mocks above ignore their arguments, so a
+    // regression that built the catalog for the wrong user — or for nobody —
+    // would still return the same tools and pass every test above it.
+    const listExternal = vi.fn(registry.listExternal);
+    const listAccessible = vi.fn(manuals.listAccessible);
+    const getDetail = vi.fn(manuals.getDetail);
+    const spying = new AllowedToolsChecker({ listExternal }, { listAccessible, getDetail }, 'knowledge-base');
+
+    expect(entries(await spying.check('alice@example.com', ['hubspot.serch']))).toEqual(['hubspot.serch']);
+    expect(listExternal).toHaveBeenCalledWith({ userEmail: 'alice@example.com' });
+    expect(listAccessible).toHaveBeenCalledWith('alice@example.com');
+    // The per-manual detail decides which tools exist, so it is the caller's
+    // view of that manual that must be read, not an ambient one.
+    expect(getDetail).toHaveBeenCalledWith('alice@example.com', 'hubspot');
   });
 });

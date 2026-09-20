@@ -31,6 +31,7 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
     getWorkspacePath: async () => workspaceDir,
     getOrCreateForBranch: async () => ({}) as unknown,
     readFile: async (_id: string, wsRel: string) => fs.readFile(resolve(wsRel), 'utf-8'),
+    readFileBinary: async (_id: string, wsRel: string) => fs.readFile(resolve(wsRel)),
     writeFile: async (_id: string, wsRel: string, content: string) => {
       const abs = resolve(wsRel);
       await fs.mkdir(path.dirname(abs), { recursive: true });
@@ -348,13 +349,16 @@ describe('AccessMutationService', () => {
       // Admin write on an access.md comes from the hardcoded rescue, which a
       // `deny` entry cannot shadow. denyHere must detect the deny had no effect,
       // roll the file back, and refuse — never report a no-op success.
+      // (A subfolder's access.md: at the root the Admin write floor refuses the
+      // deny up front instead — see access-control.admin-root-floor.test.ts.)
+      await write(repo, 'Sales/access.md', '---\nwrite:\n  - Admin\n---\n# Sales folder\n');
       const admin: Principal = { kind: 'user', email: 'razvan@bevel.software', displayName: 'Razvan' };
-      await expect(mutation.denyHere(WS, 'file', 'access.md', admin)).rejects.toMatchObject({
+      await expect(mutation.denyHere(WS, 'file', 'Sales/access.md', admin)).rejects.toMatchObject({
         status: 409,
       });
       // The access.md is unchanged (rolled back) — admin still writes it.
       access.invalidate(WS);
-      expect(await access.canWrite(WS, 'razvan@bevel.software', 'access.md')).toBe(true);
+      expect(await access.canWrite(WS, 'razvan@bevel.software', 'Sales/access.md')).toBe(true);
     });
 
     it('GROUP deny with a VANISHED group succeeds even when a same-named ROLE keeps a role/<Name> grant', async () => {

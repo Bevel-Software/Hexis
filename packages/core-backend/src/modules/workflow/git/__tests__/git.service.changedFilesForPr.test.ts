@@ -6,7 +6,8 @@ import path from 'node:path';
 import os from 'node:os';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
-import { GitService, parseNameStatusZ, parseNumstatZ } from '../git.service.js';
+import { GitService, parseNameStatusZ, parseNumstatZ, withoutPlaceholderRename } from '../git.service.js';
+import { WorkspaceMutex } from '../../../kb-fs/mutex.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -57,6 +58,26 @@ function stubWorkspaceService(workspaceId: string, repo: string): WorkspaceServi
     },
   } as unknown as WorkspaceService;
 }
+
+describe('withoutPlaceholderRename', () => {
+  it('turns a rename onto the placeholder into a removal, and off it into an addition', () => {
+    expect(withoutPlaceholderRename({ status: 'renamed', previousPath: 'A/x.md', path: 'A/.gitkeep' })).toEqual({
+      status: 'removed',
+      path: 'A/x.md',
+    });
+    expect(withoutPlaceholderRename({ status: 'renamed', previousPath: 'A/.gitkeep', path: 'A/x.md' })).toEqual({
+      status: 'added',
+      path: 'A/x.md',
+    });
+  });
+
+  it('leaves every other entry as it is', () => {
+    const plain = { status: 'renamed' as const, previousPath: 'A/x.md', path: 'B/x.md' };
+    const moved = { status: 'renamed' as const, previousPath: 'A/.gitkeep', path: 'B/.gitkeep' };
+    const added = { status: 'added' as const, path: 'A/.gitkeep' };
+    expect([plain, moved, added].map(withoutPlaceholderRename)).toEqual([plain, moved, added]);
+  });
+});
 
 describe('parseNameStatusZ', () => {
   it('parses adds/mods/deletes and rename pairs', () => {
@@ -226,6 +247,79 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
   });
 
   /**
+   * The empty-folder placeholder is never content, so the change-request file
+   * list does not show it, at any depth, and the +/- counts stay aligned. The
+   * touched paths keep it: a request that only creates a folder is not empty,
+   * and must not be closed as if it were.
+   */
+  it('excludes the folder placeholder from the changed-file list but not the touched paths', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    await runGit(repo, ['checkout', '-b', 'alice/new-folders']);
+    await fs.mkdir(path.join(repo, 'Reports/Empty'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'Reports/Empty/.gitkeep'), '');
+    await fs.writeFile(path.join(repo, 'Reports/.gitkeep'), '');
+    await fs.writeFile(path.join(repo, 'Reports/q3.md'), 'one\ntwo\nthree\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'folders']);
+    await runGit(repo, ['push', '-u', 'origin', 'alice/new-folders']);
+
+    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), 'knowledge-base');
+
+    const files = await git.changedFilesForPr(workspaceId, 'current-company-state', 'alice/new-folders');
+    expect(files.map((f) => f.path)).toEqual(['Reports/q3.md']);
+    expect(files[0].additions).toBe(3);
+
+    const paths = await git.changedPathsForPr(workspaceId, 'current-company-state', 'alice/new-folders');
+    expect(paths.sort()).toEqual(['Reports/.gitkeep', 'Reports/Empty/.gitkeep', 'Reports/q3.md']);
+  });
+
+  /**
+   * Deleting a folder's last file writes the placeholder; when that file was
+   * empty too, `-M` sees an identical blob move and pairs them as a rename.
+   * The review surface must still show the file's removal.
+   */
+  it('an empty file replaced by the placeholder is reviewed as a removal, not dropped with it', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    await fs.mkdir(path.join(repo, 'Reports'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'Reports/empty.md'), '');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'empty file']);
+    await runGit(repo, ['push', 'origin', 'current-company-state']);
+    await runGit(repo, ['checkout', '-b', 'alice/emptied']);
+    await fs.rm(path.join(repo, 'Reports/empty.md'));
+    await fs.writeFile(path.join(repo, 'Reports/.gitkeep'), '');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'emptied']);
+    await runGit(repo, ['push', '-u', 'origin', 'alice/emptied']);
+
+    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), 'knowledge-base');
+
+    const files = await git.changedFilesForPr(workspaceId, 'current-company-state', 'alice/emptied');
+    expect(files.map((f) => ({ path: f.path, status: f.status, previousPath: f.previousPath }))).toEqual([
+      { path: 'Reports/empty.md', status: 'removed', previousPath: undefined },
+    ]);
+
+    const paths = await git.changedPathsForPr(workspaceId, 'current-company-state', 'alice/emptied');
+    expect(paths.sort()).toEqual(['Reports/.gitkeep', 'Reports/empty.md']);
+  });
+
+  it('pathExistsAtRef answers for files and folders at a ref, and false for what is not there', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), 'knowledge-base');
+    await fs.mkdir(path.join(repo, 'Docs'));
+    await fs.writeFile(path.join(repo, 'Docs/.gitkeep'), '');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'folder']);
+
+    await expect(git.pathExistsAtRef(workspaceId, 'HEAD', 'base.md')).resolves.toBe(true);
+    await expect(git.pathExistsAtRef(workspaceId, 'HEAD', 'Docs/.gitkeep')).resolves.toBe(true);
+    await expect(git.pathExistsAtRef(workspaceId, 'HEAD~1', 'Docs/.gitkeep')).resolves.toBe(false);
+    await expect(git.pathExistsAtRef(workspaceId, 'HEAD', 'missing.md')).resolves.toBe(false);
+    // Not an answer about the path at all: the ref does not resolve.
+    await expect(git.pathExistsAtRef(workspaceId, 'deadbeef', 'base.md')).rejects.toThrow();
+  });
+
+  /**
    * The per-file revert's two primitives: the merge-base a revert restores
    * from, and the restore itself — byte-exact via git, with "absent at the
    * merge-base" meaning deletion (the revert of an added file).
@@ -277,5 +371,148 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     await expect(
       execFileAsync('git', ['-C', repo, 'cat-file', '-e', 'HEAD:added.md']),
     ).rejects.toThrow();
+  });
+});
+
+/**
+ * `changedPathsForPr` fetches the two refs it is about before diffing them —
+ * one network round trip per call. A change-request LIST calls it once per
+ * open request, which is where the "very slow loading" reported against the
+ * request list came from (~0.55s per additional open request, measured).
+ * `fetch: false` lets the list refresh the whole clone once instead and then
+ * diff locally; every other caller keeps the fetch.
+ */
+describe('GitService.changedPathsForPr: who pays for the fetch', () => {
+  let root: string;
+  const workspaceId = 'current-company-state';
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-pr-paths-'));
+  });
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+  });
+
+  /**
+   * Push a change request's head branch to the remote from a DIFFERENT
+   * clone, so the workspace clone has never seen it — which is exactly what
+   * the flag decides about.
+   */
+  async function pushedElsewhere(upstream: string, file: string): Promise<string> {
+    const other = path.join(root, `.other-${file}`);
+    await runGit(root, ['clone', upstream, other]);
+    await runGit(other, ['config', 'user.email', 'test@bevel.local']);
+    await runGit(other, ['config', 'user.name', 'Test Runner']);
+    await runGit(other, ['checkout', '-b', 'biz/proposal']);
+    await fs.writeFile(path.join(other, file), 'proposed\n');
+    await runGit(other, ['add', '-A']);
+    await runGit(other, ['commit', '-m', 'propose']);
+    await runGit(other, ['push', '-u', 'origin', 'biz/proposal']);
+    return other;
+  }
+
+  it('finds a branch pushed since the last fetch — the default', async () => {
+    const { repo, upstream } = await seedWorkspace(root, workspaceId);
+    await pushedElsewhere(upstream, 'brief.pdf');
+    const git = new GitService(
+      stubWorkspaceService(workspaceId, repo),
+      new WorkflowHooks(),
+      'knowledge-base',
+    );
+    expect(
+      await git.changedPathsForPr(workspaceId, 'current-company-state', 'biz/proposal'),
+    ).toEqual(['brief.pdf']);
+  });
+
+  it('with fetch: false, reads the refs the clone already has and skips the network', async () => {
+    const { repo, upstream } = await seedWorkspace(root, workspaceId);
+    const other = await pushedElsewhere(upstream, 'brief.pdf');
+    const git = new GitService(
+      stubWorkspaceService(workspaceId, repo),
+      new WorkflowHooks(),
+      'knowledge-base',
+    );
+    // The clone now knows the branch — this stands in for the one fetch a
+    // list does for the whole clone before asking about every request.
+    await runGit(repo, ['fetch', '--prune', 'origin']);
+    // A second file lands on the branch afterwards.
+    await fs.writeFile(path.join(other, 'extra.pdf'), 'more\n');
+    await runGit(other, ['add', '-A']);
+    await runGit(other, ['commit', '-m', 'second']);
+    await runGit(other, ['push', 'origin', 'biz/proposal']);
+
+    // Skipped: the answer is the clone's own refs, one push behind — which
+    // is the trade the flag makes, and why only a caller that has JUST
+    // refreshed the clone may pass it.
+    expect(
+      await git.changedPathsForPr(workspaceId, 'current-company-state', 'biz/proposal', {
+        fetch: false,
+      }),
+    ).toEqual(['brief.pdf']);
+    // The default pays for the round trip and sees both.
+    expect(
+      (await git.changedPathsForPr(workspaceId, 'current-company-state', 'biz/proposal')).sort(),
+    ).toEqual(['brief.pdf', 'extra.pdf']);
+  });
+
+  /**
+   * The one case `fetch: false` must NOT honour. A branch this clone has
+   * never heard of does not give a stale diff, it gives NO diff — an empty
+   * touched-path set, which is a change request missing from its own
+   * author's tree. So the skip only applies to refs that are actually here.
+   */
+  it('fetches anyway for a branch the clone has never seen', async () => {
+    const { repo, upstream } = await seedWorkspace(root, workspaceId);
+    await pushedElsewhere(upstream, 'brief.pdf');
+    const git = new GitService(
+      stubWorkspaceService(workspaceId, repo),
+      new WorkflowHooks(),
+      'knowledge-base',
+    );
+    // Nothing has refreshed this clone since the branch was pushed.
+    expect(
+      await git.changedPathsForPr(workspaceId, 'current-company-state', 'biz/proposal', {
+        fetch: false,
+      }),
+    ).toEqual(['brief.pdf']);
+  });
+
+  /**
+   * The skip decision and the diff must be ONE reading of the refs. Both
+   * fetches in this flow (`ensureRemotesFetched` for the list,
+   * `fetchPrRefs` here) run outside the workspace mutex deliberately, so a
+   * `fetch --prune origin` CAN land between "the clone knows both branches"
+   * and the diff itself. Re-resolving inside the mutex would then fail, and
+   * `touchedPathsFor` turns that failure into an empty touched-path set —
+   * the request missing from its own author's tree that this whole path
+   * exists to prevent.
+   */
+  it('diffs the commits it decided on, even if a concurrent prune drops the ref', async () => {
+    const { repo, upstream } = await seedWorkspace(root, workspaceId);
+    await pushedElsewhere(upstream, 'brief.pdf');
+    // The list's one fetch for the whole clone.
+    await runGit(repo, ['fetch', '--prune', 'origin']);
+
+    /** Runs the race exactly in the window, then the real critical section. */
+    class PrunedMidCall extends WorkspaceMutex {
+      override async run<T>(key: string, fn: () => Promise<T>): Promise<T> {
+        return super.run(key, async () => {
+          await runGit(repo, ['update-ref', '-d', 'refs/remotes/origin/biz/proposal']);
+          return fn();
+        });
+      }
+    }
+    const git = new GitService(
+      stubWorkspaceService(workspaceId, repo),
+      new WorkflowHooks(),
+      'knowledge-base',
+      new PrunedMidCall(),
+    );
+
+    expect(
+      await git.changedPathsForPr(workspaceId, 'current-company-state', 'biz/proposal', {
+        fetch: false,
+      }),
+    ).toEqual(['brief.pdf']);
   });
 });

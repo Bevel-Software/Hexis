@@ -60,7 +60,7 @@ const CACHE_TTL_MS = 60_000;
  * author-written, so its `tools` array is unbounded input; the page renders one
  * bullet per entry, and a thousand of them is a broken page, not a useful one.
  */
-const MAX_CAPABILITIES = 100;
+export const MAX_CAPABILITIES = 100;
 
 /**
  * UTCP namespaces a user `.tool` may NOT claim: they belong to built-in manuals

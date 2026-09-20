@@ -5,6 +5,7 @@ import { IGNORE_FILENAME, isAbsence, type IFsProbe } from '../../../../shared/fs
 import { PREAMBLE_FILE } from '../../../agent-instructions/compose.js';
 import { TemplateSource } from './template-source.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
+import { hasGitInternalsSegment } from '../../../../shared/git-internals.js';
 
 /** Root-anchored so a knowledge folder may still contain an ordinary namesake. */
 const PREAMBLE_IGNORE_PATTERN = `/${PREAMBLE_FILE}`;
@@ -85,7 +86,7 @@ function assertRootSegment(dir: string): void {
   // `.git` can never be a KB root: writing `<dir>/.gitkeep` under it would
   // corrupt the clone's own metadata. Any case — Windows filesystems treat
   // `.GIT` as the same directory.
-  if (dir.toLowerCase() === '.git') {
+  if (hasGitInternalsSegment(dir)) {
     throw new Error(`Reserved KB root must not be ".git" (any case); got "${dir}"`);
   }
 }

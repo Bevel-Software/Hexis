@@ -57,12 +57,37 @@ vi.mock('../services/plugins.api', () => ({
 vi.mock('../../access/components/ManageAccessDialog', () => ({
   ManageAccessDialog: ({
     entry,
+    workspaceId,
+    onManageAncestor,
     onClose,
   }: {
     entry: { relativePath: string; type: string };
+    workspaceId?: string;
+    onManageAncestor?(entry: { name: string; relativePath: string; type: string }): void;
     onClose(): void;
   }) => (
-    <div role="dialog" aria-label={`Manage access ${entry.type} ${entry.relativePath}`}>
+    // The branch and the ancestor walk are the page's to hand over, so the
+    // stub surfaces both: which branch the rules are read and written on, and
+    // whether an inherited grant can be managed where it actually lives.
+    <div
+      role="dialog"
+      aria-label={`Manage access ${entry.type} ${entry.relativePath}`}
+      data-workspace={workspaceId}
+    >
+      {onManageAncestor && (
+        <button
+          type="button"
+          onClick={() =>
+            onManageAncestor({
+              name: 'GTM',
+              relativePath: 'knowledge-base/Plugins/GTM',
+              type: 'directory',
+            })
+          }
+        >
+          Manage GTM →
+        </button>
+      )}
       <button type="button" onClick={onClose}>
         Close access
       </button>
@@ -166,11 +191,18 @@ function LocationProbe() {
   return <div aria-label="href">{location.pathname + location.search}</div>;
 }
 
-function renderPlugin(name: string, children?: ReactNode, admin: AdminContextValue = nonAdmin) {
+function renderPlugin(
+  name: string,
+  children?: ReactNode,
+  admin: AdminContextValue = nonAdmin,
+  // The branch the app happens to have OPEN. It is the default one in every
+  // case but the access test, which is about the page not following it.
+  ambient: WorkspaceContextValue = workspace,
+) {
   return render(
     <MemoryRouter initialEntries={[`/skills-and-tools/plugins/${encodeURIComponent(name)}`]}>
       <AdminContext.Provider value={admin}>
-        <WorkspaceContext.Provider value={workspace}>
+        <WorkspaceContext.Provider value={ambient}>
           <LibraryToastProvider>
             <LibraryProvider>
               {withAuth(
@@ -437,7 +469,11 @@ describe('PluginPage', () => {
     expect(
       await screen.findByRole('heading', { name: 'Add a skill or tool to GTM' }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/No review step/)).toBeInTheDocument();
+    // The clause is on both the Skills prompt and the hidden Tools one, so
+    // this reads the panel on screen.
+    expect(
+      within(screen.getByRole('tabpanel')).getByText(/No review step/),
+    ).toBeInTheDocument();
     expect(screen.queryByText('Start an empty SKILL.md')).not.toBeInTheDocument();
   });
 
@@ -634,6 +670,96 @@ describe('PluginPage', () => {
     ).toBeInTheDocument();
   });
 
+  /**
+   * The gap a business-user tester fell into: they were standing on a plugin's
+   * page looking at a skill, and the only Share on screen was the plugin's. A
+   * skill card carries its own now, and it opens the SKILL's folder — the
+   * thing the card is about — not the plugin's.
+   */
+  it("a skill card's menu shares that skill's own folder, not the plugin's", async () => {
+    renderPlugin('GTM');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for outreach' }));
+    expect(
+      within(screen.getByRole('menu'))
+        .getAllByRole('menuitem')
+        .map((i) => i.textContent),
+    ).toEqual(['Open', 'Share']);
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }));
+    expect(
+      await screen.findByRole('dialog', {
+        name: 'Manage access directory knowledge-base/Plugins/GTM/outreach',
+      }),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * A skill in a plugin usually has NO rules of its own — it reads the ones the
+   * plugin folder above it sets. The skill page answers that with the dialog's
+   * `Manage <Folder> →`, and a card's Share is the same Share: without the
+   * walk, the grant it lands on is read-only here and editable one click away,
+   * which is the same dialog disagreeing with itself.
+   */
+  it("a card's Share can walk up to the folder the skill inherits from", async () => {
+    renderPlugin('GTM');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for outreach' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage GTM →' }));
+
+    expect(
+      await screen.findByRole('dialog', {
+        name: 'Manage access directory knowledge-base/Plugins/GTM',
+      }),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * The Library lists the DEFAULT branch, so the rules it shares are edited
+   * where it read them. The ambient workspace here is a different branch on
+   * purpose: without the page pinning it, a grant would be spliced into an
+   * `access.md` on whatever branch happened to be open — a rule nobody merges,
+   * which looks like it worked.
+   */
+  it("edits access on the branch the catalog was read from, not the one that's open", async () => {
+    renderPlugin('GTM', undefined, nonAdmin, {
+      ...workspace,
+      workspaceId: 'a-change-request-branch',
+    } as WorkspaceContextValue);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Share' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.getAttribute('data-workspace')).toBe(encodeURIComponent(DEFAULT_BRANCH));
+    expect(dialog.getAttribute('data-workspace')).not.toBe('a-change-request-branch');
+  });
+
+  /**
+   * Both are corner controls on the same card, and the manager view is the one
+   * place they meet. Neither may sit on top of the other.
+   */
+  it('gives a manager the card menu AND Remove, on separate targets', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true })]);
+    renderPlugin('GTM');
+
+    const remove = await screen.findByRole('button', { name: 'Remove outreach' });
+    const dots = screen.getByRole('button', { name: 'Actions for outreach' });
+    expect(remove).not.toBe(dots);
+    // The `…` keeps the corner every menu in this product lives in; Remove
+    // steps left of it rather than under it.
+    expect(dots.className).toContain('right-1.5');
+    expect(remove.className).toContain('right-8');
+    expect(remove.className).not.toContain('right-1.5');
+  });
+
+  it('leaves a TOOL card alone — access to a tool is decided at its plugin', async () => {
+    renderPlugin('GTM');
+
+    expect(await screen.findByRole('button', { name: 'Actions for outreach' })).toBeInTheDocument();
+    // `connectedTool()` is in this plugin and renders a card beside the skill.
+    expect(screen.queryByRole('button', { name: /^Actions for (?!outreach)/ })).toBeNull();
+  });
+
   it('an UNDISCOVERABLE plugin renders exactly like one that does not exist', async () => {
     // Fail-closed: the endpoint omits plugins with no verdict at all, so the
     // page cannot tell "hidden from you" apart from "absent" — the point.
@@ -810,6 +936,109 @@ describe('PluginPage', () => {
 
       await waitFor(() => expect(spinning()).toBe(false));
       expect(screen.queryByText('Last updated just now')).not.toBeInTheDocument();
+    });
+  });
+
+  /**
+   * The Linked pill: which of a plugin's cards live somewhere else.
+   *
+   * The complaint behind it was a skill on the plugin's page that the Advanced
+   * tree did not list under the plugin's folder. Both were right — the skill is
+   * linked, the tree shows the disk — and the page was the one saying nothing.
+   * The pill is that missing sentence, and its tooltip is what reconciles the
+   * two views by naming where the item actually lives.
+   */
+  describe('the Linked pill', () => {
+    /** A shared skill the plugin links, and a tool sitting under a linked root. */
+    const LINKED_CATALOG: LibraryData = {
+      ...CATALOG,
+      skills: [
+        ...CATALOG.skills,
+        {
+          name: 'test-shared-linking',
+          description: 'Shared across plugins.',
+          path: 'Skills/Testing/test-shared-linking',
+          plugins: [{ name: 'GTM', linked: true, granted: true }],
+        },
+      ],
+      tools: [
+        connectedTool(),
+        connectedTool({ slug: 'grafana', name: 'grafana', path: 'Plugins/Shared/observability/grafana.tool' }),
+      ],
+    };
+    /** The roots GTM's manifest points at — the skill's, and the tool's. */
+    const linking = gtm({
+      linkedRoots: ['Skills/Testing', 'Plugins/Shared/observability'],
+      skillCount: 2,
+      toolCount: 2,
+    });
+
+    const pillOn = (testId: string) => within(screen.getByTestId(testId)).queryByText('Linked');
+
+    beforeEach(() => {
+      dataMock.useLibraryData.mockReturnValue(LINKED_CATALOG);
+      pluginsMock.listPlugins.mockResolvedValue([linking]);
+    });
+
+    it('marks a LINKED skill and names where it lives; an inline skill wears none', async () => {
+      renderPlugin('GTM');
+      await screen.findByTestId('library-card-skill-test-shared-linking');
+
+      expect(pillOn('library-card-skill-test-shared-linking')).toHaveAttribute(
+        'title',
+        "Lives in Skills/Testing; linked from this plugin's manifest",
+      );
+      // The skill inside the plugin's own folder is simply here — nothing to say.
+      expect(pillOn('library-card-skill-outreach')).toBeNull();
+    });
+
+    // A manifest can link ONE skill folder rather than the shelf holding it.
+    // The tooltip names the root that was linked, not its parent: `Skills/Testing`
+    // here would point at a shelf this plugin was never given.
+    it('names the skill folder itself when the manifest links it outright', async () => {
+      pluginsMock.listPlugins.mockResolvedValue([
+        { ...linking, linkedRoots: ['Skills/Testing/test-shared-linking', 'Plugins/Shared/observability'] },
+      ]);
+      renderPlugin('GTM');
+      await screen.findByTestId('library-card-skill-test-shared-linking');
+
+      expect(pillOn('library-card-skill-test-shared-linking')).toHaveAttribute(
+        'title',
+        "Lives in Skills/Testing/test-shared-linking; linked from this plugin's manifest",
+      );
+    });
+
+    it('marks a TOOL that reaches the plugin through a linked root, and leaves the inline one alone', async () => {
+      renderPlugin('GTM');
+      await screen.findByTestId('library-card-integration-grafana');
+
+      expect(pillOn('library-card-integration-grafana')).toHaveAttribute(
+        'title',
+        "Lives in Plugins/Shared/observability; linked from this plugin's manifest",
+      );
+      expect(pillOn('library-card-integration-heyreach')).toBeNull();
+    });
+
+    it('is scoped to the page it is on: another plugin neither lists the linked items nor pills its own', async () => {
+      // The pill says "linked from THIS plugin's manifest", so it is only ever
+      // decided against the plugin whose page the card is on.
+      renderPlugin('Product');
+      await screen.findByTestId('library-card-skill-roadmap');
+      expect(screen.queryByTestId('library-card-skill-test-shared-linking')).toBeNull();
+      expect(screen.queryByTestId('library-card-integration-grafana')).toBeNull();
+      expect(pillOn('library-card-skill-roadmap')).toBeNull();
+    });
+
+    it('offers a manager no Remove on a tool reached by link — it is removed where it lives', async () => {
+      pluginsMock.listPlugins.mockResolvedValue([{ ...linking, canWrite: true }]);
+      renderPlugin('GTM');
+
+      // The tool in the plugin's own folder is still the manager's to remove.
+      await screen.findByRole('button', { name: 'Remove heyreach' });
+      expect(screen.queryByRole('button', { name: 'Remove grafana' })).toBeNull();
+      // The linked SKILL keeps its verb: unlinking is a manifest edit this
+      // plugin's manager owns.
+      expect(screen.getByRole('button', { name: 'Remove test-shared-linking' })).toBeInTheDocument();
     });
   });
 });
