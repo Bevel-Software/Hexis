@@ -198,6 +198,36 @@ describe("ChangeRequestDialog: a file the viewer may not read", () => {
     expect(document.body.textContent).not.toMatch(/honest/);
     expect(wsMock.getOrCreateWorkspace).toHaveBeenCalledWith(MAIN);
   });
+
+  /**
+   * The row and the pane answer the same question, so they cannot disagree
+   * about it. A refusal of the CURRENT copy is as much a refusal of the file
+   * as a refusal of the proposed one — a reader who meets the sentence in the
+   * pane and no lock in the list is being told two different things.
+   */
+  it("locks the row on a refused base copy too, with the pane's own sentence", async () => {
+    reads({ [CR_BRANCH]: 'bands:\n  - L3\n', [MAIN]: new WorkspaceApiError(403) });
+    governedBy('Knowledge/Finance/Payroll/access.md');
+
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    await screen.findByText(DENIED_HERE);
+
+    const tree = screen.getByRole('tree', { name: 'Files in this change request' });
+    const lock = within(tree).getByRole('img', { name: DENIED_HERE });
+    expect(lock).toHaveAttribute('title', DENIED_HERE);
+  });
+
+  /** A base copy that merely broke is still not a refusal: reason, retry, no lock. */
+  it('leaves the row unlocked when the base copy merely broke', async () => {
+    reads({ [CR_BRANCH]: 'bands:\n  - L3\n', [MAIN]: new WorkspaceApiError(500) });
+
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    const note = await screen.findByText(/couldn't be read right now/);
+    expect(note).toHaveTextContent("This file couldn't be read right now (HTTP 500). Try again.");
+    const tree = screen.getByRole('tree', { name: 'Files in this change request' });
+    expect(within(tree).queryByRole('img', { name: /don't have access/ })).not.toBeInTheDocument();
+  });
 });
 
 describe('ChangeRequestDialog: a read that merely broke', () => {

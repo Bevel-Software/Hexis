@@ -536,6 +536,20 @@ export function ChangeRequestDialog({
   const readsUnmarked = !selectedIsMarkdown && detail !== null && !touchesSelected;
   const rawFallback = oldPathUnreadable ? branchRaw : readsUnmarked ? (mainRaw ?? branchRaw) : null;
 
+  /**
+   * Why the selected file cannot be shown — `null` when it can.
+   *
+   * ONE value, read by the pane and by the file row alike. A failure only
+   * gets the last word when there is nothing left to show: a file this
+   * request doesn't touch reads fine from whichever copy arrived. Which SIDE
+   * failed no longer changes the sentence — the reader's question is why they
+   * can't see it, and that answer is the same — so the base copy's denial has
+   * to reach the row exactly as the branch copy's does, or a file the pane
+   * calls refused would sit in the tree with no lock.
+   */
+  const selectedFailure: ReadFailure | null =
+    branchFailure.get(selected) ?? (baseUnreadable && !readsUnmarked ? baseFailure : null);
+
   /** Per-file approval verdicts, straight from the detail. */
   const approvalByPath = useMemo(
     () => new Map((detail?.approvals ?? []).map((a) => [a.path, a])),
@@ -691,7 +705,10 @@ export function ChangeRequestDialog({
       // Only files the reader has actually opened can carry the lock: the
       // dialog reads one copy at a time, so a denial is a fact about a file
       // that has been asked for, never a guess about the rest of the list.
-      const failure = branchFailure.get(path);
+      // For the open file that means the SAME failure the pane is showing,
+      // base copy included — a refusal of the before-side is still a refusal
+      // of this file, and the row says so with the pane's own sentence.
+      const failure = path === selected ? selectedFailure : branchFailure.get(path);
       return {
         path,
         changed: changedFiles.has(path),
@@ -701,7 +718,16 @@ export function ChangeRequestDialog({
         deniedNote: failure?.kind === 'denied' ? deniedSentence(failure.folder) : undefined,
       };
     });
-  }, [detail, allFiles, changedFiles, addedFiles, approvalByPath, branchFailure]);
+  }, [
+    detail,
+    allFiles,
+    changedFiles,
+    addedFiles,
+    approvalByPath,
+    branchFailure,
+    selected,
+    selectedFailure,
+  ]);
 
   /** The footer's verdicts: apply plainly, apply by covering, or wait. */
   const allApproved =
@@ -1121,15 +1147,7 @@ export function ChangeRequestDialog({
               <MarkedFile
                 diff={diff}
                 raw={rawFallback}
-                failure={
-                  // A failure only gets the last word when there is nothing
-                  // left to show: a file this request doesn't touch reads
-                  // fine from whichever copy arrived. Which SIDE failed no
-                  // longer changes the sentence — the reader's question is
-                  // why they can't see it, and that answer is the same.
-                  branchFailure.get(selected) ??
-                  (baseUnreadable && !readsUnmarked ? baseFailure : null)
-                }
+                failure={selectedFailure}
                 onRetry={retrySelectedRead}
               />
               )}

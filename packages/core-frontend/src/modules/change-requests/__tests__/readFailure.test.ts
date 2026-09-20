@@ -56,10 +56,47 @@ describe('naming the folder to ask about', () => {
     );
   });
 
+  /**
+   * The rule that produced the 403 is as often a `deny` as a missing grant,
+   * and a deny is usually written NEARER the file than the grant it cuts
+   * down. Reading grants only sent the reader to ask an owner of the folder
+   * that let them in — or, where the deny was the only ancestor rule at all,
+   * to "this file" — never to the folder actually holding them out.
+   */
+  it('reads the deny scopes too, and prefers whichever rule sits nearest', () => {
+    expect(
+      nearestRuleFolder(
+        { 'r:developer': { read: [ancestor('Knowledge/access.md')] } },
+        { 'u:ali@example.com': { read: [ancestor('Knowledge/Finance/Payroll/access.md')] } },
+      ),
+    ).toBe('Knowledge/Finance/Payroll');
+  });
+
+  it('names a deny-only ancestor rather than falling back to the file', () => {
+    expect(
+      nearestRuleFolder(
+        {},
+        { 'u:ali@example.com': { read: [ancestor('Knowledge/Finance/access.md')] } },
+      ),
+    ).toBe('Knowledge/Finance');
+  });
+
+  it('keeps the nearest GRANT when the deny is written farther out', () => {
+    expect(
+      nearestRuleFolder(
+        { 'r:developer': { read: [ancestor('Knowledge/Finance/Payroll/access.md')] } },
+        { 'u:ali@example.com': { read: [ancestor('Knowledge/access.md')] } },
+      ),
+    ).toBe('Knowledge/Finance/Payroll');
+  });
+
   it('names nothing when the only rule is the file\'s own frontmatter', () => {
     expect(nearestRuleFolder({ 'u:ali@example.com': { read: [{ kind: 'direct' }] } })).toBeNull();
     expect(nearestRuleFolder({})).toBeNull();
     expect(nearestRuleFolder(undefined)).toBeNull();
+    // An older server sends no denials at all; that is not a rule folder.
+    expect(nearestRuleFolder({}, undefined)).toBeNull();
+    expect(nearestRuleFolder({}, { 'u:ali@example.com': { read: [{ kind: 'direct' }] } })).toBeNull();
   });
 });
 

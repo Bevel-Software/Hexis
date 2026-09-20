@@ -28,7 +28,10 @@ export async function governingRuleFolder(
   try {
     const { workspace } = await getOrCreateWorkspace(branch);
     const access = await fetchFileAccess(workspace.id, repoRelativePath);
-    return nearestRuleFolder(access.sources);
+    // Grants AND denials: a 403 is as often a `deny` written nearer the file
+    // as it is a grant the reader is missing, and the folder worth asking
+    // about is whichever rule sits closest to the path.
+    return nearestRuleFolder(access.sources, access.denials);
   } catch {
     return null;
   }

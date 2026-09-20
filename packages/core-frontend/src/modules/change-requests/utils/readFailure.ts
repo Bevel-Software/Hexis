@@ -1,4 +1,4 @@
-import type { AccessResponse } from '../../access/api';
+import type { AccessResponse, GrantSources } from '../../access/api';
 
 /**
  * WHY a copy of a file could not be read.
@@ -46,23 +46,36 @@ export function failureReason(err: unknown): string {
 /** How deep a repo-relative folder sits; the root (`''`) is depth 0. */
 const depthOf = (folder: string): number => (folder === '' ? 0 : folder.split('/').length);
 
-/**
- * The nearest folder with an access rule for the path, read off the resolved
- * access view's `sources` map.
- *
- * Every `ancestor` source names the `access.md` that grants a principal a
- * verb — which is exactly "a folder with an access rule for this path".
- * Resolution is closeness-first, so the DEEPEST of them is the one the reader
- * should be asking about. A path whose only rules are its own frontmatter has
- * no ancestor source and therefore no folder to name: `null`, and the sentence
- * says "this file" instead of inventing a directory.
- */
-export function nearestRuleFolder(sources: AccessResponse['sources'] | undefined): string | null {
-  const folders = Object.values(sources ?? {})
+/** The folders named by the `ancestor` entries of one per-principal map. */
+function ancestorFolders(map: Record<string, GrantSources> | undefined): string[] {
+  return Object.values(map ?? {})
     .flatMap((verbs) => Object.values(verbs ?? {}))
     .flatMap((list) => list ?? [])
     .filter((source) => source.kind === 'ancestor')
     .map((source) => (source as { path: string }).path.replace(/(^|\/)access\.md$/, ''));
+}
+
+/**
+ * The nearest folder with an access rule for the path, read off the resolved
+ * access view's `sources` AND `denials` maps.
+ *
+ * Every `ancestor` entry in either map names the `access.md` that settles a
+ * principal's verb — which is exactly "a folder with an access rule for this
+ * path". The denials are read too, and that is the point: the refusal being
+ * explained is often a `deny` written in a folder BELOW the one that grants
+ * read, and naming only grant folders would send the reader to ask an owner
+ * who does not hold the rule that stopped them — or, where the deny is the
+ * only ancestor rule at all, to "this file". Resolution is closeness-first,
+ * so the DEEPEST folder either map names is the one to ask about. A path
+ * whose only rules are its own frontmatter has no ancestor entry and
+ * therefore no folder to name: `null`, and the sentence says "this file"
+ * instead of inventing a directory.
+ */
+export function nearestRuleFolder(
+  sources: AccessResponse['sources'] | undefined,
+  denials?: AccessResponse['denials'],
+): string | null {
+  const folders = [...ancestorFolders(sources), ...ancestorFolders(denials)];
   if (folders.length === 0) return null;
   return folders.reduce((best, folder) => (depthOf(folder) > depthOf(best) ? folder : best));
 }

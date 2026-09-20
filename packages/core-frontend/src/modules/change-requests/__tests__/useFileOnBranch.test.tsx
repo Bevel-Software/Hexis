@@ -71,11 +71,6 @@ describe('useFileOnBranch', () => {
   });
 });
 
-/**
- * A caller that cannot tell "failed" from "in flight" can only render
- * "Loading…" for both — which is what left the change-request pane hanging on
- * a file the default branch does not have.
- */
 /** What a rejected read settles as: failed, with the reason it gave. */
 const FAILED_404 = {
   content: null,
@@ -83,6 +78,11 @@ const FAILED_404 = {
   failure: { kind: 'error', reason: '404' },
 };
 
+/**
+ * A caller that cannot tell "failed" from "in flight" can only render
+ * "Loading…" for both — which is what left the change-request pane hanging on
+ * a file the default branch does not have.
+ */
 describe('useFileOnBranchRead', () => {
   it('reports a settled failure as a failure, not as a wait', async () => {
     api.readFileOnBranch.mockRejectedValue(new Error('404'));

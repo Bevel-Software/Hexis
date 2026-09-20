@@ -36,7 +36,11 @@ export function useForkPointFileRead(
   const [settled, setSettled] = useState<ReadonlyMap<string, BranchFileRead>>(new Map());
   /** Keys already requested — read and written only inside the effect. */
   const asked = useRef<Set<string>>(new Set());
-  const key = `${crNumber}::${sha ?? ''}::${repoRelativePath ?? ''}::${revision}`;
+  // `targetBranch` belongs in the key, not only in the effect's deps: the
+  // effect skips a key `asked` has already seen, so the same file at the same
+  // fork point read against a DIFFERENT branch would keep the first branch's
+  // answer — including the folder a denial names.
+  const key = `${crNumber}::${sha ?? ''}::${repoRelativePath ?? ''}::${targetBranch}::${revision}`;
 
   useEffect(() => {
     if (!sha || !repoRelativePath || asked.current.has(key)) return;
