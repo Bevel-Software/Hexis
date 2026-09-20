@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { LibraryCard, type LibraryCardProps } from '../components/LibraryCard';
+import { NAME_MIN_WIDTH } from '../components/NameWithBadges';
 import { displayFirstName, personalPluginName } from '../utils/personal-plugin';
 
 /**
@@ -28,16 +29,6 @@ function card(over: Partial<LibraryCardProps> = {}) {
     ...over,
   } as LibraryCardProps;
   render(<LibraryCard {...props} />);
-}
-
-/**
- * The badges in a card's title row — the round chips, which is what separates
- * them from the monogram's rounded square sitting in the same row. Both are
- * `shrink-0`, and how many of them share the row is exactly what decides how
- * much width is left for the one item that can shrink: the name.
- */
-function badgesIn(titleRow: Element): Element[] {
-  return [...titleRow.children].filter((el) => el.className.includes('rounded-full'));
 }
 
 describe('LibraryCard', () => {
@@ -159,11 +150,9 @@ describe('LibraryCard', () => {
    * wears the same review badge and the same dashed outline, because it is the
    * same fact.
    *
-   * What it does NOT wear is the flavour badge. A released card carries it to
-   * answer "which file do I edit", and a proposal has no file to edit yet —
-   * the change request the card opens shows the reviewer the declaration
-   * itself. Drawing both cost the name its room (see the badge-count test
-   * below), so the row spends its one badge on the fact that matters here.
+   * What it does NOT wear is the connection line. That is the one thing a
+   * released tool card always states, and on a proposal it would send the
+   * reader off to fill in a credential for a file nobody has approved.
    */
   it('marks a proposed tool in review without claiming it is connected', () => {
     card({
@@ -180,10 +169,10 @@ describe('LibraryCard', () => {
     expect(screen.getByText('In review')).toBeInTheDocument();
     expect(screen.getByText(/From Ali Raza: waiting on you/)).toBeInTheDocument();
     expect(screen.queryByText('Needs setup')).not.toBeInTheDocument();
-    // The flavour badge stays off, on the mcp side as on the utcp side the
-    // badge-count test below covers — so the comment above is checked here
-    // rather than merely asserted in prose.
-    expect(screen.queryByText('MCP server')).not.toBeInTheDocument();
+    // The flavour badge is untouched by any of that: silencing the connection
+    // line is about a credential that cannot exist yet, not about hiding which
+    // file the request adds.
+    expect(screen.getByText('MCP server')).toBeInTheDocument();
     // Dashed: the card is an outline of a tool rather than one, and that reads
     // before any text does.
     expect(screen.getByTestId('library-card-integration-tickets').className).toContain(
@@ -192,17 +181,21 @@ describe('LibraryCard', () => {
   });
 
   /**
-   * The title row of a tool card fits ONE badge, and this is the regression
-   * that proved it: a proposal drew the flavour badge and `In review` side by
-   * side, and since both are `shrink-0` beside a `shrink-0` monogram, the
-   * truncating name absorbed the whole deficit — `prometheus_metrics` rendered
-   * as `p…` in a 260px grid track.
+   * A proposed tool is the most crowded card in the library: a monogram, its
+   * flavour, and `In review`, all beside a name. That crowding is what once
+   * rendered `prometheus_metrics` as `p…` in a 260px track — every badge is
+   * `shrink-0`, so the truncating name paid for all of them.
    *
-   * jsdom has no layout, so this cannot be asserted in pixels. The structural
-   * cause can be: how many things in that row refuse to shrink. That is the
-   * invariant worth holding, because it is the one that was broken.
+   * `NameWithBadges` is the fix, and it is the shared one rather than this
+   * card's: the name keeps a floor and the badges wrap under it instead. So
+   * what is worth pinning HERE is that a proposal actually reaches that
+   * protection — it is the card with the most to lose, and a floor granted
+   * only while badges are present is a floor a proposal must not fall out of.
+   *
+   * jsdom has no layout, so none of this can be asserted in pixels. The floor
+   * is a class, and the class can be.
    */
-  it('spends only one badge on a proposed tool’s title row', () => {
+  it('gives a proposed tool’s name the floor, and still says how it is declared', () => {
     card({
       kind: 'integration',
       flavor: 'utcp',
@@ -211,39 +204,15 @@ describe('LibraryCard', () => {
       status: { state: 'ok', text: 'Connected' },
       pending: { authorName: 'Ali Raza', mine: true },
     });
-    // Badges are the round chips (`rounded-full`); the monogram beside them is
-    // a rounded SQUARE, and it is `shrink-0` too — so counting badges, not
-    // every rigid child, is what names the thing that overflowed.
-    expect(badgesIn(screen.getByText('prometheus_metrics').parentElement!)).toHaveLength(1);
-    // And it is the badge that says the tool is not here yet — the flavour
-    // names which file an owner edits, which is a question about a released
-    // tool; a reviewer is shown that file by the change request itself.
+    const name = screen.getByText('prometheus_metrics');
+    expect(name.className).toContain(NAME_MIN_WIDTH);
+    // Whatever the row clips is one hover away.
+    expect(name).toHaveAttribute('title', 'prometheus_metrics');
+    // Both chips, because the row no longer has to choose between them: an
+    // approver is deciding on a FILE, so which file it is belongs beside the
+    // badge saying the tool is not here yet.
     expect(screen.getByText('In review')).toBeInTheDocument();
-    expect(screen.queryByText('UTCP manual')).not.toBeInTheDocument();
-
-    // A RELEASED tool keeps its flavour badge — this is the proposal's
-    // arrangement, not a retreat from saying how a tool is declared.
-    cleanup();
-    card({
-      kind: 'integration',
-      flavor: 'utcp',
-      id: 'prometheus_metrics',
-      name: 'prometheus_metrics',
-      status: { state: 'ok', text: 'Connected' },
-    });
     expect(screen.getByText('UTCP manual')).toBeInTheDocument();
-  });
-
-  /**
-   * A name the row had to clip is still readable on hover. Truncation is the
-   * intended outcome in a fixed grid track; an unreadable card is not.
-   */
-  it('carries the full name as a tooltip, however the row clips it', () => {
-    card({ id: 'prometheus_metrics', name: 'prometheus_metrics' });
-    expect(screen.getByText('prometheus_metrics')).toHaveAttribute(
-      'title',
-      'prometheus_metrics',
-    );
   });
 
   it('does not call a proposal yours to own', () => {

@@ -10,6 +10,7 @@ import type { LibraryData } from '../hooks/useLibraryData';
 import type { PendingToolSummary } from '../services/tools.api';
 import type { PluginSummary } from '../services/plugins.api';
 import { withAuth } from './auth-harness';
+import { NAME_MIN_WIDTH } from '../components/NameWithBadges';
 
 /**
  * A tool proposed on an open change request, in the library.
@@ -218,16 +219,20 @@ describe('a tool proposed on an open change request', () => {
   });
 
   /**
-   * A proposal spends its one badge on `In review` and keeps its name legible.
+   * A long proposed tool keeps a readable name, through the whole page rather
+   * than in a hand-built card.
    *
-   * The card sits in a fixed 260px grid track beside a monogram, and every
-   * badge is `shrink-0` — so drawing the flavour badge as well left the
-   * truncating name 25px of the 141px `prometheus_metrics` needs, and the card
-   * read `p…`. The flavour answers "which file do I edit", a question about a
-   * released tool; the reviewer clicking through is shown that file and its
-   * diff by the change request itself.
+   * A proposal is the most crowded card the library draws — a monogram, the
+   * flavour chip and `In review`, all beside the name — and every one of those
+   * is `shrink-0`, so before `NameWithBadges` the truncating name paid for all
+   * of them: 25px of the 141px `prometheus_metrics` needs, rendered as `p…` in
+   * the 260px grid track. The floor is what stops that, and it is granted only
+   * while badges are present, so the card with the most badges is the one
+   * worth checking reaches it by the real data path.
+   *
+   * jsdom has no layout, so this is the class rather than the pixels.
    */
-  it('keeps a long proposed tool’s name legible rather than spending the row on badges', async () => {
+  it('keeps a long proposed tool’s name legible on the page that draws it', async () => {
     dataMock.useLibraryData.mockReturnValue({
       ...emptyCatalog,
       pendingTools: [
@@ -243,17 +248,14 @@ describe('a tool proposed on an open change request', () => {
 
     const card = await screen.findByTestId('library-card-integration-prometheus_metrics');
     expect(card).toHaveTextContent('In review');
-    expect(card).not.toHaveTextContent('MCP server');
-    // The row's only flexible item is the name; one badge is what it fits.
-    // Badges are the round chips — the monogram beside them is a rounded
-    // square, and rigid in just the same way.
-    const title = within(card).getByText('prometheus_metrics').parentElement!;
-    expect([...title.children].filter((el) => el.className.includes('rounded-full'))).toHaveLength(1);
+    // Which file the request adds, beside the fact that it has not landed —
+    // the two things an approver is deciding between.
+    expect(card).toHaveTextContent('MCP server');
+
+    const name = within(card).getByText('prometheus_metrics');
+    expect(name.className).toContain(NAME_MIN_WIDTH);
     // Clipped or not, the whole name is one hover away.
-    expect(within(card).getByText('prometheus_metrics')).toHaveAttribute(
-      'title',
-      'prometheus_metrics',
-    );
+    expect(name).toHaveAttribute('title', 'prometheus_metrics');
   });
 
   /**

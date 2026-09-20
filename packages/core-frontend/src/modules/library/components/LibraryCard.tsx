@@ -2,6 +2,7 @@ import { ExternalLink, Users } from 'lucide-react';
 import { Badge, Surface } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { ItemMenuFrame } from './ItemActionsMenu';
+import { NameWithBadges } from './NameWithBadges';
 import { StatusDot } from './StatusDot';
 import { ToolLogo } from './ToolLogo';
 import type { AttentionStatus, GemState } from '../utils/status';
@@ -32,11 +33,11 @@ export type LibraryCardProps = LibraryCardCommonProps &
          * UTCP manual. Two different files to edit and two different
          * capability sets, so the card says which one this is.
          *
-         * Still REQUIRED on a proposal even though the badge is not drawn
-         * there (see the render): what a caller knows about the item should
-         * not depend on how the card happens to lay out this week, and an
-         * optional here is what shipped cards silently missing the badge in
-         * the first place.
+         * Mandatory, and `NameWithBadges` leans on that: a tool card carries a
+         * mark, and a mark earns the name no floor of its own, so the floor has
+         * to come from a badge that is always there. A PROPOSED tool says it
+         * too — an approver is deciding on a file, and which file it is belongs
+         * on the card beside `In review`.
          */
         flavor: 'mcp' | 'utcp';
         /**
@@ -150,6 +151,53 @@ export function LibraryCard({
       ? status
       : null;
 
+  /**
+   * The chips that qualify the name — as an ARRAY, not a fragment.
+   *
+   * `NameWithBadges` gives the name its minimum width only while something is
+   * actually competing with it for the row, and a fragment of four falsy
+   * branches is indistinguishable from a fragment of four pills. An array can
+   * be counted. Which badges appear is untouched: these are the same four
+   * conditions, in the same order, that this row has always rendered.
+   */
+  const badges = [
+    kind === 'integration' && flavor ? (
+      <Badge key="flavor" tone="outline" size="xs" className="shrink-0 uppercase">
+        {flavor === 'mcp' ? 'MCP server' : 'UTCP manual'}
+      </Badge>
+    ) : null,
+    pending ? (
+      <Badge key="pending" tone="wait" size="xs" className="shrink-0 uppercase">
+        In review
+      </Badge>
+    ) : null,
+    owned && !pending ? (
+      <Badge key="owner" tone="outline" size="xs" className="shrink-0 uppercase">
+        Owner
+      </Badge>
+    ) : null,
+    /* The card is on a plugin's page and the item lives somewhere else. The
+       Owner pill's exact dress, because it makes the same kind of statement —
+       a fact about the item's standing, not a problem — and the skill's own
+       page already spells LINKED this way.
+
+       The pill alone would say "not here" without saying where, and "where" is
+       the whole reason the reader is puzzled: the Advanced tree shows the disk,
+       so a linked skill is not under the plugin's folder there, and the tooltip
+       is what reconciles the two views. */
+    linkedHome ? (
+      <Badge
+        key="linked"
+        tone="outline"
+        size="xs"
+        className="shrink-0 uppercase"
+        title={`Lives in ${linkedHome}; linked from this plugin's manifest`}
+      >
+        Linked
+      </Badge>
+    ) : null,
+  ].filter((badge) => badge !== null);
+
   const card = (
     <Surface
       as="button"
@@ -171,63 +219,20 @@ export function LibraryCard({
       )}
       onClick={onOpen}
     >
-      <span className="flex items-center gap-2">
-        {/* Only tools carry a mark. A skill has no brand to recognise — its
-            name IS the thing — and a monogram beside every skill would add a
-            column of coloured squares that distinguish nothing. */}
-        {kind === 'integration' && <ToolLogo slug={id} name={name} />}
-        {/* `title`, because this row's only flexible item is the name: the
-            monogram and every badge beside it are `shrink-0`, so all of a
-            narrow track's deficit lands here. Truncation is the intended
-            outcome; a truncation you cannot read at all is not, and the
-            tooltip is what keeps a clipped name recoverable. */}
-        <span className="truncate text-lede font-semibold text-ink" title={name}>
-          {name}
-        </span>
-        {/* How the integration is declared — but NOT on a proposal. The name
-            is the row's only flexible item, and a tool card already spends a
-            monogram plus this badge before reaching it; adding `In review`
-            beside them left an 18-character name 25px of the 141px it needed
-            and rendered it as `p…`. One badge is what this row fits, and on a
-            proposal the one worth keeping is the one that says the tool is
-            not here yet. Nothing is lost: the flavour answers "which file do I
-            edit", a question about a released tool, and a reviewer opening the
-            change request is shown that file and its diff outright. */}
-        {kind === 'integration' && flavor && !pending && (
-          <Badge tone="outline" size="xs" className="shrink-0 uppercase">
-            {flavor === 'mcp' ? 'MCP server' : 'UTCP manual'}
-          </Badge>
-        )}
-        {pending && (
-          <Badge tone="wait" size="xs" className="shrink-0 uppercase">
-            In review
-          </Badge>
-        )}
-        {owned && !pending && (
-          <Badge tone="outline" size="xs" className="shrink-0 uppercase">
-            Owner
-          </Badge>
-        )}
-        {/* The card is on a plugin's page and the item lives somewhere else.
-            The Owner pill's exact dress, because it makes the same kind of
-            statement — a fact about the item's standing, not a problem — and
-            the skill's own page already spells LINKED this way.
-
-            The pill alone would say "not here" without saying where, and
-            "where" is the whole reason the reader is puzzled: the Advanced
-            tree shows the disk, so a linked skill is not under the plugin's
-            folder there, and the tooltip is what reconciles the two views. */}
-        {linkedHome && (
-          <Badge
-            tone="outline"
-            size="xs"
-            className="shrink-0 uppercase"
-            title={`Lives in ${linkedHome}; linked from this plugin's manifest`}
-          >
-            Linked
-          </Badge>
-        )}
-      </span>
+      {/* Only tools carry a mark. A skill has no brand to recognise — its
+          name IS the thing — and a monogram beside every skill would add a
+          column of coloured squares that distinguish nothing. It goes in as
+          the row's `leading` so it stays on the name's line when the badges
+          leave for the one below — a logo stranded above its own name is
+          worse than no logo. A tool card is never without badges anyway: the
+          union makes `flavor` mandatory, so the floor is always in force
+          wherever a mark is. */}
+      <NameWithBadges
+        leading={kind === 'integration' && <ToolLogo slug={id} name={name} />}
+        name={name}
+        nameClassName="text-lede font-semibold text-ink"
+        badges={badges.length > 0 ? badges : undefined}
+      />
 
       {description && (
         <span className="line-clamp-2 text-detail text-ink-muted">{description}</span>
