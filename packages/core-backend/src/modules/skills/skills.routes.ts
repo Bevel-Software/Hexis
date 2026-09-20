@@ -3,6 +3,7 @@ import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IPendingSkillService, ISkillService, PluginMembership } from './skills.contract.js';
+import type { IAllowedToolsChecker } from './allowed-tools-check.js';
 
 /** The slice of the plugin link index this surface reads — see `PluginLinkIndex`. */
 export interface SkillMembershipSource {
@@ -44,6 +45,12 @@ export function createSkillsRoutes(
    * verdict), so this surface never reveals a plugin `/api/plugins` omits.
    */
   gate?: SkillMembershipGate,
+  /**
+   * When given, a loaded skill carries `warnings` for `allowed-tools` entries
+   * that name no tool the caller can see — the same list `get_skill` returns,
+   * so the skill page can say so when it opens, not only after a save.
+   */
+  allowedTools?: IAllowedToolsChecker,
 ): express.Router {
   const router = express.Router();
 
@@ -108,7 +115,12 @@ export function createSkillsRoutes(
       return;
     }
     const file = typeof req.query.file === 'string' ? req.query.file : undefined;
-    res.json(await skillService.getSkill(email, req.params.name, file));
+    const result = await skillService.getSkill(email, req.params.name, file);
+    if (!allowedTools || !result.ok || result.kind !== 'skill') {
+      res.json(result);
+      return;
+    }
+    res.json({ ...result, warnings: await allowedTools.check(email, result.skill.allowedTools) });
   });
 
   return router;

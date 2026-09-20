@@ -692,6 +692,20 @@ describe('SkillPage', () => {
     expect(screen.queryByRole('textbox', { name: 'Edit SKILL.md' })).toBeNull();
   });
 
+  it('warnings the skill already carries show on open, before any save', async () => {
+    // A manual retired after the skill was written: nobody saved anything, so
+    // the only way the page can know is from the skill it loads.
+    apiMock.getSkill.mockResolvedValue({
+      ...skillDetail,
+      warnings: [{ entry: 'legacy_crm', message: '"legacy_crm" in allowed-tools is not a tool you can use here.' }],
+    });
+    renderPage(true);
+
+    const status = (await screen.findByText('Some tools this skill lists are not available')).closest('[role="status"]');
+    expect(status).not.toBeNull();
+    expect(within(status as HTMLElement).getByText(/"legacy_crm" in allowed-tools/)).toBeInTheDocument();
+  });
+
   it('arriving with startEditing in router state opens the editor without a click', async () => {
     // The creation hand-off: NewSkillPanel navigates here with the flag, so
     // the person who just made an empty skill lands with the cursor in it.

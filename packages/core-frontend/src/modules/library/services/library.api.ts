@@ -96,6 +96,13 @@ export interface LibrarySkill extends LibrarySkillSummary {
   allowedTools?: string[];
   /** Repo-root-relative bundled file paths (SKILL.md itself is not listed). */
   files: string[];
+  /**
+   * `allowed-tools` entries that look like platform tools but name none the
+   * caller can see. Advisory, and about the skill as it reads NOW — so the page
+   * can say so on open, before anyone saves. Absent from a backend built before
+   * the check existed.
+   */
+  warnings?: SkillToolWarning[];
 }
 
 /**
@@ -121,7 +128,7 @@ interface SkillFilePayload {
 }
 
 type GetSkillPayload =
-  | { ok: true; kind: 'skill'; skill: LibrarySkill }
+  | { ok: true; kind: 'skill'; skill: LibrarySkill; warnings?: SkillToolWarning[] }
   | { ok: true; kind: 'file'; file: SkillFilePayload }
   | { ok: false; error: 'not_found' | 'forbidden' | 'invalid_file' };
 
@@ -137,7 +144,9 @@ export async function getSkill(name: string): Promise<LibrarySkill> {
     await authFetch(`/api/skills/${encodeURIComponent(name)}`),
   );
   if (!data.ok || data.kind !== 'skill') throw new Error("Couldn't load this skill.");
-  return data.skill;
+  // The warnings ride beside the skill on the wire (as `get_skill` returns
+  // them); the page reads one object, so they are folded onto it here.
+  return Array.isArray(data.warnings) ? { ...data.skill, warnings: data.warnings } : data.skill;
 }
 
 /**

@@ -79,6 +79,24 @@ export const CLIENT_TOOL_NAMES: ReadonlySet<string> = new Set([
   'replace',
 ]);
 
+/**
+ * Whether an entry has one of the shapes the platform checks — decided from
+ * the entry alone, before any catalog is read. A list of nothing but client
+ * tools (`Bash Read Edit`) therefore costs no catalog reads, which matters
+ * because `get_skill` runs on every skill use, and the catalog behind a check
+ * is a skill listing, a manual listing and one detail read per inline manual.
+ */
+export function looksLikePlatformTool(raw: string): boolean {
+  const entry = raw.trim();
+  if (!entry || /[()*\s]/.test(entry)) return false; // permission-rule syntax or a wildcard
+  const lower = entry.toLowerCase();
+  if (lower.startsWith('mcp__')) return lower.startsWith(MCP_PREFIX); // else another MCP server's tool
+  const dot = entry.indexOf('.');
+  if (dot > 0) return /^\w+$/.test(lower.slice(0, dot)); // else not a manual name — a file, a URL, …
+  // Bare names: a capital first letter is a client tool's shape.
+  return /^[a-z][\w-]*$/.test(entry) && !CLIENT_TOOL_NAMES.has(entry);
+}
+
 /** Classify and resolve every entry; only unresolved platform-looking ones come back. */
 export function checkAllowedTools(entries: readonly string[], visible: VisibleTools): AllowedToolWarning[] {
   const core = new Set(visible.core.map((n) => n.toLowerCase()));
@@ -103,36 +121,46 @@ function checkEntry(
   manuals: Map<string, string[] | null>,
   visible: VisibleTools,
 ): AllowedToolWarning | null {
-  if (/[()*\s]/.test(entry)) return null; // permission-rule syntax or a wildcard
+  if (!looksLikePlatformTool(entry)) return null;
   const lower = entry.toLowerCase();
 
-  if (lower.startsWith('mcp__')) {
-    if (!lower.startsWith(MCP_PREFIX)) return null; // another MCP server's tool
+  if (lower.startsWith(MCP_PREFIX)) {
     const name = lower.slice(MCP_PREFIX.length);
     if (core.has(name) || resolvesUnderscored(name, manuals)) return null;
-    return warn(entry, `mcp__hexis__${name}`, [
-      ...visible.core.map((c) => MCP_PREFIX + c),
-      ...underscoredCandidates(visible).map((c) => MCP_PREFIX + c),
-    ]);
+    return warn(
+      entry,
+      lower,
+      [...visible.core.map((c) => MCP_PREFIX + c), ...underscoredCandidates(visible).map((c) => MCP_PREFIX + c)],
+      MCP_PREFIX.length,
+    );
   }
 
   const dot = entry.indexOf('.');
   if (dot > 0) {
     const manual = lower.slice(0, dot);
     const tool = lower.slice(dot + 1);
-    if (!/^\w+$/.test(manual)) return null; // not a manual name — a file, a URL, …
     // The core toolset's own namespace, as `call_tool_chain` spells it.
-    if (manual === EXTERNAL_KB_MANUAL_NAME.toLowerCase() && core.has(tool)) return null;
+    if (manual === EXTERNAL_KB_MANUAL_NAME.toLowerCase()) {
+      if (core.has(tool)) return null;
+      return warn(entry, lower, visible.core.map((c) => `${EXTERNAL_KB_MANUAL_NAME}.${c}`), dot + 1);
+    }
     const tools = manuals.get(manual);
     if (tools === null) return null;
-    if (tools !== undefined && tools.includes(tool)) return null;
-    return warn(entry, lower, [
-      ...visible.manuals.flatMap((m) => (m.tools ? m.tools.map((t) => `${m.name}.${t}`) : [`${m.name}.${entry.slice(dot + 1)}`])),
-    ]);
+    if (tools === undefined) {
+      // The manual itself is unknown, so the typo may be anywhere in the name.
+      return warn(
+        entry,
+        lower,
+        visible.manuals.flatMap((m) => (m.tools ? m.tools.map((t) => `${m.name}.${t}`) : [`${m.name}.${entry.slice(dot + 1)}`])),
+      );
+    }
+    if (tools.includes(tool)) return null;
+    // The manual is known: only its own tools are candidates, and only the
+    // tool part is scored.
+    const known = visible.manuals.find((m) => m.name.toLowerCase() === manual);
+    return warn(entry, lower, (known?.tools ?? []).map((t) => `${known!.name}.${t}`), dot + 1);
   }
 
-  // Bare names: a capital first letter is a client tool's shape.
-  if (!/^[a-z][\w-]*$/.test(entry) || CLIENT_TOOL_NAMES.has(entry)) return null;
   if (core.has(lower) || manuals.has(lower) || resolvesUnderscored(lower, manuals)) return null;
   return warn(entry, lower, [...visible.core, ...visible.manuals.map((m) => m.name), ...underscoredCandidates(visible)]);
 }
@@ -152,8 +180,17 @@ function underscoredCandidates(visible: VisibleTools): string[] {
   return visible.manuals.flatMap((m) => (m.tools ?? []).map((t) => `${m.name}_${t}`));
 }
 
-function warn(entry: string, normalized: string, candidates: string[]): AllowedToolWarning {
-  const suggestion = closest(normalized, candidates);
+/**
+ * @param shared How many leading characters the entry and every candidate
+ *   share (`mcp__hexis__`, `<manual>.`). They are left out of the typo
+ *   scoring: the budget is a third of the scored name, and a prefix pads it
+ *   with characters that can never be misspelt — scored whole,
+ *   `mcp__hexis__weather_forecast` was "corrected" to `mcp__hexis__write_files`.
+ *   The suggestion keeps the entry's own prefix in front of the candidate's tail.
+ */
+function warn(entry: string, normalized: string, candidates: string[], shared = 0): AllowedToolWarning {
+  const tail = closest(normalized.slice(shared), candidates.map((c) => c.slice(shared)));
+  const suggestion = tail === undefined ? undefined : entry.slice(0, shared) + tail;
   return {
     entry,
     message: suggestion
@@ -229,7 +266,8 @@ export class AllowedToolsChecker implements IAllowedToolsChecker {
   ) {}
 
   async check(userEmail: string, allowedTools: readonly string[] | undefined): Promise<AllowedToolWarning[]> {
-    if (!allowedTools || allowedTools.length === 0) return [];
+    // Nothing the platform could have an opinion on → nothing to read.
+    if (!allowedTools?.some(looksLikePlatformTool)) return [];
     try {
       return checkAllowedTools(allowedTools, await this.visibleTools(userEmail));
     } catch (err) {

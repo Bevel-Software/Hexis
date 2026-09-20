@@ -59,6 +59,20 @@ describe('checkAllowedTools', () => {
     expect(checkAllowedTools(['gmial.send_message'], visible)[0]?.suggestion).toBe('gmail.send_message');
   });
 
+  test('a shared prefix does not pad the typo budget', () => {
+    // Scored whole, `mcp__hexis__weather_forecast` is within a third of its
+    // length of `mcp__hexis__write_files` — the twelve prefix characters can
+    // never be misspelt, yet they bought nine edits of slack.
+    const withWriteFiles: VisibleTools = { ...visible, core: [...visible.core, 'write_files'] };
+    const [retired] = checkAllowedTools(['mcp__hexis__weather_forecast'], withWriteFiles);
+    expect(retired?.entry).toBe('mcp__hexis__weather_forecast');
+    expect(retired?.suggestion).toBeUndefined();
+    // A real typo behind the prefix is still found, in the entry's own namespace spelling.
+    expect(checkAllowedTools(['KNOWLEDGE_BASE.read_fil'], visible)[0]?.suggestion).toBe('KNOWLEDGE_BASE.read_file');
+    // Under a known manual only that manual's tools are candidates.
+    expect(checkAllowedTools(['hubspot.create_contct'], visible)[0]?.suggestion).toBe('hubspot.create_contact');
+  });
+
   test('an unknown name with nothing close carries no suggestion', () => {
     const [w] = checkAllowedTools(['mcp__hexis__totally_unrelated_thing'], visible);
     expect(w?.entry).toBe('mcp__hexis__totally_unrelated_thing');
@@ -173,5 +187,19 @@ describe('AllowedToolsChecker', () => {
     // The per-manual detail decides which tools exist, so it is the caller's
     // view of that manual that must be read, not an ambient one.
     expect(getDetail).toHaveBeenCalledWith('alice@example.com', 'hubspot');
+  });
+
+  test('a list of nothing but client tools reads no catalog at all', async () => {
+    // `get_skill` runs on every skill use; a skill that names only the
+    // client's tools must not cost a skill listing and a manual listing each time.
+    const listExternal = vi.fn(registry.listExternal);
+    const listAccessible = vi.fn(manuals.listAccessible);
+    const getDetail = vi.fn(manuals.getDetail);
+    const spying = new AllowedToolsChecker({ listExternal }, { listAccessible, getDetail }, 'knowledge-base');
+
+    expect(await spying.check('a@x.com', ['Bash', 'Read', 'Bash(git:*)', 'mcp__github__create_issue', 'shell'])).toEqual([]);
+    expect(listExternal).not.toHaveBeenCalled();
+    expect(listAccessible).not.toHaveBeenCalled();
+    expect(getDetail).not.toHaveBeenCalled();
   });
 });
