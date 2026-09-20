@@ -64,6 +64,15 @@ describe('DeploymentPage', () => {
     apiMock.fetchSetupStatus.mockResolvedValue(COMPLETE_STATUS);
   });
 
+  it('shows whether the single sign-on configuration is verified', async () => {
+    apiMock.fetchSetupStatus.mockResolvedValue({ ...COMPLETE_STATUS, oidcVerification: 'unverified' });
+    renderPage(admin(true));
+    expect(await screen.findByTestId('oidc-verification')).toHaveTextContent(
+      'Unverified — sign in once to confirm',
+    );
+    expect(screen.getByRole('button', { name: 'Test sign-in configuration' })).toBeInTheDocument();
+  });
+
   it('shows the setup form to an admin — AFTER setup is complete', async () => {
     renderPage(admin(true));
     // The single-sign-on fields are reachable again: the whole point of the page.

@@ -22,10 +22,14 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 // relies on) — not a workflow service, so this stays inside the module boundary.
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import { assertInsideRepo, normalizePathArgs } from '../kb-fs/repo-path.js';
+import { GitGuardedFilesystem } from '../kb-fs/git-guarded-filesystem.js';
+import { assertNoGitInternalsSegment, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence } from '../../shared/fs.contract.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../access/access-control.interface.js';
+import { accessRoster, resolveAccessView } from '../access/access-view.js';
+import { accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from '../access/access-mutation.service.js';
 import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
@@ -35,6 +39,8 @@ import { createFileReaderRegistry } from './file-readers/file-reader.registry.js
 import { DocumentReader } from './file-readers/document-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
 import {
+  folderPlaceholderPath,
+  isFolderPlaceholder,
   isPlatformFile,
   isPlatformFolder,
   isProtectedBranch,
@@ -44,6 +50,10 @@ import {
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import { PROPOSAL_ROUTE_NOTE, rethrowAsWriteDenial } from './write-denial.js';
+import { logger } from '../../shared/logging.js';
+import { printable } from '../../shared/printable.js';
+
+const log = logger('workspace-tools');
 
 /** The caller's verdict per access verb on one path. */
 interface AccessVerbs {
@@ -120,6 +130,59 @@ async function filterReadableEntries(
     const wsPath = dir ? `${dir}/${e.name}` : e.name;
     return verdict.get(wsPath) === true;
   });
+}
+
+/**
+ * Drop the empty-folder placeholder from a directory listing: it keeps a
+ * folder alive in git and is never content (see `placeholder.ts`).
+ */
+function withoutPlaceholder(entries: DirEntry[]): DirEntry[] {
+  return entries.filter((e) => e.type === 'directory' || !isFolderPlaceholder(e.name));
+}
+
+/**
+ * Keep the folder a removal just emptied. A folder exists until it is deleted
+ * explicitly, so when deleting or moving out its last entry leaves it empty it
+ * gets the placeholder, written through the same filesystem (the agent's
+ * lock-aware one commits it) within the same tool call. Only folders inside
+ * the repository qualify, never the clone folder itself.
+ *
+ * It runs in the folder's turn, which the explicit folder delete also takes,
+ * and looks inside it: a folder that is gone by then was deleted explicitly
+ * and stays gone. A failure fails the call — the removal landed, but the
+ * folder would vanish on the next clone, and the agent must hear that.
+ */
+async function keepFolderOf(
+  fs: LocalFilesystem,
+  ctx: ToolContext,
+  branch: string,
+  removedPath: string,
+  kbDirName: string,
+): Promise<void> {
+  const trimmed = removedPath.replace(/^\/+/, '').replace(/\/+$/, '');
+  const dir = trimmed.includes('/') ? trimmed.slice(0, trimmed.lastIndexOf('/')) : '';
+  if (!dir.startsWith(`${kbDirName}/`)) return;
+  try {
+    await ctx.workspaceService.withFolderTurn(workspaceIdForBranch(branch), dir, async () => {
+      let entries: unknown[];
+      try {
+        entries = await fs.readdir(dir);
+      } catch (err) {
+        if (isAbsence(err)) return;
+        throw err;
+      }
+      if (entries.length > 0) return;
+      await fs.writeFile(folderPlaceholderPath(dir), '');
+    });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    log.error(`could not keep the folder ${printable(dir)} after removing ${printable(removedPath)}: ${printable(reason)}`);
+    const message = `"${removedPath}" was removed, but its folder "${dir}" could not be kept: ${reason}`;
+    // The original error keeps its status (a lock held elsewhere stays a 409).
+    if (!(err instanceof Error)) throw new ToolError(message, 500);
+    err.message = message;
+    throw err;
+  }
 }
 
 /**
@@ -285,6 +348,84 @@ async function assertNotBinaryOverwrite(
   return existing;
 }
 
+/** What a write is ALLOWED to do at a path. `create` is the default everywhere. */
+export type WriteMode = 'create' | 'overwrite' | 'update';
+
+/** What a write actually DID at a path, in the answer the caller reads. */
+export type WriteOutcome = 'created' | 'replaced' | 'updated';
+
+/**
+ * The `mode` input, on both write tools. Stated on the input itself and not
+ * only in the description, because the argument is where an agent decides:
+ * the default refuses to replace anything, so "write this here" can no longer
+ * destroy a page the agent never read.
+ */
+const WRITE_MODE_INPUT: JsonSchema = {
+  type: 'string',
+  enum: ['create', 'overwrite', 'update'],
+  description:
+    'What the write may do at the path, default `create`: `create` writes a NEW file and refuses (`exists`) a path that already ' +
+    'holds something; `overwrite` replaces what is there, and creates the file when there is nothing; `update` replaces an ' +
+    'EXISTING file and refuses (`missing`) a path that holds nothing.',
+};
+
+/** The same three modes, said once, for both tool descriptions. */
+const WRITE_MODE_NOTE =
+  ' `mode` decides what may happen at a path and DEFAULTS TO `create`: `create` writes a new file and refuses a path that ' +
+  'already exists (`exists`, with the path — pass `mode: overwrite` to replace it), `overwrite` replaces what is there ' +
+  '(creating it if there is nothing), `update` replaces an existing file and refuses a path that does not exist (`missing`). ' +
+  'A refused path is left exactly as it was.';
+
+/** The refusal `create` gives on a path that already holds something. */
+function pathExists(path: string): ToolError {
+  return new ToolError(
+    `"${displayPath(path)}" already exists — pass mode: overwrite to replace it, or write to a different path.`,
+    409,
+    { code: 'exists', path },
+  );
+}
+
+/** The refusal `update` gives on a path that holds nothing. */
+function pathMissing(path: string): ToolError {
+  return new ToolError(
+    `"${displayPath(path)}" does not exist — pass mode: create to create it.`,
+    404,
+    { code: 'missing', path },
+  );
+}
+
+/**
+ * The mode gate for ONE path: refuses the write the mode does not allow, or
+ * names what it is about to do. `create` on something that exists and `update`
+ * on something that does not are the two refusals; everything else writes, and
+ * the outcome distinguishes a file that was there from one that was not.
+ */
+function decideWrite(mode: WriteMode, path: string, exists: boolean): WriteOutcome {
+  if (mode === 'create' && exists) throw pathExists(path);
+  if (mode === 'update' && !exists) throw pathMissing(path);
+  if (mode === 'update') return 'updated';
+  return exists ? 'replaced' : 'created';
+}
+
+/** The three modes, as a set the handler can check a raw argument against. */
+const WRITE_MODES: readonly WriteMode[] = ['create', 'overwrite', 'update'];
+
+/**
+ * The call's mode — `create` when it says nothing, which is the whole point of
+ * the default. A mode that is not one of the three is REFUSED rather than
+ * treated as the nearest thing: a tool that quietly read `replace` as
+ * "overwrite" would put the silent overwrite back, by a different door.
+ */
+function modeOf(a: Record<string, unknown>): WriteMode {
+  if (a.mode === undefined || a.mode === null) return 'create';
+  if (typeof a.mode === 'string' && (WRITE_MODES as readonly string[]).includes(a.mode)) return a.mode as WriteMode;
+  throw new ToolError(
+    `"${String(a.mode)}" is not a write mode: use ${WRITE_MODES.map((m) => `\`${m}\``).join(', ')} (default \`create\`).`,
+    400,
+    { code: 'bad_mode' },
+  );
+}
+
 /**
  * What searching ONE file amounted to. The walk ignores this (a file with
  * nothing searchable is just a file with no matches), but a grep whose path
@@ -405,7 +546,8 @@ async function grepWalk(
   entries = await filterReadableEntries(gate, dir, entries);
   for (const e of entries) {
     if (out.length >= max) return;
-    if (e.name === '.git' || e.name === 'node_modules') continue;
+    if (hasGitInternalsSegment(e.name) || e.name === 'node_modules') continue;
+    if (e.type !== 'directory' && isFolderPlaceholder(e.name)) continue;
     const p = dir ? `${dir}/${e.name}` : e.name;
     if (e.type === 'directory') {
       await grepWalk(fs, p, re, out, max, depth + 1, gate, recordOntologyRead, docs);
@@ -462,6 +604,89 @@ export function registerWorkspaceTools(
     workspaceId: workspaceIdForBranch(branch),
     userEmail: ctx.user.email,
   });
+
+  /** A repo-relative path in the workspace-relative form every tool speaks. */
+  const toWs = (rel: string): string => (rel ? `${kbDirName}/${rel}` : kbDirName);
+  const sourceToWs = (s: AccessDecisionSource | null) => (s ? { ...s, path: toWs(s.path) } : null);
+
+  /**
+   * What `file_stat` adds to its `access` verdicts when asked to explain them:
+   * `why` each verdict holds, from the resolver the gates use, and — only for
+   * someone who may write the path's access rules, the same gate the Manage
+   * access dialog's grant route applies — the roster that dialog lists. A file
+   * that cannot carry rules of its own is governed by its folder's
+   * `access.md`, so that is the file the gate asks about.
+   */
+  const explainAccessAt = async (branch: string, ctx: ToolContext, p: string, kind: AccessTargetKind) => {
+    const norm = p.replace(/^\/+/, '').replace(/\/+$/, '');
+    const rel = norm === kbDirName ? '' : toKbRelative(norm, kbDirName);
+    if (rel === null) {
+      return { why: null, roster: null, rosterReason: `"${p}" is outside the \`${kbDirName}/\` repository, so no access rules apply to it.` };
+    }
+    if (!accessControl.explainAccess) throw new ToolError('Access explanation is not available on this server.', 501);
+    const workspaceId = workspaceIdForBranch(branch);
+    const email = ctx.user.email;
+    const explained = await accessControl.explainAccess(workspaceId, email, kind, rel);
+    const why = Object.fromEntries(
+      Object.entries(explained).map(([verb, { source, via, principal }]) => [verb, { source: sourceToWs(source), via, principal }]),
+    );
+    const rulesPath =
+      kind === 'folder'
+        ? accessMdPathForFolder(rel)
+        : fileCarriesAccessRules(rel)
+          ? rel
+          : accessMdPathForFolder(governingFolderOf(rel));
+    if (!(await accessControl.canWrite(workspaceId, email, rulesPath))) {
+      return {
+        why,
+        roster: null,
+        rosterReason: `You cannot change who has access here (no write on ${toWs(rulesPath)}), so only your own access is shown.`,
+      };
+    }
+    const roster = accessRoster(await resolveAccessView(accessControl, workspaceId, rel, email, kind), kind, rel);
+    const rosterWs = Object.fromEntries(
+      Object.entries(roster).map(([verb, entries]) => [
+        verb,
+        entries.map((e) => ({ ...e, sources: e.sources.map((s) => ({ ...s, path: toWs(s.path) })) })),
+      ]),
+    );
+    return { why, roster: rosterWs };
+  };
+
+  /**
+   * Refuse a file tool call that names the repository's git folder, in any
+   * input, before any gate, lock or read runs (see `shared/git-internals.ts`).
+   * Every spelling first, then the resolved form against the branch's
+   * workspace, so a link into the folder is refused the same way. The resolved
+   * check only runs on a branch that is already cloned: bootstrapping a clone
+   * here would happen before the handler's access and ontology gates. A branch
+   * not cloned yet (or that does not resolve) is left to the handler; the
+   * filesystem refuses again underneath regardless.
+   */
+  const assertToolPathsNotGitInternals = async (args: Record<string, unknown>, ctx: ToolContext): Promise<void> => {
+    const paths: string[] = [];
+    for (const key of ['path', 'src', 'dest', 'destination'] as const) {
+      if (typeof args[key] === 'string') paths.push(args[key]);
+    }
+    if (Array.isArray(args.files)) {
+      for (const f of args.files as unknown[]) {
+        const fp = f && typeof f === 'object' ? (f as Record<string, unknown>).path : undefined;
+        if (typeof fp === 'string') paths.push(fp);
+      }
+    }
+    for (const p of paths) assertNoGitInternalsSegment(p);
+    const onDisk = paths.filter((p) => !spillStore.isSpillRef(p));
+    if (onDisk.length === 0 || typeof args.branch !== 'string' || args.branch === '') return;
+    let fs: LocalFilesystem;
+    try {
+      if (!(await ctx.workspaceService.hasBootstrappedWorkspace(workspaceIdForBranch(args.branch)))) return;
+      fs = await ctx.getFilesystem(args.branch);
+    } catch {
+      return;
+    }
+    if (!(fs instanceof GitGuardedFilesystem)) return;
+    for (const p of onDisk) await fs.assertNotGitInternals(p);
+  };
 
   // ── preflight for moves and deletes ─────────────────────────────────────
   // What an agent is told before (and instead of) a destructive operation:
@@ -673,7 +898,7 @@ export function registerWorkspaceTools(
    * walk cannot wander into a folder elsewhere, and is ALSO named in `links`:
    * the per-file delete cannot remove a link (it stats through it, so a dangling
    * link or a link to a folder fails), so a folder holding one is refused before
-   * anything is deleted. `.git` metadata is skipped.
+   * anything is deleted. The git folder is skipped, in any spelling of its name.
    */
   const filesUnder = async (
     fs: LocalFilesystem,
@@ -694,7 +919,7 @@ export function registerWorkspaceTools(
       for (const e of (await fs.readdir(d)) as DirEntry[]) {
         if (truncated) return;
         const child = `${d.replace(/\/+$/, '')}/${e.name}`;
-        if (e.name === '.git') continue;
+        if (hasGitInternalsSegment(e.name)) continue;
         if (e.type === 'directory' && !e.isSymlink) {
           await walk(child);
         } else {
@@ -776,21 +1001,25 @@ export function registerWorkspaceTools(
       // A leading slash is the root-anchored form Copy path gives and names
       // the same workspace path — normalised once here, for every path input.
       toolHandler(
-        spec.proposable
-          ? async (args, ctx) => {
-              try {
-                // Awaited here so a refusal is caught; proposable tools never stream.
-                return await spec.handler(normalizePathArgs(args), ctx);
-              } catch (err) {
-                return rethrowAsWriteDenial(
-                  err,
-                  { tool: spec.name, branch: args.branch, userEmail: ctx.user.email, userId: ctx.user.id },
-                  accessControl,
-                  kbDirName,
-                );
-              }
-            }
-          : (args, ctx) => spec.handler(normalizePathArgs(args), ctx),
+        async (args, ctx) => {
+          const normalized = normalizePathArgs(args);
+          // The git folder is refused before the handler — and so before the
+          // write-denial wrapper below, which would otherwise offer to propose
+          // a change to it.
+          if (spec.fileTool !== false) await assertToolPathsNotGitInternals(normalized, ctx);
+          if (!spec.proposable) return spec.handler(normalized, ctx);
+          try {
+            // Awaited here so a refusal is caught; proposable tools never stream.
+            return await spec.handler(normalized, ctx);
+          } catch (err) {
+            return rethrowAsWriteDenial(
+              err,
+              { tool: spec.name, branch: args.branch, userEmail: ctx.user.email, userId: ctx.user.id },
+              accessControl,
+              kbDirName,
+            );
+          }
+        },
         { write: spec.write },
       ),
     );
@@ -813,10 +1042,19 @@ export function registerWorkspaceTools(
   // ontology and then having `ask` write into another. In a core-only
   // deployment (no chat/ask) the default sink mints a bare id, which is all
   // the ontology gate needs.
+  //
+  // The description tells the caller that retrying is safe, and that is a
+  // property of the sink rather than a promise this route makes on its own:
+  // minting leaves nothing half-made. A call that failed created no session
+  // (the core sink is a random id and does no I/O at all; a chat thread the
+  // enterprise sink failed to create does not exist), and two calls that both
+  // succeed leave two unrelated ids, neither of which invalidates the other.
+  // Saying so matters because the alternative is a caller that reads a
+  // transport hiccup on its first call as an unrecoverable start.
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint the KnowledgeBase session id this run needs to read or write the knowledge ontologies. Call this ONCE, before any other KnowledgeBase tool, and only once per run — every gated tool needs the `sessionId` it returns to enforce the one-ontology-per-conversation boundary, and minting a new id mid-run resets that boundary. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: reads and ask then share one ontology boundary. Pass the returned id explicitly as `sessionId` on every subsequent KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). Returns `{ sessionId }`.',
+      'Mint the KnowledgeBase session id this run needs to read or write the knowledge ontologies. Call this ONCE, before any other KnowledgeBase tool, and only once per run — every gated tool needs the `sessionId` it returns to enforce the one-ontology-per-conversation boundary, and minting a new id mid-run resets that boundary. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: reads and ask then share one ontology boundary. Pass the returned id explicitly as `sessionId` on every subsequent KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it — there is no half-made session to clean up. If a retry lands after a success you simply hold two independent ids, which is harmless: keep passing the one id you have already used for the rest of the run and ignore the other. Returns `{ sessionId }`.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
@@ -947,7 +1185,7 @@ export function registerWorkspaceTools(
       const dir = (a.path as string) || '';
       await recordOntologyRead(sessionOntologyGate, ctx, dir);
       const fs = await ctx.getFilesystem(a.branch as string);
-      const entries = (await fs.readdir(dir || '.')) as DirEntry[];
+      const entries = withoutPlaceholder((await fs.readdir(dir || '.')) as DirEntry[]);
       const filtered = await filterReadableEntries(readGateFor(a.branch as string, ctx), dir, entries);
       return { path: a.path ?? '', entries: filtered };
     },
@@ -959,7 +1197,7 @@ export function registerWorkspaceTools(
       'Get a file/directory\'s metadata (name, type, size, …) without returning content. A file also reports `contentMode`: `text` (read, write and edit it as text), `document` (read returns an extraction; replace it by upload) or `binary` (bytes: copy, move, delete, or replace by upload), plus `kind` (`text` | `document` | `image` | `binary`), `mime`, `mimeSource` and `textEditable` — decided by the same file readers read_file, grep and the write tools use, so an extensionless text file is `text/plain`.' +
       ' Every entry also reports what you may DO with it. ' +
       '`managed` is true for a platform item — a platform file (`access.md`, `roles.yaml`, `.bevelignore`, `AGENTS.md`) or a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`); managed items are never movable or deletable through these tools. ' +
-      '`access: { read, write, download, owner }` is your own verdict under the access rules. `movable` and `deletable` say whether `move_file` / `delete_file` / `delete_folder` would be allowed for you, judged like their dry runs: not managed, no symbolic link, and on a protected branch you hold write on the item AND on every file under a folder (on a draft branch writes are not gated). `movable` judges the source side only; the destination is judged by a `move_file` dry run. ' +
+      '`access: { read, write, download, owner }` is your own verdict under the access rules; pass `explainAccess: true` to learn why, and who else holds each verb. `movable` and `deletable` say whether `move_file` / `delete_file` / `delete_folder` would be allowed for you, judged like their dry runs: not managed, no symbolic link, and on a protected branch you hold write on the item AND on every file under a folder (on a draft branch writes are not gated). `movable` judges the source side only; the destination is judged by a `move_file` dry run. ' +
       'For a folder, `descendants` is the number of files under it at any depth; counting stops at 10000 and `descendantsTruncated` says so, and past that point `movable` and `deletable` are false because a folder that large was not judged in full — run the `move_file` or `delete_folder` dry run for the real verdict. ' +
       'Call this before a move or delete to see what it would touch.' +
       ONTOLOGY_BOUNDARY_NOTE,
@@ -968,6 +1206,11 @@ export function registerWorkspaceTools(
       properties: {
         branch: BRANCH_INPUT,
         path: wsPath(kbDirName, 'Path'),
+        explainAccess: {
+          type: 'boolean',
+          description:
+            'Also explain `access` (default false): `access.why` says what decided each of your verdicts — the folder rules or file frontmatter and whether that is inherited; `access.roster` lists who holds each verb and where each grant is written, given only when you can manage this path\'s access (otherwise null, with `access.rosterReason`).',
+        },
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'path'],
@@ -991,6 +1234,17 @@ export function registerWorkspaceTools(
             write: { type: 'boolean', description: 'You may write it.' },
             download: { type: 'boolean', description: 'You may download it.' },
             owner: { type: 'boolean', description: 'You own it.' },
+            why: {
+              type: ['object', 'null'],
+              description:
+                'Only with `explainAccess: true`. `why.<verb>` is `{ source, via, principal }`: `source` is `{ kind: folder | frontmatter, path, inherited }` (null when no rule decided it — default-deny, admin rescue, a machine-owned file, or Admin\'s write at a root with no rules); `via` is `person`, `group`, `role`, `plugin`, `everyone`, `admin-rescue`, `admin-floor` (Admin always keeps write at the repository root), `machine-owned` or `default-deny`. Null for a path outside the repository.',
+            },
+            roster: {
+              type: ['object', 'null'],
+              description:
+                'Only with `explainAccess: true`. `roster.<verb>` lists `{ kind: group | role | plugin | person, name, email?, sources }` as the Manage access dialog does; null with `rosterReason` when you cannot manage this path\'s access. Paths start with the repository folder.',
+            },
+            rosterReason: str('Present when `roster` is null: why only your own access is shown.'),
           },
           required: ['read', 'write', 'download', 'owner'],
         },
@@ -1024,6 +1278,10 @@ export function registerWorkspaceTools(
       const branch = a.branch as string;
       await recordOntologyRead(sessionOntologyGate, ctx, p);
       await assertCanRead(readGateFor(branch, ctx), p);
+      // Nothing there is a 404, and the placeholder — never content — gets
+      // exactly that answer.
+      const nothingThere = () => new ToolError(`There is no file or directory at "${displayPath(p)}".`, 404);
+      if (isFolderPlaceholder(p)) throw nothingThere();
       const fs = await ctx.getFilesystem(branch);
       const root = await workspaceRoot(branch, ctx);
       // Judged before `stat`, which follows links: a link anywhere on the path
@@ -1039,6 +1297,7 @@ export function registerWorkspaceTools(
         if (viaLink !== undefined) {
           throw new ToolError(`"${p}" goes through the symbolic link "${viaLink}", which leads nowhere; the agent tools never follow links.`, 400);
         }
+        if (isAbsence(err)) throw nothingThere();
         throw err;
       }
       // The filesystem's own `mimeType` comes from a second extension table
@@ -1047,7 +1306,9 @@ export function registerWorkspaceTools(
       delete stat.mimeType;
       const kind = stat.type === 'directory' ? 'folder' : 'file';
       const managed = managedReason(await onDiskSpelling(root, p), kind) !== undefined;
-      const access = await accessAt(branch, ctx, p);
+      const verdicts = await accessAt(branch, ctx, p);
+      const access =
+        a.explainAccess === true ? { ...verdicts, ...(await explainAccessAt(branch, ctx, p, kind)) } : verdicts;
       const link = !plain || viaLink !== undefined;
       // Judged on the same paths move_file and delete_folder judge: a folder
       // move or delete touches every file under it, so a file its own rules
@@ -1092,7 +1353,8 @@ export function registerWorkspaceTools(
         access,
       };
       if (kind === 'folder') {
-        out.descendants = files.length;
+        // The placeholder is never content: a folder holding only it has none.
+        out.descendants = files.filter((f) => !isFolderPlaceholder(f)).length;
         if (truncated) out.descendantsTruncated = true;
         return out;
       }
@@ -1168,7 +1430,14 @@ export function registerWorkspaceTools(
       const docs: DocGrepState = { readers, uncachedBudget: UNCACHED_DOCS_PER_GREP, skippedUncached: 0 };
       // The empty root is the workspace itself — always a directory, and never
       // worth a stat.
-      const kind = searchRoot === '' ? 'directory' : await searchRootKind(fs, searchRoot);
+      // A placeholder named on its own is searched as what it is to every
+      // other tool: nothing.
+      const kind =
+        searchRoot === ''
+          ? 'directory'
+          : isFolderPlaceholder(searchRoot)
+            ? 'missing'
+            : await searchRootKind(fs, searchRoot);
       /** Why a single-file search found nothing, when "no matches" would be a lie. */
       let fileNote: string | undefined;
       if (kind === 'directory') {
@@ -1228,7 +1497,9 @@ export function registerWorkspaceTools(
   mount({
     name: 'write_file',
     description:
-      'Write (create or overwrite) a workspace TEXT file. The change is committed + pushed as you. Returns `{ path, bytes }`.' +
+      'Write a workspace TEXT file. The change is committed + pushed as you. Returns `{ path, bytes, outcome }`, where `outcome` is ' +
+      '`created`, `replaced` or `updated`.' +
+      WRITE_MODE_NOTE +
       IMAGE_CONVENTION_NOTE +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
@@ -1237,6 +1508,7 @@ export function registerWorkspaceTools(
         branch: BRANCH_INPUT,
         path: wsPath(kbDirName, 'Path'),
         content: str('Full file content.'),
+        mode: WRITE_MODE_INPUT,
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'path', 'content'],
@@ -1244,8 +1516,16 @@ export function registerWorkspaceTools(
     },
     outputs: {
       type: 'object',
-      properties: { path: str('The path written (echoes the input).'), bytes: int('Number of bytes written.') },
-      required: ['path', 'bytes'],
+      properties: {
+        path: str('The path written (echoes the input).'),
+        bytes: int('Number of bytes written.'),
+        outcome: {
+          type: 'string',
+          enum: ['created', 'replaced', 'updated'],
+          description: 'What the write did: `created` (nothing was there), `replaced` (`mode: overwrite` over an existing file), `updated` (`mode: update`).',
+        },
+      },
+      required: ['path', 'bytes', 'outcome'],
     },
     write: true,
     proposable: true,
@@ -1257,10 +1537,41 @@ export function registerWorkspaceTools(
       // through (see `assertPathWritable`), so it does not limit other agents.
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.path as string);
+      const mode = modeOf(a);
       const fs = await ctx.getFilesystem(a.branch as string);
       await assertNotBinaryOverwrite(readers,a.path as string, fs);
-      await fs.writeFile(a.path as string, a.content as string);
-      return { path: a.path, bytes: Buffer.byteLength(a.content as string, 'utf8') };
+      // The mode is judged AFTER the content gates, so a file the tools may
+      // not write as text is still answered with the capability refusal that
+      // names the tool to use instead — not with "it already exists".
+      const decide = async (): Promise<WriteOutcome> =>
+        decideWrite(mode, a.path as string, (await kindOf(fs, a.path as string)) !== null);
+      // Judged twice, on purpose. This first verdict is the cheap one, taken
+      // before any lock so an ordinary refusal never contends for one — but it
+      // is a verdict about a path anyone may still change. The one the answer
+      // carries is taken again inside `writeFile`, with the path's lock HELD
+      // (`write: true` guarantees the locking filesystem, as the batch cast
+      // below does): only there can `create` be sure it is not about to
+      // replace a file a human editor saved a moment ago, and `update` sure it
+      // is not recreating one somebody just deleted. A filesystem without the
+      // hook runs no second verdict, so the preflight one stands.
+      const preflight = await decide();
+      let locked: WriteOutcome | null = null;
+      const locking = fs as unknown as {
+        writeFile(
+          path: string,
+          content: string,
+          options: undefined,
+          check: () => Promise<void>,
+        ): Promise<void>;
+      };
+      await locking.writeFile(a.path as string, a.content as string, undefined, async () => {
+        locked = await decide();
+      });
+      return {
+        path: a.path,
+        bytes: Buffer.byteLength(a.content as string, 'utf8'),
+        outcome: (locked ?? preflight) as WriteOutcome,
+      };
     },
   });
 
@@ -1268,10 +1579,14 @@ export function registerWorkspaceTools(
     name: 'write_files',
     description:
       'Batch-write many files in ONE commit — far faster than calling write_file once per file when ' +
-      'creating many files at once (e.g. seeding a knowledge base). Each entry is `{ path, content }`; all ' +
-      'are created/overwritten and committed + pushed together as you. Prefer this over many write_file ' +
-      'calls. All files must be in the SAME ontology (the boundary below applies to the batch). Text files only; one refused ' +
-      'file refuses the whole batch. Returns `{ count }`.' +
+      'creating many files at once (e.g. seeding a knowledge base). Each entry is `{ path, content }`, and the files it ' +
+      'writes are committed + pushed together as you. Prefer this over many write_file ' +
+      'calls. All files must be in the SAME ontology (the boundary below applies to the batch). Text files only. ' +
+      'Returns `{ count, files }`: one entry per REQUESTED path, in the order you gave them, each `{ path, outcome }` — ' +
+      '`created` / `replaced` / `updated` for a path it wrote, or `refused` with `error` (the code) and `message` (why) for a ' +
+      'path it could not. `count` is how many were written. A path it refuses — the mode said no, or the file is not text — ' +
+      'does not stop the others; read `files` to see what landed.' +
+      WRITE_MODE_NOTE +
       IMAGE_CONVENTION_NOTE +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
@@ -1280,7 +1595,7 @@ export function registerWorkspaceTools(
         branch: BRANCH_INPUT,
         files: {
           type: 'array',
-          description: 'Files to write; each created or overwritten.',
+          description: 'Files to write; `mode` decides what each one may do at its path.',
           items: {
             type: 'object',
             properties: { path: wsPath(kbDirName, 'Path'), content: str('Full file content.') },
@@ -1288,6 +1603,7 @@ export function registerWorkspaceTools(
             additionalProperties: false,
           },
         },
+        mode: WRITE_MODE_INPUT,
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'files'],
@@ -1295,31 +1611,110 @@ export function registerWorkspaceTools(
     },
     outputs: {
       type: 'object',
-      properties: { count: int('Number of files written.') },
-      required: ['count'],
+      properties: {
+        count: int('Number of files written — the entries in `files` whose `outcome` is not `refused`.'),
+        files: {
+          type: 'array',
+          description: 'One entry per REQUESTED path, in input order.',
+          items: {
+            type: 'object',
+            properties: {
+              path: str('The requested path (echoes the input).'),
+              outcome: {
+                type: 'string',
+                enum: ['created', 'replaced', 'updated', 'refused'],
+                description: 'What happened at this path. `refused` means nothing was written there and the file is untouched.',
+              },
+              error: str('Present when `outcome` is `refused`: the refusal code — `exists`, `missing` or `binary_not_writable`.'),
+              message: str('Present when `outcome` is `refused`: the full refusal, the same one write_file would have given.'),
+            },
+            required: ['path', 'outcome'],
+          },
+        },
+      },
+      required: ['count', 'files'],
     },
     write: true,
     proposable: true,
     handler: async (a, ctx: ToolContext) => {
       const files = (a.files as Array<{ path: string; content: string }>) ?? [];
-      if (files.length === 0) return { count: 0 };
-      // Gate every path first (records ontology touches; a cross-ontology batch
-      // is blocked exactly like the per-file write tools).
-      for (const f of files) assertNotDocumentEdit(readers, f.path);
+      if (files.length === 0) return { count: 0, files: [] };
+      const mode = modeOf(a);
+      // The POLICY gates still judge the whole batch: a restricted run or a
+      // cross-ontology batch is a call that should not have been made at all,
+      // not a per-path outcome, and the ontology gate must see every path
+      // before anything lands. What a single FILE is (not text) or what its
+      // path already holds (the mode) is decided per path, below.
       for (const f of files) writePolicy.assertPathWritable(ctx.sessionId, f.path);
       for (const f of files) await assertOntologyWriteAllowed(sessionOntologyGate, ctx, f.path);
+      const fs = await ctx.getFilesystem(a.branch as string);
       // `write: true` guarantees a LockingFilesystem here; `writeFiles` lands the
-      // whole batch as one commit. Structural cast avoids a workflow-internal import.
-      const fs = (await ctx.getFilesystem(a.branch as string)) as unknown as {
-        writeFiles(writes: { path: string; content: string }[], summary: string): Promise<void>;
-        readFile(p: string): Promise<string | Buffer>;
+      // batch as one commit. Structural cast avoids a workflow-internal import.
+      const batching = fs as unknown as {
+        writeFiles(
+          writes: { path: string; content: string }[],
+          summary: string,
+          deletes: string[],
+          check: (
+            pending: readonly { path: string; content: string }[],
+          ) => Promise<{ path: string; content: string }[]>,
+        ): Promise<void>;
       };
-      for (const f of files) await assertNotBinaryOverwrite(readers,f.path, fs);
-      await fs.writeFiles(
-        files.map((f) => ({ path: f.path, content: f.content })),
-        `Write ${files.length} file(s)`,
-      );
-      return { count: files.length };
+      const writes: { path: string; content: string }[] = [];
+      const outcomes: Record<string, unknown>[] = [];
+      /** The `files` entry for `writes[i]`, so the re-judgement can revise it. */
+      const entryOf: Record<string, unknown>[] = [];
+      /** Record on `entry` that this path was refused, as write_file would say it. */
+      const refuse = (entry: Record<string, unknown>, err: unknown): void => {
+        if (!(err instanceof ToolError)) throw err;
+        const details = (err.details ?? {}) as { code?: string; kind?: string };
+        entry.outcome = 'refused';
+        entry.error = details.code ?? details.kind ?? 'refused';
+        entry.message = err.message;
+      };
+      for (const f of files) {
+        const entry: Record<string, unknown> = { path: f.path };
+        outcomes.push(entry);
+        try {
+          assertNotDocumentEdit(readers, f.path);
+          await assertNotBinaryOverwrite(readers, f.path, fs);
+          // An earlier entry in this same batch counts as existing: two `create`
+          // entries for one path are a mistake the commit would otherwise hide.
+          const exists = writes.some((w) => w.path === f.path) || (await kindOf(fs, f.path)) !== null;
+          entry.outcome = decideWrite(mode, f.path, exists);
+          writes.push({ path: f.path, content: f.content });
+          entryOf.push(entry);
+        } catch (err) {
+          refuse(entry, err);
+        }
+      }
+      // The same mode gate again, run by `writeFiles` once EVERY path's lock is
+      // held — the verdict the answer carries, for the reason write_file states
+      // above. `pending` is this batch's writes in the order they were handed
+      // over, so `pending[i]` is `writes[i]` and `entryOf[i]` is its `files`
+      // entry. A path whose verdict changed under the lock is dropped from the
+      // batch and reported refused, leaving the rest of the batch to land.
+      const recheck = async (
+        pending: readonly { path: string; content: string }[],
+      ): Promise<{ path: string; content: string }[]> => {
+        const kept: { path: string; content: string }[] = [];
+        for (let i = 0; i < pending.length; i++) {
+          const entry = entryOf[i];
+          try {
+            const exists =
+              kept.some((k) => k.path === pending[i].path) || (await kindOf(fs, pending[i].path)) !== null;
+            entry.outcome = decideWrite(mode, pending[i].path, exists);
+            kept.push(pending[i]);
+          } catch (err) {
+            refuse(entry, err);
+          }
+        }
+        return kept;
+      };
+      if (writes.length > 0) {
+        await batching.writeFiles(writes, `Write ${writes.length} file(s)`, [], recheck);
+      }
+      return { count: outcomes.filter((o) => o.outcome !== 'refused').length, files: outcomes };
     },
   });
 
@@ -1374,7 +1769,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'delete_file',
     description:
-      'Delete ONE workspace file (a symbolic link is refused: links are never followed or removed). Committed + pushed as you. Files only: a folder is refused with a pointer to `delete_folder`. ' +
+      'Delete ONE workspace file (a symbolic link is refused: links are never followed or removed). Committed + pushed as you. Its folder stays, even when this was its last file. Files only: a folder is refused with a pointer to `delete_folder`. ' +
       'A platform file (`access.md` or `.bevelignore` in any folder, `roles.yaml` or `AGENTS.md` at the repository root) and git metadata are refused.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
@@ -1418,6 +1813,8 @@ export function registerWorkspaceTools(
       await assertNoSymlinkOnPath(root, path, true);
       if ((await writeBlocked(branch, ctx, [path])).length > 0) throw await writeRefusal(branch, path);
       await fs.deleteFile(path);
+      // Deleting content is not deleting structure: an emptied folder stays.
+      await keepFolderOf(fs, ctx, branch, path, kbDirName);
       return { path, deleted: true };
     },
   });
@@ -1425,7 +1822,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'delete_folder',
     description:
-      'Delete a workspace FOLDER and every file under it, at any depth; the whole folder lands as ONE committed + pushed change as you — all of it or none of it — then the empty folder is removed. ' +
+      'Delete a workspace FOLDER and every file under it, at any depth; the whole folder lands as ONE committed + pushed change as you — all of it or none of it — then the empty folder is removed. This is the one way a folder goes away: the folder that held it stays, even if this was all it had, and a folder holding nothing but its empty-folder placeholder counts as empty. ' +
       'Preflight first: `dryRun: true` changes nothing and answers `{ path, kind: "folder", descendants, files, filesTruncated, allowed, reason? }` — `descendants` is the file count, `files` names up to 100 of them. ' +
       'A non-empty folder is deleted only with `confirm: true`; without it the call deletes nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm. ' +
       'Refused (in a dry run as `allowed: false` with the `reason`): a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`), git metadata, a folder holding a symbolic link (links are never removed), and a folder holding any file you may not write. A path that is a file is refused with a pointer to `delete_file`, and a path through a symbolic link is refused (links are never followed). ' +
@@ -1475,65 +1872,93 @@ export function registerWorkspaceTools(
       }
       const root = await workspaceRoot(branch, ctx);
       await assertNoSymlinkOnPath(root, path);
-      const { files, links } = await filesUnder(fs, path);
-      // A restricted run is judged on what it would actually delete: the files.
-      for (const f of files) writePolicy.assertPathWritable(ctx.sessionId, f);
-      const managed = managedReason(await onDiskSpelling(root, path), 'folder');
-      const blocked = managed !== undefined ? [] : await writeBlocked(branch, ctx, [path, ...files]);
-      const linked = managed === undefined && links.length > 0 ? linksRefusal(path, links) : undefined;
-      const reason = managed ?? linked ?? (blocked.length > 0
-        ? `You may not write ${blocked.length === 1 ? `"${blocked[0]}"` : `${blocked.length} of the paths, e.g. "${blocked[0]}"`}, so the folder cannot be deleted.`
-        : undefined);
-      const impact = {
-        path,
-        kind: 'folder' as const,
-        descendants: files.length,
-        files: files.slice(0, LISTED_FILES_CAP),
-        filesTruncated: files.length > LISTED_FILES_CAP,
-        allowed: reason === undefined,
-        ...(reason !== undefined ? { reason } : {}),
+      /**
+       * Everything the delete is judged on. `files` is every file that goes,
+       * the empty-folder placeholders included; `content` leaves those out,
+       * because a placeholder is never content — a folder holding nothing but
+       * its placeholder is EMPTY, needs no confirmation, and reports no files.
+       */
+      const judge = async () => {
+        const { files, links } = await filesUnder(fs, path);
+        const content = files.filter((f) => !isFolderPlaceholder(f));
+        // A restricted run is judged on what it would actually delete: the files.
+        for (const f of files) writePolicy.assertPathWritable(ctx.sessionId, f);
+        const managed = managedReason(await onDiskSpelling(root, path), 'folder');
+        const blocked = managed !== undefined ? [] : await writeBlocked(branch, ctx, [path, ...files]);
+        const linked = managed === undefined && links.length > 0 ? linksRefusal(path, links) : undefined;
+        const reason = managed ?? linked ?? (blocked.length > 0
+          ? `You may not write ${blocked.length === 1 ? `"${blocked[0]}"` : `${blocked.length} of the paths, e.g. "${blocked[0]}"`}, so the folder cannot be deleted.`
+          : undefined);
+        const impact = {
+          path,
+          kind: 'folder' as const,
+          descendants: content.length,
+          files: content.slice(0, LISTED_FILES_CAP),
+          filesTruncated: content.length > LISTED_FILES_CAP,
+          allowed: reason === undefined,
+          ...(reason !== undefined ? { reason } : {}),
+        };
+        return { files, content, managed, linked, blocked, impact };
       };
-      if (a.dryRun === true) return { ...impact, dryRun: true };
-      if (managed !== undefined) throw new ToolError(managed, 400);
-      if (linked !== undefined) throw new ToolError(linked, 400);
-      if (blocked.length > 0) throw await writeRefusal(branch, blocked[0]);
-      if (files.length > 0 && a.confirm !== true) {
+      if (a.dryRun === true) return { ...(await judge()).impact, dryRun: true };
+
+      // The real delete runs in the folder's TURN, judged again inside it: an
+      // emptied folder being kept (`keepFolderOf`, which takes the turn of
+      // the folder it keeps) can never write its placeholder into this folder
+      // after the files below were enumerated, and so bring it back.
+      const outcome = await ctx.workspaceService.withFolderTurn(workspaceIdForBranch(branch), path, async () => {
+        const { files, content, managed, linked, blocked, impact } = await judge();
+        if (managed !== undefined) throw new ToolError(managed, 400);
+        if (linked !== undefined) throw new ToolError(linked, 400);
+        if (blocked.length > 0) throw await writeRefusal(branch, blocked[0]);
+        if (content.length > 0 && a.confirm !== true) {
+          return {
+            ...impact,
+            confirmationRequired: true,
+            deleted: false,
+            message: `Nothing was deleted: "${path}" holds ${content.length} ${content.length === 1 ? 'file' : 'files'}, so deleting it requires confirm: true.`,
+          };
+        }
+        // ONE commit for the whole folder. `write: true` guarantees a
+        // LockingFilesystem here, and its `writeFiles` takes every path's lock
+        // BEFORE touching disk, deletes inside those locks and commits the set
+        // as a single change (fail-closed: a refusal commits nothing). A folder
+        // therefore never half-disappears, and its own `access.md` needs no
+        // ordering trick to keep the rest governed on the way — nothing lands
+        // until all of it does. The placeholders go too: this is the one
+        // operation that removes a folder. Structural cast, as `write_files`
+        // does, to avoid importing the workflow-internal class here.
+        if (files.length > 0) {
+          const batch = fs as unknown as {
+            writeFiles(
+              writes: { path: string; content: string }[],
+              summary: string,
+              deletes: string[],
+            ): Promise<unknown>;
+          };
+          await batch.writeFiles([], `Delete ${path} and its ${content.length} file(s)`, files);
+        }
+        // Git tracks no folders: once the files are gone, the shells left on
+        // disk are swept so the folder stops appearing in listings. Only empty
+        // folders go, so a file a concurrent writer just dropped in survives.
+        await removeEmptyDirs(join(root, path));
         return {
           ...impact,
-          confirmationRequired: true,
-          deleted: false,
-          message: `Nothing was deleted: "${path}" holds ${files.length} ${files.length === 1 ? 'file' : 'files'}, so deleting it requires confirm: true.`,
+          deleted: true,
+          message: `Deleted "${path}" and its ${content.length} ${content.length === 1 ? 'file' : 'files'}.`,
         };
-      }
-      // ONE commit for the whole folder. `write: true` guarantees a
-      // LockingFilesystem here, and its `writeFiles` takes every path's lock
-      // BEFORE touching disk, deletes inside those locks and commits the set
-      // as a single change (fail-closed: a refusal commits nothing). A folder
-      // therefore never half-disappears, and its own `access.md` needs no
-      // ordering trick to keep the rest governed on the way — nothing lands
-      // until all of it does. Structural cast, as `write_files` does, to avoid
-      // importing the workflow-internal class here.
-      if (files.length > 0) {
-        const batch = fs as unknown as {
-          writeFiles(
-            writes: { path: string; content: string }[],
-            summary: string,
-            deletes: string[],
-          ): Promise<unknown>;
-        };
-        await batch.writeFiles([], `Delete ${path} and its ${files.length} file(s)`, files);
-      }
-      // Git tracks no folders: once the files are gone, the shells left on
-      // disk are swept so the folder stops appearing in listings. Only empty
-      // folders go, so a file a concurrent writer just dropped in survives.
-      await removeEmptyDirs(join(root, path));
-      return { ...impact, deleted: true, message: `Deleted "${path}" and its ${files.length} ${files.length === 1 ? 'file' : 'files'}.` };
+      });
+      // The folder that HELD this one is not being deleted: if this was all it
+      // had, it stays, with its placeholder. Outside the turn above — the
+      // parent's turn overlaps it, and a folder turn is never nested.
+      if (outcome.deleted) await keepFolderOf(fs, ctx, branch, path, kbDirName);
+      return outcome;
     },
   });
 
   mount({
     name: 'mkdir',
-    description: 'Create a directory (recursive). An empty dir gets a `.gitkeep` so it persists in git.' + ONTOLOGY_BOUNDARY_NOTE,
+    description: 'Create a directory (recursive). It lists as an empty folder and persists in git until it is deleted explicitly.' + ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
       properties: {
@@ -1630,7 +2055,8 @@ export function registerWorkspaceTools(
 
       const [before, after] = await Promise.all([accessAt(branch, ctx, src), accessAt(branch, ctx, dest)]);
       const accessChanges = (Object.keys(before) as (keyof AccessVerbs)[]).some((v) => before[v] !== after[v]);
-      const descendants = srcFiles.length;
+      // The placeholder moves with its folder, but it is never content.
+      const descendants = srcFiles.filter((f) => !isFolderPlaceholder(f)).length;
       // Neither end may be the platform's own: a move neither takes a platform
       // item away nor makes one (a note renamed to `access.md` would start
       // governing its folder).
@@ -1685,6 +2111,9 @@ export function registerWorkspaceTools(
         };
       }
       await fs.moveFile(src, dest);
+      // Moving the last file — or a whole folder — out leaves the folder it
+      // came from in place, like a delete.
+      await keepFolderOf(fs, ctx, branch, src, kbDirName);
       return { ...impact, moved: true };
     },
   });

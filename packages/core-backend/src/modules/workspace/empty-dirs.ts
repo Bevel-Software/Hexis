@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 
 const codeOf = (err: unknown): string | undefined => (err as { code?: string } | null)?.code;
 
@@ -11,7 +12,8 @@ const isGone = (err: unknown): boolean => codeOf(err) === 'ENOENT' || codeOf(err
  * remove `absoluteDir` itself if it ends up empty. A directory is removed only
  * if it contains nothing at the moment it's visited, so any file a concurrent
  * writer dropped in mid-delete — and every parent directory on its path —
- * survives. `.git` is left alone. Used after a recursive folder delete to
+ * survives. The git folder is left alone, in any spelling of its name
+ * (`shared/git-internals.ts`) — a sweep is not a way into it. Used after a recursive folder delete to
  * sweep the leftover empty-folder shells off disk so the file tree (which
  * lists on-disk directories, not just tracked files) stops showing the
  * deleted container. Only a directory that vanished or filled up under a
@@ -27,7 +29,7 @@ export async function removeEmptyDirs(absoluteDir: string): Promise<void> {
     throw err;
   }
   for (const entry of entries) {
-    if (entry.name === '.git' && entry.isDirectory()) continue;
+    if (hasGitInternalsSegment(entry.name)) continue;
     if (entry.isDirectory()) {
       await removeEmptyDirs(path.join(absoluteDir, entry.name));
     }

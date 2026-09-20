@@ -1,11 +1,25 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useGit } from '../../git/state/git.context';
 import { useWorkspace } from '../state/workspace.context';
 import { authFetch } from '../../../lib/api';
 import { isExternalHref, isOpenableExternalHref } from '../../../shared/markdown/hrefs';
 
 export const KB_ROUTE_PREFIX = '/workspace';
+
+/**
+ * The open change request, in the URL. A proposed row opens the shared
+ * change-request dialog AT the file that was clicked, and both halves of
+ * that — which request, which file — live in the query so a reload (or a
+ * pasted link) lands on the same file of the same request.
+ *
+ * `CR_FILE_PARAM` is WORKSPACE-relative — the same path space as the route's
+ * own segments and as every path the tree holds, so the row that was clicked
+ * and the query that records it are the one string. The dialog speaks
+ * repo-relative and the conversion happens where it is handed over, once.
+ */
+export const CR_PARAM = 'cr';
+export const CR_FILE_PARAM = 'file';
 
 /**
  * Matches an id-link destination: a bare frontmatter id (`bdl-cpb-service-terms`,
@@ -275,11 +289,33 @@ export function openExternalHref(href: string): boolean {
   return true;
 }
 
+/**
+ * The branch segment of a `/workspace/<branch>/…` pathname, decoded, or null
+ * when this location is not a workspace URL. The pathname from the router is
+ * still percent-encoded (unlike `useParams`, which decodes for you), so this
+ * decodes exactly once. A malformed escape (a name ending in a bare `%`)
+ * throws out of `decodeURIComponent`; the raw segment is the honest fallback.
+ */
+export function branchFromPathname(pathname: string): string | null {
+  if (!pathname.startsWith(`${KB_ROUTE_PREFIX}/`)) return null;
+  const segment = pathname.slice(KB_ROUTE_PREFIX.length + 1).split('/')[0];
+  return segment ? safeDecode(segment) : null;
+}
+
 export function useFileNav() {
   const navigate = useNavigate();
+  const location = useLocation();
   const git = useGit();
   const { kbDirName } = useWorkspace();
-  const branch = git.status?.branch ?? null;
+  // The URL's branch first, the git status second. During a branch switch the
+  // status still reports the branch being LEFT — it only catches up once the
+  // destination workspace has bootstrapped and answered — so building a click
+  // target from it sent the user back to the branch they were leaving, which
+  // read as the switch undoing itself. The URL is the app's authority for
+  // which branch is on screen (`FileRoute` bootstraps to match it), so a click
+  // lands on the branch being switched TO. Off a workspace route there is no
+  // branch in the URL and the status is the only answer there is.
+  const branch = branchFromPathname(location.pathname) ?? git.status?.branch ?? null;
 
   const openFile = useCallback(
     (pathOrUrl: string) => {

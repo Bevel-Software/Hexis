@@ -986,9 +986,10 @@ describe('AccessControlService', () => {
       it('reports restricted=true with no readers for a default-denied node', async () => {
         const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
         await writeFile(repo, 'roles.yaml', ROLES_YAML);
-        // Only `download` is granted — it does not confer read (read ⊄ download),
-        // so no principal can read this node.
-        await writeFile(repo, 'access.md', '---\ndownload:\n  - Admin\n---\n');
+        // The only line in the tree is a DENIAL — a denial grants nobody, and
+        // no verb that folds into read grants anyone either, so the node is
+        // default-denied with no readers to name.
+        await writeFile(repo, 'access.md', '---\nread:\n  - deny everyone\n---\n');
 
         const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
         const e = await svc.eligibleReaders(workspaceId, 'Knowledge/Foo.md');

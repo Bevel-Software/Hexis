@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
+import { buttonClasses, type ButtonSize } from '../../../shared/components';
 import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
 import {
   WorkspaceContext,
@@ -9,6 +10,7 @@ import {
 } from '../../workspace/state/workspace.context';
 import {
   checkToolConnection,
+  deleteAdminVar,
   setAdminVar,
   type ProbeVerdict,
   type ToolSecrets,
@@ -32,6 +34,7 @@ vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolConnectionSection } from '../components/tool-page/ToolConnectionSection';
+import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 
 // `checkToolConnection` is one module-level mock shared by every test here.
 // `resetAllMocks`, not `clearAllMocks`: clearing kept whatever implementation
@@ -493,6 +496,297 @@ describe('ToolConnectionSection', () => {
       });
       expect(screen.getByRole('alert')).toHaveTextContent('Invalid API key.');
       expect(screen.queryByTestId('tool-health')).toBeNull();
+    });
+  });
+
+  /**
+   * What this section owes the REST of the app.
+   *
+   * The stale-status bug never showed here: a save re-probes, so the page the
+   * key was typed on was always right. It showed one click later, on the
+   * plugin page and the cards, which read a catalog loaded before the write.
+   * So the thing worth pinning is the announcement, not the local repaint.
+   */
+  describe('announcing a landed credential', () => {
+    const heard = vi.fn();
+    beforeEach(() => {
+      heard.mockReset();
+      window.addEventListener(TOOL_CREDENTIALS_STALE_EVENT, heard);
+    });
+    afterEach(() => window.removeEventListener(TOOL_CREDENTIALS_STALE_EVENT, heard));
+
+    /** One admin key a writer can set, replace and remove. */
+    const withKey = (adminConfigured: boolean) =>
+      tool({
+        canWrite: true,
+        variables: [
+          {
+            name: 'API_KEY',
+            scope: 'admin',
+            label: null,
+            key: 'github_API_KEY',
+            adminConfigured,
+            userConfigured: false,
+          },
+        ],
+      });
+
+    it('announces a save without waiting for the probe to answer', async () => {
+      // The catalog's answer does not depend on whether the provider likes the
+      // key, so making the reload wait on a round-trip nobody is watching only
+      // keeps the plugin page stale for longer.
+      vi.mocked(setAdminVar).mockResolvedValue(undefined);
+      vi.mocked(checkToolConnection).mockReturnValue(new Promise<ProbeVerdict>(() => {}));
+      renderSection(withKey(false));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Set key' }));
+      fireEvent.change(screen.getByLabelText('Value for API_KEY'), { target: { value: 'k' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      // The probe is started and will never answer, so an announcement that
+      // arrives at all is one that did not wait for a verdict.
+      await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
+      expect(checkToolConnection).toHaveBeenCalledTimes(1);
+    });
+
+    it('announces a removal, which starts no probe of its own', async () => {
+      vi.mocked(deleteAdminVar).mockResolvedValue(undefined);
+      renderSection(withKey(true));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+
+      await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
+      expect(checkToolConnection).not.toHaveBeenCalled();
+    });
+
+    it('announces nothing when the save fails', async () => {
+      // A failed save changed nothing. Reloading on it would blink every card
+      // in the Library for no reason — and teach the reader that the blink
+      // means something landed.
+      vi.mocked(setAdminVar).mockRejectedValue(new Error('Nope.'));
+      const onError = vi.fn();
+      render(
+        wrap(
+          <ToolConnectionSection
+            tool={withKey(false)}
+            configRevision={0}
+            onChanged={vi.fn()}
+            onError={onError}
+          />,
+        ),
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: 'Set key' }));
+      fireEvent.change(screen.getByLabelText('Value for API_KEY'), { target: { value: 'k' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(onError).toHaveBeenCalledWith('Nope.'));
+      expect(heard).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * One size for every action in the section.
+   *
+   * The heights used to disagree: Set key was `sm` while Test connection,
+   * Remove and Sign in beside it were `tiny`, so a single row read as three
+   * unrelated controls. Edit server and Save set the size and everything here
+   * follows them.
+   *
+   * Asserted through the size TOKENS `buttonClasses` emits rather than a
+   * literal class string, so moving the padding scale moves this test with it
+   * instead of leaving it asserting a size nothing renders any more. The
+   * `px-*` token differs between quiet and solid buttons; what every button of
+   * a size shares is its vertical padding and its type scale — which is
+   * precisely what a row's height is made of.
+   */
+  describe('one size', () => {
+    function sizeTokens(size: ButtonSize): string[] {
+      const solid = buttonClasses({ variant: 'outline', size }).split(' ');
+      const quiet = new Set(buttonClasses({ variant: 'quiet', size }).split(' '));
+      // `md` carries everything that is NOT size-specific — the frame, the
+      // focus ring, the variant's colours — so subtracting it leaves the size.
+      const sizeless = new Set(buttonClasses({ variant: 'outline', size: 'md' }).split(' '));
+      return solid.filter((c) => quiet.has(c) && !sizeless.has(c));
+    }
+
+    const SMALL = sizeTokens('sm');
+    const TINY = sizeTokens('tiny');
+
+    /**
+     * What the section offers as an action: every <button>, plus the links
+     * that are DRESSED as buttons. A link only counts when it carries the
+     * frame every button shares — `buttonClasses` is what turns Open Secrets
+     * into a button to the eye — so a plain link written into the banner's
+     * prose one day stays prose, and this test keeps its opinion to the
+     * controls it is about.
+     */
+    const FRAME = (() => {
+      const md = new Set(buttonClasses({ variant: 'outline', size: 'md' }).split(' '));
+      // Different variant AND different size, so what survives is neither.
+      return buttonClasses({ variant: 'quiet', size: 'tiny' })
+        .split(' ')
+        .filter((c) => md.has(c));
+    })();
+
+    /** Every action the section is currently offering. */
+    function actions(): HTMLElement[] {
+      return [
+        ...screen.queryAllByRole('button'),
+        ...screen
+          .queryAllByRole('link')
+          .filter((el) => FRAME.every((c) => el.className.split(' ').includes(c))),
+      ];
+    }
+
+    /**
+     * What those actions call themselves. Size alone cannot hold a case
+     * honest: `notSmall()` reads nothing into a control that is absent, and
+     * every fixture below carries Open Secrets — a link that is always small —
+     * so a branch that stopped rendering its action entirely would leave
+     * `notSmall()` just as empty as one that sized it correctly. Each case
+     * names the actions it expects first, and the size assertion then speaks
+     * about a cast already known to be complete.
+     */
+    function actionNames(): string[] {
+      return actions()
+        .map(
+          (el) =>
+            el.getAttribute('aria-label') ?? (el.textContent ?? '').replace(/\s+/g, ' ').trim(),
+        )
+        .sort();
+    }
+
+    /**
+     * Every action on screen that is NOT small, named by what it reads as —
+     * so a failure says which control drifted rather than only how many did.
+     */
+    function notSmall(): string[] {
+      return actions()
+        .filter((el) => {
+          const classes = el.className.split(' ');
+          return !SMALL.every((c) => classes.includes(c)) || TINY.some((c) => classes.includes(c));
+        })
+        .map((el) => `${el.textContent} — ${el.className}`);
+    }
+
+    it('distinguishes the two sizes it is asserting on', () => {
+      // Guards the derivation itself: were `sizeTokens` to come back empty, or
+      // the two sizes to share every token, `notSmall` would be vacuous and
+      // every case below would pass against tiny buttons.
+      expect(SMALL.length).toBeGreaterThan(0);
+      expect(SMALL.filter((c) => TINY.includes(c))).toEqual([]);
+      // And that the frame is a real filter: an empty one would wave every
+      // link through as an action, which is the opposite of what it is for.
+      expect(FRAME.length).toBeGreaterThan(0);
+    });
+
+    it('holds the one action that is a link to the same size', () => {
+      // Named on its own because it is the case the frame test above protects:
+      // Open Secrets is a <Link>, not a <Button>, and it is the control most
+      // easily left behind when the buttons beside it move.
+      renderSection(tool());
+      const link = screen.getByRole('link', { name: 'Open Secrets' });
+      expect(SMALL.every((c) => link.className.split(' ').includes(c))).toBe(true);
+      expect(actionNames()).toEqual(['Open Secrets', 'Test connection: github'].sort());
+      expect(notSmall()).toEqual([]);
+    });
+
+    type Var = ToolSecrets['variables'][number];
+
+    const signIn = (over: Partial<Var> = {}): Var => ({
+      name: 'SIGNIN',
+      scope: 'user',
+      label: null,
+      key: 'github_SIGNIN',
+      adminConfigured: true,
+      userConfigured: false,
+      oauth: true,
+      authorized: false,
+      ...over,
+    });
+
+    const sharedKey = (over: Partial<Var> = {}): Var => ({
+      name: 'API_KEY',
+      scope: 'admin',
+      label: null,
+      key: 'github_API_KEY',
+      adminConfigured: true,
+      userConfigured: false,
+      ...over,
+    });
+
+    // Between them these cover every button the section can render: the header
+    // pair, the banner's action, and each branch of the row matrix.
+    it.each<[string, ToolSecrets, string[]]>([
+      [
+        'a settled tool an owner is looking at',
+        tool({
+          setup: { kind: 'oauth-manual' },
+          canWrite: true,
+          variables: [signIn({ authorized: true }), sharedKey()],
+        }),
+        [
+          'Test connection: github',
+          'Open Secrets',
+          'Reconnect',
+          'Replace client secret',
+          'Replace',
+          'Remove',
+        ],
+      ],
+      [
+        'a tool still waiting on its keys',
+        tool({
+          canWrite: true,
+          variables: [
+            sharedKey({ adminConfigured: false }),
+            {
+              name: 'MY_KEY',
+              scope: 'user',
+              label: null,
+              key: 'github_MY_KEY',
+              adminConfigured: false,
+              userConfigured: false,
+            },
+          ],
+        }),
+        // The banner's Set key, plus the rows' own Set key and Add key.
+        ['Open Secrets', 'Set key', 'Set key: API_KEY', 'Add key'],
+      ],
+      ['a sign-in nobody has done yet', tool({ variables: [signIn()] }), ['Open Secrets', 'Sign in']],
+      [
+        'a sign-in that has to be done again',
+        tool({ variables: [signIn({ authorized: true, needsReauth: true })] }),
+        ['Open Secrets', 'Sign in again'],
+      ],
+      [
+        'an oauth-manual setup the owner has not started',
+        tool({ setup: OAUTH_MANUAL, canWrite: true }),
+        ['Open Secrets', 'Edit the tool file'],
+      ],
+      [
+        'a declared sign-in still missing its client secret',
+        tool({ setup: OAUTH_MANUAL, canWrite: true, variables: [signIn({ adminConfigured: false })] }),
+        ['Open Secrets', 'Set client secret'],
+      ],
+    ])('sizes every action small on %s', (_name, t, expected) => {
+      renderSection(t);
+      expect(actionNames()).toEqual([...expected].sort());
+      expect(notSmall()).toEqual([]);
+    });
+
+    it("sizes the row editor's Save and Cancel like the row that opened it", () => {
+      renderSection(tool({ canWrite: true, variables: [sharedKey()] }));
+      fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+      expect(screen.getByLabelText('Value for API_KEY')).toBeInTheDocument();
+      // The row keeps its own actions while the editor is open, so Save and
+      // Cancel are joining a row rather than replacing it — which is exactly
+      // why they have to match the height of what they stand next to.
+      expect(actionNames()).toEqual(
+        ['Test connection: github', 'Open Secrets', 'Replace', 'Remove', 'Save', 'Cancel'].sort(),
+      );
+      expect(notSmall()).toEqual([]);
     });
   });
 });

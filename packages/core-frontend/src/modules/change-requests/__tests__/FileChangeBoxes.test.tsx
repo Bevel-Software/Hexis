@@ -15,12 +15,16 @@ import {
 
 const api = vi.hoisted(() => ({
   readFileOnBranch: vi.fn(),
+  readFileAtForkPoint: vi.fn(),
   fetchPrDetail: vi.fn(),
   approvePrFile: vi.fn(),
   mergePullRequest: vi.fn(),
   cancelPullRequest: vi.fn(),
 }));
-vi.mock('../services/change-requests.api', () => ({ readFileOnBranch: api.readFileOnBranch }));
+vi.mock('../services/change-requests.api', () => ({
+  readFileOnBranch: api.readFileOnBranch,
+  readFileAtForkPoint: api.readFileAtForkPoint,
+}));
 vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: api.fetchPrDetail }));
 vi.mock('../../pr/services/pr-approvals.api', () => ({ approvePrFile: api.approvePrFile }));
 vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: api.mergePullRequest }));
@@ -91,6 +95,8 @@ beforeEach(() => {
   api.readFileOnBranch.mockImplementation(async (branch: string) =>
     branch === CR.branch ? 'new line\n' : 'old line\n',
   );
+  // The box's "before" side is the request's fork point, not main's tip.
+  api.readFileAtForkPoint.mockResolvedValue({ content: 'old line\n', forkSha: 'f'.repeat(40) });
   api.fetchPrDetail.mockResolvedValue({
     ...CR,
     state: 'open',

@@ -408,6 +408,111 @@ describe('ManageAccessDialog: naming the rules', () => {
   });
 });
 
+/**
+ * A file that cannot carry frontmatter (a PDF, a deck, an image) has no rules
+ * of its own. The sheet says so in the same sentence the routes refuse with,
+ * offers the folder's sheet instead of the field and the rows, and still shows
+ * who can open the file.
+ */
+describe('ManageAccessDialog: a file whose folder governs its access', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
+  });
+
+  const DECK: FileTreeEntry = {
+    name: 'Deck.pptx',
+    relativePath: `${KB}/Sales/Deck.pptx`,
+    type: 'file',
+  } as unknown as FileTreeEntry;
+
+  const binaryView = {
+    canRead: true, canWrite: true, canDownload: true, canOwner: true,
+    eligible: { roles: [], users: [A] },
+    readers: { restricted: true, roles: [], users: [A, { name: 'Bo', email: 'bo@x.com' }] },
+    owners: { roles: [], users: [] },
+    downloaders: { roles: [], users: [] },
+    sources: {
+      'u:alice@x.com': { read: [{ kind: 'ancestor', path: 'Sales/access.md' }], write: [{ kind: 'ancestor', path: 'Sales/access.md' }] },
+      'u:bo@x.com': { read: [{ kind: 'ancestor', path: 'Sales/access.md' }] },
+    },
+    governedByFolder: 'Sales',
+  } as AccessResponse;
+
+  it('shows the folder sentence and a button to the folder in place of the field and rows, keeping who can open it', async () => {
+    const user = userEvent.setup();
+    const onManageAncestor = vi.fn();
+    api.fetchFileAccess.mockResolvedValue(binaryView);
+    render(<ManageAccessDialog entry={DECK} onClose={() => {}} onManageAncestor={onManageAncestor} />);
+
+    expect(
+      await screen.findByText("This file's access comes from its folder. Manage access on Sales instead."),
+    ).toBeInTheDocument();
+    // No field, no editable rows, no per-folder disclosures.
+    expect(screen.queryByPlaceholderText(/Add people, groups, roles or plugins/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /On this file/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /People invited to Sales/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Remove/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /can edit/i })).not.toBeInTheDocument();
+    // The read side is still there, read-only.
+    expect(screen.getByRole('heading', { name: /Who can open it/i })).toBeInTheDocument();
+    expect(screen.getByText('Alice')).toBeInTheDocument();
+    expect(screen.getByText('Bo')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Manage access on Sales' }));
+    expect(onManageAncestor).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Sales', relativePath: `${KB}/Sales`, type: 'directory' }),
+    );
+    expect(api.grantAccess).not.toHaveBeenCalled();
+    expect(api.revokeAccess).not.toHaveBeenCalled();
+  });
+
+  it('a file at the root points at the whole workspace', async () => {
+    const user = userEvent.setup();
+    const onManageAncestor = vi.fn();
+    api.fetchFileAccess.mockResolvedValue({ ...binaryView, governedByFolder: '' });
+    const blob = { name: 'blob', relativePath: `${KB}/blob`, type: 'file' } as unknown as FileTreeEntry;
+    render(<ManageAccessDialog entry={blob} onClose={() => {}} onManageAncestor={onManageAncestor} />);
+
+    expect(
+      await screen.findByText(
+        "This file's access comes from its folder. Manage access on the whole workspace instead.",
+      ),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Manage access on the whole workspace' }));
+    expect(onManageAncestor).toHaveBeenCalledWith(
+      expect.objectContaining({ relativePath: KB, type: 'directory' }),
+    );
+  });
+
+  it('a Markdown note keeps the field and its rows', async () => {
+    api.fetchFileAccess.mockResolvedValue({ ...binaryView, governedByFolder: undefined });
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} onManageAncestor={() => {}} />);
+    expect(await screen.findByRole('heading', { name: /On this file/i })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Add people, groups, roles or plugins/)).toBeInTheDocument();
+    expect(screen.queryByText(/access comes from its folder/)).not.toBeInTheDocument();
+  });
+
+  it("the server's ruling decides: a binary saved as .md shows the folder pointer", async () => {
+    api.fetchFileAccess.mockResolvedValue({ ...binaryView, governedByFolder: 'Sales' });
+    const fake = { name: 'Fake.md', relativePath: `${KB}/Sales/Fake.md`, type: 'file' } as unknown as FileTreeEntry;
+    render(<ManageAccessDialog entry={fake} onClose={() => {}} onManageAncestor={() => {}} />);
+    expect(
+      await screen.findByText("This file's access comes from its folder. Manage access on Sales instead."),
+    ).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/Add people, groups, roles or plugins/)).not.toBeInTheDocument();
+  });
+
+  it("the server's ruling decides: an overlay-registered kind the server accepts keeps the field", async () => {
+    api.fetchFileAccess.mockResolvedValue({ ...binaryView, governedByFolder: undefined });
+    const flow = { name: 'Flow.pipeline', relativePath: `${KB}/Sales/Flow.pipeline`, type: 'file' } as unknown as FileTreeEntry;
+    render(<ManageAccessDialog entry={flow} onClose={() => {}} onManageAncestor={() => {}} />);
+    expect(await screen.findByRole('heading', { name: /On this file/i })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Add people, groups, roles or plugins/)).toBeInTheDocument();
+    expect(screen.queryByText(/access comes from its folder/)).not.toBeInTheDocument();
+  });
+});
+
 // ── group principals in the picker ──
 describe('ManageAccessDialog: group principals', () => {
   const VIEW = {

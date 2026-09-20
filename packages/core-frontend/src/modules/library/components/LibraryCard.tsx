@@ -63,12 +63,15 @@ export interface LibraryCardCommonProps {
    */
   pending?: { authorName: string; mine: boolean };
   /**
-   * A skill's governance lifecycle (`metadata.lifecycle`). Only the two states
-   * that need a reader's attention are shown — `deprecated` (still works,
-   * find the replacement) and `retired` (kept for its owners, never
-   * distributed); `active` and absence render nothing.
+   * Where the item LIVES, when it reaches the page showing this card through
+   * a link rather than by sitting in its folder — `Skills/Testing`. Draws the
+   * Linked pill, with that folder in its tooltip.
+   *
+   * Set only on a plugin's page, and only for a linked card: a gallery card
+   * is in as many plugins as it is in, and "linked" there would name no
+   * plugin to be linked from. Absent ⇒ no pill, which is every inline card.
    */
-  lifecycle?: string;
+  linkedHome?: string;
   /** Open the item. The whole card is the target. */
   onOpen(): void;
 }
@@ -108,7 +111,7 @@ export function LibraryCard({
   status,
   version,
   pending,
-  lifecycle,
+  linkedHome,
   onOpen,
   onShare,
   flavor,
@@ -177,9 +180,23 @@ export function LibraryCard({
             Owner
           </Badge>
         )}
-        {(lifecycle === 'deprecated' || lifecycle === 'retired') && (
-          <Badge tone="wait" size="xs" className="shrink-0 uppercase">
-            {lifecycle === 'retired' ? 'Retired' : 'Deprecated'}
+        {/* The card is on a plugin's page and the item lives somewhere else.
+            The Owner pill's exact dress, because it makes the same kind of
+            statement — a fact about the item's standing, not a problem — and
+            the skill's own page already spells LINKED this way.
+
+            The pill alone would say "not here" without saying where, and
+            "where" is the whole reason the reader is puzzled: the Advanced
+            tree shows the disk, so a linked skill is not under the plugin's
+            folder there, and the tooltip is what reconciles the two views. */}
+        {linkedHome && (
+          <Badge
+            tone="outline"
+            size="xs"
+            className="shrink-0 uppercase"
+            title={`Lives in ${linkedHome}; linked from this plugin's manifest`}
+          >
+            Linked
           </Badge>
         )}
       </span>
