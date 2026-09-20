@@ -678,14 +678,16 @@ export async function createCoreServices(
 
   // Catalog freshness: the skill / tool-manual / plugin-index caches all scan
   // the DEFAULT branch's working tree, and all three go stale on the same
-  // events (a commit, a working-tree write, a merge). Wired in one place so a
-  // new way of reaching the default branch cannot refresh two of them and
-  // leave the third serving last minute's answer.
+  // events (a commit, a working-tree write, a merge) — as does the access
+  // model they are filtered through. Wired in one place so a new way of
+  // reaching the default branch cannot refresh two of them and leave the
+  // third serving last minute's answer.
   registerCatalogCacheInvalidation({
     eventBus,
     fileChangeNotifier,
     kbDirName,
     catalogs: [toolManualService, skillService, pluginIndexService, pluginLinkIndex],
+    accessControl,
   });
 
   // Admin = `Admin` role in roles.yaml, resolved through the access model on the

@@ -1,5 +1,7 @@
 import express from 'express';
+import { inArray } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
+import { printable } from '../../shared/printable.js';
 
 // The audit lines this file writes have always carried their own tags —
 // `access.grant`, `access.revoke` and their sub-cases — so each keeps it.
@@ -43,7 +45,8 @@ import {
   type Verb,
 } from '../access-model/access-grammar.js';
 import { listAccessDeclarationsUnder } from './access-declarations.js';
-import { holderPrincipals, resolveAccessView } from './access-view.js';
+import { emailsInView, holderPrincipals, labelAccountHolders, resolveAccessView } from './access-view.js';
+import type { AccessView, LabelledAccessView } from './access-view.js';
 import { toHttpError as sharedToHttpError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
 import { RolesAdminService } from './roles-admin.service.js';
 import type { Principal } from '../access-model/access-splice.js';
@@ -484,7 +487,9 @@ export function createAccessRoutes(
    * always show; PEOPLE are withheld until `q` is ≥ 2 chars, so an empty query
    * can't dump the whole directory (email-harvesting guard). People are the
    * union of the KB-canonical set (roles.yaml + access.md grants) and the
-   * `users` table (logged-in users). Results are capped.
+   * `users` table (logged-in users). Results are capped. Each person carries
+   * `hasAccount` — false for someone named only in the KB, who has never
+   * signed in — so the dialog can label them; it withholds nobody.
    *
    * A name shared by a group and a role is offered as BOTH — nothing is
    * withheld: grant precedence resolves the collision (bare token = the
@@ -496,6 +501,10 @@ export function createAccessRoutes(
 
     const q = (typeof req.query.q === 'string' ? req.query.q : '').trim().toLowerCase();
     const CAP = 15;
+    // The harvesting guard, named once: it decides both that people are not
+    // returned and that this answer says nothing about accounts. The two must
+    // never disagree — a withheld list is not evidence that nobody has one.
+    const peopleWithheld = q.length < 2;
     try {
       // Independent lookups batched in ONE Promise.all: the default-branch
       // principals (cached model), the branch-local KB people (cached model),
@@ -503,7 +512,7 @@ export function createAccessRoutes(
       const [{ roles, groups, plugins }, { people: kbPeople }, userRows] = await Promise.all([
         defaultBranchPrincipals(),
         accessControl.kbPrincipals(req.params.id),
-        q.length >= 2 ? db.select().from(users) : Promise.resolve([]),
+        peopleWithheld ? Promise.resolve([]) : db.select().from(users),
       ]);
 
       const matchedRoles = roles
@@ -527,8 +536,8 @@ export function createAccessRoutes(
         .map((p) => p.name)
         .slice(0, CAP);
 
-      let people: { name: string; email: string }[] = [];
-      if (q.length >= 2) {
+      let people: { name: string; email: string; hasAccount: boolean }[] = [];
+      if (!peopleWithheld) {
         // Union the KB-canonical people with the login-only users table.
         const byEmail = new Map<string, { name: string; email: string }>();
         for (const p of kbPeople) byEmail.set(p.email.toLowerCase(), p);
@@ -542,9 +551,22 @@ export function createAccessRoutes(
             byEmail.set(key, { name: u.name || u.email, email: u.email });
           }
         }
+        // A suggestion says whether that person has an ACCOUNT, the same fact
+        // the access view reports: `users` is exactly the set that has signed
+        // in, so a KB-canonical person named only in access rules — someone
+        // granted ahead of their first sign-in — comes back `false` and the
+        // dialog labels the chip it makes of them.
+        const accountEmails = new Set(userRows.map((u) => u.email.trim().toLowerCase()));
         people = [...byEmail.values()]
           .filter((p) => p.email.toLowerCase().includes(q) || p.name.toLowerCase().includes(q))
-          .slice(0, CAP);
+          // The address actually TYPED is never hidden by the cap. A chip made
+          // from a free-typed email labels itself by ABSENCE from this list, so
+          // an exact match dropped at the 15th match would say "hasn't signed
+          // in yet" about somebody who has. Exact email first, then the rest in
+          // the order they were unioned (sort is stable), then cap.
+          .sort((a, b) => Number(b.email.toLowerCase() === q) - Number(a.email.toLowerCase() === q))
+          .slice(0, CAP)
+          .map((p) => ({ ...p, hasAccount: accountEmails.has(p.email.trim().toLowerCase()) }));
       }
 
       res.json({
@@ -555,7 +577,19 @@ export function createAccessRoutes(
         // deprecated alias of `roles` below.
         pluginPrincipals: matchedPlugins,
         people,
-        peopleWithheld: q.length < 2,
+        peopleWithheld,
+        // THIS ANSWER rules on accounts — not "this build can": every person
+        // above carries `hasAccount`, and an email absent from `people` is
+        // absent because no account exists for it. The dialog labels a
+        // free-typed chip only on this evidence.
+        //
+        // It is therefore false whenever people were WITHHELD: under two
+        // characters the harvesting guard returns nobody, and an empty list
+        // there means "not asked", which is not the same fact at all. An
+        // older server (no such field) and a failed lookup (no response) are
+        // the other two ways to say nothing — all three leave the address
+        // unjudged rather than labelled on a guess.
+        accountsKnown: !peopleWithheld,
         // DEPRECATED alias of `roles` — the shipped share dialog still reads
         // `plugins`. Kept populated for ONE release; remove in 0.2.0 together
         // with the dialog's rename to `roles`.
@@ -680,6 +714,28 @@ export function createAccessRoutes(
     void isProtectedBranch;
   }
 
+  /**
+   * Which of `emails` have an ACCOUNT — a row in `users`, which exists only
+   * once that person has signed in at least once. Emails are stored canonical
+   * (the auth service lowercases every address it writes), so the canonical
+   * forms match the unique index directly and the lookup stays one indexed
+   * query scoped to the addresses asked about.
+   *
+   * Purely informational. No grant is refused, delayed or rewritten because
+   * an email is missing here — pre-provisioning under single sign-on means
+   * granting to an address whose account does not exist yet, and that is a
+   * supported thing to do.
+   */
+  async function accountsAmong(emails: string[]): Promise<Set<string>> {
+    // `inArray` refuses an empty list, and there is nothing to ask anyway.
+    if (emails.length === 0) return new Set();
+    const rows = await db
+      .select({ email: users.email })
+      .from(users)
+      .where(inArray(users.email, emails));
+    return new Set(rows.map((r) => r.email.trim().toLowerCase()));
+  }
+
   /** The full resolved-access view returned after a successful mutation. */
   async function resolvedView(
     workspaceId: string,
@@ -687,7 +743,33 @@ export function createAccessRoutes(
     userEmail: string,
     kind: TargetKind,
   ) {
-    const view = await resolveAccessView(accessControl, workspaceId, repoRelTarget, userEmail, kind);
+    const resolved = await resolveAccessView(accessControl, workspaceId, repoRelTarget, userEmail, kind);
+
+    // Every person the view names says whether they have signed in yet, so the
+    // dialog can label a grant made ahead of a first sign-in (`hasAccount:
+    // false`) without changing what the grant does. The flag is read from the
+    // users table each time the view is built, so it flips to true on its own
+    // the first time that person signs in.
+    //
+    // BEST-EFFORT, deliberately: this view is built AFTER the mutation has
+    // committed, so a users lookup that fails must not turn a grant that was
+    // written into a 500 the caller reads as "it did not save". On failure the
+    // flag is simply ABSENT — which the dialog reads as "the server did not
+    // say", not as "no account", so nobody is labelled on a guess.
+    let view: AccessView | LabelledAccessView = resolved;
+    try {
+      view = labelAccountHolders(resolved, await accountsAmong(emailsInView(resolved)));
+    } catch (err) {
+      // Every piece of this line is caller-controlled — the workspace id and
+      // path come off the request, and the driver's message can carry back
+      // text from the query. `printable` quotes each as one token, the same
+      // rule the rest of the backend's logs follow.
+      logger('access.view.accounts').warn(
+        `users lookup failed for ws=${printable(workspaceId)} path=${printable(repoRelTarget)}; hasAccount omitted: ${printable(
+          err instanceof Error ? err.message : String(err),
+        )}`,
+      );
+    }
 
     // A file that cannot carry frontmatter has no rules of its own: name the
     // folder whose rules govern it (repo-relative, `''` for the root), which

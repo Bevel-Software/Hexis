@@ -259,4 +259,67 @@ describe('SkillService', () => {
     } as unknown as IAccessControl;
     expect(await svc(denyRfi).getSkill('user@x.eu', 'rfi')).toEqual({ ok: false, error: 'forbidden' });
   });
+
+  /**
+   * The listing and the loader must never disagree about the same skill at the
+   * same instant.
+   *
+   * The regression: `getSkill` gated on `canRead`, which reads a file's own
+   * frontmatter rules off disk per call, while `listSkills` gated on
+   * `canReadBatch`, which resolves them through a per-workspace memo with its
+   * own lifetime. So a freshly written SKILL.md could be loadable by name and
+   * absent from the listing — an author who writes a skill and then lists them
+   * not seeing their own work, and an agent discovering by listing unable to
+   * find a skill it could load. Both now resolve through the one batch gate.
+   */
+  describe('listSkills and getSkill never disagree', () => {
+    /** Records which gate each surface consulted, and answers only on the batch one. */
+    function splitBrain(batchVerdict: boolean) {
+      const consulted: string[] = [];
+      const access = {
+        canRead: async () => {
+          consulted.push('canRead');
+          return !batchVerdict; // the OPPOSITE answer, so any use of it shows up
+        },
+        canReadBatch: async (_w: string, _e: string, paths: string[]) => {
+          consulted.push('canReadBatch');
+          return new Map(paths.map((p) => [p, batchVerdict]));
+        },
+      } as unknown as IAccessControl;
+      return { access, consulted };
+    }
+
+    test('a skill the batch gate allows is both listed and loadable', async () => {
+      const { access, consulted } = splitBrain(true);
+      const service = svc(access);
+      const listed = (await service.listSkills('user@x.eu')).map((s) => s.name);
+      const loaded = await service.getSkill('user@x.eu', 'rfi');
+
+      expect(listed).toContain('rfi');
+      expect(loaded.ok).toBe(true);
+      // The single-file gate — whose answer here is the opposite — was never
+      // asked. One resolver decides both.
+      expect(consulted).not.toContain('canRead');
+    });
+
+    test('a skill the batch gate denies is neither listed nor loadable', async () => {
+      const { access, consulted } = splitBrain(false);
+      const service = svc(access);
+      const listed = (await service.listSkills('user@x.eu')).map((s) => s.name);
+      const loaded = await service.getSkill('user@x.eu', 'rfi');
+
+      expect(listed).not.toContain('rfi');
+      expect(loaded).toEqual({ ok: false, error: 'forbidden' });
+      expect(consulted).not.toContain('canRead');
+    });
+
+    test('a bundled file is served on the same verdict as the listing', async () => {
+      const { access } = splitBrain(false);
+      // Not `not_found`: the skill exists and the caller may not read it.
+      expect(await svc(access).getSkill('user@x.eu', 'rfi', 'scripts/build_xlsx.py')).toEqual({
+        ok: false,
+        error: 'forbidden',
+      });
+    });
+  });
 });

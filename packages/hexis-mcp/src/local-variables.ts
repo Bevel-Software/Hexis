@@ -108,6 +108,26 @@ export function resetLocalVariableResolver(id?: string): void {
 }
 
 /**
+ * Forget every value a binding has resolved so far, keeping the binding.
+ *
+ * For a catalog refresh that swaps the set of local manuals under a live
+ * client: a manual that kept its name but changed its file may now declare
+ * other variables, or be addressed by another slug, and the values cached
+ * against its OLD definition would otherwise be handed to its new tools for
+ * the rest of the cache's life. In-flight resolutions are left to finish —
+ * their result is dropped on arrival by the generation check below — and
+ * collision reports are cleared with the values, so a collision the new set
+ * removed is not still suppressed, and one it introduced is reported once.
+ */
+export function dropLocalVariableCache(id: string): void {
+  const s = bindings.get(id);
+  if (!s) return;
+  s.cache.clear();
+  s.inFlight.clear();
+  s.reportedCollisions.clear();
+}
+
+/**
  * Which local manual, if any, owns this UTCP-namespaced key.
  *
  * Matched on the LONGEST prefix so a manual `a` cannot shadow `a_b` when both
