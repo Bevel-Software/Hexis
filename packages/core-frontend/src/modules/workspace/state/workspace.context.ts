@@ -1,9 +1,61 @@
 import { createContext, useContext } from 'react';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 
+/**
+ * Which tree a drop landed in, so its banners can be shown THERE and only
+ * there. Every tree that accepts uploads declares one (`TreeChrome`'s
+ * `uploadTarget`) and hands it to `dispatchUpload`; `UploadNotices` renders
+ * only the banners carrying its own. The Library sidebar holds two of these
+ * trees (`Skills/` and `Plugins/`) and Knowledge holds one — over one shared
+ * piece of state an untargeted banner appeared once per tree, which is how
+ * the same "upload became a suggestion" notice showed up twice on one page.
+ */
+export type UploadTarget = string;
+
+/** The tree the Knowledge explorer is, and the default for any other caller. */
+export const KNOWLEDGE_UPLOAD_TARGET: UploadTarget = 'knowledge';
+
+/**
+ * The name of one of the Library sidebar's trees (`Skills/`, `Plugins/`).
+ * The `library:` prefix is a protocol between the tree that renders the
+ * banners and the dispatch that stamps them, so it is spelled once, here,
+ * rather than re-typed by every tree and every test: a tree that spelled it
+ * differently would draw no banners at all, which is the silent upload this
+ * whole module exists to prevent.
+ */
+export function libraryUploadTarget(dir: string): UploadTarget {
+  return `library:${dir}`;
+}
+
 export interface UploadError {
+  /** The file's NAME — what the user dropped, not its full workspace path. */
   filename: string;
+  /** The server's own words, shown in full rather than behind a tooltip. */
   reason: string;
+  /**
+   * HTTP status of the refusal, when it came from one — the discriminator
+   * `uploadErrorNextStep` uses to pick what to tell the user to do. Absent
+   * for failures that never reached a response (network, the folder walker),
+   * which get the generic next step.
+   */
+  status?: number;
+}
+
+/**
+ * The non-error news about an upload.
+ *
+ * `progress` is set the instant a drop is dispatched, BEFORE the suggestion
+ * routing round-trips (an ACL read, and on a first suggestion the branch
+ * creation plus its workspace clone). Without it the first suggestion-routed
+ * upload of a session is completely silent for as long as all that takes —
+ * and there are no optimistic rows either, because a suggestion-routed upload
+ * deliberately draws no overlay. That silence is what "I dropped a file and
+ * nothing happened" was. It is replaced by `suggestion`, or cleared, once the
+ * upload settles.
+ */
+export interface UploadNotice {
+  kind: 'progress' | 'suggestion';
+  message: string;
 }
 
 /**
@@ -82,10 +134,10 @@ export interface WorkspaceContextValue {
    * Why the last workspace bootstrap failed, or null. A bootstrap that fails
    * leaves `workspaceId` on whatever it was, so without this a route could
    * only wait forever; `status` is the HTTP status the bootstrap answered
-   * (410: the branch no longer exists on the git host), 0 for a transport
-   * failure, and `message` is what the failure said, so a screen can name it
-   * rather than only naming the branch. Cleared by the next successful
-   * bootstrap and by `retryBootstrap`.
+   * (404: no branch by that name; 410: the branch no longer exists on the git
+   * host), 0 for a transport failure, and `message` is what the failure said,
+   * so a screen can name it rather than only naming the branch. Cleared by
+   * the next successful bootstrap and by `retryBootstrap`.
    */
   bootstrapError: { branch: string; status: number; message: string } | null;
   /**
@@ -148,20 +200,26 @@ export interface WorkspaceContextValue {
    */
   fsRevision: number;
   /**
-   * Most recent upload error, surfaced inline in the file explorer for both
-   * the toolbar button and drag-drop. Cleared on the next successful dispatch
-   * or via `clearUploadError`.
+   * The last upload error in each tree, keyed by the tree that received the
+   * drop — see {@link UploadTarget}. Surfaced inline in that tree for both
+   * the toolbar button and drag-drop. A tree's entry is replaced on its next
+   * dispatch, or removed via `clearUploadError`. Keyed rather than a single
+   * slot because two of these trees share one sidebar: with one slot, a drop
+   * into `Plugins/` wiped the banner `Skills/` was still showing.
    */
-  uploadError: UploadError | null;
+  uploadErrors: ReadonlyMap<UploadTarget, UploadError>;
   /**
-   * Non-error news about the last upload — currently one message: the upload
-   * went to the caller's suggestions branch because they cannot write the
-   * target folder, and the files are now a change request, not tree content.
-   * Without this the outcome is indistinguishable from a silently failed
-   * upload: nothing appears where the user dropped the files.
+   * Non-error news about the last upload in each tree, keyed the same way as
+   * {@link WorkspaceContextValue.uploadErrors}: that it is under way, or that
+   * it went to the caller's suggestions branch because they cannot write the
+   * target folder and the files are now a change request rather than tree
+   * content. Without this the outcome is indistinguishable from a silently
+   * failed upload: nothing appears where the user dropped the files. Keyed,
+   * so one tree's drop settling never blanks the news another tree's drop is
+   * still waiting on.
    */
-  uploadNotice: string | null;
-  clearUploadNotice: () => void;
+  uploadNotices: ReadonlyMap<UploadTarget, UploadNotice>;
+  clearUploadNotice: (target: UploadTarget) => void;
   /** True while a `dispatchUpload` call is in flight; gates the toolbar button. */
   isUploading: boolean;
   /**
@@ -244,14 +302,23 @@ export interface WorkspaceContextValue {
   uploadFiles: (files: File[], targetDirectory: string) => Promise<void>;
   /**
    * UI-facing entry point for uploads from drag-drop and file/folder pickers.
-   * Captures errors into `uploadError`, toggles `isUploading`, drives
+   * Captures errors into `uploadErrors`, toggles `isUploading`, drives
    * `pendingUploads` for optimistic rendering, and (for `kind: 'items'`)
    * lazily walks dropped FileSystemEntries so uploads start before
    * enumeration finishes. Preserves empty subdirectories from folder drops
    * by creating them server-side after the file upload pass.
    */
-  dispatchUpload: (input: UploadInput, targetDirectory: string) => Promise<void>;
-  clearUploadError: () => void;
+  dispatchUpload: (
+    input: UploadInput,
+    targetDirectory: string,
+    /**
+     * The tree the drop came from, so its banners appear beside the rows they
+     * explain — see {@link UploadTarget}. Omitted means the Knowledge
+     * explorer.
+     */
+    uploadTarget?: UploadTarget,
+  ) => Promise<void>;
+  clearUploadError: (target: UploadTarget) => void;
   /**
    * Delete this branch's copy of a file or folder. Resolves `false` when
    * nothing was deleted because the user kept their unsaved tabs.

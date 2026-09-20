@@ -17,12 +17,16 @@ import type {
   GrantPrincipal,
   GrantSource,
   GrantSources,
+  PathHolders,
+  ProspectiveHolders,
   ResolvedPrincipal,
 } from './access-control.interface.js';
 import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginDir,
   pluginIdentityOf,
+  platformRestoreDestination,
 } from '@bevel-software/platform-shared';
 import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { synthesizePluginPrincipals } from '../access-model/plugin-principals.js';
 import {
   GROUPS_YAML,
@@ -1462,6 +1466,52 @@ export class AccessControlService implements IAccessControl {
     return eligibleHoldersResolved(model, 'download', relativePath, own);
   }
 
+  /**
+   * The read and write holders of one file at its current path and at a path
+   * it has not moved to yet (see the interface).
+   *
+   * A move changes nothing about the file's own frontmatter — that travels
+   * with the bytes — and everything about the folder chain above it. So the
+   * hypothetical side is the ordinary resolution with the destination path
+   * substituted: the same model, the same own-entries (read from the SOURCE,
+   * since nothing sits at the destination to read), resolved against the
+   * destination's ancestors. One model load and one file read serve all four
+   * lookups.
+   */
+  async prospectiveHolders(
+    workspaceId: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<ProspectiveHolders> {
+    const model = await this.loadModel(workspaceId);
+    const repoDir = await this.repoDir(workspaceId);
+    // A FILE question only. A folder carries its own `access.md` — which moves
+    // with it and governs everything under it — so resolving it as a file
+    // would read frontmatter it does not have and omit the rules it does,
+    // naming principals that are not the ones a folder move changes. Refuse
+    // rather than answer the wrong question convincingly.
+    //
+    // Only absence is an answer here (see `isAbsence`): a probe that failed on
+    // permissions or I/O does not say "this is a file", and folding it into
+    // one would let the very case above through on an unreadable source.
+    const fromStat = await fs.stat(path.join(repoDir, fromPath)).catch((err: unknown) => {
+      if (isAbsence(err)) return null;
+      throw err;
+    });
+    if (fromStat?.isDirectory()) {
+      throw new WorkflowDomainError(
+        'prospective access answers for a file, not a folder',
+        400,
+      );
+    }
+    const own = await this.readOwnEntries(repoDir, fromPath);
+    const holdersAt = (relativePath: string): PathHolders => ({
+      read: eligibleHoldersResolved(model, 'read', relativePath, own),
+      write: eligibleHoldersResolved(model, 'write', relativePath, own),
+    });
+    return { before: holdersAt(fromPath), after: holdersAt(toPath) };
+  }
+
   async eligibleWriterEmails(
     workspaceId: string,
     relativePath: string,
@@ -1735,6 +1785,49 @@ export class AccessControlService implements IAccessControl {
   async holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean> {
     const model = await this.loadModel(workspaceId);
     return isAdminEmail(model, canonicalEmail(userEmail));
+  }
+
+  async canRestorePlatformFile(
+    workspaceId: string,
+    userEmail: string,
+    destinationRelativePath: string,
+  ): Promise<boolean> {
+    const target = platformRestoreDestination(destinationRelativePath);
+    if (target === null) return false;
+    const email = canonicalEmail(userEmail);
+
+    let admin: boolean;
+    try {
+      admin = isAdminEmail(await this.loadModel(workspaceId), email);
+    } catch {
+      // The repository this rescue exists for is exactly the one whose
+      // `roles.yaml` may be the file that went missing, and `loadModel`
+      // throws when it cannot be read. With no model to ask, the deployment
+      // owner is the only admin left — and they are the person who sets
+      // `ADMIN_EMAIL`, so admitting them concedes nothing they did not have.
+      admin = this.deploymentOwners.has(email);
+    }
+    if (!admin) return false;
+
+    // A restore puts back what is MISSING, so the place it lands must be
+    // empty. An `access.md` goes back only into a folder that has none —
+    // into a folder that already has one it would not be a restore but a rule
+    // change wearing a move's clothes, and the destination's own rules would
+    // be the thing it bypassed the write gate to overwrite. The same holds at
+    // the root: a move is a rename on disk, so landing `.bevelignore` on a
+    // root that already has one would silently replace it, and the repository
+    // was never missing that file to begin with.
+    const destination =
+      target.kind === 'root' ? target.name : path.join(target.dir, 'access.md');
+    const repoDir = await this.repoDir(workspaceId);
+    try {
+      await fs.stat(path.join(repoDir, destination));
+      return false;
+    } catch (err) {
+      if (isAbsence(err)) return true;
+      // Anything other than genuine absence is not an answer: fail closed.
+      return false;
+    }
   }
 
   async eligibleWritersForPathsAtRef(

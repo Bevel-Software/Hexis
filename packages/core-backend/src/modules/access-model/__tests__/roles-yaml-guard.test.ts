@@ -7,6 +7,8 @@ import {
   NEW_ROLE_GUIDANCE,
   RolesYamlInvalidError,
   RolesYamlNewRoleError,
+  RolesYamlUnknownGroupError,
+  assertKnownGroups,
 } from '../roles-yaml-guard.js';
 
 const KB = 'knowledge-base';
@@ -142,6 +144,54 @@ describe('roles-yaml-guard', () => {
       await expect(run(new TextEncoder().encode(`${CURRENT}  Phoenix:\n    - p@x.eu\n`))).rejects.toBeInstanceOf(
         RolesYamlNewRoleError,
       );
+    });
+
+    describe('group entries', () => {
+      const GROUPS = new Map([['platform team', { displayName: 'Platform Team', emails: new Set(['p@x.eu']) }]]);
+      const active = { groups: GROUPS, sourceFile: 'groups.yaml' };
+      const runWithGroups = (content: string, groups: typeof active | null = active, current: string | null = CURRENT) =>
+        Promise.resolve().then(() =>
+          makeAgentRolesYamlWriteValidator(KB, async () => current, async () => groups)(`${KB}/roles.yaml`, content),
+        );
+
+      it('passes an entry naming a known group, in any case or spacing', async () => {
+        await expect(runWithGroups(`${CURRENT}    - group:Platform Team\n`)).resolves.toBeUndefined();
+        await expect(runWithGroups(`${CURRENT}    - group:platform   TEAM\n`)).resolves.toBeUndefined();
+      });
+
+      it('refuses an unknown group with a 422 naming the entry and its role; nothing else is named', async () => {
+        const err = await runWithGroups(`${CURRENT}    - group:Platfrom Team\n    - group:Platform Team\n`).then(
+          () => null,
+          (e: unknown) => e,
+        );
+        expect(err).toBeInstanceOf(RolesYamlUnknownGroupError);
+        const refusal = err as RolesYamlUnknownGroupError;
+        expect(refusal.status).toBe(422);
+        expect(refusal.payload).toEqual({
+          kind: 'roles-yaml-unknown-group',
+          entries: [{ role: 'Sales', entry: 'group:Platfrom Team' }],
+          sourceFile: 'groups.yaml',
+        });
+        expect(refusal.message).toContain("'- group:Platfrom Team' under role 'Sales'");
+        expect(refusal.message).toContain('groups.yaml does not declare');
+      });
+
+      it('leaves an entry already in the file alone, so a retired group cannot block a membership edit', async () => {
+        const current = `${CURRENT}    - group:Retired\n`;
+        await expect(runWithGroups(`${current}    - u@x.eu\n`, active, current)).resolves.toBeUndefined();
+        // The same group added under ANOTHER role is a new entry, and is checked.
+        await expect(
+          runWithGroups('roles:\n  Admin:\n    - a@x.eu\n    - group:Retired\n  Sales:\n    - group:Retired\n', active, current),
+        ).rejects.toMatchObject({ entries: [{ role: 'Admin', entry: 'group:Retired' }] });
+      });
+
+      it('checks nothing when the group source cannot be read', async () => {
+        await expect(runWithGroups(`${CURRENT}    - group:Anything\n`, null)).resolves.toBeUndefined();
+      });
+
+      it('assertKnownGroups is the same check, callable on its own', () => {
+        expect(() => assertKnownGroups(CURRENT, `${CURRENT}    - group:Nope\n`, active)).toThrow(RolesYamlUnknownGroupError);
+      });
     });
 
     it('leaves every other path alone', async () => {

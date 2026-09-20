@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button } from '../../../shared/components';
+import { cn } from '../../../lib/utils';
+import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
 import { useLibraryToast } from '../state/toast.context';
 import { isInPlugin, withLinkHealth } from '../utils/status';
@@ -280,8 +282,6 @@ export function PluginPage() {
 
   return (
     <div className="pb-14">
-      <PluginBreadcrumb name={label} />
-
       {/* The title row carries the page's one persistent action. `Share` IS
           the manage-access dialog — not a doorway to it. It stays un-gated:
           for a non-writer the dialog renders read-only (its own `canWrite`
@@ -290,18 +290,29 @@ export function PluginPage() {
       {/* Three actions, beside the title, for everyone (proto:3012-3025).
           Share stays un-gated: for a non-writer the dialog renders read-only,
           which is exactly what "who is this shared with?" should answer. */}
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="mt-1.5 text-display font-semibold">{label}</h1>
-          {/* Where it lives — the folder is no longer the name, so it is
-              said beneath it, the way a file path sits under a document title. */}
-          {primaryFolder && (
-            <p className="mt-0.5 truncate font-mono text-meta text-ink-faint" title={primaryFolder}>
-              {primaryFolder}
-            </p>
-          )}
+      {/* On the shared band, the same height as the sidebar's header row, and
+          the FIRST row of the page — the breadcrumb rides on the band rather
+          than in a row above it, because a row above would push this one off
+          the line the sidebar's header row holds. The hand-tuned `mt-1.5`
+          that used to nudge the heading and the actions into agreement with
+          each other is gone too: the band centres both, and it is the only
+          thing deciding how tall this row is. */}
+      <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'justify-between gap-4')}>
+        {/* The trail and the title are the part of this row allowed to run out
+            of space; the actions beside them are not. `flex-1` + `min-w-0`
+            takes the row's shortfall from HERE, and `overflow-hidden` is what
+            makes that safe: the trail is a fixed width, so on a narrow
+            viewport a group that could only shrink would push its content
+            straight across the manifest and action buttons instead. Clipped,
+            the title truncates first, the trail goes last, and the controls
+            stay where they are and stay clickable. */}
+        <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+          <PluginBreadcrumb />
+          <h1 className="min-w-0 truncate text-display font-semibold" title={label}>
+            {label}
+          </h1>
         </div>
-        <div className="mt-1.5 flex items-center gap-1">
+        <div className="flex flex-none items-center gap-1">
           <ManifestButton kbDirName={kbDirName} folder={folderBelowRoot} canWrite={summary?.canWrite === true} />
           <PageActions
             onShare={primaryFolder ? () => setManageFolder(primaryFolder) : undefined}
@@ -325,6 +336,16 @@ export function PluginPage() {
           />
         </div>
       </div>
+      {/* Where it lives — the folder is no longer the name, so it is said
+          beneath the title bar, the way a file path sits under a document
+          title. Below the band rather than inside it: a second line in the
+          row would make the row taller than the band it shares with the
+          sidebar. */}
+      {primaryFolder && (
+        <p className="mt-0.5 truncate font-mono text-meta text-ink-faint" title={primaryFolder}>
+          {primaryFolder}
+        </p>
+      )}
 
       {/* Somebody is waiting on the person reading this. Rendered only for a
           plugin manager (canWrite) — every member can see the CRs elsewhere,
@@ -401,6 +422,18 @@ export function PluginPage() {
         skillItems={shownSkills}
         toolItems={toolItems}
         onOpen={openItem}
+        // This page is ONE plugin's, so a card here can be linked from it —
+        // and the ones that are say so, with the folder they live in on
+        // hover. The Advanced tree shows the disk and therefore does not list
+        // a linked skill under this folder; the pill is what stops the two
+        // views from looking like a contradiction.
+        linkedIn={plugin}
+        // The manifest's own roots, which is what the tooltip names — a
+        // manifest can link one skill folder outright, and only the summary
+        // says so (see `linkedHomeOf`). Absent while the summary loads, or
+        // when the plugins endpoint failed; the tooltip falls back rather
+        // than waiting.
+        linkedRoots={summary?.linkedRoots}
         // A skill's OWN rules, from its card — the skill page's Share, on the
         // skill's folder rather than the plugin's. It reuses this page's one
         // access dialog (`manageTarget`), the same one the title row's Share
@@ -416,9 +449,15 @@ export function PluginPage() {
         onRemove={summary?.canWrite ? setRemoving : undefined}
         // A LINK into a plugin whose links live in an external format cannot
         // be removed here — the endpoint refuses it — so it is not offered.
-        canRemove={(item) =>
-          summary?.linksAreManaged !== false || !(item.plugins?.some((m) => m.name === plugin && m.linked) ?? false)
-        }
+        canRemove={(item) => {
+          const linked = item.plugins?.some((m) => m.name === plugin && m.linked) ?? false;
+          // A TOOL reached through a linked root has no verb here at all: the
+          // unlink endpoint speaks skills (a root is linked, not the manual
+          // sitting in it), and deleting the file would take it from whoever
+          // the folder actually belongs to. It is removed where it lives.
+          if (linked && item.kind === 'integration') return false;
+          return summary?.linksAreManaged !== false || !linked;
+        }}
         emptySkills={
           filterOn ? (
             'Nothing in this band needs you right now.'

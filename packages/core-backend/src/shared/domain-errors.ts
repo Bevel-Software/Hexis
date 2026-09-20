@@ -168,10 +168,35 @@ export class PullRebaseConflictError extends WorkflowDomainError {
 }
 
 /**
+ * The platform has never heard of this branch: nothing it has cloned, and
+ * nothing any listing of origin's branches has mentioned. Distinct from
+ * `RemoteBranchGoneError`, which is the SAME git failure about a branch the
+ * platform did know — and answering that for a name nobody ever pushed told
+ * the reader their typo "no longer exists on the remote", which implies it
+ * once did. 404, and the message names the branch and nothing else: no git
+ * output, no remote URL.
+ */
+export class BranchNotFoundError extends WorkflowDomainError {
+  readonly kind = 'branch-not-found' as const;
+  constructor(readonly branch: string) {
+    super(`There is no branch named ${branch}.`, 404, {
+      kind: 'branch-not-found',
+      branch,
+    });
+    this.name = 'BranchNotFoundError';
+  }
+}
+
+/**
  * The clone's branch no longer exists on origin: the fetch that refreshes
  * `refs/remotes/origin/<branch>` found no such ref. Distinct from an
  * unreachable remote — the host answered, and the answer was "gone" — so a
  * caller can treat the clone as stale rather than the sync as failed. 410.
+ *
+ * Only for a branch the platform KNEW: a clone of it, or a listing that named
+ * it. For a name it has never heard of, the same git failure is a
+ * `BranchNotFoundError` — see `WorkspaceService.hasHeardOfBranch`. A sync
+ * always has the clone in hand, so it is always this one.
  */
 export class RemoteBranchGoneError extends WorkflowDomainError {
   readonly kind = 'remote-branch-gone' as const;

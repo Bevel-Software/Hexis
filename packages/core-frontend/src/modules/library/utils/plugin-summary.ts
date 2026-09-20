@@ -1,4 +1,5 @@
-import { isPersonalPluginFolder, pluginOfPath } from '@bevel-software/platform-shared';
+import { isPersonalPluginFolder, pluginOfPath, skillUnderRoot } from '@bevel-software/platform-shared';
+import type { PluginMembership } from '../services/library.api';
 import type { PluginPrincipals, PluginSummary } from '../services/plugins.api';
 
 /**
@@ -45,6 +46,39 @@ export function pluginHoldingPath<S extends Pick<PluginSummary, 'folders'>>(
     }
   }
   return best?.plugin ?? null;
+}
+
+/**
+ * Which plugins hold a TOOL, in the shape a skill's memberships arrive in.
+ *
+ * The server sends none: a `.tool` manual and an `mcp.json` server are not
+ * linked one by one the way a skill is, they are REACHED. So the membership
+ * is derived from the two facts the browser already holds — where the file
+ * is, and which roots each plugin's manifest points at:
+ *
+ *  - INLINE in the plugin whose folder holds the file (deepest wins, as
+ *    everywhere else a path is attributed to a plugin);
+ *  - LINKED into every other plugin one of whose linked roots holds it — the
+ *    tool sits beside the skills that root brought in, and arrives with them.
+ *
+ * `granted` is always true: the grant a link needs is an access rule on a
+ * SKILL's folder, and a tool has none to lose or repair.
+ */
+export function pluginsHoldingTool(
+  repoPath: string,
+  summaries: readonly Pick<PluginSummary, 'name' | 'folders' | 'linkedRoots'>[],
+): PluginMembership[] {
+  const inline = pluginHoldingPath(repoPath, summaries);
+  const memberships: PluginMembership[] = [];
+  if (inline) memberships.push({ name: inline.name, linked: false, granted: true });
+  for (const summary of summaries) {
+    if (summary === inline) continue;
+    // `skillUnderRoot` is the one containment rule for a linked root, not a
+    // rule about skills — a tool under the root is under it the same way.
+    if (!(summary.linkedRoots ?? []).some((root) => skillUnderRoot(repoPath, root))) continue;
+    memberships.push({ name: summary.name, linked: true, granted: true });
+  }
+  return memberships;
 }
 
 /** What a plugin is called on screen — its display name, else its identity. */

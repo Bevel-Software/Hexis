@@ -21,6 +21,7 @@ const principals = (over: Partial<PluginCatalogEntry>): PluginCatalogEntry => ({
   name: 'gtm',
   displayName: 'GTM',
   folders: ['Plugins/GTM'],
+  linkedRoots: [],
   linksAreManaged: true,
   skillCount: 0,
   toolCount: 0,
