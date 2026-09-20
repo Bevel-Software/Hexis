@@ -45,7 +45,7 @@ import {
   type Verb,
 } from '../access-model/access-grammar.js';
 import { listAccessDeclarationsUnder } from './access-declarations.js';
-import { emailsInView, labelAccountHolders, resolveAccessView } from './access-view.js';
+import { emailsInView, holderPrincipals, labelAccountHolders, resolveAccessView } from './access-view.js';
 import type { AccessView, LabelledAccessView } from './access-view.js';
 import { toHttpError as sharedToHttpError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
 import { RolesAdminService } from './roles-admin.service.js';
@@ -264,9 +264,24 @@ export function createAccessRoutes(
    * GET /api/workspace/:id/access?path=<relativePath>&kind=<folder|file>
    * Returns the resolved access view for the current user at a single path,
    * including a per-principal `sources` map (where each principal's access comes
-   * from) so the dialog can show inherited-vs-direct. `kind` defaults to `file`
-   * (the resolver treats a folder vs a file's own scope differently only for the
-   * `sources` direct/ancestor split; the eligible/verdict fields are identical).
+   * from) so the dialog can show inherited-vs-direct, the matching `denials` map
+   * (per verb, the entries that DENY it — same direct/ancestor split, closest
+   * first, stopping at a grant that beats them) and `deniedHere` — every
+   * principal a deny ON THIS TARGET names, however many verbs it took. Note what
+   * that is NOT: a partial restriction (edit denied, read still inherited) puts
+   * the principal in `deniedHere` while they stay in the eligible lists for the
+   * verbs they keep; only a principal denied every verb holds nothing and drops
+   * out of those lists. A deny naming a role nobody knows appears in neither
+   * field — the resolver ignores such a line, so it restricts nothing.
+   *
+   * Together those two let the dialog decide its sections by LOCAL ENTRY, grant
+   * or denial, rather than by local grant alone: without them a person
+   * restricted here reads as merely inherited and drops into the collapsed
+   * parent section, looking removed.
+   *
+   * `kind` defaults to `file` (the resolver treats a folder vs a file's own scope
+   * differently only for the direct/ancestor split; the eligible/verdict fields
+   * are identical).
    */
   router.get('/workspace/:id/access', async (req, res) => {
     const user = await requireUser(req, res);
@@ -347,6 +362,70 @@ export function createAccessRoutes(
       res.json({
         overrides: overrides.filter((o) => readable.get(o.governs) === true),
         truncated,
+      });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * GET /api/workspace/:id/access/prospective?from=<file>&toDir=<folder>
+   *
+   * Who can open and who can edit one file where it is, and where a move
+   * would put it — `{ before, after }`, each `{ read, write }` lists of
+   * principals named as their grants name them. `toDir` is the destination
+   * FOLDER (`''` is the repo root); the file keeps its name, so the route
+   * derives the destination path itself rather than trusting a second one.
+   *
+   * The destination path does not exist yet, which is why this cannot be two
+   * calls to `GET /access`: the resolver is asked for a hypothetical, with
+   * the file's own frontmatter (read where the file actually is) layered over
+   * the destination's folder chain. Nothing is written and nothing is moved.
+   *
+   * Gated like the sibling `overrides` route rather than the permissive
+   * `GET /access`: the caller must resolve read on the file being moved. The
+   * lists name people, and someone who cannot see the file has no business
+   * learning who can.
+   *
+   * `from` must be a FILE. A folder carries its own `access.md` and governs
+   * everything under it, which is a different question; the resolver refuses
+   * one with a 400 rather than answering it as if it were a file.
+   */
+  router.get('/workspace/:id/access/prospective', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+
+    const rawFrom = req.query.from;
+    // An empty `toDir` is the repo ROOT, a real destination — only a missing
+    // one is a bad request.
+    const rawToDir = req.query.toDir;
+    if (typeof rawFrom !== 'string' || !rawFrom) {
+      res.status(400).json({ error: 'from query parameter is required' });
+      return;
+    }
+    if (typeof rawToDir !== 'string') {
+      res.status(400).json({ error: 'toDir query parameter is required' });
+      return;
+    }
+
+    try {
+      const from = toRepoRelative(rawFrom);
+      assertRepoRelativeTarget(from, 'file');
+      const toDir = toRepoRelative(rawToDir);
+      assertRepoRelativeTarget(toDir, 'folder');
+
+      if (!(await accessControl.canRead(req.params.id, user.email, from))) {
+        res.status(403).json({ error: 'You do not have access to this file.' });
+        return;
+      }
+
+      const name = from.slice(from.lastIndexOf('/') + 1);
+      const to = toDir ? `${toDir}/${name}` : name;
+      const { before, after } = await accessControl.prospectiveHolders(req.params.id, from, to);
+      res.json({
+        before: { read: holderPrincipals(before.read), write: holderPrincipals(before.write) },
+        after: { read: holderPrincipals(after.read), write: holderPrincipals(after.write) },
       });
     } catch (err) {
       const { status, body } = toHttpError(err);

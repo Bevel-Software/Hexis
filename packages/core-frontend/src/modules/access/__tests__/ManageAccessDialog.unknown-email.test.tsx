@@ -273,6 +273,31 @@ describe('ManageAccessDialog: an email with no account is labelled, not refused'
     expect(within(await rowFor(KNOWN.name)).queryByText(NOTE)).toBeNull();
   });
 
+  it('a person only RESTRICTED here carries the note too', async () => {
+    // A `deny` on a mistyped address restricts nobody and looks fine; the
+    // restricted row is the one place that typo would otherwise stay hidden.
+    api.fetchFileAccess.mockResolvedValue({
+      ...EMPTY,
+      deniedHere: {
+        principals: [],
+        users: [
+          { ...KNOWN, hasAccount: true },
+          { ...UNKNOWN, hasAccount: false },
+        ],
+      },
+      // The `deny` is written HERE, which is what gives a restricted-only
+      // person a direct row of their own (see `classifyManage`).
+      denials: {
+        [`u:${KNOWN.email}`]: { read: [{ kind: 'direct' }] },
+        [`u:${UNKNOWN.email}`]: { read: [{ kind: 'direct' }] },
+      },
+    } as AccessResponse);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    expect(within(await rowFor(UNKNOWN.name)).getByText(NOTE)).toBeInTheDocument();
+    expect(within(await rowFor(KNOWN.name)).queryByText(NOTE)).toBeNull();
+  });
+
   it('the row note disappears once that person has signed in', async () => {
     // Same grant, two loads of the dialog: before the first sign-in and after
     // it. Nothing about the grant changed in between.

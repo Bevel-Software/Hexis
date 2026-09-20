@@ -155,7 +155,7 @@ describe('ManageAccessDialog: Download carries Read', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
-  it('on an EXISTING row whose only grant is download: Read reads as checked and implied', async () => {
+  it('on an EXISTING row whose only grant is download: Read reads as checked, and is still pickable', async () => {
     const user = userEvent.setup();
     // A server that has not folded yet (`readers` empty): the row must still
     // show Read, because the grant the file holds confers it.
@@ -171,8 +171,13 @@ describe('ManageAccessDialog: Download carries Read', () => {
     await user.click(rowTrigger);
     const menu = screen.getAllByRole('button', { name: /^can download$/i }).slice(-1)[0]
       .parentElement as HTMLElement;
+    // The summary says both, and both items read as checked.
     const readItem = within(menu).getByRole('button', { name: /^can read$/i });
-    expect(readItem).toBeDisabled();
-    expect(within(menu).getByRole('button', { name: /^can download$/i })).not.toBeDisabled();
+    expect(readItem).toHaveClass('font-medium');
+    expect(within(menu).getByRole('button', { name: /^can download$/i })).toHaveClass('font-medium');
+    // Read is no longer greyed out. Each item is a whole SET now, not a box
+    // that Download holds down: picking "Can read" means read AND NOTHING ELSE,
+    // which is exactly how a download grant is taken back.
+    expect(readItem).not.toBeDisabled();
   });
 });

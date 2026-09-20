@@ -38,6 +38,8 @@ async function makeHarness(opts: {
   accounts?: string[];
   /** People the knowledge base knows of, for the suggest route. */
   kbPeople?: { name: string; email: string }[];
+  /** People RESTRICTED on the target — named by a `deny`, holding nothing. */
+  denied?: { name: string; email: string }[];
   /** Override the users database — to stand in a lookup that is DOWN. */
   db?: Database;
 }): Promise<{ server: Server; baseUrl: string; files: Map<string, string> }> {
@@ -56,6 +58,7 @@ async function makeHarness(opts: {
     eligibleReaders: vi.fn(async () => ({ restricted: true, roles: [], users: granted })),
     eligibleOwners: vi.fn(async () => ({ roles: [], users: [] })),
     eligibleDownloaders: vi.fn(async () => ({ roles: [], users: [] })),
+    locallyDeniedPrincipals: vi.fn(async () => ({ principals: [], users: opts.denied ?? [] })),
   } as unknown as IAccessControl;
 
   const workspaceService = {
@@ -190,6 +193,21 @@ describe('a grant to an email with no account', () => {
     // would hide them from the writers half of the dialog while the readers
     // assertion above still passed.
     expect(body.eligible.users).toEqual([
+      { ...KNOWN, hasAccount: true },
+      { ...UNKNOWN, hasAccount: false },
+    ]);
+  });
+
+  it('labels a person who is only RESTRICTED here — a deny on a mistyped address restricts nobody', async () => {
+    // Restricted people hold nothing, so no eligible list names them; the
+    // `deny` is still an entry on this target with a row of its own, and that
+    // row is where a typo would otherwise stay invisible.
+    h = await makeHarness({ denied: [KNOWN, UNKNOWN], accounts: [KNOWN.email] });
+
+    const body = (await (await view()).json()) as {
+      deniedHere: { users: { email: string; hasAccount: boolean }[] };
+    };
+    expect(body.deniedHere.users).toEqual([
       { ...KNOWN, hasAccount: true },
       { ...UNKNOWN, hasAccount: false },
     ]);

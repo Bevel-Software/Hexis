@@ -1,8 +1,10 @@
 import type {
   AccessDecisionSource,
   AccessTargetKind,
+  DenialSources,
   GrantSource,
   GrantSources,
+  HolderList,
   IAccessControl,
   ResolvedPrincipal,
 } from './access-control.interface.js';
@@ -23,7 +25,7 @@ export async function resolveAccessView(
   userEmail: string,
   kind: AccessTargetKind,
 ) {
-  const [canRead, canWrite, canDownload, canOwner, eligible, readers, owners, downloaders] =
+  const [canRead, canWrite, canDownload, canOwner, eligible, readers, owners, downloaders, deniedHere] =
     await Promise.all([
       accessControl.canRead(workspaceId, userEmail, repoRelTarget),
       accessControl.canWrite(workspaceId, userEmail, repoRelTarget),
@@ -33,6 +35,12 @@ export async function resolveAccessView(
       accessControl.eligibleReaders(workspaceId, repoRelTarget),
       accessControl.eligibleOwners(workspaceId, repoRelTarget),
       accessControl.eligibleDownloaders(workspaceId, repoRelTarget),
+      // The principals this target RESTRICTS. They hold nothing through it, so
+      // no eligible list can carry them — yet the `deny` naming them is an entry
+      // ON this target, and the dialog's row for it is where the restriction is
+      // lifted. Unioned into the row set below alongside the holders.
+      accessControl.locallyDeniedPrincipals?.(workspaceId, kind, repoRelTarget) ??
+        Promise.resolve({ principals: [], users: [] }),
     ]);
 
   // Per-principal, per-verb origin (direct / ancestor — MECE over editable
@@ -49,43 +57,78 @@ export async function resolveAccessView(
   // group/everyone/rescue has no source (the verb is absent) and renders
   // non-actionable. Built over the union of every principal in the four
   // eligible lists (kinded `principals`, with the name-only `roles` list as
-  // the all-roles fallback).
+  // the all-roles fallback) PLUS every principal this target DENIES — a
+  // restriction is an entry here too, and a principal denied every verb
+  // appears in no eligible list at all.
   const collectives = new Map<string, ResolvedPrincipal>();
+  const addCollective = (p: ResolvedPrincipal) => {
+    const key = rowKey(p);
+    if (!collectives.has(key)) collectives.set(key, p);
+  };
   for (const list of [eligible, readers, owners, downloaders]) {
     const kinded =
       list.principals ?? list.roles.map((name) => ({ name, kind: 'role' as const }));
-    for (const p of kinded) {
-      const key = rowKey(p);
-      if (!collectives.has(key)) collectives.set(key, p);
-    }
+    for (const p of kinded) addCollective(p);
   }
+  for (const p of deniedHere.principals) addCollective(p);
   const userSet = new Map<string, { name: string; email: string }>();
-  for (const u of [...eligible.users, ...readers.users, ...owners.users, ...downloaders.users]) {
+  for (const u of [
+    ...eligible.users,
+    ...readers.users,
+    ...owners.users,
+    ...downloaders.users,
+    ...deniedHere.users,
+  ]) {
+    // First writer wins, and the eligible lists come first deliberately: they
+    // carry the roster's display name, while a deny line carries only whatever
+    // the file spelled.
     if (!userSet.has(u.email.toLowerCase())) userSet.set(u.email.toLowerCase(), u);
   }
   const sources: Record<string, GrantSources> = {};
+  // Denials ride in their OWN map, keyed the same way. A row reads both: the
+  // grants say where each held verb comes from, the denials say why each missing
+  // one is missing — "restricted here" as against never granted.
+  const denials: Record<string, DenialSources> = {};
   await Promise.all([
     ...[...collectives.entries()].map(async ([key, p]) => {
       const token =
         p.kind === 'role' && canonicalRoleName(p.name) !== EVERYONE_CANONICAL
           ? `${ROLE_TOKEN_PREFIX}${p.name}`
           : p.name;
-      sources[key] = await accessControl.grantSources(workspaceId, kind, repoRelTarget, {
-        kind: 'role',
-        role: token,
-      });
+      const principal = { kind: 'role' as const, role: token };
+      const [grants, denied] = await Promise.all([
+        accessControl.grantSources(workspaceId, kind, repoRelTarget, principal),
+        accessControl.denialSources?.(workspaceId, kind, repoRelTarget, principal) ??
+          Promise.resolve({} as DenialSources),
+      ]);
+      sources[key] = grants;
+      if (Object.keys(denied).length > 0) denials[key] = denied;
     }),
     ...[...userSet.values()].map(async (u) => {
-      sources[`u:${u.email.toLowerCase()}`] = await accessControl.grantSources(
-        workspaceId,
-        kind,
-        repoRelTarget,
-        { kind: 'user', email: u.email },
-      );
+      const principal = { kind: 'user' as const, email: u.email };
+      const [grants, denied] = await Promise.all([
+        accessControl.grantSources(workspaceId, kind, repoRelTarget, principal),
+        accessControl.denialSources?.(workspaceId, kind, repoRelTarget, principal) ??
+          Promise.resolve({} as DenialSources),
+      ]);
+      sources[`u:${u.email.toLowerCase()}`] = grants;
+      if (Object.keys(denied).length > 0) denials[`u:${u.email.toLowerCase()}`] = denied;
     }),
   ]);
 
-  return { canRead, canWrite, canDownload, canOwner, eligible, readers, owners, downloaders, sources };
+  return {
+    canRead,
+    canWrite,
+    canDownload,
+    canOwner,
+    eligible,
+    readers,
+    owners,
+    downloaders,
+    sources,
+    denials,
+    deniedHere,
+  };
 }
 
 export type AccessView = Awaited<ReturnType<typeof resolveAccessView>>;
@@ -93,6 +136,32 @@ export type AccessView = Awaited<ReturnType<typeof resolveAccessView>>;
 /** The dialog's row key for a collective principal. */
 function rowKey(p: ResolvedPrincipal): string {
   return `${p.kind === 'group' ? 'g' : p.kind === 'plugin' ? 'p' : 'r'}:${p.name.toLowerCase()}`;
+}
+
+/**
+ * A principal as its grant names it — a group, a role, a plugin principal
+ * (`plugin/<Name>/<verb>`), or a person granted directly. The reduced
+ * {@link RosterEntry} without the sources, for consumers that only need to
+ * know WHO holds a verb: the move confirmation's before/after lists.
+ */
+export interface AccessPrincipalRef {
+  kind: 'group' | 'role' | 'plugin' | 'person';
+  name: string;
+  email?: string;
+}
+
+/**
+ * The principals holding one verb, in the roster's order — collectives as the
+ * resolver kinded them, then the directly granted people. An older resolver
+ * double omitting `principals` degrades to the name-only `roles` (all roles),
+ * exactly as `accessRoster` does, so the two never disagree about a name.
+ */
+export function holderPrincipals(list: HolderList): AccessPrincipalRef[] {
+  const kinded = list.principals ?? list.roles.map((name) => ({ name, kind: 'role' as const }));
+  return [
+    ...kinded.map((p): AccessPrincipalRef => ({ kind: p.kind, name: p.name })),
+    ...list.users.map((u): AccessPrincipalRef => ({ kind: 'person', name: u.name, email: u.email })),
+  ];
 }
 
 /** One principal holding one verb, with every scope that names it for that verb, closest first. */
@@ -181,12 +250,18 @@ type Labelled<L extends { users: { name: string; email: string }[] }> = Omit<L, 
 /** {@link AccessView} with every person carrying {@link AccessViewUser.hasAccount}. */
 export type LabelledAccessView = Omit<
   AccessView,
-  'eligible' | 'readers' | 'owners' | 'downloaders'
+  'eligible' | 'readers' | 'owners' | 'downloaders' | 'deniedHere'
 > & {
   eligible: Labelled<AccessView['eligible']>;
   readers: Labelled<AccessView['readers']>;
   owners: Labelled<AccessView['owners']>;
   downloaders: Labelled<AccessView['downloaders']>;
+  /**
+   * Restricted here, labelled the same way. A `deny` on a mistyped address
+   * restricts nobody and looks fine — this row is where such a typo would
+   * otherwise stay invisible.
+   */
+  deniedHere: Labelled<AccessView['deniedHere']>;
 };
 
 /**
@@ -197,7 +272,13 @@ export type LabelledAccessView = Omit<
 export function emailsInView(view: AccessView): string[] {
   return [
     ...new Set(
-      [...view.eligible.users, ...view.readers.users, ...view.owners.users, ...view.downloaders.users]
+      [
+        ...view.eligible.users,
+        ...view.readers.users,
+        ...view.owners.users,
+        ...view.downloaders.users,
+        ...view.deniedHere.users,
+      ]
         .map((u) => u.email.trim().toLowerCase())
         .filter((e) => e.length > 0),
     ),
@@ -226,5 +307,6 @@ export function labelAccountHolders(
     readers: mark(view.readers),
     owners: mark(view.owners),
     downloaders: mark(view.downloaders),
+    deniedHere: mark(view.deniedHere),
   };
 }
