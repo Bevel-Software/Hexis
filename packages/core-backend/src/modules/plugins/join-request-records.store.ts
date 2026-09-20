@@ -22,9 +22,23 @@ export interface JoinRequestRecord {
   changeRequestNumber: number | null;
   /** When a process took this row's git work; null when nobody holds it. */
   claimedAt: Date | null;
+  /**
+   * The fencing token of the claim `claimedAt` is the liveness of; null when
+   * nobody holds it. A worker names this on every write that holds or decides
+   * the row, so a superseded one writes nothing.
+   */
+  claimToken: string | null;
 }
 
 export type JoinRequestStatus = 'pending' | 'opened' | 'failed';
+
+/**
+ * A record this process HOLDS — the only shape a claim hands back, and the
+ * only one the write methods below will accept a token from. Carrying the
+ * token in the type is what stops a caller from settling a row it never
+ * claimed: there is no token to pass unless a claim produced one.
+ */
+export type ClaimedJoinRequest = JoinRequestRecord & { claimToken: string };
 
 /**
  * Where join requests are recorded.
@@ -59,25 +73,44 @@ export interface JoinRequestStore {
    *
    * Claims expire (see `claimed_at` on the table) so a process that dies
    * holding one does not owe the request forever.
+   *
+   * The record that comes back carries a FRESH `claimToken`, which the caller
+   * names on every write after it. That is what makes the claim exclusive
+   * rather than merely advisory: a worker that overran the stale window and
+   * had its row taken can no longer settle the attempt that replaced it.
    */
-  claim(id: string, staleAfterMs: number): Promise<JoinRequestRecord | null>;
+  claim(id: string, staleAfterMs: number): Promise<ClaimedJoinRequest | null>;
   /**
    * Say the claim on this row is still being worked — push its timestamp
    * forward. What turns `claimed_at` from a deadline into a liveness signal:
    * a process that is still going keeps its row however long the work takes,
    * and one that died stops beating and lets go within the stale window.
+   *
+   * Answers whether the claim is still THIS caller's. False means the row
+   * moved on without it: taken over after the window lapsed, settled by
+   * somebody else, or deleted outright — which is the shape account erasure
+   * takes. A worker that reads false has to stop before its next side effect
+   * rather than finish work nobody is owed and open a change request for an
+   * account that no longer exists.
    */
-  heartbeat(id: string): Promise<void>;
+  heartbeat(id: string, claimToken: string): Promise<boolean>;
   /**
    * Give a claim back without deciding the request — the platform was not
    * ready, so the row stays `pending` and becomes claimable again at once
    * instead of after the stale window.
    */
-  release(id: string): Promise<void>;
-  /** The git work landed: the change request exists, under this number. */
-  markOpened(id: string, changeRequestNumber: number): Promise<void>;
-  /** The git work refused, in its own words. */
-  markFailed(id: string, reason: string): Promise<void>;
+  release(id: string, claimToken: string): Promise<void>;
+  /**
+   * The git work landed: the change request exists, under this number.
+   * A no-op unless the caller still holds the claim it names.
+   */
+  markOpened(id: string, claimToken: string, changeRequestNumber: number): Promise<void>;
+  /**
+   * The git work refused, in its own words. A no-op unless the caller still
+   * holds the claim it names — a superseded worker's failure must not be
+   * stamped on the attempt that replaced it.
+   */
+  markFailed(id: string, claimToken: string, reason: string): Promise<void>;
 }
 
 export class DbJoinRequestStore implements JoinRequestStore {
@@ -111,6 +144,7 @@ export class DbJoinRequestStore implements JoinRequestStore {
         // already `pending` keeps whatever claim is running against it, so a
         // second click still cannot start a second job.
         claimedAt: sql`case when ${pluginJoinRequests.status} = 'failed' then null else ${pluginJoinRequests.claimedAt} end`,
+        claimToken: sql`case when ${pluginJoinRequests.status} = 'failed' then null else ${pluginJoinRequests.claimToken} end`,
         updatedAt: new Date(),
       })
       .where(
@@ -154,10 +188,14 @@ export class DbJoinRequestStore implements JoinRequestStore {
    * database in the same statement that takes the row, so two processes
    * asking together cannot both be told yes.
    */
-  async claim(id: string, staleAfterMs: number): Promise<JoinRequestRecord | null> {
+  async claim(id: string, staleAfterMs: number): Promise<ClaimedJoinRequest | null> {
     const [row] = await this.db
       .update(pluginJoinRequests)
-      .set({ claimedAt: new Date() })
+      // The token is minted by the DATABASE, in the same statement that takes
+      // the row, so it is unique to this claim by construction — two callers
+      // racing here cannot be handed the same one even if one of them read a
+      // stale row a moment before.
+      .set({ claimedAt: new Date(), claimToken: sql`gen_random_uuid()` })
       .where(
         and(
           eq(pluginJoinRequests.id, id),
@@ -166,14 +204,22 @@ export class DbJoinRequestStore implements JoinRequestStore {
         ),
       )
       .returning();
-    return row ? toRecord(row) : null;
+    if (!row) return null;
+    const record = toRecord(row);
+    // The same statement that took the row minted the token, so a returned
+    // row always has one. The check is the type's rather than a real branch —
+    // and if the column ever did come back null, refusing the claim is the
+    // safe reading: no token, no exclusive right to the row.
+    return record.claimToken ? { ...record, claimToken: record.claimToken } : null;
   }
 
-  async heartbeat(id: string): Promise<void> {
-    // Conditional on the row still being claimed AND pending: a beat that
-    // landed after the work finished must not resurrect a claim on a row
-    // somebody else may by then be entitled to.
-    await this.db
+  async heartbeat(id: string, claimToken: string): Promise<boolean> {
+    // Conditional on the row still being claimed AND pending AND claimed by
+    // THIS caller. Pending-and-claimed keeps a late beat from resurrecting a
+    // claim on a row that has already been settled; the token keeps a worker
+    // which overran the stale window from beating — and so from keeping alive
+    // — a claim that now belongs to its replacement.
+    const beaten = await this.db
       .update(pluginJoinRequests)
       .set({ claimedAt: new Date() })
       .where(
@@ -181,29 +227,55 @@ export class DbJoinRequestStore implements JoinRequestStore {
           eq(pluginJoinRequests.id, id),
           eq(pluginJoinRequests.status, 'pending'),
           isNotNull(pluginJoinRequests.claimedAt),
+          eq(pluginJoinRequests.claimToken, claimToken),
+        ),
+      )
+      .returning({ id: pluginJoinRequests.id });
+    // Nothing matched: taken over, already settled, or the row is gone —
+    // account erasure deletes it. All three mean "stop", which is why the
+    // caller gets a boolean rather than silence.
+    return beaten.length > 0;
+  }
+
+  async release(id: string, claimToken: string): Promise<void> {
+    await this.db
+      .update(pluginJoinRequests)
+      .set({ claimedAt: null, claimToken: null })
+      .where(
+        and(
+          eq(pluginJoinRequests.id, id),
+          eq(pluginJoinRequests.status, 'pending'),
+          eq(pluginJoinRequests.claimToken, claimToken),
         ),
       );
   }
 
-  async release(id: string): Promise<void> {
+  async markOpened(id: string, claimToken: string, changeRequestNumber: number): Promise<void> {
     await this.db
       .update(pluginJoinRequests)
-      .set({ claimedAt: null })
-      .where(and(eq(pluginJoinRequests.id, id), eq(pluginJoinRequests.status, 'pending')));
+      .set({
+        status: 'opened',
+        changeRequestNumber,
+        failureReason: null,
+        // The claim is spent with the outcome it decided, in one statement.
+        claimedAt: null,
+        claimToken: null,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(pluginJoinRequests.id, id), eq(pluginJoinRequests.claimToken, claimToken)));
   }
 
-  async markOpened(id: string, changeRequestNumber: number): Promise<void> {
+  async markFailed(id: string, claimToken: string, reason: string): Promise<void> {
     await this.db
       .update(pluginJoinRequests)
-      .set({ status: 'opened', changeRequestNumber, failureReason: null, updatedAt: new Date() })
-      .where(eq(pluginJoinRequests.id, id));
-  }
-
-  async markFailed(id: string, reason: string): Promise<void> {
-    await this.db
-      .update(pluginJoinRequests)
-      .set({ status: 'failed', failureReason: reason, updatedAt: new Date() })
-      .where(eq(pluginJoinRequests.id, id));
+      .set({
+        status: 'failed',
+        failureReason: reason,
+        claimedAt: null,
+        claimToken: null,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(pluginJoinRequests.id, id), eq(pluginJoinRequests.claimToken, claimToken)));
   }
 }
 
@@ -220,6 +292,7 @@ function toRecord(row: typeof pluginJoinRequests.$inferSelect): JoinRequestRecor
     failureReason: row.failureReason,
     changeRequestNumber: row.changeRequestNumber,
     claimedAt: row.claimedAt,
+    claimToken: row.claimToken,
   };
 }
 

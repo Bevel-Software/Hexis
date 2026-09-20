@@ -10,7 +10,11 @@ import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { pluginsWorkspaceId } from './plugins.service.js';
-import type { JoinRequestRecord, JoinRequestStore } from './join-request-records.store.js';
+import type {
+  ClaimedJoinRequest,
+  JoinRequestRecord,
+  JoinRequestStore,
+} from './join-request-records.store.js';
 
 const log = logger('plugins');
 
@@ -69,6 +73,30 @@ export class JoinRequestNotReadyError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'JoinRequestNotReadyError';
+  }
+}
+
+/**
+ * The row stopped being this process's to finish, mid-work.
+ *
+ * Two ways that happens, and neither is the request's fault. The claim
+ * LAPSED — this process stalled past {@link CLAIM_STALE_AFTER_MS}, so another
+ * took the row over and is doing the work now. Or the row was DELETED, which
+ * is what account erasure does to it: the person who asked no longer exists,
+ * so neither does the ask.
+ *
+ * In both cases the only correct thing left is to stop, and in particular to
+ * stop BEFORE opening a change request. Carrying on would open a second
+ * change request alongside the replacement's for the first case, and one for
+ * an erased account in the second — a change request in a deleted person's
+ * name, which the row that would have recorded it no longer exists to undo.
+ * Nothing is written and nothing is said to the requester: for a lapsed claim
+ * the holder will say it, and for an erased account there is nobody to tell.
+ */
+class ClaimLostError extends Error {
+  constructor() {
+    super('the recorded request is no longer this process\'s to finish');
+    this.name = 'ClaimLostError';
   }
 }
 
@@ -154,6 +182,24 @@ export interface JoinRequestJobsDeps {
  * beats. A live process holds a row for as long as the work honestly takes; a
  * dead one lets go in ninety seconds.
  *
+ * AND THE CLAIM IS FENCED, because a heartbeat still cannot make missing the
+ * window impossible — a long GC pause, a frozen host, a partition that
+ * outlives three beats. A worker that comes back from one believes it still
+ * holds a row another worker has since taken, and if the writes that decide
+ * the row were addressed by id alone it would settle its replacement's
+ * attempt: the replacement's fresh run stamped `opened` by the straggler's
+ * stale number, or a run that is going fine stamped `failed` under it. So a
+ * claim mints a token, and every write that holds or decides the row names
+ * the token it believes it holds. A superseded worker writes nothing.
+ *
+ * The same mechanism is what makes the row's DELETION visible. Account
+ * erasure removes a requester's rows outright, in a transaction this has no
+ * part in; a beat against a row that is gone matches nothing, exactly as a
+ * beat against a stolen one does. Both read as "not ours any more", which is
+ * why {@link attempt} beats the claim immediately before the git and again
+ * immediately before the change request, and stops rather than opening one
+ * for an account that no longer exists.
+ *
  * AND SOMETHING ALWAYS LOOKS AGAIN. {@link startSweeping} re-reads the owed
  * rows on a timer, not only at boot, because the one case boot cannot cover
  * is the redeploy: the incoming process skips a row the outgoing one holds,
@@ -236,12 +282,12 @@ export class PluginJoinRequestJobs {
    */
   startSweeping(intervalMs: number = SWEEP_INTERVAL_MS): void {
     void this.sweep().catch((err: unknown) => {
-      log.warn(`could not look at the join requests still owed: ${sanitizeError(err)}`);
+      log.warn(`could not look at the join requests still owed: ${loggable(sanitizeError(err))}`);
     });
     if (this.sweepTimer) return;
     this.sweepTimer = setInterval(() => {
       void this.sweep().catch((err: unknown) => {
-        log.warn(`could not look at the join requests still owed: ${sanitizeError(err)}`);
+        log.warn(`could not look at the join requests still owed: ${loggable(sanitizeError(err))}`);
       });
     }, intervalMs);
     // Never a reason for the process to stay alive: every row is durable, and
@@ -271,7 +317,7 @@ export class PluginJoinRequestJobs {
     // wrap the whole attempt: the claim has to be refreshed for as long as
     // the work runs, and the work is the part that can take minutes.
     const live = await this.store.claim(record.id, CLAIM_STALE_AFTER_MS).catch((err: unknown) => {
-      log.warn(`could not claim a join request: ${sanitizeError(err)}`);
+      log.warn(`could not claim a join request: ${loggable(sanitizeError(err))}`);
       return null;
     });
     if (!live) {
@@ -281,49 +327,88 @@ export class PluginJoinRequestJobs {
       return;
     }
 
-    const heartbeat = setInterval(() => {
-      void this.store.heartbeat(live.id).catch((err: unknown) => {
+    // One beat, and the answer to "is this row still mine". Both questions
+    // are the same statement, so asking the second costs nothing beyond the
+    // first — which is why the guard before each side effect can afford to
+    // ask it rather than trust a flag last refreshed up to thirty seconds ago.
+    let held = true;
+    const beat = async (): Promise<boolean> => {
+      if (!held) return false;
+      const still = await this.store.heartbeat(live.id, live.claimToken).catch((err: unknown) => {
         // A missed beat is survivable — the window is three of them — and the
-        // work is still running, so there is nothing to do but note it.
-        log.warn(`could not refresh a join-request claim: ${sanitizeError(err)}`);
+        // work is still running, so there is nothing to do but note it. In
+        // particular it is NOT read as the claim being lost: a database blip
+        // must not abandon work that is going fine.
+        log.warn(`could not refresh a join-request claim: ${loggable(sanitizeError(err))}`);
+        return true;
       });
-    }, CLAIM_HEARTBEAT_MS);
+      if (!still) held = false;
+      return still;
+    };
+
+    const heartbeat = setInterval(() => void beat(), CLAIM_HEARTBEAT_MS);
     heartbeat.unref?.();
 
     try {
-      await this.attempt(record);
+      await this.attempt(record, live, async () => {
+        if (!(await beat())) throw new ClaimLostError();
+      });
     } catch (err) {
       const reason = sanitizeError(err);
       // `pluginKey` is a persisted folder path, so it is escaped before it
       // reaches a log line: a folder carrying control characters could
       // otherwise write newlines of its own into the log.
       const key = printable(record.pluginKey);
+      if (err instanceof ClaimLostError) {
+        // Nothing is written, deliberately — see ClaimLostError. Logged all
+        // the same, because a process that keeps losing claims it holds is
+        // either stalling for minutes at a time or racing an erasure, and
+        // both are worth being able to see.
+        log.warn(`join request for ${key} stopped: ${loggable(reason)}`);
+        return;
+      }
       if (err instanceof JoinRequestNotReadyError) {
         // Nothing is wrong with the request, so nothing is said to the person
         // who made it. The claim goes back so the next sweep — or their next
         // click — can pick the row up immediately rather than waiting out a
         // claim held by a process that never really started.
-        log.warn(`join request for ${key} postponed: ${reason}`);
-        await this.store.release(record.id).catch((releaseErr: unknown) => {
-          log.warn(`could not release that claim: ${sanitizeError(releaseErr)}`);
+        log.warn(`join request for ${key} postponed: ${loggable(reason)}`);
+        await this.store.release(record.id, live.claimToken).catch((releaseErr: unknown) => {
+          log.warn(`could not release that claim: ${loggable(sanitizeError(releaseErr))}`);
         });
         return;
       }
-      log.error(`join request for ${key} failed: ${reason}`);
+      log.error(`join request for ${key} failed: ${loggable(reason)}`);
       await this.store
-        .markFailed(record.id, reason)
+        // Named with the token, so this lands only if the row is still this
+        // process's. A worker that overran the window and had its row taken
+        // writes nothing here rather than stamping its failure on the attempt
+        // that replaced it — which would show the requester a failure for
+        // work that is, at that moment, succeeding.
+        .markFailed(record.id, live.claimToken, reason)
         // Nothing left to do if even that write fails: the row stays
         // `pending` and the next boot's sweep tries the whole thing again.
         .catch((writeErr: unknown) => {
-          log.error(`could not record that failure: ${sanitizeError(writeErr)}`);
+          log.error(`could not record that failure: ${loggable(sanitizeError(writeErr))}`);
         });
     } finally {
+      held = false;
       clearInterval(heartbeat);
     }
   }
 
-  /** The work itself. The caller has already claimed `record`. */
-  private async attempt(record: JoinRequestRecord): Promise<void> {
+  /**
+   * The work itself. The caller has already claimed `record` and passes the
+   * claim it holds, plus `stillOurs` — which beats the claim and throws
+   * {@link ClaimLostError} if the row has moved on. That is called before each
+   * step that touches the world, so a claim lost mid-clone costs a clone
+   * rather than a duplicate change request.
+   */
+  private async attempt(
+    record: JoinRequestRecord,
+    claim: ClaimedJoinRequest,
+    stillOurs: () => Promise<void>,
+  ): Promise<void> {
     const { workflow, workspaceService, kbDirName } = this.deps;
     const target = await this.deps.target(record.pluginKey);
     if (!target) throw new Error('the plugin is no longer available');
@@ -347,9 +432,15 @@ export class PluginJoinRequestJobs {
     });
     const open = mine.find((cr) => cr.state === 'open' && cr.branch === branch);
     if (open) {
-      await this.store.markOpened(record.id, open.number);
+      await this.store.markOpened(record.id, claim.claimToken, open.number);
       return;
     }
+
+    // Before the git. The listing above is a network round-trip, and the
+    // target and requester lookups before it may each have been one; a claim
+    // that lapsed across them belongs to somebody else by now, and a row that
+    // was erased across them is owed to nobody.
+    await stillOurs();
 
     // A leftover branch from a rejected/withdrawn request is reused — the
     // grant commit is already on it and the splice below no-ops.
@@ -375,6 +466,14 @@ export class PluginJoinRequestJobs {
       await workspaceService.writeFile(ws.id, accessPath, spliced.text);
       await workflow.commitChanges(ws.id, user, `Request access to ${target.displayName}`);
     }
+    // The last gate, and the one that matters most: everything above is
+    // idempotent and reusable — a branch, a commit on it — but a change
+    // request is a thing a manager sees, and a second one for the same
+    // request is exactly what this ticket promises cannot happen. The clone
+    // and the push just before can take minutes on a first-ever request, more
+    // than enough for a stalled process to have lost its claim, and for an
+    // administrator to have erased the account in the meantime.
+    await stillOurs();
     const detail = await workflow.openChangeRequest(ws.id, user, {
       sourceBranch: branch,
       targetBranch: DEFAULT_BRANCH,
@@ -385,7 +484,7 @@ export class PluginJoinRequestJobs {
         `granting the access this branch proposes; the request closes itself once ` +
         `every proposal has landed.`,
     });
-    await this.store.markOpened(record.id, detail.number);
+    await this.store.markOpened(record.id, claim.claimToken, detail.number);
   }
 
   /**
@@ -420,6 +519,22 @@ export class PluginJoinRequestJobs {
       // It exists — this call raced another, or an earlier attempt left it.
     }
   }
+}
+
+/**
+ * An error as a LOG line may carry it.
+ *
+ * `sanitizeError` strips credentials — which is what makes the string safe to
+ * show a requester — but it says nothing about control characters, and the
+ * text it returns is very often a git remote's: a message from the other end
+ * of the network, or from whatever a misconfigured host chose to print. ANSI
+ * and C1 sequences in there steer an operator's terminal and can forge whole
+ * log lines. So a reason is escaped on its way to the log, and only there:
+ * the copy persisted on the row is the requester's sentence, rendered as
+ * text by React, and escaping that would put \\u001b litter in front of them.
+ */
+function loggable(reason: string): string {
+  return printable(reason);
 }
 
 /** Node's "there is no such file" errors, and only those. */

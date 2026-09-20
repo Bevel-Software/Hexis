@@ -71,6 +71,13 @@ describe('PluginJoinRequestJobs', () => {
   });
   afterEach(() => {
     consoleError.mockRestore();
+    // The same discipline, for the same reason. Several tests below install
+    // fake timers and move the system clock minutes forward; a
+    // `useRealTimers()` on the success path leaves both in place for every
+    // later test in the file the moment an assertion above it fails, and a
+    // shifted clock makes the claim-window tests fail in ways that have
+    // nothing to do with what they are testing. Harmless when no test
+    // installed them.
   });
 
   it('runs the same steps the endpoint used to run inline, and records the number', async () => {
@@ -234,7 +241,6 @@ describe('PluginJoinRequestJobs', () => {
     await h.jobs.start({ ...record });
 
     expect(h.store.all()[0]).toMatchObject({ status: 'opened', changeRequestNumber: 42 });
-    vi.useRealTimers();
   });
 
   it('a request claimed the instant before a crash is finished by the next boot', async () => {
@@ -259,28 +265,109 @@ describe('PluginJoinRequestJobs', () => {
 
     expect(h.store.all()[0]).toMatchObject({ status: 'opened', changeRequestNumber: 42 });
     expect(fresh.workflow.openChangeRequest).toHaveBeenCalledTimes(1);
-    vi.useRealTimers();
   });
 
-  it('a live process keeps its claim however long the work takes', async () => {
-    // The other half: the heartbeat must hold a claim past the stale window
-    // for work that is genuinely still running, or a first-ever clone would
-    // be stolen out from under the process doing it.
+  it('a live process keeps its claim however long the work takes, by its own heartbeat', async () => {
+    // The other half of the window, and the half that has to be tested
+    // through the SERVICE. Beating the claim by calling `store.heartbeat`
+    // from the test would prove only that the fake store refreshes a
+    // timestamp; the thing that can actually regress is the interval `run`
+    // installs. Nothing below touches the store by hand — the claim survives
+    // only if the service is beating it.
+    vi.useFakeTimers();
     const h = harness();
     const record = pendingRow(h.store);
-    await h.store.claim(record.id, CLAIM_STALE_AFTER_MS);
 
-    // Long past the window — but the process is alive and beating.
-    vi.useFakeTimers();
-    vi.setSystemTime(Date.now() + 10 * 60 * 1000);
-    await h.store.heartbeat(record.id);
+    // A first-ever request is a full clone. This one hangs for well over the
+    // stale window, which is the case the heartbeat exists for: without it
+    // the work would be stolen out from under the process doing it.
+    let finishClone = (): void => {};
+    h.workflow.createBranch.mockReturnValue(
+      new Promise((resolve) => {
+        finishClone = () => resolve({ name: 'x', isDefault: false, isProtected: false });
+      }) as never,
+    );
 
+    const flight = h.jobs.start(record);
+    await vi.advanceTimersByTimeAsync(0); // the claim lands
+    const beats = 4 * CLAIM_STALE_AFTER_MS;
+    await vi.advanceTimersByTimeAsync(beats);
+
+    // Four windows in, and still held — by the interval, and nothing else.
     const other = harness({}, h.store);
     await other.jobs.start({ ...record });
-
     expect(other.workflow.createBranch).not.toHaveBeenCalled();
     expect(h.store.all()[0].status).toBe('pending');
-    vi.useRealTimers();
+
+    // And it still completes: the beats did not disturb the work.
+    finishClone();
+    await flight;
+    expect(h.store.all()[0]).toMatchObject({ status: 'opened', changeRequestNumber: 42 });
+    expect(h.workflow.openChangeRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops before the change request when the row was erased under it', async () => {
+    // Account erasure deletes a requester's recorded rows in a transaction
+    // this job has no part in and cannot be told about. It lands here between
+    // the commit and the change request — the worst moment, because what
+    // comes next is the one step that leaves something a manager sees.
+    const h = harness();
+    const record = pendingRow(h.store);
+    h.workflow.commitChanges.mockImplementation(async () => {
+      h.store.deleteFor(ALI, 'Finance');
+      return null;
+    });
+
+    await h.jobs.start(record);
+
+    // No change request in a deleted person's name — and no row written back,
+    // which would resurrect the ask the erasure just removed.
+    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.store.all()).toEqual([]);
+  });
+
+  it('settles nothing when its claim was taken over mid-work', async () => {
+    // The straggler. This worker stalled past the window — a frozen host, a
+    // partition that outlived three beats — and another process took the row
+    // over and is doing the work now. Coming back to life, it must not open a
+    // second change request, and must not stamp its own ending on the attempt
+    // that replaced it.
+    const h = harness();
+    const record = pendingRow(h.store);
+    h.workflow.commitChanges.mockImplementation(async () => {
+      // A zero window is "the claim has lapsed", without minutes of fake time.
+      await h.store.claim(record.id, 0);
+      return null;
+    });
+
+    await h.jobs.start(record);
+
+    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    // Still pending, under the NEW claim: not `failed`, which is what an
+    // unfenced worker would have written over a run that is going fine.
+    expect(h.store.all()[0]).toMatchObject({ status: 'pending', failureReason: null });
+  });
+
+  it('a superseded token can neither beat nor decide the row', async () => {
+    // The fence itself, at the store: the contract `DbJoinRequestStore` puts
+    // in SQL (`where claim_token = $token`) and this fake mirrors.
+    const h = harness();
+    const record = pendingRow(h.store);
+    const first = await h.store.claim(record.id, CLAIM_STALE_AFTER_MS);
+    const second = await h.store.claim(record.id, 0);
+    expect(first?.claimToken).toBeTruthy();
+    expect(second?.claimToken).not.toBe(first?.claimToken);
+
+    await h.store.markOpened(record.id, second!.claimToken, 7);
+
+    // Everything the superseded worker might still do, with the token it
+    // believes it holds. All of it must be a no-op.
+    expect(await h.store.heartbeat(record.id, first!.claimToken)).toBe(false);
+    await h.store.markFailed(record.id, first!.claimToken, 'the git host went away');
+    await h.store.markOpened(record.id, first!.claimToken, 99);
+    await h.store.release(record.id, first!.claimToken);
+
+    expect(h.store.all()[0]).toMatchObject({ status: 'opened', changeRequestNumber: 7 });
   });
 
   it('keeps sweeping on a tick, so a row nobody is working is picked up without a restart', async () => {
@@ -304,7 +391,6 @@ describe('PluginJoinRequestJobs', () => {
 
     expect(h.store.all()[0]).toMatchObject({ status: 'opened', changeRequestNumber: 42 });
     h.jobs.stopSweeping();
-    vi.useRealTimers();
   });
 
   it('stopSweeping ends the tick', async () => {
@@ -319,7 +405,6 @@ describe('PluginJoinRequestJobs', () => {
     await h.jobs.drain();
 
     expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it('proceeds past a createBranch failure only when the branch is really there', async () => {

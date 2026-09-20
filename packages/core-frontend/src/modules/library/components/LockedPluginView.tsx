@@ -124,9 +124,16 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
           The button says "Requesting…" too, but pressing it disables it and a
           disabled button drops focus, so that label change is never read out.
           The acknowledgement is the whole point of this ticket, and it has to
-          reach somebody who cannot see the label. */}
+          reach somebody who cannot see the label.
+
+          `pending`, not `requesting`, is what ends it. The success path never
+          clears `requesting` — deliberately, so the button cannot flicker back
+          to life between the answer and the swap to the Requested card — which
+          left this region presenting "Requesting access to …" for as long as
+          the page stayed up. A screen-reader user arriving at the region after
+          the card had rendered was told the request was still going. */}
       <span role="status" aria-live="polite" aria-label="Request progress" className="sr-only">
-        {requesting ? `Requesting access to ${plugin.displayName || plugin.name}…` : ''}
+        {requesting && !pending ? `Requesting access to ${plugin.displayName || plugin.name}…` : ''}
       </span>
 
       <div className="mt-5">

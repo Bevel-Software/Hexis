@@ -6,7 +6,6 @@ CREATE TABLE "plugin_join_requests" (
 	"status" text DEFAULT 'pending' NOT NULL,
 	"failure_reason" text,
 	"change_request_number" integer,
-	"claimed_at" timestamp,
 	"created_at" timestamp DEFAULT now() NOT NULL,
 	"updated_at" timestamp DEFAULT now() NOT NULL,
 	CONSTRAINT "plugin_join_requests_status" CHECK ("plugin_join_requests"."status" IN ('pending', 'opened', 'failed'))

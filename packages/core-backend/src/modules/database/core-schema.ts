@@ -632,6 +632,27 @@ export const pluginJoinRequests = pgTable('plugin_join_requests', {
    * which is the common restart case.
    */
   claimedAt: timestamp('claimed_at'),
+  /**
+   * WHICH claim `claimed_at` is the liveness of — a fencing token, fresh on
+   * every claim.
+   *
+   * A timestamp alone says a row is held; it cannot say by whom. So a worker
+   * that misses the stale window — a long GC pause, a host that froze, a
+   * network partition that outlived three beats — carries on believing it
+   * holds the row that somebody else has since taken, and its `markOpened`
+   * or `markFailed`, addressed by id alone, lands on the NEW attempt: the
+   * second worker's run is settled by the first worker's outcome, or a row
+   * mid-flight is stamped `failed` under it. Two change requests for one
+   * request is the same race a step earlier.
+   *
+   * Every write that decides or holds the row therefore names the token it
+   * believes it holds, and matches nothing if the token has moved on. A
+   * superseded worker's writes become no-ops rather than corruption, and it
+   * learns it was superseded from its next beat returning false — which is
+   * also how it learns the row was DELETED out from under it, the shape
+   * account erasure takes.
+   */
+  claimToken: uuid('claim_token'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (t) => ({

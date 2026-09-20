@@ -1,6 +1,6 @@
 {
-  "id": "e21e0893-9b76-4f51-b72c-121e5cafd1bb",
-  "prevId": "8f0a1478-114d-40f6-a60c-fe6a752ebfc2",
+  "id": "d3d65e19-2a8a-4808-b701-2b680b643a1c",
+  "prevId": "e21e0893-9b76-4f51-b72c-121e5cafd1bb",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1201,6 +1201,18 @@
         "change_request_number": {
           "name": "change_request_number",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "claimed_at": {
+          "name": "claimed_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "claim_token": {
+          "name": "claim_token",
+          "type": "uuid",
           "primaryKey": false,
           "notNull": false
         },

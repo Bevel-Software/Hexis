@@ -268,6 +268,20 @@ describe('LockedPluginView', () => {
 
     release();
     await screen.findByText('Requested: Olga Ivanova decides who gets access.');
+
+    // AND IT STOPS. The success path never clears `requesting` — on purpose,
+    // so the button cannot flicker back to life between the answer and the
+    // Requested card — which left this region saying the request was still
+    // going for as long as the page stayed up. A screen-reader user reaching
+    // it after the card had rendered was told something untrue.
+    expect(screen.getByRole('status', { name: 'Request progress' })).toHaveTextContent('');
+  });
+
+  it('says nothing in the live region for a request that was already standing', () => {
+    // Arriving on a plugin already requested: there is no in-flight request
+    // to announce, so the region must be empty rather than describing one.
+    renderLocked(finance({ hasRequested: true }));
+    expect(screen.getByRole('status', { name: 'Request progress' })).toHaveTextContent('');
   });
 });
 

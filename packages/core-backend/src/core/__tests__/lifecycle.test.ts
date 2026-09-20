@@ -259,13 +259,13 @@ describe('createShutdown', () => {
     expect(d.order).toEqual([
       'server.close',
       'server.closeAllConnections',
-      'commitWorker.stop',
       'backgroundJobs.stopSweeping',
+      'commitWorker.stop',
       'db.end',
     ]);
   });
 
-it('stops the background sweep before the pool goes, so no tick can query a closed client', async () => {
+  it('stops the background sweep before anything it could outlive', async () => {
     const d = deps();
     const shutdown = createShutdown(d.deps as never);
     const done = shutdown('SIGTERM');
@@ -273,9 +273,15 @@ it('stops the background sweep before the pool goes, so no tick can query a clos
     d.finishClose();
     await done;
 
-    // Order is the point, not just presence: the sweep ticks a query, and a
-    // tick that fired after `db.end` would hit a client that is gone.
-    expect(d.order.indexOf('backgroundJobs.stopSweeping')).toBeLessThan(d.order.indexOf('db.end'));
+    // Order is the point, not just presence, in BOTH directions. A tick that
+    // fired after `db.end` would query a client that is gone; a tick during
+    // `commitWorker.stop` — which awaits an in-flight commit and can take
+    // most of the shutdown budget — would start fresh clone/commit/push work
+    // that the process exit immediately after kills mid-git.
+    const stopped = d.order.indexOf('backgroundJobs.stopSweeping');
+    expect(stopped).toBeGreaterThanOrEqual(0);
+    expect(stopped).toBeLessThan(d.order.indexOf('commitWorker.stop'));
+    expect(stopped).toBeLessThan(d.order.indexOf('db.end'));
   });
 
   it('shuts down cleanly when no background jobs were built yet', async () => {
@@ -304,8 +310,8 @@ it('stops the background sweep before the pool goes, so no tick can query a clos
     expect(d.order).toEqual([
       'server.close',
       'server.closeAllConnections',
-      'commitWorker.stop',
       'backgroundJobs.stopSweeping',
+      'commitWorker.stop',
       'db.end',
     ]);
   });

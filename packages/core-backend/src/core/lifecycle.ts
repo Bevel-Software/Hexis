@@ -282,10 +282,16 @@ export function createShutdown(
         'closing the server',
         log,
       );
-      await bounded(deps.commitWorker.stop(), remaining(), 'stopping the commit worker', log);
-      // Synchronous and unfailing — just clears an interval — so it needs no
-      // budget of its own, but it must happen before the pool ends.
+      // Immediately after the server, and BEFORE the commit worker is stopped.
+      // Stopping that worker awaits an in-flight commit and can spend most of
+      // the remaining budget doing it; a sweep tick firing inside that window
+      // reads the still-open pool and starts fresh clone/commit/push work that
+      // the `process.exit()` at the end of the sequence then kills mid-git.
+      // Nothing new can be recorded once the server is closed, so this is the
+      // earliest point the interval is dead weight. Synchronous and unfailing
+      // — it just clears an interval — so it needs no budget of its own.
       deps.backgroundJobs?.stopSweeping();
+      await bounded(deps.commitWorker.stop(), remaining(), 'stopping the commit worker', log);
       await bounded(deps.db.$client.end(), remaining(), 'ending the database pool', log);
 
       log(`shutdown complete in ${Date.now() - startedAt}ms`);

@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import type {
+  ClaimedJoinRequest,
   JoinRequestRecord,
   JoinRequestStore,
 } from '../join-request-records.store.js';
@@ -25,14 +27,26 @@ export class FakeJoinRequestStore implements JoinRequestStore {
    * `byId` and returned by `pending`, yet never by `forRequester` — a split
    * the table cannot produce, and one a test could accidentally rely on.
    */
-  seed(record: Omit<JoinRequestRecord, 'id'> & { id?: string }): JoinRequestRecord {
+  seed(
+    record: Omit<JoinRequestRecord, 'id' | 'claimToken'> & { id?: string; claimToken?: string | null },
+  ): JoinRequestRecord {
     const row: JoinRequestRecord = {
+      claimToken: null,
       ...record,
       id: record.id ?? `jr-${this.nextId++}`,
       requesterEmail: record.requesterEmail.toLowerCase(),
     };
     this.rows.set(keyOf(row.requesterEmail, row.pluginKey), row);
     return { ...row };
+  }
+
+  /**
+   * Delete a row behind the service's back, the way account erasure does it:
+   * one statement against the table, with no idea whether a job is mid-flight
+   * against it. The test seam for "the row went away under a running job".
+   */
+  deleteFor(requesterEmail: string, pluginKey: string): boolean {
+    return this.rows.delete(keyOf(requesterEmail, pluginKey));
   }
 
   /** Every row, in insertion order — what an assertion counts. */
@@ -52,6 +66,7 @@ export class FakeJoinRequestStore implements JoinRequestStore {
         existing.status = 'pending';
         existing.failureReason = null;
         existing.claimedAt = null;
+        existing.claimToken = null;
       }
       return { ...existing };
     }
@@ -63,6 +78,7 @@ export class FakeJoinRequestStore implements JoinRequestStore {
       failureReason: null,
       changeRequestNumber: null,
       claimedAt: null,
+      claimToken: null,
     });
   }
 
@@ -83,40 +99,52 @@ export class FakeJoinRequestStore implements JoinRequestStore {
       .map((r) => ({ ...r }));
   }
 
-  async claim(id: string, staleAfterMs: number): Promise<JoinRequestRecord | null> {
+  async claim(id: string, staleAfterMs: number): Promise<ClaimedJoinRequest | null> {
     const row = this.rowById(id);
     if (!row || row.status !== 'pending') return null;
     const held = row.claimedAt;
     if (held && Date.now() - held.getTime() < staleAfterMs) return null;
     row.claimedAt = new Date();
-    return { ...row };
+    // Fresh per claim, exactly as `gen_random_uuid()` makes it in the table —
+    // so a test that takes a row over really does invalidate the previous
+    // holder's token rather than handing out the same one twice.
+    const claimToken = randomUUID();
+    row.claimToken = claimToken;
+    return { ...row, claimToken };
   }
 
-  async heartbeat(id: string): Promise<void> {
+  async heartbeat(id: string, claimToken: string): Promise<boolean> {
     const row = this.rowById(id);
-    if (!row || row.status !== 'pending' || !row.claimedAt) return;
+    if (!row || row.status !== 'pending' || !row.claimedAt) return false;
+    if (row.claimToken !== claimToken) return false;
     row.claimedAt = new Date();
+    return true;
   }
 
-  async release(id: string): Promise<void> {
+  async release(id: string, claimToken: string): Promise<void> {
     const row = this.rowById(id);
-    if (!row || row.status !== 'pending') return;
+    if (!row || row.status !== 'pending' || row.claimToken !== claimToken) return;
     row.claimedAt = null;
+    row.claimToken = null;
   }
 
-  async markOpened(id: string, changeRequestNumber: number): Promise<void> {
+  async markOpened(id: string, claimToken: string, changeRequestNumber: number): Promise<void> {
     const row = this.rowById(id);
-    if (!row) return;
+    if (!row || row.claimToken !== claimToken) return;
     row.status = 'opened';
     row.changeRequestNumber = changeRequestNumber;
     row.failureReason = null;
+    row.claimedAt = null;
+    row.claimToken = null;
   }
 
-  async markFailed(id: string, reason: string): Promise<void> {
+  async markFailed(id: string, claimToken: string, reason: string): Promise<void> {
     const row = this.rowById(id);
-    if (!row) return;
+    if (!row || row.claimToken !== claimToken) return;
     row.status = 'failed';
     row.failureReason = reason;
+    row.claimedAt = null;
+    row.claimToken = null;
   }
 
   private rowById(id: string): JoinRequestRecord | undefined {
