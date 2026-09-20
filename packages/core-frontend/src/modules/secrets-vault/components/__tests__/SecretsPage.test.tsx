@@ -1,10 +1,15 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { ToolSecrets } from '../../services/tool-secrets.api';
 import { SecretsPage } from '../SecretsPage';
+import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../../core/events';
 
-const toolSecretsMock = vi.hoisted(() => ({ listToolSecrets: vi.fn() }));
+const toolSecretsMock = vi.hoisted(() => ({
+  listToolSecrets: vi.fn(),
+  setUserVar: vi.fn(),
+  deleteUserVar: vi.fn(),
+}));
 
 vi.mock('../../services/secrets.api', () => ({
   listSecrets: vi.fn(async () => []),
@@ -15,10 +20,10 @@ vi.mock('../../services/secrets.api', () => ({
 vi.mock('../../services/tool-secrets.api', () => ({
   listToolSecrets: toolSecretsMock.listToolSecrets,
   setAdminVar: vi.fn(async () => {}),
-  setUserVar: vi.fn(async () => {}),
+  setUserVar: toolSecretsMock.setUserVar,
   setOAuthClientSecret: vi.fn(async () => {}),
   deleteAdminVar: vi.fn(async () => {}),
-  deleteUserVar: vi.fn(async () => {}),
+  deleteUserVar: toolSecretsMock.deleteUserVar,
 }));
 
 /** The page carries links now, so it needs a router around it. */
@@ -78,5 +83,74 @@ describe('SecretsPage', () => {
     renderPage();
     expect(await screen.findByText('Access denied')).toBeInTheDocument();
     expect(window.location.hash).toBe('');
+  });
+
+  /**
+   * The vault is a shell route of its own: no Library is mounted under
+   * `/secrets`, so a key set here has no provider to call. It ANNOUNCES
+   * instead — the one rule every writing surface follows — and the cards and
+   * plugin banners pick it up wherever they are.
+   */
+  describe('a key set here reaches the Library', () => {
+    const heard = vi.fn();
+    const heyreach: ToolSecrets = {
+      slug: 'heyreach',
+      name: 'heyreach',
+      path: 'Plugins/GTM/heyreach.tool',
+      type: 'inline',
+      setup: null,
+      canWrite: false,
+      variables: [
+        {
+          name: 'API_KEY',
+          scope: 'user',
+          label: null,
+          key: 'heyreach_API_KEY',
+          adminConfigured: true,
+          userConfigured: false,
+        },
+      ],
+    };
+
+    beforeEach(() => {
+      heard.mockReset();
+      toolSecretsMock.setUserVar.mockReset().mockResolvedValue(undefined);
+      toolSecretsMock.deleteUserVar.mockReset().mockResolvedValue(undefined);
+      window.addEventListener(TOOL_CREDENTIALS_STALE_EVENT, heard);
+    });
+    afterEach(() => window.removeEventListener(TOOL_CREDENTIALS_STALE_EVENT, heard));
+
+    const showTool = async (userConfigured: boolean) => {
+      toolSecretsMock.listToolSecrets.mockResolvedValue([
+        { ...heyreach, variables: [{ ...heyreach.variables[0], userConfigured }] },
+      ]);
+      renderPage();
+      return screen.findByLabelText('Value for API_KEY');
+    };
+
+    it('announces a saved key', async () => {
+      const field = await showTool(false);
+      fireEvent.change(field, { target: { value: 'k' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
+    });
+
+    it('announces a removed one', async () => {
+      await showTool(true);
+      fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+
+      await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
+    });
+
+    it('announces nothing when the save fails', async () => {
+      toolSecretsMock.setUserVar.mockRejectedValue(new Error('Nope.'));
+      const field = await showTool(false);
+      fireEvent.change(field, { target: { value: 'k' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent('Nope.');
+      expect(heard).not.toHaveBeenCalled();
+    });
   });
 });

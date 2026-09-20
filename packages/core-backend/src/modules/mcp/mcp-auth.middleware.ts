@@ -6,6 +6,7 @@ import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.
 import type { AuthService } from '../auth/auth.service.js';
 import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
 import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
+import { rejectConnectionKey } from '../tool-auth/connection-key-rejection.js';
 import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
 import '../tool-auth/external-api-key.interface.js'; // Express Request augmentation (req.externalApiKeyId)
 
@@ -38,8 +39,10 @@ import '../tool-auth/external-api-key.interface.js'; // Express Request augmenta
  *
  * Failures return 401 with a `WWW-Authenticate` challenge carrying
  * `resource_metadata` (RFC 9728) so an OAuth-capable MCP client discovers our
- * authorization server and starts the flow, while clients configured with a
- * key simply prompt for it.
+ * authorization server and starts the flow — EXCEPT a bearer shaped like a
+ * connection key that does not verify: that caller configured a key, so it
+ * gets a plain `invalid_token` answer and no sign-in invitation (see
+ * `connection-key-rejection.ts`).
  */
 export function createMcpAuthMiddleware(
   authService: AuthService,
@@ -82,7 +85,7 @@ export function createMcpAuthMiddleware(
         // `externalApiKeyId` unset and are not metered.
         const resolved = await externalApiKeyService.verifyAndLoadToken(token);
         if (!resolved) {
-          unauthorized(res, 'Invalid or revoked connection key');
+          rejectConnectionKey(res);
           return;
         }
         req.userId = resolved.user.id;

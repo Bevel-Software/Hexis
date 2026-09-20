@@ -172,7 +172,7 @@ function isAccessConfigPath(p: string): boolean {
  * and any call-site that needs the "does this participate in approvals"
  * question answered consistently.
  */
-function isGateRelevant(a: FileApprovalState): boolean {
+function isGateRelevant(a: Pick<FileApprovalState, 'path' | 'eligibleApprovers'>): boolean {
   const hasEligible =
     a.eligibleApprovers.roles.length > 0 || a.eligibleApprovers.users.length > 0;
   const lower = a.path.toLowerCase();
@@ -368,6 +368,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     // the caller is unauthenticated. The frontend can still surface the
     // eligible roles/users list; it just won't render an Approve button.
     let viewerCanApproveByPath: Map<string, boolean> = new Map();
+    let eligibilityResolved = false;
     if (workspaceId) {
       await this.workspaceService.ensureRemotesFetched(workspaceId).catch(() => undefined);
       try {
@@ -376,7 +377,10 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           baseRef,
           paths,
         );
-        if (resolved) eligibilityByPath = resolved;
+        if (resolved) {
+          eligibilityByPath = resolved;
+          eligibilityResolved = true;
+        }
       } catch (err) {
         // An unreadable tree is not "no eligible writers": that answer would
         // drop every file out of the merge gate. Fail closed instead.
@@ -445,13 +449,15 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           },
         );
 
-      return {
+      const state = {
         path: file.path,
         eligibleApprovers: { roles: eligible.roles, users: eligible.users },
         approvedBy,
+        eligibilityResolved,
         isApproved: hasEligibleApproval,
         viewerCanApprove: viewerCanApproveByPath.get(file.path) === true,
       };
+      return { ...state, inMergeGate: isGateRelevant(state) };
     });
   }
 

@@ -1,24 +1,30 @@
 import type { Server as HttpServer } from 'node:http';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import AdmZip from 'adm-zip';
 import express from 'express';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import type { ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
-import { registerWorkspaceTools } from '../workspace.tools.js';
+import { CONTENT_RULE, registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
+import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
+import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
+import { isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
+import { GIT_INTERNALS_MESSAGE } from '../../../shared/domain-errors.js';
+import { AccessDeniedError } from '../../access-model/access-errors.js';
+import { PROPOSAL_ROUTE_NOTE, proposalTitleFor } from '../write-denial.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -27,6 +33,13 @@ const allowAll = {
   canRead: async () => true,
   canReadBatch: async (_w: string, _u: string, paths: string[]) =>
     new Map(paths.map((p) => [p, true])),
+  // The verbs `file_stat` and the move/delete preflight ask about. Allowing
+  // everything, and answering "no rules at HEAD" for the batch write check,
+  // keeps these tests about what they test rather than about access.
+  canWrite: async () => true,
+  canDownload: async () => true,
+  canOwner: async () => true,
+  canWriteBatchAtRef: async () => null,
 } as unknown as IAccessControl;
 
 /** Access control that denies `canRead` for an explicit set of repo-relative paths. */
@@ -58,6 +71,8 @@ let fs: LocalFilesystem;
  * named "undefined" is attempted.
  */
 let workspacePathCalls: string[] = [];
+/** Every folder turn a tool took, as `workspaceId:dir`. */
+let folderTurns: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
 let writePolicy: RoutineWritePolicyService;
 /**
@@ -68,23 +83,77 @@ let writePolicy: RoutineWritePolicyService;
 let focusedBranch: string | undefined;
 /** The registry the tools were mounted into, so a test can inspect their defs. */
 let toolRegistry: ToolRegistry;
+/**
+ * Another writer getting to a path in the window the real `LockingFilesystem`
+ * closes: the stand-ins below run it where that filesystem would be acquiring
+ * the lock — after the tool's preflight, before the under-lock `check`. Fires
+ * ONCE (it clears itself), so a test's later writes are ordinary ones.
+ */
+let raceHook: (() => Promise<void>) | null = null;
 
 async function start(
   scope: 'read' | 'write' = 'write',
   access: IAccessControl = allowAll,
+  /** The signed-in caller's address — only the branch-naming tests vary it. */
+  userEmail = 'e@x',
 ): Promise<string> {
+  raceHook = null;
   tempDir = await mkdtemp(join(tmpdir(), 'ws-tools-'));
   docCacheDir = await mkdtemp(join(tmpdir(), 'ws-doc-cache-'));
   fs = new LocalFilesystem({ basePath: tempDir, contained: true });
+  // `LockingFilesystem.writeFiles` is what the real `delete_folder` and
+  // `write_files` land through — one lock cycle over every path, then one
+  // commit. A plain LocalFilesystem has no such method, so stand in for its
+  // DISK effect and let the tools be exercised end to end. This stand-in is
+  // NOT atomic, and these tests do not claim atomicity: they assert what the
+  // TOOL controls — that it hands the whole folder over in ONE batch. The
+  // batch's own all-or-none behaviour is asserted where it lives, in
+  // `locking-filesystem.test.ts` ("a DELETE batch whose later lock is
+  // contended deletes nothing").
+  // Both stand-ins honour the caller's under-lock `check` the way the real
+  // filesystem does — run it with the paths "locked" (here: just before any
+  // byte lands), let a refusal through untouched, and in the batch case write
+  // only what the check keeps. That is what makes the outcome the tools report
+  // a verdict about the state they actually wrote over.
+  const runRaceHook = async (): Promise<void> => {
+    const hook = raceHook;
+    raceHook = null;
+    if (hook) await hook();
+  };
+  const plainWriteFile = fs.writeFile.bind(fs);
+  (fs as unknown as Record<string, unknown>).writeFile = async (
+    path: string,
+    content: string,
+    options?: unknown,
+    check?: () => Promise<void>,
+  ) => {
+    await runRaceHook();
+    await check?.();
+    return plainWriteFile(path, content, options as never);
+  };
+  (fs as unknown as Record<string, unknown>).writeFiles = async (
+    writes: { path: string; content: string }[],
+    _summary: string,
+    deletes: string[] = [],
+    check?: (
+      pending: readonly { path: string; content: string }[],
+    ) => Promise<{ path: string; content: string }[]>,
+  ) => {
+    await runRaceHook();
+    const landing = check ? await check(writes) : writes;
+    for (const w of landing) await plainWriteFile(w.path, w.content);
+    for (const p of deletes) await fs.deleteFile(p);
+  };
   await fs.writeFile('a.md', 'hello\nworld\n');
   workspacePathCalls = [];
+  folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
   focusedBranch = undefined;
 
   const registry = new ToolRegistry();
   toolRegistry = registry;
   const resolve = async (auth: ToolAuth, signal: AbortSignal, sessionId?: string): Promise<ToolContext> => ({
-    user: { id: 'u', email: 'e@x', name: 'N' },
+    user: { id: 'u', email: userEmail, name: 'N' },
     scope: auth.scope,
     source: auth.source,
     sessionId,
@@ -100,6 +169,10 @@ async function start(
       getWorkspacePath: async (id: string) => {
         workspacePathCalls.push(id);
         return tempDir;
+      },
+      withFolderTurn: async <T>(id: string, dir: string, op: () => Promise<T>) => {
+        folderTurns.push(`${id}:${dir}`);
+        return op();
       },
     } as never,
     workflowService: {} as never,
@@ -480,6 +553,258 @@ describe('workspace file primitives', () => {
     const base = await start('read');
     expect((await post(`${base}/api/agent/tools/write_file`, { path: 'c.md', content: 'x' })).status).toBe(403);
     expect((await post(`${base}/api/agent/tools/read_file`, { path: 'a.md' })).status).toBe(200);
+  });
+});
+
+/**
+ * `mode` on the two write tools. The default is `create`, so "write this
+ * content here" can no longer replace a page the agent never read: an
+ * existing path is refused, by name, with the one argument that would have
+ * made it a deliberate replacement. `write_files` answers for EVERY requested
+ * path, in the order it was given them, and a path it cannot write does not
+ * stop the ones it can.
+ */
+describe('write modes and per-path outcomes', () => {
+  const writeFile = (base: string, body: Record<string, unknown>) => post(`${base}/api/agent/tools/write_file`, body);
+  const writeFiles = (base: string, body: Record<string, unknown>) => post(`${base}/api/agent/tools/write_files`, body);
+  const onDisk = (p: string) => readFile(join(tempDir, p), 'utf8');
+  interface BatchAnswer { count: number; files: { path: string; outcome: string; error?: string; message?: string }[] }
+
+  it('write_file with no mode creates a new file and says `created`', async () => {
+    const base = await start();
+    const res = await writeFile(base, { path: 'fresh.md', content: 'new page' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ path: 'fresh.md', bytes: 8, outcome: 'created' });
+    expect(await onDisk('fresh.md')).toBe('new page');
+  });
+
+  it('write_file with no mode refuses a path that exists, names it, says how to replace it, and leaves it alone', async () => {
+    const base = await start();
+    const res = await writeFile(base, { path: 'a.md', content: 'clobbered' });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; code: string; path: string };
+    expect(body.code).toBe('exists');
+    expect(body.path).toBe('a.md');
+    expect(body.error).toContain('a.md');
+    expect(body.error).toContain('pass mode: overwrite to replace it');
+    expect(await onDisk('a.md')).toBe('hello\nworld\n');
+  });
+
+  it('write_file mode overwrite replaces and says `replaced`, and creates what is not there yet', async () => {
+    const base = await start();
+    const replaced = await writeFile(base, { path: 'a.md', content: 'replacement' });
+    expect(replaced.status).toBe(409); // …without the mode.
+    const res = await writeFile(base, { path: 'a.md', content: 'replacement', mode: 'overwrite' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ path: 'a.md', outcome: 'replaced' });
+    expect(await onDisk('a.md')).toBe('replacement');
+    // `overwrite` on a path with nothing at it is still a create, and says so.
+    const created = await writeFile(base, { path: 'not-there.md', content: 'x', mode: 'overwrite' });
+    expect(await created.json()).toMatchObject({ outcome: 'created' });
+  });
+
+  it('write_file mode update rewrites an existing file and refuses a missing one with `missing`', async () => {
+    const base = await start();
+    const updated = await writeFile(base, { path: 'a.md', content: 'second draft', mode: 'update' });
+    expect(updated.status).toBe(200);
+    expect(await updated.json()).toMatchObject({ path: 'a.md', outcome: 'updated' });
+    expect(await onDisk('a.md')).toBe('second draft');
+
+    const missing = await writeFile(base, { path: 'nowhere.md', content: 'x', mode: 'update' });
+    expect(missing.status).toBe(404);
+    const body = (await missing.json()) as { error: string; code: string; path: string };
+    expect(body.code).toBe('missing');
+    expect(body.path).toBe('nowhere.md');
+    expect(body.error).toContain('nowhere.md');
+    await expect(onDisk('nowhere.md')).rejects.toThrow();
+  });
+
+  it('write_files answers for every requested path in input order, writes the rest, and counts only what landed', async () => {
+    const base = await start();
+    const res = await writeFiles(base, {
+      files: [
+        { path: 'one.md', content: 'first' },
+        { path: 'a.md', content: 'clobbered' }, // already there
+        { path: 'two.md', content: 'second' },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as BatchAnswer;
+    expect(body.count).toBe(2);
+    expect(body.files.map((f) => f.path)).toEqual(['one.md', 'a.md', 'two.md']);
+    expect(body.files.map((f) => f.outcome)).toEqual(['created', 'refused', 'created']);
+    expect(body.files[1].error).toBe('exists');
+    expect(body.files[1].message).toContain('pass mode: overwrite to replace it');
+    // The two it could write landed; the one it refused is untouched.
+    expect(await onDisk('one.md')).toBe('first');
+    expect(await onDisk('two.md')).toBe('second');
+    expect(await onDisk('a.md')).toBe('hello\nworld\n');
+  });
+
+  it('write_files takes the same three modes', async () => {
+    const base = await start();
+    const overwritten = (await (await writeFiles(base, {
+      mode: 'overwrite',
+      files: [{ path: 'a.md', content: 'replaced text' }, { path: 'brand-new.md', content: 'new' }],
+    })).json()) as BatchAnswer;
+    expect(overwritten.count).toBe(2);
+    expect(overwritten.files.map((f) => f.outcome)).toEqual(['replaced', 'created']);
+    expect(await onDisk('a.md')).toBe('replaced text');
+
+    const updated = (await (await writeFiles(base, {
+      mode: 'update',
+      files: [{ path: 'a.md', content: 'again' }, { path: 'never-written.md', content: 'x' }],
+    })).json()) as BatchAnswer;
+    expect(updated.count).toBe(1);
+    expect(updated.files.map((f) => f.outcome)).toEqual(['updated', 'refused']);
+    expect(updated.files[1].error).toBe('missing');
+    await expect(onDisk('never-written.md')).rejects.toThrow();
+  });
+
+  it('write_files refuses a second create for a path an earlier entry in the SAME batch already claims', async () => {
+    const base = await start();
+    const body = (await (await writeFiles(base, {
+      files: [{ path: 'dup.md', content: 'first' }, { path: 'dup.md', content: 'second' }],
+    })).json()) as BatchAnswer;
+    expect(body.count).toBe(1);
+    expect(body.files.map((f) => f.outcome)).toEqual(['created', 'refused']);
+    expect(body.files[1].error).toBe('exists');
+    expect(await onDisk('dup.md')).toBe('first');
+  });
+
+  it('an empty batch is still an answer with both fields', async () => {
+    const base = await start();
+    expect(await (await writeFiles(base, { files: [] })).json()).toEqual({ count: 0, files: [] });
+  });
+
+  it('a mode that is not one of the three is refused, not read as the nearest one', async () => {
+    const base = await start();
+    for (const res of [
+      await writeFile(base, { path: 'a.md', content: 'x', mode: 'replace' }),
+      await writeFiles(base, { files: [{ path: 'a.md', content: 'x' }], mode: 'replace' }),
+    ]) {
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; code: string };
+      expect(body.code).toBe('bad_mode');
+      expect(body.error).toContain('`create`, `overwrite`, `update`');
+    }
+    expect(await onDisk('a.md')).toBe('hello\nworld\n');
+  });
+
+  /**
+   * The mode is a promise about the state the write lands on, so it has to be
+   * judged over a state no one else can move — i.e. with the path's lock held,
+   * not at a preflight anybody may invalidate before the bytes land. These
+   * four drive that window directly: `raceHook` is the other writer, running
+   * exactly where the real filesystem acquires the lock.
+   */
+  describe('the mode is judged over the state the write actually lands on', () => {
+    it('write_file create refuses a path another writer created after the preflight, and keeps their file', async () => {
+      const base = await start();
+      raceHook = async () => { await fs.writeFile('contested.md', 'theirs\n'); };
+      const res = await writeFile(base, { path: 'contested.md', content: 'mine' });
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { code: string; path: string; error: string };
+      expect(body.code).toBe('exists');
+      expect(body.path).toBe('contested.md');
+      expect(body.error).toContain('pass mode: overwrite to replace it');
+      // The point of the whole feature: their bytes are still there.
+      expect(await onDisk('contested.md')).toBe('theirs\n');
+    });
+
+    it('write_file update refuses a path another writer deleted after the preflight, and does not recreate it', async () => {
+      const base = await start();
+      raceHook = async () => { await fs.deleteFile('a.md'); };
+      const res = await writeFile(base, { path: 'a.md', content: 'second draft', mode: 'update' });
+      expect(res.status).toBe(404);
+      expect(await res.json()).toMatchObject({ code: 'missing', path: 'a.md' });
+      await expect(onDisk('a.md')).rejects.toThrow();
+    });
+
+    it('write_file overwrite reports `replaced`, not `created`, when the file appeared after the preflight', async () => {
+      const base = await start();
+      raceHook = async () => { await fs.writeFile('late.md', 'theirs\n'); };
+      const res = await writeFile(base, { path: 'late.md', content: 'mine', mode: 'overwrite' });
+      expect(res.status).toBe(200);
+      // The preflight saw nothing there and would have answered `created`.
+      expect(await res.json()).toMatchObject({ path: 'late.md', outcome: 'replaced' });
+      expect(await onDisk('late.md')).toBe('mine');
+    });
+
+    it('write_files drops only the path another writer took, lands the rest, and counts what landed', async () => {
+      const base = await start();
+      raceHook = async () => { await fs.writeFile('two.md', 'theirs\n'); };
+      const body = (await (await writeFiles(base, {
+        files: [
+          { path: 'one.md', content: 'first' },
+          { path: 'two.md', content: 'second' },
+          { path: 'three.md', content: 'third' },
+        ],
+      })).json()) as BatchAnswer;
+      expect(body.count).toBe(2);
+      expect(body.files.map((f) => f.path)).toEqual(['one.md', 'two.md', 'three.md']);
+      expect(body.files.map((f) => f.outcome)).toEqual(['created', 'refused', 'created']);
+      expect(body.files[1].error).toBe('exists');
+      expect(await onDisk('one.md')).toBe('first');
+      expect(await onDisk('three.md')).toBe('third');
+      expect(await onDisk('two.md')).toBe('theirs\n');
+    });
+  });
+
+  it('both descriptions state the default and all three modes, and `mode` is an input on each', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    for (const name of ['write_file', 'write_files']) {
+      const def = tools.find((t) => t.name === name)!;
+      expect(def.description, name).toContain('DEFAULTS TO `create`');
+      for (const mode of ['`create`', '`overwrite`', '`update`']) {
+        expect(def.description, `${name} ${mode}`).toContain(mode);
+      }
+      const body = (def.inputs as { properties: { body: { properties: Record<string, { enum?: string[]; description?: string }> } } }).properties.body;
+      expect(body.properties.mode, name).toBeDefined();
+      expect(body.properties.mode.enum, name).toEqual(['create', 'overwrite', 'update']);
+      expect(body.properties.mode.description, name).toContain('default `create`');
+    }
+  });
+
+  /**
+   * The audited-caller case, as a KB fixture: a skill whose step rewrites a
+   * ticket card it has just read (the shape every delivery skill uses to
+   * append to a ticket's log). It keeps working because the rewrite says
+   * `mode: overwrite` — and the same step WITHOUT the mode is refused, which
+   * is exactly the signal the audit was for.
+   */
+  it('a skill that rewrites a ticket card it just read still works, because it passes mode: overwrite', async () => {
+    const base = await start();
+    const card = `${KB_DIR}/Data/Tickets/Ship-It.md`;
+    await fs.mkdir(`${KB_DIR}/Data/Tickets`, { recursive: true });
+    await fs.writeFile(card, '# Ship It\n\n# Log\n- filed\n');
+
+    const read = (await (await post(`${base}/api/agent/tools/read_file`, { path: card })).json()) as { content: string };
+    const updatedCard = `${read.content}- coding done\n`;
+
+    // The step as the skill writes it today, with no mode: refused, card intact.
+    const blind = await writeFile(base, { path: card, content: updatedCard });
+    expect(blind.status).toBe(409);
+    expect(await onDisk(card)).toBe('# Ship It\n\n# Log\n- filed\n');
+
+    // The audited step, saying what it means: the rewrite lands.
+    const audited = await writeFile(base, { path: card, content: updatedCard, mode: 'overwrite' });
+    expect(audited.status).toBe(200);
+    expect(await audited.json()).toMatchObject({ path: card, outcome: 'replaced' });
+    expect(await onDisk(card)).toBe('# Ship It\n\n# Log\n- filed\n- coding done\n');
+
+    // …and the same step through the batch tool, which the skills use to land
+    // a card and its transcript in ONE commit.
+    const both = (await (await writeFiles(base, {
+      mode: 'overwrite',
+      files: [
+        { path: card, content: `${updatedCard}- local testing done\n` },
+        { path: `${KB_DIR}/Data/Tickets/Ship-It/transcripts/02-coding.md`, content: '# transcript\n' },
+      ],
+    })).json()) as BatchAnswer;
+    expect(both.count).toBe(2);
+    expect(both.files.map((f) => f.outcome)).toEqual(['replaced', 'created']);
   });
 });
 
@@ -967,7 +1292,7 @@ describe('office documents and PDFs', () => {
       ['edit_file', { path: 'Inbox/offer.eml', old_string: 'original', new_string: 'changed' }],
     ] as const) {
       const res = await post(`${base}/api/agent/tools/${tool}`, body);
-      expect(res.status, tool).toBe(400);
+      expect(res.status, tool).toBe(415);
       const { error } = (await res.json()) as { error: string };
       expect(error, tool).toContain('email file');
       expect(error, tool).toContain('snapshot');
@@ -1013,7 +1338,7 @@ describe('office documents and PDFs', () => {
       ['write_file', { path: 'old.doc', content: 'plain text' }],
     ] as const) {
       const res = await post(`${base}/api/agent/tools/${tool}`, body);
-      expect(res.status, tool).toBe(400);
+      expect(res.status, tool).toBe(415);
       const { error } = (await res.json()) as { error: string };
       expect(error, tool).toContain('legacy binary office format');
       expect(error, tool).toContain('.docx');
@@ -1032,7 +1357,7 @@ describe('office documents and PDFs', () => {
       ['edit_file', { path: 'blob.dat', old_string: 'a', new_string: 'b' }],
     ] as const) {
       const res = await post(`${base}/api/agent/tools/${tool}`, body);
-      expect(res.status, tool).toBe(400);
+      expect(res.status, tool).toBe(415);
       const { error } = (await res.json()) as { error: string };
       expect(error, tool).toContain('binary content');
       expect(error, tool).toContain('uploading a new version');
@@ -1063,36 +1388,196 @@ describe('office documents and PDFs', () => {
       ['write_file', { path: 'slides.odp', content: 'plain text' }],
       ['edit_file', { path: 'deck.pptx', old_string: 'Original', new_string: 'Changed' }],
       ['edit_file', { path: 'numbers.ods', old_string: 'a', new_string: 'b' }],
-      ['write_files', { files: [{ path: 'ok.md', content: 'fine' }, { path: 'sheet.xlsx', content: 'nope' }] }],
-      ['write_files', { files: [{ path: 'ok.md', content: 'fine' }, { path: 'sheet.ods', content: 'nope' }] }],
     ] as const) {
       const res = await post(`${base}/api/agent/tools/${tool}`, body);
-      expect(res.status, tool).toBe(400);
+      expect(res.status, tool).toBe(415);
       const { error } = (await res.json()) as { error: string };
       expect(error, tool).toContain('EXTRACTED text');
       expect(error, tool).toContain('uploading a new version');
     }
-    // The batch was refused atomically — the innocent .md was not written either.
-    expect((await post(`${base}/api/agent/tools/read_file`, { path: 'ok.md' })).status).not.toBe(200);
+    // In a BATCH the same refusal is per path: the document is refused with the
+    // same explanation, and the innocent .md beside it is still written.
+    for (const doc of ['sheet.xlsx', 'sheet.ods']) {
+      const res = await post(`${base}/api/agent/tools/write_files`, {
+        files: [{ path: `ok-${doc}.md`, content: 'fine' }, { path: doc, content: 'nope' }],
+      });
+      expect(res.status, doc).toBe(200);
+      const body = (await res.json()) as { count: number; files: { path: string; outcome: string; error?: string; message?: string }[] };
+      expect(body.count, doc).toBe(1);
+      expect(body.files.map((f) => f.path), doc).toEqual([`ok-${doc}.md`, doc]);
+      expect(body.files[0], doc).toMatchObject({ outcome: 'created' });
+      expect(body.files[1], doc).toMatchObject({ outcome: 'refused', error: 'binary_not_writable' });
+      expect(body.files[1].message, doc).toContain('EXTRACTED text');
+      expect(body.files[1].message, doc).toContain('uploading a new version');
+      expect(await readContent(base, `ok-${doc}.md`)).toBe('fine');
+      expect((await post(`${base}/api/agent/tools/file_stat`, { path: doc })).status, doc).not.toBe(200);
+    }
     // And the pptx is untouched: reading it still extracts the original text.
     expect(await readContent(base, 'deck.pptx')).toContain('Original');
   });
 
-  it('the write tools DESCRIBE every refused family — modern, legacy binary, and the upload path — so agents learn before the call', async () => {
+  it('every file tool states the SAME content rule — refused families, the byte tools and the upload path — so agents learn before the call', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
-    for (const name of ['write_file', 'write_files', 'edit_file']) {
+    const fileTools = ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'mkdir', 'move_file', 'copy_file', 'unzip'];
+    for (const name of fileTools) {
       const def = tools.find((t) => t.name === name);
       expect(def, name).toBeDefined();
+      // One constant, verbatim — the description is what tools_info returns.
+      expect(def!.description, name).toContain(CONTENT_RULE);
+      expect(def!.description, name).toContain('`binary_not_writable`');
+      expect(def!.description, name).toContain('copy_file, move_file, delete_file and unzip act on bytes of any kind');
+      expect(def!.description, name).toContain('`request_upload_token` + `apply_upload`');
+      expect(def!.description, name).toContain('`contentMode`');
       // Modern extractable formats…
       expect(def!.description, name).toContain('.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf');
       // …email files (extractions too, so the same refusal applies)…
       expect(def!.description, name).toContain('.eml/.msg');
       // …the legacy binary family the refusal also covers…
       expect(def!.description, name).toContain('.doc/.ppt/.xls');
-      // …and the replace-by-upload way out.
-      expect(def!.description, name).toContain('uploading a new version');
     }
+    // The shell is not a file tool: it does not carry the rule.
+    expect(tools.find((t) => t.name === 'execute_command')!.description).not.toContain(CONTENT_RULE);
+  });
+
+  describe('binary capability contract: a text file, a document, an image and a zip', () => {
+    const PNG = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    const zipBytes = (): Buffer => {
+      const z = new AdmZip();
+      z.addFile('inner.md', Buffer.from('# inner\n'));
+      return z.toBuffer();
+    };
+    /** Seed the four kinds; returns each path with its exact bytes and expected answers. */
+    const seed = async () => {
+      const files = [
+        { path: 'notes.md', bytes: Buffer.from('hello text\n'), mode: 'text', kind: null },
+        { path: 'deck.pptx', bytes: pptx([['Original']]), mode: 'document', kind: 'document' },
+        { path: 'logo.png', bytes: PNG, mode: 'binary', kind: 'image' },
+        { path: 'bundle.zip', bytes: zipBytes(), mode: 'binary', kind: 'archive' },
+      ] as const;
+      for (const f of files) await fs.writeFile(f.path, f.bytes);
+      return files;
+    };
+    const onDisk = async (path: string) => Buffer.from(await readFile(join(tempDir, path)));
+    interface Refusal { error: string; kind: string; fileKind: string; useInstead: string[] }
+    const expectRefusal = async (res: Response, fileKind: string, label: string) => {
+      expect(res.status, label).toBe(415);
+      const body = (await res.json()) as Refusal;
+      expect(body.kind, label).toBe('binary_not_writable');
+      expect(body.fileKind, label).toBe(fileKind);
+      expect(body.useInstead, label).toEqual(['upload', 'copy_file', 'move_file']);
+      // The prose names the kind and the alternatives too, for a caller that only sees the message.
+      expect(body.error, label).toContain(`this file's kind is ${fileKind};`);
+      expect(body.error, label).toContain('upload');
+      expect(body.error, label).toContain('copy_file / move_file');
+    };
+    /** The same refusal, as `write_files` reports it: per path, inside a 200. */
+    const expectBatchRefusal = async (res: Response, fileKind: string, label: string) => {
+      expect(res.status, label).toBe(200);
+      const body = (await res.json()) as { count: number; files: { outcome: string; error?: string; message?: string }[] };
+      expect(body.count, label).toBe(0);
+      expect(body.files[0].outcome, label).toBe('refused');
+      expect(body.files[0].error, label).toBe('binary_not_writable');
+      expect(body.files[0].message, label).toContain(`this file's kind is ${fileKind};`);
+    };
+
+    it('file_stat reports contentMode text | document | binary', async () => {
+      const base = await start();
+      for (const f of await seed()) {
+        const stat = (await (await post(`${base}/api/agent/tools/file_stat`, { path: f.path })).json()) as Record<string, unknown>;
+        expect(stat.type, f.path).toBe('file');
+        expect(stat.contentMode, f.path).toBe(f.mode);
+      }
+      // Binary content under a text name is binary: write_file would refuse it.
+      await fs.writeFile('blob.dat', Buffer.from([0x00, 0xff]));
+      const blob = (await (await post(`${base}/api/agent/tools/file_stat`, { path: 'blob.dat' })).json()) as Record<string, unknown>;
+      expect(blob.contentMode).toBe('binary');
+      // A directory has no content mode.
+      await fs.mkdir('dir', { recursive: true });
+      const dir = (await (await post(`${base}/api/agent/tools/file_stat`, { path: 'dir' })).json()) as Record<string, unknown>;
+      expect(dir.contentMode).toBeUndefined();
+      expect(dir.kind).toBeUndefined();
+    });
+
+    it('file_stat classifies a file the way read_file does: kind, mime, mimeSource, textEditable', async () => {
+      const base = await start();
+      const stat = async (path: string) =>
+        (await (await post(`${base}/api/agent/tools/file_stat`, { path })).json()) as Record<string, unknown>;
+      // Extensionless UTF-8: read_file returns its text, so stat says text/plain.
+      await fs.writeFile('Sample file', Buffer.from('plain words, no extension\n'));
+      expect(await (await post(`${base}/api/agent/tools/read_file`, { path: 'Sample file' })).json()).toMatchObject({ content: 'plain words, no extension\n' });
+      expect(await stat('Sample file')).toMatchObject({ type: 'file', kind: 'text', mime: 'text/plain', mimeSource: 'sniff', textEditable: true });
+      expect(await stat('Sample file')).not.toHaveProperty('mimeNote');
+      // The filesystem's own mimeType (a second extension table: octet-stream
+      // here) is not passed through, so nothing in the answer contradicts `mime`.
+      expect((await fs.stat('Sample file')).mimeType).toBeDefined();
+      await fs.writeFile('notes.md', Buffer.from('# notes\n'));
+      await fs.mkdir('folder', { recursive: true });
+      for (const p of ['Sample file', 'notes.md', 'folder']) {
+        expect(await stat(p), p).not.toHaveProperty('mimeType');
+      }
+      expect(await stat('notes.md')).toMatchObject({ kind: 'text', mime: 'text/plain' });
+      await fs.writeFile('plata.pdf', Buffer.from('%PDF-1.4\n'));
+      expect(await stat('plata.pdf')).toMatchObject({ kind: 'document', mime: 'application/pdf', textEditable: false });
+      await seed();
+      expect(await stat('deck.pptx')).toMatchObject({ kind: 'document', mimeSource: 'extension', textEditable: false });
+      expect(await stat('logo.png')).toMatchObject({ kind: 'image', mime: 'image/png', textEditable: false });
+      // Real binary bytes without a known extension: the octet-stream fallback, and a note saying so.
+      await fs.writeFile('Sample blob', Buffer.from([0x00, 0x01, 0xff]));
+      const blob = await stat('Sample blob');
+      expect(blob).toMatchObject({ kind: 'binary', mime: 'application/octet-stream', mimeSource: 'fallback', textEditable: false });
+      expect(blob.mimeNote).toBe(OCTET_STREAM_FALLBACK_NOTE);
+    });
+
+    it('write_file, write_files and edit_file accept the text file and refuse the other three with binary_not_writable, bytes untouched', async () => {
+      const base = await start();
+      // The plain test filesystem has no batch commit; give it one that lands
+      // each write, so the text batch must actually SUCCEED past the gate.
+      (fs as unknown as { writeFiles: (writes: { path: string; content: string }[]) => Promise<void> }).writeFiles = async (writes) => {
+        for (const w of writes) await fs.writeFile(w.path, w.content);
+      };
+      const files = await seed();
+      for (const f of files) {
+        // Every seeded file already exists, so the write says it means to replace it.
+        const write = await post(`${base}/api/agent/tools/write_file`, { path: f.path, content: 'plain text', mode: 'overwrite' });
+        const batch = await post(`${base}/api/agent/tools/write_files`, { files: [{ path: f.path, content: 'plain text' }], mode: 'overwrite' });
+        const edit = await post(`${base}/api/agent/tools/edit_file`, { path: f.path, old_string: 'a', new_string: 'b' });
+        if (f.kind === null) {
+          expect(write.status, f.path).toBe(200);
+          expect(batch.status, f.path).toBe(200);
+          // Content is now 'plain text', so 'a' is found once.
+          expect(edit.status, f.path).toBe(200);
+          expect((await onDisk(f.path)).toString('utf8')).toBe('plbin text');
+          continue;
+        }
+        await expectRefusal(write, f.kind, `write_file ${f.path}`);
+        await expectBatchRefusal(batch, f.kind, `write_files ${f.path}`);
+        await expectRefusal(edit, f.kind, `edit_file ${f.path}`);
+        expect((await onDisk(f.path)).equals(f.bytes), f.path).toBe(true);
+      }
+      // Creating a NEW image or zip by text is refused the same way — nothing lands.
+      await expectRefusal(await post(`${base}/api/agent/tools/write_file`, { path: 'new.png', content: 'x' }), 'image', 'new.png');
+      await expectRefusal(await post(`${base}/api/agent/tools/write_file`, { path: 'new.zip', content: 'x' }), 'archive', 'new.zip');
+      expect((await post(`${base}/api/agent/tools/file_stat`, { path: 'new.png' })).status).not.toBe(200);
+    });
+
+    it('copy_file and move_file carry every kind byte-for-byte', async () => {
+      const base = await start();
+      for (const f of await seed()) {
+        const copied = await post(`${base}/api/agent/tools/copy_file`, { src: f.path, dest: `copies/${f.path}` });
+        expect(copied.status, f.path).toBe(200);
+        expect((await onDisk(`copies/${f.path}`)).equals(f.bytes), `copy ${f.path}`).toBe(true);
+        const moved = await post(`${base}/api/agent/tools/move_file`, { src: f.path, dest: `moved/${f.path}` });
+        expect(moved.status, f.path).toBe(200);
+        expect((await onDisk(`moved/${f.path}`)).equals(f.bytes), `move ${f.path}`).toBe(true);
+      }
+      // The moved zip is still a real archive: unzip reads it as bytes.
+      const z = new AdmZip(await onDisk('moved/bundle.zip'));
+      expect(z.getEntry('inner.md')?.getData().toString('utf8')).toBe('# inner\n');
+    });
   });
 
   it('the page-writing tools say where images go, so an agent writes the link a page will render', async () => {
@@ -1209,7 +1694,14 @@ describe('start_session', () => {
   let server: HttpServer | undefined;
   let created: Array<{ userId: string; startedAt: Date }> = [];
 
-  async function startSessionApp(source: 'external' | 'internal' = 'external'): Promise<string> {
+  async function startSessionApp(
+    source: 'external' | 'internal' = 'external',
+    // The default fake returns one fixed id, which is what most of these
+    // assertions want. The load reproduction below substitutes the REAL
+    // `UuidSessionSink`, because "did fifty first calls collide?" is a question
+    // only the real minting can answer.
+    sink?: ISessionSink,
+  ): Promise<string> {
     created = [];
     const registry = new ToolRegistry();
     const resolve = async (auth: ToolAuth, signal: AbortSignal): Promise<ToolContext> => ({
@@ -1243,7 +1735,7 @@ describe('start_session', () => {
       new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, KB_DIR,
       { service: {} as never, enabled: false, kbDirName: KB_DIR, recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
       new RoutineWritePolicyService(),
-      fakeSessionSink,
+      sink ?? fakeSessionSink,
     );
     app.use('/api', router);
     server = await new Promise<HttpServer>((r) => {
@@ -1279,6 +1771,107 @@ describe('start_session', () => {
     const res = await post(`${base}/api/agent/tools/start_session`);
     expect(res.status).toBe(403);
     expect(created).toHaveLength(0);
+  });
+
+  /**
+   * The load reproduction, platform side.
+   *
+   * The report behind this was one first call on a fresh connection failing
+   * with a generic error, an immediate retry working, and the error carrying a
+   * `req_011…` id — the Anthropic API's request-id shape, which nothing here
+   * mints. The hypothesis was that the failure never reached the tool. These
+   * run the real `UuidSessionSink` behind the real route, fifty calls at once,
+   * so the hypothesis stops being the only account of what the route does
+   * under a burst.
+   *
+   * `first-call-probe.ts` (and its suite) does the same over a real MCP
+   * transport; this one strips the transport away so a future failure can be
+   * placed on one side of it or the other.
+   */
+  describe('fifty first calls at once', () => {
+    it('answers every one of them with a session id of its own', async () => {
+      const base = await startSessionApp('external', new UuidSessionSink());
+
+      const responses = await Promise.all(Array.from({ length: 50 }, () => post(`${base}/api/agent/tools/start_session`)));
+      const bodies = (await Promise.all(responses.map((r) => r.json()))) as Array<{ sessionId?: string }>;
+
+      expect(responses.map((r) => r.status)).toEqual(Array.from({ length: 50 }, () => 200));
+      // Fifty ids, no collision and no blank: a burst is not one id handed out
+      // repeatedly, and it is not a partially-served queue either.
+      expect(new Set(bodies.map((b) => b.sessionId)).size).toBe(50);
+      expect(bodies.every((b) => typeof b.sessionId === 'string' && b.sessionId.length > 0)).toBe(true);
+    });
+
+    it('mints nothing when the call fails, so the retry the description promises is safe', async () => {
+      // A sink that fails the first call and serves the second is the reported
+      // sequence exactly. What the retry must NOT inherit is any state the
+      // failed call left — and there is none to inherit, because a failed mint
+      // never reached the point of producing an id.
+      let calls = 0;
+      const flaky: ISessionSink = {
+        createSession: async () => {
+          calls++;
+          if (calls === 1) throw new Error('sink unavailable');
+          return { sessionId: `session-${calls}` };
+        },
+      };
+      const base = await startSessionApp('external', flaky);
+
+      // The route logs the sink's failure — correct behaviour, and expected
+      // here, so it is kept out of the suite's output rather than left to look
+      // like a real fault. Restored in a `finally`: if the request itself
+      // rejected, an un-restored spy would go on swallowing console.error for
+      // every later test in this file, and they would pass while saying nothing.
+      const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let failed: Awaited<ReturnType<typeof post>>;
+      try {
+        failed = await post(`${base}/api/agent/tools/start_session`);
+      } finally {
+        errorLog.mockRestore();
+      }
+      expect(failed.status).toBeGreaterThanOrEqual(500);
+
+      const retried = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      expect(retried.sessionId).toBe('session-2');
+      expect(calls).toBe(2);
+    });
+
+    it('gives a retry that lands after a success a NEW id, leaving the first one usable', async () => {
+      // The harmless case the description calls out: a client that retries a
+      // call which had in fact succeeded ends up holding two ids. Neither
+      // supersedes the other — the run keeps using the one it already passed
+      // to other tools, and the spare is simply never mentioned again.
+      const base = await startSessionApp('external', new UuidSessionSink());
+
+      const first = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const retry = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+
+      expect(retry.sessionId).not.toBe(first.sessionId);
+      expect(first.sessionId).toBeTruthy();
+    });
+  });
+
+  it('tells the caller, in the tool description, that a failed call can be retried', async () => {
+    const registry = new ToolRegistry();
+    const router = express.Router();
+    const noopAuth: express.RequestHandler = (_req, _res, next) => next();
+    registerWorkspaceTools(
+      registry, router, noopAuth, (() => () => {}) as never,
+      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, KB_DIR,
+      { service: {} as never, enabled: false, kbDirName: KB_DIR, recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+      new RoutineWritePolicyService(),
+      {} as never,
+    );
+
+    const description = (await registry.listExternal()).find((t) => t.name === 'start_session')?.description ?? '';
+
+    // The three things a caller has to be told, and the reason the ticket asked
+    // for them: without the first two a transport hiccup reads as a dead end,
+    // and without the third a client that already retried thinks it has
+    // corrupted its own run.
+    expect(description).toMatch(/retry/i);
+    expect(description).toMatch(/created nothing/i);
+    expect(description).toMatch(/harmless/i);
   });
 });
 
@@ -1393,5 +1986,1036 @@ describe('path inputs tell the agent about the repository folder', () => {
     expect(list).toBeDefined();
     expect(list!.description).toContain(`\`${KB_DIR}/\``);
     expect(inputDescription(list, 'path')).toContain(`\`${KB_DIR}/\``);
+  });
+});
+
+/**
+ * A folder exists until someone deletes it, and its placeholder is never shown
+ * as content — the agent tools' half (the UI routes' half lives in
+ * `workspace.routes.folders.test.ts`). The filesystem here is a plain
+ * LocalFilesystem, so "committed" is proven the way git sees it: a real
+ * repository in the clone folder, committed and freshly cloned.
+ */
+describe('folders never vanish', () => {
+  const KB = (p: string) => `${KB_DIR}/${p}`;
+  const tool = async (base: string, name: string, body: Record<string, unknown>) => {
+    const res = await post(`${base}/api/agent/tools/${name}`, body);
+    return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  };
+  const names = async (base: string, dir: string) =>
+    ((await tool(base, 'list_files', { path: dir })).body.entries as { name: string; type: string }[]).map(
+      (e) => `${e.name}:${e.type}`,
+    );
+  const gitIn = (cwd: string, args: string[]) =>
+    promisify(execFile)('git', args, {
+      cwd,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@x',
+      },
+    });
+
+  it('list_files, file_stat and grep never show the placeholder', async () => {
+    const base = await start();
+    await fs.writeFile(KB('Docs/note.md'), 'marker');
+    await fs.writeFile(KB('Docs/.gitkeep'), 'marker');
+    await fs.writeFile(KB('Docs/Empty/.gitkeep'), '');
+
+    expect((await names(base, KB('Docs'))).sort()).toEqual(['Empty:directory', 'note.md:file']);
+    expect(await names(base, KB('Docs/Empty'))).toEqual([]);
+
+    const missing = await tool(base, 'file_stat', { path: KB('Docs/nothing-here.md') });
+    const placeholder = await tool(base, 'file_stat', { path: KB('Docs/.gitkeep') });
+    expect(missing.status).toBe(404);
+    expect(placeholder).toEqual({ status: 404, body: { error: `There is no file or directory at "${KB('Docs/.gitkeep')}".` } });
+    expect((await tool(base, 'file_stat', { path: KB('Docs/Empty') })).body).toMatchObject({ type: 'directory' });
+
+    const grep = await tool(base, 'grep', { pattern: 'marker' });
+    expect((grep.body.matches as { path: string }[]).map((m) => m.path)).toEqual([KB('Docs/note.md')]);
+    expect((await tool(base, 'grep', { pattern: 'marker', path: KB('Docs/.gitkeep') })).status).toBe(404);
+  });
+
+  it('delete_folder removes its folder but keeps the one that held it, placeholder not counted as content', async () => {
+    const base = await start();
+    await fs.writeFile(KB('Parent/Child/a.md'), 'a');
+    await fs.writeFile(KB('Parent/Child/.gitkeep'), '');
+
+    // The placeholder goes with the folder, but it is not a file the caller
+    // is told about or asked to confirm.
+    const dry = await tool(base, 'delete_folder', { path: KB('Parent/Child'), dryRun: true });
+    expect(dry.body).toMatchObject({ descendants: 1, files: [KB('Parent/Child/a.md')] });
+    expect((await tool(base, 'file_stat', { path: KB('Parent/Child') })).body).toMatchObject({ descendants: 1 });
+
+    const run = await tool(base, 'delete_folder', { path: KB('Parent/Child'), confirm: true });
+    expect(run.body).toMatchObject({ deleted: true });
+    expect(await fs.exists(KB('Parent/Child'))).toBe(false);
+    // `Parent` was not deleted: now empty, it stays, listed as an empty folder.
+    expect(await names(base, KB(''))).toContain('Parent:directory');
+    expect(await names(base, KB('Parent'))).toEqual([]);
+    expect(await fs.exists(KB('Parent/.gitkeep'))).toBe(true);
+  });
+
+  it('a folder holding only its placeholder is empty: deleted without confirm, reporting no files', async () => {
+    const base = await start();
+    await fs.writeFile(KB('Holder/Empty/.gitkeep'), '');
+    await fs.writeFile(KB('Holder/keep.md'), 'k');
+
+    const run = await tool(base, 'delete_folder', { path: KB('Holder/Empty') });
+    expect(run.body).toMatchObject({ deleted: true, descendants: 0, files: [] });
+    expect(await fs.exists(KB('Holder/Empty'))).toBe(false);
+    // `Holder` still has content of its own, so it needs no placeholder.
+    expect(await fs.exists(KB('Holder/.gitkeep'))).toBe(false);
+  });
+
+  it('move_file of a whole folder out keeps the folder it came from', async () => {
+    const base = await start();
+    await fs.writeFile(KB('Src/Inner/x.md'), 'x');
+
+    expect((await tool(base, 'move_file', { src: KB('Src/Inner'), dest: KB('Dst/Inner') })).status).toBe(200);
+    expect(await fs.exists(KB('Dst/Inner/x.md'))).toBe(true);
+    expect(await names(base, KB('Src'))).toEqual([]);
+    expect(await fs.exists(KB('Src/.gitkeep'))).toBe(true);
+  });
+
+  it('delete_file on the last file keeps the folder, and it survives a fresh clone', async () => {
+    const base = await start();
+    const repo = join(tempDir, KB_DIR);
+    await fs.writeFile(KB('nested/level-two/notes.md'), 'x');
+    await gitIn(repo, ['init', '-q', '-b', 'main']);
+    await gitIn(repo, ['add', '-A']);
+    await gitIn(repo, ['commit', '-qm', 'seed']);
+
+    expect((await tool(base, 'delete_file', { path: KB('nested/level-two/notes.md') })).status).toBe(200);
+
+    expect(await names(base, KB('nested'))).toEqual(['level-two:directory']);
+    expect(await names(base, KB('nested/level-two'))).toEqual([]);
+    // What the lock-aware filesystem commits on release, committed here by hand.
+    await gitIn(repo, ['add', '-A']);
+    await gitIn(repo, ['commit', '-qm', 'delete']);
+    await gitIn(tempDir, ['clone', '-q', repo, 'fresh-clone']);
+    expect((await fs.stat('fresh-clone/nested/level-two')).type).toBe('directory');
+  });
+
+  it('delete_file with siblings left, or at the clone folder itself, writes no placeholder', async () => {
+    const base = await start();
+    await fs.writeFile(KB('full/a.md'), 'a');
+    await fs.writeFile(KB('full/b.md'), 'b');
+    await fs.writeFile(KB('top.md'), 't');
+
+    expect((await tool(base, 'delete_file', { path: KB('full/a.md') })).status).toBe(200);
+    expect((await tool(base, 'delete_file', { path: KB('top.md') })).status).toBe(200);
+    expect((await tool(base, 'delete_file', { path: 'a.md' })).status).toBe(200);
+
+    expect(await names(base, KB('full'))).toEqual(['b.md:file']);
+    await expect(fs.exists(KB('full/.gitkeep'))).resolves.toBe(false);
+    await expect(fs.exists(KB('.gitkeep'))).resolves.toBe(false);
+    await expect(fs.exists('.gitkeep')).resolves.toBe(false);
+  });
+
+  it('delete_file keeps the folder in its folder turn, on the branch it was given', async () => {
+    const base = await start();
+    await fs.writeFile(KB('turned/only.md'), 'x');
+
+    expect((await tool(base, 'delete_file', { path: KB('turned/only.md'), branch: 'alice/draft' })).status).toBe(200);
+    expect(folderTurns).toEqual([`alice%2Fdraft:${KB('turned')}`]);
+  });
+
+  it('delete_file fails when the emptied folder cannot be kept, and says the file is gone', async () => {
+    const base = await start();
+    await fs.writeFile(KB('unkeepable/only.md'), 'x');
+    const write = fs.writeFile.bind(fs);
+    const spy = vi.spyOn(fs, 'writeFile').mockImplementation(async (p, ...rest) => {
+      if (p.endsWith('.gitkeep')) throw new Error('disk full');
+      return write(p, ...rest);
+    });
+
+    let res: Awaited<ReturnType<typeof tool>>;
+    try {
+      res = await tool(base, 'delete_file', { path: KB('unkeepable/only.md') });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe(
+      `"${KB('unkeepable/only.md')}" was removed, but its folder "${KB('unkeepable')}" could not be kept: disk full`,
+    );
+    await expect(fs.exists(KB('unkeepable/only.md'))).resolves.toBe(false);
+  });
+
+  it('move_file of the last file keeps the source folder', async () => {
+    const base = await start();
+    await fs.writeFile(KB('from/a.md'), 'a');
+
+    expect((await tool(base, 'move_file', { src: KB('from/a.md'), dest: KB('to/a.md') })).status).toBe(200);
+
+    expect((await names(base, KB(''))).sort()).toEqual(['from:directory', 'to:directory']);
+    expect(await names(base, KB('from'))).toEqual([]);
+    await expect(fs.exists(KB('from/.gitkeep'))).resolves.toBe(true);
+  });
+
+  it('mkdir, a nested write, and an emptied folder converge on the same state', async () => {
+    const base = await start();
+    await tool(base, 'mkdir', { path: KB('Made') });
+    await tool(base, 'write_file', { path: KB('Written/n.md'), content: 'n' });
+
+    expect((await names(base, KB(''))).sort()).toEqual(['Made:directory', 'Written:directory']);
+    expect(await names(base, KB('Made'))).toEqual([]);
+
+    await tool(base, 'delete_file', { path: KB('Written/n.md') });
+    expect((await names(base, KB(''))).sort()).toEqual(['Made:directory', 'Written:directory']);
+    expect(await names(base, KB('Written'))).toEqual(await names(base, KB('Made')));
+    expect((await tool(base, 'file_stat', { path: KB('Written') })).body).toMatchObject({ type: 'directory' });
+  });
+});
+
+/**
+ * The safety contract an agent gets before a move or delete: `file_stat` says
+ * what an item is and what the caller may do with it, `move_file` and
+ * `delete_folder` answer a dry run with the impact and wait for `confirm`, and
+ * a permission refusal says whether and how to propose instead. The access
+ * double below stands in for the rules, per top-level KB folder:
+ *   Sales/  — everything (the default for anything unlisted)
+ *   HR/     — read + write, no download, no owner: a move here changes access
+ *   Locked/ — read only: writes are refused, proposing is possible
+ *   Secret/ — nothing: writes are refused, proposing is not
+ *   …/sealed.md — read only, wherever it sits: a denied file inside a writable folder
+ *   Sales/outbox/nested/, Sales/moved/nested/ — read only: a denial at only the old, or only the new, path of a moved folder
+ */
+describe('preflight for moves and deletes', () => {
+  const PROTECTED = 'target-company-state';
+  const KB = (p: string) => `${KB_DIR}/${p}`;
+
+  const verbsFor = (rel: string) => {
+    if (rel.startsWith('Sales/outbox/nested/') || rel.startsWith('Sales/moved/nested/')) {
+      return { read: true, write: false, download: false, owner: false };
+    }
+    if (rel === 'sealed.md' || rel.endsWith('/sealed.md')) return { read: true, write: false, download: false, owner: false };
+    if (rel.startsWith('HR/')) return { read: true, write: true, download: false, owner: false };
+    if (rel.startsWith('Locked/')) return { read: true, write: false, download: false, owner: false };
+    if (rel.startsWith('Secret/')) return { read: false, write: false, download: false, owner: false };
+    return { read: true, write: true, download: true, owner: true };
+  };
+  const rules = {
+    canRead: async (_w: string, _u: string, rel: string) => verbsFor(rel).read,
+    canReadBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, verbsFor(p).read])),
+    canWrite: async (_w: string, _u: string, rel: string) => verbsFor(rel).write,
+    canDownload: async (_w: string, _u: string, rel: string) => verbsFor(rel).download,
+    canOwner: async (_w: string, _u: string, rel: string) => verbsFor(rel).owner,
+    canWriteBatchAtRef: async (_w: string, _r: string, _u: string, rels: string[]) =>
+      new Map(rels.map((p) => [p, verbsFor(p).write])),
+    eligibleWritersAtRef: async () => ({ roles: ['Admin'], users: [] }),
+  } as unknown as IAccessControl;
+
+  const call = async (base: string, tool: string, body: Record<string, unknown>) => {
+    const res = await post(`${base}/api/agent/tools/${tool}`, { branch: PROTECTED, ...body });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- a tool body is free-form JSON, probed field by field
+    return { status: res.status, body: (await res.json()) as Record<string, any> };
+  };
+  const exists = async (p: string) => fs.exists(p);
+
+  async function seeded(): Promise<string> {
+    const base = await start('write', rules);
+    await fs.writeFile(KB('access.md'), '---\nread: everyone\n---\n');
+    await fs.writeFile(KB('KnowledgeBase/Team/a.md'), 'a');
+    await fs.writeFile(KB('Sales/deal.md'), 'deal');
+    await fs.writeFile(KB('Sales/archive/nested/old.md'), 'old');
+    await fs.writeFile(KB('Sales/archive/nested/older.md'), 'older');
+    await fs.writeFile(KB('Sales/archive/top.md'), 'top');
+    await fs.writeFile(KB('HR/policy.md'), 'policy');
+    await fs.writeFile(KB('Locked/rules.md'), 'rules');
+    return base;
+  }
+
+  describe('file_stat', () => {
+    it('a platform file is managed, not movable, not deletable', async () => {
+      const base = await seeded();
+      const { status, body } = await call(base, 'file_stat', { path: KB('access.md') });
+      expect(status).toBe(200);
+      expect(body).toMatchObject({ type: 'file', managed: true, movable: false, deletable: false });
+      expect(body.access).toEqual({ read: true, write: true, download: true, owner: true });
+      expect(body.descendants).toBeUndefined();
+    });
+
+    it('a plain file is movable and deletable, with the caller\'s verdicts', async () => {
+      const base = await seeded();
+      expect((await call(base, 'file_stat', { path: KB('Sales/deal.md') })).body).toMatchObject({
+        type: 'file', managed: false, movable: true, deletable: true,
+        access: { read: true, write: true, download: true, owner: true },
+      });
+      expect((await call(base, 'file_stat', { path: KB('Locked/rules.md') })).body).toMatchObject({
+        managed: false, movable: false, deletable: false,
+        access: { read: true, write: false, download: false, owner: false },
+      });
+    });
+
+    it('a folder counts its files at any depth; a reserved root folder is managed', async () => {
+      const base = await seeded();
+      expect((await call(base, 'file_stat', { path: KB('Sales/archive') })).body).toMatchObject({
+        type: 'directory', managed: false, movable: true, deletable: true, descendants: 3,
+      });
+      expect((await call(base, 'file_stat', { path: KB('KnowledgeBase') })).body).toMatchObject({
+        type: 'directory', managed: true, movable: false, deletable: false, descendants: 1,
+      });
+    });
+  });
+
+  describe('move_file', () => {
+    it('a same-access move: the dry run changes nothing, the real call runs without confirm', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/deal.md'), dest: KB('Sales/2026/deal.md') };
+      const dry = await call(base, 'move_file', { ...args, dryRun: true });
+      expect(dry.status).toBe(200);
+      expect(dry.body).toMatchObject({
+        ...args, kind: 'file', descendants: 1, accessChanges: false, allowed: true, dryRun: true, moved: false,
+      });
+      expect(dry.body.access.before).toEqual(dry.body.access.after);
+      expect(dry.body.reason).toBeUndefined();
+      expect(await exists(args.src)).toBe(true);
+      expect(await exists(args.dest)).toBe(false);
+
+      const run = await call(base, 'move_file', args);
+      expect(run.body).toMatchObject({ moved: true });
+      expect(await exists(args.dest)).toBe(true);
+      expect(await exists(args.src)).toBe(false);
+    });
+
+    it('an access-changing move shows before/after and runs only with confirm: true', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/deal.md'), dest: KB('HR/deal.md') };
+      const dry = await call(base, 'move_file', { ...args, dryRun: true });
+      expect(dry.body).toMatchObject({
+        accessChanges: true,
+        allowed: true,
+        access: {
+          before: { read: true, write: true, download: true, owner: true },
+          after: { read: true, write: true, download: false, owner: false },
+        },
+      });
+
+      const unconfirmed = await call(base, 'move_file', args);
+      expect(unconfirmed.status).toBe(200);
+      expect(unconfirmed.body).toMatchObject({ accessChanges: true, confirmationRequired: true, moved: false });
+      expect(unconfirmed.body.message).toContain('confirm: true');
+      expect(await exists(args.src)).toBe(true);
+      expect(await exists(args.dest)).toBe(false);
+
+      const confirmed = await call(base, 'move_file', { ...args, confirm: true });
+      expect(confirmed.body).toMatchObject({ moved: true });
+      expect(await exists(args.dest)).toBe(true);
+    });
+
+    it('a folder moves recursively', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/archive'), dest: KB('Sales/old-archive') };
+      expect((await call(base, 'move_file', { ...args, dryRun: true })).body).toMatchObject({ kind: 'folder', descendants: 3 });
+      expect((await call(base, 'move_file', args)).body).toMatchObject({ moved: true });
+      expect(await exists(KB('Sales/old-archive/nested/old.md'))).toBe(true);
+      expect(await exists(args.src)).toBe(false);
+    });
+
+    it('a move the caller may not write: the dry run says so, the real call is a write-denied with proposal steps', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/deal.md'), dest: KB('Locked/deal.md') };
+      const dry = await call(base, 'move_file', { ...args, dryRun: true });
+      expect(dry.body).toMatchObject({ allowed: false });
+      expect(dry.body.reason).toContain(KB('Locked/deal.md'));
+
+      const run = await call(base, 'move_file', args);
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Locked/deal.md'), canPropose: true });
+      expect(run.body.reason).toContain('Eligible: Admin');
+      // `reason` is what the refusal said; `error` is the sentence the agent
+      // reads, which carries it plus the invitation to propose.
+      expect(run.body.error).toContain('Eligible: Admin');
+      expect(run.body.error).toContain('You may propose this change instead');
+      expect(run.body.proposal.targetBranch).toBe(PROTECTED);
+      expect(run.body.proposal.steps.map((s: { tool: string }) => s.tool)).toEqual([
+        'create_branch',
+        'move_file',
+        'open_change_request',
+      ]);
+      expect(await exists(args.src)).toBe(true);
+    });
+
+    it('a folder move judges every file under it: one denied file blocks the move, in the dry run and for real', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/archive/nested/sealed.md'), 'sealed');
+      const args = { src: KB('Sales/archive'), dest: KB('Sales/archive-2026') };
+      const dry = await call(base, 'move_file', { ...args, dryRun: true });
+      expect(dry.body).toMatchObject({ kind: 'folder', descendants: 4, accessChanges: false, allowed: false });
+      expect(dry.body.reason).toContain('sealed.md');
+      const run = await call(base, 'move_file', { ...args, confirm: true });
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Sales/archive/nested/sealed.md'), canPropose: true });
+      expect(await exists(KB('Sales/archive/nested/sealed.md'))).toBe(true);
+      expect(await exists(args.dest)).toBe(false);
+    });
+
+    it('file_stat on a folder answers exactly what the move and delete dry runs answer, a denied file inside included', async () => {
+      const base = await seeded();
+      const path = KB('Sales/archive');
+      const verdicts = async () => ({
+        stat: (await call(base, 'file_stat', { path })).body,
+        move: (await call(base, 'move_file', { src: path, dest: KB('Sales/archive-2026'), dryRun: true })).body,
+        del: (await call(base, 'delete_folder', { path, dryRun: true })).body,
+      });
+      // All writable: every answer says yes.
+      let v = await verdicts();
+      expect([v.stat.movable, v.move.allowed, v.stat.deletable, v.del.allowed]).toEqual([true, true, true, true]);
+      // One file its own rules deny, deep inside the writable folder: every answer says no.
+      await fs.writeFile(KB('Sales/archive/nested/sealed.md'), 'sealed');
+      v = await verdicts();
+      expect(v.stat).toMatchObject({ access: { write: true }, descendants: 4 });
+      expect(v.stat.movable).toBe(v.move.allowed);
+      expect(v.stat.deletable).toBe(v.del.allowed);
+      expect([v.stat.movable, v.stat.deletable]).toEqual([false, false]);
+    });
+
+    it('a folder move judges each file at its old path and at its new path, separately', async () => {
+      const base = await seeded();
+      // Denied only at the old path: the file under Sales/outbox/nested/ may not be removed.
+      await fs.writeFile(KB('Sales/outbox/nested/letter.md'), 'letter');
+      const oldSide = await call(base, 'move_file', { src: KB('Sales/outbox'), dest: KB('Sales/sent'), dryRun: true });
+      expect(oldSide.body).toMatchObject({ allowed: false });
+      expect(oldSide.body.reason).toContain(KB('Sales/outbox/nested/letter.md'));
+      // Denied only at the new path: Sales/archive is writable, Sales/moved/nested/ is not.
+      const newSide = await call(base, 'move_file', { src: KB('Sales/archive'), dest: KB('Sales/moved'), dryRun: true });
+      expect(newSide.body).toMatchObject({ allowed: false });
+      expect(newSide.body.reason).toContain(KB('Sales/moved/nested/'));
+      const run = await call(base, 'move_file', { src: KB('Sales/archive'), dest: KB('Sales/moved'), confirm: true });
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ kind: 'write-denied' });
+      expect(await exists(KB('Sales/archive/nested/old.md'))).toBe(true);
+    });
+
+    it('trailing slashes do not change which paths a folder move is judged on', async () => {
+      const base = await seeded();
+      const args = { src: `${KB('Sales/archive')}/`, dest: `${KB('Sales/moved')}/` };
+      const dry = await call(base, 'move_file', { ...args, dryRun: true });
+      expect(dry.body).toMatchObject({ src: KB('Sales/archive'), dest: KB('Sales/moved'), descendants: 3, allowed: false });
+      expect(dry.body.reason).toContain(KB('Sales/moved/nested/'));
+      expect((await call(base, 'move_file', { ...args, confirm: true })).status).toBe(403);
+      expect(await exists(KB('Sales/archive/nested/old.md'))).toBe(true);
+      expect(await exists(KB('Sales/moved'))).toBe(false);
+    });
+
+    it('a denied move into a path the caller cannot read cannot be proposed, and says why', async () => {
+      const base = await seeded();
+      const run = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Secret/deal.md'), confirm: true });
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ kind: 'write-denied', canPropose: false });
+      expect(run.body.proposal).toBeUndefined();
+      expect(run.body.cannotProposeReason).toContain('you cannot read this path');
+    });
+
+    it('a draft branch is not write-gated, so the same move is allowed there', async () => {
+      const base = await seeded();
+      const dry = await call(base, 'move_file', { branch: 'someone/draft', src: KB('Sales/deal.md'), dest: KB('Locked/deal.md'), dryRun: true });
+      expect(dry.body).toMatchObject({ allowed: true, accessChanges: true });
+    });
+
+    it('a platform file is refused with the platform-file sentence, in the dry run and for real', async () => {
+      const base = await seeded();
+      const args = { src: KB('access.md'), dest: KB('Sales/access.md') };
+      const sentence = 'access.md is a platform file and stays in its folder.';
+      expect((await call(base, 'move_file', { ...args, dryRun: true })).body).toMatchObject({ allowed: false, reason: sentence });
+      const run = await call(base, 'move_file', { ...args, confirm: true });
+      expect(run.status).toBe(400);
+      expect(run.body.error).toBe(sentence);
+      expect(await exists(args.src)).toBe(true);
+    });
+
+    it('an existing destination is refused, never overwritten', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/deal.md'), dest: KB('Sales/archive/top.md') };
+      expect((await call(base, 'move_file', { ...args, dryRun: true })).body).toMatchObject({ allowed: false });
+      expect((await call(base, 'move_file', args)).status).toBe(409);
+      expect(await fs.readFile(args.dest, { encoding: 'utf-8' })).toBe('top');
+    });
+  });
+
+  describe('delete_folder', () => {
+    it('the dry run lists the files and deletes nothing; without confirm nothing is deleted; with confirm the folder is gone', async () => {
+      const base = await seeded();
+      const path = KB('Sales/archive');
+      const dry = await call(base, 'delete_folder', { path, dryRun: true });
+      expect(dry.status).toBe(200);
+      expect(dry.body).toMatchObject({ path, kind: 'folder', descendants: 3, allowed: true, dryRun: true, filesTruncated: false });
+      expect([...dry.body.files].sort()).toEqual([
+        KB('Sales/archive/nested/old.md'), KB('Sales/archive/nested/older.md'), KB('Sales/archive/top.md'),
+      ]);
+      expect(await exists(KB('Sales/archive/top.md'))).toBe(true);
+
+      const unconfirmed = await call(base, 'delete_folder', { path });
+      expect(unconfirmed.body).toMatchObject({ confirmationRequired: true, deleted: false });
+      expect(unconfirmed.body.message).toContain('confirm: true');
+      expect(await exists(KB('Sales/archive/nested/old.md'))).toBe(true);
+
+      const confirmed = await call(base, 'delete_folder', { path, confirm: true });
+      expect(confirmed.body).toMatchObject({ deleted: true, descendants: 3 });
+      expect(await exists(path)).toBe(false);
+      const listing = await call(base, 'list_files', { path: KB('Sales') });
+      expect(listing.body.entries.map((e: { name: string }) => e.name)).toEqual(['deal.md']);
+    });
+
+    it('a platform folder is refused with its reason', async () => {
+      const base = await seeded();
+      const dry = await call(base, 'delete_folder', { path: KB('KnowledgeBase'), dryRun: true });
+      expect(dry.body).toMatchObject({ allowed: false, reason: 'KnowledgeBase/ is a platform folder and cannot be moved or deleted.' });
+      const run = await call(base, 'delete_folder', { path: KB('KnowledgeBase'), confirm: true });
+      expect(run.status).toBe(400);
+      expect(await exists(KB('KnowledgeBase/Team/a.md'))).toBe(true);
+    });
+
+    it('a folder the caller cannot write is refused with the structured denial', async () => {
+      const base = await seeded();
+      expect((await call(base, 'delete_folder', { path: KB('Locked'), dryRun: true })).body).toMatchObject({ allowed: false });
+      const run = await call(base, 'delete_folder', { path: KB('Locked'), confirm: true });
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ kind: 'write-denied', canPropose: true });
+      expect(await exists(KB('Locked/rules.md'))).toBe(true);
+    });
+
+    it('an empty folder is deleted without confirm; a file is pointed to delete_file', async () => {
+      const base = await seeded();
+      await fs.mkdir(KB('Sales/empty'), { recursive: true });
+      expect((await call(base, 'delete_folder', { path: KB('Sales/empty') })).body).toMatchObject({ deleted: true, descendants: 0 });
+      expect(await exists(KB('Sales/empty'))).toBe(false);
+      const file = await call(base, 'delete_folder', { path: KB('Sales/deal.md') });
+      expect(file.status).toBe(400);
+      expect(file.body.error).toContain('delete_file');
+    });
+  });
+
+  describe('delete_file', () => {
+    it('on a folder answers with delete_folder instead of the filesystem error', async () => {
+      const base = await seeded();
+      const run = await call(base, 'delete_file', { path: KB('Sales/archive') });
+      expect(run.status).toBe(400);
+      expect(run.body.error).toContain('use delete_folder');
+      expect(await exists(KB('Sales/archive/top.md'))).toBe(true);
+    });
+
+    it('a denied delete is the structured denial', async () => {
+      const base = await seeded();
+      const run = await call(base, 'delete_file', { path: KB('Locked/rules.md') });
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Locked/rules.md'), canPropose: true });
+      expect(run.body.proposal.steps.map((s: { tool: string }) => s.tool)).toContain('delete_file');
+    });
+    it('a refusal from the lock gate itself (rules changed after the preflight) is the structured denial too', async () => {
+      const base = await seeded();
+      fs.deleteFile = async (p: string) => {
+        throw new AccessDeniedError({ path: p, eligibleRoles: ['Admin'], eligibleUsers: [] });
+      };
+      const run = await call(base, 'delete_file', { path: KB('Sales/deal.md') });
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Sales/deal.md'), canPropose: true });
+    });
+  });
+
+  describe('what counts as the platform\'s own, and what a move or delete may reach', () => {
+    const caseSensitiveDisk = process.platform === 'linux';
+
+    it('roles.yaml and AGENTS.md are platform files only at the root; access.md and .bevelignore at any depth', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
+      await fs.writeFile(KB('Sales/roles.yaml'), 'content');
+      await fs.writeFile(KB('Sales/AGENTS.md'), 'content');
+      await fs.writeFile(KB('Sales/.bevelignore'), '*.tmp\n');
+      const managed = async (p: string) => (await call(base, 'file_stat', { path: KB(p) })).body.managed;
+      expect(await managed('roles.yaml')).toBe(true);
+      expect(await managed('Sales/roles.yaml')).toBe(false);
+      expect(await managed('Sales/AGENTS.md')).toBe(false);
+      expect(await managed('Sales/.bevelignore')).toBe(true);
+      expect((await call(base, 'move_file', { src: KB('Sales/roles.yaml'), dest: KB('Sales/old-roles.yaml') })).body).toMatchObject({ moved: true });
+    });
+
+    it.skipIf(!caseSensitiveDisk)('a differently cased access.md is content on a case-sensitive disk', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/Access.md'), 'notes');
+      expect((await call(base, 'file_stat', { path: KB('Sales/Access.md') })).body).toMatchObject({ managed: false, movable: true });
+    });
+
+    // The git folder is not merely "managed": it is not reachable at all, so
+    // every one of these is the one sanitized refusal (`shared/git-internals.ts`)
+    // rather than this preflight's own "git metadata" answer — a dry run
+    // included, since even describing what is in there is not on offer.
+    it('git metadata is refused, and a folder walk never enters it', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('.git/HEAD'), 'ref: refs/heads/main\n');
+      await fs.writeFile(KB('Sales/sub/.git/HEAD'), 'ref: refs/heads/main\n');
+      for (const call_ of [
+        { tool: 'delete_folder', args: { path: KB('.git'), dryRun: true } },
+        { tool: 'delete_folder', args: { path: KB('.git'), confirm: true } },
+        { tool: 'delete_file', args: { path: KB('.git/HEAD') } },
+        { tool: 'move_file', args: { src: KB('.git'), dest: KB('Sales/git') } },
+      ]) {
+        const res = await call(base, call_.tool, call_.args);
+        expect({ tool: call_.tool, status: res.status, error: res.body.error }).toEqual({
+          tool: call_.tool,
+          status: 403,
+          error: GIT_INTERNALS_MESSAGE,
+        });
+      }
+      expect(await exists(KB('.git/HEAD'))).toBe(true);
+      expect((await call(base, 'file_stat', { path: KB('Sales/sub') })).body).toMatchObject({ descendants: 0 });
+    });
+
+    it('a folder\'s own access.md goes with it, in the same single change as every other file', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/archive/access.md'), '---\nread: everyone\n---\n');
+      // What the TOOL decides is the shape it hands the filesystem: ONE batch
+      // carrying every file, the folder's own access.md among them. That the
+      // batch then lands all-or-nothing is the batch's own property, asserted
+      // in locking-filesystem.test.ts; the harness stand-in here only applies
+      // the deletes.
+      const batches: string[][] = [];
+      const fsAny = fs as unknown as Record<string, unknown>;
+      const writeFiles = fsAny.writeFiles as (w: unknown[], s: string, d: string[]) => Promise<void>;
+      fsAny.writeFiles = async (w: unknown[], s: string, d: string[] = []) => {
+        batches.push([...d]);
+        return writeFiles(w, s, d);
+      };
+
+      const run = await call(base, 'delete_folder', { path: KB('Sales/archive'), confirm: true });
+
+      expect(run.body).toMatchObject({ deleted: true, descendants: 4 });
+      expect(batches).toHaveLength(1);
+      expect([...batches[0]].sort()).toEqual([
+        KB('Sales/archive/access.md'),
+        KB('Sales/archive/nested/old.md'),
+        KB('Sales/archive/nested/older.md'),
+        KB('Sales/archive/top.md'),
+      ]);
+      expect(await exists(KB('Sales/archive/access.md'))).toBe(false);
+      expect(await exists(KB('Sales/archive'))).toBe(false);
+    });
+
+    it('a restricted run is judged on the files a folder delete or move would write, not the folder path', async () => {
+      const base = await seeded();
+      writePolicy.restrictToExtensions('restricted-run', ['.html']);
+      await fs.writeFile(KB('Sales/views/a.html'), '<p>a</p>');
+      await fs.writeFile(KB('Sales/views/b.html'), '<p>b</p>');
+      const moved = await call(base, 'move_file', { src: KB('Sales/views'), dest: KB('Sales/dashboards'), sessionId: 'restricted-run' });
+      expect(moved.body).toMatchObject({ moved: true, descendants: 2 });
+      const deleted = await call(base, 'delete_folder', { path: KB('Sales/dashboards'), confirm: true, sessionId: 'restricted-run' });
+      expect(deleted.body).toMatchObject({ deleted: true });
+      const refused = await call(base, 'delete_folder', { path: KB('Sales/archive'), confirm: true, sessionId: 'restricted-run' });
+      expect(refused.status).toBe(403);
+      expect(await exists(KB('Sales/archive/top.md'))).toBe(true);
+    });
+
+    it.skipIf(process.platform === 'win32')('a move or folder delete through a symbolic link that leaves the repository is refused, a dangling one included', async () => {
+      const base = await seeded();
+      await mkdir(join(tempDir, 'beside-the-clone'), { recursive: true });
+      await symlink(join(tempDir, 'beside-the-clone'), join(tempDir, KB('Sales/out')));
+      const escaped = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/out/deal.md'), dryRun: true });
+      expect(escaped.status).toBe(400);
+      expect(escaped.body.error).toContain('symbolic link');
+      expect((await call(base, 'delete_folder', { path: KB('Sales/out'), dryRun: true })).status).toBe(400);
+      await symlink(join(tempDir, 'nowhere'), join(tempDir, KB('Sales/dangling.md')));
+      const collided = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/dangling.md') });
+      expect(collided.status).toBe(400);
+      expect(collided.body.error).toContain('symbolic link');
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+
+    it('a path with "." or ".." segments is refused by every move and delete, before anything changes', async () => {
+      const base = await seeded();
+      const sneaky = KB('Sales/../Locked/rules.md');
+      const del = await call(base, 'delete_file', { path: sneaky });
+      expect(del.status).toBe(400);
+      expect(del.body.error).toContain('".." segments');
+      expect((await call(base, 'move_file', { src: sneaky, dest: KB('Sales/rules.md'), dryRun: true })).status).toBe(400);
+      expect((await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/../Locked/deal.md') })).status).toBe(400);
+      expect((await call(base, 'delete_folder', { path: KB('Sales/../Locked'), confirm: true })).status).toBe(400);
+      expect((await call(base, 'file_stat', { path: KB('Sales/./deal.md') })).body).toMatchObject({ movable: false, deletable: false });
+      expect(await exists(KB('Locked/rules.md'))).toBe(true);
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+
+    it.skipIf(process.platform === 'win32')('file_stat agrees with move and delete about links on the way, a dangling one included', async () => {
+      const base = await seeded();
+      await symlink(join(tempDir, KB('Locked')), join(tempDir, KB('Sales/alias')));
+      expect((await call(base, 'file_stat', { path: KB('Sales/alias/rules.md') })).body).toMatchObject({ movable: false, deletable: false });
+      await symlink(join(tempDir, 'nowhere'), join(tempDir, KB('Sales/gone')));
+      const dangling = await call(base, 'file_stat', { path: KB('Sales/gone/x.md') });
+      expect(dangling.status).toBe(400);
+      expect(dangling.body.error).toContain(`the symbolic link "${KB('Sales/gone')}"`);
+    });
+
+    it.skipIf(process.platform === 'win32')('a link past the descendants cap still makes a folder not deletable', async () => {
+      const base = await seeded();
+      const dir = join(tempDir, KB('Sales/bulk'));
+      await mkdir(join(dir, 'a'), { recursive: true });
+      const names = Array.from({ length: 10_001 }, (_, i) => `f${i}.md`);
+      for (let i = 0; i < names.length; i += 500) {
+        await Promise.all(names.slice(i, i + 500).map((n) => writeFile(join(dir, 'a', n), '')));
+      }
+      await mkdir(join(dir, 'z'), { recursive: true });
+      await symlink(join(tempDir, 'nowhere'), join(dir, 'z', 'link'));
+      const stat = await call(base, 'file_stat', { path: KB('Sales/bulk') });
+      expect(stat.body).toMatchObject({ descendants: 10_000, descendantsTruncated: true, deletable: false });
+      expect((await call(base, 'delete_folder', { path: KB('Sales/bulk'), dryRun: true })).body).toMatchObject({ allowed: false });
+    }, 60_000);
+
+    it.skipIf(process.platform === 'win32')('a link inside the repository is not followed either, so a move cannot write into a folder whose rules it never judged', async () => {
+      const base = await seeded();
+      await symlink(join(tempDir, KB('Locked')), join(tempDir, KB('Sales/alias')));
+      const run = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/alias/deal.md'), dryRun: true });
+      expect(run.status).toBe(400);
+      expect(run.body.error).toContain(`the symbolic link "${KB('Sales/alias')}"`);
+      expect((await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/alias/deal.md') })).status).toBe(400);
+      expect((await call(base, 'delete_file', { path: KB('Sales/alias/rules.md') })).status).toBe(400);
+      expect(await exists(KB('Locked/rules.md'))).toBe(true);
+      expect(await exists(KB('Locked/deal.md'))).toBe(false);
+    });
+
+    it.skipIf(process.platform === 'win32')('a folder holding a symbolic link is refused in the dry run and deletes nothing, instead of half-deleting', async () => {
+      const base = await seeded();
+      // The Local Testing shape: a file sorted before the link, the link (to a
+      // folder, so the per-file delete cannot remove it), a file after it.
+      await fs.writeFile(KB('Sales/links/aaa.md'), 'a');
+      await fs.writeFile(KB('Sales/links/real.md'), 'r');
+      await symlink('../archive', join(tempDir, KB('Sales/links/inside')));
+      const dry = await call(base, 'delete_folder', { path: KB('Sales/links'), dryRun: true });
+      expect(dry.status).toBe(200);
+      expect(dry.body).toMatchObject({ allowed: false });
+      expect(dry.body.reason).toContain(`"${KB('Sales/links/inside')}"`);
+      const run = await call(base, 'delete_folder', { path: KB('Sales/links'), confirm: true });
+      expect(run.status).toBe(400);
+      expect(run.body.error).toBe(dry.body.reason);
+      for (const p of ['Sales/links/aaa.md', 'Sales/links/real.md', 'Sales/archive/top.md']) {
+        expect(await exists(KB(p)), p).toBe(true);
+      }
+      expect((await call(base, 'file_stat', { path: KB('Sales/links') })).body).toMatchObject({ deletable: false });
+    });
+
+    it.skipIf(process.platform === 'win32')('a link itself is answered as a link by delete_file, move_file and file_stat, not "not found"', async () => {
+      const base = await seeded();
+      await symlink(join(tempDir, 'nowhere'), join(tempDir, KB('Sales/dangling.md')));
+      await symlink('deal.md', join(tempDir, KB('Sales/alias.md')));
+      for (const path of [KB('Sales/dangling.md'), KB('Sales/alias.md')]) {
+        const del = await call(base, 'delete_file', { path });
+        expect(del.status, path).toBe(400);
+        expect(del.body.error, path).toBe(`"${path}" is a symbolic link; the agent tools never follow or remove links.`);
+        const mv = await call(base, 'move_file', { src: path, dest: KB('Sales/moved.md'), dryRun: true });
+        expect(mv.status, path).toBe(400);
+        expect(mv.body.error, path).toContain('symbolic link');
+      }
+      expect((await call(base, 'file_stat', { path: KB('Sales/alias.md') })).body).toMatchObject({ movable: false, deletable: false });
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+
+    it('a move cannot create a platform file or folder at the destination', async () => {
+      const base = await seeded();
+      const dry = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/archive/access.md'), dryRun: true });
+      expect(dry.body).toMatchObject({ allowed: false, reason: 'access.md is a platform file name; a move cannot create a platform file.' });
+      expect((await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/archive/access.md') })).status).toBe(400);
+      expect((await call(base, 'move_file', { src: KB('Sales/archive'), dest: KB('Skills'), dryRun: true })).body).toMatchObject({ allowed: false });
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+      expect(await exists(KB('Sales/archive/access.md'))).toBe(false);
+    });
+
+    it.skipIf(process.platform !== 'linux')('on a case-sensitive disk a case-distinct destination is a collision, not an overwrite', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/Deal.md'), 'other deal');
+      const run = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/Deal.md') });
+      expect(run.status).toBe(409);
+      expect(await fs.readFile(KB('Sales/Deal.md'), { encoding: 'utf-8' })).toBe('other deal');
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+  });
+
+  describe('descriptions match behaviour', () => {
+    type Schema = { properties?: Record<string, Schema> };
+    const def = async (name: string) => {
+      const d = (await toolRegistry.listInternal()).find((t) => t.name === name);
+      expect(d, name).toBeDefined();
+      return d as unknown as { description: string; inputs: Schema; outputs: Schema };
+    };
+    const declaredOutputs = (d: { outputs: Schema }) => Object.keys(d.outputs.properties ?? {});
+
+    it('move_file states folders, recursion, collisions, platform files and the confirm rule, and declares every field it returns', async () => {
+      const base = await seeded();
+      const d = await def('move_file');
+      expect(d.description).toMatch(/FILE or FOLDER/);
+      expect(d.description).toMatch(/folder moves recursively/);
+      expect(d.description).toMatch(/destination must not exist/);
+      expect(d.description).toContain('is a platform file and stays in its folder.');
+      expect(d.description).toContain('`dryRun: true`');
+      expect(d.description).toContain('`confirm: true`');
+      expect(Object.keys(d.inputs.properties.body.properties)).toEqual(expect.arrayContaining(['dryRun', 'confirm']));
+      // What the description promises a dry run returns is what it returns.
+      const dry = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('HR/deal.md'), dryRun: true });
+      for (const key of ['src', 'dest', 'kind', 'descendants', 'access', 'accessChanges', 'allowed']) {
+        expect(d.description, key).toContain(key);
+        expect(dry.body, key).toHaveProperty(key);
+      }
+      const unconfirmed = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('HR/deal.md') });
+      expect(d.description).toContain('confirmationRequired: true');
+      expect(unconfirmed.body.confirmationRequired).toBe(true);
+      for (const body of [dry.body, unconfirmed.body]) {
+        expect(declaredOutputs(d)).toEqual(expect.arrayContaining(Object.keys(body)));
+      }
+    });
+
+    it('delete_folder states the confirm rule and refusals, and declares every field it returns', async () => {
+      const base = await seeded();
+      const d = await def('delete_folder');
+      expect(d.description).toContain('`dryRun: true`');
+      expect(d.description).toContain('A non-empty folder is deleted only with `confirm: true`');
+      expect(d.description).toContain('platform folder');
+      const dry = await call(base, 'delete_folder', { path: KB('Sales/archive'), dryRun: true });
+      const unconfirmed = await call(base, 'delete_folder', { path: KB('Sales/archive') });
+      const confirmed = await call(base, 'delete_folder', { path: KB('Sales/archive'), confirm: true });
+      for (const body of [dry.body, unconfirmed.body, confirmed.body]) {
+        expect(declaredOutputs(d)).toEqual(expect.arrayContaining(Object.keys(body)));
+      }
+    });
+
+    it('delete_file names delete_folder, file_stat names its new fields, and every destructive tool names the proposal route', async () => {
+      const base = await seeded();
+      expect((await def('delete_file')).description).toContain('`delete_folder`');
+      const stat = await def('file_stat');
+      const body = (await call(base, 'file_stat', { path: KB('Sales/archive') })).body;
+      for (const key of ['managed', 'movable', 'deletable', 'access', 'descendants']) {
+        expect(stat.description, key).toContain(`\`${key}`);
+        expect(body, key).toHaveProperty(key);
+      }
+      for (const name of ['move_file', 'delete_file', 'delete_folder']) {
+        expect((await def(name)).description, name).toContain('`write-denied`');
+      }
+    });
+  });
+});
+
+describe('a write refused for permissions says whether and how to propose it', () => {
+  const TARGET = 'target-company-state';
+  const DENIED = `${KB_DIR}/Sales/deal.md`;
+  const KEY = 'hx_live_Zm9vYmFyU2VjcmV0S2V5';
+  const SECRET_CONTENT = 'password=hunter2-do-not-echo';
+
+  it('the suggested change-request title fits the limit and never splits an emoji', () => {
+    const lead = 'Propose a change to ';
+    expect(proposalTitleFor('Sales/deal.md')).toBe(`${lead}Sales/deal.md`);
+    // The emoji's high surrogate lands on the 255th unit, the last one kept before the ellipsis.
+    const path = `${'a'.repeat(254 - lead.length)}😀${'b'.repeat(40)}`;
+    const title = proposalTitleFor(path);
+    expect(title).toBe(`${lead}${'a'.repeat(254 - lead.length)}…`);
+    expect(title.length).toBeLessThanOrEqual(256);
+    expect(title).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+  });
+
+  /** Access control whose read verdict is `readable` and which records every call. */
+  const readVerdict = (readable: boolean | 'throws') => {
+    const calls: string[] = [];
+    const ac = {
+      canRead: async (_w: string, _u: string, rel: string) => {
+        calls.push(rel);
+        if (readable === 'throws') throw new Error('git failed');
+        return readable;
+      },
+      canReadBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
+      // The move/delete preflight asks these before it ever reaches the
+      // filesystem. `canWriteBatchAtRef` answering null is "no rules resolve
+      // at HEAD", so the preflight blocks nothing and the refusal comes from
+      // the lock gate below — which is the denial these tests are about.
+      canWrite: async () => true,
+      canDownload: async () => true,
+      canOwner: async () => true,
+      canWriteBatchAtRef: async () => null,
+      eligibleWritersAtRef: async () => ({ roles: ['Sales Lead'], users: [{ name: 'Owner', email: 'owner@x' }] }),
+    } as unknown as IAccessControl;
+    return { ac, calls };
+  };
+
+  /** Make every mutating filesystem method refuse like the lock gate on a protected branch. */
+  const denyWrites = (message?: string) => {
+    const refuse = async (p?: unknown) => {
+      const err = new AccessDeniedError({
+        path: typeof p === 'string' ? p : DENIED,
+        eligibleRoles: ['Sales Lead'],
+        eligibleUsers: [{ name: 'Owner', email: 'owner@x' }],
+      });
+      if (message) Object.defineProperty(err, 'message', { value: message });
+      throw err;
+    };
+    const target = fs as unknown as Record<string, unknown>;
+    for (const m of ['writeFile', 'deleteFile', 'moveFile', 'mkdir']) target[m] = refuse;
+    target.copyFile = async (_src: string, dest: string) => refuse(dest);
+    target.writeFiles = async (writes: { path: string }[]) => refuse(writes[0]?.path);
+  };
+
+  const call = async (base: string, tool: string, body: Record<string, unknown>) => {
+    const res = await fetch(`${base}/api/agent/tools/${tool}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${KEY}` },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- a JSON body read field by field
+    return { status: res.status, text, json: JSON.parse(text) as Record<string, any> };
+  };
+
+  const CALLS: Array<[string, Record<string, unknown>]> = [
+    // The denied path already exists, so the writes say they mean to replace
+    // it: the mode gate is not what these tests are about.
+    ['write_file', { branch: TARGET, path: DENIED, content: SECRET_CONTENT, mode: 'overwrite' }],
+    ['write_files', { branch: TARGET, files: [{ path: DENIED, content: SECRET_CONTENT }], mode: 'overwrite' }],
+    ['edit_file', { branch: TARGET, path: DENIED, old_string: 'old', new_string: SECRET_CONTENT }],
+    ['move_file', { branch: TARGET, src: DENIED, dest: `${KB_DIR}/Sales/moved.md` }],
+    ['delete_file', { branch: TARGET, path: DENIED }],
+    ['copy_file', { branch: TARGET, src: `${KB_DIR}/a.md`, dest: DENIED }],
+    ['mkdir', { branch: TARGET, path: DENIED }],
+  ];
+
+  it.each(CALLS)('%s: a reader gets canPropose and the three steps, and nothing is created', async (tool, body) => {
+    const { ac, calls } = readVerdict(true);
+    const base = await start('write', ac);
+    await fs.mkdir(`${KB_DIR}/Sales`, { recursive: true });
+    await fs.writeFile(DENIED, 'old text\n');
+    denyWrites();
+    const workflowCalls = workspacePathCalls.length;
+
+    const { status, json } = await call(base, tool, body);
+
+    expect(status).toBe(403);
+    expect(json).toMatchObject({
+      kind: 'write-denied',
+      path: DENIED,
+      reason: 'Eligible: Sales Lead; Owner <owner@x>.',
+      canPropose: true,
+    });
+    expect(json.cannotProposeReason).toBeUndefined();
+    expect(json.error).toContain('You may propose this change instead');
+    const draft = json.proposal.draftBranch as string;
+    expect(json.proposal.targetBranch).toBe(TARGET);
+    expect(json.proposal.steps.map((s: { tool: string }) => s.tool)).toEqual(['create_branch', tool, 'open_change_request']);
+    expect(json.proposal.steps[0].args).toEqual({ name: draft, branch: TARGET });
+    expect(json.proposal.steps[1].args).toEqual({ branch: draft });
+    // Every argument open_change_request requires is present, so the step works as given.
+    expect(json.proposal.steps[2].args).toEqual({ sourceBranch: draft, targetBranch: TARGET, title: 'Propose a change to Sales/deal.md' });
+    // The read verdict was asked of the repo-relative path.
+    expect(calls).toContain('Sales/deal.md');
+    // Nothing was created: no workspace was resolved for the DRAFT the answer
+    // suggests, and the context's workflow service is an empty stub, so a
+    // create_branch or change request would have 500d. (The tools that
+    // preflight do resolve the CALLER's own workspace on the way — to read
+    // the on-disk spelling and refuse links — which is not a draft.)
+    const forDraft = workspacePathCalls
+      .slice(workflowCalls)
+      .filter((b) => b.includes(draft) || b.includes(encodeURIComponent(draft)));
+    expect(forDraft).toEqual([]);
+  });
+
+  it('the suggested draft is a branch the caller owns, for an address the convention rewrites', async () => {
+    // `john.doe@` is the common corporate shape, and the one that catches a
+    // prefix derived by a second spelling of the rule: the platform judges
+    // authorship on `john-doe/`, so a suggested `john.doe/…` would be a draft
+    // the agent creates, proposes from, and is then refused permission to
+    // delete. Asserted through the platform's own predicate, not the regex.
+    const email = 'John.Doe+kb@example.com';
+    const { ac } = readVerdict(true);
+    const base = await start('write', ac, email);
+    denyWrites();
+
+    const { json } = await call(base, 'write_file', CALLS[0][1]);
+
+    const draft = json.proposal.draftBranch as string;
+    expect(isBranchAuthoredBy(draft, email)).toBe(true);
+    expect(draft).toBe('john-doe-kb/propose-deal');
+    // The step the agent actually runs carries that same name.
+    expect(json.proposal.steps[0].args).toEqual({ name: draft, branch: TARGET });
+  });
+
+  it('an address with no usable localpart is given a draft under its own suggestions prefix, still one it owns', async () => {
+    // `branchAuthorLocalpart` answers null for a local part with no letter or
+    // digit, rather than inventing an identity. The draft must still be one
+    // the caller can later delete, so it comes from the second authorship
+    // convention — keyed by user id — and is judged by that convention's own
+    // predicate, as the branch-delete path judges it.
+    const email = '+++@example.com';
+    const { ac } = readVerdict(true);
+    const base = await start('write', ac, email);
+    denyWrites();
+
+    const { json } = await call(base, 'write_file', CALLS[0][1]);
+
+    const draft = json.proposal.draftBranch as string;
+    expect(isBranchAuthoredBy(draft, email)).toBe(false);
+    expect(isOwnSuggestionsBranch(draft, { email, id: 'u' })).toBe(true);
+    expect(draft.startsWith('suggestions/')).toBe(true);
+    expect(draft.endsWith('/propose-deal')).toBe(true);
+  });
+
+  it('without read access the denial says so in one sentence and offers no proposal', async () => {
+    const { ac } = readVerdict(false);
+    const base = await start('write', ac);
+    denyWrites();
+    const { status, json } = await call(base, 'write_file', CALLS[0][1]);
+    expect(status).toBe(403);
+    expect(json).toMatchObject({ kind: 'write-denied', path: DENIED, canPropose: false });
+    expect(json.proposal).toBeUndefined();
+    expect(json.cannotProposeReason).toBe('Proposing is not available: you cannot read this path.');
+    expect(json.error).toContain('you cannot read this path');
+  });
+
+  it('on a branch that takes no change requests the denial says the branch is not proposable', async () => {
+    const { ac } = readVerdict(true);
+    const base = await start('write', ac);
+    denyWrites();
+    const { json } = await call(base, 'write_file', { ...CALLS[0][1], branch: 'someone/draft' });
+    expect(json).toMatchObject({ kind: 'write-denied', canPropose: false });
+    expect(json.cannotProposeReason).toContain('not a branch that accepts change requests');
+  });
+
+  it('fails closed when the read verdict cannot be reached', async () => {
+    const { ac } = readVerdict('throws');
+    const base = await start('write', ac);
+    denyWrites();
+    const { json } = await call(base, 'write_file', CALLS[0][1]);
+    expect(json).toMatchObject({ kind: 'write-denied', canPropose: false });
+    expect(json.proposal).toBeUndefined();
+  });
+
+  it('carries the excluded-principal sentence as the reason when the refusal gives one', async () => {
+    const { ac } = readVerdict(true);
+    const base = await start('write', ac);
+    denyWrites(`You don't have permission to write to "${DENIED}". The Sales role is excluded at this folder.`);
+    const { json } = await call(base, 'write_file', CALLS[0][1]);
+    expect(json.reason).toBe('The Sales role is excluded at this folder.');
+  });
+
+  it('never echoes the key, the content or the session id', async () => {
+    const { ac } = readVerdict(true);
+    const base = await start('write', ac);
+    await fs.mkdir(`${KB_DIR}/Sales`, { recursive: true });
+    await fs.writeFile(DENIED, 'old text\n');
+    denyWrites();
+    for (const [tool, body] of CALLS) {
+      const { text } = await call(base, tool, { ...body, sessionId: 'sess-secret-123' });
+      expect(text, tool).toContain('write-denied');
+      for (const secret of [KEY, SECRET_CONTENT, 'sess-secret-123', 'Bearer']) expect(text, tool).not.toContain(secret);
+    }
+  });
+
+  it('other failures pass through unchanged', async () => {
+    const base = await start('write', readVerdict(true).ac);
+    const res = await call(base, 'edit_file', { branch: TARGET, path: 'a.md', old_string: 'nope', new_string: 'x' });
+    expect(res.status).toBe(400);
+    expect(res.json).toEqual({ error: 'old_string not found in the file.' });
+  });
+
+  it('each write tool mentions the proposal route in its description; read tools do not', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    for (const name of ['write_file', 'edit_file', 'write_files', 'move_file', 'delete_file', 'copy_file', 'mkdir']) {
+      expect(tools.find((t) => t.name === name)?.description, name).toContain(PROPOSAL_ROUTE_NOTE.trim());
+    }
+    for (const name of ['read_file', 'grep', 'list_files']) {
+      expect(tools.find((t) => t.name === name)?.description, name).not.toContain(PROPOSAL_ROUTE_NOTE.trim());
+    }
   });
 });

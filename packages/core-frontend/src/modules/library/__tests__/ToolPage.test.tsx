@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -60,6 +60,7 @@ vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolPage } from '../components/tool-page/ToolPage';
+import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 
 const GITHUB: ToolSecrets = {
   slug: 'heyreach',
@@ -409,6 +410,46 @@ describe('ToolPage: OAuth round-trip', () => {
     expect(window.location.pathname).toBe(
       '/workspace/main/knowledge-base/Plugins/Everyone/mcp.json',
     );
+  });
+
+  /**
+   * The Library is a second store, and the sign-in happened outside both of
+   * them. Everything that says "needs setup" — the cards, the plugin banner,
+   * the sidebar count — was loaded before the browser left for the provider,
+   * so the page the reader goes back to is the one that gets it wrong.
+   */
+  describe('telling the Library', () => {
+    const heard = vi.fn();
+    beforeEach(() => {
+      heard.mockReset();
+      window.addEventListener(TOOL_CREDENTIALS_STALE_EVENT, heard);
+    });
+    afterEach(() => window.removeEventListener(TOOL_CREDENTIALS_STALE_EVENT, heard));
+
+    it('announces a successful return', async () => {
+      window.history.replaceState(null, '', '/skills-and-tools/tools/heyreach#authorized=sec_1');
+      renderPage();
+
+      await screen.findByRole('status');
+      await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
+    });
+
+    it('announces a failed one too — the page wrote nothing either way', async () => {
+      // Not a failed save: this page stored nothing, and the outcome it was
+      // handed is the only evidence about a grant somebody else decided. The
+      // honest move on both is to go and re-read.
+      window.history.replaceState(null, '', '/skills-and-tools/tools/heyreach#error=Access%20denied');
+      renderPage();
+
+      await screen.findByRole('alert');
+      await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
+    });
+
+    it('stays quiet on an ordinary visit, with no fragment to consume', async () => {
+      renderPage();
+      await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+      expect(heard).not.toHaveBeenCalled();
+    });
   });
 });
 

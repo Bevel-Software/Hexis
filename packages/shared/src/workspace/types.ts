@@ -26,6 +26,13 @@ export interface FileTreeEntry {
   relativePath: string;
   type: 'file' | 'directory';
   children?: FileTreeEntry[];
+  /**
+   * Set on the ROOT of a read-filtered listing only, and only when non-zero:
+   * how many entries the caller's read rules kept out of this tree. A number,
+   * never names — it lets the explorer tell "nothing is shared with you"
+   * apart from "this knowledge base is empty" without saying what exists.
+   */
+  withheld?: number;
 }
 
 import type { AuthUser } from '../auth/types.js';

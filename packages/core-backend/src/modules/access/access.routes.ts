@@ -6,12 +6,16 @@ import { logger } from '../../shared/logging.js';
 const grantLog = logger('access.grant');
 const revokeLog = logger('access.revoke');
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { isProtectedBranch, DEFAULT_BRANCH, pluginManifestName } from '@bevel-software/platform-shared';
+import {
+  isProtectedBranch,
+  DEFAULT_BRANCH,
+  pluginManifestName,
+  FOLDER_GOVERNS_ACCESS_KIND,
+} from '@bevel-software/platform-shared';
 import type {
   IAccessControl,
   GrantPrincipal,
   GrantSources,
-  ResolvedPrincipal,
 } from './access-control.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId, workspaceIdForBranch } from '../../shared/workspace-id.js';
@@ -24,6 +28,9 @@ import {
   AccessMutationService,
   AccessMutationError,
   accessMdPathForFolder,
+  assertFileCarriesAccessRules,
+  fileCarriesAccessRules,
+  governingFolderOf,
   type TargetKind,
 } from './access-mutation.service.js';
 import {
@@ -36,6 +43,7 @@ import {
   type Verb,
 } from '../access-model/access-grammar.js';
 import { listAccessDeclarationsUnder } from './access-declarations.js';
+import { holderPrincipals, resolveAccessView } from './access-view.js';
 import { toHttpError as sharedToHttpError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
 import { RolesAdminService } from './roles-admin.service.js';
 import type { Principal } from '../access-model/access-splice.js';
@@ -56,6 +64,19 @@ function toHttpError(err: unknown): { status: number; body: Record<string, unkno
 /** Shared non-empty-string coercion; 400s render as RolesAdminError-family. */
 function requireNonEmptyString(value: unknown, field: string): string {
   return sharedRequireNonEmptyString(value, field);
+}
+
+/**
+ * Is this the "the folder governs this file" refusal? It is the one mutation
+ * failure that is guaranteed to have written nothing — it is thrown as the
+ * file is read — so the lock it holds must be released without discarding the
+ * path (see `withEditLock`).
+ */
+function isFolderGovernsRefusal(err: unknown): boolean {
+  return (
+    err instanceof AccessMutationError &&
+    err.payload?.kind === FOLDER_GOVERNS_ACCESS_KIND
+  );
 }
 
 export function createAccessRoutes(
@@ -228,6 +249,12 @@ export function createAccessRoutes(
     ) {
       throw new AccessMutationError('path must stay inside the KB repo');
     }
+    // One spelling per target, as the file verbs and the edit lock require: a
+    // `./README.md` would reach the resolver as a different chain from
+    // `README.md` (and a `./A/x.md` would skip `A/access.md`).
+    if (repoRelTarget.split('/').some((segment) => segment === '.')) {
+      throw new AccessMutationError("path must not contain '.' segments");
+    }
   }
 
   /**
@@ -243,11 +270,14 @@ export function createAccessRoutes(
     if (!user) return;
 
     const rawPath = req.query.path;
-    if (typeof rawPath !== 'string' || !rawPath) {
+    const kind: TargetKind = req.query.kind === 'folder' ? 'folder' : 'file';
+    // The dialog addresses the repository root as the empty repo-relative path,
+    // so an empty `path` is the root FOLDER — refusing it left the root
+    // dialog unable to re-read its view after a change.
+    if (typeof rawPath !== 'string' || (!rawPath && kind !== 'folder')) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
-    const kind: TargetKind = req.query.kind === 'folder' ? 'folder' : 'file';
 
     try {
       // Same sanitize/validate the POST routes apply: strip any kbDir prefix and
@@ -314,6 +344,70 @@ export function createAccessRoutes(
       res.json({
         overrides: overrides.filter((o) => readable.get(o.governs) === true),
         truncated,
+      });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * GET /api/workspace/:id/access/prospective?from=<file>&toDir=<folder>
+   *
+   * Who can open and who can edit one file where it is, and where a move
+   * would put it — `{ before, after }`, each `{ read, write }` lists of
+   * principals named as their grants name them. `toDir` is the destination
+   * FOLDER (`''` is the repo root); the file keeps its name, so the route
+   * derives the destination path itself rather than trusting a second one.
+   *
+   * The destination path does not exist yet, which is why this cannot be two
+   * calls to `GET /access`: the resolver is asked for a hypothetical, with
+   * the file's own frontmatter (read where the file actually is) layered over
+   * the destination's folder chain. Nothing is written and nothing is moved.
+   *
+   * Gated like the sibling `overrides` route rather than the permissive
+   * `GET /access`: the caller must resolve read on the file being moved. The
+   * lists name people, and someone who cannot see the file has no business
+   * learning who can.
+   *
+   * `from` must be a FILE. A folder carries its own `access.md` and governs
+   * everything under it, which is a different question; the resolver refuses
+   * one with a 400 rather than answering it as if it were a file.
+   */
+  router.get('/workspace/:id/access/prospective', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+
+    const rawFrom = req.query.from;
+    // An empty `toDir` is the repo ROOT, a real destination — only a missing
+    // one is a bad request.
+    const rawToDir = req.query.toDir;
+    if (typeof rawFrom !== 'string' || !rawFrom) {
+      res.status(400).json({ error: 'from query parameter is required' });
+      return;
+    }
+    if (typeof rawToDir !== 'string') {
+      res.status(400).json({ error: 'toDir query parameter is required' });
+      return;
+    }
+
+    try {
+      const from = toRepoRelative(rawFrom);
+      assertRepoRelativeTarget(from, 'file');
+      const toDir = toRepoRelative(rawToDir);
+      assertRepoRelativeTarget(toDir, 'folder');
+
+      if (!(await accessControl.canRead(req.params.id, user.email, from))) {
+        res.status(403).json({ error: 'You do not have access to this file.' });
+        return;
+      }
+
+      const name = from.slice(from.lastIndexOf('/') + 1);
+      const to = toDir ? `${toDir}/${name}` : name;
+      const { before, after } = await accessControl.prospectiveHolders(req.params.id, from, to);
+      res.json({
+        before: { read: holderPrincipals(before.read), write: holderPrincipals(before.write) },
+        after: { read: holderPrincipals(after.read), write: holderPrincipals(after.write) },
       });
     } catch (err) {
       const { status, body } = toHttpError(err);
@@ -524,11 +618,16 @@ export function createAccessRoutes(
    * The access.md / node path the write lands on, and the path the write-gate
    * keys on. For a folder both are the folder's access.md; for a file they are
    * the node file itself.
+   *
+   * A file that cannot carry frontmatter has no path of its own to edit: this
+   * throws `folder-governs-access` (422) before any gate, lock or read, so the
+   * grant, default revoke and deny-here all refuse it identically.
    */
   function gateAndEditPaths(kind: TargetKind, repoRelTarget: string): {
     gatePath: string;
     editPath: string;
   } {
+    assertFileCarriesAccessRules(kind, repoRelTarget);
     const editPath = kind === 'folder' ? accessMdPathForFolder(repoRelTarget) : repoRelTarget;
     return { gatePath: editPath, editPath };
   }
@@ -573,69 +672,21 @@ export function createAccessRoutes(
     userEmail: string,
     kind: TargetKind,
   ) {
-    const [canRead, canWrite, canDownload, canOwner, eligible, readers, owners, downloaders] =
-      await Promise.all([
-        accessControl.canRead(workspaceId, userEmail, repoRelTarget),
-        accessControl.canWrite(workspaceId, userEmail, repoRelTarget),
-        accessControl.canDownload(workspaceId, userEmail, repoRelTarget),
-        accessControl.canOwner(workspaceId, userEmail, repoRelTarget),
-        accessControl.eligibleWriters(workspaceId, repoRelTarget),
-        accessControl.eligibleReaders(workspaceId, repoRelTarget),
-        accessControl.eligibleOwners(workspaceId, repoRelTarget),
-        accessControl.eligibleDownloaders(workspaceId, repoRelTarget),
-      ]);
+    const view = await resolveAccessView(accessControl, workspaceId, repoRelTarget, userEmail, kind);
 
-    // Per-principal, per-verb origin (direct / ancestor — MECE over editable
-    // files). Keyed `u:<email>` / `r:<role>` / `g:<group>` to match the
-    // dialog's row keys, so each row can show where its access comes from and
-    // which verbs are removable here. Groups get their OWN `g:` namespace: a
-    // group and a role sharing a name are DIFFERENT principals (bare token vs
-    // `role/<name>`), and one shared `r:` entry could only describe one of
-    // them. Each kind resolves through the token spelling that IS that
-    // principal — a group through its bare token (group-first precedence), a
-    // role through its explicit `role/<name>` alias (correct whether or not a
-    // group shadows the name; the built-in `everyone` keeps its bare spelling,
-    // it has no alias). A row whose verbs resolve only via a
-    // group/everyone/rescue has no source (the verb is absent) and renders
-    // non-actionable. Built over the union of every principal in the four
-    // eligible lists (kinded `principals`, with the name-only `roles` list as
-    // the all-roles fallback).
-    const collectives = new Map<string, ResolvedPrincipal>();
-    for (const list of [eligible, readers, owners, downloaders]) {
-      const kinded =
-        list.principals ?? list.roles.map((name) => ({ name, kind: 'role' as const }));
-      for (const p of kinded) {
-        const key = `${p.kind === 'group' ? 'g' : p.kind === 'plugin' ? 'p' : 'r'}:${p.name.toLowerCase()}`;
-        if (!collectives.has(key)) collectives.set(key, p);
-      }
-    }
-    const userSet = new Map<string, { name: string; email: string }>();
-    for (const u of [...eligible.users, ...readers.users, ...owners.users, ...downloaders.users]) {
-      if (!userSet.has(u.email.toLowerCase())) userSet.set(u.email.toLowerCase(), u);
-    }
-    const sources: Record<string, Awaited<ReturnType<IAccessControl['grantSources']>>> = {};
-    await Promise.all([
-      ...[...collectives.entries()].map(async ([key, p]) => {
-        const token =
-          p.kind === 'role' && canonicalRoleName(p.name) !== EVERYONE_CANONICAL
-            ? `${ROLE_TOKEN_PREFIX}${p.name}`
-            : p.name;
-        sources[key] = await accessControl.grantSources(workspaceId, kind, repoRelTarget, {
-          kind: 'role',
-          role: token,
-        });
-      }),
-      ...[...userSet.values()].map(async (u) => {
-        sources[`u:${u.email.toLowerCase()}`] = await accessControl.grantSources(
-          workspaceId,
-          kind,
-          repoRelTarget,
-          { kind: 'user', email: u.email },
-        );
-      }),
-    ]);
+    // A file that cannot carry frontmatter has no rules of its own: name the
+    // folder whose rules govern it (repo-relative, `''` for the root), which
+    // is where the mutation routes point too.
+    // Content counts as much as the name: bytes that are not text (a binary
+    // saved as `.md`) are refused by the mutations too, so the view must say
+    // so — otherwise the dialog offers a field whose every write answers 422.
+    const governedByFolder =
+      kind === 'file' &&
+      (!fileCarriesAccessRules(repoRelTarget) || !(await mutation.targetHoldsText(workspaceId, repoRelTarget)))
+        ? governingFolderOf(repoRelTarget)
+        : undefined;
 
-    return { canRead, canWrite, canDownload, canOwner, eligible, readers, owners, downloaders, sources };
+    return { ...view, ...(governedByFolder !== undefined && { governedByFolder }) };
   }
 
   /**
@@ -643,6 +694,14 @@ export function createAccessRoutes(
    * under the lock) → release (enqueues the commit + push out of band). Mirrors
    * the human-save `withLock` so protected-branch enforcement + commit-as-user
    * are inherited. On op failure, release WITHOUT committing partial bytes.
+   *
+   * The whole sequence takes the path's TURN first, exactly as `PUT /file`
+   * does (turn outside, lock inside — the same order, so the two can never
+   * wait on each other). The mutation re-reads the file under the lock and
+   * refuses binary content; without the turn an upload landing between that
+   * read and the write would be overwritten by frontmatter, or would arrive
+   * just after the read and turn a refusal into a discard of the upload. The
+   * write inside takes the same turn re-entrantly.
    */
   async function withEditLock(
     workspaceId: string,
@@ -652,6 +711,20 @@ export function createAccessRoutes(
     op: () => Promise<void>,
   ): Promise<void> {
     const wsEditPath = `${kbDirName}/${editPath}`;
+    return workspaceService.withPathTurn(workspaceId, wsEditPath, () =>
+      lockAndRun(workspaceId, branch, wsEditPath, editPath, user, op),
+    );
+  }
+
+  /** The acquire → op → release half of {@link withEditLock}, inside the turn. */
+  async function lockAndRun(
+    workspaceId: string,
+    branch: string,
+    wsEditPath: string,
+    editPath: string,
+    user: AuthUser,
+    op: () => Promise<void>,
+  ): Promise<void> {
     const existing = await workflowService.getLock(workspaceId, branch, wsEditPath);
     if (existing && existing.holderUserId === user.id) {
       // Caller already holds the lock (mid-edit) — write without touching it.
@@ -681,7 +754,16 @@ export function createAccessRoutes(
       await op();
     } catch (err) {
       try {
-        await workflowService.releaseLockNoCommit(workspaceId, branch, wsEditPath, user);
+        // A refusal wrote NOTHING, so the release must leave the disk alone:
+        // `releaseLockNoCommit` discards the path's working-tree changes, and
+        // right after an upload whose commit is still queued that deletes the
+        // upload. Every other failure may have left partial bytes, so it keeps
+        // the discarding release.
+        if (isFolderGovernsRefusal(err)) {
+          await workflowService.releaseLockUntouched(workspaceId, branch, wsEditPath, user);
+        } else {
+          await workflowService.releaseLockNoCommit(workspaceId, branch, wsEditPath, user);
+        }
       } catch {
         /* best-effort */
       }
@@ -782,6 +864,8 @@ export function createAccessRoutes(
       await workspaceService.getOrCreateForBranch(branch);
       // Fail-closed gate (BEFORE acquiring the lock).
       await assertCanMutate(workspaceId, branch, user.email, gatePath);
+      // Binary content refuses BEFORE the lock (see assertTargetHoldsText).
+      await mutation.assertTargetHoldsText(workspaceId, kind, repoRelTarget);
 
       const editPath = gatePath; // grant edits the same path it gates on
       await withEditLock(workspaceId, branch, editPath, user, async () => {
@@ -923,6 +1007,7 @@ export function createAccessRoutes(
       if (mode === 'deny-here') {
         const { gatePath } = gateAndEditPaths(kind, repoRelTarget);
         await assertCanMutate(workspaceId, branch, user.email, gatePath);
+        await mutation.assertTargetHoldsText(workspaceId, kind, repoRelTarget);
         await withEditLock(workspaceId, branch, gatePath, user, async () => {
           // Scope the deny to the same verb the user acted on (if any).
           await mutation.denyHere(workspaceId, kind, repoRelTarget, principal, verb, revokeOpts);
@@ -939,6 +1024,7 @@ export function createAccessRoutes(
       // ---- default: revoke on the target, classified -----------------------
       const { gatePath } = gateAndEditPaths(kind, repoRelTarget);
       await assertCanMutate(workspaceId, branch, user.email, gatePath);
+      await mutation.assertTargetHoldsText(workspaceId, kind, repoRelTarget);
 
       const editPath = gatePath;
       let changed = false;

@@ -60,6 +60,7 @@ export function SetupGate({ children }: { children: ReactNode }) {
       settings={status.settings}
       sync={status.sync}
       kbInit={status.kbInit}
+      oidcVerification={status.oidcVerification}
       onSaved={refresh}
     />
   );

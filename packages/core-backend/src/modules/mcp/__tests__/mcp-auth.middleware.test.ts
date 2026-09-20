@@ -140,20 +140,23 @@ describe('createMcpAuthMiddleware', () => {
     expect((auth as any).verifyToken).not.toHaveBeenCalled();
   });
 
-  it('401s with WWW-Authenticate when a bevel_ token is unknown or revoked', async () => {
+  it('401s a bevel_ token that is unknown or revoked with a plain invalid_token challenge — no resource_metadata', async () => {
     const mw = makeMw({ keys: makeExternalApiKeyService(async () => null) });
     const { req, res, next, setHeader, status, json } = makeReqRes('Bearer bevel_revoked');
 
     await mw(req, res, next);
 
+    // A caller who configured a key is not invited into a browser sign-in:
+    // signing in does not repair the key.
+    expect(setHeader).toHaveBeenCalledTimes(1);
     expect(setHeader).toHaveBeenCalledWith(
       'WWW-Authenticate',
-      expect.stringContaining('Bearer'),
+      'Bearer error="invalid_token", error_description="Invalid or revoked connection key"',
     );
     expect(status).toHaveBeenCalledWith(401);
-    expect(json).toHaveBeenCalledWith(
-      expect.objectContaining({ error: expect.stringMatching(/connection key/i) }),
-    );
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid or revoked connection key. Mint a new one in External agent access.',
+    });
     expect(next).not.toHaveBeenCalled();
   });
 

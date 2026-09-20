@@ -64,6 +64,15 @@ describe('DeploymentPage', () => {
     apiMock.fetchSetupStatus.mockResolvedValue(COMPLETE_STATUS);
   });
 
+  it('shows whether the single sign-on configuration is verified', async () => {
+    apiMock.fetchSetupStatus.mockResolvedValue({ ...COMPLETE_STATUS, oidcVerification: 'unverified' });
+    renderPage(admin(true));
+    expect(await screen.findByTestId('oidc-verification')).toHaveTextContent(
+      'Unverified — sign in once to confirm',
+    );
+    expect(screen.getByRole('button', { name: 'Test sign-in configuration' })).toBeInTheDocument();
+  });
+
   it('shows the setup form to an admin — AFTER setup is complete', async () => {
     renderPage(admin(true));
     // The single-sign-on fields are reachable again: the whole point of the page.
@@ -90,9 +99,13 @@ describe('DeploymentPage', () => {
     expect(screen.getByRole('heading', { name: 'Marketplace' })).toBeInTheDocument();
     expect(screen.getByText('Register this deployment with your Claude organization')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Skip for now' })).toBeNull();
-    // After the settings form, not before it.
+    // After the settings fields, and BEFORE "Save and continue": the button is
+    // the last thing on the page, so a reader meets this section before the
+    // control that leaves the screen. The button is tied to the form it sits
+    // outside of by `form=`.
     const save = screen.getByRole('button', { name: 'Save and continue' });
-    expect(save.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(save.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    expect(save).toHaveAttribute('form', 'setup-settings-form');
     expect(await screen.findByRole('button', { name: 'Mark as registered' })).toBeInTheDocument();
     expect(facadeMock.fetchGitHubFacade).not.toHaveBeenCalled();
   });

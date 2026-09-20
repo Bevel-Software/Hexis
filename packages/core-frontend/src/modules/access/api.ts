@@ -114,6 +114,16 @@ export interface AccessResponse {
    * is how the dialog chains into "Remove from parent?".
    */
   sources: Record<string, GrantSources>;
+  /**
+   * Present for a file that cannot carry frontmatter (a PDF, a deck, an
+   * image — or binary bytes saved under a note's name, which the server
+   * judges by reading them): the repo-relative folder (`''` for the root)
+   * whose rules govern it. Such a file has no per-file rules, and the
+   * mutation routes refuse it with `folder-governs-access`. This is the
+   * server's ruling, and the dialog follows it rather than re-deciding from
+   * the path, so the sheet and the routes can never disagree.
+   */
+  governedByFolder?: string;
 }
 
 /**
@@ -286,6 +296,50 @@ export async function fetchFileAccessBatch(
       // The default goes unsent, so a write lookup is the request it always was.
       body: JSON.stringify(verb === 'write' ? { paths: relativePaths } : { paths: relativePaths, verb }),
     }),
+  );
+}
+
+/**
+ * A principal as its grant names it — a group, a role, a plugin principal
+ * (spelled as its `plugin/<Name>/<verb>` token), or a person granted
+ * directly. What the prospective-access lists are made of.
+ */
+export interface AccessPrincipalRef {
+  kind: 'group' | 'role' | 'plugin' | 'person';
+  name: string;
+  email?: string;
+}
+
+/** Who can open and who can edit one path. */
+export interface PathPrincipals {
+  read: AccessPrincipalRef[];
+  write: AccessPrincipalRef[];
+}
+
+/** One file's holders where it is now and where a move would put it. */
+export interface ProspectiveAccess {
+  before: PathPrincipals;
+  after: PathPrincipals;
+}
+
+/**
+ * Resolve who holds read and write on `relativePath` today and who would hold
+ * them once the file sits in `toDir` — the destination's folder rules with the
+ * file's own frontmatter layered on top. Both paths are repo-relative
+ * (`Knowledge/Foo.md`, `Knowledge/Sales`); `toDir` is `''` for the repo root.
+ *
+ * `signal` lets the move dialog give up on it: the answer decorates the
+ * confirmation and must never hold it open.
+ */
+export async function fetchProspectiveAccess(
+  workspaceId: string,
+  relativePath: string,
+  toDir: string,
+  signal?: AbortSignal,
+): Promise<ProspectiveAccess> {
+  const query = `from=${encodeURIComponent(relativePath)}&toDir=${encodeURIComponent(toDir)}`;
+  return handleApiResponse(
+    await authFetch(`/api/workspace/${workspaceId}/access/prospective?${query}`, { signal }),
   );
 }
 

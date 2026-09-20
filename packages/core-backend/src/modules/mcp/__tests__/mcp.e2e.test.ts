@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { RequestHandler } from 'express';
@@ -22,6 +23,7 @@ import type { ForcedRefreshOutcome, ISecretsVaultService } from '../../secrets-v
 import type { IToolManualService } from '../../tool-manuals/tool-manuals.contract.js';
 import { setLogger } from '../../../shared/logging.js';
 import type { ILogger } from '../../../shared/logger.contract.js';
+import { formatProbeReport, probeFirstCall } from '../first-call-probe.js';
 
 /**
  * True end-to-end test over the REAL Streamable-HTTP MCP transport. Real MCP
@@ -105,6 +107,12 @@ interface PlatformOptions {
   /** The vault + manual catalog behind per-user credentials; absent ⇒ the proxy skips credential handling. */
   secretsVault?: ConstructorParameters<typeof McpService>[1];
   toolManuals?: ConstructorParameters<typeof McpService>[2];
+  /**
+   * Extra KB-manual tools in this platform's catalog. Empty for every suite
+   * that asserts on the catalog's exact contents; the first-call reproduction
+   * adds `start_session` so it can call the tool the ticket is about.
+   */
+  extraTools?: string[];
 }
 
 const platforms: Platform[] = [];
@@ -117,7 +125,7 @@ const cleanups: Array<() => Promise<void>> = [];
 async function startPlatform(opts: PlatformOptions = {}): Promise<Platform> {
   const askCalls: Platform['askCalls'] = [];
   // Per-user catalogs: user B can see `b_only`, user A cannot.
-  const routesA = createManualRoutes(registryWith([]), passthrough);
+  const routesA = createManualRoutes(registryWith(opts.extraTools ?? []), passthrough);
   const routesB = createManualRoutes(registryWith(['b_only']), passthrough);
 
   const app = express();
@@ -129,6 +137,10 @@ async function startPlatform(opts: PlatformOptions = {}): Promise<Platform> {
     res.json({ text: `echo: ${b.prompt} sid=${incoming ?? 'NONE'}`, sessionId: incoming ?? 'sess-1' });
   });
   app.post('/api/agent/tools/boom', (_req, res) => res.status(500).json({ error: 'kaboom' }));
+  // The real `start_session` behind the core `UuidSessionSink`: a fresh id and
+  // no I/O whatsoever. Mounted on every platform, but reachable only through a
+  // catalog that lists the tool (see `extraTools`).
+  app.post('/api/agent/tools/start_session', (_req, res) => res.json({ sessionId: randomUUID() }));
   app.get('/api/agent/all-tools', (req, res) => {
     res.json({
       manuals: [
@@ -834,4 +846,43 @@ describe.runIf(process.env.MCP_PERF === '1')('per-request overhead (reported, no
     );
     expect(list.p50).toBeGreaterThan(0);
   });
+});
+
+/**
+ * The ticket's reproduction, run against the whole platform: real transport,
+ * real `McpService` proxy, real catalog discovery, real tool route.
+ *
+ * The report was one first `start_session` failing on a fresh connection with
+ * a generic error, and an immediate retry working. Fifty fresh connections,
+ * one first call each, all at once — an agent tester opens them in bursts, and
+ * a first-call failure that only shows under contention would never appear one
+ * connection at a time. Every connection pays for its own `initialize` and its
+ * own catalog discovery here, which is the expensive part of a first call and
+ * the part a reused connection never repeats.
+ *
+ * The suite asserts no timing: what it pins is that the burst produces fifty
+ * ids and no failure, so a regression that makes the first call flaky under
+ * load fails here instead of in an agent's transcript.
+ */
+describe('the first call on a fresh connection, fifty at once', () => {
+  it('serves every one of fifty fresh connections its own session id', async () => {
+    const { baseUrl } = await startPlatform({ extraTools: ['start_session'] });
+
+    // `timeoutMs` well under the vitest budget on purpose. The probe charges it
+    // per phase, so the default 30s would let one hung attempt burn ~60s and
+    // vitest would abort the test before `probeFirstCall` resolved — in exactly
+    // the flaky-first-call scenario this test exists to catch, the failure list
+    // and the report below would never be printed, and the run would show a
+    // bare timeout instead of which attempt died where.
+    const report = await probeFirstCall({ baseUrl, bearer: KEY_A, connections: 50, timeoutMs: 20_000 });
+
+    // Printed as well as asserted: this block is what the ticket's log records,
+    // and a run whose numbers were never shown proves nothing to a reader.
+    console.log(`[first-call probe]\n${formatProbeReport(report)}`);
+    // Not `toHaveLength(0)`: on a failure the assertion should show WHICH
+    // attempt died, at which stage, with the platform's own error text.
+    expect(report.failures).toEqual([]);
+    expect(report.ok).toBe(50);
+    expect(report.distinctSessionIds).toBe(50);
+  }, 120_000);
 });

@@ -7,6 +7,7 @@ import type { AuthProviderPlugin } from './auth.routes.js';
 import { AUTH_COOKIE_MAX_AGE_S } from './auth.routes.js';
 import { AUTH_COOKIE_NAME } from './auth.middleware.js';
 import type { AuthService } from './auth.service.js';
+import { normalizeIssuerUrl } from '../settings/oidc-check.js';
 
 // Short-lived CSRF state + PKCE verifier for the OAuth round-trip: set before
 // redirecting to the provider, verified/consumed on callback.
@@ -39,9 +40,10 @@ export interface OidcSettings {
  * all set.
  */
 export function oidcSettingsFrom(settings: { resolve(key: string): string }): OidcSettings | null {
-  // Trailing slashes stripped so `<issuer>/.well-known/…` is well-formed and
-  // `https://idp/` and `https://idp` are one issuer to the discovery cache.
-  const issuerUrl = settings.resolve('oidcIssuerUrl').replace(/\/+$/, '');
+  // Normalized so `<issuer>/.well-known/…` is well-formed, `https://idp/` and
+  // `https://idp` are one issuer to the discovery cache, and the values a
+  // sign-in records match the ones the setup screen checks.
+  const issuerUrl = normalizeIssuerUrl(settings.resolve('oidcIssuerUrl'));
   const clientId = settings.resolve('oidcClientId');
   const clientSecret = settings.resolve('oidcClientSecret');
   if (!issuerUrl || !clientId || !clientSecret) return null;
@@ -68,6 +70,21 @@ export interface OidcAuthProviderOptions {
   cookieSecure: boolean;
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch;
+  /**
+   * Called after someone has signed in through this provider, with the
+   * configuration that sign-in used — the proof that those values work.
+   * Failures are logged, never fail the sign-in.
+   */
+  onSignedIn?: (used: OidcSettings) => void | Promise<void>;
+}
+
+/**
+ * The redirect URI to register with the provider — and the one the
+ * configuration check sends. `publicBackendUrl` arrives from CoreConfig
+ * without userinfo or a trailing slash, so it is used exactly as configured.
+ */
+export function oidcRedirectUri(publicBackendUrl: string): string {
+  return `${publicBackendUrl}/api/auth/oidc/callback`;
 }
 
 /** Read one named cookie from the raw header (no cookie-parser dep, matching auth.middleware). */
@@ -162,7 +179,7 @@ export class OidcAuthProvider implements AuthProviderPlugin {
   }
 
   private redirectUri(): string {
-    return `${this.opts.publicBackendUrl}/api/auth/oidc/callback`;
+    return oidcRedirectUri(this.opts.publicBackendUrl);
   }
 
   mountRoutes(router: express.Router, authService: AuthService): void {
@@ -288,6 +305,11 @@ export class OidcAuthProvider implements AuthProviderPlugin {
           '';
 
         const { token } = await authService.loginWithSso(claims.email, name);
+        try {
+          await this.opts.onSignedIn?.(oidc);
+        } catch (error) {
+          log.error('OIDC sign-in record failed:', { err: error });
+        }
         res.cookie(AUTH_COOKIE_NAME, token, {
           httpOnly: true,
           sameSite: 'lax',

@@ -82,7 +82,11 @@ function RoutedConnectAgentPill() {
   return (
     <div
       className={cn(
-        'group/pill mb-1.5 flex flex-none items-center rounded-full transition-colors',
+        // No margin of its own: this fills `SidebarFrame`'s header band,
+        // whose height is the shared `--spacing-header` token. A margin here
+        // would be a second number deciding how tall the sidebar's header
+        // row is, which is exactly the drift the band removes.
+        'group/pill flex w-full min-w-0 flex-none items-center rounded-full transition-colors',
         selected
           ? 'bg-accent/15'
           : 'bg-accent/8 hover:bg-accent/15 motion-safe:animate-onboarding-pulse-slow',

@@ -47,7 +47,7 @@ export const SESSION_ID_INPUT: JsonSchema = {
  * docs/glossary.md.
  */
 export const ONTOLOGY_BOUNDARY_NOTE =
-  ' Stay within one KnowledgeBase ontology per conversation: once this run has read or written files in two different ontologies, every later content write (write_file/edit_file/mkdir/unzip, and both endpoints of move_file/copy_file) is blocked with a 403 and no override. Reads and delete_file never block — but each one records the ontology it touched and can poison a later content write, so do broad cross-ontology exploration only when you do not intend to write. Note move_file/copy_file are blocked outright when source and destination are different ontologies, since they would carry content across.';
+  ' Stay within one KnowledgeBase ontology per conversation: once this run has read or written files in two different ontologies, every later content write (write_file/edit_file/mkdir/unzip, and both endpoints of move_file/copy_file) is blocked with a 403 and no override. Reads, delete_file and delete_folder never block — but each one records the ontology it touched and can poison a later content write, so do broad cross-ontology exploration only when you do not intend to write. Note move_file/copy_file are blocked outright when source and destination are different ontologies, since they would carry content across.';
 
 /** Thrown when a write is refused because the session has crossed ontologies. */
 export class OntologyWriteBlockedError extends ToolError {

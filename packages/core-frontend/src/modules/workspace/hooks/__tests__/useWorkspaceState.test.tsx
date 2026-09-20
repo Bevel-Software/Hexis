@@ -7,8 +7,8 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 const apiMocks = vi.hoisted(() => {
   class FakeWorkspaceApiError extends Error {
     status: number;
-    constructor(status: number) {
-      super(`HTTP ${status}`);
+    constructor(status: number, message?: string) {
+      super(message ?? `HTTP ${status}`);
       this.status = status;
       this.name = 'WorkspaceApiError';
     }
@@ -46,7 +46,27 @@ import type { ReactNode } from 'react';
 import { AuthContext } from '../../../auth/state/auth.context';
 import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../../core/events';
 import { useWorkspaceState } from '../useWorkspaceState';
+import {
+  KNOWLEDGE_UPLOAD_TARGET,
+  libraryUploadTarget,
+  type UploadError,
+  type UploadNotice,
+} from '../../state/workspace.context';
+import { FILE_TRACE_STORAGE_KEY } from '../../utils/file-trace';
 const WorkspaceApiError = apiMocks.WorkspaceApiError;
+
+/**
+ * The upload banners are keyed by the tree that took the drop, so every
+ * assertion about one names its tree. `KNOWLEDGE_UPLOAD_TARGET` is what a
+ * `dispatchUpload` with no target of its own lands under.
+ */
+interface UploadBanners {
+  uploadNotices: ReadonlyMap<string, UploadNotice>;
+  uploadErrors: ReadonlyMap<string, UploadError>;
+}
+const noticeIn = (s: UploadBanners, target = KNOWLEDGE_UPLOAD_TARGET) => s.uploadNotices.get(target) ?? null;
+const errorIn = (s: UploadBanners, target = KNOWLEDGE_UPLOAD_TARGET) => s.uploadErrors.get(target) ?? null;
+
 
 const WORKSPACE_FIXTURE = {
   workspace: {
@@ -296,20 +316,292 @@ describe('useWorkspaceState multi-tab', () => {
     expect(result.current.openFileSavedContent).toBe('content:a.md');
   });
 
-  it('persists tabs to localStorage after hydrate, debounced', async () => {
+  /**
+   * The reproduction's "URL and open file disagree after fast clicks": click
+   * several unopened files, then one that is already open. Reopening an open
+   * tab took a shortcut that skipped the "latest open" token, so the last
+   * still-in-flight read counted as the newest intent and activated ITS file
+   * when it landed — the URL naming one file and the screen showing another,
+   * indefinitely.
+   */
+  it('reopening an already-open tab outranks an older read still in flight', async () => {
     const result = await mountReady();
+    await act(async () => { await result.current.addTab('b.md'); });
+    expect(result.current.activeTab?.path).toBe('b.md');
+
+    // A click on an unopened file: its read hangs.
+    let releaseRead: ((content: string) => void) | undefined;
+    apiMocks.readFile.mockImplementation(
+      () => new Promise<string>((resolve) => { releaseRead = resolve; }),
+    );
+    let slowOpen: Promise<boolean> | undefined;
+    act(() => { slowOpen = result.current.addTab('a.md'); });
+
+    // A click on `b.md`, which is already open — the last thing the user asked for.
+    await act(async () => { await result.current.addTab('b.md'); });
+    expect(result.current.activeTab?.path).toBe('b.md');
+
+    // Now `a.md` arrives. It opens its tab, but it does NOT steal the focus.
+    await act(async () => {
+      releaseRead?.('content:a.md');
+      await slowOpen;
+    });
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['b.md', 'a.md']);
+    expect(result.current.activeTab?.path).toBe('b.md');
+  });
+
+  it('persists tabs to localStorage after hydrate, debounced', async () => {
+    // A real workspace id IS the encoded branch, and the persistence key is
+    // built from the branch the workspace turned out to be — so the fixture
+    // has to be a branch-shaped id, not an opaque one.
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
     act(() => { result.current.setPersistenceBranch('alice/draft'); });
     await act(async () => { await result.current.hydrateTabs(['a.md', 'b.md'], 'b.md'); });
     await act(async () => { await result.current.addTab('c.md'); });
 
     // Wait for the 200ms debounce to flush.
     await waitFor(() => {
-      const raw = localStorage.getItem('bevel.tabs.ws-1.alice/draft');
+      const raw = localStorage.getItem('bevel.tabs.alice%2Fdraft.alice/draft');
       expect(raw).not.toBeNull();
       const parsed = JSON.parse(raw!);
       expect(parsed.paths).toEqual(['a.md', 'b.md', 'c.md']);
       expect(parsed.activePath).toBe('c.md');
     });
+  });
+
+  /**
+   * A restore and an open are different claims. The open says "this file is
+   * what I want ACTIVE"; the restore says "these tabs are this branch's".
+   * Sharing one token made an ordinary click mid-restore look like it had
+   * retired the restore: the branch's whole tab list was dropped on the floor,
+   * and — the marker for "this key has been hydrated" never being set —
+   * persistence for that branch stayed off, so the list was never written
+   * again either. The click wins the focus; it does not empty the strip.
+   */
+  it('an open during a hydration keeps the focus without discarding the restored tabs', async () => {
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
+    act(() => { result.current.setPersistenceBranch('alice/draft'); });
+
+    // The restore's reads hang; the click's read answers at once.
+    const pendingReads: ((content: string) => void)[] = [];
+    apiMocks.readFile.mockImplementation(async (_wsId: string, path: string) => {
+      if (path === 'c.md') return 'content:c.md';
+      return new Promise<string>((resolve) => { pendingReads.push(resolve); });
+    });
+
+    let hydration: Promise<unknown> | undefined;
+    act(() => { hydration = result.current.hydrateTabs(['a.md', 'b.md'], 'b.md'); });
+    await act(async () => { await result.current.addTab('c.md'); });
+    expect(result.current.activeTab?.path).toBe('c.md');
+
+    await act(async () => {
+      for (const resolve of pendingReads) resolve('content:restored');
+      await hydration;
+    });
+
+    // Every restored tab is there, alongside the one the user clicked, and the
+    // click keeps the focus it claimed.
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['a.md', 'b.md', 'c.md']);
+    expect(result.current.activeTab?.path).toBe('c.md');
+
+    // And persistence is live for this branch: the restore counted.
+    await waitFor(() => {
+      const raw = localStorage.getItem('bevel.tabs.alice%2Fdraft.alice/draft');
+      expect(raw).not.toBeNull();
+      expect(JSON.parse(raw!).paths).toEqual(['a.md', 'b.md', 'c.md']);
+    });
+  });
+
+  /**
+   * The other half of the same split: a NEWER RESTORE does retire an older
+   * one, and the older one has to say so. A caller that recorded it as done
+   * would mark the branch hydrated on the strength of a result that never
+   * reached the screen.
+   */
+  it('reports a hydration overtaken by a newer hydration as superseded', async () => {
+    const { result } = await (async () => {
+      const r = renderHook(() => useWorkspaceState());
+      await waitFor(() => expect(r.result.current.workspaceId).toBe('ws-1'));
+      return r;
+    })();
+
+    const pendingReads: ((content: string) => void)[] = [];
+    apiMocks.readFile.mockImplementation(
+      () => new Promise<string>((resolve) => { pendingReads.push(resolve); }),
+    );
+    let first: Promise<{ superseded: boolean }> | undefined;
+    act(() => { first = result.current.hydrateTabs(['a.md'], 'a.md'); });
+
+    apiMocks.readFile.mockImplementation(async (_wsId: string, path: string) => `content:${path}`);
+    await act(async () => { await result.current.hydrateTabs(['b.md'], 'b.md'); });
+
+    let firstResult: { superseded: boolean } | undefined;
+    await act(async () => {
+      for (const resolve of pendingReads) resolve('content:a.md');
+      firstResult = await first;
+    });
+    expect(firstResult?.superseded).toBe(true);
+    // The newer restore's strip stands, untouched by the older one.
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['b.md']);
+  });
+
+  /**
+   * The crossed key from the reproduction: `bevel.tabs.main.someone/draft` —
+   * one branch's workspace under another branch's name. It was written
+   * mid-switch, because the persistence key took its branch from
+   * `persistenceBranch`, which points at the branch being switched TO from the
+   * instant the switch starts, while `workspaceId` still serves the branch
+   * being left. Tabs are persisted under the key of the branch they were READ
+   * from, or not at all.
+   */
+  it('never persists one branch\'s tabs under another branch\'s key during a switch', async () => {
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'main' },
+    });
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('main'));
+
+    act(() => { result.current.setPersistenceBranch('main'); });
+    await act(async () => { await result.current.hydrateTabs(['a.md'], 'a.md'); });
+    await waitFor(() => {
+      expect(localStorage.getItem('bevel.tabs.main.main')).not.toBeNull();
+    });
+
+    // A second hydration against `main` goes in flight…
+    const pendingReads: ((content: string) => void)[] = [];
+    apiMocks.readFile.mockImplementation(
+      () => new Promise<string>((resolve) => { pendingReads.push(resolve); }),
+    );
+    let hydration: Promise<unknown> | undefined;
+    act(() => { hydration = result.current.hydrateTabs(['a.md', 'b.md'], 'b.md'); });
+
+    // …and mid-flight the user switches away. `persistenceBranch` moves to the
+    // destination immediately; the destination's workspace never arrives.
+    apiMocks.getOrCreateWorkspace.mockImplementation(() => new Promise(() => {}));
+    act(() => { result.current.setPersistenceBranch('someone/draft'); });
+
+    // Now `main`'s reads land. These bytes belong to `main` and to no other key.
+    await act(async () => {
+      for (const resolve of pendingReads) resolve('content:from-main');
+      await hydration;
+    });
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(localStorage.getItem('bevel.tabs.main.someone/draft')).toBeNull();
+    expect(localStorage.getItem('bevel.tabs.someone%2Fdraft.someone/draft')).toBeNull();
+    expect(JSON.parse(localStorage.getItem('bevel.tabs.main.main')!).paths)
+      .toEqual(['a.md', 'b.md']);
+  });
+
+  /**
+   * A restore overtaken by a click MERGES into the strip rather than replacing
+   * it. If the strip still held the branch being left, the merge carried those
+   * tabs over: shown on the new branch with the old branch's text, and
+   * persisted under the new branch's key. The strip belongs to the workspace
+   * it was read from, so a new workspace starts it empty.
+   */
+  it('a click during a switch never carries the previous branch\'s tabs into the new one', async () => {
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'main' },
+    });
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('main'));
+    act(() => { result.current.setPersistenceBranch('main'); });
+    await act(async () => { await result.current.hydrateTabs(['only-on-main.md'], 'only-on-main.md'); });
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['only-on-main.md']);
+
+    // Switch to the draft; its workspace arrives.
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    act(() => { result.current.setPersistenceBranch('alice/draft'); });
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
+
+    // The draft's restore hangs; the user clicks a file meanwhile.
+    const pendingReads: ((content: string) => void)[] = [];
+    apiMocks.readFile.mockImplementation(async (_wsId: string, path: string) => {
+      if (path === 'clicked.md') return 'content:clicked.md';
+      return new Promise<string>((resolve) => { pendingReads.push(resolve); });
+    });
+    let hydration: Promise<unknown> | undefined;
+    act(() => { hydration = result.current.hydrateTabs(['restored.md'], 'restored.md'); });
+    await act(async () => { await result.current.addTab('clicked.md'); });
+    await act(async () => {
+      for (const resolve of pendingReads) resolve('content:restored.md');
+      await hydration;
+    });
+
+    // Only the draft's tabs: the restored one and the clicked one.
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['restored.md', 'clicked.md']);
+    await waitFor(() => {
+      const raw = localStorage.getItem('bevel.tabs.alice%2Fdraft.alice/draft');
+      expect(raw).not.toBeNull();
+      expect(JSON.parse(raw!).paths).toEqual(['restored.md', 'clicked.md']);
+    });
+  });
+
+  /**
+   * The last read without a workspace guard: activating a tab whose bytes an
+   * fs bump invalidated re-reads it in the background. If the branch switches
+   * while that read is in flight, the tab of the same path on the new branch
+   * is not the one it was for — its answer, bytes or a 404, is about the
+   * branch that was left.
+   */
+  it.each([
+    ['bytes', (resolve: (c: string) => void) => resolve('content:from-main')],
+    ['a 404', (_resolve: (c: string) => void, reject: (e: unknown) => void) => reject(new WorkspaceApiError(404))],
+  ])('an activate re-read from the branch left behind lands nowhere (%s)', async (_label, settle) => {
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'main' },
+    });
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('main'));
+    await act(async () => { await result.current.addTab('shared.md'); });
+    await act(async () => { await result.current.addTab('other.md'); });
+    // An fs bump invalidates the inactive tab; re-activating it re-reads.
+    act(() => { result.current.bumpFsRevision(); });
+    await waitFor(() => {
+      expect(result.current.openTabs.find((t) => t.path === 'shared.md')?.content).toBeNull();
+    });
+    let resolveOld: (c: string) => void = () => {};
+    let rejectOld: (e: unknown) => void = () => {};
+    apiMocks.readFile.mockImplementation((wsId: string, path: string) => {
+      if (wsId === 'main') {
+        return new Promise<string>((resolve, reject) => { resolveOld = resolve; rejectOld = reject; });
+      }
+      return Promise.resolve(`content:draft:${path}`);
+    });
+    const invalidated = result.current.openTabs.find((t) => t.path === 'shared.md')!;
+    act(() => { result.current.activateTab(invalidated); });
+
+    // Switch to the draft and open the same path there.
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    act(() => { result.current.setPersistenceBranch('alice/draft'); });
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
+    await act(async () => { await result.current.addTab('shared.md'); });
+
+    // main's answer arrives late.
+    await act(async () => { settle(resolveOld, rejectOld); await Promise.resolve(); });
+
+    const draftTab = result.current.openTabs.find((t) => t.path === 'shared.md');
+    expect(draftTab?.content).toBe('content:draft:shared.md');
   });
 });
 
@@ -424,8 +716,16 @@ describe('dispatchUpload: suggestion routing', () => {
       const detail = (onAnnounce.mock.calls[0][0] as CustomEvent).detail;
       expect(detail.number).toBe(12);
       expect(detail.touchedNodePaths).toContain('KnowledgeBase/Ops/note.md');
-      expect(result.current.uploadNotice).toMatch(/became a suggestion/);
-      expect(result.current.uploadError).toBeNull();
+      expect(noticeIn(result.current)?.message).toMatch(/became a suggestion/);
+      expect(noticeIn(result.current)?.kind).toBe('suggestion');
+      // …and where to undo it. The notice used to say a thing happened and
+      // nothing about reversing it, and the accent-coloured row it produces
+      // said nothing either — which is how an accidental upload into a folder
+      // you cannot write came to read as permanent.
+      expect(noticeIn(result.current)?.message).toMatch(
+        /To take it back, right-click the file and choose Withdraw suggestion\.$/,
+      );
+      expect(errorIn(result.current)).toBeNull();
     } finally {
       window.removeEventListener(PR_STALE_EVENT, onStale);
       window.removeEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
@@ -454,7 +754,7 @@ describe('dispatchUpload: suggestion routing', () => {
       { defer: false },
     );
     expect(proposeMocks.ensureKnowledgeSuggestionWorkspace).not.toHaveBeenCalled();
-    expect(result.current.uploadNotice).toBeNull();
+    expect(noticeIn(result.current)).toBeNull();
   });
 
   it('never routes on a draft branch, even without write access', async () => {
@@ -479,5 +779,544 @@ describe('dispatchUpload: suggestion routing', () => {
       file,
       { defer: false },
     );
+  });
+});
+
+/**
+ * The reported silence: "first upload to Skills, nothing happened; second one
+ * showed the message". Reproduced from the code path, because the difference
+ * between the two uploads is entirely in how long the FIRST one takes to
+ * learn where the bytes go.
+ *
+ * Every scrap of feedback used to wait on `resolveSuggestionRouting`, and the
+ * first suggestion of a session is the one time that answer is slow: the
+ * server creates the caller's personal branch and clones a workspace for it
+ * before `ensureKnowledgeSuggestionWorkspace` resolves, and only then is the
+ * change request opened. A suggestion-routed upload also draws no optimistic
+ * rows, deliberately — the files never land on the branch being viewed — so
+ * for the whole of that wait the tree showed nothing whatsoever: no spinner,
+ * no row, no banner. The SECOND upload finds the branch, the workspace and
+ * the open request all there and answers at once, which is the whole of the
+ * difference the user saw.
+ *
+ * The fix is to say something on the first tick, in the tree that took the
+ * drop. These tests pin that, and pin that the result still replaces it.
+ */
+describe('dispatchUpload: the drop is never silent', () => {
+  const PROTECTED_FIXTURE = {
+    workspace: {
+      id: 'target-company-state',
+      name: 'Workspace',
+      absolutePath: '/tmp/ws',
+      createdAt: '2026-04-20T00:00:00.000Z',
+      kbDirName: 'knowledge-base',
+    },
+    fileTree: { name: '.', relativePath: '.', type: 'directory' as const, children: [] },
+  };
+
+  /** The Library's Skills tree — the surface the report came from. */
+  const SKILLS_TREE = libraryUploadTarget('Skills');
+  const SKILLS_FOLDER = 'knowledge-base/Skills/house-writing-standards';
+
+  const SUGGESTION_TARGET = {
+    branch: 'suggestions/reader/knowledge',
+    workspaceId: 'suggestions%2Freader%2Fknowledge',
+    kbDirName: 'knowledge-base',
+    existingCr: null,
+  };
+
+  const CHANGE_REQUEST = {
+    number: 12,
+    title: 'Changes from Rae Reader. Knowledge',
+    branch: 'suggestions/reader/knowledge',
+    base: 'target-company-state',
+    state: 'open',
+    createdAt: '2026-09-17T00:00:00.000Z',
+    touchedNodePaths: [],
+    author: { login: 'user-x' },
+    review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
+    url: '',
+  };
+
+  function wrapper({ children }: { children: ReactNode }) {
+    return (
+      <AuthContext.Provider
+        value={{
+          user: { id: 'u1', email: 'bo@example.com', name: 'Bo Business' },
+          token: 't',
+          isLoading: false,
+          login: async () => {},
+          logout: () => {},
+        }}
+      >
+        {children}
+      </AuthContext.Provider>
+    );
+  }
+
+  /** Every relativePath in a server tree, for "did the row arrive?". */
+  function pathsIn(node: { relativePath: string; children?: unknown[] } | null): string[] {
+    if (!node) return [];
+    const out = [node.relativePath];
+    for (const child of (node.children ?? []) as { relativePath: string; children?: unknown[] }[]) {
+      out.push(...pathsIn(child));
+    }
+    return out;
+  }
+
+  beforeEach(() => {
+    apiMocks.getOrCreateWorkspace.mockReset().mockResolvedValue(PROTECTED_FIXTURE);
+    apiMocks.listFiles.mockReset().mockResolvedValue(PROTECTED_FIXTURE.fileTree);
+    apiMocks.uploadFile.mockReset().mockResolvedValue(undefined);
+    accessApiMock.fetchFileAccess.mockReset();
+    proposeMocks.ensureKnowledgeSuggestionWorkspace.mockReset().mockResolvedValue(SUGGESTION_TARGET);
+    proposeMocks.ensureKnowledgeChangeRequest.mockReset().mockResolvedValue(CHANGE_REQUEST);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    localStorage.clear();
+  });
+
+  async function mountProtected() {
+    const { result } = renderHook(() => useWorkspaceState(), { wrapper });
+    await waitFor(() => expect(result.current.workspaceId).toBe('target-company-state'));
+    return result;
+  }
+
+  it('reports the drop before the suggestion routing has answered', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canWrite: false,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    // The FIRST suggestion of a session: the branch and its workspace clone do
+    // not exist yet, so this is the call that takes seconds. Held open here so
+    // the assertions land inside the window the user was staring at.
+    let releaseRouting: (target: typeof SUGGESTION_TARGET) => void = () => {};
+    proposeMocks.ensureKnowledgeSuggestionWorkspace.mockReturnValue(
+      new Promise((resolve) => { releaseRouting = resolve; }),
+    );
+    const result = await mountProtected();
+
+    const file = new File(['hello'], 'report.pdf', { type: 'application/pdf' });
+    let dispatched: Promise<void> | undefined;
+    await act(async () => {
+      dispatched = result.current.dispatchUpload(
+        { kind: 'files', files: [file] },
+        SKILLS_FOLDER,
+        SKILLS_TREE,
+      );
+      await Promise.resolve();
+    });
+
+    // Nothing has been uploaded yet, and nothing is going to appear in this
+    // branch's tree when it is — so the notice is the only thing there is.
+    expect(apiMocks.uploadFile).not.toHaveBeenCalled();
+    expect(result.current.isUploading).toBe(true);
+    expect(noticeIn(result.current, SKILLS_TREE)).toEqual({
+      kind: 'progress',
+      message: 'Adding report.pdf to house-writing-standards…',
+    });
+
+    await act(async () => {
+      releaseRouting(SUGGESTION_TARGET);
+      await dispatched;
+    });
+
+    // The result replaces it — in the same tree, once.
+    expect(result.current.uploadNotices.size).toBe(1);
+    expect(noticeIn(result.current, SKILLS_TREE)).toEqual({
+      kind: 'suggestion',
+      message: expect.stringContaining('became a suggestion'),
+    });
+    expect(errorIn(result.current, SKILLS_TREE)).toBeNull();
+    expect(result.current.isUploading).toBe(false);
+  });
+
+  it('says so on the FIRST suggestion as reliably as on a repeat', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canWrite: false,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    const result = await mountProtected();
+    const upload = (name: string) =>
+      act(async () => {
+        await result.current.dispatchUpload(
+          { kind: 'files', files: [new File(['x'], name)] },
+          SKILLS_FOLDER,
+          SKILLS_TREE,
+        );
+      });
+
+    // First: the branch has to be made and the request opened.
+    await upload('first.pdf');
+    expect(noticeIn(result.current, SKILLS_TREE)?.kind).toBe('suggestion');
+    expect(result.current.uploadNotices.size).toBe(1);
+
+    // Second: the request is already there, so nothing is created.
+    proposeMocks.ensureKnowledgeSuggestionWorkspace.mockResolvedValue({
+      ...SUGGESTION_TARGET,
+      existingCr: CHANGE_REQUEST,
+    });
+    await upload('second.pdf');
+    expect(noticeIn(result.current, SKILLS_TREE)?.kind).toBe('suggestion');
+    expect(result.current.uploadNotices.size).toBe(1);
+  });
+
+  // Two drops in flight at once. The notices are per-TREE and the progress
+  // one is retired per-tree too, because over a single shared slot the drop
+  // that settled first pulled the other's notice off the screen — and a
+  // suggestion-routed upload has nothing else to show, so that drop went
+  // silent, which is the whole failure this feature exists to prevent.
+  it('keeps a second drop\u2019s notice when the first settles', async () => {
+    accessApiMock.fetchFileAccess.mockImplementation(async (_ws: string, path: string) => ({
+      // The Knowledge drop may write (ordinary upload, settles at once); the
+      // Skills drop may not, so it goes off to the routing round-trip.
+      canWrite: !path.startsWith('Skills/'),
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    }));
+    let releaseRouting: (target: typeof SUGGESTION_TARGET) => void = () => {};
+    proposeMocks.ensureKnowledgeSuggestionWorkspace.mockReturnValue(
+      new Promise((resolve) => { releaseRouting = resolve; }),
+    );
+    const result = await mountProtected();
+
+    // The slow one first: dropped into Skills, still waiting on its branch.
+    let skillsDrop: Promise<void> | undefined;
+    await act(async () => {
+      skillsDrop = result.current.dispatchUpload(
+        { kind: 'files', files: [new File(['x'], 'report.pdf')] },
+        SKILLS_FOLDER,
+        SKILLS_TREE,
+      );
+      await Promise.resolve();
+    });
+    expect(noticeIn(result.current, SKILLS_TREE)?.kind).toBe('progress');
+
+    // And an ordinary drop into Knowledge, which runs to completion.
+    await act(async () => {
+      await result.current.dispatchUpload(
+        { kind: 'files', files: [new File(['y'], 'note.md')] },
+        'knowledge-base/KnowledgeBase/Ops',
+      );
+    });
+
+    // Knowledge has its rows and no notice; Skills is still waiting, and is
+    // still saying so.
+    expect(noticeIn(result.current)).toBeNull();
+    expect(noticeIn(result.current, SKILLS_TREE)?.kind).toBe('progress');
+
+    await act(async () => {
+      releaseRouting(SUGGESTION_TARGET);
+      await skillsDrop;
+    });
+    expect(noticeIn(result.current, SKILLS_TREE)?.kind).toBe('suggestion');
+  });
+
+  // Same tree, two drops: the first to finish must not retire the notice the
+  // second is still relying on.
+  it('keeps the notice up while a sibling drop into the same tree is still running', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    // The second drop's ACL answer is held, so it is still in its pre-UI
+    // window when the first drop settles.
+    let releaseSecondAcl: () => void = () => {};
+    const result = await mountProtected();
+
+    // `dispatchUpload` is async, but its prefix — the error reset, the
+    // progress notice, `isUploading` — runs synchronously on the call, so the
+    // start goes inside `act` like every other dispatch in this file. The
+    // `await first` below still works: the captured promise resolves in
+    // flight.
+    let first: Promise<void> | undefined;
+    act(() => {
+      first = result.current.dispatchUpload(
+        { kind: 'files', files: [new File(['x'], 'one.md')] },
+        'knowledge-base/KnowledgeBase/Ops',
+      );
+    });
+    accessApiMock.fetchFileAccess.mockReturnValue(new Promise((resolve) => {
+      releaseSecondAcl = () => resolve({
+        canWrite: true,
+        eligible: { roles: [], users: [] },
+        owners: { roles: [], users: [] },
+      });
+    }));
+    let second: Promise<void> | undefined;
+    await act(async () => {
+      second = result.current.dispatchUpload(
+        { kind: 'files', files: [new File(['y'], 'two.md')] },
+        'knowledge-base/KnowledgeBase/Ops',
+      );
+      await first;
+    });
+
+    // The first is done. The second has drawn nothing yet — its notice is
+    // all it has, and it is still there.
+    expect(noticeIn(result.current)?.kind).toBe('progress');
+
+    await act(async () => {
+      releaseSecondAcl();
+      await second;
+    });
+    expect(noticeIn(result.current)).toBeNull();
+  });
+
+  // A drop still routing when the user changes branch never runs its own
+  // cleanup — its result belongs to the branch it was dispatched from. Left
+  // alone, its "Adding …" sat over the new tree forever.
+  it('drops the banners of a branch the user has left', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canWrite: false,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    let releaseRouting: (target: typeof SUGGESTION_TARGET) => void = () => {};
+    proposeMocks.ensureKnowledgeSuggestionWorkspace.mockReturnValue(
+      new Promise((resolve) => { releaseRouting = resolve; }),
+    );
+    const result = await mountProtected();
+
+    let dropped: Promise<void> | undefined;
+    await act(async () => {
+      dropped = result.current.dispatchUpload(
+        { kind: 'files', files: [new File(['x'], 'report.pdf')] },
+        SKILLS_FOLDER,
+        SKILLS_TREE,
+      );
+      await Promise.resolve();
+    });
+    expect(noticeIn(result.current, SKILLS_TREE)?.kind).toBe('progress');
+
+    // Off to another branch while the routing is still open.
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...PROTECTED_FIXTURE,
+      workspace: { ...PROTECTED_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    act(() => { result.current.setPersistenceBranch('alice/draft'); });
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
+    expect(result.current.uploadNotices.size).toBe(0);
+
+    // And the stale upload settling later does not put it back.
+    await act(async () => {
+      releaseRouting(SUGGESTION_TARGET);
+      await dropped;
+    });
+    expect(result.current.uploadNotices.size).toBe(0);
+    expect(result.current.uploadErrors.size).toBe(0);
+  });
+
+  it('hands an ordinary upload over to its rows, which survive the refresh', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    const uploadedPath = 'knowledge-base/KnowledgeBase/Ops/note.md';
+    /** The server's tree, with the uploaded file in it or without. */
+    const serverTree = (withNote: boolean) => ({
+      name: '.',
+      relativePath: '.',
+      type: 'directory' as const,
+      children: [{
+        name: 'knowledge-base',
+        relativePath: 'knowledge-base',
+        type: 'directory' as const,
+        children: [{
+          name: 'KnowledgeBase',
+          relativePath: 'knowledge-base/KnowledgeBase',
+          type: 'directory' as const,
+          children: [{
+            name: 'Ops',
+            relativePath: 'knowledge-base/KnowledgeBase/Ops',
+            type: 'directory' as const,
+            children: withNote
+              ? [{ name: 'note.md', relativePath: uploadedPath, type: 'file' as const }]
+              : [],
+          }],
+        }],
+      }],
+    });
+    // The commit is what puts the file on the server, so every read BEFORE it
+    // answers without the file. Staggered deliberately: with the finished tree
+    // mocked from the start, the bootstrap fetch alone would satisfy "the row
+    // is there" and the test would pass with the post-upload refresh deleted —
+    // which is the regression it exists to catch.
+    let committed = false;
+    apiMocks.listFiles.mockImplementation(async () => serverTree(committed));
+    // Hold the upload open so the mid-flight state is observable.
+    let releaseUpload: () => void = () => {};
+    apiMocks.uploadFile.mockReturnValue(new Promise<void>((resolve) => {
+      releaseUpload = () => { committed = true; resolve(); };
+    }));
+    const result = await mountProtected();
+    // Nothing has been uploaded yet, so nothing in the tree on screen is the
+    // file — anything asserting otherwise later had to be put there by the
+    // upload.
+    expect(pathsIn(result.current.fileTree)).not.toContain(uploadedPath);
+
+    let dispatched: Promise<void> | undefined;
+    act(() => {
+      dispatched = result.current.dispatchUpload(
+        { kind: 'files', files: [new File(['hi'], 'note.md')] },
+        'knowledge-base/KnowledgeBase/Ops',
+      );
+    });
+
+    // The optimistic row is in the tree within the frame — and because it is,
+    // the progress notice steps aside rather than sitting over it.
+    await waitFor(() => expect(result.current.pendingUploads.has(uploadedPath)).toBe(true));
+    await waitFor(() => expect(noticeIn(result.current)).toBeNull());
+    // Mid-flight the server still has no such file: the row on screen is the
+    // optimistic one, and nothing else.
+    expect(pathsIn(result.current.fileTree)).not.toContain(uploadedPath);
+
+    await act(async () => {
+      releaseUpload();
+      await dispatched;
+    });
+
+    // The real row arrives and the optimistic one is retired — no reload.
+    await waitFor(() => expect(pathsIn(result.current.fileTree)).toContain(uploadedPath));
+    await waitFor(() => expect(result.current.pendingUploads.has(uploadedPath)).toBe(false));
+    expect(noticeIn(result.current)).toBeNull();
+    expect(errorIn(result.current)).toBeNull();
+  });
+
+  it('names the file, not its workspace path, and stamps the tree that asked', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    const reason = 'You do not have permission to write to Knowledge/Legal';
+    // The refusal as it arrives: the backend's words AND the status the
+    // banner's next step is chosen from.
+    apiMocks.uploadFile.mockRejectedValue(new WorkspaceApiError(403, reason));
+    const result = await mountProtected();
+
+    await act(async () => {
+      await result.current.dispatchUpload(
+        { kind: 'files', files: [new File(['x'], 'quarterly-report.pdf')] },
+        SKILLS_FOLDER,
+        SKILLS_TREE,
+      );
+    });
+
+    // "Couldn't add knowledge-base/K…" was the whole of the reported banner:
+    // a path long enough that the reason never made it onto the screen.
+    expect(errorIn(result.current, SKILLS_TREE)).toEqual({
+      filename: 'quarterly-report.pdf',
+      reason,
+      status: 403,
+    });
+    // In THAT tree and no other — the Knowledge explorer never saw this drop.
+    expect(result.current.uploadErrors.size).toBe(1);
+    // And the in-progress notice does not outlive the upload it described.
+    expect(noticeIn(result.current, SKILLS_TREE)).toBeNull();
+  });
+});
+
+/**
+ * `?trace=files`: the bootstrap is one of the gates a blank file page waits on,
+ * so its start and outcome are logged, and nothing else about it changes.
+ */
+describe('useWorkspaceState: bootstrap trace', () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    apiMocks.getOrCreateWorkspace.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    sessionStorage.clear();
+    localStorage.clear();
+  });
+
+  function traceCalls(info: ReturnType<typeof vi.spyOn>) {
+    return info.mock.calls
+      .filter((c: unknown[]) => c[0] === '[trace:files]')
+      .map((c: unknown[]) => ({ event: c[1] as string, fields: c[2] as Record<string, unknown> }));
+  }
+
+  it('logs the start and the workspace a successful bootstrap produced', async () => {
+    sessionStorage.setItem(FILE_TRACE_STORAGE_KEY, '1');
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    apiMocks.getOrCreateWorkspace.mockResolvedValue(WORKSPACE_FIXTURE);
+
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('ws-1'));
+
+    const calls = traceCalls(info);
+    expect(calls.map((c) => c.event)).toEqual(['bootstrap:start', 'bootstrap:ok']);
+    expect(calls[0].fields).toMatchObject({ branch: null });
+    expect(calls[1].fields).toMatchObject({ branch: null, workspaceId: 'ws-1', cancelled: false });
+  });
+
+  it('logs the status and message of a failed bootstrap, which still surfaces as bootstrapError', async () => {
+    sessionStorage.setItem(FILE_TRACE_STORAGE_KEY, '1');
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    apiMocks.getOrCreateWorkspace.mockRejectedValue(new WorkspaceApiError(500));
+
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(traceCalls(info).some((c) => c.event === 'bootstrap:failed')).toBe(true));
+
+    expect(traceCalls(info).find((c) => c.event === 'bootstrap:failed')?.fields).toMatchObject({
+      branch: null,
+      status: 500,
+      message: 'HTTP 500',
+      cancelled: false,
+    });
+    expect(traceCalls(info).some((c) => c.event === 'bootstrap:ok')).toBe(false);
+    await waitFor(() => expect(result.current.bootstrapError).toMatchObject({ status: 500 }));
+    expect(result.current.workspaceId).toBeNull();
+  });
+
+  /**
+   * A bootstrap failure used to be terminal for the session: the workspace
+   * never came up, the file route waited on it forever, and only a full page
+   * reload could try again. `retryBootstrap` re-runs the same request for the
+   * same branch, which is what the file page's Retry is wired to.
+   */
+  it('retryBootstrap re-runs the request for the same branch and recovers', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    apiMocks.getOrCreateWorkspace.mockRejectedValue(new WorkspaceApiError(500));
+
+    const { result } = renderHook(() => useWorkspaceState());
+    act(() => { result.current.setPersistenceBranch('alice/draft'); });
+    await waitFor(() =>
+      expect(result.current.bootstrapError)
+        .toMatchObject({ branch: 'alice/draft', status: 500, message: 'HTTP 500' }),
+    );
+    expect(result.current.workspaceId).toBeNull();
+
+    // The outage clears; the reader presses Retry.
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    act(() => { result.current.retryBootstrap(); });
+
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
+    expect(result.current.bootstrapError).toBeNull();
+    // Retried for the branch that was asked for, not the default.
+    expect(apiMocks.getOrCreateWorkspace).toHaveBeenLastCalledWith('alice/draft');
+  });
+
+  it('logs nothing without the flag', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    apiMocks.getOrCreateWorkspace.mockResolvedValue(WORKSPACE_FIXTURE);
+
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('ws-1'));
+
+    expect(traceCalls(info)).toHaveLength(0);
   });
 });

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { cn } from '../../../../lib/utils';
+import { HEADER_BAND, HEADER_BAND_LEAD, PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
 import { ArrowLeft, History } from 'lucide-react';
 import {
   DEFAULT_BRANCH,
@@ -30,7 +32,10 @@ import { useFileAccess } from '../../../access/hooks/useFileAccess';
 import { proposeChange, suggestionBranchFor } from '../../services/library.api';
 import { getOrCreateWorkspace, writeFile } from '../../../workspace/services/workspace.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
-import { useApplyChangeRequest } from '../../../change-requests/hooks/useApplyChangeRequest';
+import {
+  refusalLine,
+  useApplyChangeRequest,
+} from '../../../change-requests/hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
 import { useDefaultBranchFile, useFileOnBranch } from '../../../change-requests/hooks/useFileOnBranch';
 import { useLibrary } from '../../state/library-data';
@@ -428,7 +433,7 @@ export function SkillPage({
   const raw = active === 'SKILL.md' ? rawOnMain : detail.fileContent(active);
 
   /** Every open change request's version of the file on screen. */
-  const crDiffs = useCrFileDiffs(skillCrs, fileRepoPath, rawOnMain, revision);
+  const crDiffs = useCrFileDiffs(skillCrs, fileRepoPath, revision);
 
   /** The change requests with something to say about THIS file. */
   const boxes = useMemo(
@@ -625,10 +630,16 @@ export function SkillPage({
   // second layout when the detail request settles.
   return (
     <Article>
-      {backLink}
-
-      <header className="mt-4">
-        <div className="flex items-center gap-3">
+      <header>
+        {/* The shared header band — one height for this title bar and the
+            sidebar's header row beside it, so a skill page opens on the same
+            line a file page and the Library's own pages do. The way back
+            rides ON the band, as its leading item: a back link in a row above
+            would push this row down off that line, which is the whole seam.
+            (The error and not-found returns above still lead with it on its
+            own row — they have no title bar to hold a line with.) */}
+        <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-3')}>
+          <div className={HEADER_BAND_LEAD}>{backLink}</div>
           {/* `tabIndex={-1}` keeps the heading out of the tab order while
               letting `.focus()` land on it — where focus goes when closing
               the log finds no clock to hand back to. No focus ring: it is a
@@ -636,7 +647,10 @@ export function SkillPage({
           <h1
             ref={titleRef}
             tabIndex={-1}
-            className="min-w-0 text-display font-semibold text-ink focus:outline-none"
+            // `title` because `truncate` hides the rest of a long skill name,
+            // and a heading you cannot finish reading needs somewhere to say it.
+            title={skill?.name ?? name}
+            className="min-w-0 truncate text-display font-semibold text-ink focus:outline-none"
           >
             {skill?.name ?? name}
           </h1>
@@ -899,7 +913,8 @@ export function SkillPage({
           // `[]` is the hook's "overtaken" answer — the proposal and the file
           // now say the same thing — and is distinct from `null`, which only
           // means a side has not arrived yet.
-          const fileDiff = crDiffs.get(cr.number) ?? null;
+          const read = crDiffs.get(cr.number) ?? null;
+          const fileDiff = read === 'unreadable' ? null : read;
           return (
             <ChangeBox
               key={cr.number}
@@ -910,16 +925,11 @@ export function SkillPage({
               canDecide={canWrite && !mine}
               diff={fileDiff}
               binary={isBinaryFile(active)}
+              unreadable={read === 'unreadable'}
               upToDate={fileDiff !== null && fileDiff.length === 0}
               blocked={blockedCrs.has(cr.number)}
               conflictPrompt={conflictResolutionPrompt(cr)}
-              // A conflict already speaks through `blocked`; repeating it as a
-              // refusal line would say the same thing twice in one box.
-              refusal={
-                applying.refusals.get(cr.number)?.conflicts === false
-                  ? (applying.refusals.get(cr.number)?.reason ?? null)
-                  : null
-              }
+              refusal={refusalLine(cr, applying.refusals)}
               owner={ownerName}
               busy={busyCr === cr.number || applying.activeCr === cr.number}
               phase={applying.activeCr === cr.number ? applying.phase : 'idle'}

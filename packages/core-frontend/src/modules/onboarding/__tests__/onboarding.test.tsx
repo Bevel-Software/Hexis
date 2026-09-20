@@ -342,8 +342,70 @@ describe('WelcomePage', () => {
     expect(screen.queryByText(/mcpServers/)).toBeNull();
     await userEvent.click(screen.getByRole('radio', { name: 'Desktop agents' }));
     expect(screen.getByText(/@bevel-software\/hexis-mcp/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('radio', { name: 'Other' }));
+    await userEvent.click(screen.getByRole('radio', { name: 'Other tools' }));
     expect(screen.getByText(/skills-tools-knowledge/)).toBeInTheDocument();
+  });
+
+  /**
+   * ChatGPT renamed Apps & Connectors to Plugins, and a one-line path with the
+   * old names stranded people. The steps are numbered, in the order the
+   * settings are actually walked, and each renamed thing is named both ways
+   * so either build of ChatGPT reads right.
+   */
+  it('walks ChatGPT as numbered steps naming both the current and the previous page', async () => {
+    mountPage();
+    await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
+    const steps = screen.getAllByRole('listitem').map((li) => li.textContent);
+    expect(steps).toEqual([
+      'Open Settings in ChatGPT.',
+      'Open Plugins (called Apps & Connectors in older versions).',
+      'Turn on Developer Mode (under Advanced in older versions).',
+      'Go back and choose Create (or Add).',
+      'Name it “Skills, Tools and Knowledge”.',
+      'Paste the address below, then save.',
+    ]);
+    // An ordered list, so the numbers are real rather than typed into the text.
+    expect(screen.getByRole('list').tagName).toBe('OL');
+    // The other options keep their one-paragraph hint.
+    await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
+    expect(screen.queryByRole('list')).toBeNull();
+  });
+
+  /**
+   * "A JSON config" told a business user nothing. The Other tools option
+   * says where it goes, and gives the bare address too — many tools take a
+   * URL and nothing else — each with its own copy button.
+   */
+  it('tells Other tools where the configuration goes, and offers the bare address too', async () => {
+    configureMcpUrl('https://kb.acme.com/api/mcp');
+    const writeText = stubClipboard();
+    mountPage();
+    await userEvent.click(screen.getByRole('radio', { name: 'Other tools' }));
+    expect(
+      screen.getByText(
+        'For any other AI tool that supports MCP servers. Open the tool’s settings, find MCP servers (also called connectors or integrations), choose add, and paste this configuration. If the tool asks for an address only, paste this instead:',
+      ),
+    ).toBeInTheDocument();
+
+    const address = screen.getByText('https://kb.acme.com/api/mcp');
+    const config = screen.getByText(/mcpServers/);
+    // The address first — the hint ends on "paste this instead:" — then the JSON.
+    expect(address.compareDocumentPosition(config) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(config.textContent).toContain('https://kb.acme.com/api/mcp');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Copy address' }));
+    expect(writeText).toHaveBeenLastCalledWith('https://kb.acme.com/api/mcp');
+    await userEvent.click(screen.getByRole('button', { name: 'Copy' }));
+    expect(writeText).toHaveBeenLastCalledWith(config.textContent);
+  });
+
+  it('shows the separate address block on Other tools alone', async () => {
+    mountPage();
+    expect(screen.queryByRole('button', { name: 'Copy address' })).toBeNull();
+    await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
+    expect(screen.queryByRole('button', { name: 'Copy address' })).toBeNull();
+    await userEvent.click(screen.getByRole('radio', { name: 'Desktop agents' }));
+    expect(screen.queryByRole('button', { name: 'Copy address' })).toBeNull();
   });
 
   /**
@@ -374,6 +436,25 @@ describe('WelcomePage', () => {
     expect(snippet).not.toContain('HEXIS_CONNECTION_KEY');
     // The hint says how identity arrives instead: browser sign-in on first run.
     expect(screen.getByText(/your browser opens so you can sign in/)).toBeInTheDocument();
+  });
+
+  /**
+   * The two ways this snippet fails on a machine where it is otherwise
+   * right: the wrong Node major, and a client launched from the Dock, which
+   * was started by the window server and so never read the shell profile
+   * that put `npx` on PATH (Cursor and Claude Desktop on macOS). The fix for
+   * the second is an absolute path, which is specific to one machine — so it
+   * belongs in the hint and NOT in the snippet, which has to stay right for
+   * every reader whose PATH was fine all along.
+   */
+  it('warns Desktop agents about Node and PATH, leaving the snippet on bare npx', async () => {
+    mountPage();
+    await userEvent.click(screen.getByRole('radio', { name: 'Desktop agents' }));
+    expect(screen.getByText(/Needs Node 22\.13\+ or 24/)).toBeInTheDocument();
+    expect(screen.getByText(/cannot see your shell’s PATH/)).toBeInTheDocument();
+    expect(screen.getByText(/run `which npx` in a terminal/)).toBeInTheDocument();
+    const snippet = screen.getByText(/mcpServers/).textContent!;
+    expect(JSON.parse(snippet).mcpServers['skills-tools-knowledge'].command).toBe('npx');
   });
 
   /**
@@ -432,7 +513,7 @@ describe('WelcomePage', () => {
       expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
       await userEvent.click(screen.getByRole('radio', { name: 'Desktop agents' }));
       expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
-      await userEvent.click(screen.getByRole('radio', { name: 'Other' }));
+      await userEvent.click(screen.getByRole('radio', { name: 'Other tools' }));
       expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
     });
 
@@ -451,7 +532,7 @@ describe('WelcomePage', () => {
       expect(screen.queryByRole('link', { name: 'Add to ChatGPT' })).toBeNull();
       await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
       const link = screen.getByRole('link', { name: 'Add to ChatGPT' });
-      expect(link).toHaveAttribute('href', 'https://chatgpt.com/#settings/Connectors');
+      expect(link).toHaveAttribute('href', 'https://chatgpt.com/#settings');
       expect(link).toHaveAttribute('target', '_blank');
       expect(link).toHaveAttribute('rel', 'noopener noreferrer');
       expect(screen.getByText(/Skills, Tools and Knowledge/)).toBeInTheDocument();
@@ -540,7 +621,7 @@ describe('WelcomePage', () => {
     const options = screen.getAllByRole('radio');
     expect(group).toContainElement(options[0]!);
     // Claude and ChatGPT lead; Claude is the default.
-    expect(options.map((o) => o.textContent)).toEqual(['Claude', 'ChatGPT', 'Desktop agents', 'Other']);
+    expect(options.map((o) => o.textContent)).toEqual(['Claude', 'ChatGPT', 'Desktop agents', 'Other tools']);
     expect(options.map((o) => o.getAttribute('aria-checked'))).toEqual([
       'true',
       'false',
@@ -573,7 +654,7 @@ describe('WelcomePage', () => {
     await userEvent.keyboard('{ArrowDown}');
     expect(checked()).toHaveAccessibleName('Desktop agents');
     await userEvent.keyboard('{ArrowRight}');
-    expect(checked()).toHaveAccessibleName('Other');
+    expect(checked()).toHaveAccessibleName('Other tools');
 
     // Off the end and round to the first.
     await userEvent.keyboard('{ArrowRight}');
@@ -581,7 +662,7 @@ describe('WelcomePage', () => {
 
     // And backwards past the start, to the last.
     await userEvent.keyboard('{ArrowLeft}');
-    expect(checked()).toHaveAccessibleName('Other');
+    expect(checked()).toHaveAccessibleName('Other tools');
   });
 
   // Roving tabindex: the picker is ONE tab stop, not one per client.

@@ -39,7 +39,6 @@ export function WelcomePage() {
   const toast = useLibraryToast();
   const navigate = useNavigate();
   const [clientId, setClientId] = useState<AgentClient['id']>('claude');
-  const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
 
   // Once, on arrival — this is what makes the welcome redirect one-time.
   const { markWelcomed } = onboarding;
@@ -190,30 +189,6 @@ export function WelcomePage() {
     radios.current[next]?.focus();
   }
 
-  // One timer, cleared before it is replaced: a second copy inside the 1.5s
-  // window would otherwise inherit the FIRST copy's expiry and blank the
-  // checkmark almost immediately.
-  const resetTimer = useRef<number | undefined>(undefined);
-  useEffect(() => () => window.clearTimeout(resetTimer.current), []);
-
-  /**
-   * Copy the snippet currently on screen, and say so — as a checkmark for
-   * anyone watching and as a live-region announcement for anyone not. A
-   * failure is reported, never swallowed: the toast names the alternative
-   * (select the text) instead of leaving a button that silently did nothing.
-   */
-  async function copySnippet() {
-    const ok = await copyToClipboard(snippet);
-    if (!ok) toast(COPY_FAILED_TOAST, 'danger');
-    window.clearTimeout(resetTimer.current);
-    // Back to idle FIRST, so a repeat copy is a real state change and the
-    // live region announces it again — setting 'ok' over 'ok' is a no-op that
-    // says nothing to a screen reader.
-    setCopied('idle');
-    window.setTimeout(() => setCopied(ok ? 'ok' : 'fail'), 0);
-    resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
-  }
-
   // Both exits land in the same place. Whether you connected an agent or
   // walked past it, where you want to be next is somewhere you can start —
   // by default your own shelf, not the whole company's catalog. A deep link
@@ -311,7 +286,15 @@ export function WelcomePage() {
           ))}
         </div>
 
-        <p className="mt-2.5 text-meta leading-normal text-ink-faint">{client.hint}</p>
+        {Array.isArray(client.hint) ? (
+          <ol className="mt-2.5 list-decimal space-y-0.5 pl-5 text-meta leading-normal text-ink-faint">
+            {client.hint.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ol>
+        ) : (
+          <p className="mt-2.5 text-meta leading-normal text-ink-faint">{client.hint}</p>
+        )}
 
         {/* The web assistants only: Claude's link prefills the connector,
             ChatGPT's opens the settings pane it is created in. Both render
@@ -323,37 +306,16 @@ export function WelcomePage() {
         {client.id === 'claude' && <ClaudeInstallLink mcpUrl={mcpUrl} className="mt-3.5" />}
         {client.id === 'chatgpt' && <ChatGptInstallLink mcpUrl={mcpUrl} className="mt-3.5" />}
 
-        {/* The copy rides the block it copies. */}
-        <div className="relative mt-3.5">
-          <div
-            className={cn(
-              'overflow-x-auto rounded-lg border border-line bg-sunken py-2.5 pl-3 pr-10',
-              'font-mono text-detail text-ink',
-              snippet.includes('\n') ? 'whitespace-pre' : 'whitespace-nowrap',
-            )}
-          >
-            {snippet}
-          </div>
-          <IconButton
-            size={24}
-            aria-label="Copy"
-            title="Copy"
-            onClick={() => void copySnippet()}
-            className="absolute right-2 top-2"
-          >
-            {copied === 'ok' ? (
-              <Check size={13} className="text-ok" />
-            ) : copied === 'fail' ? (
-              <X size={13} className="text-danger" />
-            ) : (
-              <Copy size={13} />
-            )}
-          </IconButton>
-          {/* The icon's answer, said out loud for anyone not watching it. */}
-          <span role="status" aria-live="polite" className="sr-only">
-            {copied === 'ok' ? 'Copied' : copied === 'fail' ? 'Copy failed' : ''}
-          </span>
-        </div>
+        {/* Other tools: the hint ends on "paste this instead:", so the bare
+            address comes first, then the configuration it points back to.
+            Many tools take a URL and nothing else. */}
+        {client.id === 'other' && (
+          <SnippetBlock value={mcpUrl} copyLabel="Copy address" className="mt-3.5" />
+        )}
+
+        {/* Keyed by client, so a checkmark earned on one option does not
+            linger on the next option's snippet. */}
+        <SnippetBlock key={client.id} value={snippet} copyLabel="Copy" className="mt-3.5" />
 
         <div className="mt-5 flex items-center gap-4">
           <Button
@@ -378,6 +340,81 @@ export function WelcomePage() {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * One snippet and the button that copies it — the copy rides the block it
+ * copies. Its own component so a tab can carry two (Other tools shows the
+ * bare address AND the configuration), each with its own checkmark.
+ *
+ * Copying says so as a checkmark for anyone watching and as a live-region
+ * announcement for anyone not. A failure is reported, never swallowed: the
+ * toast names the alternative (select the text) instead of leaving a button
+ * that silently did nothing.
+ */
+function SnippetBlock({
+  value,
+  copyLabel,
+  className,
+}: {
+  value: string;
+  /** The button's accessible name — distinct per block when a tab has two. */
+  copyLabel: string;
+  className?: string;
+}) {
+  const toast = useLibraryToast();
+  const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
+
+  // One timer, cleared before it is replaced: a second copy inside the 1.5s
+  // window would otherwise inherit the FIRST copy's expiry and blank the
+  // checkmark almost immediately.
+  const resetTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(resetTimer.current), []);
+
+  async function copy() {
+    const ok = await copyToClipboard(value);
+    if (!ok) toast(COPY_FAILED_TOAST, 'danger');
+    window.clearTimeout(resetTimer.current);
+    // Back to idle FIRST, so a repeat copy is a real state change and the
+    // live region announces it again — setting 'ok' over 'ok' is a no-op that
+    // says nothing to a screen reader.
+    setCopied('idle');
+    window.setTimeout(() => setCopied(ok ? 'ok' : 'fail'), 0);
+    resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
+  }
+
+  return (
+    <div className={cn('relative', className)}>
+      <div
+        className={cn(
+          'overflow-x-auto rounded-lg border border-line bg-sunken py-2.5 pl-3 pr-10',
+          'font-mono text-detail text-ink',
+          value.includes('\n') ? 'whitespace-pre' : 'whitespace-nowrap',
+        )}
+      >
+        {value}
+      </div>
+      <IconButton
+        size={24}
+        aria-label={copyLabel}
+        title={copyLabel}
+        onClick={() => void copy()}
+        className="absolute right-2 top-2"
+      >
+        {copied === 'ok' ? (
+          <Check size={13} className="text-ok" />
+        ) : copied === 'fail' ? (
+          <X size={13} className="text-danger" />
+        ) : (
+          <Copy size={13} />
+        )}
+      </IconButton>
+      {/* The icon's answer, said out loud for anyone not watching it. */}
+      <span role="status" aria-live="polite" className="sr-only">
+        {copied === 'ok' ? 'Copied' : copied === 'fail' ? 'Copy failed' : ''}
+      </span>
     </div>
   );
 }

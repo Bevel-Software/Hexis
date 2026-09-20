@@ -128,12 +128,10 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
   const put = (rel: string, content: string | Buffer) =>
     files.set(rel, typeof content === 'string' ? Buffer.from(content, 'utf-8') : content);
 
-  // One verdict per skill, resolved once: every plugin below reads from it. A
-  // RETIRED skill (its governance lifecycle) stays in the catalog for its
-  // owners but never ships — retiring is how a skill leaves every agent.
+  // One verdict per skill, resolved once: every plugin below reads from it.
+  // Readability is the only gate — every skill the caller may read ships.
   const readableSkills = new Map<string, SkillSummary>();
   for (const s of skills) {
-    if (s.lifecycle === 'retired') continue;
     if (await readable(`${s.path}/SKILL.md`)) readableSkills.set(s.path, s);
   }
 

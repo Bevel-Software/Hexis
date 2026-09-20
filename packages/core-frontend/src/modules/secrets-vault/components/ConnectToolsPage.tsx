@@ -6,6 +6,7 @@ import { LIBRARY_ROOT, pathForTool } from '../../library/routes/library-paths';
 import { ToolLogo } from '../../library/components/ToolLogo';
 import { startOAuth } from '../services/secrets.api';
 import { setUserVar, deleteUserVar } from '../services/tool-secrets.api';
+import { announceToolCredentialsChanged } from '../../../core/events';
 import {
   getConnectPending,
   startToolOAuth,
@@ -126,6 +127,10 @@ export function ConnectToolsPage() {
     else if (params.has('error')) setError(params.get('error') || 'Authorization failed.');
     if (params.has('authorized') || params.has('error')) {
       window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      // Whichever way the round-trip went, a provider has just had its say
+      // about a sign-in this page did not perform itself — so the Library's
+      // view of the tool is from before the browser left.
+      announceToolCredentialsChanged();
     }
   }, []);
 
@@ -165,8 +170,19 @@ export function ConnectToolsPage() {
    * whether any per-user value exists; `wipe` removes them all. Unticking a
    * configured entry wipes it (that's what "skip" means — the tool must not
    * register for the agent); unticking an unconfigured one just hides inputs.
+   *
+   * `wipe` calls the `removed` callback it is handed after each DELETE that
+   * lands. A tool with several saved keys is several round-trips, and the
+   * second one can fail after the first succeeded: that key is gone for real,
+   * so the Library's copy went stale at the FIRST success, not at the last.
+   * Announcing only on a clean wipe would leave the catalog showing a key
+   * nobody has any more.
    */
-  const onToggle = async (id: string, configured: boolean, wipe: () => Promise<void>) => {
+  const onToggle = async (
+    id: string,
+    configured: boolean,
+    wipe: (removed: () => void) => Promise<void>,
+  ) => {
     const isOn = configured || included.has(id);
     if (!isOn) {
       setIncluded((s) => new Set(s).add(id));
@@ -179,12 +195,21 @@ export function ConnectToolsPage() {
     });
     if (configured) {
       setWiping((s) => new Set(s).add(id));
+      let removedAny = false;
       try {
-        await wipe();
-        await refresh();
+        await wipe(() => {
+          removedAny = true;
+        });
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
+        if (removedAny) {
+          // Before this page's own refetch, not after it: the Library is a
+          // different store with a different round-trip, and there is nothing
+          // for it to wait on.
+          announceToolCredentialsChanged();
+          await refresh();
+        }
         setWiping((s) => {
           const nextSet = new Set(s);
           nextSet.delete(id);
@@ -336,7 +361,10 @@ export function ConnectToolsPage() {
                                 : 'needs-signin'
                         }
                         onToggle={() =>
-                          void onToggle(id, o.authorized, () => deleteUserVar(o.slug, o.varName))
+                          void onToggle(id, o.authorized, async (removed) => {
+                            await deleteUserVar(o.slug, o.varName);
+                            removed();
+                          })
                         }
                         action={
                           on ? (
@@ -400,9 +428,10 @@ export function ConnectToolsPage() {
                           busy={wiping.has(id)}
                           state={!on ? 'skipped' : unset > 0 ? 'needs-key' : 'key-saved'}
                           onToggle={() =>
-                            void onToggle(id, configured, async () => {
+                            void onToggle(id, configured, async (removed) => {
                               for (const v of tool.variables.filter((x) => x.configured)) {
                                 await deleteUserVar(tool.slug, v.name);
+                                removed();
                               }
                             })
                           }
@@ -416,7 +445,10 @@ export function ConnectToolsPage() {
                                 name={v.name}
                                 label={v.label}
                                 configured={v.configured}
-                                onSaved={() => void refresh()}
+                                onSaved={() => {
+                                  announceToolCredentialsChanged();
+                                  void refresh();
+                                }}
                                 onError={setError}
                               />
                             ))}

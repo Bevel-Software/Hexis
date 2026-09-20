@@ -2,7 +2,9 @@ import type { Request, Response } from 'express';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('tools');
-import { hasHttpStatus, type ToolHandler } from './tool.contract.js';
+import { hasHttpStatus, ToolError, type ToolHandler } from './tool.contract.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { domainErrorBody } from '../../shared/http-errors.js';
 import type { ResolveToolContext } from './tool-context.js';
 import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
 
@@ -80,7 +82,17 @@ export function createToolHandlerFactory(resolve: ResolveToolContext) {
           return;
         }
         if (hasHttpStatus(err)) {
-          res.status(err.status).json({ error: err.message });
+          // Structured details ride beside `error`, never over it. A domain
+          // refusal brings its own payload (`kind`, and whatever that kind
+          // carries) exactly as it does on the HTTP routes — a tool caller
+          // switching on `branch-not-found` vs `remote-branch-gone` should
+          // not have to read the prose to tell them apart.
+          if (err instanceof WorkflowDomainError) {
+            res.status(err.status).json(domainErrorBody(err));
+            return;
+          }
+          const details = err instanceof ToolError ? err.details : undefined;
+          res.status(err.status).json({ ...details, error: err.message });
           return;
         }
         const msg = err instanceof Error ? err.message : 'Unknown error';

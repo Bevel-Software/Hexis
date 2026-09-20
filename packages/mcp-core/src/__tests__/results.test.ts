@@ -14,6 +14,37 @@ describe('describeToolFailure', () => {
     expect(describeToolFailure({ response: { data: { error: 'no such branch' } } })).toBe('no such branch');
   });
 
+  it('keeps a typed refusal\'s machine-readable fields beside its message', () => {
+    const data = { error: 'logo.png is an image.', kind: 'binary_not_writable', fileKind: 'image', useInstead: ['upload'] };
+    expect(describeToolFailure({ response: { data } })).toBe(
+      'logo.png is an image. {"kind":"binary_not_writable","fileKind":"image","useInstead":["upload"]}',
+    );
+  });
+
+  it('keeps `kind` when the refusal details do not serialise as plain JSON', () => {
+    const data = { error: 'refused.', kind: 'binary_not_writable', size: 10n };
+    expect(describeToolFailure({ response: { data } })).toBe('refused. {"kind":"binary_not_writable","size":"10"}');
+  });
+
+  it('falls back to the plain message when reading the refusal details throws', () => {
+    const data = {
+      error: 'refused.',
+      get kind(): string {
+        throw new Error('getter boom');
+      },
+    };
+    expect(describeToolFailure({ response: { data } })).toBe('refused.');
+    const proxied = new Proxy(
+      { error: 'refused.' },
+      {
+        ownKeys: () => {
+          throw new Error('proxy boom');
+        },
+      },
+    );
+    expect(describeToolFailure({ response: { data: proxied } })).toBe('refused.');
+  });
+
   it('never throws on a thrown value whose own toString throws', () => {
     // A null-prototype object has no toString; String() on it throws — and a
     // describe that throws inside a catch path turns a tool failure into a

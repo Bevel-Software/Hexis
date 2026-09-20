@@ -57,6 +57,9 @@ vi.mock('../../change-requests/services/change-requests.api', () => ({
   listOpenChangeRequests: vi.fn(async () => []),
   listMyChangeRequests: vi.fn(async () => []),
   readFileOnBranch: apiMock.readFileOnBranch,
+  // No fork point: the change boxes fall back to the default branch, which is
+  // what these tests diff against.
+  readFileAtForkPoint: vi.fn(async () => ({ content: null, forkSha: null })),
 }));
 vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: apiMock.mergePullRequest }));
 vi.mock('../../pr/services/pr-cancel.api', () => ({
@@ -402,6 +405,7 @@ beforeEach(() => {
         isApproved: false,
         approvedBy: [],
         eligibleApprovers: { roles: ['Newsroom'], users: [] },
+        inMergeGate: true,
       },
     ],
   });
@@ -975,12 +979,14 @@ describe('SkillPage: deciding on a change', () => {
           isApproved: false,
           approvedBy: [],
           eligibleApprovers: { roles: ['Newsroom'], users: [] },
+          inMergeGate: true,
         },
         {
           path: 'Skills/newsletter/sources.yaml',
           isApproved: false,
           approvedBy: [],
           eligibleApprovers: { roles: [], users: [] },
+          inMergeGate: false,
         },
       ],
     });

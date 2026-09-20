@@ -10,12 +10,16 @@ import {
 } from '../../change-requests/services/propose.api';
 import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../core/events';
 import type {
+  HydrateResult,
   OpenTab,
   PendingEntry,
   UploadError,
   UploadInput,
+  UploadNotice,
+  UploadTarget,
   WorkspaceContextValue,
 } from '../state/workspace.context';
+import { KNOWLEDGE_UPLOAD_TARGET } from '../state/workspace.context';
 import {
   getOrCreateWorkspace,
   listFiles,
@@ -33,6 +37,7 @@ import {
 import { contentChanged } from '../utils/diff';
 import { isUploadNoise, walkEntries, type DroppedItem } from '../utils/readDroppedEntries';
 import { tabsKey, type PersistedTabState } from '../utils/tab-persistence';
+import { traceFiles } from '../utils/file-trace';
 
 const PERSIST_DEBOUNCE_MS = 200;
 // Bounded concurrency cap for upload requests. The server serializes git
@@ -48,6 +53,22 @@ const UNSAVED_TABS_BULK_WARNING = (filenames: string[]) =>
 function basename(path: string): string {
   const i = path.lastIndexOf('/');
   return i >= 0 ? path.slice(i + 1) : path;
+}
+
+/**
+ * Which branch a workspace IS, read off the workspace itself rather than off
+ * whatever we happened to ask for. `WorkspaceInfo.id` is
+ * `encodeURIComponent(branch)` and documents the decode as the supported way
+ * to recover the branch without a round-trip — so the answer travels with the
+ * id, and the pair can never come apart mid-switch. `requested` is only the
+ * fallback for a malformed id.
+ */
+function workspaceBranchOf(workspaceId: string, requested: string | undefined): string {
+  try {
+    return decodeURIComponent(workspaceId);
+  } catch {
+    return requested ?? DEFAULT_BRANCH;
+  }
 }
 
 /**
@@ -92,6 +113,55 @@ function collectPaths(root: FileTreeEntry): Set<string> {
   return out;
 }
 
+/** The last segment of a workspace path — what the user calls the file. */
+function fileNameOf(path: string): string {
+  const name = path.split('/').filter(Boolean).pop();
+  return name ?? path;
+}
+
+/**
+ * What the progress notice calls this drop: one file by name, several by
+ * count, and the folder it is going into. Read off the INPUT rather than the
+ * walk, because the walk has not started yet — saying something on the first
+ * tick is the whole point.
+ */
+function describeUpload(input: UploadInput, targetDirectory: string): string {
+  let what: string;
+  if (input.kind === 'files') {
+    what = input.files.length === 1 ? input.files[0]!.name : `${input.files.length} files`;
+  } else if (input.kind === 'paths') {
+    what = input.items.length === 1
+      ? fileNameOf(input.items[0]!.relativePath)
+      : `${input.items.length} files`;
+  } else {
+    what = input.entries.length === 1
+      ? input.entries[0]!.name || 'the dropped item'
+      : `${input.entries.length} items`;
+  }
+  const where = targetDirectory ? fileNameOf(targetDirectory) : null;
+  return where ? `${what} to ${where}` : what;
+}
+
+const EMPTY_ERRORS: ReadonlyMap<UploadTarget, UploadError> = new Map();
+const EMPTY_NOTICES: ReadonlyMap<UploadTarget, UploadNotice> = new Map();
+
+/**
+ * Set or remove one tree's upload banner, leaving every other tree's alone.
+ * Returns the map unchanged when there was nothing to remove, so a dispatch
+ * into a tree with no banner doesn't re-render the ones that have.
+ */
+function withBanner<V>(
+  current: ReadonlyMap<UploadTarget, V>,
+  target: UploadTarget,
+  value: V | null,
+): ReadonlyMap<UploadTarget, V> {
+  if (value === null && !current.has(target)) return current;
+  const next = new Map(current);
+  if (value === null) next.delete(target);
+  else next.set(target, value);
+  return next;
+}
+
 interface UseWorkspaceStateReturn extends WorkspaceContextValue {
   setPersistenceBranch: (branch: string | null) => void;
   deleteWorkspace: () => Promise<void>;
@@ -99,13 +169,33 @@ interface UseWorkspaceStateReturn extends WorkspaceContextValue {
 
 export function useWorkspaceState(): UseWorkspaceStateReturn {
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
-  const [bootstrapError, setBootstrapError] = useState<{ branch: string; status: number } | null>(null);
+  /**
+   * The branch the CURRENT `workspaceId` actually is (see
+   * {@link workspaceBranchOf}). Not the same thing as `persistenceBranch`,
+   * which is the branch we've asked for and may still be bootstrapping. Every
+   * key that has to say "these tabs came from that branch" is built from this
+   * one, paired with the `workspaceId` of the same render, so a switch can
+   * never write one branch's tabs under another branch's name.
+   */
+  const [workspaceBranch, setWorkspaceBranch] = useState<string | null>(null);
+  const [bootstrapError, setBootstrapError] = useState<
+    { branch: string; status: number; message: string } | null
+  >(null);
+  // Bumped by `retryBootstrap`. A dependency of the bootstrap effect, so a
+  // retry re-runs it for the SAME persistenceBranch (which a plain state set
+  // would not, the value being unchanged).
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
   const [kbDirName, setKbDirName] = useState<string | null>(null);
   const [fileTree, setFileTree] = useState<FileTreeEntry | null>(null);
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
   const [activeTabPath, setActiveTabPath] = useState<string | null>(null);
-  const [uploadError, setUploadError] = useState<UploadError | null>(null);
-  const [uploadNotice, setUploadNotice] = useState<string | null>(null);
+  // Upload banners are per-TREE, not per-workspace: the Library sidebar shows
+  // two upload targets at once, and with a single slot each the second drop's
+  // notice replaced the first's — and the first upload to settle cleared the
+  // second's. Either way one of the two drops went silent, which is the whole
+  // failure this module exists to prevent. See `withBanner`.
+  const [uploadErrors, setUploadErrors] = useState<ReadonlyMap<UploadTarget, UploadError>>(EMPTY_ERRORS);
+  const [uploadNotices, setUploadNotices] = useState<ReadonlyMap<UploadTarget, UploadNotice>>(EMPTY_NOTICES);
   const [isUploading, setIsUploading] = useState(false);
   // Who is signed in — the suggestion-routed upload needs an author for the
   // branch name and the change request. Read nullable (not `useAuth`, which
@@ -120,6 +210,15 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   // Monotonic token so a slow `addTab` whose response arrives after a newer add
   // doesn't clobber the newer state.
   const addRequestIdRef = useRef(0);
+  // A SECOND token, for hydrations only. "Which file should be active" and
+  // "which restore owns the tab strip" are different questions, and sharing one
+  // counter conflated them: an ordinary `addTab` starting mid-hydration made
+  // the hydration look superseded, so it dropped the branch's whole restored
+  // tab list on the floor AND left `hydratedKeyRef` unset, which silently
+  // disables persistence for that branch until the next switch. Only a NEWER
+  // hydration (or the workspace moving) may retire a hydration's claim on the
+  // strip; a newer open only outranks it for activation.
+  const hydrateRequestIdRef = useRef(0);
   // Tracks the (workspaceId, persistenceBranch) key we've successfully hydrated
   // for. Auto-persist effect won't write until hydrate has run for the current
   // key — avoids overwriting localStorage with `[]` before the restore lands.
@@ -142,10 +241,45 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   // persistenceBranch as a ref too, so hydrateTabs reads the latest value
   // even when setPersistenceBranch was called in the same render.
   const persistenceBranchRef = useRef<string | null>(persistenceBranch);
+  /**
+   * The live `workspaceId`, for the reads that resolve AFTER the workspace
+   * moved on. A read started against branch A's workspace must not write its
+   * bytes into branch B's tab strip: every tab mutation below compares the
+   * workspaceId it was started with against this before touching state.
+   */
+  const workspaceIdRef = useRef<string | null>(workspaceId);
   useEffect(() => { openTabsRef.current = openTabs; }, [openTabs]);
   useEffect(() => { activeTabPathRef.current = activeTabPath; }, [activeTabPath]);
   useEffect(() => { fileTreeRef.current = fileTree; }, [fileTree]);
   useEffect(() => { persistenceBranchRef.current = persistenceBranch; }, [persistenceBranch]);
+
+  /**
+   * The one place `workspaceId` moves. The ref is advanced in the same tick as
+   * the state, not in an effect: child effects (FileRoute's hydrate) run before
+   * this component's own effects, so an effect-synced ref would still read the
+   * PREVIOUS workspace on the very render that introduced the new one.
+   */
+  const adoptWorkspace = useCallback((id: string, branch: string) => {
+    // A different workspace IS a different branch, and every open tab holds
+    // bytes read from the one being left. The strip starts empty for the new
+    // branch rather than waiting for its restore to replace it: a restore
+    // overtaken by a click MERGES into the strip instead of replacing it, and
+    // merged with a strip that still held the old branch's tabs it carried
+    // them over — shown on the new branch with the old branch's text, and
+    // persisted under the new branch's key. Refs move with the state for the
+    // same reason `workspaceIdRef` does: the reads resolving next consult
+    // them. Nothing typed is lost — a switch is refused while any tab is dirty
+    // (`FileRoute`), and `deleteWorkspace` closes every tab before it re-adopts.
+    if (workspaceIdRef.current !== null && workspaceIdRef.current !== id) {
+      openTabsRef.current = [];
+      activeTabPathRef.current = null;
+      setOpenTabs([]);
+      setActiveTabPath(null);
+    }
+    workspaceIdRef.current = id;
+    setWorkspaceId(id);
+    setWorkspaceBranch(branch);
+  }, []);
 
   const setPersistenceBranch = useCallback((branch: string | null) => {
     persistenceBranchRef.current = branch;
@@ -168,30 +302,53 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const branch = persistenceBranch ?? undefined;
     let cancelled = false;
     (async () => {
+      traceFiles('bootstrap:start', { branch: branch ?? null, attempt: bootstrapAttempt });
       try {
         const { workspace, fileTree: tree } = await getOrCreateWorkspace(branch);
+        traceFiles('bootstrap:ok', { branch: branch ?? null, workspaceId: workspace.id, cancelled });
         if (cancelled) return;
-        setWorkspaceId(workspace.id);
+        adoptWorkspace(workspace.id, workspaceBranchOf(workspace.id, branch));
         setKbDirName(workspace.kbDirName);
         setFileTree(tree);
         setBootstrapError(null);
       } catch (err) {
+        traceFiles('bootstrap:failed', {
+          branch: branch ?? null,
+          status: err instanceof WorkspaceApiError ? err.status : null,
+          message: err instanceof Error ? err.message : String(err),
+          cancelled,
+        });
         if (cancelled) return;
         console.error('Failed to bootstrap workspace:', err);
         // Surfaced, not just logged: a bootstrap that fails leaves
         // `workspaceId` where it was, and the route waiting on it needs to
-        // know why — a branch the host deleted (410) has its own screen.
+        // know why — a branch the host deleted (410) and a branch that never
+        // existed (404) each have their own screen, and every other status
+        // gets a named failure with a Retry. The message rides along so the
+        // screen can say what actually failed instead of only which branch
+        // it was.
         // No persistence branch means the server bootstrapped the DEFAULT
         // branch, so that is the branch this failure is about — an empty
         // name would never match the URL a route is on.
         setBootstrapError({
           branch: branch ?? DEFAULT_BRANCH,
           status: err instanceof WorkspaceApiError ? err.status : 0,
+          message: err instanceof Error ? err.message : String(err),
         });
       }
     })();
     return () => { cancelled = true; };
-  }, [persistenceBranch]);
+  }, [persistenceBranch, bootstrapAttempt, adoptWorkspace]);
+
+  /**
+   * Re-run the bootstrap for the branch we're already asking for. The one
+   * recovery from a failed `GET /api/workspace` that doesn't need a page
+   * reload — the Retry on the file page's bootstrap-failure screen calls it.
+   */
+  const retryBootstrap = useCallback(() => {
+    setBootstrapError(null);
+    setBootstrapAttempt((n) => n + 1);
+  }, []);
 
   const refreshFileTree = useCallback(async () => {
     if (!workspaceId) return null;
@@ -234,11 +391,19 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // null-content guard renders an empty/loading state until content arrives.
     if (tab.content === null && workspaceId) {
       const path = tab.path;
-      readFile(workspaceId, path).then((content) => {
+      // The same guard the eager refetch and `addTab` carry: a switch while
+      // this read is in flight clears the strip, and a tab of the SAME path
+      // may already be open on the new branch. Its answer — bytes, a 404 or a
+      // 403 — is about the branch that was left, so it must neither overwrite
+      // that tab nor close it.
+      const readFrom = workspaceId;
+      readFile(readFrom, path).then((content) => {
+        if (workspaceIdRef.current !== readFrom) return;
         setOpenTabs((prev) => prev.map((t) => (
           t.path === path ? { ...t, content, savedContent: content } : t
         )));
       }).catch((err) => {
+        if (workspaceIdRef.current !== readFrom) return;
         if (
           err instanceof WorkspaceApiError &&
           (err.status === 404 || err.status === 403)
@@ -258,12 +423,25 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // on dirty state — opening more tabs never discards work.
     const existing = openTabsRef.current.find((t) => t.path === relativePath);
     if (existing) {
+      // Claim the "latest open" token even though there is nothing to fetch.
+      // Without it, an OLDER addTab still in flight counted as the latest when
+      // it landed and activated ITS file — so a burst of tree clicks ending on
+      // an already-open tab left the screen on some other file while the URL
+      // named this one, for good. Opening a tab is the newest intent whether or
+      // not it costs a read.
+      ++addRequestIdRef.current;
       activateTab(existing);
       return true;
     }
     const requestId = ++addRequestIdRef.current;
     try {
       const content = await readFile(workspaceId, relativePath);
+      // A read that outlived its workspace belongs to another branch's tab
+      // strip; drop it rather than splicing those bytes into this one.
+      if (workspaceIdRef.current !== workspaceId) {
+        traceFiles('add-tab:stale-workspace', { path: relativePath, readFrom: workspaceId, now: workspaceIdRef.current });
+        return false;
+      }
       const isLatest = requestId === addRequestIdRef.current;
       // Re-check dedup in case of races during the await.
       const stillExisting = openTabsRef.current.find((t) => t.path === relativePath);
@@ -289,7 +467,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       return true;
     } catch (err) {
       // Drop stale errors silently — the user already navigated to a newer
-      // tab, surfacing the older error would be confusing.
+      // tab, or the workspace moved to another branch; surfacing the older
+      // error would be confusing.
+      if (workspaceIdRef.current !== workspaceId) return false;
       if (requestId !== addRequestIdRef.current) return false;
       // A 403 (read-restricted deep-link / id-link) throws like any other
       // failure: NO tab is created for a file the user can't read — the route
@@ -344,18 +524,35 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const hydrateTabs = useCallback(async (
     paths: string[],
     activePath: string | null,
-  ): Promise<{ surviving: string[]; dropped: string[]; denied: string[] }> => {
-    if (!workspaceId) return { surviving: [], dropped: paths.slice(), denied: [] };
+  ): Promise<HydrateResult> => {
+    // No workspace, nothing read, nothing owned: `superseded` so the caller
+    // doesn't record a restore that never happened.
+    if (!workspaceId) {
+      return { surviving: [], dropped: paths.slice(), denied: [], superseded: true };
+    }
+    // The key these tabs belong to, pinned from THIS render's (workspaceId,
+    // workspaceBranch) pair — the two always move together, so the key can
+    // never cross one branch's workspace with another branch's name. It used
+    // to be built from `persistenceBranchRef` at settle time, which is the
+    // branch being switched TO, and that is exactly how a key like
+    // `bevel.tabs.main.someone/draft` got written mid-switch.
+    const hydratedKey = workspaceBranch ? `${workspaceId}.${workspaceBranch}` : null;
     // Deduplicate while preserving order.
     const uniqPaths = paths.filter((p, i) => paths.indexOf(p) === i);
+
+    // Two claims, two tokens. `addRequestIdRef` says "this is the newest thing
+    // the user asked to have ACTIVE" — a hydration and an open compete for
+    // that, and whichever started last wins when they settle out of order.
+    // `hydrateRequestIdRef` says "this restore owns the tab strip", which only
+    // another restore can take away.
+    const requestId = ++addRequestIdRef.current;
+    const hydrateId = ++hydrateRequestIdRef.current;
 
     if (uniqPaths.length === 0) {
       setOpenTabs([]);
       setActiveTabPath(null);
-      hydratedKeyRef.current = persistenceBranchRef.current
-        ? `${workspaceId}.${persistenceBranchRef.current}`
-        : null;
-      return { surviving: [], dropped: [], denied: [] };
+      hydratedKeyRef.current = hydratedKey;
+      return { surviving: [], dropped: [], denied: [], superseded: false };
     }
 
     // Fetch every path in parallel. 404s are silently dropped (file no longer
@@ -365,6 +562,16 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // access message instead of "file not found". Other errors throw so the
     // caller can show "file-load-failed".
     const results = await Promise.allSettled(uniqPaths.map((p) => readFile(workspaceId, p)));
+    // The strip is no longer this hydration's to write: the workspace moved to
+    // another branch, or a newer restore started while these reads were in
+    // flight. Report what we read so the caller can still classify its
+    // deeplink, but touch nothing — and tell the caller, so it doesn't record
+    // a hydration that never landed.
+    const superseded =
+      workspaceIdRef.current !== workspaceId || hydrateId !== hydrateRequestIdRef.current;
+    // A newer `addTab` started meanwhile. It owns the ACTIVE tab, not the
+    // strip: its file still has to sit alongside the restored ones.
+    const outranked = requestId !== addRequestIdRef.current;
     const survivors: OpenTab[] = [];
     const surviving: string[] = [];
     const dropped: string[] = [];
@@ -395,17 +602,36 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       }
     }
 
+    if (superseded) {
+      traceFiles('hydrate:superseded', { readFrom: workspaceId, now: workspaceIdRef.current, surviving });
+      return { surviving, dropped, denied, superseded: true };
+    }
+
+    if (outranked) {
+      // Merge instead of replace: the newer open's tab stays (it may not even
+      // be in `prev` yet — `addTab` appends with its own race-safe setter, so
+      // it lands on top of this list), and the restored tabs join it in their
+      // persisted order. Activation is left alone; the newer open is the
+      // user's latest intent and has already claimed it.
+      traceFiles('hydrate:outranked-by-open', { readFrom: workspaceId, surviving });
+      const restored = new Set(surviving);
+      setOpenTabs((prev) => [...survivors, ...prev.filter((t) => !restored.has(t.path))]);
+      // Still a completed restore for this key: the strip now holds this
+      // branch's tabs, so persistence may resume. Leaving the marker unset was
+      // what stopped this branch's tabs from ever being written again.
+      hydratedKeyRef.current = hydratedKey;
+      return { surviving, dropped, denied, superseded: false };
+    }
+
     setOpenTabs(survivors);
     // Activate `activePath` if it survived; else last surviving path; else null.
     const requested = activePath && survivors.some((t) => t.path === activePath)
       ? activePath
       : (survivors[survivors.length - 1]?.path ?? null);
     setActiveTabPath(requested);
-    hydratedKeyRef.current = persistenceBranchRef.current
-      ? `${workspaceId}.${persistenceBranchRef.current}`
-      : null;
-    return { surviving, dropped, denied };
-  }, [workspaceId]);
+    hydratedKeyRef.current = hydratedKey;
+    return { surviving, dropped, denied, superseded: false };
+  }, [workspaceId, workspaceBranch]);
 
   // ── Renderer value bridge → active tab.content ────────────────────────────
 
@@ -485,8 +711,24 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     bumpFs();
   }, [workspaceId, refreshFileTree, bumpFs]);
 
-  const clearUploadError = useCallback(() => setUploadError(null), []);
-  const clearUploadNotice = useCallback(() => setUploadNotice(null), []);
+  const clearUploadError = useCallback(
+    (target: UploadTarget) => setUploadErrors((current) => withBanner(current, target, null)),
+    [],
+  );
+  const clearUploadNotice = useCallback(
+    (target: UploadTarget) => setUploadNotices((current) => withBanner(current, target, null)),
+    [],
+  );
+  /**
+   * Retire a tree's "this is happening" notice without touching a RESULT that
+   * has already replaced it — a suggestion notice stays until the user
+   * dismisses it.
+   */
+  const clearProgressNotice = useCallback((target: UploadTarget) => {
+    setUploadNotices((current) => (
+      current.get(target)?.kind === 'progress' ? withBanner(current, target, null) : current
+    ));
+  }, []);
 
   // Pending overlay: files/dirs the user dropped but whose server commits
   // haven't echoed back yet. The ref holds the mutable working set the
@@ -551,8 +793,48 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   );
 
   const activeUploadsRef = useRef(0);
-  const dispatchUpload = useCallback(async (input: UploadInput, targetDirectory: string) => {
+  // How many dispatches are still running INTO EACH TREE. A progress notice
+  // belongs to its tree, not to the dispatch that raised it: the one that
+  // settles first must not pull the notice out from under a sibling drop into
+  // the same tree that is still waiting on its routing round-trip.
+  const activeUploadsByTargetRef = useRef(new Map<UploadTarget, number>());
+  const dispatchUpload = useCallback(async (
+    input: UploadInput,
+    targetDirectory: string,
+    uploadTarget: UploadTarget = KNOWLEDGE_UPLOAD_TARGET,
+  ) => {
     if (!workspaceId) return;
+
+    // Pin the workspace at dispatch time. A folder upload can take seconds;
+    // if the user switches branches mid-flight, the trailing state
+    // mutations (setUploadErrors / setIsUploading / setFileTree via
+    // refreshFileTree / clearPendingMatching) would clobber the new
+    // branch's UI with old-branch results. `isCurrent()` gates every
+    // post-await mutation; the workspaceId reset effect above already
+    // clears the optimistic refs the moment the switch happens.
+    const dispatchWorkspaceId = workspaceId;
+    const isCurrent = () => workspaceIdRef.current === dispatchWorkspaceId;
+
+    // ── Say something on the FIRST tick ──
+    // Everything below this point can take seconds, and the first
+    // suggestion-routed upload of a session takes the longest of all: the ACL
+    // read, then a branch created on the server and a workspace cloned for
+    // it, then the change request opened. None of that draws a row — a
+    // suggestion-routed upload deliberately has no optimistic overlay — so
+    // until this notice existed the user dropped a file and watched nothing
+    // whatsoever happen, which is indistinguishable from a dead drop target.
+    // The SECOND upload finds the branch, the workspace and the request all
+    // there and answers at once, which is why the report was "the first
+    // showed nothing, the second showed the notice".
+    setUploadErrors((current) => withBanner(current, uploadTarget, null));
+    setUploadNotices((current) => withBanner(current, uploadTarget, {
+      kind: 'progress',
+      message: `Adding ${describeUpload(input, targetDirectory)}…`,
+    }));
+    activeUploadsRef.current += 1;
+    const activeHere = activeUploadsByTargetRef.current;
+    activeHere.set(uploadTarget, (activeHere.get(uploadTarget) ?? 0) + 1);
+    setIsUploading(true);
 
     // ── Suggestion routing ──
     // An upload into a KB folder the caller may NOT write neither fails nor
@@ -568,6 +850,16 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     } catch (err) {
       console.warn('[workspace] suggestion routing check failed:', err);
     }
+    // An ordinary upload says what it is doing with ROWS — the optimistic
+    // overlay below puts them in the tree within the frame. The progress
+    // notice was only covering the wait for this answer, so it goes now
+    // rather than flashing over the rows for the length of the upload.
+    // Only when this is the only drop this tree is waiting on: a sibling
+    // upload into the same tree may still be mid-routing, and its progress
+    // notice is the only thing it has to show.
+    if (!suggestion && isCurrent() && (activeHere.get(uploadTarget) ?? 0) <= 1) {
+      clearProgressNotice(uploadTarget);
+    }
     const uploadWorkspaceId = suggestion?.workspaceId ?? workspaceId;
     // No optimistic tree overlay for a suggestion-routed upload: the files
     // will never appear in THIS branch's tree — they surface as suggestion
@@ -577,20 +869,6 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const suggestionPrefix = suggestion ? `${suggestion.kbDirName}/` : null;
     /** Repo-relative paths of the files that LANDED on the suggestions branch. */
     const suggestedRepoPaths: string[] = [];
-    // Pin the workspace at dispatch time. A folder upload can take seconds;
-    // if the user switches branches mid-flight, the trailing state
-    // mutations (setUploadError / setIsUploading / setFileTree via
-    // refreshFileTree / clearPendingMatching) would clobber the new
-    // branch's UI with old-branch results. `isCurrent()` gates every
-    // post-await mutation; the workspaceId reset effect above already
-    // clears the optimistic refs the moment the switch happens.
-    const dispatchWorkspaceId = workspaceId;
-    const isCurrent = () => workspaceIdRef.current === dispatchWorkspaceId;
-
-    setUploadError(null);
-    setUploadNotice(null);
-    activeUploadsRef.current += 1;
-    setIsUploading(true);
 
     // Batch mode collapses N per-file pushes into one end-of-burst push
     // via `POST /flush` — mirrors the recursive folder-delete batch.
@@ -620,7 +898,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     let uploaded = 0;
     let total: number | null = null;
     let abort = false;
-    let firstError: { filename: string; reason: string } | null = null;
+    let firstError: UploadError | null = null;
     // Tracks whether any deferred `createDirectory` (empty-dir preservation)
     // commits landed. Without this, a folder drop containing only empty
     // subdirectories would skip `flushBatch` (`uploaded === 0`) and leave
@@ -634,7 +912,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const recordError = (filename: string, err: unknown) => {
       if (firstError) return;
       const reason = err instanceof Error ? err.message : 'Upload failed';
-      firstError = { filename, reason };
+      // The status, not the wording, decides what we tell the user to do
+      // next: the backend is free to rephrase "you can't write here" without
+      // the banner quietly starting to give the wrong advice.
+      const status = err instanceof WorkspaceApiError ? err.status : undefined;
+      // The NAME, not the workspace path: the banner's first line is what the
+      // user dropped. A path is what produced "Couldn't add knowledge-base/K…"
+      // — a line so long the reason behind it never fitted on screen.
+      firstError = { filename: fileNameOf(filename), reason, status };
       abort = true;
     };
 
@@ -803,10 +1088,17 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           }
           window.dispatchEvent(new Event(PR_STALE_EVENT));
           if (isCurrent()) {
-            setUploadNotice(
-              "You can't write to that folder, so the upload became a suggestion: " +
-                'it is now a change request for the folder’s owners to review.',
-            );
+            setUploadNotices((current) => withBanner(current, uploadTarget, {
+              kind: 'suggestion',
+              message:
+                "You can't write to that folder, so the upload became a suggestion: " +
+                'it is now a change request for the folder’s owners to review. ' +
+                // Where the undo is. Without this sentence the notice says a
+                // thing happened and nothing about reversing it, and the
+                // accent-coloured row it produces says nothing either — which
+                // is how an accidental upload came to read as permanent.
+                'To take it back, right-click the file and choose Withdraw suggestion.',
+            }));
           }
         } catch (err) {
           recordError('change request', err);
@@ -824,9 +1116,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // they already left. The workspace-change effect already reset the
       // optimistic overlays.
       activeUploadsRef.current = Math.max(0, activeUploadsRef.current - 1);
+      const remainingHere = Math.max(0, (activeHere.get(uploadTarget) ?? 1) - 1);
+      if (remainingHere === 0) activeHere.delete(uploadTarget);
+      else activeHere.set(uploadTarget, remainingHere);
       if (isCurrent()) {
         if (firstError) {
-          setUploadError(firstError);
+          setUploadErrors((current) => withBanner(current, uploadTarget, firstError));
           // Drop any pending overlay entries that didn't make it — files
           // we already uploaded successfully are removed inside uploadOne.
           clearPendingMatching(() => true);
@@ -835,6 +1130,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         const stillRunning = activeUploadsRef.current > 0;
         setIsUploading(stillRunning);
         if (!stillRunning) setUploadProgress(null);
+        // A progress notice has nothing left to report once this tree has no
+        // upload in flight, and one left behind would sit there forever. The
+        // suggestion notice is a RESULT, and stays until dismissed. Scoped to
+        // THIS tree so a drop settling in one never blanks another's news.
+        if (remainingHere === 0) clearProgressNotice(uploadTarget);
 
         // One final refresh to reconcile the server tree with whatever
         // committed, then clear pending overlay entries whose real
@@ -858,7 +1158,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   }, [
     workspaceId, refreshFileTree, bumpFs,
     addPending, removePending, clearPendingMatching,
-    resolveSuggestionRouting, authUser,
+    resolveSuggestionRouting, authUser, clearProgressNotice,
   ]);
 
   const deleteEntry = useCallback(async (relativePath: string) => {
@@ -883,7 +1183,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const dirty = toClose.filter((t) => t.isDirty);
     if (dirty.length > 0) {
       const confirmed = window.confirm(UNSAVED_TABS_BULK_WARNING(dirty.map((t) => basename(t.path))));
-      if (!confirmed) return;
+      if (!confirmed) return false;
     }
     // Optimistic tree removal. A folder delete on the server takes 2-3s
     // (N per-file commits batched into one push) — without optimism the
@@ -1136,22 +1436,27 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   // When the user switches branches, the previously-hydrated key no longer
   // applies. Clear the marker so the auto-persist effect waits for a fresh
   // `hydrateTabs` call before writing localStorage for the new branch.
+  //
+  // Keyed on `workspaceBranch` — the branch the workspace IS — not on
+  // `persistenceBranch`, the branch we're heading for. The two differ for the
+  // whole length of a switch, and keying on the destination is what let the
+  // old branch's tabs be persisted under the new branch's name.
   useEffect(() => {
-    if (!workspaceId || !persistenceBranch) {
+    if (!workspaceId || !workspaceBranch) {
       hydratedKeyRef.current = null;
       return;
     }
-    const key = `${workspaceId}.${persistenceBranch}`;
+    const key = `${workspaceId}.${workspaceBranch}`;
     if (hydratedKeyRef.current !== key) {
       hydratedKeyRef.current = null;
     }
-  }, [workspaceId, persistenceBranch]);
+  }, [workspaceId, workspaceBranch]);
 
   // ── Auto-persist tabs to localStorage (debounced) ─────────────────────────
 
   useEffect(() => {
-    if (!workspaceId || !persistenceBranch) return;
-    const key = `${workspaceId}.${persistenceBranch}`;
+    if (!workspaceId || !workspaceBranch) return;
+    const key = `${workspaceId}.${workspaceBranch}`;
     if (hydratedKeyRef.current !== key) return;
 
     const handle = window.setTimeout(() => {
@@ -1160,13 +1465,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           paths: openTabs.map((t) => t.path),
           activePath: activeTabPath,
         };
-        localStorage.setItem(tabsKey(workspaceId, persistenceBranch), JSON.stringify(payload));
+        localStorage.setItem(tabsKey(workspaceId, workspaceBranch), JSON.stringify(payload));
       } catch (err) {
         console.warn('Failed to persist tabs:', err);
       }
     }, PERSIST_DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
-  }, [openTabs, activeTabPath, workspaceId, persistenceBranch]);
+  }, [openTabs, activeTabPath, workspaceId, workspaceBranch]);
 
   const deleteWorkspace = useCallback(async () => {
     if (!workspaceId) return;
@@ -1179,13 +1484,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // swaps the user onto a different branch after a delete.
       const branch = persistenceBranchRef.current ?? undefined;
       const { workspace, fileTree: tree } = await getOrCreateWorkspace(branch);
-      setWorkspaceId(workspace.id);
+      adoptWorkspace(workspace.id, workspaceBranchOf(workspace.id, branch));
       setKbDirName(workspace.kbDirName);
       setFileTree(tree);
     } catch (err) {
       console.error('Failed to delete workspace:', err);
     }
-  }, [workspaceId, closeAllTabs]);
+  }, [workspaceId, closeAllTabs, adoptWorkspace]);
 
   // ── Live updates: react to other users' / agent's edits ───────────────────
   //
@@ -1214,13 +1519,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   // The bus only delivers workspace-scoped events for the currently
   // focused workspace (set by `EventBusFocusBinder`), so the workspace
   // filter on the handler is belt-and-braces.
-  // Track the current workspaceId in a ref so the async readFile handler
-  // below can detect a workspace switch that happened after it was
-  // subscribed but before its fetch resolved — otherwise a stale resolve
-  // would call `setOpenTabs` on the new workspace's tabs, replacing the
-  // wrong file's content with bytes from the old branch.
-  const workspaceIdRef = useRef<string | null>(workspaceId);
-  useEffect(() => { workspaceIdRef.current = workspaceId; }, [workspaceId]);
+  // The async readFile handler below detects a workspace switch that happened
+  // after it was subscribed but before its fetch resolved via `workspaceIdRef`
+  // (declared with the other refs above, advanced by `adoptWorkspace`) —
+  // otherwise a stale resolve would call `setOpenTabs` on the new workspace's
+  // tabs, replacing the wrong file's content with bytes from the old branch.
 
   // Reset the optimistic-overlay state on workspace switch. Without this,
   // pending entries from a partly-uploaded folder on branch A linger in
@@ -1235,6 +1538,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     pendingDeletePathsRef.current = new Set();
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPendingUploads(new Map());
+    // The banners go with them. An upload still routing when the user
+    // switches workspaces skips its own cleanup (`isCurrent()` is false by
+    // the time it settles, and rightly so — its result belongs to the branch
+    // it was dispatched from), so its "Adding …" notice would otherwise sit
+    // over the new tree forever, describing a drop into a branch the user has
+    // left. Same for an error banner about a file in the old branch.
+    setUploadNotices(EMPTY_NOTICES);
+    setUploadErrors(EMPTY_ERRORS);
   }, [workspaceId]);
 
   const bus = useEventBus();
@@ -1385,6 +1696,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     kbDirName,
     fileTree,
     bootstrapError,
+    workspaceBranch,
+    retryBootstrap,
     openTabs,
     activeTab,
     dirtyTabFilenames,
@@ -1396,8 +1709,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setHasUnsavedFileChanges,
     setActiveTabContent,
     fsRevision,
-    uploadError,
-    uploadNotice,
+    uploadErrors,
+    uploadNotices,
     clearUploadNotice,
     isUploading,
     uploadProgress,
@@ -1426,9 +1739,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setPersistenceBranch,
     deleteWorkspace,
   }), [
-    workspaceId, kbDirName, fileTree, bootstrapError, openTabs, activeTab, dirtyTabFilenames,
+    workspaceId, kbDirName, fileTree, bootstrapError, workspaceBranch, retryBootstrap, openTabs, activeTab, dirtyTabFilenames,
     openFilePath, openFileContent, openFileSavedContent, hasUnsavedFileChanges, pendingFileContent,
-    setHasUnsavedFileChanges, setActiveTabContent, fsRevision, uploadError, uploadNotice, clearUploadNotice, isUploading, uploadProgress, pendingUploads, refreshFileTree, bumpFs,
+    setHasUnsavedFileChanges, setActiveTabContent, fsRevision, uploadErrors, uploadNotices, clearUploadNotice, isUploading, uploadProgress, pendingUploads, refreshFileTree, bumpFs,
     addTab, closeTab, activateTab, reorderTab, closeAllTabs, hydrateTabs,
     createFile, createDirectory, unzipHere, uploadFiles, dispatchUpload, clearUploadError,
     deleteEntry, moveEntry, saveFile, reloadTabFromDisk,

@@ -6,7 +6,12 @@ import {
   bindLocalVariableResolver,
   resetLocalVariableResolver,
 } from '../local-variables.js';
-import { fetchLocalOnlyManuals, fetchLocalToolVariables, type LocalManualInfo } from '../deployment.js';
+import {
+  ConnectionKeyRejectedError,
+  fetchLocalOnlyManuals,
+  fetchLocalToolVariables,
+  type LocalManualInfo,
+} from '../deployment.js';
 import type { HexisMcpConfig } from '../config.js';
 
 const config = { baseUrl: 'https://x.example', connectionKey: 'bevel_k' } as HexisMcpConfig;
@@ -85,6 +90,11 @@ describe('fetchLocalToolVariables', () => {
     expect(await fetchLocalToolVariables(config, 'git')).toEqual({ ok: false, values: {} });
   });
 
+  it('lets a rejected key through instead of degrading it to unset secrets', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })));
+    await expect(fetchLocalToolVariables(config, 'git')).rejects.toBeInstanceOf(ConnectionKeyRejectedError);
+  });
+
   it('reports a malformed response as a failure rather than as an unset secret', async () => {
     // Protocol drift and an unset secret look identical to a caller otherwise,
     // and only one of them is fixed by visiting the Secrets page.
@@ -109,6 +119,16 @@ describe('HexisLocalVariableLoader', () => {
     stubVariables({ git: { variables: { GITHUB_TOKEN: 'ghp_x' } } });
     const loader = bind(local({ git: { slug: 'git', path: 'p' } }));
     expect(await loader.get('git_GITHUB_TOKEN')).toBe('ghp_x');
+  });
+
+  it('fails the lookup with the plain sentence when the key was revoked mid-run', async () => {
+    // Falling through to process.env would run the tool without its secrets
+    // and hide why; the call fails in the rejected key's own words instead.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })));
+    const loader = bind(local({ git: { slug: 'git', path: 'p' } }));
+    await expect(loader.get('git_GITHUB_TOKEN')).rejects.toThrow(
+      'The connection key was rejected by https://x.example. Mint a new one in External agent access.',
+    );
   });
 
   it('answers null for anything that is not a local manual', async () => {
