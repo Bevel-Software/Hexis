@@ -98,6 +98,34 @@ export type ProspectiveHolders = { before: PathHolders; after: PathHolders };
 export type GrantSources = Partial<Record<'read' | 'write' | 'download' | 'owner', VerbSources>>;
 
 /**
+ * ONE place a principal is DENIED a verb — the mirror of {@link GrantSource},
+ * over the same two editable locations: `direct` is a `deny` written in the
+ * target's OWN access file (a restriction made HERE), `ancestor` one written in
+ * a parent folder's `access.md` at `path`.
+ *
+ * A denial is a first-class entry, not the absence of a grant: it is what
+ * "restrict just this folder" writes, and the share dialog has to render it —
+ * otherwise a principal whose only entry here is a denial reads as ungoverned
+ * by this target and drops out of its "on this folder" list.
+ */
+export type DenialSource = GrantSource;
+
+/**
+ * EVERY scope that DENIES a principal one verb, ordered **closest-first**, up
+ * to (but not including) a closer own GRANT — which beats a farther deny under
+ * closest-wins and makes it dead. `[0]` is the effective denial. Only verbs the
+ * principal is actually denied appear; a verb with no denial is omitted.
+ *
+ * Deliberately a SEPARATE map from {@link GrantSources} rather than extra
+ * entries in it: every existing reader of `GrantSources` means "where their
+ * access comes from" and filters on `direct` / `ancestor` with no polarity
+ * check, so a denial smuggled in there would be read as a grant.
+ */
+export type DenialSources = Partial<
+  Record<'read' | 'write' | 'download' | 'owner', DenialSource[]>
+>;
+
+/**
  * Where one verdict was decided, repo-relative: a folder's rules (its
  * `access.md`; `''` is the repo root) or a file's own frontmatter.
  * `inherited` is true when that place is not the target's own — an ancestor
@@ -408,6 +436,49 @@ export interface IAccessControl {
     principal: GrantPrincipal,
     opts?: { tokenMatch?: 'exact' | 'name' },
   ): Promise<GrantSources>;
+
+  /**
+   * The polarity twin of {@link grantSources}: per verb, WHERE the principal is
+   * DENIED — a `deny` line in the target's own access file (`direct`) or in a
+   * parent folder's (`ancestor`). Same closeness-first walk, same `tokenMatch`
+   * pinning, same omit-what-does-not-apply shape.
+   *
+   * The share dialog needs this to say WHY a verb is off. "Restricted here" is a
+   * fact about this target that only a denial entry carries; without it, a
+   * principal restricted here is indistinguishable from one never granted, and
+   * the dialog cannot offer to lift the restriction.
+   *
+   * Optional so existing test doubles stay valid; the real service implements it.
+   */
+  denialSources?(
+    workspaceId: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+    principal: GrantPrincipal,
+    opts?: { tokenMatch?: 'exact' | 'name' },
+  ): Promise<DenialSources>;
+
+  /**
+   * Every principal DENIED some verb by the target's OWN access file — the
+   * folder's `access.md`, or a file node's own frontmatter.
+   *
+   * The eligible lists cannot report these, by construction: a principal denied
+   * every verb here holds nothing and appears in none of them, yet the
+   * restriction IS an entry on this target and the row it belongs to has to stay
+   * listed. Shaped like an eligible list so the view can union it in without a
+   * second code path.
+   *
+   * Only the target's OWN scope counts. A denial inherited from a parent is
+   * reported per-verb by {@link denialSources} against a row that already
+   * exists; it does not, by itself, put a new row on this target.
+   *
+   * Optional so existing test doubles stay valid; the real service implements it.
+   */
+  locallyDeniedPrincipals?(
+    workspaceId: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+  ): Promise<{ principals: ResolvedPrincipal[]; users: { name: string; email: string }[] }>;
 
   /**
    * The caller's own verdict on each verb at a target, and what decided it —
