@@ -15,6 +15,7 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { SpillStore } from '../../workspace/spill-store.js';
 import { DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
 import { NEW_ROLE_GUIDANCE } from '../../access-model/roles-yaml-guard.js';
+import { loadActiveGroups } from '../../access/access-control.service.js';
 
 /**
  * The agent's file tools over the production context resolver and a real
@@ -54,6 +55,7 @@ async function start(): Promise<string> {
     events: {} as never,
     kbDirName: KB,
     creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} },
+    loadActiveGroups,
   });
   const registry = new ToolRegistry();
   const toolAuth = createToolAuthMiddleware({ verifyAndLoadToken: async () => null } as never, internalToken);
@@ -165,5 +167,44 @@ describe('agent writes to roles.yaml never create a role', () => {
     });
     expect(res.status).toBe(200);
     expect(await rolesOnDisk()).toBe(`${CURRENT}    - dana@x.io\n`);
+  });
+});
+
+describe('agent writes to roles.yaml check `- group:<Name>` entries against the active group source', () => {
+  beforeEach(async () => {
+    await fs.writeFile(path.join(root, KB, 'groups.yaml'), 'groups:\n  Platform Team:\n    - p@x.io\n');
+  });
+
+  it('an entry naming a known group lands, matched case- and whitespace-insensitively', async () => {
+    const base = await start();
+    const res = await call(base, 'edit_file', {
+      path: ROLES,
+      old_string: '    - felix@x.io\n',
+      new_string: '    - felix@x.io\n    - group:platform  team\n',
+    });
+    expect(res.status).toBe(200);
+    expect(await rolesOnDisk()).toBe(`${CURRENT}    - group:platform  team\n`);
+  });
+
+  it('an unknown group → 422 naming the entry and its role; nothing written', async () => {
+    const base = await start();
+    const res = await call(base, 'write_file', { path: ROLES, content: `${CURRENT}    - group:Platfrom Team\n` });
+    expect(res.status).toBe(422);
+    const { error } = (await res.json()) as { error: string };
+    expect(error).toContain("'- group:Platfrom Team' under role 'Sales'");
+    expect(error).toContain('groups.yaml');
+    expect(await rolesOnDisk()).toBe(CURRENT);
+  });
+
+  it('in IdP mode the synced file is the source, and groups.yaml no longer counts', async () => {
+    await fs.writeFile(path.join(root, KB, 'synced-groups.yaml'), 'groups:\n  Directory Team:\n    - d@x.io\n');
+    const base = await start();
+    const refused = await call(base, 'write_file', { path: ROLES, content: `${CURRENT}    - group:Platform Team\n` });
+    expect(refused.status).toBe(422);
+    expect(((await refused.json()) as { error: string }).error).toContain('synced-groups.yaml');
+    expect(await rolesOnDisk()).toBe(CURRENT);
+    const landed = await call(base, 'write_file', { path: ROLES, content: `${CURRENT}    - group:Directory Team\n` });
+    expect(landed.status).toBe(200);
+    expect(await rolesOnDisk()).toBe(`${CURRENT}    - group:Directory Team\n`);
   });
 });

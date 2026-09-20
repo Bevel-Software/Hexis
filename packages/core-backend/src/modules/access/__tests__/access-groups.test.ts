@@ -448,3 +448,42 @@ describe('group files as access principals', () => {
     expect(eligible?.roles).toEqual([]);
   });
 });
+
+describe('a role given to a group (`- group:<Name>`), as the agent guide documents it', () => {
+  let root: string;
+  const workspaceId = 'ws-groups-role-ref';
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  async function makeService(files: Record<string, string>) {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    for (const [rel, contents] of Object.entries(files)) {
+      await writeFile(repo, rel, contents);
+    }
+    return new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR, new NodeFs());
+  }
+
+  it('a denial of the role removes its contribution for the whole group; a direct grant to a person is unaffected', async () => {
+    const svc = await makeService({
+      // Spelled differently from groups.yaml: matched case- and whitespace-insensitively.
+      'roles.yaml': 'roles:\n  Admin:\n    - admin@x.io\n    - group:engineering\n',
+      'groups.yaml': GROUPS_YAML_TEXT,
+      'access.md': '---\nread:\n  - Admin\n---\n',
+      'Sub/access.md': '---\nread:\n  - deny Admin\n  - Bo <bo@x.io>\n---\n',
+    });
+    // Group members and direct emails hold the role alike.
+    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Doc.md')).toBe(true);
+    expect(await svc.canRead(workspaceId, 'admin@x.io', 'Doc.md')).toBe(true);
+    // The role denial reaches everyone who held the role, group members included…
+    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Sub/Doc.md')).toBe(false);
+    expect(await svc.canRead(workspaceId, 'admin@x.io', 'Sub/Doc.md')).toBe(false);
+    // …but not a person granted by name.
+    expect(await svc.canRead(workspaceId, 'bo@x.io', 'Sub/Doc.md')).toBe(true);
+  });
+});
