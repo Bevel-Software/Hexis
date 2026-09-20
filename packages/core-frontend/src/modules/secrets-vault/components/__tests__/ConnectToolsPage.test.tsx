@@ -25,7 +25,9 @@ vi.mock('../../services/connect.api', () => connectMock);
 
 const varsMock = vi.hoisted(() => ({
   setUserVar: vi.fn(),
+  setAdminVar: vi.fn(),
   deleteUserVar: vi.fn(),
+  setOAuthClientSecret: vi.fn(),
   checkToolConnection: vi.fn(),
 }));
 vi.mock('../../services/tool-secrets.api', () => varsMock);
@@ -40,8 +42,9 @@ function pending(configured: boolean): ConnectPending {
         name: 'heyreach',
         path: 'Plugins/GTM/heyreach.tool',
         type: 'inline',
+        canWrite: false,
         variables: [
-          { name: 'API_KEY', label: null, key: 'heyreach_API_KEY', configured },
+          { name: 'API_KEY', label: null, key: 'heyreach_API_KEY', scope: 'user', configured, ownerOnly: false },
         ],
       },
     ],
@@ -57,7 +60,9 @@ function pendingPair(): ConnectPending {
     name: 'API_SECRET',
     label: null,
     key: 'heyreach_API_SECRET',
+    scope: 'user',
     configured: true,
+    ownerOnly: false,
   });
   return one;
 }
@@ -88,13 +93,11 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
   });
   afterEach(() => window.removeEventListener(TOOL_CREDENTIALS_STALE_EVENT, heard));
 
-  /** An unconfigured tool starts skipped; ticking it reveals its key fields. */
-  const include = async () =>
-    fireEvent.click(await screen.findByRole('checkbox', { name: 'Include this tool' }));
+  // An unconfigured tool is INCLUDED to begin with — its key fields are there
+  // on arrival, because the page is reached from a banner saying it needs one.
 
   it('announces a saved key', async () => {
     renderPage();
-    await include();
 
     fireEvent.change(await screen.findByLabelText('API_KEY value'), { target: { value: 'k' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -172,7 +175,6 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
   it('announces nothing when the save fails', async () => {
     varsMock.setUserVar.mockRejectedValue(new Error('Nope.'));
     renderPage();
-    await include();
 
     fireEvent.change(await screen.findByLabelText('API_KEY value'), { target: { value: 'k' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -196,7 +198,6 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
   describe('the saved key is probed', () => {
     const saveKey = async (secret = 'k') => {
       renderPage();
-      await include();
       fireEvent.change(await screen.findByLabelText('API_KEY value'), {
         target: { value: secret },
       });
@@ -376,7 +377,6 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
         .mockImplementation(() => new Promise<ConnectPending>((resolve) => held.push(resolve)));
 
       renderPage();
-      await include();
       await save('a');
       await waitFor(() => expect(held).toHaveLength(1));
       await save('b');
@@ -408,7 +408,6 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
         .mockResolvedValueOnce(pending(false))
         .mockResolvedValue(pending(true));
       renderPage();
-      await include();
       await save('a');
       expect(await screen.findByTestId('saved-key-probe')).toHaveTextContent('Connected');
 

@@ -10,6 +10,7 @@ import {
   SecretOAuthError,
   scopesCovered,
   missingScopes,
+  configuredAs,
   type ISecretsVaultService,
 } from './secrets-vault.contract.js';
 import type { IToolManualService, ToolManualSummary, ToolVariable } from '../tool-manuals/tool-manuals.contract.js';
@@ -253,49 +254,89 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
   });
 
   // The aggregated "connect your tools" view for a single user: every accessible
-  // tool with ONLY its per-user (`user`-scoped) variables and whether the caller
-  // has set each, plus the caller's OAuth secrets and their authorized state. This
-  // is the surface an external-agent user lands on from the needs-authorization
-  // link — it shows exactly what THEY must provide, never the admin/shared items.
+  // tool with the variables still standing between the caller and using it, plus
+  // the caller's OAuth secrets and their authorized state. This is the surface an
+  // external-agent user lands on from the needs-authorization link.
+  //
+  // It reports the WORKSPACE-scoped (`admin`) values too, and not because the
+  // reader can always set them: the Library's plugin banner COUNTS an integration
+  // that needs one, so a page that left them out told the reader four things
+  // needed setup and then showed two. An `admin` value the caller may not write
+  // is flagged `ownerOnly` — the page greys it and names who has to act — and one
+  // that is already set is nobody's outstanding work, so it is dropped. What is
+  // not relaxed is readability: the listing is still built from `listAccessible`,
+  // so a tool the caller may not read is named here in no state at all.
   router.get('/connect/pending', async (req, res) => {
     const userId = req.userId;
     const email = req.userEmail;
     if (!userId || !email) return void res.status(401).json({ error: 'Not authenticated' });
     try {
       const manuals = await toolManualService.listAccessible(email);
-      const allKeys = manuals.flatMap((m) =>
-        (m.variables ?? []).filter((v) => v.scope === 'user').map((v) => varKey(m.name, v.name)),
-      );
+      // BOTH tiers now — the workspace values are reported as well, so their
+      // stored state has to be asked for.
+      const allKeys = manuals.flatMap((m) => (m.variables ?? []).map((v) => varKey(m.name, v.name)));
       const status = await secretsVault.statusFor(userId, allKeys);
       const statusByKey = new Map(status.map((s) => [s.key, s]));
+      // Who may set a tool's workspace values — writers of its `.tool` file, the
+      // same verdict the admin write route enforces. Resolved once per manual
+      // because both the key rows and the sign-in rows ask it.
+      const canWriteBySlug = new Map(
+        await Promise.all(
+          manuals.map(
+            async (m) =>
+              [m.slug, await accessControl.canWrite(defaultWs(), email, m.path)] as const,
+          ),
+        ),
+      );
 
       const tools = manuals
-        .map((m) => ({
-          slug: m.slug,
-          name: m.name,
-          path: m.path,
-          type: m.type,
-          // Plain (non-OAuth) per-user vars render as key inputs under "Keys".
-          variables: (m.variables ?? [])
-            .filter((v) => v.scope === 'user' && !v.oauth)
-            .map((v) => {
-              const key = varKey(m.name, v.name);
-              return {
-                name: v.name,
-                label: v.label ?? null,
-                key,
-                configured: statusByKey.get(key)?.userConfigured ?? false,
-              };
-            }),
-        }))
-        // Only surface tools that actually have per-user items to configure.
+        .map((m) => {
+          const canWrite = canWriteBySlug.get(m.slug) ?? false;
+          return {
+            slug: m.slug,
+            name: m.name,
+            path: m.path,
+            type: m.type,
+            canWrite,
+            // Plain (non-OAuth) vars render as key rows under "Keys".
+            variables: (m.variables ?? [])
+              .filter((v) => !v.oauth)
+              .map((v) => {
+                const key = varKey(m.name, v.name);
+                const st = statusByKey.get(key);
+                return {
+                  name: v.name,
+                  label: v.label ?? null,
+                  key,
+                  scope: v.scope,
+                  // "Is there a value this caller's agent would resolve?" — the
+                  // workspace's for an `admin` var, the caller's own for a `user`
+                  // one. A row of the WRONG KIND does not count: this var is not
+                  // oauth, so an `oauth` row left behind by an earlier `.tool`
+                  // edit holds a token set where `resolve` wants a value, and
+                  // calling that configured hides the key nobody has set.
+                  configured:
+                    v.scope === 'admin'
+                      ? configuredAs('static', st?.adminConfigured, st?.adminKind)
+                      : configuredAs('static', st?.userConfigured, st?.userKind),
+                  ownerOnly: v.scope === 'admin' && !canWrite,
+                };
+              })
+              // A workspace value already set is outstanding for nobody. The
+              // caller's own vars stay listed once set, because this page is also
+              // where they replace one.
+              .filter((v) => v.scope !== 'admin' || !v.configured),
+          };
+        })
+        // Only surface tools that actually have something to show.
         .filter((t) => t.variables.length > 0);
 
       // OAuth-backed per-user vars render as Authorize buttons under "Sign-ins".
       // Keyed by slug+var (the caller's row may not exist yet), with authorized
       // state from the oauth-aware status.
-      const toolOAuth = manuals.flatMap((m) =>
-        (m.variables ?? [])
+      const toolOAuth = manuals.flatMap((m) => {
+        const canWrite = canWriteBySlug.get(m.slug) ?? false;
+        return (m.variables ?? [])
           .filter((v) => v.scope === 'user' && v.oauth)
           .map((v) => {
             const st = statusByKey.get(varKey(m.name, v.name));
@@ -304,6 +345,13 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
             // tool declares → surface as needing re-authorization, not as connected.
             const needsReauth =
               authorized && !scopesCovered(v.oauth?.scopes, st?.grantedScopes);
+            // On an oauth var the ADMIN row is the provider registration — the
+            // client secret — without which nobody's Authorize can work. It is a
+            // workspace value like any other, so it carries the same flag. It
+            // must be an OAUTH row: `beginToolOAuthByKey` refuses a static one,
+            // so a shared key left over from before this var was made OAuth
+            // would otherwise light up Authorize with nothing behind it.
+            const ownerConfigured = configuredAs('oauth', st?.adminConfigured, st?.adminKind);
             return {
               slug: m.slug,
               varName: v.name,
@@ -312,9 +360,11 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
               label: v.label ?? null,
               authorized,
               needsReauth,
+              ownerConfigured,
+              ownerOnly: !ownerConfigured && !canWrite,
             };
-          }),
-      );
+          });
+      });
 
       // Standalone sign-ins = oauth secrets the user registered directly on the
       // Secrets page. A TOOL sign-in provisions a per-user row in the same

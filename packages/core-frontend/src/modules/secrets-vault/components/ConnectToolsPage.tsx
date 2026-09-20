@@ -5,7 +5,7 @@ import { cn } from '../../../lib/utils';
 import { LIBRARY_ROOT, pathForTool } from '../../library/routes/library-paths';
 import { ToolLogo } from '../../library/components/ToolLogo';
 import { startOAuth } from '../services/secrets.api';
-import { setUserVar, deleteUserVar } from '../services/tool-secrets.api';
+import { setUserVar, setAdminVar, deleteUserVar, setOAuthClientSecret } from '../services/tool-secrets.api';
 import { SavedKeyProbeResult } from '../probe/SavedKeyProbeResult';
 import { useSavedKeyProbe, type SavedKeyProbe } from '../probe/useSavedKeyProbe';
 import { announceToolCredentialsChanged } from '../../../core/events';
@@ -18,6 +18,12 @@ import {
   type ConnectOAuth,
   type ConnectToolOAuth,
 } from '../services/connect.api';
+import {
+  isActionable,
+  outstandingCount,
+  ownerReason,
+  standaloneOutstanding,
+} from '../utils/connect-status';
 
 /**
  * Persisted copy of the external-agent authorization state (`?oauth=<state>`).
@@ -29,10 +35,25 @@ const MCP_OAUTH_STATE_KEY = 'mcp-oauth-state';
 
 /**
  * "Connect your tools" — the page a person lands on from the needs-authorization
- * link surfaced by their external agent. It consolidates every per-user
- * credential they still owe across all the tools they can reach: an input for
- * each personal API key, an "Authorize" button for each OAuth sign-in. Shared
- * (owner-set) values are intentionally not shown here — they are the admin's job.
+ * link surfaced by their external agent, and from the plugin banner that says
+ * how many integrations need setup. It lists everything standing between them
+ * and the tools they can reach: an input for each personal API key, an
+ * "Authorize" button for each OAuth sign-in.
+ *
+ * It also lists what they CANNOT act on, which is the whole point of the list
+ * agreeing with the banner that sent them. Three states, and the page owes the
+ * reader the reason for each of the two that are not theirs to fix:
+ *
+ *  - actionable — their own key or sign-in, or a workspace value they own;
+ *  - owner-only — a workspace value somebody else has to set, greyed, naming
+ *    the variable so they know what to ask for;
+ *  - skipped — a tool they took out themselves, greyed, with Include to put it
+ *    back.
+ *
+ * All three are counted. A banner saying four and a page showing two was the
+ * bug; a page that showed four and counted two would be the same bug with more
+ * steps. What is NOT here is a tool the reader may not read — the server never
+ * sends one, so there is no state in which this page names it.
  *
  * Two modes:
  *  - Plain (default): configure credentials, go back to the agent by hand.
@@ -68,18 +89,21 @@ export function ConnectToolsPage() {
   const [agentState, setAgentState] = useState<string | null>(null);
   const [agentName, setAgentName] = useState<string | null>(null);
   const [finishing, setFinishing] = useState(false);
-  // Entries the user explicitly ticked while still unconfigured (reveals the
-  // inputs). Configured entries are implicitly ticked; unticking one wipes it.
-  const [included, setIncluded] = useState<Set<string>>(new Set());
+  // Entries the user took OUT. Everything the server sent is in by default —
+  // it used to be the other way round, and an unconfigured tool the reader had
+  // never seen rendered grey and uncounted, which is exactly how a page reached
+  // from "4 integrations need setup" came to show two.
+  const [skipped, setSkipped] = useState<Set<string>>(new Set());
   const [wiping, setWiping] = useState<Set<string>>(new Set());
 
   /**
-   * Which load is allowed to publish. Saving two rows in quick succession
-   * starts two refetches, and the first can answer last: its list still says
-   * the second key is unset, so the row that was just saved flips back to
-   * `Needs a key` and stays there. The same newest-wins rule the probe itself
-   * follows, for the same reason — a late answer describing an earlier state
-   * is worse than no answer.
+   * Which load is allowed to publish. Saving a key refreshes, and so does the
+   * mount, the Refresh button and every wipe — so two are routinely open at
+   * once, and the network does not promise to answer them in order. An older
+   * answer landing last would repaint the page with the state from BEFORE the
+   * save: the row just filled in back to `Needs a key`, or the client-secret
+   * form the owner just completed, back and empty. The same newest-wins rule
+   * the probe itself follows, for the same reason.
    */
   const loadSeq = useRef(0);
 
@@ -201,10 +225,12 @@ export function ConnectToolsPage() {
   };
 
   /**
-   * Include/skip toggle. `id` keys the local opt-in set; `configured` says
+   * Include/skip toggle. `id` keys the local opt-out set; `configured` says
    * whether any per-user value exists; `wipe` removes them all. Unticking a
    * configured entry wipes it (that's what "skip" means — the tool must not
    * register for the agent); unticking an unconfigured one just hides inputs.
+   * Either way the row STAYS, greyed and still counted: skipping is a decision
+   * about what the agent may use, not a claim the tool is set up.
    *
    * `wipe` calls the `removed` callback it is handed after each DELETE that
    * lands. A tool with several saved keys is several round-trips, and the
@@ -218,16 +244,15 @@ export function ConnectToolsPage() {
     configured: boolean,
     wipe: (removed: () => void) => Promise<void>,
   ) => {
-    const isOn = configured || included.has(id);
-    if (!isOn) {
-      setIncluded((s) => new Set(s).add(id));
+    if (skipped.has(id)) {
+      setSkipped((s) => {
+        const nextSet = new Set(s);
+        nextSet.delete(id);
+        return nextSet;
+      });
       return;
     }
-    setIncluded((s) => {
-      const nextSet = new Set(s);
-      nextSet.delete(id);
-      return nextSet;
-    });
+    setSkipped((s) => new Set(s).add(id));
     if (configured) {
       setWiping((s) => new Set(s).add(id));
       let removedAny = false;
@@ -258,23 +283,17 @@ export function ConnectToolsPage() {
   const toolId = (t: ConnectTool) => `tool:${t.slug}`;
   const signInId = (o: ConnectToolOAuth) => `signin:${o.key}`;
   const toolConfigured = (t: ConnectTool) => t.variables.some((v) => v.configured);
-  const isIncluded = (id: string, configured: boolean) => configured || included.has(id);
+  const isOn = (id: string) => !skipped.has(id);
 
-  // Outstanding counts only what the user is actually including — a skipped
-  // tool owes nothing.
-  const outstanding =
-    tools.reduce(
-      (n, t) =>
-        isIncluded(toolId(t), toolConfigured(t))
-          ? n + t.variables.filter((v) => !v.configured).length
-          : n,
-      0,
-    ) +
-    oauth.filter((o) => !o.authorized).length +
-    // Not-yet-connected OR connected-but-under-scoped (needs reconnect) both count.
-    toolOAuth.filter(
-      (o) => isIncluded(signInId(o), o.authorized) && (!o.authorized || o.needsReauth),
-    ).length;
+  // One integration, one unit — and every state of it, including the two the
+  // reader cannot act on. See `outstandingCount`: this number exists to equal
+  // the plugin banner's, and the rules that make it do so are written down
+  // beside the rule the banner itself uses.
+  // …and the standalone sign-ins on top of it, only for the "anything left?"
+  // question the zero-state banner asks. No banner counts those, so they stay
+  // out of the number that has to match one.
+  const listing = { tools, oauth, toolOAuth };
+  const outstanding = outstandingCount(listing) + standaloneOutstanding(listing);
   const nothingToDo =
     !loading && tools.length === 0 && oauth.length === 0 && toolOAuth.length === 0;
 
@@ -347,12 +366,16 @@ export function ConnectToolsPage() {
             </Banner>
           )}
 
+          {/* The third sentence is the one that earns the list its length: the
+              page shows more than the reader's own homework, so it has to say
+              so before they wonder why a row has no field. */}
           {!nothingToDo && (
             <p className="mb-5 text-ui text-ink-muted">
-              These tools need your own sign-in or keys before they will work in your agent.
-              Authorize each connection and enter any keys below, then head back to your agent and
-              run the tool again. Your values are stored securely and never shown again after
-              saving.
+              These tools need a sign-in or a key before they will work in your agent. Authorize
+              each connection and enter any keys below, then head back to your agent and run the
+              tool again. Anything greyed out is not yours to do — it is waiting on the tool&apos;s
+              owner, or you took it out yourself. Your values are stored securely and never shown
+              again after saving.
             </p>
           )}
 
@@ -388,7 +411,37 @@ export function ConnectToolsPage() {
                   {/* OAuth-backed tool variables — authorized via the tool-scoped flow. */}
                   {toolOAuth.map((o) => {
                     const id = signInId(o);
-                    const on = isIncluded(id, o.authorized);
+                    const on = isOn(id);
+                    // The provider was never registered, so there is no consent
+                    // screen for Authorize to open. Whose job that is decides
+                    // whether this is a greyed reason or a field.
+                    if (!o.ownerConfigured) {
+                      return o.ownerOnly ? (
+                        <ConnectRow
+                          key={o.key}
+                          slug={o.slug}
+                          name={o.toolName}
+                          label={o.label || o.toolName}
+                          on
+                          dim
+                          busy={false}
+                          state="owner-only"
+                          reason={ownerReason(o.varName)}
+                        />
+                      ) : (
+                        <SignInOwnerSecret
+                          key={o.key}
+                          o={o}
+                          onSaved={() => {
+                            announceToolCredentialsChanged();
+                            // Quiet, for the same reason as a key save: the row
+                            // is about to show the probe's answer.
+                            void refresh(true);
+                          }}
+                          onError={setError}
+                        />
+                      );
+                    }
                     return (
                       <ConnectRow
                         key={o.key}
@@ -396,6 +449,7 @@ export function ConnectToolsPage() {
                         name={o.toolName}
                         label={o.label || o.toolName}
                         on={on}
+                        dim={!on}
                         busy={wiping.has(id)}
                         state={
                           !on
@@ -421,7 +475,9 @@ export function ConnectToolsPage() {
                             >
                               {o.authorized ? 'Reconnect' : 'Authorize'}
                             </Button>
-                          ) : null
+                          ) : (
+                            <IncludeButton onClick={() => void onToggle(id, false, async () => {})} />
+                          )
                         }
                       />
                     );
@@ -434,6 +490,7 @@ export function ConnectToolsPage() {
                       name={o.label || o.key}
                       label={o.label || o.key}
                       on
+                      dim={false}
                       busy={false}
                       state={o.authorized ? 'signed-in' : 'needs-signin'}
                       action={
@@ -455,8 +512,28 @@ export function ConnectToolsPage() {
                   {tools.map((tool) => {
                     const id = toolId(tool);
                     const configured = toolConfigured(tool);
-                    const on = isIncluded(id, configured);
-                    const unset = tool.variables.filter((v) => !v.configured).length;
+                    // A tool whose every remaining variable belongs to somebody
+                    // else offers nothing to opt into, so it gets no toggle —
+                    // and cannot be "skipped by you", because you never had it.
+                    const actionable = tool.variables.filter(isActionable);
+                    const on = actionable.length === 0 || isOn(id);
+                    const unset = actionable.filter((v) => !v.configured).length;
+                    const ownerVar = tool.variables.find((v) => v.ownerOnly);
+                    // Grey the CARD only when nothing on it is the reader's to
+                    // do: they took the tool out, or every variable left on it
+                    // belongs to an owner. A tool that owes a workspace value
+                    // AND offers the reader a field of their own keeps its
+                    // normal weight — the owner's line is already greyed on its
+                    // own row (see `KeyRow`), and dimming the card around it
+                    // would fade out an input that works right now.
+                    const dim = !on || actionable.length === 0;
+                    const state = !on
+                      ? ('skipped' as const)
+                      : unset > 0
+                        ? ('needs-key' as const)
+                        : ownerVar
+                          ? ('owner-only' as const)
+                          : ('key-saved' as const);
                     return (
                       <Surface
                         key={tool.slug}
@@ -464,22 +541,32 @@ export function ConnectToolsPage() {
                         radius="xl"
                         elevation="card"
                         padded
-                        className={cn(!on && 'opacity-60')}
+                        className={cn(dim && 'opacity-60')}
                       >
                         <ConnectRowHead
                           slug={tool.slug}
                           name={tool.name}
                           label={tool.name}
                           on={on}
+                          dim={dim}
                           busy={wiping.has(id)}
-                          state={!on ? 'skipped' : unset > 0 ? 'needs-key' : 'key-saved'}
-                          onToggle={() =>
-                            void onToggle(id, configured, async (removed) => {
-                              for (const v of tool.variables.filter((x) => x.configured)) {
-                                await deleteUserVar(tool.slug, v.name);
-                                removed();
-                              }
-                            })
+                          state={state}
+                          reason={state === 'owner-only' && ownerVar ? ownerReason(ownerVar.name) : undefined}
+                          onToggle={
+                            actionable.length === 0
+                              ? undefined
+                              : () =>
+                                  void onToggle(id, configured, async (removed) => {
+                                    for (const v of actionable.filter((x) => x.configured)) {
+                                      await deleteUserVar(tool.slug, v.name);
+                                      removed();
+                                    }
+                                  })
+                          }
+                          action={
+                            on ? undefined : (
+                              <IncludeButton onClick={() => void onToggle(id, false, async () => {})} />
+                            )
                           }
                         />
                         {on && (
@@ -525,6 +612,13 @@ function Section({ title, children }: { title: string; children: React.ReactNode
  * what is wrong. "skipped" is the one non-status here: it is a choice you made,
  * not a state of the tool, so it stays grey.
  *
+ * Two of the seven are GREY on purpose, against the Library's rule that nothing
+ * needing a person is grey — because the rule is about the person READING. A
+ * workspace key only an owner can set, and a tool you took out yourself, both
+ * need somebody; neither needs you, and drawing them amber beside the rows you
+ * can actually fix is what makes a list of four unusable. They keep their place
+ * in the count regardless: grey says "not yours", never "not counted".
+ *
  * Note what is NOT here: `Connected`. A ROW knows only what is STORED, and the
  * one word that asserts a working connection belongs to a probe that actually
  * called the provider — which is the line underneath the row, not the badge on
@@ -534,7 +628,13 @@ function Section({ title, children }: { title: string; children: React.ReactNode
  * exists to stop.
  */
 const ROW_STATE: Record<
-  'signed-in' | 'key-saved' | 'needs-signin' | 'needs-reauth' | 'needs-key' | 'skipped',
+  | 'signed-in'
+  | 'key-saved'
+  | 'needs-signin'
+  | 'needs-reauth'
+  | 'needs-key'
+  | 'owner-only'
+  | 'skipped',
   { text: string; tone: 'ok' | 'wait' | 'outline' }
 > = {
   'signed-in': { text: 'Signed in', tone: 'ok' },
@@ -542,42 +642,75 @@ const ROW_STATE: Record<
   'needs-signin': { text: 'Needs your sign-in', tone: 'wait' },
   'needs-reauth': { text: 'Needs signing in again', tone: 'wait' },
   'needs-key': { text: 'Needs a key from you', tone: 'wait' },
-  skipped: { text: 'Skipped', tone: 'outline' },
+  // The default for a row whose `reason` names no variable; every one this page
+  // renders does name it, because "an owner" without "to set what" leaves the
+  // reader with nothing to ask for.
+  'owner-only': { text: 'Needs an owner', tone: 'outline' },
+  skipped: { text: 'Skipped by you', tone: 'outline' },
 };
 
 interface RowHeadProps {
   slug: string;
   name: string;
   label: string;
+  /** The include/skip toggle's position — what the agent may use. */
   on: boolean;
+  /** Greyed: nothing here is the reader's to do. Not the same question as `on`. */
+  dim: boolean;
   busy: boolean;
   state: keyof typeof ROW_STATE;
+  /** Overrides the state's stock wording — used to name the awaited variable. */
+  reason?: string;
   onToggle?: () => void;
   action?: React.ReactNode;
 }
 
 /** Mark, name, state, and (optionally) the control that fixes it. */
-function ConnectRowHead({ slug, name, label, on, busy, state, onToggle, action }: RowHeadProps) {
+function ConnectRowHead({
+  slug,
+  name,
+  label,
+  on,
+  dim,
+  busy,
+  state,
+  reason,
+  onToggle,
+  action,
+}: RowHeadProps) {
   const s = ROW_STATE[state];
   return (
     <div className="flex items-center gap-2.5">
       {onToggle && <IncludeToggle on={on} busy={busy} onChange={onToggle} />}
-      <ToolLogo slug={slug} name={name} className={cn(!on && 'grayscale')} />
+      <ToolLogo slug={slug} name={name} className={cn(dim && 'grayscale')} />
       <Link
         to={pathForTool(slug)}
         aria-label={`Open ${name}`}
         className={cn(
           'truncate rounded-xs text-ui font-semibold hover:underline',
-          on ? 'text-ink' : 'text-ink-faint',
+          dim ? 'text-ink-faint' : 'text-ink',
         )}
       >
         {label}
       </Link>
       <Badge tone={s.tone} size="xs" className="shrink-0">
-        {s.text}
+        {reason ?? s.text}
       </Badge>
       {action && <span className="ml-auto shrink-0">{action}</span>}
     </div>
+  );
+}
+
+/**
+ * Put a skipped tool back. The checkbox beside the name does the same thing,
+ * and this is here anyway: an unticked box in a greyed row reads as a record of
+ * what happened, not as the way to undo it.
+ */
+function IncludeButton({ onClick }: { onClick: () => void }) {
+  return (
+    <Button variant="outline" size="tiny" onClick={onClick}>
+      Include
+    </Button>
   );
 }
 
@@ -616,12 +749,16 @@ function IncludeToggle({
 }
 
 /**
- * One tool's per-user keys, and the ONE probe they share.
+ * One tool's keys, and the ONE probe they share.
  *
  * Tool-level, not row-level, because that is what a probe actually is: a
  * single call carrying the tool's whole credential set. Two rows probing
  * independently would each keep their own `Connected`, and the first would go
  * on claiming it after the second changed the very keys it was testing.
+ *
+ * Each row saves through the call its tier needs — the workspace's value for
+ * an `admin` var, the reader's own for a `user` one — and a workspace value
+ * the reader may not write renders as the reason instead of a field.
  */
 function ToolKeyList({
   tool,
@@ -638,10 +775,13 @@ function ToolKeyList({
       {tool.variables.map((v) => (
         <KeyRow
           key={v.key}
-          slug={tool.slug}
           name={v.name}
           label={v.label}
           configured={v.configured}
+          ownerOnly={v.ownerOnly}
+          save={(value) =>
+            v.scope === 'admin' ? setAdminVar(tool.slug, v.name, value) : setUserVar(tool.slug, v.name, value)
+          }
           probe={probe}
           onSaved={onSaved}
           onError={onError}
@@ -651,19 +791,74 @@ function ToolKeyList({
   );
 }
 
+/**
+ * The owner's half of a sign-in — the client secret — on the Connect page, so
+ * the person who CAN unblock everyone else does not have to go and find the
+ * tool page to do it. Its own probe, like every other place a credential is
+ * saved: a replaced client secret can invalidate the tokens minted under the
+ * old one, so the tool's health is worth testing straight away.
+ */
+function SignInOwnerSecret({
+  o,
+  onSaved,
+  onError,
+}: {
+  o: ConnectToolOAuth;
+  onSaved: () => void;
+  onError: (m: string) => void;
+}) {
+  const probe = useSavedKeyProbe(o.slug);
+  return (
+    <Surface tone="surface" radius="lg" elevation="none" padded className="border border-line">
+      <ConnectRowHead
+        slug={o.slug}
+        name={o.toolName}
+        label={o.label || o.toolName}
+        on
+        dim={false}
+        busy={false}
+        state="needs-key"
+      />
+      <ul className="mt-3 flex flex-col gap-2">
+        <KeyRow
+          name={o.varName}
+          label={`${o.varName} (client secret)`}
+          configured={false}
+          ownerOnly={false}
+          save={(value) => setOAuthClientSecret(o.slug, o.varName, value)}
+          probe={probe}
+          onSaved={onSaved}
+          onError={onError}
+        />
+      </ul>
+    </Surface>
+  );
+}
+
+/**
+ * One variable of a tool: the field that sets it, or — when it is a workspace
+ * value the reader may not write — the name of who has to.
+ *
+ * `save` rather than a slug plus a tier, because the three things a row can
+ * write (your own key, the workspace's, a sign-in's client secret) are three
+ * different calls and the row's job is the same in all three.
+ */
 function KeyRow({
-  slug,
   name,
   label,
   configured,
+  ownerOnly,
+  save: persist,
   probe,
   onSaved,
   onError,
 }: {
-  slug: string;
   name: string;
   label: string | null;
   configured: boolean;
+  /** A workspace value the reader cannot set: no field, just the reason. */
+  ownerOnly: boolean;
+  save: (value: string) => Promise<void>;
   /** Shared with this tool's other rows; it answers for whichever saved last. */
   probe: SavedKeyProbe;
   onSaved: () => void;
@@ -676,7 +871,7 @@ function KeyRow({
     if (!value.trim()) return;
     setBusy(true);
     try {
-      await setUserVar(slug, name, value.trim());
+      await persist(value.trim());
       // The value is STORED before anything is probed, and the field is
       // cleared before anything is probed. Nothing below can fail the save or
       // hold it open — the probe is a question asked after the fact, and it is
@@ -694,6 +889,19 @@ function KeyRow({
     // Naming the variable moves the shared answer onto THIS row.
     probe.probeSaved(name);
   };
+
+  if (ownerOnly) {
+    return (
+      <li className="flex items-center gap-2.5">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <span className="truncate text-detail text-ink-faint">{label || name}</span>
+          <Badge tone="outline" size="xs" className="shrink-0">
+            {ownerReason(name)}
+          </Badge>
+        </div>
+      </li>
+    );
+  }
 
   return (
     <li className="flex flex-col gap-1.5">
