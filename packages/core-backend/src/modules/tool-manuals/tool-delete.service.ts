@@ -74,6 +74,8 @@ interface CommitDriver {
     user: AuthUser,
     opts?: { systemAuthorized?: boolean },
   ): Promise<void>;
+  /** Whether a commit is sitting on the local branch unpushed — see {@link ToolDeleteService.deleteManual}. */
+  hasUnpushedCommits(workspaceId: string): Promise<boolean>;
 }
 
 interface Located {
@@ -95,6 +97,16 @@ export function allowedToolNames(entry: string, toolName: string): boolean {
   return e === n || e.startsWith(`${n}_`) || e.startsWith(`${n}.`);
 }
 
+/**
+ * Own-property membership. `name in obj` answers for the PROTOTYPE too, so a
+ * tool called `toString` or `constructor` would look declared by every
+ * `mcpServers` map on the tree — a dependent list naming unrelated plugins,
+ * and a delete that proceeds against a file the server is no longer in.
+ */
+function hasOwn(obj: object, name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, name);
+}
+
 export class ToolDeleteService {
   constructor(
     private readonly workspaceService: WorkspaceService,
@@ -114,8 +126,10 @@ export class ToolDeleteService {
     const { tool, source, plugin, folder } = await this.authorize(userEmail, slug);
     const [skills, plugins, secrets] = await Promise.all([
       this.dependentSkills(userEmail, tool.name),
-      this.carryingPlugins(tool, folder, plugin),
-      this.vault.countNamespace(utcpNamespacePrefix(tool.name), declaredNames(tool)),
+      this.carryingPlugins(userEmail, tool, folder, plugin),
+      this.claimedVars(tool).then((declared) =>
+        this.vault.countNamespace(utcpNamespacePrefix(tool.name), declared),
+      ),
     ]);
     return {
       slug: tool.slug,
@@ -151,7 +165,7 @@ export class ToolDeleteService {
     this.pluginIndex.invalidate();
     // Only after the commit landed: a refused delete must leave the tool
     // exactly as it was, credentials included.
-    await this.vault.removeNamespace(utcpNamespacePrefix(tool.name), declaredNames(tool));
+    await this.wipeSecrets(tool);
     return { plugin: plugin.name };
   }
 
@@ -192,6 +206,60 @@ export class ToolDeleteService {
     return owner ? best : null;
   }
 
+  /**
+   * Wipe the tool's namespace, RETRIED — the definition is already gone at
+   * HEAD and cannot come back, so a vault that blinks once must not be what
+   * leaves rows under a name nothing declares (a credential nobody can see or
+   * remove, and one a later tool reusing the name would inherit).
+   *
+   * If it still will not go, the caller hears so in those words: the delete
+   * itself happened, and the one action left is a manual one.
+   */
+  private async wipeSecrets(tool: ToolManualSummary): Promise<void> {
+    const declared = await this.claimedVars(tool);
+    let last: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await this.vault.removeNamespace(utcpNamespacePrefix(tool.name), declared);
+        return;
+      } catch (err) {
+        last = err;
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+      }
+    }
+    const why = last instanceof Error ? last.message : String(last);
+    throw new ToolDeleteError(
+      `The ${tool.name} tool was deleted, but its stored credentials could not be wiped (${why}). ` +
+        'Remove them from Secrets before anything reuses the name.',
+      500,
+    );
+  }
+
+  /**
+   * The variable names this tool may CLAIM in its vault namespace — its
+   * declared ones, minus any another tool's namespace could also produce.
+   *
+   * UTCP doubles every underscore when it namespaces, so tool `foo` declaring
+   * `_bar_KEY` and tool `foo_bar` declaring `KEY` name the SAME vault row
+   * (`foo__bar_KEY`): one row with two honest claimants, which no membership
+   * rule can split. Counting it is merely generous; WIPING it would take a
+   * live credential from a tool nobody asked to delete. So an ambiguous
+   * variable is dropped from the claim and its row survives, still visible to
+   * the tool that still declares it. (Nothing to do for the ordinary name: a
+   * variable not starting with `_` cannot collide.)
+   */
+  private async claimedVars(tool: ToolManualSummary): Promise<string[]> {
+    const names = declaredNames(tool);
+    if (!names.some((n) => n.startsWith('_'))) return names;
+    const prefix = utcpNamespacePrefix(tool.name);
+    const others = (await this.toolManuals.listAllSummaries())
+      .filter((t) => t.name !== tool.name)
+      .map((t) => utcpNamespacePrefix(t.name));
+    return names.filter(
+      (n) => !n.startsWith('_') || !others.some((other) => `${prefix}${n}`.startsWith(other)),
+    );
+  }
+
   private async dependentSkills(userEmail: string, toolName: string): Promise<ToolDependents['skills']> {
     // The caller's readable skills only: naming a skill somebody cannot read
     // would confirm it exists. `allowed-tools` has no bulk read, so one load
@@ -213,6 +281,7 @@ export class ToolDeleteService {
    * across bundles). The tool's own plugin is not a dependent — it is the home.
    */
   private async carryingPlugins(
+    userEmail: string,
     tool: ToolManualSummary,
     folder: string,
     home: PluginCatalogEntry,
@@ -223,19 +292,42 @@ export class ToolDeleteService {
       await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
       const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
       discovered = await this.source.discover(kbRoot);
-    } catch {
-      return [];
+    } catch (err) {
+      // A partial answer is the one thing this list must never be: "no other
+      // plugin carries it" is what the owner deletes ON, so a scan that did
+      // not finish refuses rather than reassures.
+      throw new ToolDeleteError(
+        `Couldn't read which plugins carry this tool (${err instanceof Error ? err.message : String(err)}) — nothing was deleted.`,
+        503,
+      );
+    }
+    if (discovered.unreadable.length > 0) {
+      // A HOLE is a plugin that exists and could not be read. Listing the
+      // rest as if it were the whole answer would let the dialog vouch for a
+      // tree it never saw.
+      throw new ToolDeleteError(
+        `${discovered.unreadable.length === 1 ? 'A plugin' : `${discovered.unreadable.length} plugins`} could not be read, so what carries this tool cannot be listed in full — nothing was deleted.`,
+        503,
+      );
     }
     const catalog = await this.pluginIndex.catalog();
-    const out = new Map<string, { name: string; displayName: string }>();
-    for (const p of discovered.plugins) {
-      if (p.folder === folder || p.name === home.name) continue;
+    const candidates = discovered.plugins.filter((p) => {
+      if (p.folder === folder || p.name === home.name) return false;
       const links = p.linkedRoots.some((r) => tool.path === r || tool.path.startsWith(`${r.replace(/\/+$/, '')}/`));
-      const declares = p.mcpServers !== null && tool.name in p.mcpServers;
-      if (!links && !declares) continue;
+      const declares = p.mcpServers !== null && hasOwn(p.mcpServers, tool.name);
+      return links || declares;
+    });
+    // Named only to a caller who can read the plugin's folder: a dependent
+    // list is not a side door onto which plugins exist.
+    const readable = await Promise.all(
+      candidates.map((p) => this.accessControl.canRead(wsId, userEmail, p.folder)),
+    );
+    const out = new Map<string, { name: string; displayName: string }>();
+    candidates.forEach((p, i) => {
+      if (!readable[i]) return;
       const entry = catalog.find((c) => c.name === p.name);
       out.set(p.name, { name: p.name, displayName: entry?.displayName ?? p.displayName });
-    }
+    });
     return [...out.values()];
   }
 
@@ -256,7 +348,17 @@ export class ToolDeleteService {
         systemAuthorized: true,
       });
     } catch (err) {
-      await fs.rename(parked, abs).catch(() => {});
+      // Restore ONLY when nothing landed. The pipeline commits locally and
+      // THEN pushes, so a refused push leaves a commit that already removed
+      // the file: renaming it back there would leave the working tree dirty
+      // against HEAD — re-adding, on the next commit, the very tool this one
+      // deleted, which is the state the workflow layer's own recovery
+      // misreads (McpServerEditService refuses to touch the tree for the same
+      // reason). A probe that itself fails counts as "a commit may exist": the
+      // park survives, dot-prefixed and invisible to the scanner, for a person
+      // to clear — a delete must never destroy more than it names.
+      const committed = await this.commits.hasUnpushedCommits(wsId).catch(() => true);
+      if (!committed) await fs.rename(parked, abs).catch(() => {});
       throw err;
     }
     await fs.rm(parked, { force: true }).catch(() => {});
@@ -280,7 +382,7 @@ export class ToolDeleteService {
     const manifestAbs = path.join(pluginDir, PLUGIN_MANIFEST_FILE);
     const mcp = await this.disk.readJsonObject(mcpAbs);
     const servers = mcp?.mcpServers;
-    if (!servers || typeof servers !== 'object' || Array.isArray(servers) || !(tool.name in servers)) {
+    if (!servers || typeof servers !== 'object' || Array.isArray(servers) || !hasOwn(servers, tool.name)) {
       throw new ToolDeleteError('No such server.', 404);
     }
     delete (servers as Record<string, unknown>)[tool.name];
@@ -296,7 +398,7 @@ export class ToolDeleteService {
       extServers !== null &&
       typeof extServers === 'object' &&
       !Array.isArray(extServers) &&
-      tool.name in extServers;
+      hasOwn(extServers, tool.name);
     if (touchManifest) delete (extServers as Record<string, unknown>)[tool.name];
 
     const [mcpBefore, manifestBefore] = await Promise.all([

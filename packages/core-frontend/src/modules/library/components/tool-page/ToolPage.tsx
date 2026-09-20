@@ -103,9 +103,13 @@ export function ToolPage({
   // Ownership of the plugin the tool LIVES IN — not of the tool file, which
   // has no rules of its own. The same folder verdict the backend re-derives,
   // so the menu item and the endpoint agree about who may delete.
-  const ownsPlugin = toolPath
-    ? (pluginHoldingPath(toolPath, data.pluginSummaries)?.isOwner ?? false)
-    : false;
+  //
+  // AND its links have to be ours to write: a plugin read from an external
+  // format is edited in its own repository, and the DELETE route refuses one
+  // (422). Offering the item to its owner would be offering a button whose
+  // only outcome is that refusal.
+  const holder = toolPath ? pluginHoldingPath(toolPath, data.pluginSummaries) : null;
+  const canDelete = (holder?.isOwner ?? false) && (holder?.linksAreManaged ?? false);
 
   if (page.loading) {
     return <div className="py-16 text-center text-ui text-ink-muted">Loading…</div>;
@@ -190,7 +194,7 @@ export function ToolPage({
           // The OWNER's verb, and the same verdict the DELETE route enforces
           // (ownership of the plugin holding the tool) — so the item appears
           // for exactly the people the backend will let through.
-          onDelete={ownsPlugin ? () => setDeleteOpen(true) : undefined}
+          onDelete={canDelete ? () => setDeleteOpen(true) : undefined}
           deleteLabel="Delete tool"
         />
       </header>

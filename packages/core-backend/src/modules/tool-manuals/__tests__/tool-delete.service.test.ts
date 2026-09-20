@@ -25,12 +25,14 @@ const USER: AuthUser = { id: 'u-1', email: 'owner@x.com', name: 'Ola' } as AuthU
 let root: string;
 let repo: string;
 let svc: ToolDeleteService;
-let commits: { runPendingCommit: ReturnType<typeof vi.fn> };
+let commits: { runPendingCommit: ReturnType<typeof vi.fn>; hasUnpushedCommits: ReturnType<typeof vi.fn> };
 let vault: {
   countNamespace: ReturnType<typeof vi.fn>;
   removeNamespace: ReturnType<typeof vi.fn>;
 };
 let owners: string[];
+/** Folders `canRead` says no to — the dependent list must not name their plugins. */
+let unreadableFolders: string[];
 let invalidatedTools: number;
 let invalidatedPlugins: number;
 
@@ -108,7 +110,9 @@ function skillsWith(entries: Record<string, string[]>): ISkillService {
   } as unknown as ISkillService;
 }
 
-function build(opts: { source?: PluginSource; skills?: ISkillService } = {}): ToolDeleteService {
+function build(
+  opts: { source?: PluginSource; skills?: ISkillService; accessible?: ToolManualSummary[] } = {},
+): ToolDeleteService {
   const wsDir = path.join(root, workspaceIdForBranch(DEFAULT_BRANCH));
   const workspaceService = {
     getOrCreateForBranch: vi.fn(async () => ({ id: workspaceIdForBranch(DEFAULT_BRANCH) })),
@@ -118,9 +122,11 @@ function build(opts: { source?: PluginSource; skills?: ISkillService } = {}): To
     canOwner: vi.fn(async (_ws: string, email: string, folder: string) =>
       owners.includes(email) && folder === 'Plugins/GTM',
     ),
+    canRead: vi.fn(async (_ws: string, _email: string, folder: string) => !unreadableFolders.includes(folder)),
   } as unknown as IAccessControl;
   const toolManuals = {
-    listAccessible: vi.fn(async () => summaries),
+    listAccessible: vi.fn(async () => opts.accessible ?? summaries),
+    listAllSummaries: vi.fn(async () => opts.accessible ?? summaries),
     invalidate: vi.fn(() => {
       invalidatedTools += 1;
     }),
@@ -149,9 +155,13 @@ beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-tool-delete-'));
   repo = path.join(root, workspaceIdForBranch(DEFAULT_BRANCH), KB);
   owners = [USER.email];
+  unreadableFolders = [];
   invalidatedTools = 0;
   invalidatedPlugins = 0;
-  commits = { runPendingCommit: vi.fn(async () => undefined) };
+  commits = {
+    runPendingCommit: vi.fn(async () => undefined),
+    hasUnpushedCommits: vi.fn(async () => false),
+  };
   vault = {
     countNamespace: vi.fn(async () => ({ keys: 2, signIns: 3 })),
     removeNamespace: vi.fn(async () => ({ keys: 2, signIns: 3 })),
@@ -194,8 +204,17 @@ describe('the owner gate', () => {
     await expect(fs.stat(path.join(repo, 'Plugins/GTM/weather.tool'))).resolves.toBeTruthy();
   });
 
-  it('answers 404 for a tool the caller cannot read — identical to an unknown slug', async () => {
+  it('answers 404 for an unknown slug', async () => {
     await expect(svc.deleteTool(USER, 'nope')).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('answers the same 404 for a tool that EXISTS but the caller cannot read', async () => {
+    // The slug is real; `listAccessible` just does not carry it for them —
+    // which must be indistinguishable from the unknown slug above.
+    svc = build({ accessible: summaries.filter((t) => t.slug !== 'weather') });
+    await expect(svc.deleteTool(USER, 'weather')).rejects.toMatchObject({ status: 404 });
+    await expect(svc.dependents(USER.email, 'weather')).rejects.toMatchObject({ status: 404 });
+    await expect(fs.stat(path.join(repo, 'Plugins/GTM/weather.tool'))).resolves.toBeTruthy();
   });
 
   it('refuses a tool held by no plugin the caller owns', async () => {
@@ -235,10 +254,22 @@ describe('deleting a `.tool` manual', () => {
     expect(left.filter((n) => n.startsWith('.deleting-'))).toEqual([]);
   });
 
-  it('puts the file back and keeps the secrets when the commit is refused', async () => {
+  it('puts the file back and keeps the secrets when NOTHING was committed', async () => {
     commits.runPendingCommit.mockRejectedValueOnce(new Error('push refused'));
     await expect(svc.deleteTool(USER, 'weather')).rejects.toThrow('push refused');
     await expect(fs.stat(path.join(repo, 'Plugins/GTM/weather.tool'))).resolves.toBeTruthy();
+    expect(vault.removeNamespace).not.toHaveBeenCalled();
+  });
+
+  it('leaves the file parked when the commit LANDED and only the push failed', async () => {
+    // Restoring here would put back a file HEAD already deleted — a working
+    // tree dirty against its own commit, which the next commit would re-add.
+    commits.runPendingCommit.mockRejectedValueOnce(new Error('push refused'));
+    commits.hasUnpushedCommits.mockResolvedValue(true);
+    await expect(svc.deleteTool(USER, 'weather')).rejects.toThrow('push refused');
+    await expect(fs.stat(path.join(repo, 'Plugins/GTM/weather.tool'))).rejects.toThrow();
+    const left = await fs.readdir(path.join(repo, 'Plugins/GTM'));
+    expect(left.filter((n) => n.startsWith('.deleting-')).length).toBe(1);
     expect(vault.removeNamespace).not.toHaveBeenCalled();
   });
 });
@@ -308,5 +339,128 @@ describe('dependents', () => {
     });
     const d = await svc.dependents(USER.email, 'weather');
     expect(d.plugins.map((p) => p.name).sort()).toEqual(['ops', 'sales']);
+  });
+});
+
+describe('names that are also Object prototype members', () => {
+  /**
+   * `toString` is a legal tool name and a property of every object. A `name in
+   * obj` test answers yes for it against ANY map, so the delete would proceed
+   * against a file the server is not in, and the dialog would name plugins
+   * that never declared it.
+   */
+  const protoSummaries: ToolManualSummary[] = [
+    { slug: 'to-string', name: 'toString', path: 'Plugins/GTM/mcp.json', type: 'mcp' },
+  ];
+
+  beforeEach(async () => {
+    await write('Plugins/GTM/mcp.json', { mcpServers: { other: { type: 'stdio', command: 'x' } } });
+  });
+
+  it('answers 404 rather than deleting a server only the prototype has', async () => {
+    svc = build({ accessible: protoSummaries });
+    await expect(svc.deleteTool(USER, 'to-string')).rejects.toMatchObject({ status: 404 });
+    expect(vault.removeNamespace).not.toHaveBeenCalled();
+    // The siblings are untouched.
+    const mcp = await readJson('Plugins/GTM/mcp.json');
+    expect(Object.keys(mcp.mcpServers as Record<string, unknown>)).toEqual(['other']);
+  });
+
+  it('does not report unrelated plugins as carrying it', async () => {
+    svc = build({
+      accessible: protoSummaries,
+      source: discovery([
+        { name: 'gtm', displayName: 'GTM', folder: 'Plugins/GTM', relFolder: 'GTM' },
+        // Declares servers — just not this one.
+        { name: 'ops', displayName: 'Ops', folder: 'Plugins/Ops', relFolder: 'Ops', mcpServers: { weather: {} } },
+      ]),
+    });
+    const d = await svc.dependents(USER.email, 'to-string');
+    expect(d.plugins).toEqual([]);
+  });
+});
+
+describe('dependents the caller must not be told about', () => {
+  function threePlugins(): PluginSource {
+    return discovery([
+      { name: 'gtm', displayName: 'GTM', folder: 'Plugins/GTM', relFolder: 'GTM' },
+      { name: 'sales', displayName: 'Sales', folder: 'Plugins/Sales', relFolder: 'Sales', linkedRoots: ['Plugins/GTM'] },
+      { name: 'secret', displayName: 'Secret', folder: 'Plugins/Secret', relFolder: 'Secret', linkedRoots: ['Plugins/GTM'] },
+    ]);
+  }
+
+  it('omits a carrying plugin the caller cannot read', async () => {
+    unreadableFolders = ['Plugins/Secret'];
+    svc = build({ source: threePlugins() });
+    const d = await svc.dependents(USER.email, 'weather');
+    expect(d.plugins.map((p) => p.name)).toEqual(['sales']);
+    expect(JSON.stringify(d)).not.toContain('Secret');
+  });
+
+  it('refuses rather than answering from a scan that failed', async () => {
+    const broken = {
+      dialect: 'native',
+      discover: vi.fn(async () => {
+        throw new Error('EACCES');
+      }),
+    } as unknown as PluginSource;
+    svc = build({ source: broken });
+    await expect(svc.dependents(USER.email, 'weather')).rejects.toMatchObject({ status: 503 });
+  });
+
+  it('refuses while discovery reports a plugin it could not read', async () => {
+    // "No other plugin carries it" is what the owner deletes ON — a partial
+    // scan must not be allowed to say it.
+    const holed = {
+      dialect: 'native',
+      discover: vi.fn(async () => ({
+        plugins: [],
+        warnings: [],
+        unreadable: ['Plugins/Locked'],
+        claimed: [],
+      })),
+    } as unknown as PluginSource;
+    svc = build({ source: holed });
+    await expect(svc.dependents(USER.email, 'weather')).rejects.toMatchObject({ status: 503 });
+  });
+});
+
+describe('the credentials wipe', () => {
+  it('retries a vault that blinks, because the definition is already gone', async () => {
+    vault.removeNamespace
+      .mockRejectedValueOnce(new Error('deadlock'))
+      .mockResolvedValueOnce({ keys: 2, signIns: 3 });
+    await expect(svc.deleteTool(USER, 'weather')).resolves.toEqual({ plugin: 'gtm' });
+    expect(vault.removeNamespace).toHaveBeenCalledTimes(2);
+  });
+
+  it('says the tool went but its credentials did not, when the vault will not have it', async () => {
+    vault.removeNamespace.mockRejectedValue(new Error('vault down'));
+    await expect(svc.deleteTool(USER, 'weather')).rejects.toMatchObject({
+      status: 500,
+      message: expect.stringContaining('could not be wiped'),
+    });
+    // The delete itself is not undone — HEAD has no such tool any more.
+    await expect(fs.stat(path.join(repo, 'Plugins/GTM/weather.tool'))).rejects.toThrow();
+  });
+
+  it('does not claim a variable another tool’s namespace could also produce', async () => {
+    // `owner` declaring `_side_KEY` and `owner_side` declaring `KEY` name the
+    // SAME vault row. Counting it is generous; wiping it would take a live
+    // credential from a tool nobody asked to delete.
+    const ambiguous: ToolManualSummary[] = [
+      {
+        slug: 'owner',
+        name: 'owner',
+        path: 'Plugins/GTM/owner.tool',
+        type: 'http',
+        variables: [{ name: 'KEY', scope: 'admin' }, { name: '_side_KEY', scope: 'admin' }],
+      },
+      { slug: 'owner-side', name: 'owner_side', path: 'Plugins/GTM/owner-side.tool', type: 'http' },
+    ];
+    await write('Plugins/GTM/owner.tool', '---\nid: owner\ntype: http\nurl: https://o.example\n---\n');
+    svc = build({ accessible: ambiguous });
+    await svc.deleteTool(USER, 'owner');
+    expect(vault.removeNamespace).toHaveBeenCalledWith('owner_', ['KEY']);
   });
 });

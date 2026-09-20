@@ -52,6 +52,7 @@ vi.mock('../services/library.api', () => ({
 /** The plugin catalog the page's owner verdict comes from. */
 const libraryData = vi.hoisted(() => ({
   isOwner: true,
+  linksAreManaged: true,
   reload: vi.fn(),
   reloadPlugins: vi.fn(),
 }));
@@ -63,6 +64,7 @@ vi.mock('../state/library-data', () => ({
         displayName: 'GTM',
         folders: ['Plugins/GTM'],
         isOwner: libraryData.isOwner,
+        linksAreManaged: libraryData.linksAreManaged,
         canRead: true,
         canWrite: true,
       },
@@ -164,6 +166,11 @@ function renderPage() {
   );
 }
 
+/** Type the tool's name into the dialog's confirm field — what arms Delete. */
+function confirmName(name = 'heyreach') {
+  fireEvent.change(screen.getByLabelText(/Type .* to confirm/), { target: { value: name } });
+}
+
 /** Render the page, open the `⋯` menu, and hand back its Delete item, if it has one. */
 async function openMenu() {
   renderPage();
@@ -175,6 +182,7 @@ async function openMenu() {
 beforeEach(() => {
   window.history.replaceState(null, '', '/skills-and-tools/tools/heyreach');
   libraryData.isOwner = true;
+  libraryData.linksAreManaged = true;
   libraryData.reload.mockClear();
   libraryData.reloadPlugins.mockClear();
   secretsMock.listToolSecrets.mockReset().mockResolvedValue([TOOL]);
@@ -195,6 +203,15 @@ describe('who is offered Delete', () => {
     libraryData.isOwner = false;
     expect(await openMenu()).toBeNull();
     // And nothing else in the menu went with it.
+    expect(screen.getByRole('menuitem', { name: /Copy link/ })).toBeInTheDocument();
+  });
+
+  it('does not offer it for a plugin managed in another format, even to its owner', async () => {
+    // That plugin is edited in its own repository and the DELETE route
+    // refuses one (422) — the item would be a button whose only outcome is
+    // that refusal.
+    libraryData.linksAreManaged = false;
+    expect(await openMenu()).toBeNull();
     expect(screen.getByRole('menuitem', { name: /Copy link/ })).toBeInTheDocument();
   });
 });
@@ -224,7 +241,7 @@ describe('the confirmation', () => {
     });
     fireEvent.click((await openMenu())!);
 
-    expect(await screen.findByText("No skill's allowed tools name it.")).toBeInTheDocument();
+    expect(await screen.findByText('No skill you can see names it in its allowed tools.')).toBeInTheDocument();
     expect(screen.getByText('No other plugin carries it.')).toBeInTheDocument();
     expect(screen.getByText('Nothing is stored under its name.')).toBeInTheDocument();
   });
@@ -237,9 +254,26 @@ describe('the confirmation', () => {
     expect(screen.getByRole('button', { name: 'Delete tool' })).toBeDisabled();
   });
 
+  it('keeps Delete disabled until the tool\'s name is typed exactly', async () => {
+    fireEvent.click((await openMenu())!);
+    await screen.findByText('outreach, follow-up');
+    const del = screen.getByRole('button', { name: 'Delete tool' });
+    // Loaded, dependents shown — and still not armed.
+    expect(del).toBeDisabled();
+    confirmName('heyreac');
+    expect(del).toBeDisabled();
+    confirmName('HEYREACH');
+    expect(del).toBeDisabled();
+    confirmName();
+    expect(del).toBeEnabled();
+    // Typing is not doing: nothing has been deleted yet.
+    expect(toolsMock.deleteTool).not.toHaveBeenCalled();
+  });
+
   it('deletes nothing until it is confirmed, and nothing at all on Cancel', async () => {
     fireEvent.click((await openMenu())!);
     await screen.findByText('outreach, follow-up');
+    confirmName();
     expect(toolsMock.deleteTool).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
@@ -251,7 +285,9 @@ describe('the confirmation', () => {
 describe('confirming', () => {
   it("deletes the tool, then lands on the tool's plugin and reloads the library", async () => {
     fireEvent.click((await openMenu())!);
-    fireEvent.click(await screen.findByRole('button', { name: 'Delete tool' }));
+    await screen.findByText('outreach, follow-up');
+    confirmName();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete tool' }));
 
     await waitFor(() => expect(toolsMock.deleteTool).toHaveBeenCalledWith('heyreach'));
     await waitFor(() =>
@@ -266,7 +302,9 @@ describe('confirming', () => {
   it("keeps the page and shows the backend's refusal verbatim", async () => {
     toolsMock.deleteTool.mockRejectedValue(new Error("Only the owners of this tool's plugin can delete it."));
     fireEvent.click((await openMenu())!);
-    fireEvent.click(await screen.findByRole('button', { name: 'Delete tool' }));
+    await screen.findByText('outreach, follow-up');
+    confirmName();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete tool' }));
 
     expect(
       await screen.findByText("Only the owners of this tool's plugin can delete it."),

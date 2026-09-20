@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Banner, Button, Dialog } from '../../../../shared/components';
+import { Banner, Button, Dialog, TextField } from '../../../../shared/components';
 import { deleteTool, getToolDependents, type ToolDependents } from '../../services/tools.api';
 
 /**
@@ -16,6 +16,11 @@ import { deleteTool, getToolDependents, type ToolDependents } from '../../servic
  *
  * Who may open it is the caller's decision (plugin ownership); the backend
  * enforces the same verdict for real, and its refusal is what this shows.
+ *
+ * And the confirm is the tool's NAME, typed. The plugin dialog is content of
+ * yours going with a folder of yours; this one also wipes credentials that are
+ * not the clicker's — other people's stored keys and sign-ins — so the hand
+ * that does it says the name first.
  */
 export function DeleteToolDialog({
   slug,
@@ -34,6 +39,7 @@ export function DeleteToolDialog({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [typed, setTyped] = useState('');
 
   useEffect(() => {
     let live = true;
@@ -67,7 +73,11 @@ export function DeleteToolDialog({
     }
   }
 
+  // The name as the BACKEND spells it once it answers, so the thing typed is
+  // the thing deleted even if the page arrived with a stale label.
+  const confirmName = dependents?.name ?? name;
   const ready = dependents !== null && loadError === null;
+  const confirmed = ready && typed.trim() === confirmName;
 
   return (
     <Dialog
@@ -81,7 +91,7 @@ export function DeleteToolDialog({
           <Button variant="quiet" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button variant="danger" onClick={() => void remove()} disabled={busy || !ready}>
+          <Button variant="danger" onClick={() => void remove()} disabled={busy || !confirmed}>
             {busy ? 'Deleting…' : 'Delete tool'}
           </Button>
         </>
@@ -101,11 +111,15 @@ export function DeleteToolDialog({
               : `This deletes the ${dependents.name} tool from ${dependents.plugin.displayName} for everyone, and there is no undo — it survives only in git history.`}
           </p>
           <DependentList
-            label="Skills that allow it"
+            // "You can see" is not modesty: the backend lists only the
+            // caller's readable skills, because naming one they cannot read
+            // would confirm it exists. An unqualified heading would present
+            // that subset as the whole truth.
+            label="Skills you can see that allow it"
             items={dependents.skills.map((s) => s.name)}
             // Said plainly, because it is the consequence people are most
             // likely to be surprised by: the skills keep the name and break.
-            none="No skill's allowed tools name it."
+            none="No skill you can see names it in its allowed tools."
             tail="keep naming it in their allowed tools — those entries stop resolving."
             tailOne="keeps naming it in its allowed tools — that entry stops resolving."
           />
@@ -119,6 +133,20 @@ export function DeleteToolDialog({
           <p className="mt-3 text-ui text-ink-muted">
             {secretsLine(dependents.storedKeys, dependents.signIns)}
           </p>
+          <label className="mt-4 block text-ui text-ink-muted" htmlFor={CONFIRM_FIELD_ID}>
+            {'Type '}
+            <span className="font-semibold text-ink">{confirmName}</span>
+            {' to confirm.'}
+          </label>
+          <TextField
+            id={CONFIRM_FIELD_ID}
+            className="mt-1.5"
+            value={typed}
+            autoComplete="off"
+            spellCheck={false}
+            disabled={busy}
+            onChange={(e) => setTyped(e.target.value)}
+          />
         </>
       )}
       {error && (
@@ -129,6 +157,8 @@ export function DeleteToolDialog({
     </Dialog>
   );
 }
+
+const CONFIRM_FIELD_ID = 'delete-tool-confirm';
 
 /** One kind of dependent, named — or the honest "nothing" that saves a worry. */
 function DependentList({

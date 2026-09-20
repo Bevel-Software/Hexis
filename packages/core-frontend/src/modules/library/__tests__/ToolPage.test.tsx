@@ -440,7 +440,12 @@ describe('ToolPage: OAuth round-trip', () => {
       window.history.replaceState(null, '', '/skills-and-tools/tools/heyreach#authorized=sec_1');
       renderPage();
 
-      await screen.findByRole('status');
+      // `All`, because the page carries more than one live region (the
+      // sections announce their own loading) — the one this waits on is the
+      // sign-in's.
+      expect((await screen.findAllByRole('status')).map((s) => s.textContent)).toContain(
+        'Signed in to heyreach.',
+      );
       await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
     });
 

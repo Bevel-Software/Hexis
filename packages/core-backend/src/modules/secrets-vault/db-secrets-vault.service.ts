@@ -252,16 +252,33 @@ export class DbSecretsVaultService implements ISecretsVaultService {
   }
 
   async removeNamespace(prefix: string, declared: readonly string[] = []): Promise<NamespaceSecretCount> {
-    const rows = await this.namespaceRows(prefix, declared);
-    if (rows.length === 0) return { keys: 0, signIns: 0 };
-    await this.db.delete(secrets).where(inArray(secrets.id, rows.map((r) => r.id)));
-    // Every tier may have changed: shared rows affect everyone, and each
-    // user whose row went is told on their own.
-    this.notifyMutation(null);
-    for (const userId of new Set(rows.map((r) => r.userId).filter((u): u is string => u !== null))) {
+    // Scanned and deleted until a pass finds NOTHING. The membership rule
+    // (`isKeyInNamespace`) cannot be said in SQL, so the ids have to be read
+    // before they are deleted — and a row written in that window would
+    // otherwise outlive the namespace it belongs to, which is precisely the
+    // orphan this method exists to prevent. Bounded, so a writer looping
+    // against us cannot hold the request open; what it deleted is what it
+    // reports, taken from the delete's own `returning`, never from the scan.
+    const gone: { key: string; userId: string | null; kind: string }[] = [];
+    for (let pass = 0; pass < 5; pass++) {
+      const rows = await this.namespaceRows(prefix, declared);
+      if (rows.length === 0) break;
+      const deleted = await this.db
+        .delete(secrets)
+        .where(inArray(secrets.id, rows.map((r) => r.id)))
+        .returning({ id: secrets.id });
+      const ids = new Set(deleted.map((d) => d.id));
+      gone.push(...rows.filter((r) => ids.has(r.id)));
+    }
+    if (gone.length === 0) return { keys: 0, signIns: 0 };
+    // The `null` sentinel means "everyone's pooled connection" — earned only
+    // by a SHARED row actually going. A namespace of nothing but per-user rows
+    // tells those users and no one else.
+    if (gone.some((r) => r.userId === null)) this.notifyMutation(null);
+    for (const userId of new Set(gone.map((r) => r.userId).filter((u): u is string => u !== null))) {
       this.notifyMutation(userId);
     }
-    return tally(rows);
+    return tally(gone);
   }
 
   /**
