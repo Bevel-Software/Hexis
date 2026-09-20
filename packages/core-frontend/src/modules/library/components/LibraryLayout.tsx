@@ -3,6 +3,7 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { isPersonalPluginFolder } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
+import { HEADER_COLUMN_TOP } from '../../../shared/theme/header';
 import { useAdmin } from '../../admin/state/admin.context';
 import { attentionOf, useLibrary, workspaceHasNoPlugins } from '../state/library-data';
 import { personalPluginName } from '../utils/personal-plugin';
@@ -16,6 +17,7 @@ import { useSidebar } from '../../layout/state/sidebar';
 import { SidebarFrame } from '../../layout/components/SidebarFrame';
 import { ConnectAgentPill } from '../../onboarding/components/ConnectAgentPill';
 import { PullRequestsForMe } from '../../git/components/PullRequestsForMe';
+import { IntegrationsSetupReminder } from './IntegrationsSetupReminder';
 import { PluginsSidebar, type SidebarContextTarget } from './PluginsSidebar';
 import { PluginsTree, SkillsTree } from './SkillsTree';
 import { PluginsSidebarMenu } from './PluginsSidebarMenu';
@@ -117,16 +119,33 @@ export function LibraryLayout() {
           Knowledge still sees it. It renders nothing once onboarding is
           done. The change-request dock below the nav is the same one
           Knowledge pins under its tree — the requests waiting on you are
-          the same whichever app you are in. */}
-      <SidebarFrame label="Library navigation" header={<ConnectAgentPill />} footer={<PullRequestsForMe />}>
+          the same whichever app you are in.
+
+          The footer is a GROUP, and both of its rows are passed here for the
+          same reason the header's pill is: the frame spaces them and draws
+          the one rule above them, and the surface decides what they are. The
+          setup reminder used to close the nav from inside `PluginsSidebar`,
+          which is how it and the dock came to disagree about where the
+          column's left edge is. */}
+      <SidebarFrame
+        label="Library navigation"
+        header={<ConnectAgentPill />}
+        footer={
+          <>
+            <IntegrationsSetupReminder
+              count={attentionCount}
+              onFinishSetup={() => navigate('/connect')}
+            />
+            <PullRequestsForMe />
+          </>
+        }
+      >
         <PluginsSidebar
           filter={filter}
           onSelect={(next) => navigate(pathForLibraryFilter(next))}
           ownedCount={ownedCount}
           ownedAttention={ownedAttention}
           teams={teamRows}
-          attentionCount={attentionCount}
-          onFinishSetup={() => navigate('/connect')}
           onCreatePlugin={() => setNewPlugin({ parent: '' })}
           canCreatePlugin={isAdmin && workspaceHasNoPlugins(lib)}
           onContextMenu={openContextMenu}
@@ -188,11 +207,17 @@ export function LibraryLayout() {
           scroller so the scrollbar keeps sitting at its edge; the column
           inside it is the same 880px and the same side gutters Knowledge
           uses, so the two surfaces cannot report different widths at the same
-          window width. Top padding is the one measure they deliberately do
-          NOT share: Skills opens on a heading (34px), Knowledge on a tab
-          strip (12px). */}
+          window width.
+
+          Top padding is shared now too. It used to be the one measure the two
+          surfaces deliberately did not share — 34px here against Knowledge's
+          12px — and that difference was the reported bug: every Library page
+          opens on a title bar, and 34px put it 20px below the sidebar's
+          header row sitting right beside it. `HEADER_COLUMN_TOP` is the one
+          offset both columns open on; `HEADER_BAND` is the one height their
+          first rows are. */}
       <main className="min-w-0 flex-1 overflow-y-auto">
-        <div className={cn(DOCUMENT_COLUMN, documentGutters(collapsed), 'pt-[34px]')}>
+        <div className={cn(DOCUMENT_COLUMN, documentGutters(collapsed), HEADER_COLUMN_TOP)}>
           <Outlet />
         </div>
       </main>

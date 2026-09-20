@@ -8,7 +8,7 @@ A rename or a move onto a name that is already taken is refused instead of repla
 
 The destination is now checked in the one place every surface goes through, so the refusal reads the same wherever it is met: "A file named Notes.md already exists in Sales." — or "A folder named …", named for whatever is in the way rather than for what was being moved. Nothing is overwritten and nothing is merged: a folder moved onto an existing folder is refused too. To replace a file, upload a new version by the same name, which is still the path for that.
 
-In the sidebar the rename box shows the sentence under the name you typed and stays open, so the name is there to fix; a refused drag says so under the row it was dropped on and leaves both entries where they were. Neither is a popup any more. The agent's `move_file` and `copy_file` answer the same sentence with a 409 — `copy_file` never overwrote silently before either, and now says why.
+In the sidebar the rename box shows the sentence under the name you typed and stays open, so the name is there to fix; a refused drag says so under the row it was dropped on and leaves both entries where they were. Neither is a popup any more. The agent's `move_file` and `copy_file` answer the same sentence with a 409. For `copy_file` this is a change of behaviour: a copy onto an existing path used to replace that file, and is now refused; to replace a file's content, write it with `write_file`.
 
 The sentence names what is in a folder, so it is only ever said to someone who may write there: both tools settle the write verdict first, and a caller a protected branch denies gets the same refusal whether the name they asked for is taken or free.
 
