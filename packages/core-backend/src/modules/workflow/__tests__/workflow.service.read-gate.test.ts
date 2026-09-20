@@ -8,7 +8,6 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { FileLockService } from '../file-lock.service.js';
 import type { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowEventBus } from '../event-bus.js';
-import { WorkflowHooks } from '../workflow-hooks.js';
 import { WorkflowService } from '../workflow.service.js';
 import type { Database } from '../../database/connection.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
@@ -63,13 +62,31 @@ function makeService(opts: {
     { acquire, get: vi.fn(async () => null) } as unknown as FileLockService,
     {} as PendingCommitsService,
     KB,
+    opts.gate ?? gateThat({ allowed: true, via: 'readable' }).gate,
     new WorkflowEventBus(),
-    undefined,
-    new WorkflowHooks(),
-    opts.gate,
   );
   return { svc, acquire, accessControl };
 }
+
+describe('WorkflowService cannot exist without the gate', () => {
+  it('refuses construction when none is given, whatever the compiler was told', () => {
+    expect(
+      () =>
+        new WorkflowService(
+          {} as unknown as Database,
+          {} as GitService,
+          {} as PullRequestService,
+          {} as IReviewWorkflowService,
+          {} as WorkspaceService,
+          {} as IAccessControl,
+          {} as FileLockService,
+          {} as PendingCommitsService,
+          KB,
+          undefined as unknown as IChangeReadGate,
+        ),
+    ).toThrow(/requires a read-before-write gate/);
+  });
+});
 
 describe('acquireLock asks the read-before-write gate', () => {
   const PATH = `${KB}/KnowledgeBase/Sealed/brief.pdf`;

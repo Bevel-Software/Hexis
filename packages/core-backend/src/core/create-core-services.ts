@@ -572,13 +572,13 @@ export async function createCoreServices(
     fileLockService,
     pendingCommitsService,
     kbDirName,
+    changeGate,
     eventBus,
     fileChangeNotifier,
     // Exposed as `workflowService.hooks` — the SAME instance GitService and
     // the session-ontology gate consult, so enterprise registrations against
     // it reach every hook point.
     workflowHooks,
-    changeGate,
   );
 
   // Join requests: derived entirely from two copies of a plugin's `access.md`

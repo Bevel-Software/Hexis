@@ -291,6 +291,13 @@ export class WorkflowService implements IWorkflowService {
     private readonly pendingCommits: PendingCommitsService,
     private readonly kbDirName: string,
     /**
+     * The read-before-write gate `acquireLock` asks on every branch (see
+     * `access-model/change-gate.ts`). Required, and checked at construction:
+     * a service without it would let a change land where its author cannot
+     * read, so there is no such service.
+     */
+    private readonly changeGate: IChangeReadGate,
+    /**
      * Event bus that fans state changes out to connected SSE sessions.
      * Optional so test harnesses / minimal boots can omit it — emits
      * become no-ops in that case (we null-guard each call). In a real
@@ -314,17 +321,11 @@ export class WorkflowService implements IWorkflowService {
      * exercise hooks) unchanged.
      */
     public readonly hooks: WorkflowHooks = new WorkflowHooks(),
-    /**
-     * The read-before-write gate `acquireLock` asks on every branch (see
-     * `access-model/change-gate.ts`). Optional so test constructions that
-     * exercise other surfaces need not wire it; the composition root always
-     * does, and a boot without it is logged as such at construction, since
-     * it would let a change land where its author cannot read.
-     */
-    private readonly changeGate?: IChangeReadGate,
   ) {
-    if (!changeGate) {
-      lockLog.warn('WorkflowService constructed without a read-before-write gate: acquireLock will not check read access');
+    // The type already requires it; this holds for a caller the compiler did
+    // not see (plain JavaScript, a positional slip in a harness).
+    if (!changeGate || typeof changeGate.assertMayChange !== 'function') {
+      throw new Error('WorkflowService requires a read-before-write gate (IChangeReadGate)');
     }
   }
 
@@ -1043,7 +1044,7 @@ export class WorkflowService implements IWorkflowService {
           opts?.platformRestore,
         );
       }
-      if (via !== 'restore' && this.changeGate) {
+      if (via !== 'restore') {
         await this.changeGate.assertMayChange(workspaceId, user.email, targetPath, 'file');
       }
     }
