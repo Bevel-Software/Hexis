@@ -17,6 +17,7 @@ import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
 import { KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
 import { GroupsToPluginsStep } from '../modules/workspace/startup/steps/groups-to-plugins.step.js';
+import { PluginDisplayNamesStep } from '../modules/workspace/startup/steps/plugin-display-names.step.js';
 import { PluginManifestsStep } from '../modules/workspace/startup/steps/plugin-manifests.step.js';
 import { PersonalSpacesStep } from '../modules/workspace/startup/steps/personal-spaces.step.js';
 import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-files.step.js';
@@ -52,7 +53,7 @@ import { AuthService } from '../modules/auth/auth.service.js';
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
 import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
 import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
-import { AccessControlService } from '../modules/access/access-control.service.js';
+import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
@@ -363,6 +364,11 @@ export async function createCoreServices(
   const kbStartupSteps = [
     new GroupsToPluginsStep(disk),
     new PluginManifestsStep(disk),
+    // After the manifests step: a folder that only just got its manifest got
+    // one the renderer wrote, which already carries the display name — the
+    // backfill then has nothing to do for it. Ordered the other way, the
+    // backfill would walk a tree still missing those manifests.
+    new PluginDisplayNamesStep(disk),
     new PersonalSpacesStep(disk),
     new TemplateFilesStep(disk, extraDirs),
     new RolesYamlStep(disk, [config.adminEmail]),
@@ -481,6 +487,10 @@ export async function createCoreServices(
   // A fresh clone has already fetched every ref — let the git layer skip the
   // redundant implicit `git fetch` on the first `listBranches` after bootstrap.
   workspaceService.setWorkspaceClonedListener((id) => gitService.noteWorkspaceFetched(id));
+  // A branch listing is also the platform's memory of which branch names it
+  // has ever heard of — what tells a deleted branch (410) from one that never
+  // existed (404) when a bootstrap finds no such ref on origin.
+  gitService.setBranchesListedListener((names) => workspaceService.noteBranchesListed(names));
   const pullRequestService = new PullRequestService(
     db,
     workspaceService,
@@ -866,6 +876,7 @@ export async function createCoreServices(
     events: eventBus,
     kbDirName: kbDirName,
     creatorAccess,
+    loadActiveGroups,
   });
   const toolHandlerFactory = createToolHandlerFactory(resolveToolContext);
   const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService);
@@ -943,6 +954,14 @@ export async function createCoreServices(
       publicBackendUrl: config.publicBackendUrl,
       publicFrontendUrl: config.publicFrontendUrl,
       cookieSecure: config.publicBackendUrl.startsWith('https'),
+      // A real sign-in proves the values that sign-in used. Recorded against
+      // those — under their own key — so it says nothing about any saved
+      // since, and cannot overwrite what was recorded about them.
+      onSignedIn: async ({ issuerUrl, clientId, clientSecret }) => {
+        const credentials = { issuerUrl, clientId, clientSecret };
+        if ((await settings.oidcVerificationOf(credentials)) === 'verified') return;
+        await settings.recordOidcVerification('verified', credentials);
+      },
     }),
   );
 

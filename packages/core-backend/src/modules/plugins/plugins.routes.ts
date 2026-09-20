@@ -321,6 +321,7 @@ export function createPluginsRoutes(
           name: g.name,
           displayName: g.displayName,
           folders: g.folders,
+          linkedRoots: g.linkedRoots,
           canRead: member,
           canWrite: manager,
           isOwner: owner,

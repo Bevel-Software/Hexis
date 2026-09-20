@@ -152,36 +152,143 @@ describe('UserAccountsPage', () => {
     expect(deleteAccount).not.toHaveBeenCalled();
   });
 
+  // The one account no admin may give a stored password. Its password is the
+  // environment's: a stored one would not replace that credential, it would add
+  // a second that survives rotating ADMIN_PASSWORD. The service refuses it, so
+  // the page must not offer a button that can only fail — it says why instead.
+  it('offers no password action on the deployment admin row, and says why', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([
+      ALICE,
+      ROOT,
+      { ...ROOT, id: 'u-root-hashed', name: 'Root Hashed', email: 'root2@example.com', hasPassword: true },
+    ]);
+    renderPage();
+    await waitFor(() => screen.getByText('Root'));
+    // Neither label, and `hasPassword` does not pick one for it either: the
+    // deployment admin reads the same with or without a stored hash.
+    for (const email of ['root@example.com', 'root2@example.com']) {
+      expect(
+        screen.queryByRole('button', { name: `Set password for ${email}` }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: `Reset password for ${email}` }),
+      ).not.toBeInTheDocument();
+    }
+    const li = screen.getByText('Root').closest('li');
+    expect(li).toHaveTextContent('Password set in the deployment environment');
+    expect(screen.getByText('Root Hashed').closest('li')).toHaveTextContent(
+      'Password set in the deployment environment',
+    );
+    // Only that one action is withheld — erasure still belongs to another admin.
+    expect(
+      screen.getByRole('button', { name: 'Delete account root@example.com' }),
+    ).toBeInTheDocument();
+    // And the ordinary account beside it is untouched by the rule.
+    expect(
+      screen.getByRole('button', { name: 'Set password for alice@example.com' }),
+    ).toBeInTheDocument();
+  });
+
   it('after Set password the label follows the refreshed facts, no manual reload', async () => {
     // Initial load, then one reload per Set password: each reload reports the
     // hash now stored for the account that was just set.
     vi.mocked(listAccounts)
-      .mockResolvedValueOnce([ALICE, ROOT])
-      .mockResolvedValueOnce([ALICE, { ...ROOT, hasPassword: true }])
-      .mockResolvedValueOnce([{ ...ALICE, hasPassword: true }, { ...ROOT, hasPassword: true }]);
+      .mockResolvedValueOnce([ALICE, BOB])
+      .mockResolvedValueOnce([{ ...ALICE, hasPassword: true }, BOB]);
     renderPage();
     await waitFor(() => screen.getByText('Alice'));
 
-    async function setPassword(email: string) {
-      await userEvent.click(screen.getByRole('button', { name: `Set password for ${email}` }));
-      const dialog = within(screen.getByRole('dialog'));
-      await userEvent.type(dialog.getByLabelText('New password'), 'fresh-password-1');
-      await userEvent.click(dialog.getByRole('button', { name: 'Set password' }));
-      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    }
-
-    // Deployment admin: both facts now true — still the deployment-admin label.
-    await setPassword('root@example.com');
-    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(2));
-    await waitFor(() =>
-      expect(row('Root')).toHaveTextContent(/· Password \(deployment admin\)$/),
-    );
-
-    // Any other account: flips to Password on the refresh alone.
     expect(row('Alice')).toHaveTextContent(/· No password — signs in with single sign-on$/);
-    await setPassword('alice@example.com');
+    await userEvent.click(screen.getByRole('button', { name: 'Set password for alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await userEvent.type(dialog.getByLabelText('New password'), 'fresh-password-1');
+    await userEvent.click(dialog.getByRole('button', { name: 'Set password' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
     await waitFor(() => expect(row('Alice')).toHaveTextContent(/· Password$/));
-    expect(listAccounts).toHaveBeenCalledTimes(3);
+    expect(listAccounts).toHaveBeenCalledTimes(2);
+    // ...and the action offered on that row is now the OTHER one: the same
+    // reload that changed the sign-in method changes what the button does.
+    expect(
+      screen.getByRole('button', { name: 'Reset password for alice@example.com' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Set password for alice@example.com' }),
+    ).not.toBeInTheDocument();
+  });
+
+  // The whole point of the ticket: first setup and replacing a working
+  // credential are different acts, so they are not offered in the same words.
+  it('offers Set password without one and Reset password with one', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB]);
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    expect(
+      screen.getByRole('button', { name: 'Set password for alice@example.com' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Reset password for bob@example.com' }),
+    ).toBeInTheDocument();
+    // Neither label leaks onto the other row.
+    expect(
+      screen.queryByRole('button', { name: 'Reset password for alice@example.com' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Set password for bob@example.com' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('the Set password dialog says the person gains a way to sign in', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB]);
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Set password for alice@example.com' }));
+    const dialog = screen.getByRole('dialog');
+    // Title, explanation and confirm button all say the same act.
+    expect(within(dialog).getByRole('heading', { name: 'Set password' })).toBeInTheDocument();
+    expect(dialog).toHaveTextContent(/from now on they will be able to sign in with this one/);
+    expect(within(dialog).getByRole('button', { name: 'Set password' })).toBeInTheDocument();
+    // Nothing is being taken away, so nothing warns that it is.
+    expect(dialog).not.toHaveTextContent(/stops working/);
+    expect(dialog).not.toHaveTextContent(/Reset it\?/);
+  });
+
+  it('the Reset password dialog says the old password stops working, and asks', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB]);
+    renderPage();
+    await waitFor(() => screen.getByText('Bob'));
+    await userEvent.click(screen.getByRole('button', { name: 'Reset password for bob@example.com' }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('heading', { name: 'Reset password' })).toBeInTheDocument();
+    expect(dialog).toHaveTextContent(/current password stops working immediately/);
+    expect(dialog).toHaveTextContent(/Reset it\?/);
+    expect(within(dialog).getByRole('button', { name: 'Reset password' })).toBeInTheDocument();
+    // It asks before it does anything: the question is on screen and nothing
+    // has been sent until the confirm button is pressed.
+    expect(createAccount).not.toHaveBeenCalled();
+    await userEvent.type(within(dialog).getByLabelText('New password'), 'fresh-password-2');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Reset password' }));
+    await waitFor(() =>
+      expect(createAccount).toHaveBeenCalledWith('bob@example.com', '', 'fresh-password-2'),
+    );
+    // ...and the banner reports the act that was actually performed.
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Password reset for bob@example.com',
+    );
+  });
+
+  it('cancelling a reset leaves the password alone', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB]);
+    renderPage();
+    await waitFor(() => screen.getByText('Bob'));
+    await userEvent.click(screen.getByRole('button', { name: 'Reset password for bob@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await userEvent.type(dialog.getByLabelText('New password'), 'fresh-password-2');
+    await userEvent.click(dialog.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(createAccount).not.toHaveBeenCalled();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(listAccounts).toHaveBeenCalledTimes(1);
   });
 
   it('sets a password for a user WITHOUT touching their name', async () => {

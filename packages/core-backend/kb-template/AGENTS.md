@@ -168,13 +168,40 @@ and `Pipelines/` scaffold an agentic execution layer in some installations.
 They are not part of this template and are not created here; where they exist,
 each carries its own `README.md` describing what belongs in it.
 
+## Where a new file goes
+
+Decide by what the file IS, not by which folder you already hold rights in.
+Write access is not evidence that a file belongs somewhere.
+
+- **Any document goes under `{{knowledgeBaseDir}}/`.** Knowledge, notes,
+  reports, tickets, specifications, plans, meeting minutes — anything written
+  to be read by a person. That is what the root is for, and its shape inside
+  is yours to choose.
+- **A shared skill goes under `{{skillsDir}}/`**, or under
+  `{{pluginsDir}}/<Plugin>/skills/<skill>/SKILL.md` when it belongs to one
+  plugin alone. A person's private skill goes in their own space (`my_plugin`).
+- **Tool manuals, MCP server declarations and manifests go inside a plugin:**
+  `.tool` manuals under `{{pluginsDir}}/<Plugin>/software.bevel.hexis/tools/`,
+  servers in that plugin's `mcp.json`, and `plugin.json` at its root.
+- **A plugin folder never holds a document.** `{{pluginsDir}}/` carries
+  machinery — manifests, tool manuals, server declarations, access rules, and
+  the skills a plugin owns. A ticket or a report written there is filed where
+  nobody will look for it, under rules written for tools.
+- **When the place named does not exist, or nothing fits, ask.** If the user
+  names a folder that is not there, or the file is of a kind this deployment
+  has made no home for, say so and ask where it should go. Do not settle for a
+  folder you happen to be able to write to; a wrong guess is discovered much
+  later than a question.
+
 ## Access control
 
 Access to any path — reading it as much as writing it — is governed by
 `roles.yaml` (who has which role), `groups.yaml` (who is in which group) and
 `access.md` files (who may do what, where).
 
-- **Roles** in `roles.yaml` map a role name to a list of emails. Role names are
+- **Roles** in `roles.yaml` map a role name to a list of members: emails, and
+  `group:<Name>` entries that give the role to a whole group (see *Giving a
+  role to a group* below). Role names are
   case- and whitespace-insensitive (`Admin` = `admin` = `ADMIN`; `Product Team`
   = `product team`). The reserved name `deny` cannot be used, and neither can
   names starting with `role/` or `plugin/` — those spellings are tokens in
@@ -206,10 +233,20 @@ Access to any path — reading it as much as writing it — is governed by
   frontmatter so the plugin can be found and joined, and that admits nobody
   to the plugin itself. A person's own space (`{{pluginsDir}}/personal-<id>/`)
   denies `everyone` outright, so opening a parent folder never opens it.
+  When a group and a role share a name, the bare name means the GROUP;
+  `role/<Name>` (for example `deny role/Reviewer`) always means the role.
 - **Keep an `access.md` body pure YAML**, with any explanation in `#` comments.
   A body that does not parse as YAML naming at least one verb is read in the
   older format instead, where the FRONTMATTER carried the folder's rules — so a
   stray line of prose silently changes which block governs the folder.
+- **The verbs nest.** `owner` sits over `write` and `download`; `write` and
+  `download` each sit over `read` — anyone who may edit a node, or save a copy
+  of it, may also view it. `write` and `download` say nothing about each other.
+  The nesting is GRANT-ONLY: a grant of a higher verb confers the lower ones,
+  but `deny write` or `deny download` says nothing about `read` and never
+  strips a separate read grant. So `download: Ana <ana@x.io>` alone lets Ana
+  open the node as well as download it, and a `deny download` beside an
+  inherited read leaves her able to open it but not save it.
 - **Resolution** walks repo root → file directory, accumulating per-principal
   state. User-level entries trump role-level entries. A role denial removes
   only that role's contribution; it does not undo grants from other roles.
@@ -217,6 +254,15 @@ Access to any path — reading it as much as writing it — is governed by
   never overridable by an `access.md`.
 - **`access.md` files are picked up at any depth**, so a folder can tighten or
   widen what it inherited from its parent.
+- **Per-file rules exist for Markdown notes only.** A note (`.md`, lowercase)
+  may name verbs in its own frontmatter, and those rules apply to that one
+  note. (A `.tool` definition keeps the access verbs in its own YAML the same
+  way.) Every other file (a PDF, a presentation, a spreadsheet, an image, any
+  binary, a `.markdown` or `.MD` file, or binary content saved as `.md`)
+  takes its folder's rules: sharing it on its own is refused with
+  `folder-governs-access`, naming the folder. To change who
+  can open such a file, change its folder's `access.md`, or move the file to a
+  folder whose rules fit.
 
 Rules are enforced at runtime; a malformed `roles.yaml` or `access.md` surfaces
 when access is resolved.
@@ -256,6 +302,76 @@ role.
 3. If your user still needs a role the platform does not have, that is not an
    edit you can make — say so, and leave the decision to an admin.
 
+### Giving a role to a group
+
+A role's member list takes a group as well as individual emails. Write the
+entry as `- group:<Name>`, where `<Name>` is a group in the active group
+source — `synced-groups.yaml` when the deployment syncs groups from an
+identity provider, `groups.yaml` otherwise. Here a `Reviewer` role the
+deployment already has goes to a whole group:
+
+```yaml
+roles:
+  Admin:
+    - dana@example.com
+  Reviewer:
+    - lee@example.com
+    - group:Platform Team
+```
+
+- **Matching.** The name is matched case- and whitespace-insensitively against
+  the active group source, like role names: `group:platform team` and
+  `group:Platform  Team` are the same entry as `group:Platform Team`.
+- **Unknown groups are refused.** An entry naming a group the active source
+  does not declare is a validation error: the write is refused with a 422
+  that names the entry and its role (`'- group:Platfrom Team' under role
+  'Reviewer'`), and nothing is saved. Create the group first, or fix the name.
+- **A group under `Admin` makes every member a full admin** — including anyone
+  added to the group later, and including the right to edit `roles.yaml`
+  itself. Only propose it when your user explicitly asks for exactly that, and
+  say so in the change request. `Admin` must also always keep at least one
+  direct email member; a group entry alone is not enough, so a broken
+  directory can never leave the deployment without an admin.
+- **With direct emails.** Group entries and emails add up: the role's members
+  are everyone listed by email plus everyone currently in each listed group.
+  A person in both is simply a member; adding or removing someone from the
+  group changes the role with no edit to `roles.yaml`.
+- **With denials.** Group members hold the role's grants exactly as if they
+  were listed by email. A denial of the role in an `access.md`
+  (`deny role/Reviewer`) therefore removes the role's contribution for
+  everyone in the group, as it does for the emails. Write the `role/` form:
+  a bare `deny Reviewer` would deny a group named `Reviewer` instead, if one
+  exists. The nearest `access.md` that says
+  anything about the person decides: a person granted by name
+  (`Name <email>`) in the SAME `access.md` as the denial keeps that access,
+  because within one file a person's own entry beats a role entry. A grant by
+  name in a folder further up does not survive a role denial closer to the
+  file.
+
+**Editing `roles.yaml` goes through a change request** unless your user is an
+Admin: only admins may write the file on the default branch. Draft the edit
+on a branch and open a change request for an admin to approve:
+
+1. `create_branch` with `name: dana/platform-team-reviewer` and `branch` set
+   to the default branch.
+2. On that draft, `edit_file` `roles.yaml`, adding the entry under the
+   existing role:
+
+   ```yaml
+   roles:
+     Admin:
+       - dana@example.com
+     Reviewer:
+       - lee@example.com
+       - group:Platform Team   # added
+   ```
+
+3. `commit_change` with `summary: "Give the Reviewer role to the Platform Team group"`.
+4. `open_change_request` with `sourceBranch: dana/platform-team-reviewer`,
+   the default branch as `targetBranch`, and a title such as `Give Reviewer
+   to the Platform Team group`. Tell your user an admin must approve it
+   before the role takes effect.
+
 ### Direct writes vs change requests
 
 File-level write access decides how a change lands on the default branch:
@@ -292,7 +408,7 @@ skills live under `{{skillsDir}}/`, organised by ownership; a skill that belongs
 exactly one plugin may live inside that plugin's `skills/` folder instead.
 Skill names are unique across the whole catalog, whichever home they have.
 The frontmatter names it, declares which tools it may use, and may carry a
-governance record:
+version:
 
 ```yaml
 ---
@@ -301,16 +417,14 @@ description: Drafts the Friday newsletter for review.
 allowed-tools: [slack_post_message]
 metadata:
   version: "1.4.0"
-  owner: "GTM"
-  lifecycle: active
 ---
 ```
 
 The body is the instructions, in plain markdown. `allowed-tools` entries are
 tool names from the `.tool` manuals and MCP servers of the plugins that hold
-the skill. `metadata.version` is semver; `metadata.lifecycle` is `active`,
-`deprecated` (still served, flagged in the library) or `retired` (kept for
-its owners, never distributed to agents).
+the skill. `metadata.version` is semver. Any other `metadata` keys are the
+author's own notes — the catalog carries the file as it is and acts on none
+of them.
 
 **How skills reach agents.** Through the MCP server (`list_skills`,
 `get_skill`), or as native plugins: every user can clone a git remote from

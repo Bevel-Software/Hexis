@@ -158,7 +158,7 @@ export function ToolVarRow({
       // or the owner can rotate the client. The caller needs a way back into
       // consent that doesn't wait for the scope check to notice.
       meta.push(
-        <Button key="reconnect" size="tiny" variant="quiet" disabled={busy} onClick={() => void signIn()}>
+        <Button key="reconnect" size="sm" variant="quiet" disabled={busy} onClick={() => void signIn()}>
           Reconnect
         </Button>,
         // "Signed in", not "Connected": at ROW level all we know is that a token
@@ -171,7 +171,7 @@ export function ToolVarRow({
       );
       if (mayEditClientSecret) {
         meta.push(
-          <Button key="secret" size="tiny" variant="quiet" onClick={() => open('client-secret')}>
+          <Button key="secret" size="sm" variant="quiet" onClick={() => open('client-secret')}>
             Replace client secret
           </Button>,
         );
@@ -196,7 +196,7 @@ export function ToolVarRow({
       description = "The tool owner hasn't finished the sign-in setup yet.";
       if (mayEditClientSecret) {
         meta.push(
-          <Button key="secret" size="tiny" onClick={() => open('client-secret')}>
+          <Button key="secret" size="sm" onClick={() => open('client-secret')}>
             Set client secret
           </Button>,
         );
@@ -218,12 +218,12 @@ export function ToolVarRow({
       );
       if (canWrite) {
         meta.push(
-          <Button key="replace" size="tiny" variant="quiet" onClick={() => open('value')}>
+          <Button key="replace" size="sm" variant="quiet" onClick={() => open('value')}>
             Replace
           </Button>,
           <Button
             key="remove"
-            size="tiny"
+            size="sm"
             variant="quiet"
             disabled={busy}
             onClick={() => void run(() => deleteAdminVar(slug, variable.name))}
@@ -239,7 +239,7 @@ export function ToolVarRow({
       description = 'One value for the whole team';
       if (canWrite) {
         meta.push(
-          <Button key="set" size="tiny" onClick={() => open('value')}>
+          <Button key="set" size="sm" onClick={() => open('value')}>
             Set key
           </Button>,
         );
