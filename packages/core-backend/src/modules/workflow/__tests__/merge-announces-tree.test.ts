@@ -1,5 +1,10 @@
-import { describe, it, expect, vi } from 'vitest';
-import { DEFAULT_BRANCH, type WorkflowEvent } from '@bevel-software/platform-shared';
+import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest';
+import {
+  DEFAULT_BRANCH,
+  branchModelFromEnv,
+  configureBranchModel,
+  type WorkflowEvent,
+} from '@bevel-software/platform-shared';
 
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
@@ -38,12 +43,36 @@ const KB_DIR = 'knowledge-base';
 const HEAD = 'someone/add-a-tool';
 const USER = { id: 'u1', email: 'someone@x.com', name: 'Someone' };
 
+/**
+ * A default branch this deployment chose, pinned for the whole file.
+ *
+ * `DEFAULT_BRANCH` is a binding a deployment configures at boot (the suite's
+ * `test-setup.ts` applies the environment's), so reading it here would make
+ * these assertions agree with whatever that environment happens to say — and a
+ * regression that hardcoded a branch name would still pass wherever the two
+ * coincided. Deliberately NOT `main`, so `main` written into the emit would
+ * fail here rather than slip through.
+ */
+const TRUNK = 'trunk';
+
+beforeAll(() => {
+  configureBranchModel({ defaultBranch: TRUNK, protectedBranches: [TRUNK] });
+});
+afterAll(() => {
+  // Back to what the suite booted with: the binding is process-wide, and a
+  // file that leaves its own branch model behind changes the meaning of
+  // anything that runs after it in the same worker.
+  configureBranchModel(branchModelFromEnv());
+});
+
 function noopAccessControl(): IAccessControl {
   return { invalidate: vi.fn() } as unknown as IAccessControl;
 }
 
-function makeSvc(opts: { base?: string; pullTreeChanged?: boolean; mergeThrows?: Error } = {}) {
-  const base = opts.base ?? DEFAULT_BRANCH;
+function makeSvc(
+  opts: { base?: string; pullTreeChanged?: boolean; mergeThrows?: Error; pullThrows?: Error } = {},
+) {
+  const base = opts.base ?? TRUNK;
   const events: WorkflowEvent[] = [];
   const bus = {
     emit: vi.fn((payload: WorkflowEvent) => {
@@ -62,7 +91,9 @@ function makeSvc(opts: { base?: string; pullTreeChanged?: boolean; mergeThrows?:
     fetch: vi.fn().mockResolvedValue(undefined),
     // The real shape after a local merge + push: the clone is already at
     // origin, so the pull moves nothing.
-    pull: vi.fn().mockResolvedValue({ treeChanged: opts.pullTreeChanged ?? false }),
+    pull: opts.pullThrows
+      ? vi.fn().mockRejectedValue(opts.pullThrows)
+      : vi.fn().mockResolvedValue({ treeChanged: opts.pullTreeChanged ?? false }),
     readFileAtRef: vi.fn().mockResolvedValue(null), // no roles.yaml either side
     commitFile: vi.fn(),
     push: vi.fn(),
@@ -110,7 +141,30 @@ describe('applying a change request announces the tree it rewrote', () => {
     // the workspace the merge rewrote — so the tool and skill catalogs are
     // dropped before the next `list_tools` reads them.
     expect(treeEvents()).toEqual([
-      { kind: 'fs-tree-changed', workspaceId: encodeURIComponent(DEFAULT_BRANCH), branch: DEFAULT_BRANCH },
+      { kind: 'fs-tree-changed', workspaceId: encodeURIComponent(TRUNK), branch: TRUNK },
+    ]);
+    // The deployment's own default branch, read from the binding rather than
+    // written into the emit: these two are the same thing, and a hardcoded
+    // branch name would make them differ.
+    expect(DEFAULT_BRANCH).toBe(TRUNK);
+  });
+
+  /**
+   * The pull FAILING does not make the announcement a lie. `mergePr` runs
+   * `git merge --no-ff` in the target branch's OWN workspace and pushes from
+   * there, so the merged bytes are on that disk before the pull is attempted —
+   * a pull that then fails leaves the tree holding the merge, which is
+   * precisely what the catalogs have to re-scan. (The pull is there for the
+   * rarer case of someone else's commits, and its failure is already
+   * best-effort: the merge has landed on origin either way.)
+   */
+  it('announces even when the post-merge pull fails', async () => {
+    const { merge, treeEvents } = makeSvc({ pullThrows: new Error('origin unreachable') });
+
+    await merge();
+
+    expect(treeEvents()).toEqual([
+      { kind: 'fs-tree-changed', workspaceId: encodeURIComponent(TRUNK), branch: TRUNK },
     ]);
   });
 

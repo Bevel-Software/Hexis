@@ -3034,6 +3034,17 @@ export class WorkflowService implements IWorkflowService {
     // clone WAS behind (someone else pushed between the merge and the pull),
     // the pull announced the same tree and a second event buys a duplicate
     // re-scan and a duplicate browser refetch.
+    //
+    // A pull that FAILED is still announced, and that is not a guess about a
+    // tree nobody reconciled. The merge ran in THIS workspace — `mergePr`
+    // resolves the target branch's own workspace and runs `git merge --no-ff`
+    // there before pushing — so the merged bytes were on that disk before the
+    // pull was attempted, and a pull that could not run cannot un-merge them.
+    // (`baseBranch` is the branch the merge acted on: `preserveBaseRolesYaml`
+    // refuses the merge outright if it disagrees with the change request's own
+    // base, so the workspace named here is the one that was rewritten.) The
+    // failure the pull reports is about OTHER people's commits not arriving,
+    // which leaves the catalogs no staler than they were.
     if (!announced && targetWorkspaceId && baseBranch === DEFAULT_BRANCH) {
       this.events?.emit({ kind: 'fs-tree-changed', workspaceId: targetWorkspaceId, branch: DEFAULT_BRANCH });
     }

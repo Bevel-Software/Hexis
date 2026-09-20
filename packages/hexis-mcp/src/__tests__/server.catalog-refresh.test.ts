@@ -430,6 +430,25 @@ describe('a manual added on the deployment reaches an already-connected client',
     }
   });
 
+  /**
+   * A heartbeat longer than Node's timers can hold must not become a hot loop.
+   * `setInterval` does not clamp a delay above 2^31-1 ms — it wraps, and fires
+   * after ONE millisecond — so an embedding host asking to check "about once a
+   * month" would hammer its deployment with digest reads forever.
+   */
+  it('does not hammer the deployment when asked for an enormous heartbeat', { timeout: 60_000 }, async () => {
+    commit(['ping']);
+    const s = await start({ heartbeatMs: 30 * 24 * 60 * 60 * 1_000 }); // 30 days
+    try {
+      const atStartup = revisionReads.length;
+      await settle(400);
+      // A wrapped timer would have run hundreds of checks by now.
+      expect(revisionReads.length).toBe(atStartup);
+    } finally {
+      await s.shutdown();
+    }
+  });
+
   /** A heartbeat must not outlive the server it belongs to. */
   it('stops its heartbeat at shutdown', { timeout: 60_000 }, async () => {
     commit(['ping']);

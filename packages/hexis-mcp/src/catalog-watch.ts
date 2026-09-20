@@ -87,9 +87,12 @@ export interface CatalogCheck {
    * can await it, and a caller that does not (a finished tool call) can let it
    * run. Never rejects: every failure is logged and carried to the next check.
    *
-   * Throttled: a check within {@link CATALOG_CHECK_MIN_INTERVAL_MS} of the last
-   * completed one, or while one is already running, joins that one instead of
-   * asking again.
+   * Throttled from the last check's START, not its finish: a call within
+   * {@link CATALOG_CHECK_MIN_INTERVAL_MS} of the last check STARTING, or while
+   * one is still running, joins that check instead of asking again. Counting
+   * from the start keeps the window a cadence a budget can be computed from —
+   * a refresh runs inside a check, so counting from the finish would add the
+   * re-registration's seconds to every window.
    */
   check(): Promise<void>;
   stop(): void;

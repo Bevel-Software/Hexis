@@ -76,6 +76,14 @@ const SERVER_NAME = 'hexis-mcp';
 export const DISCOVERY_SHUTDOWN_GRACE_MS = 5_000;
 
 /**
+ * The longest delay Node's timers can hold (2^31-1 ms, ~24.9 days). A larger
+ * one is not clamped by the runtime but WRAPS — `setInterval` fires it after a
+ * single millisecond — so anything built from caller-supplied milliseconds is
+ * capped here first.
+ */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/**
  * A timer that does not, by existing, keep this process alive. The bounded
  * wait below races a promise against one of these, and the loser's timer
  * would otherwise hold the event loop open for its full delay after teardown
@@ -903,7 +911,16 @@ export async function createHexisMcpServer(
     // to exit. Not awaited, and `check()` never rejects, so a tick cannot
     // surface as an unhandled rejection. The checker's own throttle means a
     // tick landing next to a busy connection's activity check costs nothing.
-    const heartbeatMs = options.catalogCheck?.heartbeatMs ?? CATALOG_CHECK_INTERVAL_MS;
+    //
+    // CLAMPED to Node's timer ceiling. A delay above 2^31-1 ms does not become
+    // a long timer — it overflows and fires after ONE millisecond, so an
+    // embedding host asking for "check once a day" would get a hot loop
+    // hammering the deployment. Clamped rather than refused: the caller asked
+    // for "hardly ever", and ~24.9 days is the longest this runtime can say.
+    const heartbeatMs = Math.min(
+      options.catalogCheck?.heartbeatMs ?? CATALOG_CHECK_INTERVAL_MS,
+      MAX_TIMER_MS,
+    );
     if (heartbeatMs > 0) {
       catalogHeartbeat = setInterval(() => {
         if (catalogCheck && !closed) void catalogCheck.check();
