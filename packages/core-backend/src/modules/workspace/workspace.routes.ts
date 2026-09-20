@@ -17,7 +17,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
-import type { WorkspaceService } from './workspace.service.js';
+import { EntryExistsError, type WorkspaceService } from './workspace.service.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { canReadWorkspacePath, resolveReadableMap, toKbRelative } from '../access-model/kb-read-filter.js';
@@ -134,6 +134,43 @@ export function createWorkspaceRoutes(
   }
 
   /**
+   * Whether a failed op is one that provably touched no bytes, so its lock
+   * may be released with the disk and the commit queue left exactly as they
+   * are (`releaseLockUntouched`) rather than reset to HEAD.
+   *
+   * This is not tidiness. A release that discards resets the PATH, not "this
+   * request's changes" — git has no notion of the latter — so when the path
+   * holds a landed save whose commit is still queued (commits run out of band
+   * in the pending-commits worker), the discard destroys that save. Two moves
+   * racing onto the same free name are exactly that situation: the winner
+   * lands and enqueues, the loser then takes the same destination lock, is
+   * refused because the name is now taken, and its unwind would throw the
+   * winner's file away. One refusal, two lost files.
+   *
+   * A destination-taken refusal qualifies because nothing it can do writes:
+   * the preflight throws before the move is attempted, and the move's own
+   * no-clobber calls (`link`, `mkdir`, `open` with `O_EXCL` — see
+   * `shared/rename-no-replace.ts`) fail without creating anything, with the
+   * folder claim rolling itself back. `LockingFilesystem.withLock` draws the
+   * same line for its `CheckRefusal`, in the same words: a refusal that wrote
+   * nothing releases untouched.
+   *
+   * Deliberately a closed list of refusal TYPES rather than a guess at what
+   * an op did. An unrecognised failure keeps the discarding release, which is
+   * the fail-closed side: at worst it throws away bytes nobody promised to
+   * keep, where the other mistake throws away bytes someone was told were
+   * saved.
+   *
+   * One type, not two: the move's lower-level `DestinationTakenError` never
+   * reaches this layer — `moveEntry` converts it into `EntryExistsError`, the
+   * refusal this surface answers 409 with — so recognising it here as well
+   * would be a branch nothing can take.
+   */
+  function wroteNothing(err: unknown): boolean {
+    return err instanceof EntryExistsError;
+  }
+
+  /**
    * Acquire the workflow lock for `(workspaceId, branch, targetPath)`, run
    * `op`, then release. Release commits + pushes the file as a one-file
    * change attributed to `user` — same pipeline the lock-aware filesystem
@@ -205,16 +242,22 @@ export function createWorkspaceRoutes(
       err.status = 409;
       throw err;
     }
-    // Two release modes, depending on whether the op succeeded:
+    // Three release modes, the same three `LockingFilesystem.withLock` uses,
+    // depending on what the op did:
     //
-    //   - op() FAILED  → drop the lock WITHOUT enqueueing a commit. The
-    //     op may have written partial bytes to disk before throwing
-    //     (write that errored mid-stream, etc.). A normal `releaseLock`
-    //     would enqueue a commit for whatever's on disk and the worker
-    //     would silently persist that partial state as a real committed
-    //     change. `releaseLockNoCommit` drops the lock row only —
-    //     partial disk state stays where it is but never becomes a
-    //     committed change with the user's name on it.
+    //   - op() FAILED having possibly WRITTEN → drop the lock WITHOUT
+    //     enqueueing a commit. The op may have written partial bytes to disk
+    //     before throwing (write that errored mid-stream, etc.). A normal
+    //     `releaseLock` would enqueue a commit for whatever's on disk and the
+    //     worker would silently persist that partial state as a real
+    //     committed change. `releaseLockNoCommit` resets the path to HEAD, so
+    //     partial bytes never become a committed change with the user's name
+    //     on it.
+    //
+    //   - op() FAILED having written NOTHING → `releaseLockUntouched`: drop
+    //     the lock row and leave both the disk and the commit queue exactly
+    //     as they are. See `wroteNothing` for which refusals qualify and why
+    //     the distinction is load-bearing rather than tidy.
     //
     //   - op() SUCCEEDED → release. The new releaseLock enqueues a
     //     pending-commit row (the actual `commitFile + push` runs out
@@ -228,10 +271,18 @@ export function createWorkspaceRoutes(
       result = await op();
       opSucceeded = true;
     } catch (err) {
+      const untouched = wroteNothing(err);
       try {
-        await workflowService.releaseLockNoCommit(workspaceId, branch, targetPath, user);
+        if (untouched) {
+          await workflowService.releaseLockUntouched(workspaceId, branch, targetPath, user);
+        } else {
+          await workflowService.releaseLockNoCommit(workspaceId, branch, targetPath, user);
+        }
       } catch (releaseErr) {
-        log.warn(`releaseLockNoCommit failed after op error for "${targetPath}":`, { err: releaseErr });
+        log.warn(
+          `${untouched ? 'releaseLockUntouched' : 'releaseLockNoCommit'} failed after op error for "${targetPath}":`,
+          { err: releaseErr },
+        );
       }
       throw err;
     }
