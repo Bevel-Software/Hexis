@@ -8,6 +8,7 @@ import {
   folderRequestLine,
   moveQuestion,
   moveSentence,
+  withdrawSentence,
   type AccessChange,
 } from '../utils/treeConfirm';
 
@@ -17,6 +18,10 @@ import {
  * and a drop moved a file into another folder without a word about what that
  * means — access is attached to folders, so every cross-folder move is an
  * access change.
+ *
+ * A third verb joined them: Withdraw, on a proposed row, which cancels the
+ * change request the row stands for — destructive in the same way, and asked
+ * in the same place rather than in a confirm() the tree has nowhere else.
  *
  * One request is open at a time, held by `TreeChrome`; the rows only describe
  * what they are about to do and hand over the operation to run on Confirm.
@@ -63,6 +68,25 @@ export type TreeConfirmRequest =
       /** How the destination reads in the sentence — the drop target's row name. */
       destinationLabel: string;
       /** Today's move, unchanged. */
+      run(): void | Promise<void>;
+      returnFocusTo(): HTMLElement | null;
+      focusAfterRun(): HTMLElement | null;
+    }
+  | {
+      /**
+       * The author takes their own suggestion back — the same cancel the file
+       * page's change box calls its Withdraw, reached from the proposed row
+       * in the sidebar instead. Only ever asked for a request the caller
+       * authored; an owner's "no" on someone else's is Decline, in the dialog.
+       */
+      kind: 'withdraw';
+      /** The request being cancelled — withdrawal is per request, not per file. */
+      crNumber: number;
+      /**
+       * Every file the request carries. One row was right-clicked, but the
+       * whole request goes, so the sentence counts them.
+       */
+      files: string[];
       run(): void | Promise<void>;
       returnFocusTo(): HTMLElement | null;
       focusAfterRun(): HTMLElement | null;
@@ -146,7 +170,9 @@ export function TreeActionConfirmDialog({
   }, [onConfirmRef]);
 
   const isDelete = request.kind === 'delete';
-  const name = isDelete ? request.entry.name : (request.sourcePath.split('/').pop() ?? '');
+  const isWithdraw = request.kind === 'withdraw';
+  const isMove = request.kind === 'move';
+  const name = isMove ? (request.sourcePath.split('/').pop() ?? '') : '';
   const requests = isDelete && proposals.status === 'ready' ? proposals.requests : [];
   if (isDelete && requests.length > 0) {
     // The three-way question: this branch only, or its proposals too. The
@@ -215,7 +241,7 @@ export function TreeActionConfirmDialog({
       open
       size="sm"
       onClose={onCancel}
-      title={isDelete ? 'Delete' : 'Move'}
+      title={isDelete ? 'Delete' : isWithdraw ? 'Withdraw suggestion' : 'Move'}
       footer={
         <>
           <Button size="sm" onClick={onCancel}>
@@ -224,30 +250,34 @@ export function TreeActionConfirmDialog({
           <Button
             ref={confirmRef}
             size="sm"
-            variant={isDelete ? 'danger' : 'primary'}
+            // A withdraw takes the request away from the owners reviewing it:
+            // the same danger tone a delete gets, for the same reason.
+            variant={isDelete || isWithdraw ? 'danger' : 'primary'}
             disabled={checking}
             onClick={() => onConfirm('folder-only')}
           >
-            {isDelete ? 'Delete' : 'Move'}
+            {isDelete ? 'Delete' : isWithdraw ? 'Withdraw' : 'Move'}
           </Button>
         </>
       }
     >
       <p className="text-detail text-ink">
-        {isDelete
+        {request.kind === 'delete'
           ? deleteSentence(request.entry, request.isProposed)
-          : moveHeadline(name, request.destinationLabel, accessChange)}
+          : request.kind === 'withdraw'
+            ? withdrawSentence(request.files)
+            : moveHeadline(name, request.destinationLabel, accessChange)}
       </p>
-      {!isDelete && accessChange.status === 'loading' && (
+      {isMove && accessChange.status === 'loading' && (
         <p className="mt-2 text-detail text-ink-muted">Working out who this changes access for…</p>
       )}
-      {!isDelete && accessChange.status === 'ready' && (
+      {isMove && accessChange.status === 'ready' && (
         <>
           <AccessBlock title="Will lose access:" lines={accessChange.lose} />
           <AccessBlock title="Will gain access:" lines={accessChange.gain} />
         </>
       )}
-      {!isDelete && accessChange.status === 'failed' && (
+      {isMove && accessChange.status === 'failed' && (
         <p role="note" className="mt-2 text-detail text-ink-muted">
           {ACCESS_CHANGE_UNKNOWN}
         </p>

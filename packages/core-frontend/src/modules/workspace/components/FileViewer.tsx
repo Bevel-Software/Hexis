@@ -1151,56 +1151,67 @@ export function FileViewer() {
           the Propose changes affordance already says what they CAN do, and the
           detailed who-may-edit copy still appears where it answers a question
           (the disabled-save tooltip). */}
-      {/* ONE column holds the tabs, the title and the text at the same width,
+      {/* ONE column holds the title, the tabs and the text at the same width,
           so they share an edge and the page reads as a single centred block
-          (proto:700-705). `editorContainerRef` goes to `scrollRef` because the
-          shell is now the element that scrolls — the capture-phase listener
-          bound to it is the file lock's only activity signal for a reader. */}
+          (proto:700-705). The prototype puts the tab strip above the title;
+          this does not, because the title bar has to open the column to hold
+          its line with the sidebar's header row — see `KbDocumentShell.header`.
+          `editorContainerRef` goes to `scrollRef` because the shell is the
+          element that scrolls — the capture-phase listener bound to it is the
+          file lock's only activity signal for a reader. */}
       <KbDocumentShell
-              roomy={explorerHidden}
+        roomy={explorerHidden}
         variant={shellVariant}
         scrollRef={editorContainerRef}
+        // The document names itself, and its actions sit beside its name.
+        // Everything the deleted 40px strip carried is here — the three chips
+        // as Badges, Edit with the same handlers and the same lock semantics,
+        // the copy-link that used to be an icon in the corner — plus Share and
+        // the overflow the prototype puts on the page.
+        //
+        // It goes in the SLOT, not in the children, because the slot is what
+        // makes it the column's first row — see `KbDocumentShell.header`. It
+        // was the first child once, under `<EditorTabs />`, and a 36px tab
+        // strip plus its 18px gap pushed the file page's title bar 54px below
+        // the sidebar header row it lines up with.
+        header={
+          <KbPageHeader
+            path={openFilePath}
+            canWrite={access.canWrite}
+            editMode={editMode}
+            entering={isEnteringEdit}
+            proposeMode={proposeMode}
+            proposalBusy={proposalBusy}
+            onPropose={handleEnterPropose}
+            onSendProposal={() => void handleSendProposal()}
+            onDiscardProposal={handleDiscardProposal}
+            // `viewOnly` rides the same flag: it tells the header "the write
+            // action is not yours to render" — and the pane bar renders none.
+            writeActionInPane={shellVariant === 'prose' || viewOnly}
+            // Prose gets a pane card, and the card's bar carries Version history
+            // beside Edit. Not `viewOnly`: a view-only full-bleed file has no bar.
+            historyInPane={shellVariant === 'prose'}
+            historyButtonRef={headerClockRef}
+            titleRef={titleRef}
+            lockedBy={fileLock.externalLock?.holderName ?? null}
+            historyAvailable={historyAvailable}
+            isDirty={isManualDirty}
+            waitingOnAgentUpdate={waitingOnAgentUpdate}
+            isReviewingPending={isReviewingPending}
+            activeTab={activeTab}
+            onEdit={handleEnterEditMode}
+            onDone={handleExitEditMode}
+            // While the log is open the column is full-bleed, so the header
+            // carries the clock (pressed). A second click on a pressed clock is a
+            // request to put the document back, not to open the log again.
+            onOpenHistory={activeTab === 'history' ? backToDocument : openHistory}
+            onShare={handleShare}
+            onCopyPage={canCopyPage ? handleCopyPage : undefined}
+            onCopyLink={handleCopyLink}
+          />
+        }
       >
       <EditorTabs />
-      {/* The document names itself, and its actions sit beside its name.
-          Everything the deleted 40px strip carried is here — the three chips
-          as Badges, Edit with the same handlers and the same lock semantics,
-          the copy-link that used to be an icon in the corner — plus Share and
-          the overflow the prototype puts on the page. */}
-      <KbPageHeader
-        path={openFilePath}
-        canWrite={access.canWrite}
-        editMode={editMode}
-        entering={isEnteringEdit}
-        proposeMode={proposeMode}
-        proposalBusy={proposalBusy}
-        onPropose={handleEnterPropose}
-        onSendProposal={() => void handleSendProposal()}
-        onDiscardProposal={handleDiscardProposal}
-        // `viewOnly` rides the same flag: it tells the header "the write
-        // action is not yours to render" — and the pane bar renders none.
-        writeActionInPane={shellVariant === 'prose' || viewOnly}
-        // Prose gets a pane card, and the card's bar carries Version history
-        // beside Edit. Not `viewOnly`: a view-only full-bleed file has no bar.
-        historyInPane={shellVariant === 'prose'}
-        historyButtonRef={headerClockRef}
-        titleRef={titleRef}
-        lockedBy={fileLock.externalLock?.holderName ?? null}
-        historyAvailable={historyAvailable}
-        isDirty={isManualDirty}
-        waitingOnAgentUpdate={waitingOnAgentUpdate}
-        isReviewingPending={isReviewingPending}
-        activeTab={activeTab}
-        onEdit={handleEnterEditMode}
-        onDone={handleExitEditMode}
-        // While the log is open the column is full-bleed, so the header
-        // carries the clock (pressed). A second click on a pressed clock is a
-        // request to put the document back, not to open the log again.
-        onOpenHistory={activeTab === 'history' ? backToDocument : openHistory}
-        onShare={handleShare}
-        onCopyPage={canCopyPage ? handleCopyPage : undefined}
-        onCopyLink={handleCopyLink}
-      />
 
       {/* Content stopped being a tab: the document IS the page, and history
           and comparison are two things you can go and look at. Each renders in

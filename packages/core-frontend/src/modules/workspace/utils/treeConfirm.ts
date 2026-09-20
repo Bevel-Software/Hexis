@@ -231,3 +231,17 @@ export function moveWarnings(opts: {
   }
   return warnings;
 }
+
+/**
+ * What a withdraw asks before it takes a suggestion back.
+ *
+ * Withdrawal is per REQUEST, never per file: a multi-file drop became ONE
+ * change request, and cancelling it cancels all of it. The user right-clicked
+ * a single row, so the count is said out loud — learning afterwards that two
+ * other files went with it is the one outcome this sentence exists to prevent.
+ */
+export function withdrawSentence(files: string[]): string {
+  if (files.length > 1) return `This withdraws the whole suggestion: ${files.length} files`;
+  const name = files[0]?.split('/').pop();
+  return name ? `Withdraw ${name}?` : 'Withdraw this suggestion?';
+}

@@ -24,8 +24,9 @@ import {
   Pin,
   PinOff,
   Users,
+  Undo2,
 } from 'lucide-react';
-import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
+import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
   isProtectedBranch,
   validateFilename,
@@ -36,9 +37,15 @@ import {
   AGENTS_DIR,
   PIPELINES_DIR,
 } from '@bevel-software/platform-shared';
-import { useWorkspace } from '../state/workspace.context';
+import {
+  KNOWLEDGE_UPLOAD_TARGET,
+  useWorkspace,
+  type UploadInput,
+  type UploadTarget,
+} from '../state/workspace.context';
 import { rootAnchoredPath } from '../utils/pasteLink';
 import { findKbRoot, KB_ROOT_DIRS, pathExistsInTree, treeHasVisibleEntries } from '../utils/fileTree';
+import { uploadErrorNextStep } from '../utils/uploadError';
 import { useMergedWorkspaceTree } from '../hooks/useMergedWorkspaceTree';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
 import { PR_STALE_EVENT, SUGGESTIONS_RETRACTED_EVENT } from '../../../core/events';
@@ -46,8 +53,10 @@ import {
   listChangeRequestsUnderFolder,
   removeFolderFromChangeRequests,
 } from '../../change-requests/services/change-requests.api';
+import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
 import { snapshotEntries } from '../utils/readDroppedEntries';
-import { useFileNav } from '../routing/kb-routes';
+import { useSearchParams } from 'react-router-dom';
+import { CR_FILE_PARAM, CR_PARAM, useFileNav } from '../routing/kb-routes';
 import { rawFileUrl } from '../services/workspace.api';
 import { downloadViaBlob } from './renderers/downloadFile';
 import { cn } from '../../../lib/utils';
@@ -66,6 +75,13 @@ import {
   type TreeConfirmRequest,
 } from './TreeActionConfirm';
 import { ACCESS_LOOKUP_TIMEOUT_MS, accessChangeOf, moveWarnings } from '../utils/treeConfirm';
+import { UnreadableCreateDialog } from './UnreadableCreateConfirm';
+import {
+  UnreadableCreateContext,
+  useUnreadableCreateGate,
+  useUnreadableCreateGateState,
+} from '../state/unreadable-create.context';
+import { unreadableAmong, unreadableNames } from '../utils/unreadableCreate';
 
 /**
  * The tree row — the prototype's `.trow` (proto:684-693), and token for token
@@ -195,10 +211,35 @@ interface SuggestionsController {
   crFor(path: string): number | null;
   /** Open the shared change-request dialog on the request this path belongs to. */
   open(path: string, crNumber: number): void;
+  /**
+   * The caller AUTHORED this request, so they may take it back.
+   *
+   * Every suggestion row is the caller's own today — the map they are
+   * synthesized from is `/mine`. The menu asks anyway, because the answer is
+   * what the offer means: an owner looking at someone else's proposal must
+   * never be shown a Withdraw (their "no" is Decline, in the dialog), and
+   * this predicate is already right for the day those rows appear here.
+   */
+  mine(crNumber: number): boolean;
+  /**
+   * Every file the request carries — a multi-file drop is ONE request, and
+   * withdrawing it withdraws all of them, which the confirmation says out loud.
+   * Empty when the request has not arrived in the shared list yet.
+   */
+  filesOf(path: string, crNumber: number): string[];
+  /**
+   * Cancel the request down the author-cancel path — the same call the file
+   * page's change box makes — and tell the app its request list changed, so
+   * the rows go without a reload.
+   */
+  withdraw(crNumber: number): Promise<void>;
 }
 const SuggestionsContext = createContext<SuggestionsController>({
   crFor: () => null,
   open: () => {},
+  mine: () => false,
+  filesOf: () => [],
+  withdraw: async () => {},
 });
 const useSuggestions = () => useContext(SuggestionsContext);
 
@@ -234,6 +275,19 @@ export interface TreeMenuItem {
   onSelect(): void;
 }
 const TreeNavContext = createContext<TreeNav>({ activePath: null, open: () => {} });
+
+/**
+ * Which tree this is, for the upload banners — see `UploadTarget`. Every drop
+ * inside a `TreeChrome` carries it into `dispatchUpload`, and the
+ * `UploadNotices` inside the same chrome renders only the banners that come
+ * back with it. One page can hold two of these trees (the Library sidebar
+ * holds `Skills/` and `Plugins/`); before they were told apart, one drop
+ * painted its notice in both.
+ */
+const UploadTargetContext = createContext<UploadTarget>(KNOWLEDGE_UPLOAD_TARGET);
+
+/** The tree the surrounding `TreeChrome` is, for a drop or a banner. */
+const useUploadTarget = () => useContext(UploadTargetContext);
 
 /**
  * Ask before a delete or a move — see `TreeActionConfirm`. `TreeChrome` holds
@@ -338,6 +392,7 @@ function ContextMenu({
   onCreateFolder,
   onRename,
   onDownload,
+  onWithdraw,
   returnFocusTo,
   deletable = true,
   extraItems = [],
@@ -360,6 +415,13 @@ function ContextMenu({
   onCreateFolder?: () => void;
   onRename?: () => void;
   onDownload?: () => void;
+  /**
+   * Take this suggestion back. Supplied ONLY by a proposed row whose change
+   * request the caller authored — its absence is what keeps Withdraw off an
+   * owner's view of someone else's proposal, the same way `onRename`'s
+   * absence keeps Rename off a row that cannot be renamed.
+   */
+  onWithdraw?: () => void;
   /** The surface's own items for this entry — see `TreeNav.menuItems`. */
   extraItems?: TreeMenuItem[];
   /** The row this menu was opened from — Escape hands focus back to it. */
@@ -597,6 +659,14 @@ function ContextMenu({
           <span className="flex items-center gap-2"><Trash2 size={14} />Delete</span>
         </MenuItem>
       )}
+      {onWithdraw && (
+        // Last, in danger tone, exactly where Delete sits on a row that has
+        // one: it is the same shape of act — what the row points at stops
+        // existing — and a proposed row never has a Delete to collide with.
+        <MenuItem role="menuitem" tone="danger" onClick={() => { onWithdraw(); onClose(); }}>
+          <span className="flex items-center gap-2"><Undo2 size={14} />Withdraw suggestion</span>
+        </MenuItem>
+      )}
     </MenuPanel>
     </div>
   );
@@ -747,9 +817,15 @@ export function FileTreeNode({
   const { createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, pendingUploads } = useWorkspace();
   const nav = useTreeNav();
   const confirm = useTreeConfirm();
+  // Which tree this row belongs to, so an upload's banners land here and not
+  // in the other tree on the same page.
+  const uploadTarget = useUploadTarget();
   // One shared fetch behind this — see `OpenChangeRequestsProvider`.
   const openChangeRequests = useOpenChangeRequests();
   const suggestions = useSuggestions();
+  // Asks before anything that would land invisible here — see
+  // `UnreadableCreateConfirm`. Every create/upload path below goes through it.
+  const unreadableCreateGate = useUnreadableCreateGate();
 
   /**
    * A refused download, said in place under the row. Never an `alert()`: the
@@ -825,14 +901,38 @@ export function FileTreeNode({
     rootFolderInputRef.current?.click();
   }, []);
 
+  /**
+   * Every upload into this row goes through here: the batch is shown to the
+   * read gate FIRST, and a Cancel uploads nothing at all. One call per batch,
+   * so a fifty-file drop asks one question.
+   */
+  const uploadAfterGate = useCallback(
+    (input: UploadInput, targetDir: string) => {
+      const invisible = unreadableNames(input);
+      // Nothing here could be hidden — dispatch on this very tick, exactly as
+      // the drop handlers always did. Only a batch with something to ask
+      // about waits for an answer.
+      if (invisible.length === 0) {
+        void dispatchUpload(input, targetDir, uploadTarget);
+        return;
+      }
+      void (async () => {
+        if (await unreadableCreateGate(targetDir, invisible)) {
+          await dispatchUpload(input, targetDir, uploadTarget);
+        }
+      })();
+    },
+    [unreadableCreateGate, dispatchUpload, uploadTarget],
+  );
+
   // Resetting `value` after dispatch lets users re-select the same file and
   // still get an `onChange` event the second time around.
   const pickTarget = entry.relativePath === '.' ? '' : entry.relativePath;
   const handleRootFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     e.target.value = '';
-    if (files.length > 0) dispatchUpload({ kind: 'files', files }, pickTarget);
-  }, [dispatchUpload, pickTarget]);
+    if (files.length > 0) uploadAfterGate({ kind: 'files', files }, pickTarget);
+  }, [uploadAfterGate, pickTarget]);
 
   // Folder picker: each File carries a `webkitRelativePath` like
   // "foldername/sub/file.txt" — we feed those straight into the upload
@@ -848,8 +948,8 @@ export function FileTreeNode({
       file,
       relativePath: file.webkitRelativePath || file.name,
     }));
-    dispatchUpload({ kind: 'paths', items }, pickTarget);
-  }, [dispatchUpload, pickTarget]);
+    uploadAfterGate({ kind: 'paths', items }, pickTarget);
+  }, [uploadAfterGate, pickTarget]);
   const [dragging, setDragging] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
@@ -985,15 +1085,15 @@ export function FileTreeNode({
       const targetDir = dir === '.' ? '' : dir;
       const entries = e.dataTransfer.items ? snapshotEntries(e.dataTransfer.items) : [];
       if (entries.length > 0) {
-        dispatchUpload({ kind: 'items', entries }, targetDir);
+        uploadAfterGate({ kind: 'items', entries }, targetDir);
         return;
       }
       // Fallback for older browsers / non-entry drops: use the flat FileList.
       const files = Array.from(e.dataTransfer.files);
       if (files.length === 0) return;
-      dispatchUpload({ kind: 'files', files }, targetDir);
+      uploadAfterGate({ kind: 'files', files }, targetDir);
     },
-    [entry, isRoot, dispatchUpload, moveEntry, confirm],
+    [entry, isRoot, uploadAfterGate, moveEntry, confirm],
   );
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -1160,6 +1260,17 @@ export function FileTreeNode({
                     // "Failed to create …" popup loop against an unchanging
                     // 403. Unmounting first breaks that cycle.
                     setCreating(null);
+                    // A file the creator will not be able to see says so
+                    // first; Cancel creates nothing. A FOLDER never asks: a
+                    // new directory carries the creator's read grant in its
+                    // own `access.md`, whatever goes in it later.
+                    const invisible = kind === 'file' ? unreadableAmong([name]) : [];
+                    if (
+                      invisible.length > 0
+                      && !(await unreadableCreateGate(dirPath, invisible))
+                    ) {
+                      return;
+                    }
                     try {
                       if (kind === 'file') await createFile(fullPath);
                       else await createDirectory(fullPath);
@@ -1232,6 +1343,44 @@ export function FileTreeNode({
   // the tell that this is proposed, not present.
   const suggestedCr = suggestions.crFor(entry.relativePath);
   if (suggestedCr !== null) {
+    // The one thing the author can DO to a proposal from here: take it back.
+    // The reporter of this had uploaded a file into a folder they cannot
+    // write, watched it turn into an accent-coloured row, and concluded there
+    // was no way to undo it — the Withdraw that already existed was on the
+    // file page and in the dialog, neither of which the row leads to.
+    //
+    // `undefined` for anyone else's request, which is what keeps the item off
+    // the menu entirely; an owner's "no" is Decline, and it stays in the dialog.
+    const withdraw = suggestions.mine(suggestedCr)
+      ? () => {
+          // The request may not be in the shared list yet (the broad fetch
+          // trails a just-made suggestion). Naming the row's own file is then
+          // both true and the least surprising thing to say.
+          const carried = suggestions.filesOf(entry.relativePath, suggestedCr);
+          confirm({
+            kind: 'withdraw',
+            crNumber: suggestedCr,
+            files: carried.length > 0 ? carried : [entry.relativePath],
+            returnFocusTo: () => rowRef.current,
+            // The row leaves the tree with the request it stood for, so focus
+            // goes to the folder that held it — as a delete's does.
+            focusAfterRun: () => rowForPath(entry.relativePath.split('/').slice(0, -1).join('/')),
+            run: async () => {
+              try {
+                await suggestions.withdraw(suggestedCr);
+              } catch (err) {
+                // Already applied, or declined meanwhile: the same surfacing
+                // every other refused tree operation gets. The rows refresh
+                // either way (see the controller), so what the user sees next
+                // is the truth from the server rather than a stale row.
+                console.error('Failed to withdraw suggestion:', err);
+                const msg = err instanceof Error ? err.message : String(err);
+                alert(`Couldn't withdraw ${entry.name}:\n${msg}`);
+              }
+            },
+          });
+        }
+      : undefined;
     return (
       <>
         <button
@@ -1263,6 +1412,7 @@ export function FileTreeNode({
             isRoot={false}
             proposed
             deletable={false}
+            onWithdraw={withdraw}
             onClose={() => setContextMenu(null)}
             returnFocusTo={rowRef}
           />
@@ -1372,27 +1522,89 @@ export function TreeChrome({
   nav,
   suggestionOnlyPaths,
   pinned,
+  uploadTarget = KNOWLEDGE_UPLOAD_TARGET,
   children,
 }: {
   nav: TreeNav;
   suggestionOnlyPaths: ReadonlyMap<string, number>;
   pinned?: PinnedController;
+  /**
+   * Which tree this is, for the upload banners — see `UploadTarget`. Two
+   * trees on one page (the Library sidebar's `Skills/` and `Plugins/`) must
+   * name themselves differently, or one drop's notice appears in both.
+   */
+  uploadTarget?: UploadTarget;
   children: ReactNode;
 }) {
   const openChangeRequests = useOpenChangeRequests();
-  // A clicked suggestion row opens the SHARED change-request dialog on the
-  // request the path belongs to — the row is a link to the request, and the
-  // dialog is the one change-request view the app has.
-  const [openSuggestionCr, setOpenSuggestionCr] = useState<PullRequestSummary | null>(null);
+  const { workspaceId, kbDirName } = useWorkspace();
+  /**
+   * A clicked suggestion row opens the SHARED change-request dialog on the
+   * request the path belongs to, AT that file — the row is a link to the
+   * request's view of one file, and arriving at some other file (the
+   * request's first) is arriving somewhere the user did not click.
+   *
+   * The open dialog lives in the URL (`?cr=12&file=Sales/brief.pdf`), not in
+   * component state, so a reload — or a link pasted to a colleague — lands
+   * back on the same file of the same request instead of on the bare tree.
+   * Everything below DERIVES from the query: there is one source of truth for
+   * what is open, and no effect to keep it in step with.
+   */
+  const [searchParams, setSearchParams] = useSearchParams();
+  const openSuggestion = useMemo(() => {
+    const number = Number(searchParams.get(CR_PARAM));
+    const path = searchParams.get(CR_FILE_PARAM);
+    if (!Number.isInteger(number) || number <= 0 || !path) return null;
+    const cr = openChangeRequests.forPath(path).find((c) => c.number === number) ?? null;
+    // Not (yet) a request this viewer has: the list may still be loading, so
+    // nothing opens and the query stands — the dialog appears when it lands.
+    if (!cr) return null;
+    // The query is in the TREE's path space; the change request's files are
+    // repo-relative. One conversion, here, at the hand-over.
+    const prefix = kbDirName ? `${kbDirName}/` : null;
+    return { cr, path, file: prefix && path.startsWith(prefix) ? path.slice(prefix.length) : path };
+  }, [searchParams, kbDirName, openChangeRequests]);
+  const setOpenSuggestion = useCallback(
+    (open: { number: number; path: string } | null) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (open) {
+            next.set(CR_PARAM, String(open.number));
+            next.set(CR_FILE_PARAM, open.path);
+          } else {
+            next.delete(CR_PARAM);
+            next.delete(CR_FILE_PARAM);
+          }
+          return next;
+        },
+        // Opening a request is a place you can come back from; closing it
+        // again should not leave two entries to press Back through.
+        { replace: !open },
+      );
+    },
+    [setSearchParams],
+  );
   const suggestionsController = useMemo<SuggestionsController>(
     () => ({
       crFor: (path) => suggestionOnlyPaths.get(path) ?? null,
-      open: (path, crNumber) => {
-        const cr = openChangeRequests.forPath(path).find((c) => c.number === crNumber) ?? null;
-        setOpenSuggestionCr(cr);
+      open: (path, crNumber) => setOpenSuggestion({ number: crNumber, path }),
+      mine: (crNumber) => openChangeRequests.mineNumbers.has(crNumber),
+      filesOf: (path, crNumber) =>
+        openChangeRequests.forPath(path).find((c) => c.number === crNumber)?.touchedNodePaths ?? [],
+      withdraw: async (crNumber) => {
+        try {
+          await cancelPullRequest(crNumber);
+        } finally {
+          // On BOTH paths. A cancel that succeeded has removed the request,
+          // and one that was refused (applied or declined meanwhile) means
+          // the row was already describing something that is no longer open —
+          // either way the next thing on screen should come from the server.
+          window.dispatchEvent(new Event(PR_STALE_EVENT));
+        }
       },
     }),
-    [suggestionOnlyPaths, openChangeRequests],
+    [suggestionOnlyPaths, setOpenSuggestion, openChangeRequests],
   );
   // Right-click → Manage access opens this sheet for the chosen entry.
   const [accessTarget, setAccessTarget] = useState<FileTreeEntry | null>(null);
@@ -1428,7 +1640,26 @@ export function TreeChrome({
   // workspace it was asked in: its `run` closes over that workspace's
   // operations, so a switch while it is open drops it rather than letting
   // Confirm act on a branch the dialog never described.
-  const { workspaceId, kbDirName } = useWorkspace();
+
+  // The read check before a non-markdown creation — one gate for the whole
+  // tree, so a multi-file drop asks once (see `UnreadableCreateConfirm`).
+  const {
+    gate: unreadableCreateGate,
+    pending: unreadableCreate,
+    answer: answerUnreadableCreate,
+  } = useUnreadableCreateGateState({
+    // Stamped with the workspace it was asked in, exactly as the move/delete
+    // confirmation below is: a switch while the question is open drops it
+    // rather than letting Continue upload into a tree nobody is looking at.
+    identity: workspaceId ?? null,
+    toRepoRelative: (folder) => {
+      if (!workspaceId || !kbDirName) return null;
+      if (folder === kbDirName) return '';
+      return folder.startsWith(`${kbDirName}/`) ? folder.slice(kbDirName.length + 1) : null;
+    },
+    canRead: async (repoRelative) =>
+      (await fetchFileAccess(workspaceId!, repoRelative, 'folder')).canRead,
+  });
   const [openConfirm, setOpenConfirm] = useState<
     { request: TreeConfirmRequest; workspaceId: string | null } | null
   >(null);
@@ -1588,7 +1819,9 @@ export function TreeChrome({
   return (
     <>
       <TreeConfirmContext.Provider value={askConfirm}>
+      <UnreadableCreateContext.Provider value={unreadableCreateGate}>
       <TreeNavContext.Provider value={nav}>
+      <UploadTargetContext.Provider value={uploadTarget}>
       <PinnedContext.Provider value={pinned ?? NO_PINNING}>
       <ManageAccessContext.Provider value={openAccess}>
       <SuggestionsContext.Provider value={suggestionsController}>
@@ -1596,8 +1829,17 @@ export function TreeChrome({
       </SuggestionsContext.Provider>
       </ManageAccessContext.Provider>
       </PinnedContext.Provider>
+      </UploadTargetContext.Provider>
       </TreeNavContext.Provider>
+      </UnreadableCreateContext.Provider>
       </TreeConfirmContext.Provider>
+      {unreadableCreate && (
+        <UnreadableCreateDialog
+          request={unreadableCreate}
+          onCancel={() => answerUnreadableCreate(false)}
+          onContinue={() => answerUnreadableCreate(true)}
+        />
+      )}
       {confirmRequest && (
         <TreeActionConfirmDialog
           request={confirmRequest}
@@ -1612,12 +1854,16 @@ export function TreeChrome({
           onConfirm={(mode) => closeConfirm(true, mode)}
         />
       )}
-      {openSuggestionCr && (
+      {openSuggestion && (
         <ChangeRequestDialog
-          cr={openSuggestionCr}
-          onClose={() => setOpenSuggestionCr(null)}
+          // Remounted when the query names a different file, so the seeded
+          // selection below is re-read instead of being a one-time landing.
+          key={`${openSuggestion.cr.number}:${openSuggestion.file}`}
+          cr={openSuggestion.cr}
+          initialPath={openSuggestion.file}
+          onClose={() => setOpenSuggestion(null)}
           onResolved={() => {
-            setOpenSuggestionCr(null);
+            setOpenSuggestion(null);
             window.dispatchEvent(new Event(PR_STALE_EVENT));
           }}
         />
@@ -1719,53 +1965,70 @@ function useCanWriteFolder(workspacePath: string | null): boolean {
 }
 
 /**
- * The upload banners: the last upload's error, or the one non-error notice
- * (it landed on the suggestions branch). Rendered by every tree that can
- * upload, because the state is the workspace's and a drop into a tree with no
- * banner would fail — or succeed elsewhere — in silence.
+ * The upload banners for THIS tree: the last upload's error, or its one
+ * non-error notice (the upload is under way, or it landed on the suggestions
+ * branch). Every tree that can upload renders a pair, because the state is
+ * the workspace's and a drop into a tree with no banner would fail — or
+ * succeed elsewhere — in silence. Each pair shows only the banners stamped
+ * with its own `uploadTarget`, which is what keeps one drop from painting
+ * the same notice in both of the Library sidebar's trees.
+ *
+ * The error says everything in the banner, on as many lines as it takes:
+ * the file's name, the server's reason in full, and what to do next. It used
+ * to be one `truncate`d line with the reason in a `title` — a tooltip nobody
+ * on a touch device could open, over text that had already cut the reason off.
  */
 export function UploadNotices() {
-  const { uploadError, clearUploadError, uploadNotice, clearUploadNotice } = useWorkspace();
+  const { uploadErrors, clearUploadError, uploadNotices, clearUploadNotice } = useWorkspace();
+  const target = useUploadTarget();
+  const error = uploadErrors.get(target) ?? null;
+  const notice = uploadNotices.get(target) ?? null;
   return (
     <>
-      {uploadError && (
+      {error && (
         <div
           role="alert"
           className="flex items-start gap-1 px-2 py-1 text-xs text-danger bg-danger-soft border-b border-danger/30 shrink-0"
         >
-          <span className="flex-1 truncate" title={uploadError.reason}>
-            Couldn't add {uploadError.filename}: {uploadError.reason}
-          </span>
+          <div className="flex-1 min-w-0 space-y-0.5 whitespace-pre-wrap break-words">
+            <div className="font-medium">Couldn't add {error.filename}</div>
+            <div>{error.reason}</div>
+            <div className="text-ink-muted">{uploadErrorNextStep(error.status)}</div>
+          </div>
           <IconButton
             size={18}
             tone="danger"
             title="Dismiss"
             aria-label="Dismiss upload error"
-            onClick={clearUploadError}
+            onClick={() => clearUploadError(target)}
           >
             <X size={12} />
           </IconButton>
         </div>
       )}
-      {/* Not an error: the upload LANDED, on the suggestions branch. Saying
-          so is load-bearing — nothing appears in the tree where the user
-          dropped the files, and silence there reads as a failed upload. */}
-      {uploadNotice && (
+      {/* Either "this is happening" or "it LANDED, on the suggestions
+          branch". Both are load-bearing: a suggestion-routed upload puts
+          nothing in the tree where the user dropped the files, and silence
+          there reads as a failed upload. */}
+      {notice && (
         <div
           role="status"
+          data-testid="upload-notice"
           className="flex items-start gap-1 px-2 py-1 text-xs text-ink bg-wait-soft border-b border-line shrink-0"
         >
-          <span className="flex-1" title={uploadNotice}>
-            {uploadNotice}
-          </span>
-          <IconButton
-            size={18}
-            title="Dismiss"
-            aria-label="Dismiss upload notice"
-            onClick={clearUploadNotice}
-          >
-            <X size={12} />
-          </IconButton>
+          <span className="flex-1 min-w-0 whitespace-pre-wrap break-words">{notice.message}</span>
+          {/* Nothing to dismiss about an upload still running — it clears
+              itself the moment it has a result to show instead. */}
+          {notice.kind !== 'progress' && (
+            <IconButton
+              size={18}
+              title="Dismiss"
+              aria-label="Dismiss upload notice"
+              onClick={() => clearUploadNotice(target)}
+            >
+              <X size={12} />
+            </IconButton>
+          )}
         </div>
       )}
     </>
@@ -1914,11 +2177,12 @@ export function FileExplorer() {
       if (e.dataTransfer.getData(DRAG_MIME)) return;
       const entries = e.dataTransfer.items ? snapshotEntries(e.dataTransfer.items) : [];
       if (entries.length > 0) {
-        dispatchUpload({ kind: 'items', entries }, '');
+        // Outside the `TreeChrome` below, so this one names the tree itself.
+        dispatchUpload({ kind: 'items', entries }, '', KNOWLEDGE_UPLOAD_TARGET);
         return;
       }
       const files = Array.from(e.dataTransfer.files);
-      if (files.length > 0) dispatchUpload({ kind: 'files', files }, '');
+      if (files.length > 0) dispatchUpload({ kind: 'files', files }, '', KNOWLEDGE_UPLOAD_TARGET);
     },
     [dispatchUpload],
   );
