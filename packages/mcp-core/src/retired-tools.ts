@@ -20,6 +20,15 @@ export const RETIRED_TOOL_MESSAGES: Readonly<Record<string, string>> = Object.fr
 });
 
 /**
+ * The retired tool names themselves. A surface that PROXIES another
+ * deployment needs these: an older deployment still advertises the tool, and a
+ * discovered copy left in the registry is callable — directly and from a
+ * code-mode chain — which would perform the very merge the removal forbids.
+ * Purge by name, then answer the name from {@link retiredToolMessage}.
+ */
+export const RETIRED_TOOL_NAMES: ReadonlySet<string> = new Set(Object.keys(RETIRED_TOOL_MESSAGES));
+
+/**
  * The retired-tool message for `name`, or undefined when it is not retired.
  * Matches the bare name and any namespaced spelling of it (`manual.tool`,
  * `manual_tool` flattening aside — `manual__tool`, `a.b.tool`), since each
@@ -33,13 +42,25 @@ export function retiredToolMessage(name: string): string | undefined {
 }
 
 /**
- * The retired-tool message for the first retired tool a code-mode chain
- * references, or undefined. Only consulted once a chain has FAILED, so a chain
- * that merely mentions the name in a string and succeeds is never rewritten.
+ * The retired-tool message when `failure` — the text of a FAILED chain's
+ * error, not its source — names a retired tool, or undefined.
+ *
+ * The failure text is the signal, deliberately. Scanning the chain's source
+ * instead would rewrite any failure from a chain that merely MENTIONS the name
+ * in a comment, a string or an unrelated call, hiding the real reason it died
+ * behind a migration notice. The runtime names the callee it could not find
+ * ("KNOWLEDGE_BASE.merge_change_request is not a function"), so the tool that
+ * actually failed is right there in the message.
+ *
+ * A chain that reaches the retired name through a computed property
+ * (`KNOWLEDGE_BASE['merge_' + 'change_request']()`) is not recognised: the
+ * runtime prints the expression, not the resolved name. It still fails — the
+ * tool is gone from every registry — it just fails with the runtime's own
+ * words instead of ours.
  */
-export function retiredToolInCode(code: string): string | undefined {
+export function retiredToolInFailure(failure: string): string | undefined {
   for (const [retired, message] of Object.entries(RETIRED_TOOL_MESSAGES)) {
-    if (new RegExp(`\\b${retired}\\b`).test(code)) return message;
+    if (new RegExp(`\\b${retired}\\b`).test(failure)) return message;
   }
   return undefined;
 }
@@ -53,11 +74,15 @@ const CHAIN_FAILURE_LOG = '[ERROR] Code execution failed';
  * fails — it resolves `{ result: null, logs }` with a `[ERROR] Code execution
  * failed: …` line (e.g. `KNOWLEDGE_BASE.merge_change_request is not a
  * function`) — so a caller's catch never sees it. Undefined for a chain that
- * succeeded or failed without referencing a retired tool.
+ * succeeded, or one whose failure does not name a retired tool.
  */
-export function retiredToolChainFailure(code: string, outcome: { result: unknown; logs?: unknown }): string | undefined {
+export function retiredToolChainFailure(outcome: { result: unknown; logs?: unknown }): string | undefined {
   if (outcome.result !== null && outcome.result !== undefined) return undefined;
   const logs = Array.isArray(outcome.logs) ? outcome.logs : [];
-  if (!logs.some((l) => typeof l === 'string' && l.startsWith(CHAIN_FAILURE_LOG))) return undefined;
-  return retiredToolInCode(code);
+  const failures = logs.filter((l): l is string => typeof l === 'string' && l.startsWith(CHAIN_FAILURE_LOG));
+  for (const failure of failures) {
+    const message = retiredToolInFailure(failure);
+    if (message) return message;
+  }
+  return undefined;
 }

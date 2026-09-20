@@ -22,6 +22,7 @@ import { CodeModeUtcpClient } from '@utcp/code-mode';
 import {
   CODE_MODE_META_TOOLS,
   META_TOOL_NAMES,
+  RETIRED_TOOL_NAMES,
   dispatchMetaTool,
   dispatchToolCall,
   registerManual,
@@ -168,7 +169,7 @@ export async function discoverTools(
         'Check the URL and that the connection key is still valid.',
     );
   }
-  await removeRemoteMetaTools(client);
+  await removeUnservedRemoteTools(client);
   for (const manual of local) {
     const result = await registerManual(client, manual);
     if (!result.ok) {
@@ -180,14 +181,27 @@ export async function discoverTools(
 }
 
 /**
- * Purge the deployment's meta-tool copies from the registry. Runs at first
- * registration AND after every credential-renewal re-registration of the
+ * The names this server never serves from the deployment it proxies: the
+ * meta-tools (it serves its own trio, over the merged registry) and the
+ * retired tools (no agent surface serves those at all).
+ *
+ * A retired name is in here because this server can be pointed at an OLDER
+ * deployment that still advertises it. Discovery would then register a working
+ * copy, and `tools.find` would resolve and dispatch it — an agent merging a
+ * change request through a stale deployment, which is exactly what removing
+ * the tool was for. Purged from the registry so no chain can reach it either.
+ */
+const UNSERVED_REMOTE_TOOLS: ReadonlySet<string> = new Set([...META_TOOL_NAMES, ...RETIRED_TOOL_NAMES]);
+
+/**
+ * Purge the deployment's copies of those names from the registry. Runs at
+ * first registration AND after every credential-renewal re-registration of the
  * remote manual — re-registering rediscovers the deployment's copies, and a
  * copy left registered stays callable from chains against the remote registry
  * that cannot see a local-only tool (see `discoverTools`).
  */
-async function removeRemoteMetaTools(client: CodeModeUtcpClient): Promise<void> {
-  for (const name of META_TOOL_NAMES) {
+async function removeUnservedRemoteTools(client: CodeModeUtcpClient): Promise<void> {
+  for (const name of UNSERVED_REMOTE_TOOLS) {
     // A refused removal must not cost the caller: the listing filter below
     // still keeps the copy out of the MCP surface, so the degradation is
     // "chains can see it", not "the server never came up". Named, not silent.
@@ -204,10 +218,11 @@ async function removeRemoteMetaTools(client: CodeModeUtcpClient): Promise<void> 
 /**
  * Belt to `discoverTools`'s registry removal: whatever a repository
  * implementation declined to remove must still never reach the MCP listing,
- * where a remote `list_tools` would shadow — or duplicate — the local trio.
+ * where a remote `list_tools` would shadow — or duplicate — the local trio,
+ * and where a stale deployment's retired tool would be listed as callable.
  */
 export function withoutRemoteMetaTools(tools: ProxiedTool[]): ProxiedTool[] {
-  return tools.filter((t) => !META_TOOL_NAMES.has(t.mcpName));
+  return tools.filter((t) => !UNSERVED_REMOTE_TOOLS.has(t.mcpName));
 }
 
 /**
@@ -503,7 +518,7 @@ export async function createHexisMcpServer(
         );
         return;
       }
-      await removeRemoteMetaTools(live);
+      await removeUnservedRemoteTools(live);
       // The manual now holds a session this swap created. A call that lost its
       // own session around the swap — the two often land together, a redeploy
       // being exactly when a 401-triggered renewal happens — retries against
@@ -601,7 +616,7 @@ export async function createHexisMcpServer(
       // meta-tools, which must not be callable from a chain here (see
       // `discoverTools`) — the same purge first registration does.
       afterReregister: async (name) => {
-        if (name === REMOTE_MANUAL_NAME) await removeRemoteMetaTools(built.client);
+        if (name === REMOTE_MANUAL_NAME) await removeUnservedRemoteTools(built.client);
       },
       // No `log` override: the default writes to stderr, which is the only place
       // this stdio server may write — stdout is the MCP transport itself.
@@ -763,8 +778,13 @@ export async function createHexisMcpServer(
           // returns a truncation notice instead of a ref that resolves nowhere.
           return await dispatchMetaTool(live, name, request.params.arguments ?? {});
         }
+        // Before the lookup, never after it: pointed at an older deployment
+        // that still advertises a retired tool, a discovered copy would
+        // otherwise be found and dispatched — the removed behaviour, performed.
+        const retired = retiredToolMessage(name);
+        if (retired) return toolError(retired);
         const tool = tools.find((t) => t.mcpName === name);
-        if (!tool) return toolError(retiredToolMessage(name) ?? `Unknown tool "${name}".`);
+        if (!tool) return toolError(`Unknown tool "${name}".`);
         const progressToken = request.params._meta?.progressToken;
         return await dispatchToolCall(live, tool, request.params.arguments ?? {}, (progress, message) =>
           extra.sendNotification({

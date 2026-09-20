@@ -84,7 +84,8 @@ export function registerToolManualsTools(
       'The listing is the RELEASED catalog, built from the default branch only: a server or `.tool` you ' +
       'declared on a draft is not listed, not callable and not signed-in-able until that draft is merged. ' +
       'Pass `branch` (the draft you wrote the declaration on) and `onBranchOnly` names every tool declared ' +
-      'there that the default branch does not serve yet — open and merge a change request to activate it.',
+      'there that the default branch does not serve yet — open a change request, then ask the user to ' +
+      'review and merge it in the app to activate it.',
     path: '/api/agent/tools/list_tool_setup',
     inputs: {
       type: 'object',

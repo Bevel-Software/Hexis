@@ -1436,6 +1436,34 @@ export class GitService implements IGitService {
     targetBranch: string,
     commit: { subject: string; body: string },
     user: AuthUser,
+    opts: {
+      /**
+       * Refuse before touching the clone when the target's working tree holds
+       * edits that are not published yet. A change request's merge runs in a
+       * repo-global clone where nothing but a previous attempt can be dirty;
+       * this method is also the agent `merge_branch` path, which runs in the
+       * TARGET BRANCH'S OWN workspace — the one the file tools read and write.
+       * There the `reset --hard` below would silently destroy a save.
+       *
+       * Checked HERE, inside the reservation, and not by the caller: a save
+       * landing between a caller's check and this reset is exactly the window
+       * that has to be closed.
+       */
+      requireCleanTarget?: boolean;
+      /**
+       * Decide whether `user` may land this merge, given the target commit it
+       * is actually built on and every path it writes. Throwing refuses, and
+       * refuses before anything is committed or pushed.
+       *
+       * Also here rather than in the caller, and for the same reason: the
+       * caller's workspace `HEAD` can be behind origin (a best-effort pull
+       * that failed leaves it there), so authorizing against it would read
+       * roles that the commit being published has already changed. The fetch
+       * below is what makes the ref current, and a fetch that fails throws
+       * instead of falling back to the stale one.
+       */
+      authorize?: (target: { sha: string; changedPaths: string[] }) => Promise<void>;
+    } = {},
   ): Promise<{ kind: 'merged'; sha: string } | { kind: 'conflicts'; paths: string[] }> {
     assertValidBranchName(sourceBranch);
     assertValidBranchName(targetBranch);
@@ -1449,6 +1477,17 @@ export class GitService implements IGitService {
       // unknown" on a clone that lacks it).
       await this.git(cwd, ['config', 'user.name', BOT_NAME]);
       await this.git(cwd, ['config', 'user.email', BOT_EMAIL]);
+      if (opts.requireCleanTarget) {
+        const { stdout: dirty } = await this.git(cwd, ['status', '--porcelain=v1', '-z']);
+        const unpushed = await this.hasUnpushedCommitsAt(cwd);
+        if (parsePorcelainZ(dirty).length > 0 || unpushed) {
+          throw new WorkflowDomainError(
+            `"${targetBranch}" has edits that are not shared yet. Try the merge again once they are saved.`,
+            409,
+            { kind: 'merge-target-busy', targetBranch },
+          );
+        }
+      }
       for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
         // Explicit destination refspecs, because the two `origin/<branch>`
         // reads below MUST see the tips this fetch just retrieved. A bare
@@ -1475,6 +1514,20 @@ export class GitService implements IGitService {
         // discards a prior attempt's state, never real work.
         await this.git(cwd, ['checkout', targetBranch]);
         await this.git(cwd, ['reset', '--hard', `origin/${targetBranch}`]);
+
+        if (opts.authorize) {
+          // The tip this attempt merges into, and the paths it writes against
+          // that tip. Re-read every attempt: a retry happens BECAUSE the
+          // target moved, which can move its roles and its file set too.
+          const { stdout: targetSha } = await this.git(cwd, ['rev-parse', `origin/${targetBranch}`]);
+          const changedPaths = await this.prChangedPathsAt(
+            cwd,
+            `origin/${targetBranch}`,
+            `origin/${sourceBranch}`,
+            { forAccessCheck: true },
+          );
+          await opts.authorize({ sha: targetSha.trim(), changedPaths });
+        }
 
         // `--no-commit --no-ff` so we author the merge commit as the human and
         // never fast-forward past the merge record.
@@ -1896,18 +1949,25 @@ export class GitService implements IGitService {
    * only ever see settled states.
    */
   async hasUnpushedCommits(workspaceId: string): Promise<boolean> {
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
-      const branch = await this.currentBranch(cwd);
-      try {
-        const { stdout } = await this.git(cwd, [
-          'rev-list', '--count', `refs/remotes/origin/${branch}..HEAD`,
-        ]);
-        return Number(stdout.trim()) > 0;
-      } catch {
-        return true;
-      }
-    });
+    return this.mutex.run(workspaceId, async () => this.hasUnpushedCommitsAt(await this.repoDir(workspaceId)));
+  }
+
+  /**
+   * `hasUnpushedCommits` without the workspace reservation — for a caller that
+   * already holds one (`mergeChangeRequest`, which has to ask inside the same
+   * reservation as the reset that would discard the answer). Fails closed: a
+   * question that cannot be answered counts as "yes, unpushed".
+   */
+  private async hasUnpushedCommitsAt(cwd: string): Promise<boolean> {
+    const branch = await this.currentBranch(cwd);
+    try {
+      const { stdout } = await this.git(cwd, [
+        'rev-list', '--count', `refs/remotes/origin/${branch}..HEAD`,
+      ]);
+      return Number(stdout.trim()) > 0;
+    } catch {
+      return true;
+    }
   }
 
   /**
@@ -2549,8 +2609,14 @@ export class GitService implements IGitService {
     headBranch: string,
     opts: {
       fetch?: boolean;
-      /** Keep roles.yaml — for a merge that, unlike a change request's, does not strip it. */
-      includeRolesYaml?: boolean;
+      /**
+       * Every path the change WRITES, for authorizing it rather than
+       * describing it: `roles.yaml` kept (a merge, unlike a change request's,
+       * does not strip it) and BOTH sides of every rename. A rename writes the
+       * old path too — it deletes it — so an access check that saw only the
+       * new name would clear a caller who cannot touch what the merge removes.
+       */
+      forAccessCheck?: boolean;
     } = {},
   ): Promise<string[]> {
     assertValidBranchName(baseBranch);
@@ -2576,25 +2642,48 @@ export class GitService implements IGitService {
     return this.mutex.run(workspaceId, async () => {
       const baseRef = pinned ? pinned.base : await this.resolvePublishedBranchRef(cwd, baseBranch);
       const headRef = pinned ? pinned.head : await this.resolvePublishedBranchRef(cwd, headBranch);
-      const { stdout } = await this.git(cwd, [
-        'diff', '-M', '-z', '--name-status', `${baseRef}...${headRef}`,
-      ]);
-      return (
+      return this.prChangedPathsAt(cwd, baseRef, headRef, opts);
+    });
+  }
+
+  /**
+   * The shaping behind `changedPathsForPr`, without its workspace
+   * reservation: the caller must already hold one. `mergeChangeRequest` reads
+   * the same set inside its OWN reservation, where re-entering this one would
+   * deadlock — and where the refs are the ones the merge is actually built on.
+   */
+  private async prChangedPathsAt(
+    cwd: string,
+    baseRef: string,
+    headRef: string,
+    opts: { forAccessCheck?: boolean } = {},
+  ): Promise<string[]> {
+    const { stdout } = await this.git(cwd, [
+      'diff', '-M', '-z', '--name-status', `${baseRef}...${headRef}`,
+    ]);
+    // Deduped: both sides of a rename can collide with another entry's path.
+    return [
+      ...new Set(
         parseNameStatusZ(stdout)
           // A rename onto or off the placeholder is a real file removed or
           // added (see `withoutPlaceholderRename`): both of its paths are
           // touched, or filtering the placeholder would lose the file.
+          //
+          // Authorizing the change needs both sides of EVERY rename, not just
+          // the placeholder's: git reports a rename under its new name alone,
+          // and the old name is a path the change deletes.
           .flatMap((s) =>
-            s.previousPath && (isFolderPlaceholder(s.path) || isFolderPlaceholder(s.previousPath))
+            s.previousPath &&
+            (opts.forAccessCheck || isFolderPlaceholder(s.path) || isFolderPlaceholder(s.previousPath))
               ? [s.previousPath, s.path]
               : [s.path],
           )
           // Same rule as `changedFilesForPr`: a roles.yaml change never
           // survives a merge, so it is not a touched path for routing or
           // summaries either.
-          .filter((p) => opts?.includeRolesYaml || p !== 'roles.yaml')
-      );
-    });
+          .filter((p) => opts.forAccessCheck || p !== 'roles.yaml'),
+      ),
+    ];
   }
 
   /**

@@ -12,7 +12,7 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowService } from '../workflow.service.js';
-import { PullRebaseConflictError } from '../../../shared/domain-errors.js';
+import { PullRebaseConflictError, WorkflowDomainError } from '../../../shared/domain-errors.js';
 import { DEFAULT_BRANCH, isProtectedBranch } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 
@@ -860,13 +860,58 @@ describe('WorkflowService.mergeBranch — an agent merges branches, never an ope
   const PROTECTED = DEFAULT_BRANCH;
   const OPEN_REQUEST = { number: 12, sourceBranch: 'alice/feat', targetBranch: PROTECTED, state: 'open' };
 
+  // The tip `mergeChangeRequest` reports it built the merge on. Authorizing
+  // against THIS rather than the workspace `HEAD` is the point: the clone can
+  // be behind origin, and the roles that matter are the ones at the commit
+  // being published.
+  const TARGET_TIP = 'target-tip-sha';
+
   function harness(opts: { canWrite?: Map<string, boolean> | null } = {}) {
     const git = makeGit();
     (git as unknown as Record<string, unknown>).remoteBranchExists = vi.fn().mockResolvedValue(true);
     (git as unknown as Record<string, unknown>).hasUnpushedCommits = vi.fn().mockResolvedValue(false);
     (git.pendingChanges as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     (git as unknown as Record<string, unknown>).changedPathsForPr = vi.fn().mockResolvedValue(['Team/Process.md']);
-    (git as unknown as Record<string, unknown>).mergeChangeRequest = vi.fn().mockResolvedValue({ kind: 'merged', sha: 'merge-sha' });
+    // Stands in for the REAL `mergeChangeRequest` contract, not just its
+    // return value: the unshared-edits refusal and the authorization both
+    // live inside its workspace reservation now — that is what closes the
+    // window between asking and resetting the target's clone — so a fake that
+    // ignored them would let this suite pass with the window wide open.
+    (git as unknown as Record<string, unknown>).mergeChangeRequest = vi.fn(
+      async (
+        workspaceId: string,
+        source: string,
+        target: string,
+        _commit: unknown,
+        _user: unknown,
+        mergeOpts: {
+          requireCleanTarget?: boolean;
+          authorize?: (t: { sha: string; changedPaths: string[] }) => Promise<void>;
+        } = {},
+      ) => {
+        if (mergeOpts.requireCleanTarget) {
+          const dirty = (await git.pendingChanges(workspaceId)) as string[];
+          const unpushed = await (git as unknown as { hasUnpushedCommits: (id: string) => Promise<boolean> })
+            .hasUnpushedCommits(workspaceId);
+          if (dirty.length > 0 || unpushed) {
+            throw new WorkflowDomainError(
+              `"${target}" has edits that are not shared yet.`,
+              409,
+              { kind: 'merge-target-busy', targetBranch: target },
+            );
+          }
+        }
+        if (mergeOpts.authorize) {
+          const changedPaths = await (
+            git as unknown as {
+              changedPathsForPr: (id: string, base: string, head: string, o: unknown) => Promise<string[]>;
+            }
+          ).changedPathsForPr(workspaceId, target, source, { forAccessCheck: true });
+          await mergeOpts.authorize({ sha: TARGET_TIP, changedPaths });
+        }
+        return { kind: 'merged', sha: 'merge-sha' };
+      },
+    );
     const access = makeAccessControl();
     (access.canWriteBatchAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(opts.canWrite === undefined ? null : opts.canWrite);
     const workspaceService = makeWorkspaceService();
@@ -895,6 +940,8 @@ describe('WorkflowService.mergeBranch — an agent merges branches, never an ope
       'alice/feat',
       expect.objectContaining({ subject: `Merge ${PROTECTED} into alice/feat` }),
       expect.objectContaining({ email: 'alice@example.com' }),
+      // The unshared-edits refusal is the merge's own, inside its reservation.
+      expect.objectContaining({ requireCleanTarget: true }),
     );
   });
 
@@ -902,18 +949,23 @@ describe('WorkflowService.mergeBranch — an agent merges branches, never an ope
     const { svc, merge, access } = harness();
     expect(await svc.mergeBranch(makeUser(), 'alice/other', 'alice/feat')).toEqual({ kind: 'merged', sha: 'merge-sha' });
     expect(merge).toHaveBeenCalledTimes(1);
-    // An unprotected target needs no direct-write check.
+    // An unprotected target needs no direct-write check — so no hook at all.
+    expect(merge.mock.calls[0][5]).toMatchObject({ authorize: undefined });
     expect(access.canWriteBatchAtRef).not.toHaveBeenCalled();
   });
 
   it('refuses a protected target when the caller could not commit the changed files directly', async () => {
     expect(isProtectedBranch(PROTECTED)).toBe(true);
-    const { svc, merge, git } = harness({ canWrite: new Map([['Team/Process.md', false]]) });
+    const { svc, git, access } = harness({ canWrite: new Map([['Team/Process.md', false]]) });
     const err = await svc.mergeBranch(makeUser(), 'alice/other', PROTECTED).catch((e: unknown) => e);
     expect(err).toMatchObject({ status: 403, payload: { kind: 'protected-merge-target', deniedPaths: ['Team/Process.md'] } });
-    // roles.yaml is not stripped from this merge, so it must be in the check.
-    expect(git.changedPathsForPr).toHaveBeenCalledWith(PROTECTED, PROTECTED, 'alice/other', { includeRolesYaml: true });
-    expect(merge).not.toHaveBeenCalled();
+    // roles.yaml is not stripped from this merge, and a rename's old path is a
+    // file it deletes, so both are in the check.
+    expect(git.changedPathsForPr).toHaveBeenCalledWith(PROTECTED, PROTECTED, 'alice/other', { forAccessCheck: true });
+    // Decided at the tip the merge is built on, never the workspace HEAD.
+    expect(access.canWriteBatchAtRef).toHaveBeenCalledWith(PROTECTED, TARGET_TIP, 'alice@example.com', ['Team/Process.md']);
+    // The refusal came from inside the merge, so nothing was pushed.
+    expect(git.pull).not.toHaveBeenCalled();
   });
 
   it('merges into a protected target when the caller could commit every changed file directly', async () => {
@@ -934,9 +986,14 @@ describe('WorkflowService.mergeBranch — an agent merges branches, never an ope
   });
 
   it('refuses while the target has edits not yet shared, before touching its clone', async () => {
-    const { svc, merge, git } = harness();
+    const { svc, git } = harness();
     (git.pendingChanges as ReturnType<typeof vi.fn>).mockResolvedValue(['knowledge-base/X.md']);
-    await expect(svc.mergeBranch(makeUser(), 'alice/other', 'alice/feat')).rejects.toMatchObject({ status: 409 });
-    expect(merge).not.toHaveBeenCalled();
+    await expect(svc.mergeBranch(makeUser(), 'alice/other', 'alice/feat')).rejects.toMatchObject({
+      status: 409,
+      payload: { kind: 'merge-target-busy' },
+    });
+    // The refusal is the merge's own, asked inside the reservation that also
+    // holds the reset — so the clone is never touched and nothing is pushed.
+    expect(git.pull).not.toHaveBeenCalled();
   });
 });

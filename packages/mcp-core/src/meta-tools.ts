@@ -2,7 +2,7 @@ import type { Tool as McpTool, CallToolResult } from '@modelcontextprotocol/sdk/
 import type { CodeModeUtcpClient } from '@utcp/code-mode';
 import { utcpNameToTsInterfaceName, findToolsByNames } from './code-mode-names.js';
 import { toCallToolResult, toolError, describeToolFailure, omitImagePayloads } from './results.js';
-import { retiredToolInCode, retiredToolChainFailure } from './retired-tools.js';
+import { retiredToolInFailure, retiredToolChainFailure } from './retired-tools.js';
 
 /**
  * Code-mode meta-tools exposed ALONGSIDE the direct tools. They let an external
@@ -160,7 +160,7 @@ export async function dispatchMetaTool(
     const { result: rawResult, logs } = await client.callToolChain(code, timeout);
     // The runner reports a failed chain in `logs` rather than throwing, so a
     // chain that died calling a removed tool is recognised here, not in the catch.
-    const retired = retiredToolChainFailure(code, { result: rawResult, logs });
+    const retired = retiredToolChainFailure({ result: rawResult, logs });
     if (retired) return toolError(retired);
     // Images never ride a chain result: the chain's value is stringified JSON,
     // where base64 is context flood, not a picture. A chained `read_file` of an
@@ -197,9 +197,12 @@ export async function dispatchMetaTool(
     });
   } catch (err) {
     // A chain that failed while calling a removed tool gets the reason it was
-    // removed, not the runtime's "is not a function".
-    const retired = name === 'call_tool_chain' && typeof args.code === 'string' ? retiredToolInCode(args.code) : undefined;
+    // removed, not the runtime's "is not a function". Read from the failure
+    // itself, never from the chain's source: a chain that merely mentions the
+    // name and died of something else must report what really happened.
+    const failure = describeToolFailure(err);
+    const retired = name === 'call_tool_chain' ? retiredToolInFailure(failure) : undefined;
     if (retired) return toolError(retired);
-    return toolError(`The "${name}" tool failed: ${describeToolFailure(err)}`);
+    return toolError(`The "${name}" tool failed: ${failure}`);
   }
 }

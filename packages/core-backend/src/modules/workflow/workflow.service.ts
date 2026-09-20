@@ -3000,80 +3000,91 @@ export class WorkflowService implements IWorkflowService {
       throw new WorkflowValidationError(`\`source\` and \`target\` are both "${sourceBranch}" — name two different branches.`);
     }
 
-    // A person merges a change request. Only the request's OWN direction is
-    // blocked: the target merged into the source is how a draft under review
-    // stays current, and that must keep working while the request is open.
-    const [open] = await this.db
-      .select({ number: changeRequests.number })
-      .from(changeRequests)
-      .where(
-        and(
-          eq(changeRequests.sourceBranch, sourceBranch),
-          eq(changeRequests.targetBranch, targetBranch),
-          eq(changeRequests.state, 'open'),
-        ),
-      )
-      .limit(1);
-    if (open) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, open.number);
+    // Under the lifecycle lock of BOTH branches, the same protocol
+    // `openChangeRequest` follows — and for the same window. That method holds
+    // these keys across its whole check-then-insert (an auto-merge and a push,
+    // seconds of it), so the "no open request" answer below is only sound
+    // while they are held: a bare read would let a person open the request
+    // mid-merge and the agent would land its content anyway, which is the one
+    // thing this tool exists to prevent. `runOnBranchPair` drops a protected
+    // target's key; the source key is held either way, and every competing
+    // request from this source takes it too.
+    return this.runOnBranchPair(sourceBranch, targetBranch, async () => {
+      // A person merges a change request. Only the request's OWN direction is
+      // blocked: the target merged into the source is how a draft under review
+      // stays current, and that must keep working while the request is open.
+      const [open] = await this.db
+        .select({ number: changeRequests.number })
+        .from(changeRequests)
+        .where(
+          and(
+            eq(changeRequests.sourceBranch, sourceBranch),
+            eq(changeRequests.targetBranch, targetBranch),
+            eq(changeRequests.state, 'open'),
+          ),
+        )
+        .limit(1);
+      if (open) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, open.number);
 
-    // The merge runs in the target's own workspace, like a change request's.
-    const targetWorkspaceId = (await this.workspaceService.getOrCreateForBranch(targetBranch)).id;
-    if (!(await this.git.remoteBranchExists(targetWorkspaceId, sourceBranch))) {
-      throw new WorkflowValidationError(`No branch named "${sourceBranch}" on the shared remote.`);
-    }
-
-    // The merge resets that workspace to the published target tip, which would
-    // throw away edits still on their way out. Refuse until they are shared.
-    if (
-      (await this.git.pendingChanges(targetWorkspaceId)).length > 0 ||
-      (await this.git.hasUnpushedCommits(targetWorkspaceId))
-    ) {
-      throw new WorkflowDomainError(
-        `"${targetBranch}" has edits that are not shared yet. Try the merge again once they are saved.`,
-        409,
-        { kind: 'merge-target-busy', targetBranch },
-      );
-    }
-
-    // Into a protected branch, a merge is a commit of every file it changes:
-    // allowed only for a caller who could commit each of them directly
-    // (the same at-HEAD rule the write lock applies). roles.yaml included —
-    // unlike a change request's merge, nothing strips it here.
-    if (isProtectedBranch(targetBranch)) {
-      const paths = await this.git.changedPathsForPr(targetWorkspaceId, targetBranch, sourceBranch, {
-        includeRolesYaml: true,
-      });
-      const allowed =
-        paths.length === 0
-          ? null
-          : await this.accessControl.canWriteBatchAtRef(targetWorkspaceId, 'HEAD', user.email, paths);
-      const denied = allowed ? paths.filter((p) => !allowed.get(p)) : [];
-      if (denied.length > 0) {
-        throw new WorkflowDomainError(
-          `"${targetBranch}" is protected and you cannot commit directly to it: ` +
-            `${denied.length} changed file(s) are outside your write access (${denied.join(', ')}). ` +
-            `Open a change request from "${sourceBranch}" into "${targetBranch}" and ask the user to review it in the app.`,
-          403,
-          { kind: 'protected-merge-target', targetBranch, deniedPaths: denied },
-        );
+      // The merge runs in the target's own workspace, like a change request's.
+      const targetWorkspaceId = (await this.workspaceService.getOrCreateForBranch(targetBranch)).id;
+      if (!(await this.git.remoteBranchExists(targetWorkspaceId, sourceBranch))) {
+        throw new WorkflowValidationError(`No branch named "${sourceBranch}" on the shared remote.`);
       }
-    }
 
-    const result = await this.git.mergeChangeRequest(
-      targetWorkspaceId,
-      sourceBranch,
-      targetBranch,
-      {
-        subject: `Merge ${sourceBranch} into ${targetBranch}`,
-        body: `Merged via Bevel by ${user.name} <${user.email}>`,
-      },
-      user,
-    );
-    if (result.kind === 'conflicts') {
-      return { kind: 'conflicts-need-resolution', conflictedPaths: result.paths };
-    }
-    await this.pullMergeTarget(targetBranch, user);
-    return { kind: 'merged', sha: result.sha };
+      const result = await this.git.mergeChangeRequest(
+        targetWorkspaceId,
+        sourceBranch,
+        targetBranch,
+        {
+          subject: `Merge ${sourceBranch} into ${targetBranch}`,
+          body: `Merged via Bevel by ${user.name} <${user.email}>`,
+        },
+        user,
+        {
+          // The merge resets that workspace to the published target tip, which
+          // would throw away edits still on their way out. Refuse until they
+          // are shared — asked inside the merge's own reservation, so a save
+          // cannot land between the question and the reset.
+          requireCleanTarget: true,
+          // Into a protected branch, a merge is a commit of every file it
+          // changes: allowed only for a caller who could commit each of them
+          // directly (the same at-HEAD rule the write lock applies). The hook
+          // runs inside that reservation too, against the target tip this
+          // merge is built on rather than a workspace HEAD that may be behind
+          // it — so the rules read are the ones the merge is about to change.
+          //
+          // `changedPaths` is the authorizing set: roles.yaml kept (unlike a
+          // change request's merge, nothing strips it here) and both sides of
+          // a rename, since the old name is a file this merge deletes.
+          authorize: isProtectedBranch(targetBranch)
+            ? async ({ sha, changedPaths }) => {
+                if (changedPaths.length === 0) return;
+                const allowed = await this.accessControl.canWriteBatchAtRef(
+                  targetWorkspaceId,
+                  sha,
+                  user.email,
+                  changedPaths,
+                );
+                const denied = allowed ? changedPaths.filter((p) => !allowed.get(p)) : [];
+                if (denied.length === 0) return;
+                throw new WorkflowDomainError(
+                  `"${targetBranch}" is protected and you cannot commit directly to it: ` +
+                    `${denied.length} changed file(s) are outside your write access (${denied.join(', ')}). ` +
+                    `Open a change request from "${sourceBranch}" into "${targetBranch}" and ask the user to review it in the app.`,
+                  403,
+                  { kind: 'protected-merge-target', targetBranch, deniedPaths: denied },
+                );
+              }
+            : undefined,
+        },
+      );
+      if (result.kind === 'conflicts') {
+        return { kind: 'conflicts-need-resolution', conflictedPaths: result.paths };
+      }
+      await this.pullMergeTarget(targetBranch, user);
+      return { kind: 'merged', sha: result.sha };
+    });
   }
 
   /**

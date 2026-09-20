@@ -592,8 +592,14 @@ export interface IWorkflowService {
    *     a change request from `sourceBranch` into `targetBranch` is open; a
    *     person merges that one in the app. The reverse direction — the target
    *     into the source, the sync that keeps a draft current — is allowed.
-   *   - refused (`AccessDeniedError`) when `targetBranch` is protected and
-   *     `user` could not commit every file the merge changes directly to it.
+   *   - refused (`WorkflowDomainError`, `kind: 'protected-merge-target'`,
+   *     status 403, listing the denied paths) when `targetBranch` is protected
+   *     and `user` could not commit every file the merge changes directly to
+   *     it. Decided against the target commit the merge is built on, not a
+   *     workspace `HEAD` that may be behind it.
+   *   - refused (`WorkflowDomainError`, `kind: 'merge-target-busy'`, status
+   *     409) when `targetBranch`'s workspace still holds unshared edits: the
+   *     merge resets it to the published tip, which would discard them.
    *
    * Conflicts write nothing and come back as `conflicts-need-resolution`.
    */

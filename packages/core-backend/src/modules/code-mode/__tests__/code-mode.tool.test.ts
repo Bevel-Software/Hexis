@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import '@utcp/direct-call';
+import { addFunctionToUtcpDirectCall } from '@utcp/direct-call';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 
 /**
@@ -126,12 +128,62 @@ describe('call_tool_chain and a retired tool', () => {
     expect(out.error).toMatch(/a change request is merged by a person in the app/);
   });
 
-  it('answers it through a real code-mode runner, not a mock', async () => {
+  /**
+   * A real runner whose `KNOWLEDGE_BASE` namespace exists and serves a live
+   * tool, but not the retired one — the shape a deployment actually has.
+   *
+   * Not a client with no manuals: there `KNOWLEDGE_BASE` is undefined too, so
+   * the chain dies of `ReferenceError: KNOWLEDGE_BASE is not defined` without
+   * ever naming a tool. That failure proves nothing about a call to a removed
+   * one — it would only satisfy a check that scanned the chain's source.
+   */
+  async function realRunnerWithKnowledgeBase(): Promise<CodeModeUtcpClient> {
+    addFunctionToUtcpDirectCall('kb_manual', async () => ({
+      utcp_version: '1.0.0',
+      manual_version: '1.0.0',
+      tools: [
+        {
+          name: 'read_file',
+          description: 'A live tool, so the namespace is a real object.',
+          inputs: { type: 'object', properties: { path: { type: 'string' } } },
+          outputs: { type: 'object', properties: {} },
+          tool_call_template: { call_template_type: 'direct-call', callable_name: 'kb_read_file' },
+        },
+      ],
+    }));
+    addFunctionToUtcpDirectCall('kb_read_file', async () => ({ content: '' }));
     const client = await CodeModeUtcpClient.create(process.cwd(), null);
+    const registered = await client.registerManual({
+      name: 'KNOWLEDGE_BASE',
+      call_template_type: 'direct-call',
+      callable_name: 'kb_manual',
+    } as never);
+    expect(registered.success).toBe(true);
+    return client;
+  }
+
+  it('answers it through a real code-mode runner, not a mock', async () => {
+    const client = await realRunnerWithKnowledgeBase();
     try {
       const out = await runWith(client, RETIRED_CALL);
       expect(out.success).toBe(false);
       expect(out.error).toMatch(/a change request is merged by a person in the app/);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('leaves a real runner\'s unrelated failure alone, name in the source or not', async () => {
+    // The retired name sits in a comment while the chain dies of something
+    // else: the agent must still be told what actually killed it.
+    const client = await realRunnerWithKnowledgeBase();
+    try {
+      const out = await runWith(
+        client,
+        '// merge_change_request is gone\nreturn KNOWLEDGE_BASE.no_such_tool({})',
+      );
+      expect(JSON.stringify(out)).not.toMatch(/merged by a person in the app/);
+      expect(JSON.stringify(out)).toContain('no_such_tool');
     } finally {
       await client.close();
     }

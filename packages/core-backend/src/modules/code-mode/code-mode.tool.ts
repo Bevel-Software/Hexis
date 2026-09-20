@@ -2,7 +2,7 @@ import '@utcp/direct-call';
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
-import { omitImagePayloads, retiredToolInCode, retiredToolChainFailure } from '@bevel-software/platform-mcp-core';
+import { omitImagePayloads, retiredToolInFailure, retiredToolChainFailure } from '@bevel-software/platform-mcp-core';
 import type { SpillStore } from '../workspace/spill-store.js';
 import { utcpNameToTsInterfaceName, findToolByName, AmbiguousToolNameError } from './code-mode-names.js';
 
@@ -48,7 +48,7 @@ export function createCallToolChainTool(
         // The runner reports a failed chain in `logs` rather than throwing, so
         // a chain that died calling a removed tool is recognised here: the agent
         // gets who does it now, not "is not a function".
-        const retired = retiredToolChainFailure(input.code, { result: rawResult, logs });
+        const retired = retiredToolChainFailure({ result: rawResult, logs });
         if (retired) return { success: false, error: retired, logs };
         // Same policy as the MCP surfaces' `call_tool_chain` (see
         // `omitImagePayloads`): a chain result is stringified JSON, so an image
@@ -77,7 +77,10 @@ export function createCallToolChainTool(
         const raw = e instanceof Error ? e.message : String(e);
         // A chain that failed while calling a removed tool gets the reason it
         // was removed (who does it now, and where), not "is not a function".
-        const message = retiredToolInCode(input.code) ?? raw;
+        // The thrown failure is the signal, not the chain's source: a chain
+        // that only mentions the name and died of something else keeps its own
+        // error, instead of hiding it behind a migration notice.
+        const message = retiredToolInFailure(raw) ?? raw;
         const status = (e as { status?: unknown })?.status;
         const data = (e as { data?: unknown })?.data;
         return {
