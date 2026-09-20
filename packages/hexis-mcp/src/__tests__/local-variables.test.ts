@@ -4,6 +4,7 @@ import '@utcp/cli';
 import {
   HexisLocalVariableLoader,
   bindLocalVariableResolver,
+  dropLocalVariableCache,
   resetLocalVariableResolver,
 } from '../local-variables.js';
 import {
@@ -254,6 +255,35 @@ describe('HexisLocalVariableLoader', () => {
     expect(await loader.get('git_TOKEN')).toBe('ghp_x');
     resetLocalVariableResolver(id);
     expect(await loader.get('git_TOKEN')).toBeNull();
+  });
+
+  /**
+   * A catalog refresh swaps the local manuals under a LIVE binding. A manual
+   * that kept its name but changed its file may declare other variables, or
+   * answer to another slug: what was resolved against the old definition must
+   * not be handed to the new tools for the rest of the cache's life — and the
+   * binding itself stays, because the client that holds its id is not rebuilt.
+   */
+  it('drops what a binding cached when its local manuals are swapped, and keeps the binding', async () => {
+    const before = stubVariables({ git: { variables: { TOKEN: 'from-the-old-file' } } });
+    const manuals = local({ git: { slug: 'git', path: 'Plugins/Everyone/git.tool' } });
+    const id = bindLocalVariableResolver(config, manuals);
+    const loader = new HexisLocalVariableLoader(id);
+    expect(await loader.get('git_TOKEN')).toBe('from-the-old-file');
+    expect(await loader.get('git_TOKEN')).toBe('from-the-old-file');
+    expect(before).toHaveLength(1); // the second read was the cache
+
+    // The refresh: the deployment now answers for the redefined manual, the
+    // live map is updated in place, and the cache is dropped with the old set.
+    const after = stubVariables({ git: { variables: { TOKEN: 'from-the-new-file' } } });
+    manuals.set('git', { slug: 'git', path: 'Plugins/Everyone/git.tool' });
+    dropLocalVariableCache(id);
+    expect(await loader.get('git_TOKEN')).toBe('from-the-new-file');
+    expect(after).toHaveLength(1);
+  });
+
+  it('dropping the cache of a released or unknown binding is a no-op', () => {
+    expect(() => dropLocalVariableCache('never-bound')).not.toThrow();
   });
 
   it('releasing one binding leaves the others alone', async () => {

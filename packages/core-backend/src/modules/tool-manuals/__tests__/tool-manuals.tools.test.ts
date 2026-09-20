@@ -45,10 +45,21 @@ const CATALOG = [
   },
 ];
 
+// Alice's plugin holds a `.tool` the scan refused; Bob can't read that file.
+const REFUSED = [
+  { path: 'Plugins/Sales/broken.tool', reason: 'Nested mappings are not allowed in compact mappings (line 4, column 3)' },
+];
+
 const toolManualService = {
   listAccessible: vi.fn(async (email: string) =>
     email === ALICE.email ? CATALOG : CATALOG.filter((m) => m.slug === 'weather'),
   ),
+  // Both halves out of one call — the listing has no way to ask for them
+  // separately, and so no way to describe two different snapshots.
+  listAccessibleCatalog: vi.fn(async (email: string) => ({
+    tools: email === ALICE.email ? CATALOG : CATALOG.filter((m) => m.slug === 'weather'),
+    invalid: email === ALICE.email ? REFUSED : [],
+  })),
   listLocalOnly: async () => [],
   // Alice declared `crm` on her draft; nothing else is pending anywhere.
   listDeclaredOnlyOnBranch: vi.fn(async (email: string, branch: string) =>
@@ -150,6 +161,25 @@ describe('list_tool_setup — access controls resolved for the caller', () => {
     expect(bob.tools[0].variables[0].userConfigured).toBe(false);
   });
 
+  it('names the `.tool` files the scan refused, resolved for the caller', async () => {
+    const base = await start();
+
+    const alice = (await (await callSetup(base, 'bevel_alice')).json()) as {
+      tools: { slug: string }[];
+      invalid: { path: string; reason: string }[];
+    };
+    // The refusal costs that file and nothing else: the catalog is whole...
+    expect(alice.tools.map((t) => t.slug).sort()).toEqual(['billing', 'weather']);
+    // ...and the one file that did not make it is named, with why and where.
+    expect(alice.invalid).toEqual(REFUSED);
+    expect(toolManualService.listAccessibleCatalog).toHaveBeenCalledWith(ALICE.email);
+
+    // Bob can't read that file, so he is not told it exists — the same
+    // default-deny the catalog itself applies.
+    const bob = (await (await callSetup(base, 'bevel_bob')).json()) as { invalid: unknown[] };
+    expect(bob.invalid).toEqual([]);
+  });
+
   it('rejects an unauthenticated call outright', async () => {
     const base = await start();
     const res = await fetch(`${base}/api/agent/tools/list_tool_setup`, {
@@ -212,6 +242,20 @@ describe('list_tool_setup — a declaration that lives on a draft says so', () =
     expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledTimes(1);
     expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledWith(ALICE.email, 'alice/add-crm');
     expect(body.onBranchOnly.map((p) => p.name)).toEqual(['crm']);
+  });
+
+  it('carries the refused files on the branch answer too', async () => {
+    const base = await start();
+    const body = (await (await callSetup(base, 'bevel_alice', { branch: 'alice/add-crm' })).json()) as {
+      invalid: { path: string }[];
+      onBranchOnly: unknown[];
+      note?: string;
+    };
+    // The two halves are independent: a pending draft declaration must not
+    // displace the report of a file the released catalog refused.
+    expect(body.invalid.map((i) => i.path)).toEqual(['Plugins/Sales/broken.tool']);
+    expect(body.onBranchOnly).toHaveLength(1);
+    expect(body.note).toBeTruthy();
   });
 
   it('reports nothing pending, and no note, without a branch', async () => {

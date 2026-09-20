@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from 'node:http';
 import { execFile } from 'node:child_process';
-import { link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -22,9 +22,10 @@ import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
-import { GIT_INTERNALS_MESSAGE } from '../../../shared/domain-errors.js';
+import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { PROPOSAL_ROUTE_NOTE, proposalTitleFor } from '../write-denial.js';
+import { NOT_FOUND_NEXT_STEP } from '../not-found.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -173,6 +174,18 @@ async function start(
       withFolderTurn: async <T>(id: string, dir: string, op: () => Promise<T>) => {
         folderTurns.push(`${id}:${dir}`);
         return op();
+      },
+      // Enough of `unzipFile` to exercise the TOOL: the one answer the tool
+      // shapes is absence, and the real service raises exactly this error for
+      // it (asserted in workspace.service.test.ts). Extraction itself lives
+      // there too — none of it is the tool's to decide.
+      unzipFile: async (_id: string, zipRel: string) => {
+        try {
+          await stat(join(tempDir, zipRel));
+        } catch {
+          throw new PathNotFoundError(zipRel);
+        }
+        return { destination: '', extracted: [], skipped: [] };
       },
     } as never,
     workflowService: {} as never,
@@ -2027,7 +2040,16 @@ describe('folders never vanish', () => {
     const missing = await tool(base, 'file_stat', { path: KB('Docs/nothing-here.md') });
     const placeholder = await tool(base, 'file_stat', { path: KB('Docs/.gitkeep') });
     expect(missing.status).toBe(404);
-    expect(placeholder).toEqual({ status: 404, body: { error: `There is no file or directory at "${KB('Docs/.gitkeep')}".` } });
+    // The placeholder is nothing, and it says so in the one shape every file
+    // tool uses for a path with nothing at it (see not-found.ts).
+    expect(placeholder).toEqual({
+      status: 404,
+      body: {
+        kind: 'not_found',
+        path: KB('Docs/.gitkeep'),
+        error: `There is no file or directory at "${KB('Docs/.gitkeep')}" in this workspace. ${NOT_FOUND_NEXT_STEP}`,
+      },
+    });
     expect((await tool(base, 'file_stat', { path: KB('Docs/Empty') })).body).toMatchObject({ type: 'directory' });
 
     const grep = await tool(base, 'grep', { pattern: 'marker' });
@@ -3196,6 +3218,199 @@ describe('a write refused for permissions says whether and how to propose it', (
     }
     for (const name of ['read_file', 'grep', 'list_files']) {
       expect(tools.find((t) => t.name === name)?.description, name).not.toContain(PROPOSAL_ROUTE_NOTE.trim());
+    }
+  });
+});
+
+/**
+ * A path with nothing at it is an ordinary answer, not a server failure.
+ *
+ * Every file tool used to reach that conclusion its own way — `file_stat`,
+ * `grep` and `move_file` with a 404 of their own wording, the rest by letting
+ * the filesystem's `ENOENT` escape as a 500 — so an agent could not tell "your
+ * path is wrong" from "this deployment is broken". These tests pin ONE answer
+ * for all of them: 404, `kind: 'not_found'`, the requested path echoed back,
+ * and the one next-step sentence.
+ *
+ * The four path kinds each tool is asked about: never existed, cannot be read,
+ * deleted on this branch, and malformed.
+ */
+describe('a path with nothing at it answers 404 not_found on every file tool', () => {
+  const FOLDER = `${KB_DIR}/Knowledge`;
+  const MISSING = `${FOLDER}/NoSuchFile.md`;
+
+  /** Every file tool the ticket names, called against `path` / `src`. */
+  const callsFor = (path: string): [string, Record<string, unknown>][] => [
+    ['read_file', { path }],
+    ['file_stat', { path }],
+    ['grep', { pattern: 'anything', path }],
+    ['edit_file', { path, old_string: 'a', new_string: 'b' }],
+    ['delete_file', { path }],
+    ['move_file', { src: path, dest: `${FOLDER}/Moved.md` }],
+    ['copy_file', { src: path, dest: `${FOLDER}/Copied.md` }],
+    ['unzip', { path: `${path}.zip` }],
+  ];
+
+  /** The one answer, asserted the same way for every tool. */
+  async function expectNotFound(base: string, tool: string, body: Record<string, unknown>, named: string): Promise<void> {
+    const res = await post(`${base}/api/agent/tools/${tool}`, { branch: 'main', ...body });
+    const json = (await res.json()) as { error?: string; kind?: string; path?: string };
+    expect(res.status, `${tool} status`).toBe(404);
+    expect(json.kind, `${tool} kind`).toBe('not_found');
+    expect(json.path, `${tool} path`).toBe(named);
+    expect(json.error, `${tool} message`).toContain(`"${named}"`);
+    expect(json.error, `${tool} next step`).toContain(NOT_FOUND_NEXT_STEP);
+  }
+
+  it('a path that never existed', async () => {
+    const base = await start();
+    await fs.mkdir(FOLDER, { recursive: true });
+    for (const [tool, body] of callsFor(MISSING)) {
+      // unzip is asked about `<path>.zip`, so it names that path, not MISSING.
+      await expectNotFound(base, tool, body, (body.path as string) ?? (body.src as string));
+    }
+  });
+
+  it('a file deleted on this branch', async () => {
+    const base = await start();
+    const gone = `${FOLDER}/Gone.md`;
+    await fs.mkdir(FOLDER, { recursive: true });
+    await fs.writeFile(gone, 'here for now\n');
+    await fs.writeFile(`${gone}.zip`, 'not really a zip');
+    expect((await post(`${base}/api/agent/tools/delete_file`, { branch: 'main', path: gone })).status).toBe(200);
+    await fs.deleteFile(`${gone}.zip`);
+    for (const [tool, body] of callsFor(gone)) {
+      await expectNotFound(base, tool, body, (body.path as string) ?? (body.src as string));
+    }
+  });
+
+  // ENOTDIR, not ENOENT: nothing can live under a FILE, so the path is as
+  // absent as a name nobody used — and the raw errno used to escape as a 500
+  // carrying the server's own absolute path in its message.
+  it('a path whose parent segment is a file', async () => {
+    const base = await start();
+    await fs.mkdir(FOLDER, { recursive: true });
+    await fs.writeFile(`${FOLDER}/Note.md`, 'a real file\n');
+    const under = `${FOLDER}/Note.md/nested.md`;
+    for (const [tool, body] of callsFor(under)) {
+      await expectNotFound(base, tool, body, (body.path as string) ?? (body.src as string));
+    }
+  });
+
+  // A copy has TWO ends and the filesystem blames the source for both: it
+  // re-throws every ENOENT as `FileNotFoundError(src)`, and a destination
+  // segment that is a file escapes raw as ENOTDIR from the parent mkdir. With
+  // the source sitting right there, the absence can only be the destination's
+  // — so the 404 names the destination. It must not be left to escape as a
+  // 500 either: that is the answer whose message carries the server's own
+  // absolute path, and a mis-spelled destination is the caller's to fix.
+  it('copy_file names the DESTINATION when the source is there and the destination is not', async () => {
+    const base = await start('write');
+    await fs.mkdir(FOLDER, { recursive: true });
+    await fs.writeFile(`${FOLDER}/Note.md`, 'a real file\n');
+    await fs.writeFile(`${FOLDER}/Source.md`, 'copy me\n');
+    const dest = `${FOLDER}/Note.md/deeper/copy.md`;
+    const res = await post(`${base}/api/agent/tools/copy_file`, { branch: 'main', src: `${FOLDER}/Source.md`, dest });
+    const json = (await res.json()) as { error?: string; kind?: string; path?: string };
+    expect(res.status).toBe(404);
+    expect(json.kind).toBe('not_found');
+    expect(json.path).toBe(dest);
+    expect(json.error).toContain(NOT_FOUND_NEXT_STEP);
+    // The source is not what is wrong, and the answer never says it is.
+    expect(json.error).not.toContain('Source.md');
+    // Nor does the raw errno — and the server's own absolute path with it —
+    // reach the caller, which is what the old 500 handed over.
+    expect(json.error).not.toContain('ENOTDIR');
+  });
+
+  // A backslash is a filename character on this disk, never a separator, so
+  // the read tools meet plain absence. move_file and delete_file judge the
+  // path as WRITTEN and keep refusing it up front — an answer that predates
+  // this mapping and is not absence at all.
+  it('a malformed path: backslashes read as absence, and still refused by the tools that judge spelling', async () => {
+    const base = await start();
+    const odd = `${KB_DIR}\\Knowledge\\NoSuchFile.md`;
+    for (const tool of ['read_file', 'file_stat', 'grep', 'edit_file', 'copy_file'] as const) {
+      const body = callsFor(odd).find(([name]) => name === tool)![1];
+      await expectNotFound(base, tool, body, odd);
+    }
+    for (const [tool, body] of [
+      ['delete_file', { path: odd }],
+      ['move_file', { src: odd, dest: `${FOLDER}/Moved.md` }],
+    ] as [string, Record<string, unknown>][]) {
+      const res = await post(`${base}/api/agent/tools/${tool}`, { branch: 'main', ...body });
+      expect(res.status, tool).toBe(400);
+      expect((await res.json()).error, tool).toContain('backslashes');
+    }
+  });
+
+  // THE ordering rule: the read gate answers before absence does. A caller who
+  // may not read a path must not learn from the answer whether anything is
+  // there — so a missing denied path and an existing denied one are the SAME
+  // response, byte for byte.
+  it('a path the caller may not read answers the denial, never 404', async () => {
+    const base = await start('write', denyReads(new Set(['Knowledge/Secret.md', 'Knowledge/Ghost.md'])));
+    await fs.mkdir(FOLDER, { recursive: true });
+    await fs.writeFile(`${FOLDER}/Secret.md`, 'real content\n');
+    for (const tool of ['read_file', 'file_stat', 'grep'] as const) {
+      const ask = async (name: string): Promise<{ status: number; body: string }> => {
+        const body = callsFor(`${FOLDER}/${name}`).find(([t]) => t === tool)![1];
+        const res = await post(`${base}/api/agent/tools/${tool}`, { branch: 'main', ...body });
+        return { status: res.status, body: (await res.text()).replace(name, '<name>') };
+      };
+      const present = await ask('Secret.md');
+      const absent = await ask('Ghost.md');
+      expect(present.status, tool).toBe(403);
+      expect(absent, tool).toEqual(present);
+      expect(absent.body, tool).not.toContain('not_found');
+    }
+  });
+
+  // The same ordering rule on the WRITE side. A refusal to write must not
+  // report what is on disk, or the refusal itself becomes the disclosure: a
+  // caller who may not copy into a folder would learn from the answer whether
+  // the source they named exists. So the write denial comes first and absence
+  // is only asked about once the copy was allowed to be attempted — the 404
+  // this ticket adds must not push in front of the 403 that was already there.
+  it('copy_file refuses a denied destination with the write denial, even when the source is missing', async () => {
+    const base = await start('write');
+    await fs.mkdir(FOLDER, { recursive: true });
+    const denied = async (src: string): Promise<{ status: number; body: string }> => {
+      const copySpy = vi.spyOn(fs, 'copyFile').mockRejectedValue(
+        new AccessDeniedError({ path: `${FOLDER}/Denied.md`, eligibleRoles: ['Owner'], eligibleUsers: [] }),
+      );
+      try {
+        const res = await post(`${base}/api/agent/tools/copy_file`, { branch: 'main', src, dest: `${FOLDER}/Denied.md` });
+        return { status: res.status, body: await res.text() };
+      } finally {
+        copySpy.mockRestore();
+      }
+    };
+    await fs.writeFile(`${FOLDER}/Present.md`, 'here\n');
+    const present = await denied(`${FOLDER}/Present.md`);
+    const absent = await denied(MISSING);
+    expect(present.status).toBe(403);
+    // Byte for byte the same refusal: the source's existence changes nothing.
+    expect(absent.status).toBe(403);
+    expect(absent.body).toBe(present.body);
+    expect(absent.body).toContain('write-denied');
+    expect(absent.body).not.toContain('not_found');
+  });
+
+  // Absence is ENOENT and ENOTDIR and nothing else. A path that cannot be READ
+  // is not a path the caller should be told to go and re-spell.
+  it('a filesystem failure that is not absence stays a 500', async () => {
+    const base = await start();
+    await fs.mkdir(FOLDER, { recursive: true });
+    const boom = Object.assign(new Error('EIO: i/o error, read'), { code: 'EIO' });
+    const readFileSpy = vi.spyOn(fs, 'readFile').mockRejectedValue(boom);
+    try {
+      const res = await post(`${base}/api/agent/tools/read_file`, { branch: 'main', path: `${FOLDER}/Unreadable.md` });
+      expect(res.status).toBe(500);
+      const json = (await res.json()) as { kind?: string };
+      expect(json.kind).toBeUndefined();
+    } finally {
+      readFileSpy.mockRestore();
     }
   });
 });

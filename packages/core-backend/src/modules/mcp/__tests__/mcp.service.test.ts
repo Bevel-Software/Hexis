@@ -91,6 +91,34 @@ async function setup(deps?: {
     res.json({ text: `echo: ${b.prompt}`, sessionId: typeof b.sessionId === 'string' ? b.sessionId : 'new-sess' });
   });
   app.post('/api/agent/tools/boom', (_req, res) => res.status(500).json({ error: 'kaboom' }));
+  // A live UTCP manual a catalog entry can point at — one tool, dispatched back
+  // to the echo above. Mounted always (it costs one route) so a test can add a
+  // MANUAL to the served catalog, not merely a tool to the registry: what a
+  // `.tool` commit produces is a new entry in `/api/agent/all-tools`, and only
+  // registering one end to end proves the request discovered it.
+  app.get('/api/test/late-manual', (_req, res) =>
+    res.json({
+      utcp_version: '1.1.0',
+      manual_version: '1.0.0',
+      tools: [
+        {
+          name: 'late_arrival',
+          description: 'released after the first request',
+          inputs: { type: 'object', properties: { body: { type: 'object', properties: {} } } },
+          outputs: { type: 'object', properties: {} },
+          tags: [],
+          tool_call_template: {
+            call_template_type: 'http',
+            http_method: 'POST',
+            // Literal, not `${API_URL}`: only Bevel-hosted manuals are seeded
+            // that variable, and this one stands in for a third-party server.
+            url: `${loopbackBase}/api/agent/tools/ask`,
+            content_type: 'application/json',
+          },
+        },
+      ],
+    }),
+  );
   // Resolved after listen; the catalog handler runs later and reads it then,
   // so a manual can point back at this loopback (a live manual endpoint).
   let loopbackBase = '';
@@ -560,6 +588,60 @@ describe('McpService — manual names that rewrite to one identifier', () => {
     const names = (await client.listTools()).tools.map((t) => t.name);
     expect(names).toContain('ask');
     expect(warn.mock.calls.map((c) => String(c[0])).some((m) => m.includes('"KNOWLEDGE-BASE"') && m.includes('rewrites to'))).toBe(true);
+  });
+});
+
+describe('McpService — the stateless endpoint reads the live catalog', () => {
+  /**
+   * The freshness the STATELESS hosted endpoint gets for free, against the
+   * real service rather than a stand-in: because every request discovers the
+   * live catalog for itself, a manual released between two requests is in the
+   * second one's answer — no session to invalidate, no notification to honour,
+   * no reconnect. This is the half of the guarantee `/api/mcp` owes; the
+   * commit → catalog half is `catalog-cache-invalidation.ts`'s.
+   *
+   * Asserted through `McpService` itself, and through the CATALOG the loopback
+   * serves (`GET /api/agent/all-tools`) rather than the registry behind the KB
+   * manual — that catalog is what a committed `.tool` lands in, so a manual
+   * appearing there and being discovered, registered and listed within one
+   * request is the whole path the criterion names. A stub that re-reads a
+   * mutable array proves only that the array was re-read; this fails if the
+   * service caches its tool surface, its catalog fetch, or its registrations
+   * across requests.
+   */
+  /** The catalog entry a committed `.tool` becomes: a manual to go and read. */
+  const lateManual = (loopbackBase: string): CallTemplate =>
+    ({
+      name: 'late_manual',
+      call_template_type: 'http',
+      url: `${loopbackBase}/api/test/late-manual`,
+      http_method: 'GET',
+    }) as CallTemplate;
+
+  it("a manual released between two requests is in the second request's answer", async () => {
+    // The catalog the loopback serves, read afresh by each request.
+    let released = false;
+    const client = await setup({ extraManuals: (base) => (released ? [lateManual(base)] : []) });
+    expect((await client.listTools()).tools.some((t) => t.name.includes('late_arrival'))).toBe(false);
+
+    // The commit lands: a `.tool` is released and the catalog now lists it.
+    // Nothing reconnects, nothing is told.
+    released = true;
+
+    const second = await connectClient(lastService!, 'tok-1');
+    const after = (await second.listTools()).tools.map((t) => t.name);
+    expect(after.some((n) => n.includes('late_arrival'))).toBe(true);
+    // Still everything it had before: a new manual is added to the surface,
+    // not swapped for it.
+    expect(after).toContain('ask');
+
+    // The first request's own server, meanwhile, keeps the surface it
+    // discovered — one catalog per request, shared by that request's messages
+    // and nothing beyond. That is not a staleness bug but the shape of the
+    // endpoint: a client here makes a NEW request, and the new request sees
+    // the new manual. The long-lived-connection case is what the local
+    // bridge's catalog watch exists for.
+    expect((await client.listTools()).tools.some((t) => t.name.includes('late_arrival'))).toBe(false);
   });
 });
 
