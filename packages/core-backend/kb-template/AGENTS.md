@@ -205,7 +205,14 @@ Access to any path — reading it as much as writing it — is governed by
   case- and whitespace-insensitive (`Admin` = `admin` = `ADMIN`; `Product Team`
   = `product team`). The reserved name `deny` cannot be used, and neither can
   names starting with `role/` or `plugin/` — those spellings are tokens in
-  access entries (below).
+  access entries (below). One exception to the file's authority: the
+  **deployment admin** — the address the server configuration sets as
+  `ADMIN_EMAIL` — is **always an Admin**, whether or not `roles.yaml` lists
+  it, and taking it out of the file does not change that. It is the rescue
+  path for a `roles.yaml` that has lost its last Admin. The App roles page
+  shows that account under Admin as a fixed member that cannot be added or
+  removed there; every other Admin membership is exactly what the file says,
+  and removing one takes effect on that person's next request.
 - **Plugins are grantable principals.** `plugin/<name>/read`,
   `plugin/<name>/write` and `plugin/<name>/owner` in any access file mean
   everyone who currently holds that verb on the plugin whose manifest `name`
@@ -426,6 +433,14 @@ the skill. `metadata.version` is semver. Any other `metadata` keys are the
 author's own notes — the catalog carries the file as it is and acts on none
 of them.
 
+A `SKILL.md` committed on the default branch is listed and loadable from the
+very next `list_skills` or `get_skill`, on the connection you already have:
+skills are read from the workspace on every request, on either connection.
+See *A released tool or skill is live without a reconnect* under **Tool
+Manuals** for the one caveat (an MCP client that caches the prompt list it
+was given at connect time must re-list — the prompt-list-changed notification
+that tells it to arrives with the connection's next catalog check).
+
 **How skills reach agents.** Through the MCP server (`list_skills`,
 `get_skill`), or as native plugins: every user can clone a git remote from
 the app's external-agent page that holds a plugin marketplace compiled from
@@ -589,6 +604,10 @@ Call the **`list_tool_setup`** tool to see, for every accessible tool — `.tool
 - **Per variable**: `adminConfigured` (the shared value — or, for a sign-in, the owner-side provider setup — is done), `userConfigured` / `authorized` (the CURRENT user's own value / sign-in), and `canWrite` (whether the current user may set the tool's shared config).
 
 **Tools are served from the default branch only.** An `mcp.json` entry or `.tool` you write on a draft is committed to that draft and nowhere else: it is not listed, not callable and has no sign-in on the Connect page until the draft is merged. After declaring a tool on a draft, call `list_tool_setup` with `branch` set to that draft — `onBranchOnly` names what is still waiting there — and tell the user it goes live once the change request is merged. A tool that stays in `tools` is released, and a restart does not remove it or its sign-ins; if one disappears, check the caller's read access to the file that declares it.
+
+**A released tool or skill is live without a reconnect.** A commit on the default branch that adds, changes or removes a `.tool`, an `mcp.json`, a `plugin.json` or a `SKILL.md` drops the catalogs at once, whichever way the commit arrived (the app, the file tools, or a git push). The hosted endpoint is stateless — it reads the live catalog on every request, so the very next call sees the change. The local `hexis-mcp` server checks the workspace's catalog whenever its connection is used — when a tool call finishes, and when a client lists the tools (at most once every five seconds, and never while idle) — and re-registers what changed, local-only servers included. The change lands at the check that notices it: in the listing that ran it, or after the call that triggered it, so a new tool is callable from the call after that one, and a listing inside the five-second window still shows what the last check confirmed. From then on `list_tools`, `list_tool_setup` and `list_local_tools` answer with the new state on the connection you already have. Skills need no check at all: `list_skills` and `get_skill` read the workspace on every request, so a committed `SKILL.md` is in the very next answer, and the two resolve a skill the same way, so a skill you can load by name is a skill the listing shows.
+
+The platform also sends the MCP tool-list-changed and prompt-list-changed notifications when it can. **A client that CACHES the list it got at connect time — rather than honouring those notifications — will not see the change: it must re-list, or reconnect.** That is a property of the client, not of the workspace; if a tool you just wrote is missing, call `list_tools` again before assuming anything is wrong. One caveat on the local `hexis-mcp` server: a refresh there waits for a tool call that is still running (up to 15 seconds), so a commit made mid-call lands once that call finishes — and a LOCAL-only server (`local: true`, or a `type: "stdio"` command) that changed is restarted by that refresh, so a call to it made in the same moment may see it come back.
 
 The listing is scoped by the same access controls as everything else: a tool the caller can't READ doesn't appear at all, and `canWrite` means write access **on the file that declares it** — the `.tool` file itself (via its frontmatter `write:`/`owner:` verbs or the `access.md` chain), or the plugin's `mcp.json` for an MCP server (via the plugin's `access.md` chain — `mcp.json` carries no verb list of its own) — NOT any platform role. The people who manage that file are exactly the people who configure its shared secrets. To delegate a `.tool` to someone, add them to that file's `write:`/`owner:` list; to delegate an MCP server, grant them `write` on the plugin in its `access.md` (both are edits you can make via change request). That alone lets them configure it.
 

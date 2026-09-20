@@ -139,7 +139,11 @@ async function withProbeTimeout<T>(
   }
 }
 
-/** Below this, a "secret" is too short to blank out without eating the message. */
+/**
+ * Below this, a value is redacted only where it stands ALONE — see
+ * {@link SecretRedactor}. It is still redacted; what it may not do is match
+ * inside a longer run of letters and digits.
+ */
 const MIN_SECRET_CHARS = 6;
 /** The shortest leading run of a secret we will treat as an echo of it. */
 const MIN_ECHOED_PREFIX_CHARS = 8;
@@ -158,15 +162,26 @@ const REDACTED = '[redacted]';
  *
  * Leading PREFIXES count as well as whole values, because that echo is usually
  * masked in the middle ("sk-live-abcd…wxyz"): a whole-value search finds
- * nothing there and prints the head of the key regardless. Short values are
- * left alone — blanking a five-character string would hit unrelated text and
- * destroy the message that makes the verdict useful.
+ * nothing there and prints the head of the key regardless.
+ *
+ * SHORT values are redacted too — a four-character key is still the key, and a
+ * provider that quotes it back would otherwise hand it to any reader who can
+ * probe the tool. They are matched only where they stand alone, though,
+ * bounded by something other than a letter or digit. Not every value this
+ * class is told about is a credential: `substitute` hands it whatever every
+ * `${VAR}` in the manual resolved to, so a `${VERSION}` of `1` or a
+ * `${REGION}` of `us` arrives here alongside the token. Blanking those
+ * wherever their characters happened to fall would turn `answered 401` into
+ * `answered 40[redacted]` and destroy the message that makes the verdict
+ * useful — so the short ones may only match a run of their own.
  */
 class SecretRedactor {
   private readonly values = new Set<string>();
 
   remember(value: string): void {
-    if (value.length >= MIN_SECRET_CHARS) this.values.add(value);
+    // Blank is not a secret, and a blank needle matches everywhere: `''` would
+    // put `[redacted]` between every character of the message.
+    if (value.trim()) this.values.add(value);
   }
 
   redact(text: string): string {
@@ -177,6 +192,10 @@ class SecretRedactor {
     // leaves its tail printed — the exact half-redaction this class exists to
     // avoid, arrived at from the other direction.
     for (const secret of [...this.values].sort((a, b) => b.length - a.length)) {
+      if (secret.length < MIN_SECRET_CHARS) {
+        out = out.replace(standingAlone(secret), REDACTED);
+        continue;
+      }
       // Longest match first: replacing the whole value when it is present beats
       // replacing a prefix of it and leaving the tail on screen.
       const shortest = Math.min(secret.length, MIN_ECHOED_PREFIX_CHARS);
@@ -189,6 +208,33 @@ class SecretRedactor {
     }
     return out;
   }
+}
+
+/**
+ * `value`, wherever it appears as a run of its own.
+ *
+ * Both ends are guarded, unconditionally. An earlier version applied the guard
+ * only where the value's own edge was a letter or a digit, reasoning that a
+ * value ending in punctuation cannot hide inside a longer word — but a value
+ * made ENTIRELY of punctuation then compiled to a bare, unanchored pattern: a
+ * `${SEPARATOR}` of `.` turned every sentence period and every dot of every
+ * hostname in the provider's message into `[redacted]`, which destroys the
+ * quote this class exists to keep readable.
+ *
+ * The cost is a narrow one, and the right way round: a sub-six-character value
+ * whose edge is punctuation and which the provider echoes glued to a word
+ * character (`sk-ab` for a value of `-ab`) is not redacted. That intersection
+ * is far rarer than a punctuation-shaped `${VAR}`, and over-redaction cannot be
+ * recovered from by the reader while this miss still needs a credential short
+ * enough to carry almost no secret in the first place. Values of six
+ * characters or more never come here at all.
+ */
+function standingAlone(value: string): RegExp {
+  return new RegExp(`(?<![A-Za-z0-9])${escapeRegExp(value)}(?![A-Za-z0-9])`, 'g');
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**

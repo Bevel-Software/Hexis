@@ -41,6 +41,22 @@ export function pluginPrincipalLabel(plugin: string, verb: PluginPrincipalVerb):
   return `${plugin} · ${who}`;
 }
 
+/**
+ * A person named in an access list. `hasAccount` is false when nobody has
+ * ever signed in as that email — under single sign-on the account is created
+ * BY the first sign-in, so a grant written ahead of time is a normal thing to
+ * see and is never refused for it. The dialog turns the flag into a quiet
+ * "hasn't signed in yet" beside the name, which is what makes a typo visible;
+ * the server re-reads it with every view, so the note goes away by itself
+ * once that person signs in. Optional for version skew: an older server omits
+ * it, and `undefined` must read as "nothing to say", never as "no account".
+ */
+export interface AccessUser {
+  name: string;
+  email: string;
+  hasAccount?: boolean;
+}
+
 export interface AccessEligible {
   /**
    * Kinded twin of `roles` — the same names, each saying whether it is a ROLE
@@ -50,7 +66,7 @@ export interface AccessEligible {
    */
   principals?: ResolvedPrincipal[];
   roles: string[];
-  users: { name: string; email: string }[];
+  users: AccessUser[];
 }
 
 export interface AccessReaders extends AccessEligible {
@@ -87,6 +103,19 @@ export type VerbSources = GrantSource[];
 /** Per-verb sources of a principal's access; only held verbs appear. */
 export type GrantSources = Partial<Record<GrantVerb, VerbSources>>;
 
+/**
+ * Where a principal is DENIED one verb, closest-first (mirrors the backend
+ * `DenialSources`). `direct` is a `deny` written on the target itself — a
+ * restriction made HERE, which the row renders as "restricted here" and whose
+ * menu can lift it; `ancestor` is one written in a parent folder.
+ *
+ * A separate map from {@link GrantSources} on purpose: everything that reads
+ * `sources` means "where their access comes from" and filters on
+ * `direct`/`ancestor` with no polarity check, so a denial mixed in there would
+ * be counted as a grant. Only DENIED verbs appear; absent under version skew.
+ */
+export type DenialSources = Partial<Record<GrantVerb, VerbSources>>;
+
 export interface AccessResponse {
   /** True iff the current user may read the path (default-deny). */
   canRead: boolean;
@@ -114,6 +143,31 @@ export interface AccessResponse {
    * is how the dialog chains into "Remove from parent?".
    */
   sources: Record<string, GrantSources>;
+  /**
+   * Per-principal, per-verb DENIALS, keyed exactly like `sources`. Only
+   * principals with at least one denied verb appear. This is what lets a row
+   * say "restricted here" instead of silently showing a verb as off, and what
+   * makes a restriction liftable from the same menu that wrote it.
+   *
+   * Optional for version skew: an older server omits it and every row simply
+   * renders no restrictions.
+   */
+  denials?: Record<string, DenialSources>;
+  /**
+   * The principals this target RESTRICTS — everyone named by a `deny` in its
+   * own access file. They are in no eligible list (a principal denied every
+   * verb holds nothing), so without this list the row would vanish the moment
+   * the restriction was written: the bug this field exists to close.
+   *
+   * Shaped like an eligible list so rows build from it through the same path.
+   * No legacy name-only `roles` twin: this list is new, so nothing reads it
+   * kind-blind. Optional for version skew.
+   */
+  deniedHere?: {
+    principals: ResolvedPrincipal[];
+    /** Restricted here; each carries {@link AccessUser.hasAccount} like a holder does. */
+    users: AccessUser[];
+  };
   /**
    * Present for a file that cannot carry frontmatter (a PDF, a deck, an
    * image — or binary bytes saved under a note's name, which the server
@@ -187,9 +241,30 @@ export interface SuggestResponse {
    * which was the retired alias of `roles`.
    */
   pluginPrincipals?: string[];
-  people?: { name: string; email: string }[];
+  /**
+   * Matching people, each carrying {@link AccessUser.hasAccount} — false for
+   * someone named in the knowledge base who has never signed in. Nobody is
+   * withheld for it; it is what a chip made from the suggestion labels itself
+   * with.
+   */
+  people?: AccessUser[];
   /** True when the query was too short to return people (roles/groups still shown). */
   peopleWithheld?: boolean;
+  /**
+   * True when THIS ANSWER rules on accounts — every person above carries
+   * {@link AccessUser.hasAccount}, and an address missing from `people` is
+   * missing because no account exists for it.
+   *
+   * It describes the answer, not the build, and so is false whenever
+   * `peopleWithheld` is true: a query too short to return anybody says
+   * nothing about whether anybody has an account. Absent means the server
+   * said nothing on the subject at all (an older build), and a failed request
+   * says nothing either. The dialog labels a free-typed chip "hasn't signed
+   * in yet" only on this evidence — and checks `peopleWithheld` alongside it,
+   * so the two can never be read apart — so silence never becomes an
+   * accusation that an address is wrong.
+   */
+  accountsKnown?: boolean;
 }
 
 /**
@@ -296,6 +371,50 @@ export async function fetchFileAccessBatch(
       // The default goes unsent, so a write lookup is the request it always was.
       body: JSON.stringify(verb === 'write' ? { paths: relativePaths } : { paths: relativePaths, verb }),
     }),
+  );
+}
+
+/**
+ * A principal as its grant names it — a group, a role, a plugin principal
+ * (spelled as its `plugin/<Name>/<verb>` token), or a person granted
+ * directly. What the prospective-access lists are made of.
+ */
+export interface AccessPrincipalRef {
+  kind: 'group' | 'role' | 'plugin' | 'person';
+  name: string;
+  email?: string;
+}
+
+/** Who can open and who can edit one path. */
+export interface PathPrincipals {
+  read: AccessPrincipalRef[];
+  write: AccessPrincipalRef[];
+}
+
+/** One file's holders where it is now and where a move would put it. */
+export interface ProspectiveAccess {
+  before: PathPrincipals;
+  after: PathPrincipals;
+}
+
+/**
+ * Resolve who holds read and write on `relativePath` today and who would hold
+ * them once the file sits in `toDir` — the destination's folder rules with the
+ * file's own frontmatter layered on top. Both paths are repo-relative
+ * (`Knowledge/Foo.md`, `Knowledge/Sales`); `toDir` is `''` for the repo root.
+ *
+ * `signal` lets the move dialog give up on it: the answer decorates the
+ * confirmation and must never hold it open.
+ */
+export async function fetchProspectiveAccess(
+  workspaceId: string,
+  relativePath: string,
+  toDir: string,
+  signal?: AbortSignal,
+): Promise<ProspectiveAccess> {
+  const query = `from=${encodeURIComponent(relativePath)}&toDir=${encodeURIComponent(toDir)}`;
+  return handleApiResponse(
+    await authFetch(`/api/workspace/${workspaceId}/access/prospective?${query}`, { signal }),
   );
 }
 

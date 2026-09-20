@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from 'node:http';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -22,9 +22,10 @@ import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
-import { GIT_INTERNALS_MESSAGE } from '../../../shared/domain-errors.js';
+import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { PROPOSAL_ROUTE_NOTE, proposalTitleFor } from '../write-denial.js';
+import { NOT_FOUND_NEXT_STEP } from '../not-found.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -173,6 +174,18 @@ async function start(
       withFolderTurn: async <T>(id: string, dir: string, op: () => Promise<T>) => {
         folderTurns.push(`${id}:${dir}`);
         return op();
+      },
+      // Enough of `unzipFile` to exercise the TOOL: the one answer the tool
+      // shapes is absence, and the real service raises exactly this error for
+      // it (asserted in workspace.service.test.ts). Extraction itself lives
+      // there too — none of it is the tool's to decide.
+      unzipFile: async (_id: string, zipRel: string) => {
+        try {
+          await stat(join(tempDir, zipRel));
+        } catch {
+          throw new PathNotFoundError(zipRel);
+        }
+        return { destination: '', extracted: [], skipped: [] };
       },
     } as never,
     workflowService: {} as never,
@@ -2027,7 +2040,16 @@ describe('folders never vanish', () => {
     const missing = await tool(base, 'file_stat', { path: KB('Docs/nothing-here.md') });
     const placeholder = await tool(base, 'file_stat', { path: KB('Docs/.gitkeep') });
     expect(missing.status).toBe(404);
-    expect(placeholder).toEqual({ status: 404, body: { error: `There is no file or directory at "${KB('Docs/.gitkeep')}".` } });
+    // The placeholder is nothing, and it says so in the one shape every file
+    // tool uses for a path with nothing at it (see not-found.ts).
+    expect(placeholder).toEqual({
+      status: 404,
+      body: {
+        kind: 'not_found',
+        path: KB('Docs/.gitkeep'),
+        error: `There is no file or directory at "${KB('Docs/.gitkeep')}" in this workspace. ${NOT_FOUND_NEXT_STEP}`,
+      },
+    });
     expect((await tool(base, 'file_stat', { path: KB('Docs/Empty') })).body).toMatchObject({ type: 'directory' });
 
     const grep = await tool(base, 'grep', { pattern: 'marker' });
@@ -2313,6 +2335,55 @@ describe('preflight for moves and deletes', () => {
       expect(await exists(args.src)).toBe(false);
     });
 
+    /**
+     * "A file named rules.md already exists in Locked." is a fact about a
+     * folder. Answering it before the write verdict turned these tools into an
+     * existence oracle: a caller who may not write `Locked/` — and on a
+     * protected branch that is most callers — could ask for a name and read
+     * off whether it is taken. The two calls below differ ONLY in whether the
+     * destination exists, and must be indistinguishable.
+     */
+    it('a destination the caller may not write answers the same whether the name is taken or free', async () => {
+      const base = await seeded();
+      const taken = { src: KB('Sales/deal.md'), dest: KB('Locked/rules.md') };
+      const free = { src: KB('Sales/deal.md'), dest: KB('Locked/free.md') };
+
+      const ontoTaken = await call(base, 'move_file', taken);
+      const ontoFree = await call(base, 'move_file', free);
+      expect(ontoTaken.status).toBe(403);
+      expect(ontoTaken.status).toBe(ontoFree.status);
+      expect(ontoTaken.body.kind).toBe('write-denied');
+      expect(ontoTaken.body.error).not.toContain('already exists');
+      // Same shape, same words — only the path each names differs.
+      expect(ontoTaken.body.error.replace('rules.md', 'free.md')).toBe(ontoFree.body.error);
+
+      // The dry run is the easier oracle to reach, and says the same.
+      const dryTaken = await call(base, 'move_file', { ...taken, dryRun: true });
+      const dryFree = await call(base, 'move_file', { ...free, dryRun: true });
+      expect(dryTaken.body).toMatchObject({ allowed: false });
+      expect(dryTaken.body.reason).not.toContain('already exists');
+      expect(dryTaken.body.reason.replace('rules.md', 'free.md')).toBe(dryFree.body.reason);
+
+      // And nothing was moved onto the name that was taken.
+      expect(await fs.readFile(KB('Locked/rules.md'), { encoding: 'utf-8' })).toBe('rules');
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+
+    it('copy_file keeps the same order: the write refusal, not what is in the folder', async () => {
+      const base = await seeded();
+
+      const ontoTaken = await call(base, 'copy_file', { src: KB('Sales/deal.md'), dest: KB('Locked/rules.md') });
+      const ontoFree = await call(base, 'copy_file', { src: KB('Sales/deal.md'), dest: KB('Locked/free.md') });
+      expect(ontoTaken.status).toBe(403);
+      expect(ontoTaken.status).toBe(ontoFree.status);
+      expect(ontoTaken.body.kind).toBe('write-denied');
+      expect(ontoTaken.body.error).not.toContain('already exists');
+      expect(ontoTaken.body.error.replace('rules.md', 'free.md')).toBe(ontoFree.body.error);
+
+      expect(await fs.readFile(KB('Locked/rules.md'), { encoding: 'utf-8' })).toBe('rules');
+      expect(await exists(KB('Locked/free.md'))).toBe(false);
+    });
+
     it('a move the caller may not write: the dry run says so, the real call is a write-denied with proposal steps', async () => {
       const base = await seeded();
       const args = { src: KB('Sales/deal.md'), dest: KB('Locked/deal.md') };
@@ -2423,6 +2494,36 @@ describe('preflight for moves and deletes', () => {
       expect(run.status).toBe(400);
       expect(run.body.error).toBe(sentence);
       expect(await exists(args.src)).toBe(true);
+    });
+
+    it('every one of the four platform files gets the same sentence, and the agent never gets the admin restore', async () => {
+      // The agent move tool has no exception: the recovery move is a person's,
+      // made as an admin, and an agent is neither.
+      const base = await seeded();
+      await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
+      await fs.writeFile(KB('AGENTS.md'), 'agents\n');
+      await fs.writeFile(KB('.bevelignore'), '*.tmp\n');
+      await fs.writeFile(KB('Misplaced/access.md'), '---\nread: everyone\n---\n');
+      const cases: [string, string][] = [
+        [KB('access.md'), KB('Sales/access.md')],
+        [KB('roles.yaml'), KB('Sales/roles.yaml')],
+        [KB('.bevelignore'), KB('Sales/.bevelignore')],
+        [KB('AGENTS.md'), KB('Sales/AGENTS.md')],
+        // Including the shape of the admin's recovery move: a misplaced
+        // access.md into a folder that has none. A person holding the Admin
+        // role is allowed exactly this move from the UI; the agent is not.
+        [KB('Misplaced/access.md'), KB('HR/access.md')],
+      ];
+      for (const [src, dest] of cases) {
+        const name = src.slice(src.lastIndexOf('/') + 1);
+        const sentence = `${name} is a platform file and stays in its folder.`;
+        expect((await call(base, 'move_file', { src, dest, dryRun: true })).body)
+          .toMatchObject({ allowed: false, reason: sentence });
+        const run = await call(base, 'move_file', { src, dest, confirm: true });
+        expect(run.status).toBe(400);
+        expect(run.body.error).toBe(sentence);
+        expect(await exists(src)).toBe(true);
+      }
     });
 
     it('an existing destination is refused, never overwritten', async () => {
@@ -2726,6 +2827,95 @@ describe('preflight for moves and deletes', () => {
       expect(await fs.readFile(KB('Sales/Deal.md'), { encoding: 'utf-8' })).toBe('other deal');
       expect(await exists(KB('Sales/deal.md'))).toBe(true);
     });
+
+    /**
+     * The agent hears the sentence the sidebar shows — one refusal, named by
+     * what is in the way, so a user reading a tool result and a user reading
+     * the rename box are told the same thing.
+     */
+    it('a taken destination is refused with the one sentence, naming what is already there', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/notes.md'), '# Notes\n');
+      await fs.writeFile(KB('Sales/report.docx'), 'docx bytes');
+
+      const ontoFile = await call(base, 'move_file', { src: KB('Sales/report.docx'), dest: KB('Sales/notes.md') });
+      expect(ontoFile.status).toBe(409);
+      expect(ontoFile.body.error).toBe('A file named notes.md already exists in Sales.');
+      expect(await fs.readFile(KB('Sales/notes.md'), { encoding: 'utf-8' })).toBe('# Notes\n');
+      expect(await exists(KB('Sales/report.docx'))).toBe(true);
+
+      // Onto a FOLDER of that name: the same sentence, said of a folder.
+      const ontoFolder = await call(base, 'move_file', { src: KB('Sales/notes.md'), dest: KB('Sales/archive') });
+      expect(ontoFolder.status).toBe(409);
+      expect(ontoFolder.body.error).toBe('A folder named archive already exists in Sales.');
+      expect(await exists(KB('Sales/archive/top.md'))).toBe(true);
+
+      // A folder onto a file: named for what is in the way, not for what moves.
+      const folderOntoFile = await call(base, 'move_file', { src: KB('Sales/archive'), dest: KB('Sales/notes.md') });
+      expect(folderOntoFile.status).toBe(409);
+      expect(folderOntoFile.body.error).toBe('A file named notes.md already exists in Sales.');
+      expect(await fs.readFile(KB('Sales/notes.md'), { encoding: 'utf-8' })).toBe('# Notes\n');
+
+      // The dry run says the same thing before anything is attempted.
+      const dry = await call(base, 'move_file', { src: KB('Sales/report.docx'), dest: KB('Sales/notes.md'), dryRun: true });
+      expect(dry.body).toMatchObject({ allowed: false, reason: 'A file named notes.md already exists in Sales.' });
+    });
+
+    it('copy_file refuses a taken destination with the same sentence, and copies nothing', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/notes.md'), '# Notes\n');
+
+      const onto = await call(base, 'copy_file', { src: KB('Sales/deal.md'), dest: KB('Sales/notes.md') });
+      expect(onto.status).toBe(409);
+      expect(onto.body.error).toBe('A file named notes.md already exists in Sales.');
+      expect(await fs.readFile(KB('Sales/notes.md'), { encoding: 'utf-8' })).toBe('# Notes\n');
+
+      const ontoFolder = await call(base, 'copy_file', { src: KB('Sales/deal.md'), dest: KB('Sales/archive') });
+      expect(ontoFolder.status).toBe(409);
+      expect(ontoFolder.body.error).toBe('A folder named archive already exists in Sales.');
+
+      // A free name still copies, exactly as before.
+      const free = await call(base, 'copy_file', { src: KB('Sales/deal.md'), dest: KB('Sales/deal-copy.md') });
+      expect(free.status).toBe(200);
+      expect(await fs.readFile(KB('Sales/deal-copy.md'), { encoding: 'utf-8' })).toBe('deal');
+    });
+
+    // Only where the two spellings are distinct entries: on a case-insensitive
+    // disk `link(deal.md, Deal.md)` is EEXIST at setup, and the case-only
+    // rename it stands in for is covered by the service's own suite.
+    it.skipIf(!caseSensitiveDisk)('a hard link under a case-variant name is still a second entry, so still a clash', async () => {
+      // The one destination a move may land on is the source ITSELF, which is
+      // what a case-insensitive disk shows for `deal.md` → `Deal.md`. This
+      // disk is not that: `Deal.md` is a directory entry of its own, hard link
+      // or no hard link, and a move onto it would take that name away. One
+      // inode does not make it the same name — the folder listing does, and
+      // here the folder lists both.
+      const base = await seeded();
+      await link(join(tempDir, KB('Sales/deal.md')), join(tempDir, KB('Sales/Deal.md')));
+
+      const run = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/Deal.md') });
+      expect(run.status).toBe(409);
+      expect(run.body.error).toBe('A file named Deal.md already exists in Sales.');
+      expect(await exists(KB('Sales/Deal.md'))).toBe(true);
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+
+      const copied = await call(base, 'copy_file', { src: KB('Sales/Deal.md'), dest: KB('Sales/deal.md') });
+      expect(copied.status).toBe(409);
+    });
+
+    it.skipIf(!caseSensitiveDisk)('a hard link under an unrelated name is a clash, inode or no inode', async () => {
+      // The same reading, without the case-variance to confuse it: two names
+      // a user can see separately, and moving onto the second one would take
+      // it away.
+      const base = await seeded();
+      await link(join(tempDir, KB('Sales/deal.md')), join(tempDir, KB('Sales/twin.md')));
+
+      const run = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/twin.md') });
+      expect(run.status).toBe(409);
+      expect(run.body.error).toBe('A file named twin.md already exists in Sales.');
+      expect(await exists(KB('Sales/twin.md'))).toBe(true);
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
   });
 
   describe('descriptions match behaviour', () => {
@@ -2871,11 +3061,22 @@ describe('a write refused for permissions says whether and how to propose it', (
     ['mkdir', { branch: TARGET, path: DENIED }],
   ];
 
+  /**
+   * A copy onto a name that is TAKEN is refused for the name, before any
+   * permission is read (as a move is) — so the case that is about the
+   * permission gives it a free destination. Every other tool here acts on the
+   * file at `DENIED` and needs it present.
+   */
+  const freeDestinationFor = async (tool: string) => {
+    if (tool === 'copy_file') await rm(join(tempDir, DENIED), { force: true });
+  };
+
   it.each(CALLS)('%s: a reader gets canPropose and the three steps, and nothing is created', async (tool, body) => {
     const { ac, calls } = readVerdict(true);
     const base = await start('write', ac);
     await fs.mkdir(`${KB_DIR}/Sales`, { recursive: true });
     await fs.writeFile(DENIED, 'old text\n');
+    await freeDestinationFor(tool);
     denyWrites();
     const workflowCalls = workspacePathCalls.length;
 
@@ -2995,6 +3196,7 @@ describe('a write refused for permissions says whether and how to propose it', (
     await fs.writeFile(DENIED, 'old text\n');
     denyWrites();
     for (const [tool, body] of CALLS) {
+      await freeDestinationFor(tool);
       const { text } = await call(base, tool, { ...body, sessionId: 'sess-secret-123' });
       expect(text, tool).toContain('write-denied');
       for (const secret of [KEY, SECRET_CONTENT, 'sess-secret-123', 'Bearer']) expect(text, tool).not.toContain(secret);
@@ -3016,6 +3218,199 @@ describe('a write refused for permissions says whether and how to propose it', (
     }
     for (const name of ['read_file', 'grep', 'list_files']) {
       expect(tools.find((t) => t.name === name)?.description, name).not.toContain(PROPOSAL_ROUTE_NOTE.trim());
+    }
+  });
+});
+
+/**
+ * A path with nothing at it is an ordinary answer, not a server failure.
+ *
+ * Every file tool used to reach that conclusion its own way — `file_stat`,
+ * `grep` and `move_file` with a 404 of their own wording, the rest by letting
+ * the filesystem's `ENOENT` escape as a 500 — so an agent could not tell "your
+ * path is wrong" from "this deployment is broken". These tests pin ONE answer
+ * for all of them: 404, `kind: 'not_found'`, the requested path echoed back,
+ * and the one next-step sentence.
+ *
+ * The four path kinds each tool is asked about: never existed, cannot be read,
+ * deleted on this branch, and malformed.
+ */
+describe('a path with nothing at it answers 404 not_found on every file tool', () => {
+  const FOLDER = `${KB_DIR}/Knowledge`;
+  const MISSING = `${FOLDER}/NoSuchFile.md`;
+
+  /** Every file tool the ticket names, called against `path` / `src`. */
+  const callsFor = (path: string): [string, Record<string, unknown>][] => [
+    ['read_file', { path }],
+    ['file_stat', { path }],
+    ['grep', { pattern: 'anything', path }],
+    ['edit_file', { path, old_string: 'a', new_string: 'b' }],
+    ['delete_file', { path }],
+    ['move_file', { src: path, dest: `${FOLDER}/Moved.md` }],
+    ['copy_file', { src: path, dest: `${FOLDER}/Copied.md` }],
+    ['unzip', { path: `${path}.zip` }],
+  ];
+
+  /** The one answer, asserted the same way for every tool. */
+  async function expectNotFound(base: string, tool: string, body: Record<string, unknown>, named: string): Promise<void> {
+    const res = await post(`${base}/api/agent/tools/${tool}`, { branch: 'main', ...body });
+    const json = (await res.json()) as { error?: string; kind?: string; path?: string };
+    expect(res.status, `${tool} status`).toBe(404);
+    expect(json.kind, `${tool} kind`).toBe('not_found');
+    expect(json.path, `${tool} path`).toBe(named);
+    expect(json.error, `${tool} message`).toContain(`"${named}"`);
+    expect(json.error, `${tool} next step`).toContain(NOT_FOUND_NEXT_STEP);
+  }
+
+  it('a path that never existed', async () => {
+    const base = await start();
+    await fs.mkdir(FOLDER, { recursive: true });
+    for (const [tool, body] of callsFor(MISSING)) {
+      // unzip is asked about `<path>.zip`, so it names that path, not MISSING.
+      await expectNotFound(base, tool, body, (body.path as string) ?? (body.src as string));
+    }
+  });
+
+  it('a file deleted on this branch', async () => {
+    const base = await start();
+    const gone = `${FOLDER}/Gone.md`;
+    await fs.mkdir(FOLDER, { recursive: true });
+    await fs.writeFile(gone, 'here for now\n');
+    await fs.writeFile(`${gone}.zip`, 'not really a zip');
+    expect((await post(`${base}/api/agent/tools/delete_file`, { branch: 'main', path: gone })).status).toBe(200);
+    await fs.deleteFile(`${gone}.zip`);
+    for (const [tool, body] of callsFor(gone)) {
+      await expectNotFound(base, tool, body, (body.path as string) ?? (body.src as string));
+    }
+  });
+
+  // ENOTDIR, not ENOENT: nothing can live under a FILE, so the path is as
+  // absent as a name nobody used — and the raw errno used to escape as a 500
+  // carrying the server's own absolute path in its message.
+  it('a path whose parent segment is a file', async () => {
+    const base = await start();
+    await fs.mkdir(FOLDER, { recursive: true });
+    await fs.writeFile(`${FOLDER}/Note.md`, 'a real file\n');
+    const under = `${FOLDER}/Note.md/nested.md`;
+    for (const [tool, body] of callsFor(under)) {
+      await expectNotFound(base, tool, body, (body.path as string) ?? (body.src as string));
+    }
+  });
+
+  // A copy has TWO ends and the filesystem blames the source for both: it
+  // re-throws every ENOENT as `FileNotFoundError(src)`, and a destination
+  // segment that is a file escapes raw as ENOTDIR from the parent mkdir. With
+  // the source sitting right there, the absence can only be the destination's
+  // — so the 404 names the destination. It must not be left to escape as a
+  // 500 either: that is the answer whose message carries the server's own
+  // absolute path, and a mis-spelled destination is the caller's to fix.
+  it('copy_file names the DESTINATION when the source is there and the destination is not', async () => {
+    const base = await start('write');
+    await fs.mkdir(FOLDER, { recursive: true });
+    await fs.writeFile(`${FOLDER}/Note.md`, 'a real file\n');
+    await fs.writeFile(`${FOLDER}/Source.md`, 'copy me\n');
+    const dest = `${FOLDER}/Note.md/deeper/copy.md`;
+    const res = await post(`${base}/api/agent/tools/copy_file`, { branch: 'main', src: `${FOLDER}/Source.md`, dest });
+    const json = (await res.json()) as { error?: string; kind?: string; path?: string };
+    expect(res.status).toBe(404);
+    expect(json.kind).toBe('not_found');
+    expect(json.path).toBe(dest);
+    expect(json.error).toContain(NOT_FOUND_NEXT_STEP);
+    // The source is not what is wrong, and the answer never says it is.
+    expect(json.error).not.toContain('Source.md');
+    // Nor does the raw errno — and the server's own absolute path with it —
+    // reach the caller, which is what the old 500 handed over.
+    expect(json.error).not.toContain('ENOTDIR');
+  });
+
+  // A backslash is a filename character on this disk, never a separator, so
+  // the read tools meet plain absence. move_file and delete_file judge the
+  // path as WRITTEN and keep refusing it up front — an answer that predates
+  // this mapping and is not absence at all.
+  it('a malformed path: backslashes read as absence, and still refused by the tools that judge spelling', async () => {
+    const base = await start();
+    const odd = `${KB_DIR}\\Knowledge\\NoSuchFile.md`;
+    for (const tool of ['read_file', 'file_stat', 'grep', 'edit_file', 'copy_file'] as const) {
+      const body = callsFor(odd).find(([name]) => name === tool)![1];
+      await expectNotFound(base, tool, body, odd);
+    }
+    for (const [tool, body] of [
+      ['delete_file', { path: odd }],
+      ['move_file', { src: odd, dest: `${FOLDER}/Moved.md` }],
+    ] as [string, Record<string, unknown>][]) {
+      const res = await post(`${base}/api/agent/tools/${tool}`, { branch: 'main', ...body });
+      expect(res.status, tool).toBe(400);
+      expect((await res.json()).error, tool).toContain('backslashes');
+    }
+  });
+
+  // THE ordering rule: the read gate answers before absence does. A caller who
+  // may not read a path must not learn from the answer whether anything is
+  // there — so a missing denied path and an existing denied one are the SAME
+  // response, byte for byte.
+  it('a path the caller may not read answers the denial, never 404', async () => {
+    const base = await start('write', denyReads(new Set(['Knowledge/Secret.md', 'Knowledge/Ghost.md'])));
+    await fs.mkdir(FOLDER, { recursive: true });
+    await fs.writeFile(`${FOLDER}/Secret.md`, 'real content\n');
+    for (const tool of ['read_file', 'file_stat', 'grep'] as const) {
+      const ask = async (name: string): Promise<{ status: number; body: string }> => {
+        const body = callsFor(`${FOLDER}/${name}`).find(([t]) => t === tool)![1];
+        const res = await post(`${base}/api/agent/tools/${tool}`, { branch: 'main', ...body });
+        return { status: res.status, body: (await res.text()).replace(name, '<name>') };
+      };
+      const present = await ask('Secret.md');
+      const absent = await ask('Ghost.md');
+      expect(present.status, tool).toBe(403);
+      expect(absent, tool).toEqual(present);
+      expect(absent.body, tool).not.toContain('not_found');
+    }
+  });
+
+  // The same ordering rule on the WRITE side. A refusal to write must not
+  // report what is on disk, or the refusal itself becomes the disclosure: a
+  // caller who may not copy into a folder would learn from the answer whether
+  // the source they named exists. So the write denial comes first and absence
+  // is only asked about once the copy was allowed to be attempted — the 404
+  // this ticket adds must not push in front of the 403 that was already there.
+  it('copy_file refuses a denied destination with the write denial, even when the source is missing', async () => {
+    const base = await start('write');
+    await fs.mkdir(FOLDER, { recursive: true });
+    const denied = async (src: string): Promise<{ status: number; body: string }> => {
+      const copySpy = vi.spyOn(fs, 'copyFile').mockRejectedValue(
+        new AccessDeniedError({ path: `${FOLDER}/Denied.md`, eligibleRoles: ['Owner'], eligibleUsers: [] }),
+      );
+      try {
+        const res = await post(`${base}/api/agent/tools/copy_file`, { branch: 'main', src, dest: `${FOLDER}/Denied.md` });
+        return { status: res.status, body: await res.text() };
+      } finally {
+        copySpy.mockRestore();
+      }
+    };
+    await fs.writeFile(`${FOLDER}/Present.md`, 'here\n');
+    const present = await denied(`${FOLDER}/Present.md`);
+    const absent = await denied(MISSING);
+    expect(present.status).toBe(403);
+    // Byte for byte the same refusal: the source's existence changes nothing.
+    expect(absent.status).toBe(403);
+    expect(absent.body).toBe(present.body);
+    expect(absent.body).toContain('write-denied');
+    expect(absent.body).not.toContain('not_found');
+  });
+
+  // Absence is ENOENT and ENOTDIR and nothing else. A path that cannot be READ
+  // is not a path the caller should be told to go and re-spell.
+  it('a filesystem failure that is not absence stays a 500', async () => {
+    const base = await start();
+    await fs.mkdir(FOLDER, { recursive: true });
+    const boom = Object.assign(new Error('EIO: i/o error, read'), { code: 'EIO' });
+    const readFileSpy = vi.spyOn(fs, 'readFile').mockRejectedValue(boom);
+    try {
+      const res = await post(`${base}/api/agent/tools/read_file`, { branch: 'main', path: `${FOLDER}/Unreadable.md` });
+      expect(res.status).toBe(500);
+      const json = (await res.json()) as { kind?: string };
+      expect(json.kind).toBeUndefined();
+    } finally {
+      readFileSpy.mockRestore();
     }
   });
 });

@@ -17,6 +17,7 @@ import { createMcpRoutes } from '../modules/mcp/mcp.routes.js';
 import { createOAuthConsentRoutes } from '../modules/mcp/oauth/oauth-consent.routes.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { createManualRoutes } from '../modules/tool-registry/manual.routes.js';
+import { createCatalogRevisionRoutes } from './catalog-revision.js';
 import {
   createToolManualsAgentRoutes,
   createToolManualsBrowserRoutes,
@@ -484,6 +485,16 @@ export async function createCoreServer(
   // composes it: read by the local `hexis-mcp` bridge at startup and by the
   // External agent access card. Same `manualAuth`, same router, as `all-tools`.
   toolsRouter.use(createAgentInstructionsRoutes(core.manualAuthMiddleware, core.readAgentPreamble));
+  // The fingerprint of the caller's released catalog. The local `hexis-mcp`
+  // server polls it to learn that a manual or a skill changed under a
+  // connection it cannot be pushed to; nothing else consults it. Same
+  // `manualAuth`, same router, as `all-tools`.
+  toolsRouter.use(createCatalogRevisionRoutes({
+    toolManuals: core.toolManualService,
+    skills: core.skillService,
+    manualAuth: core.manualAuthMiddleware,
+    resolveUserEmail: async (userId) => (await core.authService.getUserById(userId))?.email,
+  }));
   // The only core route that returns secret VALUES: a local `.tool`'s declared
   // variables, for the local MCP server that will execute it. It re-reads the
   // declaring knowledge-base file server-side, so the file is the allowlist and
@@ -653,6 +664,7 @@ export async function createCoreServer(
     core.authService,
     core.adminAccess,
     core.accountErasureService,
+    core.userAccessRemovalService,
   ));
   // Connection keys across the deployment (list per account, revoke any) —
   // admin-gated inside. The per-user key surface stays on /api/mcp/…

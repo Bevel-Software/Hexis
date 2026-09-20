@@ -11,7 +11,7 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { Database } from '../../database/connection.js';
+import { usersDbDouble } from './users-db-double.js';
 import { AccessControlService } from '../access-control.service.js';
 import {
   ADMIN_ROOT_WRITE_MESSAGE,
@@ -286,7 +286,7 @@ describe('Admin write floor at the repository root', () => {
             releaseLockNoCommit: async () => undefined,
           } as unknown as WorkflowService,
           { emit: () => {} } as unknown as WorkflowEventBus,
-          {} as Database,
+          usersDbDouble(),
           KB,
         ),
       );

@@ -8,8 +8,8 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { Database } from '../../database/connection.js';
 import { createAccessRoutes } from '../access.routes.js';
+import { usersDbDouble } from './users-db-double.js';
 
 /**
  * HTTP contract for `POST /access/batch` — the verb dispatch. Existing callers
@@ -58,7 +58,7 @@ async function makeHarness(): Promise<Harness> {
       authService,
       {} as unknown as WorkflowService,
       { emit: vi.fn() } as unknown as WorkflowEventBus,
-      {} as unknown as Database,
+      usersDbDouble(),
       KB,
     ),
   );
