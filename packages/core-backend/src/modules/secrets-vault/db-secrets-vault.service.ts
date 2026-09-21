@@ -703,15 +703,21 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     return { outcome: 'refreshed', accessToken: refreshed.access_token };
   }
 
-  /** The access token currently stored on `id`, or undefined if there is none to read. */
+  /**
+   * The access token currently stored on `id`, or undefined if there is none to
+   * read — including when the row is no longer an OAuth row at all: a concurrent
+   * edit can turn a sign-in into a static value, and a static value that happens
+   * to parse as a token blob must not be handed out as a refreshed grant.
+   */
   private async currentAccessToken(id: string): Promise<string | undefined> {
     const [current] = await this.db
-      .select({ valueEncrypted: secrets.valueEncrypted })
+      .select({ kind: secrets.kind, valueEncrypted: secrets.valueEncrypted })
       .from(secrets)
       .where(eq(secrets.id, id))
       .limit(1);
+    if (!current || current.kind !== 'oauth') return undefined;
     try {
-      return current ? this.readBlob(current.valueEncrypted).tokens?.access_token : undefined;
+      return this.readBlob(current.valueEncrypted).tokens?.access_token;
     } catch {
       return undefined;
     }

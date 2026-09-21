@@ -48,6 +48,16 @@ describe('isDownstreamTokenRejection', () => {
     expect(isDownstreamTokenRejection({ code: 'ECONNRESET', message: 'invalid_token' })).toBe(true);
     expect(isDownstreamTokenRejection({ code: -32000, message: 'invalid_token' })).toBe(true);
   });
+
+  it('reads "unauthorized" as a word, not as the start of some other OAuth error', () => {
+    // `unauthorized_client` is about the client registration; a refreshed
+    // token changes nothing about it, so it must not cost a refresh (or, for
+    // a grant with no refresh token, the sign-in).
+    expect(
+      isDownstreamTokenRejection(new Error(`Server 'srv': Streamable HTTP error: Error POSTing to endpoint: {"error":"unauthorized_client"}`)),
+    ).toBe(false);
+    expect(isDownstreamTokenRejection(new Error('Error POSTing to endpoint: {"error":"unauthorized"}'))).toBe(true);
+  });
 });
 
 describe('DownstreamRefreshGuard — at most once per (user, manual) per minute', () => {
@@ -103,6 +113,24 @@ describe('DownstreamRefreshGuard — at most once per (user, manual) per minute'
     // this key — and this map entry — for the life of the process.
     await expect(guard.run('k', async () => 'recovered')).resolves.toBe('recovered');
     expect(runs).toBe(1);
+  });
+
+  it('a clock that steps backward does not stretch the window by the step', async () => {
+    let now = 1_000_000;
+    const guard = new DownstreamRefreshGuard<string>(60_000, () => now);
+    let runs = 0;
+    const refresh = async () => `run-${++runs}`;
+    await expect(guard.run('k', refresh)).resolves.toBe('run-1');
+
+    // An NTP step of ten minutes into the past. Measured from the old stamp
+    // this window would now hold for eleven minutes, not one.
+    now -= 600_000;
+    await expect(guard.run('k', refresh)).resolves.toBe('run-2');
+    // …and from there the usual minute applies.
+    now += 59_999;
+    expect(guard.run('k', refresh)).toBeUndefined();
+    now += 1;
+    await expect(guard.run('k', refresh)).resolves.toBe('run-3');
   });
 
   it('clearWhere forgets the windows it selects, by key and by outcome', async () => {

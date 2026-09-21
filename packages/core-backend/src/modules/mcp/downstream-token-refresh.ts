@@ -77,11 +77,14 @@ function saysTokenRejected(message: string): boolean {
   const m = message.toLowerCase();
   // A status number inside a URL (`/v1/401/…`, a port) proves nothing.
   const scrubbed = m.replace(/\bhttps?:\/\/\S+/g, ' ');
+  // `unauthorized` as a word (the 401 reason phrase, an `error` value), not
+  // as a substring: `unauthorized_client` is an OAuth error about the CLIENT
+  // registration, which a refreshed token would not change.
   return (
     /\b401\b/.test(scrubbed) ||
     m.includes('invalid_token') ||
     m.includes('invalid token') ||
-    m.includes('unauthorized')
+    /\bunauthorized\b/.test(m)
   );
 }
 
@@ -153,10 +156,15 @@ export class DownstreamRefreshGuard<T> {
    * so no later rejection for that (user, manual) could ever refresh again and
    * the entry could never be evicted. Once the window has passed, a new attempt
    * is within policy whether the previous one finished or not.
+   *
+   * A clock that moved BACKWARD (an NTP step) makes every age negative; such a
+   * window is forgotten too, since otherwise it would hold for the step plus a
+   * minute rather than the minute the policy promises.
    */
   private prune(at: number): void {
     for (const [key, record] of this.attempts) {
-      if (at - record.startedAt >= this.windowMs) this.attempts.delete(key);
+      const age = at - record.startedAt;
+      if (age < 0 || age >= this.windowMs) this.attempts.delete(key);
     }
   }
 }

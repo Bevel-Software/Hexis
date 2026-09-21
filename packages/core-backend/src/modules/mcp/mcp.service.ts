@@ -1098,6 +1098,17 @@ export class McpService {
         missing.push({ name: v.name, label: v.label, brokenSignIn }); // no row at all → needs a value / sign-in
         continue;
       }
+      // A row of the OTHER kind is not this credential: a `.tool` edited from
+      // an OAuth sign-in to a plain key (or back) leaves the old row behind,
+      // and serving a token where a key is declared — or a key where a
+      // sign-in is — fails opaquely at the provider. Not a broken sign-in
+      // either: nothing to reset, the user has to set the credential up as
+      // the manual now declares it.
+      const declaredKind = v.oauth ? 'oauth' : 'static';
+      if (st.userKind && st.userKind !== declaredKind) {
+        missing.push({ name: v.name, label: v.label, brokenSignIn: false });
+        continue;
+      }
       // An OAuth-backed var whose row exists but has no token yet is NOT ready —
       // the user has registered but not completed sign-in. Fail closed: anything
       // other than a confirmed `true` (including a non-oauth row → undefined)

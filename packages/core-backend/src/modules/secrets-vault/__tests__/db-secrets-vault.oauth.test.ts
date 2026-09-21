@@ -66,10 +66,16 @@ function makeFakeDb(queue: any[]) {
  * a version the row has moved past. Remove the guard from the code under test
  * and the UPDATE lands — which is what makes such a test fail.
  */
-function whereAwareDb(current: Record<string, unknown> & { valueEncrypted: string }, stale: string) {
+function whereAwareDb(
+  current: Record<string, unknown> & { valueEncrypted: string },
+  /** The ciphertext the caller read first — or the whole row as it read then, when more than the ciphertext has since changed. */
+  staleRead: string | (Partial<Record<string, unknown>> & { valueEncrypted: string }),
+) {
   const updates: Array<Record<string, unknown>> = [];
   let row = { ...current };
   let firstSelect = true;
+  const staleRow = typeof staleRead === 'string' ? { valueEncrypted: staleRead } : staleRead;
+  const stale = staleRow.valueEncrypted;
   // Drizzle builds the condition into an SQL object whose bound parameters sit
   // in nested `queryChunks`; the test only needs to know WHETHER a given
   // ciphertext was bound, so it scans the object graph for that string.
@@ -101,7 +107,7 @@ function whereAwareDb(current: Record<string, unknown> & { valueEncrypted: strin
         where: () => chain,
         limit: () => chain,
         then: (onF, onR) => {
-          const seen = firstSelect ? { ...row, valueEncrypted: stale } : row;
+          const seen = firstSelect ? { ...row, ...staleRow } : row;
           firstSelect = false;
           return Promise.resolve([seen]).then(onF, onR);
         },
@@ -556,6 +562,25 @@ describe('DbSecretsVaultService — forceRefresh (a downstream rejected the toke
 
     // A concurrent path found the grant dead and wiped it; the stored truth is
     // "not connected", and that is what the caller is told.
+    await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('rejected');
+    expect(updates).toEqual([]);
+  });
+
+  it('a refresh that loses the race to a row turned STATIC reports not connected, whatever the value parses as', async () => {
+    // The edit that replaced the sign-in stored a static value shaped exactly
+    // like a token blob. It is not a grant, and must not be served as one.
+    const lookalike = crypto.encrypt(JSON.stringify({ tokens: { access_token: 'not-a-grant' } }));
+    // Read as the OAuth row it was; by the time the refresh writes, it is static.
+    const { db, updates } = whereAwareDb(
+      { ...userRow(), kind: 'static', valueEncrypted: lookalike },
+      { valueEncrypted: userRow().valueEncrypted, kind: 'oauth' },
+    );
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ access_token: 'ours-at', expires_in: 3600 }), { status: 200 })),
+    );
+
     await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('rejected');
     expect(updates).toEqual([]);
   });

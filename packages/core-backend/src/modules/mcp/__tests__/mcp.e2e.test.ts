@@ -1046,6 +1046,32 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     // A name that belongs to no manual of the caller's is still unknown.
     expect(toolText(await client.callTool({ name: 'linear_srv_echo', arguments: {} }))).toContain('Unknown tool');
   });
+
+  it('a leftover sign-in row does not stand in for a plain key the manual now declares: the call asks for setup', async () => {
+    quiet();
+    // The `.tool` was edited from an OAuth sign-in to a static key; the user's
+    // old OAuth row is still there and its token is even accepted downstream.
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === 'old-oauth-token' });
+    const { vault } = fakeSignIn('old-oauth-token', () => 'refreshed');
+    const withKind = {
+      ...vault,
+      statusFor: async (_userId: string, keys: string[]) =>
+        keys.map((key) => ({ key, adminConfigured: false, userConfigured: true, userAuthorized: true, userKind: 'oauth' })),
+    } as unknown as ISecretsVaultService;
+    registerBevelSecretsVariableLoader(withKind);
+    const toolManuals = {
+      userScopedKeysForManual: async (manual: string) =>
+        manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion key', oauth: false }] : [],
+    } as unknown as IToolManualService;
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: withKind, toolManuals });
+    const { client } = await connectSdkClient(baseUrl, KEY_INTERACTIVE);
+
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('needs credentials you haven\'t set up yet');
+    expect(toolText(res)).toContain(CONNECT);
+    expect(downstream.executions()).toBe(0);
+  });
 });
 
 // A measurement, not a regression gate: it asserts nothing about latency, so it
