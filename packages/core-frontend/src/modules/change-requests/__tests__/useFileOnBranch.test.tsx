@@ -71,6 +71,13 @@ describe('useFileOnBranch', () => {
   });
 });
 
+/** What a rejected read settles as: failed, with the reason it gave. */
+const FAILED_404 = {
+  content: null,
+  failed: true,
+  failure: { kind: 'error', reason: '404' },
+};
+
 /**
  * A caller that cannot tell "failed" from "in flight" can only render
  * "Loading…" for both — which is what left the change-request pane hanging on
@@ -81,7 +88,9 @@ describe('useFileOnBranchRead', () => {
     api.readFileOnBranch.mockRejectedValue(new Error('404'));
     const { result } = renderHook(() => useFileOnBranchRead('main', 'Ops/gone.yaml'));
     expect(result.current).toEqual({ content: null, failed: false });
-    await waitFor(() => expect(result.current).toEqual({ content: null, failed: true }));
+    // A settled failure carries WHY, so the caller can say whether the read
+    // was refused or merely broke. A bare Error is the second.
+    await waitFor(() => expect(result.current).toEqual(FAILED_404));
     // Settled means settled: the failure is cached, not retried on every render.
     expect(api.readFileOnBranch).toHaveBeenCalledTimes(1);
   });
@@ -113,6 +122,6 @@ describe('useFileOnBranchRead', () => {
     expect(result.current.failed).toBe(false);
 
     rerender({ path: 'Ops/gone.yaml' });
-    expect(result.current).toEqual({ content: null, failed: true });
+    expect(result.current).toEqual(FAILED_404);
   });
 });

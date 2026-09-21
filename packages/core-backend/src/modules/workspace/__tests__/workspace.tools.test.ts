@@ -3035,7 +3035,11 @@ describe('a write refused for permissions says whether and how to propose it', (
     const target = fs as unknown as Record<string, unknown>;
     for (const m of ['writeFile', 'deleteFile', 'moveFile', 'mkdir']) target[m] = refuse;
     target.copyFile = async (_src: string, dest: string) => refuse(dest);
-    target.writeFiles = async (writes: { path: string }[]) => refuse(writes[0]?.path);
+    // `delete_folder` lands through the same batch with NO writes and the
+    // folder's files as `deletes` — in production the refusal comes from the
+    // lock it takes on one of them, so the denial names that file.
+    target.writeFiles = async (writes: { path: string }[], _summary?: string, deletes?: string[]) =>
+      refuse(writes[0]?.path ?? deletes?.[0]);
   };
 
   const call = async (base: string, tool: string, body: Record<string, unknown>) => {
@@ -3057,6 +3061,9 @@ describe('a write refused for permissions says whether and how to propose it', (
     ['edit_file', { branch: TARGET, path: DENIED, old_string: 'old', new_string: SECRET_CONTENT }],
     ['move_file', { branch: TARGET, src: DENIED, dest: `${KB_DIR}/Sales/moved.md` }],
     ['delete_file', { branch: TARGET, path: DENIED }],
+    // The folder HOLDING the denied file: confirmed, so the call goes past the
+    // impact preflight and reaches the gate that refuses.
+    ['delete_folder', { branch: TARGET, path: `${KB_DIR}/Sales`, confirm: true }],
     ['copy_file', { branch: TARGET, src: `${KB_DIR}/a.md`, dest: DENIED }],
     ['mkdir', { branch: TARGET, path: DENIED }],
   ];
@@ -3069,6 +3076,10 @@ describe('a write refused for permissions says whether and how to propose it', (
    */
   const freeDestinationFor = async (tool: string) => {
     if (tool === 'copy_file') await rm(join(tempDir, DENIED), { force: true });
+    // An EMPTY folder needs no batch, so it would never reach the gate: put the
+    // denied file back (past the refusing stub, straight to disk) whatever the
+    // case before it did.
+    if (tool === 'delete_folder') await writeFile(join(tempDir, DENIED), 'old text\n');
   };
 
   it.each(CALLS)('%s: a reader gets canPropose and the three steps, and nothing is created', async (tool, body) => {
@@ -3213,7 +3224,7 @@ describe('a write refused for permissions says whether and how to propose it', (
   it('each write tool mentions the proposal route in its description; read tools do not', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
-    for (const name of ['write_file', 'edit_file', 'write_files', 'move_file', 'delete_file', 'copy_file', 'mkdir']) {
+    for (const name of ['write_file', 'edit_file', 'write_files', 'move_file', 'delete_file', 'delete_folder', 'copy_file', 'mkdir']) {
       expect(tools.find((t) => t.name === name)?.description, name).toContain(PROPOSAL_ROUTE_NOTE.trim());
     }
     for (const name of ['read_file', 'grep', 'list_files']) {

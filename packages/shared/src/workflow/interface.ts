@@ -280,6 +280,16 @@ export interface IWorkflowService {
    * a commit for a hold that was never allowed to write. Internal callers
    * only; never plumbed from a route.
    *
+   * Every non-coordination acquire also passes the READ-BEFORE-WRITE gate, on
+   * every branch: the caller must be able to read the path (for a new path,
+   * where it lands), or the path must start a new folder directly under one
+   * of the three roots (knowledge, skills, plugins). Nothing is created,
+   * changed or removed where its author cannot see it, whatever write rules
+   * say; a refusal is an `AccessDeniedError` whose `access.unreadable` names
+   * the place. A write that passed only as a platform-file restore is not
+   * asked — that rescue exists for a destination whose rules deny the admin
+   * making it.
+   *
    * `opts.platformRestore` CLAIMS that this acquire is the destination side of
    * an admin putting a misplaced platform file back (`access.md`, `roles.yaml`,
    * `.bevelignore`, `AGENTS.md`), and names the move's `source` — the path the
