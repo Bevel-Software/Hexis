@@ -88,7 +88,8 @@ export function registerToolManualsTools(
       'The listing is the RELEASED catalog, built from the default branch only: a server or `.tool` you ' +
       'declared on a draft is not listed, not callable and not signed-in-able until that draft is merged. ' +
       'Pass `branch` (the draft you wrote the declaration on) and `onBranchOnly` names every tool declared ' +
-      'there that the default branch does not serve yet — open and merge a change request to activate it.',
+      'there that the default branch does not serve yet — open a change request, then ask the user to ' +
+      'review and merge it in the app to activate it.',
     path: '/api/agent/tools/list_tool_setup',
     inputs: {
       type: 'object',
@@ -236,7 +237,7 @@ export function registerToolManualsTools(
           `${onBranchOnly.map((p) => `\`${p.name}\``).join(', ')} ${onBranchOnly.length === 1 ? 'is' : 'are'} declared on ` +
           `\`${branch}\` only. Tools are served from \`${DEFAULT_BRANCH}\`, so ${onBranchOnly.length === 1 ? 'it stays' : 'they stay'} ` +
           'unlisted, uncallable and without a sign-in until that branch is merged: open a change request with ' +
-          `\`open_change_request\` (target \`${DEFAULT_BRANCH}\`) and get it merged.`,
+          `\`open_change_request\` (target \`${DEFAULT_BRANCH}\`), then ask the user to review and merge it in the app.`,
       };
     }),
   );

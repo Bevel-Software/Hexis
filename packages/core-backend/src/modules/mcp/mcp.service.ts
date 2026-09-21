@@ -36,6 +36,7 @@ import {
   flattenManualTool,
   toListedTool,
   toolError,
+  retiredToolMessage,
   needsAuthorizationResult,
   skillPromptText,
   type ProxiedTool,
@@ -336,7 +337,7 @@ export class McpService {
       }
       const proxied = tools.find((t) => t.mcpName === request.params.name);
       if (!proxied) {
-        return toolError(`Unknown tool "${request.params.name}".`);
+        return toolError(retiredToolMessage(request.params.name) ?? `Unknown tool "${request.params.name}".`);
       }
       // Stop before running a tool whose personal (user-scoped) credentials the
       // caller hasn't provided — return a setup link instead of a blank-credential

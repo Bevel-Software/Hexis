@@ -410,6 +410,22 @@ File-level write access decides how a change lands on the default branch:
   review flow — and prefer a change request when in doubt, when the change is
   large, or when it touches content the user does not own.
 
+### An agent proposes and syncs; a person merges
+
+- **Propose** with `open_change_request`, then give the user the request's
+  `url`. Reviewing, approving and merging a change request happen in the app,
+  by a person — no agent tool approves a file, bypasses approval, or merges a
+  request. `merge_change_request` no longer exists.
+- **Sync** a draft with `merge_branch`, `source` = the branch the request
+  targets, `target` = the draft. This is allowed while the draft's request is
+  open, and is how you bring it up to date or surface conflicts to resolve on
+  the draft.
+- `merge_branch` refuses to merge a draft into the branch its open change
+  request targets — it names the request; ask the user to review it in the
+  app. Into a protected branch it merges only what you could commit there
+  directly, under the rule above — and never a change to `roles.yaml`, whoever
+  you are: roles are changed in the app, not merged in from a draft.
+
 ## Skills (`{{skillsDir}}/<scope>/…/<skill>/SKILL.md`, or `{{pluginsDir}}/<Plugin>/skills/<skill>/SKILL.md`)
 
 A skill is a folder holding a `SKILL.md` and whatever files it needs. Shared
