@@ -88,12 +88,15 @@ export interface LibraryItem {
    */
   version?: string;
   /**
-   * Set only on a skill that does not exist yet — it lives on an open change
-   * request's branch and is waiting on somebody to approve it.
+   * Set only on an item that does not exist yet — it lives on an open change
+   * request's branch and is waiting on somebody to approve it. A skill's
+   * `SKILL.md`, a tool's `.tool` manual or `mcp.json` server: the same flag,
+   * because the reader's question ("can I use this yet?") and the card's
+   * answer are the same for both.
    *
    * Deliberately NOT folded into `status`: `AttentionStatus` answers "is
    * anything standing in this item's way?", which drives the setup filter and
-   * the amber counts, and a skill under review is not a broken skill. Callers
+   * the amber counts, and an item under review is not a broken one. Callers
    * that must treat a proposal differently — the card, the click — read this.
    */
   pending?: {
@@ -258,11 +261,54 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
         status: toolStatus(t),
       };
     });
-    return [...skillItems, ...pendingItems, ...toolItems];
+    /**
+     * Proposed tools, beside the released ones exactly as proposed skills sit
+     * beside released skills — and for the very same bug: a tool an agent
+     * proposed was nowhere in the library at all until somebody merged it, so
+     * the person who asked for it had no way to see that it was on its way.
+     *
+     * `owned`/`canWrite` are false and stay false: there is no file on the
+     * default branch to own or to edit, and every affordance that reads them
+     * would address a path that is not there. Membership is derived from the
+     * declaration's own path — where the file will land — by the same
+     * `pluginsHoldingTool` the released tools use, so a proposal into a root a
+     * plugin LINKS is on that plugin's page the way its released neighbours
+     * are. Without it a linked-root proposal would belong to no plugin here and
+     * simply never appear.
+     */
+    const pendingToolItems: LibraryItem[] = data.pendingTools.map((t) => {
+      const plugins = pluginsHoldingTool(t.path, pluginSummaries);
+      return {
+        kind: 'integration',
+        id: t.slug,
+        name: t.name,
+        // The released tool cards carry no description either — detail lives
+        // behind the card — and a proposal has even less standing to differ.
+        description: '',
+        owned: false,
+        canWrite: false,
+        plugin: pluginOfItem(t.path, plugins, pluginSummaries),
+        plugins,
+        path: t.path,
+        // The neutral `ok`, as for a proposed skill: a proposal has no
+        // credential resolved against it, and reporting `warn` would put it in
+        // the setup filter and the plugin's amber count as though an integration
+        // somebody has to configure had appeared.
+        status: { state: 'ok', text: 'In review' },
+        pending: {
+          changeRequestNumber: t.changeRequestNumber,
+          branch: t.branch,
+          authorName: t.authorName,
+          mine: t.isAuthor,
+        },
+      };
+    });
+    return [...skillItems, ...pendingItems, ...toolItems, ...pendingToolItems];
   }, [
     data.skills,
     data.pendingSkills,
     data.tools,
+    data.pendingTools,
     data.ownedSkills,
     data.writableSkills,
     data.ownedTools,
@@ -392,8 +438,13 @@ export function attentionOf(
   // both, and computing the part again for the tone would filter the whole
   // catalog a second time per plugin.
   const brokenLinks = brokenLinksOf(items, plugin, summaries);
+  // `!i.pending` is said out loud rather than left to the neutral `ok` a
+  // proposal carries: this count drives the sidebar badge and the setup
+  // filter, and "somebody has to configure this integration" is never true of
+  // a tool that does not exist yet. A future status change on the proposal
+  // side must not be able to leak into the amber count by accident.
   const integrations = items.filter(
-    (i) => isInPlugin(i, plugin) && i.kind === 'integration' && i.status.state !== 'ok',
+    (i) => isInPlugin(i, plugin) && i.kind === 'integration' && !i.pending && i.status.state !== 'ok',
   ).length;
   // Amber, like an integration to set up: it needs a person who can edit
   // the plugin's files, and blocks nobody but the users of what is missing.

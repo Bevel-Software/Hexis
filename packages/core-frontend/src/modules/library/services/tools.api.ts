@@ -170,3 +170,45 @@ export async function putMcpServer(slug: string, write: McpServerWrite): Promise
   if (!res.ok) await unwrap(res, "Couldn't save the server configuration.");
   return (await res.json()) as { name: string };
 }
+
+/**
+ * A tool that exists only on an open change request's branch — proposed, and
+ * waiting on somebody to approve it. The mirror of `PendingSkillSummary`, and
+ * separate from every catalog type for the same reason: it is not in the
+ * catalog, nothing registers it, nothing calls it, and it is visible only to
+ * its author and to whoever could approve it.
+ */
+export interface PendingToolSummary {
+  slug: string;
+  name: string;
+  /** The `.tool` file, or the plugin's `mcp.json` — what the card files under. */
+  path: string;
+  type: 'inline' | 'http' | 'mcp';
+  description?: string;
+  /** The plugin folder the declaration targets, or null when it targets none. */
+  plugin: string | null;
+  changeRequestNumber: number;
+  branch: string;
+  authorName: string;
+  createdAt: string;
+  /** True when the caller proposed it themselves. */
+  isAuthor: boolean;
+}
+
+/**
+ * Tools awaiting approval that the caller may see. The backend does the
+ * filtering — author or possible approver — so this is a plain read.
+ */
+export async function listPendingTools(): Promise<PendingToolSummary[]> {
+  const res = await authFetch('/api/tools/pending');
+  if (!res.ok) await unwrap(res, "Couldn't load proposed tools.");
+  const body = (await res.json()) as { tools?: PendingToolSummary[] } | null;
+  // Guarded, not trusted: a backend BUILT BEFORE this route existed answers
+  // through `/tools/:slug` — a 200 whose shape is not this one. The review
+  // shelf degrading to empty is the right failure; `undefined` reaching the
+  // item mapper takes the whole library down (blank page), which is exactly
+  // what it did on the skills side before its own guard. A bare `null` body is
+  // one of those shapes, and reading `.tools` off it would throw BEFORE the
+  // guard ran — so the optional chain is the guard's first half, not decoration.
+  return Array.isArray(body?.tools) ? body.tools : [];
+}

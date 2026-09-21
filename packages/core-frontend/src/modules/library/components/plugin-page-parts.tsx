@@ -183,11 +183,15 @@ export function CardGrid({
       )}
     >
       {items.map((item) => {
-        // The change-request number is part of the key, not decoration: two
-        // people can propose a skill of the same name into different plugins,
-        // and until one of them merges neither is in the catalog to collide
-        // with — so the name alone is not yet unique.
-        const key = `${item.kind}:${item.id}:${item.pending?.changeRequestNumber ?? ''}`;
+        // The change-request number AND the declaration's path are part of the
+        // key, not decoration. A released item's id is unique because the
+        // catalog refuses a collision; a PROPOSAL has been refused nothing yet.
+        // Two people can propose the same name into different plugins, and one
+        // request can add `weather.tool` to two plugin folders at once — same
+        // id, same request number, and the path is what tells them apart.
+        const key = item.pending
+          ? `${item.kind}:${item.id}:${item.pending.changeRequestNumber}:${item.path}`
+          : `${item.kind}:${item.id}`;
         // The flavor badge names the DECLARATION file — which file an owner
         // edits — not the transport: a `.tool` manual whose call template is
         // `type: mcp` still edits as a UTCP manual, so the path suffix is the

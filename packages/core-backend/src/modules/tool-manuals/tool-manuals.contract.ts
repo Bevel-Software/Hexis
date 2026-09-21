@@ -474,3 +474,66 @@ export interface IToolManualService {
   /** Drop the cached catalog (call after a merge to the default branch). */
   invalidate(): void;
 }
+
+/**
+ * A tool that exists ONLY on an open change request's branch — proposed, not
+ * released. The mirror of `PendingSkill`, and deliberately NOT a
+ * {@link ToolManualSummary}: the catalog is what agents register and call, and
+ * a tool nobody has approved must never become callable just because it became
+ * visible. This is a review surface only.
+ *
+ * Who may see one is narrower than who may see the catalog: its author, and
+ * whoever could approve it. See `shared/pending-proposals.ts` for why that
+ * predicate is the access tree's answer rather than a plugin-admin check
+ * spelled out again here.
+ */
+export interface PendingTool {
+  /**
+   * The route-safe id this tool would be served under once released — the
+   * resolved UTCP manual name, exactly what the catalog puts on a
+   * {@link ToolManualSummary}. NOT the file name: a `.tool` that declares its
+   * own `id`, or one whose filename is not route-safe, must still line up with
+   * the card the next load replaces it with.
+   *
+   * Unique among released tools, because the catalog refuses a namespace
+   * collision — but NOT yet unique among proposals, which is the price of
+   * nothing having been approved: two open requests may each propose the name,
+   * and until one merges neither has claimed it. A list rendering these keys on
+   * the slug alone must compose it with {@link PendingTool.path} and
+   * {@link PendingTool.changeRequestNumber}.
+   */
+  slug: string;
+  /** The UTCP manual name the declaration would take once released. */
+  name: string;
+  /**
+   * Repo-root-relative path of the DECLARATION — the `.tool` file, or the
+   * plugin's `mcp.json`. What the library files the card under, and what tells
+   * a reader which of the two kinds of tool this is.
+   */
+  path: string;
+  type: ToolManualType;
+  /** The declared one-line prose, when there is a usable one. */
+  description?: string;
+  /**
+   * The plugin folder the declaration targets, or `null` for a `.tool` that
+   * sits directly under the plugins root and so targets none.
+   */
+  plugin: string | null;
+  /** The open change request that would release it. */
+  changeRequestNumber: number;
+  branch: string;
+  /** Display name of whoever opened the request (person or agent). */
+  authorName: string;
+  createdAt: string;
+  /** True when the caller opened the request themselves. */
+  isAuthor: boolean;
+}
+
+export interface IPendingToolService {
+  /**
+   * Tools awaiting approval that `userEmail` is entitled to see — the ones they
+   * proposed, and the ones they could approve. Never throws: a review surface
+   * failing must not take the library down with it.
+   */
+  listPendingTools(userEmail: string): Promise<PendingTool[]>;
+}

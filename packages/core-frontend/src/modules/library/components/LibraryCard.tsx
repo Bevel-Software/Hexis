@@ -32,6 +32,12 @@ export type LibraryCardProps = LibraryCardCommonProps &
          * How the integration is declared: an `mcp.json` server or a `.tool`
          * UTCP manual. Two different files to edit and two different
          * capability sets, so the card says which one this is.
+         *
+         * Mandatory, and `NameWithBadges` leans on that: a tool card carries a
+         * mark, and a mark earns the name no floor of its own, so the floor has
+         * to come from a badge that is always there. A PROPOSED tool says it
+         * too — an approver is deciding on a file, and which file it is belongs
+         * on the card beside `In review`.
          */
         flavor: 'mcp' | 'utcp';
         /**
@@ -57,10 +63,15 @@ export interface LibraryCardCommonProps {
    */
   version?: string;
   /**
-   * Set only on a skill that does not exist yet — it is on an open change
+   * Set only on an item that does not exist yet — it is on an open change
    * request, waiting to be approved. `mine` distinguishes the two readers this
    * card has: the person who proposed it (waiting on someone else) and the
    * person who has to decide (being waited on).
+   *
+   * A TOOL carries this as readily as a skill: a `.tool` manual or an
+   * `mcp.json` server proposed on a change request gets the same dashed
+   * border, the same badge and the same foot, because it is the same fact —
+   * this is not here yet, and here is who it is between.
    */
   pending?: { authorName: string; mine: boolean };
   /**
@@ -128,10 +139,11 @@ export function LibraryCard({
    * its own to report; a green "Ready" on every skill in the grid is a row of
    * noise that says nothing, and it buries the two cards that DO need you.
    *
-   * A PROPOSED skill overrides both, because the one thing to know about it is
-   * that it is not usable yet — and by whose hand it got here. The status it
-   * carries is about integrations and has nothing to say about a file nobody
-   * has approved.
+   * A PROPOSAL overrides both, tool as much as skill, because the one thing to
+   * know about it is that it is not usable yet — and by whose hand it got
+   * here. A tool's connection line is the loudest thing this rule silences:
+   * "Needs setup" on something that does not exist would send the reader off
+   * to fill in a credential for a file nobody has approved.
    */
   const footNote = pending
     ? null

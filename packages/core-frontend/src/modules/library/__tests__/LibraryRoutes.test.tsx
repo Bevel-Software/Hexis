@@ -85,6 +85,7 @@ const CATALOG: LibraryData = {
     { name: 'scratch', description: 'A skill in no plugin.', path: 'Skills/scratch' },
   ],
   pendingSkills: [],
+  pendingTools: [],
   tools: [tool({}), tool({ slug: 'slack', name: 'slack', path: 'Tools/slack.tool' })],
   ownedSkills: new Set(['outreach']),
   writableSkills: new Set(['outreach']),
