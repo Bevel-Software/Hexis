@@ -2,7 +2,12 @@ import { DEFAULT_BRANCH, PLUGINS_DIR, type PullRequestSummary } from '@bevel-sof
 import { authFetch } from '../../../lib/api';
 import { handleApiResponse } from '../../git/services/git.api';
 import { createBranch } from '../../git/services/git.api';
-import { deleteFile, getOrCreateWorkspace, writeFile } from '../../workspace/services/workspace.api';
+import {
+  deleteFile,
+  getOrCreateWorkspace,
+  writeFile,
+  type SkillToolWarning,
+} from '../../workspace/services/workspace.api';
 import { openChangeRequest } from '../../pr/services/pr-open.api';
 import { postPrComment } from '../../pr/services/pr-comments.api';
 import { branchSegment } from '../../change-requests/services/propose.api';
@@ -47,10 +52,6 @@ export interface LibrarySkillSummary {
   path: string;
   /** Every plugin holding this skill. Absent from an older server. */
   plugins?: PluginMembership[];
-  /** The governance owner (`metadata.owner`), when declared. */
-  owner?: string;
-  /** The governance lifecycle (`metadata.lifecycle`), lowercased: `active`, `deprecated`, `retired`. */
-  lifecycle?: string;
 }
 
 /** The open write-access requests on a skill — `[]` to anyone but its editors. */
@@ -95,6 +96,13 @@ export interface LibrarySkill extends LibrarySkillSummary {
   allowedTools?: string[];
   /** Repo-root-relative bundled file paths (SKILL.md itself is not listed). */
   files: string[];
+  /**
+   * `allowed-tools` entries that look like platform tools but name none the
+   * caller can see. Advisory, and about the skill as it reads NOW — so the page
+   * can say so on open, before anyone saves. Absent from a backend built before
+   * the check existed.
+   */
+  warnings?: SkillToolWarning[];
 }
 
 /**
@@ -120,7 +128,7 @@ interface SkillFilePayload {
 }
 
 type GetSkillPayload =
-  | { ok: true; kind: 'skill'; skill: LibrarySkill }
+  | { ok: true; kind: 'skill'; skill: LibrarySkill; warnings?: SkillToolWarning[] }
   | { ok: true; kind: 'file'; file: SkillFilePayload }
   | { ok: false; error: 'not_found' | 'forbidden' | 'invalid_file' };
 
@@ -136,7 +144,9 @@ export async function getSkill(name: string): Promise<LibrarySkill> {
     await authFetch(`/api/skills/${encodeURIComponent(name)}`),
   );
   if (!data.ok || data.kind !== 'skill') throw new Error("Couldn't load this skill.");
-  return data.skill;
+  // The warnings ride beside the skill on the wire (as `get_skill` returns
+  // them); the page reads one object, so they are folded onto it here.
+  return Array.isArray(data.warnings) ? { ...data.skill, warnings: data.warnings } : data.skill;
 }
 
 /**
@@ -202,7 +212,7 @@ export interface ProposeChangeInput {
  */
 export async function proposeChange(
   input: ProposeChangeInput,
-): Promise<{ branch: string; kbDirName: string }> {
+): Promise<{ branch: string; kbDirName: string; warnings?: SkillToolWarning[] }> {
   const branch = input.existingCr?.branch ?? suggestionBranchFor(input.userEmail, input.skillName);
 
   if (!input.existingCr) {
@@ -215,7 +225,7 @@ export async function proposeChange(
   }
 
   const { workspace } = await getOrCreateWorkspace(branch);
-  await writeFile(
+  const saved = await writeFile(
     workspace.id,
     `${workspace.kbDirName}/${input.repoRelativePath}`,
     input.content,
@@ -233,7 +243,7 @@ export async function proposeChange(
       description: input.note || undefined,
     });
   }
-  return { branch, kbDirName: workspace.kbDirName };
+  return { branch, kbDirName: workspace.kbDirName, ...(saved?.warnings ? { warnings: saved.warnings } : {}) };
 }
 
 /**

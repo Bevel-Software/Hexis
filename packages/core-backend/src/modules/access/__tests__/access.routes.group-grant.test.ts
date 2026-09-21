@@ -8,8 +8,8 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { Database } from '../../database/connection.js';
 import { createAccessRoutes } from '../access.routes.js';
+import { usersDbDouble } from './users-db-double.js';
 
 /**
  * HTTP-level contract tests for GROUP and ROLE principals on the share
@@ -52,6 +52,7 @@ async function makeHarness(opts: {
   } as unknown as IAccessControl;
 
   const workspaceService = {
+    withPathTurn: async (_id: string, _p: string, op: () => Promise<unknown>) => op(),
     getOrCreateForBranch: vi.fn(async () => ({ id: WS, name: WS, kbDirName: KB })),
     readFile: vi.fn(async (_id: string, wsRel: string) => {
       const v = files.get(wsRel);
@@ -62,6 +63,9 @@ async function makeHarness(opts: {
       }
       return v;
     }),
+    readFileBinary: vi.fn(async (_id: string, wsRel: string) =>
+      Buffer.from(await (workspaceService.readFile as (id: string, p: string) => Promise<string>)(_id, wsRel), 'utf-8'),
+    ),
     writeFile: vi.fn(async (_id: string, wsRel: string, content: string) => {
       files.set(wsRel, content);
     }),
@@ -75,7 +79,7 @@ async function makeHarness(opts: {
     releaseLockNoCommit: vi.fn(async () => undefined),
   } as unknown as WorkflowService;
   const eventBus = { emit: vi.fn() } as unknown as WorkflowEventBus;
-  const db = {} as unknown as Database;
+  const db = usersDbDouble();
 
   const app = express();
   app.use(express.json());

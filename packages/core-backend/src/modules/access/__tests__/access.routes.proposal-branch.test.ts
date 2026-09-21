@@ -12,7 +12,7 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { Database } from '../../database/connection.js';
+import { usersDbDouble } from './users-db-double.js';
 import { AccessControlService } from '../access-control.service.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { branchForWorkspaceId, workspaceIdForBranch } from '../../../shared/workspace-id.js';
@@ -92,8 +92,10 @@ describe('access routes on a proposal branch (real git)', () => {
     const dirOf = (id: string) => dirFor(branchForWorkspaceId(id));
     const workspaceService = {
       getWorkspacePath: async (id: string) => dirOf(id),
+      withPathTurn: async (_id: string, _p: string, op: () => Promise<unknown>) => op(),
       getOrCreateForBranch: async (branch: string) => ({ id: workspaceIdForBranch(branch), kbDirName: KB }),
       readFile: async (id: string, wsRel: string) => fs.readFile(path.join(dirOf(id), wsRel), 'utf-8'),
+      readFileBinary: async (id: string, wsRel: string) => fs.readFile(path.join(dirOf(id), wsRel)),
       writeFile: async (id: string, wsRel: string, content: string) => {
         await fs.writeFile(path.join(dirOf(id), wsRel), content, 'utf-8');
       },
@@ -133,7 +135,7 @@ describe('access routes on a proposal branch (real git)', () => {
         authService,
         workflowService,
         { emit: () => {} } as unknown as WorkflowEventBus,
-        {} as Database,
+        usersDbDouble(),
         KB,
       ),
     );

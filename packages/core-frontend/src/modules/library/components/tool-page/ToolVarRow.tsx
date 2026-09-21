@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Badge, Button, ListRow, TextField } from '../../../../shared/components';
 import { startToolOAuth } from '../../../secrets-vault/services/connect.api';
 import {
@@ -43,12 +43,16 @@ export interface ToolVarRowProps {
   /** Where the OAuth round-trip should land — a bare path, no fragment. */
   returnTo: string;
   /**
-   * Bumped by the section's banner to open this row's editor from a distance
-   * ("Add key" up top is the same act as "Add key" on the row). Monotonic
-   * counter rather than a boolean so pressing the banner twice re-opens a row
-   * the user has since cancelled.
+   * This variable is REQUIRED and has no value yet.
+   *
+   * The section used to say this in a banner above the rows, which re-listed
+   * every label and status the rows already carried. The row is where the
+   * label, the status and the button live, so it is where the colour lives
+   * too — and the count the banner used to give is now simply how many rows
+   * are amber. Sighted readers get the tone; `sr-only` text carries the same
+   * sentence to everyone else.
    */
-  editSignal?: number;
+  unset?: boolean;
   onChanged(): void;
   /**
    * A credential was WRITTEN (not deleted) — a typed value or an owner's client
@@ -68,7 +72,7 @@ export function ToolVarRow({
   canWrite,
   setupKind,
   returnTo,
-  editSignal,
+  unset = false,
   onChanged,
   onSaved,
   onError,
@@ -76,34 +80,8 @@ export function ToolVarRow({
   const [editor, setEditor] = useState<Editor>(null);
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
 
   const label = variable.label ?? variable.name;
-
-  // Opening from a distance is a PROP CHANGE, not an event, so the editor state
-  // is adjusted during render against the previous signal — React's documented
-  // pattern for deriving state from a changed prop. It used to be an effect,
-  // which set state after paint: one frame of the row rendered closed, and the
-  // synchronous setState in an effect body is what `set-state-in-effect` flags.
-  // `seenSignal` starts undefined rather than at `editSignal` so a row that
-  // MOUNTS with a signal already on it still opens, as the effect version did.
-  const [seenSignal, setSeenSignal] = useState<number | undefined>(undefined);
-  if (editSignal !== seenSignal) {
-    setSeenSignal(editSignal);
-    if (editSignal) {
-      setValue('');
-      setEditor('value');
-    }
-  }
-
-  // The scroll stays an effect: it is a real DOM side effect and has to happen
-  // after the editor it scrolls to has been committed. The banner's button
-  // targets exactly one row; scrolling brings the editor to where the click
-  // happened conceptually — "fix THIS".
-  useEffect(() => {
-    if (!editSignal) return;
-    rootRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  }, [editSignal]);
 
   function open(next: Exclude<Editor, null>) {
     setValue('');
@@ -158,7 +136,7 @@ export function ToolVarRow({
       // or the owner can rotate the client. The caller needs a way back into
       // consent that doesn't wait for the scope check to notice.
       meta.push(
-        <Button key="reconnect" size="tiny" variant="quiet" disabled={busy} onClick={() => void signIn()}>
+        <Button key="reconnect" size="sm" variant="quiet" disabled={busy} onClick={() => void signIn()}>
           Reconnect
         </Button>,
         // "Signed in", not "Connected": at ROW level all we know is that a token
@@ -171,7 +149,7 @@ export function ToolVarRow({
       );
       if (mayEditClientSecret) {
         meta.push(
-          <Button key="secret" size="tiny" variant="quiet" onClick={() => open('client-secret')}>
+          <Button key="secret" size="sm" variant="quiet" onClick={() => open('client-secret')}>
             Replace client secret
           </Button>,
         );
@@ -196,7 +174,7 @@ export function ToolVarRow({
       description = "The tool owner hasn't finished the sign-in setup yet.";
       if (mayEditClientSecret) {
         meta.push(
-          <Button key="secret" size="tiny" onClick={() => open('client-secret')}>
+          <Button key="secret" size="sm" onClick={() => open('client-secret')}>
             Set client secret
           </Button>,
         );
@@ -218,12 +196,12 @@ export function ToolVarRow({
       );
       if (canWrite) {
         meta.push(
-          <Button key="replace" size="tiny" variant="quiet" onClick={() => open('value')}>
+          <Button key="replace" size="sm" variant="quiet" onClick={() => open('value')}>
             Replace
           </Button>,
           <Button
             key="remove"
-            size="tiny"
+            size="sm"
             variant="quiet"
             disabled={busy}
             onClick={() => void run(() => deleteAdminVar(slug, variable.name))}
@@ -239,7 +217,7 @@ export function ToolVarRow({
       description = 'One value for the whole team';
       if (canWrite) {
         meta.push(
-          <Button key="set" size="tiny" onClick={() => open('value')}>
+          <Button key="set" size="sm" onClick={() => open('value')}>
             Set key
           </Button>,
         );
@@ -290,9 +268,32 @@ export function ToolVarRow({
     );
   };
 
+  // Ahead of the row's own action, so a screen reader reads the label, what
+  // the variable is, that it is still needed, and then the button that
+  // supplies it. `sr-only` is out of flow, so the sighted layout is untouched.
+  if (unset) {
+    meta.unshift(
+      <span key="unset-sr" className="sr-only">
+        Required, not set
+      </span>,
+    );
+  }
+
   return (
-    <div ref={rootRef} className="flex flex-col gap-1.5">
-      <ListRow density="row" label={label} description={description} meta={meta} />
+    <div className="flex flex-col gap-1.5">
+      <ListRow
+        density="row"
+        label={label}
+        description={description}
+        meta={meta}
+        data-testid="tool-var-row"
+        // The Banner's own `wait` ground, so an unset row and the amber
+        // notices elsewhere on this page read as the same state. The border
+        // goes to full-strength `wait` rather than staying `line`: between two
+        // white rows a tint alone is easy to scroll past, and being missable
+        // is the entire complaint the banner existed to answer.
+        className={unset ? 'border-wait bg-wait-soft' : undefined}
+      />
 
       {editor && (
         <div className="flex items-center gap-2 rounded-lg border border-line bg-surface px-3.5 py-3">

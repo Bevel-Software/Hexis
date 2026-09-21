@@ -11,16 +11,23 @@ import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
   IAccessControl,
+  AccessDecision,
+  AccessDecisionSource,
   AccessTargetKind,
+  DenialSources,
   GrantPrincipal,
   GrantSource,
   GrantSources,
+  PathHolders,
+  ProspectiveHolders,
   ResolvedPrincipal,
 } from './access-control.interface.js';
 import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginDir,
   pluginIdentityOf,
+  platformRestoreDestination,
 } from '@bevel-software/platform-shared';
 import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { synthesizePluginPrincipals } from '../access-model/plugin-principals.js';
 import {
   GROUPS_YAML,
@@ -112,10 +119,11 @@ interface AccessModel {
    * Canonical emails that count as Admin whatever `roles.yaml` says — the
    * deployment owner (`ADMIN_EMAIL`). Empty when none is configured.
    *
-   * This exists for the two hardcoded `write` rescues below, and only those.
-   * It is NOT a general grant: it never enters scope resolution, so it gives
-   * no read, no download, and no write anywhere except `roles.yaml` and
-   * `access.md`. The deployment owner is the person who can already change
+   * This exists for the two hardcoded `write` rescues below and the root write
+   * floor, and only those. It is NOT a general grant: it never enters scope
+   * resolution, so it gives no read, no download, and no write beyond
+   * `roles.yaml`, `access.md`, and what the root floor reaches (see
+   * `hasPermissionResolved`). The deployment owner is the person who can already change
    * `ADMIN_EMAIL` itself, so admitting them to the rescue path concedes
    * nothing they could not already take — while withholding it turns a
    * `roles.yaml` that has lost its last Admin into a knowledge base nobody
@@ -435,6 +443,27 @@ function principalKeysOf(model: AccessModel, email: string): Set<string> | undef
   return new Set([...(own ?? []), ...pub]);
 }
 
+/** The explicit key of the Admin ROLE — never the bare token, which a same-named group may own. */
+const ADMIN_ROLE_KEY = `${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`;
+
+/**
+ * Add to `keys` what holding them confers on top: every plugin principal
+ * expanded from one of the keys, and the public keys every caller holds.
+ */
+function addDerivedKeys(model: AccessModel, keys: Set<string>): Set<string> {
+  for (const [key, principal] of model.roles.byCanonical) {
+    if (principal.kind !== 'plugin' || !principal.sourceKeys) continue;
+    for (const source of principal.sourceKeys) {
+      if (keys.has(source)) {
+        keys.add(key);
+        break;
+      }
+    }
+  }
+  for (const key of model.roles.publicKeys ?? []) keys.add(key);
+  return keys;
+}
+
 /**
  * Every principal key that being in `group` confers — the group's OWN key,
  * the roles that list the group (`group:<Name>` in roles.yaml), the plugin
@@ -457,17 +486,7 @@ function principalKeysOfGroup(model: AccessModel, group: string): Set<string> | 
   }
   // Plugin principals were expanded from role/group entries; a plugin that
   // admits the group, or a role the group is folded into, admits the group.
-  for (const [key, principal] of model.roles.byCanonical) {
-    if (principal.kind !== 'plugin' || !principal.sourceKeys) continue;
-    for (const source of principal.sourceKeys) {
-      if (keys.has(source)) {
-        keys.add(key);
-        break;
-      }
-    }
-  }
-  for (const key of model.roles.publicKeys ?? []) keys.add(key);
-  return keys;
+  return addDerivedKeys(model, keys);
 }
 
 /** The key set of a caller who holds nothing: `hasPermissionForKeys` then answers as `everyone`. */
@@ -476,7 +495,8 @@ const NO_KEYS: ReadonlySet<string> = new Set();
 /**
  * The tier-2 half of `hasPermissionResolved` on its own: a verdict for a set
  * of principal KEYS with no person behind them — no direct-email tier, no
- * admin rescue, no machine-owned rule. Closest scope first; within a scope a
+ * admin rescue, no machine-owned rule — only the Admin write floor, when the
+ * keys include the Admin role. Closest scope first; within a scope a
  * grant to any key wins over a denial to another, exactly as for a person.
  */
 function hasPermissionForKeys(
@@ -486,7 +506,9 @@ function hasPermissionForKeys(
   relativePath: string,
   fileOwn?: OwnEntries | null,
 ): boolean {
+  const adminFloor = verb === 'write' && keys.has(ADMIN_ROLE_KEY);
   for (const scope of resolveScopes(model, verb, relativePath, fileOwn)) {
+    if (adminFloor && isAdminFloorScope(scope, relativePath)) return true;
     let grant = false;
     let deny = false;
     for (const key of keys) {
@@ -498,7 +520,19 @@ function hasPermissionForKeys(
     if (deny) return false;
     if (scope.everyone) return scope.everyone === 'grant';
   }
-  return false;
+  return adminFloor;
+}
+
+/**
+ * Whether a scope sits at the Admin write floor: the repository root's own
+ * `access.md`, or the own frontmatter of a file directly in the root (those
+ * files are part of the root, so their own rules cannot take Admin's write
+ * away either). A folder directly in the root is not covered — its own
+ * `access.md` is an ordinary subfolder scope that may exclude Admin.
+ */
+function isAdminFloorScope(scope: AccessScope, relativePath: string): boolean {
+  if (scope.source.kind === 'own') return !relativePath.includes('/');
+  return scope.source.path === 'access.md';
 }
 
 function isAdminEmail(model: AccessModel, email: string): boolean {
@@ -507,7 +541,7 @@ function isAdminEmail(model: AccessModel, email: string): boolean {
   // Check the explicit `role/admin` alias, NOT the bare token: bare-name
   // precedence is group-first, so a group that happens to be named "Admin"
   // owns the bare key — and its members must never inherit the capability.
-  return !!roles && roles.has(`${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`);
+  return !!roles && roles.has(ADMIN_ROLE_KEY);
 }
 
 /**
@@ -541,6 +575,16 @@ function isAdminEmail(model: AccessModel, email: string): boolean {
  * owner is whoever can already set `ADMIN_EMAIL`, so this concedes no
  * authority they did not have; it only gives it a door.
  *
+ * One floor for `write`, applied during the walk: an admin (same definition)
+ * always holds `write` at the repository root. When the walk reaches the root
+ * `access.md` (or the own frontmatter of a file directly in the root) — or runs
+ * out of scopes without a verdict — an admin is granted,
+ * whatever the root file says, so no root rule can lock the deployment out of
+ * its own tree. A NEARER scope still decides first: a subfolder that denies
+ * Admin (or denies `everyone` without naming Admin) excludes admins there like
+ * anyone else. The root file's own entries are not rewritten — the floor is a
+ * verdict, not a grant line — so `grantSources` stays file-backed.
+ *
  * No special-cases for `read`/`download` — they fall through to scope resolution.
  */
 function hasPermissionResolved(
@@ -550,44 +594,88 @@ function hasPermissionResolved(
   relativePath: string,
   fileOwn?: OwnEntries | null,
 ): boolean {
+  return decidePermissionResolved(model, verb, userEmail, relativePath, fileOwn).allowed;
+}
+
+/**
+ * WHAT decided one caller's verdict: `hasPermissionResolved` with its reasoning
+ * kept. `scope` is the scope whose entry settled it (null for the hardcoded
+ * admin rescues and for default-deny; the root scope, or null when there is
+ * none, for the Admin write floor); `via` is the tier that matched and `key`
+ * the principal key it matched on (the caller's email, a role/group/plugin
+ * key, or `everyone`). `hasPermissionResolved` IS this function's `allowed`,
+ * so an explanation can never disagree with the gate.
+ */
+interface PermissionDecision {
+  allowed: boolean;
+  scope: AccessScope | null;
+  via: 'email' | 'principal' | 'everyone' | 'admin-rescue' | 'admin-floor' | 'default-deny';
+  key?: string;
+}
+
+function decidePermissionResolved(
+  model: AccessModel,
+  verb: Verb,
+  userEmail: string,
+  relativePath: string,
+  fileOwn?: OwnEntries | null,
+): PermissionDecision {
   const email = canonicalEmail(userEmail);
 
   if (verb === 'write') {
-    if (relativePath === 'roles.yaml') return isAdminEmail(model, email);
-    if (isAccessMdPath(relativePath) && isAdminEmail(model, email)) return true;
+    if (relativePath === 'roles.yaml') {
+      return { allowed: isAdminEmail(model, email), scope: null, via: 'admin-rescue' };
+    }
+    if (isAccessMdPath(relativePath) && isAdminEmail(model, email)) {
+      return { allowed: true, scope: null, via: 'admin-rescue' };
+    }
   }
 
-  const userRoles = principalKeysOf(model, email);
+  const adminFloor = verb === 'write' && isAdminEmail(model, email);
+  // For write, the deployment owner IS Admin — the floor admits them, so the
+  // Admin rules along the way bind them too: a subfolder denying Admin excludes
+  // the owner exactly as it excludes the role's members.
+  let userRoles = principalKeysOf(model, email);
+  if (adminFloor && !userRoles?.has(ADMIN_ROLE_KEY)) {
+    userRoles = new Set([...(userRoles ?? []), ...principalKeysOfToken(model, ADMIN_ROLE_KEY)]);
+  }
   const scopes = resolveScopes(model, verb, relativePath, fileOwn);
 
   for (const scope of scopes) {
+    if (adminFloor && isAdminFloorScope(scope, relativePath)) return { allowed: true, scope, via: 'admin-floor' };
+
     // Tier 1 — direct email entry is the most specific verdict at this scope.
     const direct = scope.byEmail.get(email);
-    if (direct) return direct === 'grant';
+    if (direct) return { allowed: direct === 'grant', scope, via: 'email', key: email };
 
     // Tier 2 — the caller's roles. A grant via any one of them wins over a deny
     // via another at this same scope (a `deny Engineer` doesn't undo an
     // unrelated `Admin` grant).
     if (userRoles && userRoles.size) {
-      let grant = false;
-      let deny = false;
+      let granted: string | undefined;
+      let denied: string | undefined;
       for (const r of userRoles) {
         const s = scope.byRole.get(r);
-        if (s === 'denied') deny = true;
-        else if (s === 'grant') grant = true;
+        if (s === 'denied') denied ??= r;
+        else if (s === 'grant') granted ??= r;
       }
-      if (grant) return true;
-      if (deny) return false;
+      if (granted !== undefined) return { allowed: true, scope, via: 'principal', key: granted };
+      if (denied !== undefined) return { allowed: false, scope, via: 'principal', key: denied };
     }
 
     // Tier 3 — the built-in `everyone` role (derived: a public plugin
     // principal granted here counts, see `AccessScope.everyone`).
-    if (scope.everyone) return scope.everyone === 'grant';
+    if (scope.everyone) {
+      return { allowed: scope.everyone === 'grant', scope, via: 'everyone', key: EVERYONE_CANONICAL };
+    }
 
     // No verdict at this scope — fall through to the next (farther) one.
   }
 
-  return false;
+  // No verdict anywhere (and no root access.md to stop at): the floor still holds.
+  return adminFloor
+    ? { allowed: true, scope: null, via: 'admin-floor' }
+    : { allowed: false, scope: null, via: 'default-deny' };
 }
 
 /**
@@ -617,6 +705,49 @@ function scopeToGrantSource(
   const ownPath = kind === 'folder' ? ownAccessMdForFolder(relativePath) : null;
   if (ownPath !== null && path === ownPath) return { kind: 'direct' };
   return { kind: 'ancestor', path };
+}
+
+/**
+ * Where a scope's rules live, as the place a person edits: a folder (the
+ * directory of its `access.md`) or the target's own frontmatter.
+ */
+function decisionSourceOf(
+  scope: AccessScope,
+  kind: AccessTargetKind,
+  relativePath: string,
+): AccessDecisionSource {
+  if (scope.source.kind === 'own') return { kind: 'frontmatter', path: relativePath, inherited: false };
+  const folder = path.posix.dirname(scope.source.path);
+  const dir = folder === '.' ? '' : folder;
+  const grant = scopeToGrantSource(scope, kind, relativePath);
+  return { kind: 'folder', path: dir, inherited: grant.kind === 'ancestor' };
+}
+
+/** A resolver decision in the terms `explainAccess` reports. */
+function explainDecision(
+  model: AccessModel,
+  decision: PermissionDecision,
+  kind: AccessTargetKind,
+  relativePath: string,
+): AccessDecision {
+  const source = decision.scope ? decisionSourceOf(decision.scope, kind, relativePath) : null;
+  const base = { allowed: decision.allowed, source };
+  switch (decision.via) {
+    case 'admin-rescue':
+    case 'default-deny':
+      return { ...base, via: decision.via, principal: null };
+    case 'admin-floor':
+      return { ...base, via: decision.via, principal: 'Admin' };
+    case 'email':
+      return { ...base, via: 'person', principal: decision.key ?? null };
+    case 'everyone':
+      return { ...base, via: 'everyone', principal: EVERYONE_CANONICAL };
+    case 'principal': {
+      const key = decision.key ?? '';
+      const record = model.roles.byCanonical.get(key);
+      return { ...base, via: record?.kind ?? 'role', principal: record?.displayName ?? key };
+    }
+  }
 }
 
 /**
@@ -677,14 +808,7 @@ function resolveGrantSourcesForVerb(
     //     a GROUP whose group has VANISHED reads "unshadowed" here, and the
     //     alias-tolerant pair would then attribute a same-named role's
     //     surviving `role/<name>` grant to the group.
-    const canonical = canonicalRoleName(principal.role);
-    const explicit = canonical.startsWith(ROLE_TOKEN_PREFIX);
-    const bare = explicit ? canonical.slice(ROLE_TOKEN_PREFIX.length) : canonical;
-    const shadowed = model.roles.byCanonical.get(bare)?.kind === 'group';
-    const tokens =
-      tokenMatch === 'exact' || shadowed
-        ? [explicit ? `${ROLE_TOKEN_PREFIX}${bare}` : bare]
-        : [bare, `${ROLE_TOKEN_PREFIX}${bare}`];
+    const tokens = ownTokensOf(model, principal.role, tokenMatch);
     for (const scope of scopes) {
       const states = tokens.map((t) => scope.byRole.get(t));
       if (states.includes('grant')) {
@@ -706,6 +830,75 @@ function resolveGrantSourcesForVerb(
     if (direct === 'grant') out.push(scopeToGrantSource(scope, kind, relativePath));
     // A group/everyone grant or deny at this scope is NOT this user's own entry:
     // it neither adds a source nor hides a farther own-entry, so we keep walking.
+  }
+  return out;
+}
+
+/**
+ * WHICH token spellings in a file are THIS role-shaped principal's own entries
+ * — the shadowing rule, in one place because the grant walk, the denial walk
+ * and the revoke splice must all agree on it (a disagreement attributes a
+ * shadowed bare token to the wrong principal, which is how a "restrict" silently
+ * strips a same-named role's grant). See `resolveGrantSourcesForVerb` for the
+ * full reasoning behind each branch.
+ */
+function ownTokensOf(
+  model: AccessModel,
+  role: string,
+  tokenMatch?: 'exact' | 'name',
+): string[] {
+  const canonical = canonicalRoleName(role);
+  const explicit = canonical.startsWith(ROLE_TOKEN_PREFIX);
+  const bare = explicit ? canonical.slice(ROLE_TOKEN_PREFIX.length) : canonical;
+  const shadowed = model.roles.byCanonical.get(bare)?.kind === 'group';
+  return tokenMatch === 'exact' || shadowed
+    ? [explicit ? `${ROLE_TOKEN_PREFIX}${bare}` : bare]
+    : [bare, `${ROLE_TOKEN_PREFIX}${bare}`];
+}
+
+/**
+ * The polarity twin of {@link resolveGrantSourcesForVerb}: every file scope
+ * whose own entry for this principal DENIES `verb`, closest-first.
+ *
+ * Same walk, mirrored stopping rule. A grant in the principal's own entry at a
+ * scope ENDS the list — under closest-wins a farther deny is dead, and reporting
+ * it would have the dialog say "restricted" about a verb the principal holds.
+ * A grant or deny reaching the principal through a group/role/`everyone` is not
+ * their own entry: it is neither a denial to report nor a reason to stop, so the
+ * walk carries on past it, exactly as the grant twin does.
+ *
+ * Returns `[]` when the principal is not denied `verb` by any file entry.
+ */
+function resolveDenialSourcesForVerb(
+  model: AccessModel,
+  verb: Verb,
+  kind: AccessTargetKind,
+  relativePath: string,
+  principal: GrantPrincipal,
+  fileOwn?: OwnEntries | null,
+  tokenMatch?: 'exact' | 'name',
+): GrantSource[] {
+  const scopes = resolveScopes(model, verb, relativePath, fileOwn);
+  const out: GrantSource[] = [];
+
+  if (principal.kind === 'role') {
+    const tokens = ownTokensOf(model, principal.role, tokenMatch);
+    for (const scope of scopes) {
+      const states = tokens.map((t) => scope.byRole.get(t));
+      // A grant under EITHER spelling wins within the scope (`buildScope` lets a
+      // grant stick over a deny of the same principal), so it ends the walk
+      // whether or not the other spelling denies here.
+      if (states.includes('grant')) break;
+      if (states.includes('denied')) out.push(scopeToGrantSource(scope, kind, relativePath));
+    }
+    return out;
+  }
+
+  const email = canonicalEmail(principal.email);
+  for (const scope of scopes) {
+    const own = scope.byEmail.get(email);
+    if (own === 'grant') break;
+    if (own === 'denied') out.push(scopeToGrantSource(scope, kind, relativePath));
   }
   return out;
 }
@@ -785,6 +978,30 @@ function canReadResolved(
   return hasPermissionResolved(model, 'read', userEmail, relativePath, fileOwn);
 }
 
+/**
+ * The key set someone holding exactly the principal behind `token` carries —
+ * the question "would a member of this principal be allowed?" put to
+ * `hasPermissionForKeys`. A group gets its full member key set
+ * (`principalKeysOfGroup`); a role or plugin principal gets every key its
+ * record is registered under (the bare name and the `role/` alias share one
+ * record) plus the plugin principals expanded from those keys; a token with no
+ * record (`everyone`, a vanished principal) is just itself. Public keys are
+ * always included — every caller holds them.
+ */
+function principalKeysOfToken(model: AccessModel, token: string): Set<string> {
+  const record = model.roles.byCanonical.get(token);
+  if (record?.kind === 'group') return principalKeysOfGroup(model, token) ?? new Set([token]);
+  const keys = new Set<string>([token]);
+  if (!record) {
+    for (const key of model.roles.publicKeys ?? []) keys.add(key);
+    return keys;
+  }
+  for (const [key, principal] of model.roles.byCanonical) {
+    if (principal === record) keys.add(key);
+  }
+  return addDerivedKeys(model, keys);
+}
+
 function eligibleHoldersResolved(
   model: AccessModel,
   verb: Verb,
@@ -809,16 +1026,31 @@ function eligibleHoldersResolved(
     const key = `${kind}\0${name.toLowerCase()}`;
     if (!byIdentity.has(key)) byIdentity.set(key, { name, kind });
   };
+  // Every row is re-checked against the resolver. The collapsed view keeps a
+  // principal's closest OWN verdict, but a nearer scope can still decide for
+  // them without naming them — a `deny everyone` in a subfolder cuts off a
+  // root `write: Admin` — and a list that named them anyway would tell the
+  // dialog and the denial message that someone is eligible whom the gate then
+  // refuses.
+  const allowedFor = (keys: ReadonlySet<string>) =>
+    hasPermissionForKeys(model, verb, keys, relativePath, fileOwn);
   for (const [canonical, state] of byRole) {
     if (state !== 'grant') continue;
+    if (!allowedFor(principalKeysOfToken(model, canonical))) continue;
     const record = model.roles.byCanonical.get(canonical);
     addPrincipal(record ? record.displayName : canonical, record?.kind ?? 'role');
+  }
+  // The Admin write floor (see `hasPermissionResolved`): Admin holds write here
+  // whenever no nearer scope excludes it, whether or not any file names it.
+  if (verb === 'write' && model.roles.byCanonical.has(ADMIN_ROLE_KEY)) {
+    const adminRole = model.roles.byCanonical.get(ADMIN_ROLE_KEY)!;
+    if (allowedFor(principalKeysOfToken(model, ADMIN_ROLE_KEY))) addPrincipal(adminRole.displayName, 'role');
   }
   // The derived everyone verdict: a public plugin principal granted here
   // means anyone signed in holds the verb, and a list that counts holders (an
   // approval gate, a "restricted to" banner) must say so — as `everyone`, the
   // same row a literal grant produces.
-  if (everyone === 'grant') addPrincipal(EVERYONE_CANONICAL, 'role');
+  if (everyone === 'grant' && allowedFor(NO_KEYS)) addPrincipal(EVERYONE_CANONICAL, 'role');
 
   // Mirror the admin overrides applied in `hasPermissionResolved`: write on
   // `roles.yaml` and on any `access.md` is granted to Admin even if the
@@ -832,7 +1064,7 @@ function eligibleHoldersResolved(
     // Look the Admin ROLE up via its explicit alias — the bare key may be
     // owned by a same-named group under group-first precedence. The override
     // is the ROLE's capability, so the row's kind is 'role' regardless.
-    const adminRole = model.roles.byCanonical.get(`${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`);
+    const adminRole = model.roles.byCanonical.get(ADMIN_ROLE_KEY);
     addPrincipal(adminRole ? adminRole.displayName : ADMIN_CANONICAL, 'role');
   }
 
@@ -847,11 +1079,24 @@ function eligibleHoldersResolved(
   const users: { name: string; email: string }[] = [];
   for (const [email, state] of byEmail) {
     if (state !== 'grant') continue;
+    if (!hasPermissionResolved(model, verb, email, relativePath, fileOwn)) continue;
     users.push({ name: '', email });
   }
   users.sort((a, b) => a.email.localeCompare(b.email));
 
   return { principals, roles, users };
+}
+
+/**
+ * Every individual the model names: `roles.yaml` members, emails named inline
+ * at this path's scope, and the deployment owner (Admin for the write floor
+ * even when `roles.yaml` does not list them).
+ */
+function namedCandidateEmails(model: AccessModel, byEmail: CollapsedScope['byEmail']): Set<string> {
+  const candidates = new Set<string>(model.deploymentOwners);
+  for (const email of model.roles.byEmail.keys()) candidates.add(email);
+  for (const email of byEmail.keys()) candidates.add(email);
+  return candidates;
 }
 
 /**
@@ -879,10 +1124,10 @@ function eligibleHolderEmailsResolved(
   // in an access.md entry at this path's scope (whether granted or denied —
   // `hasPermissionResolved` filters denials out below). The built-in
   // `everyone` role can grant arbitrary signed-in users, but this finite
-  // expansion can only return emails the access tree explicitly names.
-  const candidates = new Set<string>();
-  for (const email of model.roles.byEmail.keys()) candidates.add(email);
-  for (const email of byEmail.keys()) candidates.add(email);
+  // expansion can only return emails the access tree explicitly names. The
+  // deployment owner is a candidate too: the Admin write floor admits them
+  // whether or not `roles.yaml` lists them.
+  const candidates = namedCandidateEmails(model, byEmail);
 
   for (const email of candidates) {
     if (hasPermissionResolved(model, verb, email, relativePath, fileOwn)) {
@@ -909,9 +1154,7 @@ function ineligibleNamedEmailsResolved(
   fileOwn?: OwnEntries | null,
 ): Set<string> {
   const { byEmail } = resolveAtPath(model, verb, relativePath, fileOwn);
-  const candidates = new Set<string>();
-  for (const email of model.roles.byEmail.keys()) candidates.add(email);
-  for (const email of byEmail.keys()) candidates.add(email);
+  const candidates = namedCandidateEmails(model, byEmail);
 
   const out = new Set<string>();
   for (const email of candidates) {
@@ -1286,6 +1529,52 @@ export class AccessControlService implements IAccessControl {
     return eligibleHoldersResolved(model, 'download', relativePath, own);
   }
 
+  /**
+   * The read and write holders of one file at its current path and at a path
+   * it has not moved to yet (see the interface).
+   *
+   * A move changes nothing about the file's own frontmatter — that travels
+   * with the bytes — and everything about the folder chain above it. So the
+   * hypothetical side is the ordinary resolution with the destination path
+   * substituted: the same model, the same own-entries (read from the SOURCE,
+   * since nothing sits at the destination to read), resolved against the
+   * destination's ancestors. One model load and one file read serve all four
+   * lookups.
+   */
+  async prospectiveHolders(
+    workspaceId: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<ProspectiveHolders> {
+    const model = await this.loadModel(workspaceId);
+    const repoDir = await this.repoDir(workspaceId);
+    // A FILE question only. A folder carries its own `access.md` — which moves
+    // with it and governs everything under it — so resolving it as a file
+    // would read frontmatter it does not have and omit the rules it does,
+    // naming principals that are not the ones a folder move changes. Refuse
+    // rather than answer the wrong question convincingly.
+    //
+    // Only absence is an answer here (see `isAbsence`): a probe that failed on
+    // permissions or I/O does not say "this is a file", and folding it into
+    // one would let the very case above through on an unreadable source.
+    const fromStat = await fs.stat(path.join(repoDir, fromPath)).catch((err: unknown) => {
+      if (isAbsence(err)) return null;
+      throw err;
+    });
+    if (fromStat?.isDirectory()) {
+      throw new WorkflowDomainError(
+        'prospective access answers for a file, not a folder',
+        400,
+      );
+    }
+    const own = await this.readOwnEntries(repoDir, fromPath);
+    const holdersAt = (relativePath: string): PathHolders => ({
+      read: eligibleHoldersResolved(model, 'read', relativePath, own),
+      write: eligibleHoldersResolved(model, 'write', relativePath, own),
+    });
+    return { before: holdersAt(fromPath), after: holdersAt(toPath) };
+  }
+
   async eligibleWriterEmails(
     workspaceId: string,
     relativePath: string,
@@ -1331,6 +1620,111 @@ export class AccessControlService implements IAccessControl {
         opts?.tokenMatch,
       );
       if (sources.length > 0) out[verb] = sources;
+    }
+    return out;
+  }
+
+  async denialSources(
+    workspaceId: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+    principal: GrantPrincipal,
+    opts?: { tokenMatch?: 'exact' | 'name' },
+  ): Promise<DenialSources> {
+    const model = await this.loadModel(workspaceId);
+    // Same own-scope rule as `grantSources`: a file target consults its own
+    // frontmatter, a folder target's own access.md is already in the dir chain.
+    const own =
+      kind === 'file'
+        ? await this.readOwnEntries(await this.repoDir(workspaceId), relativePath)
+        : null;
+    const out: DenialSources = {};
+    for (const verb of KNOWN_VERBS) {
+      const sources = resolveDenialSourcesForVerb(
+        model,
+        verb,
+        kind,
+        relativePath,
+        principal,
+        own,
+        opts?.tokenMatch,
+      );
+      if (sources.length > 0) out[verb] = sources;
+    }
+    return out;
+  }
+
+  async locallyDeniedPrincipals(
+    workspaceId: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+  ): Promise<{ principals: ResolvedPrincipal[]; users: { name: string; email: string }[] }> {
+    const model = await this.loadModel(workspaceId);
+    // The target's OWN entries, and only those — the one scope whose rules a
+    // restriction made here is written into. A folder's are its `access.md` in
+    // the dir model; a file node's are its own frontmatter.
+    const own: OwnEntries | null =
+      kind === 'folder'
+        ? (model.accessFilesByDir.get(relativePath)?.entries ?? null)
+        : await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    if (!own) return { principals: [], users: [] };
+
+    const byIdentity = new Map<string, ResolvedPrincipal>();
+    const byEmail = new Map<string, { name: string; email: string }>();
+    for (const verb of KNOWN_VERBS) {
+      for (const entry of own[verb] ?? []) {
+        // Grants are already reported by the eligible lists; only the denials
+        // are invisible there, and only they are this method's business.
+        if (!entry.deny) continue;
+        if (entry.kind === 'user') {
+          if (!byEmail.has(entry.email)) {
+            byEmail.set(entry.email, { name: entry.displayName, email: entry.email });
+          }
+          continue;
+        }
+        // A token naming a role nobody knows is not a rule: `loadModel` drops
+        // such entries from every `access.md`, and `resolveScopes` filters them
+        // out of a file's own frontmatter (the one scope it does not pre-filter)
+        // — so the resolver denies nothing, `denialSources` reports nothing, and
+        // a row here would claim a restriction the server does not enforce. Skip
+        // it on the same rule, so this list and the denial sources agree.
+        if (!roleKnown(model.roles, entry.role)) continue;
+        // Resolve the token's kind and display name through the SAME merged
+        // index the eligible lists use, so a denied group keys as `g:` and a
+        // denied role as `r:` — matching the row keys the view is built on. A
+        // KNOWN token with no record is a built-in (`everyone`, `admin` before
+        // roles.yaml names it), which displays as the role it is.
+        const record = model.roles.byCanonical.get(entry.role);
+        const name = record ? record.displayName : (entry.displayRole || entry.role);
+        const kindOf = record?.kind ?? 'role';
+        const key = `${kindOf}\0${name.toLowerCase()}`;
+        if (!byIdentity.has(key)) byIdentity.set(key, { name, kind: kindOf });
+      }
+    }
+    const principals = [...byIdentity.values()].sort((a, b) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0,
+    );
+    const users = [...byEmail.values()].sort((a, b) => a.email.localeCompare(b.email));
+    return { principals, users };
+  }
+
+  async explainAccess(
+    workspaceId: string,
+    userEmail: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+  ): Promise<Record<Verb, AccessDecision>> {
+    const model = await this.loadModel(workspaceId);
+    // The same own-entries read `canRead`/`canWrite`/… make, whatever the
+    // kind: a directory simply has none.
+    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    const out = {} as Record<Verb, AccessDecision>;
+    for (const verb of KNOWN_VERBS) {
+      const machineOwned = verb === 'write' ? this.machineOwnedWriteRule(userEmail, relativePath) : null;
+      out[verb] =
+        machineOwned !== null
+          ? { allowed: machineOwned, source: null, via: 'machine-owned', principal: null }
+          : explainDecision(model, decidePermissionResolved(model, verb, userEmail, relativePath, own), kind, relativePath);
     }
     return out;
   }
@@ -1533,6 +1927,54 @@ export class AccessControlService implements IAccessControl {
     const repoDir = await this.repoDir(workspaceId);
     const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath);
     return eligibleHoldersResolved(loaded.model, 'write', relativePath, own);
+  }
+
+  async holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean> {
+    const model = await this.loadModel(workspaceId);
+    return isAdminEmail(model, canonicalEmail(userEmail));
+  }
+
+  async canRestorePlatformFile(
+    workspaceId: string,
+    userEmail: string,
+    destinationRelativePath: string,
+  ): Promise<boolean> {
+    const target = platformRestoreDestination(destinationRelativePath);
+    if (target === null) return false;
+    const email = canonicalEmail(userEmail);
+
+    let admin: boolean;
+    try {
+      admin = isAdminEmail(await this.loadModel(workspaceId), email);
+    } catch {
+      // The repository this rescue exists for is exactly the one whose
+      // `roles.yaml` may be the file that went missing, and `loadModel`
+      // throws when it cannot be read. With no model to ask, the deployment
+      // owner is the only admin left — and they are the person who sets
+      // `ADMIN_EMAIL`, so admitting them concedes nothing they did not have.
+      admin = this.deploymentOwners.has(email);
+    }
+    if (!admin) return false;
+
+    // A restore puts back what is MISSING, so the place it lands must be
+    // empty. An `access.md` goes back only into a folder that has none —
+    // into a folder that already has one it would not be a restore but a rule
+    // change wearing a move's clothes, and the destination's own rules would
+    // be the thing it bypassed the write gate to overwrite. The same holds at
+    // the root: a move is a rename on disk, so landing `.bevelignore` on a
+    // root that already has one would silently replace it, and the repository
+    // was never missing that file to begin with.
+    const destination =
+      target.kind === 'root' ? target.name : path.join(target.dir, 'access.md');
+    const repoDir = await this.repoDir(workspaceId);
+    try {
+      await fs.stat(path.join(repoDir, destination));
+      return false;
+    } catch (err) {
+      if (isAbsence(err)) return true;
+      // Anything other than genuine absence is not an answer: fail closed.
+      return false;
+    }
   }
 
   async eligibleWritersForPathsAtRef(

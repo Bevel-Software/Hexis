@@ -32,12 +32,25 @@ export interface FakeDownstreamMcpServer {
   executions(): number;
   /** Sessions currently live on the server. */
   liveSessions(): number;
+  /** Requests answered 401 because `acceptsToken` refused their bearer. */
+  rejections(): number;
 }
 
-export async function startFakeDownstreamMcpServer(): Promise<FakeDownstreamMcpServer> {
+export interface FakeDownstreamOptions {
+  /**
+   * When set, every request must carry `Authorization: Bearer <token>` with a
+   * token this accepts; anything else is answered 401 with an RFC 6750
+   * `invalid_token` challenge — what an OAuth-protected MCP server answers a
+   * revoked or expired token with.
+   */
+  acceptsToken?: (token: string) => boolean;
+}
+
+export async function startFakeDownstreamMcpServer(opts: FakeDownstreamOptions = {}): Promise<FakeDownstreamMcpServer> {
   const sessions = new Map<string, StreamableHTTPServerTransport>();
   let initializations = 0;
   let executions = 0;
+  let rejections = 0;
 
   function buildServer(): Server {
     const server = new Server({ name: 'downstream', version: '0.0.0' }, { capabilities: { tools: {} } });
@@ -76,6 +89,18 @@ export async function startFakeDownstreamMcpServer(): Promise<FakeDownstreamMcpS
 
   const http: HttpServer = createServer((req, res) => {
     void (async () => {
+      if (opts.acceptsToken) {
+        const token = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+        if (!opts.acceptsToken(token)) {
+          rejections += 1;
+          res.writeHead(401, {
+            'Content-Type': 'application/json',
+            'WWW-Authenticate': 'Bearer error="invalid_token", error_description="The access token is invalid"',
+          });
+          res.end(JSON.stringify({ error: 'invalid_token', error_description: 'The access token is invalid' }));
+          return;
+        }
+      }
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
       const body = req.method === 'POST' ? await readBody(req) : undefined;
       const live = sessionId ? sessions.get(sessionId) : undefined;
@@ -126,5 +151,6 @@ export async function startFakeDownstreamMcpServer(): Promise<FakeDownstreamMcpS
     initializations: () => initializations,
     executions: () => executions,
     liveSessions: () => sessions.size,
+    rejections: () => rejections,
   };
 }

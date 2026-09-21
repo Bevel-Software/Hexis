@@ -53,12 +53,7 @@ export class SkillService implements ISkillService {
     const skills = await this.scan();
     const summaries = skills.map((s) => s.summary);
     if (!userEmail) return summaries;
-    const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
-    const allowed = await this.accessControl.canReadBatch(
-      wsId,
-      userEmail,
-      summaries.map((s) => `${s.path}/SKILL.md`),
-    );
+    const allowed = await this.readable(userEmail, summaries.map((s) => s.path));
     // Fail closed: keep a skill only on an explicit `true` verdict — a missing
     // entry counts as denied, matching the KB's default-deny read model (and the
     // tool-manuals catalog). `!== false` would silently EXPOSE a skill any time
@@ -72,7 +67,22 @@ export class SkillService implements ISkillService {
     if (!found) return { ok: false, error: 'not_found' };
 
     const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
-    if (!(await this.accessControl.canRead(wsId, userEmail, `${found.summary.path}/SKILL.md`))) {
+    // Through `readable`, not a bare `canRead`: the two gates must never
+    // disagree. `canRead` reads a file's own frontmatter rules off disk on
+    // every call while `canReadBatch` resolves them through a per-workspace
+    // memo, so the same skill at the same instant could be loadable by name
+    // and absent from the listing — an author who writes a skill and then
+    // lists them not seeing their own work, and an agent discovering by
+    // listing unable to find a skill it could load. One resolver, one answer.
+    //
+    // The price of the shared gate is that this path now reads through that
+    // memo rather than off disk, so a SKILL.md that rewrites its own `read:`
+    // rules would be authorized against the previous verdict until the memo
+    // expires. It is not: `registerCatalogCacheInvalidation` drops the gate on
+    // the same default-branch signal that drops this catalog, so the listing
+    // and the load are refreshed by one event or by neither.
+    const allowed = await this.readable(userEmail, [found.summary.path]);
+    if (allowed.get(`${found.summary.path}/SKILL.md`) !== true) {
       return { ok: false, error: 'forbidden' };
     }
 
@@ -100,6 +110,19 @@ export class SkillService implements ISkillService {
   }
 
   // --- internal ---------------------------------------------------------------
+
+  /**
+   * The ONE read gate both surfaces resolve through, keyed by each skill's
+   * `SKILL.md`. Shared so `listSkills` and `getSkill` can only ever give the
+   * same verdict about the same skill — see the note at the `getSkill` call.
+   */
+  private async readable(userEmail: string, skillFolders: string[]): Promise<Map<string, boolean>> {
+    return this.accessControl.canReadBatch(
+      workspaceIdForBranch(DEFAULT_BRANCH),
+      userEmail,
+      skillFolders.map((p) => `${p}/SKILL.md`),
+    );
+  }
 
   private async scan(): Promise<ParsedSkill[]> {
     const cached = this.cache.get();
@@ -182,8 +205,6 @@ export class SkillService implements ISkillService {
                   name,
                   description: fm.description,
                   version: fm.version,
-                  owner: fm.owner,
-                  lifecycle: fm.lifecycle,
                   path: relFolder,
                 },
                 body: fm.body,
@@ -256,10 +277,6 @@ function scalarToString(value: unknown): string | undefined {
 export function parseSkillFrontmatter(raw: string): {
   description: string;
   version?: string;
-  /** `metadata.owner` (or a top-level `owner`) — the governance record's owner, verbatim. */
-  owner?: string;
-  /** `metadata.lifecycle` (or top-level) — e.g. `active`, `deprecated`, `retired`; lowercased. */
-  lifecycle?: string;
   allowedTools?: string[];
   body: string;
   /** The parsed frontmatter object (for shared id resolution: `id`/`name`). */
@@ -284,11 +301,6 @@ export function parseSkillFrontmatter(raw: string): {
   const description = typeof data.description === 'string' ? data.description.trim() : '';
   const metadata = (data.metadata ?? {}) as Record<string, unknown>;
   const version = scalarToString(data.version) ?? scalarToString(metadata.version);
-  // The governance record: `metadata.owner` / `metadata.lifecycle` first (the
-  // agentskills convention this catalog reads), a top-level spelling second.
-  const owner = (scalarToString(metadata.owner) ?? scalarToString(data.owner))?.trim() || undefined;
-  const lifecycle =
-    (scalarToString(metadata.lifecycle) ?? scalarToString(data.lifecycle))?.trim().toLowerCase() || undefined;
 
   // `allowed-tools` is a space-separated string (agentskills) or a YAML list.
   const at = data['allowed-tools'];
@@ -298,7 +310,7 @@ export function parseSkillFrontmatter(raw: string): {
       ? at.split(/\s+/).filter(Boolean)
       : undefined;
 
-  return { description, version, owner, lifecycle, allowedTools, body, frontmatter: data };
+  return { description, version, allowedTools, body, frontmatter: data };
 }
 
 /**

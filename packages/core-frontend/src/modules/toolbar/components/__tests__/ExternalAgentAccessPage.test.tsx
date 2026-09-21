@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ExternalAgentAccessPage } from '../ExternalAgentAccessPage';
@@ -149,7 +149,7 @@ async function revealAKey(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByRole('heading', { name: /Save this external API key now/ });
 }
 
-describe('the interactive tab: local first, hosted second, each with its own address', () => {
+describe('the interactive tab: Claude and ChatGPT first, each family on its own address', () => {
   it('builds all three hosted keyless snippets from the configured URL', () => {
     mount(PUBLIC_URL);
     const values = snippets();
@@ -167,26 +167,52 @@ describe('the interactive tab: local first, hosted second, each with its own add
   });
 
   /**
-   * The RECOMMENDED path leads: the local-server drawer renders above the
-   * hosted one, and its two snippets are KEYLESS — interactive mode signs in
-   * through the browser on first run, so no key belongs in the config. Both
-   * quote the workspace ORIGIN, because hexis-mcp resolves the endpoint from
+   * Claude and ChatGPT lead, OPEN: the page arrives on the one-click button
+   * and the address to paste. Desktop agents and every other agent follow,
+   * closed — and no drawer title calls itself recommended any more.
+   */
+  it('leads with an open Claude and ChatGPT drawer, then Desktop agents, then any other agent', () => {
+    mount(PUBLIC_URL);
+    const summaries = [
+      'Claude and ChatGPT',
+      'Desktop agents: Claude Code, Claude Desktop, Cursor, Windsurf, Cline and similar',
+      'Any other agent',
+    ].map((text) => screen.getByText(text));
+    for (const summary of summaries) expect(summary.tagName).toBe('SUMMARY');
+    // The page's own drawers, in order — the Marketplaces and Autonomous tabs are not mounted.
+    const drawers = Array.from(
+      screen.getByTestId('agent-connection-section').querySelectorAll('details > summary'),
+    );
+    expect(drawers).toEqual(summaries);
+    expect(drawers.some((d) => /recommended/i.test(d.textContent ?? ''))).toBe(false);
+    expect(summaries.map((s) => (s.closest('details') as HTMLDetailsElement).open)).toEqual([
+      true,
+      false,
+      false,
+    ]);
+
+    // Everything the first drawer promises lives inside it.
+    const first = summaries[0]!.closest('details') as HTMLElement;
+    expect(within(first).getByRole('link', { name: 'Add to Claude' })).toBeInTheDocument();
+    expect(within(first).getByRole('link', { name: 'Add to ChatGPT' })).toBeInTheDocument();
+    expect(within(first).getByRole('link', { name: /Configure your tools/ })).toBeInTheDocument();
+    expect(
+      within(first).getAllByRole('textbox').map((el) => (el as HTMLTextAreaElement).value),
+    ).toContain(PUBLIC_URL);
+
+    // Desktop agents keeps the sentence about local-only tools.
+    const desktop = summaries[1]!.closest('details') as HTMLElement;
+    expect(within(desktop).getByText(/local-only tools/)).toBeInTheDocument();
+  });
+
+  /**
+   * The local-server snippets are KEYLESS — interactive mode signs in through
+   * the browser on first run, so no key belongs in the config. Both quote the
+   * workspace ORIGIN, because hexis-mcp resolves the endpoint from
    * `GET <base>/api/config` itself.
    */
-  it('leads with the local server: keyless snippets built from the origin', () => {
+  it('gives Desktop agents keyless snippets built from the origin', () => {
     mount(PUBLIC_URL);
-    // Two CLOSED drawers, desktop first. The summaries are the whole pitch;
-    // the configs sit inside and neither drawer arrives open.
-    const local = screen.getByText(
-      'Desktop agents: Claude Code, Claude Desktop, Cursor, Windsurf, Cline and similar',
-    );
-    const hosted = screen.getByText('Any other agent');
-    // DOCUMENT_POSITION_FOLLOWING: the hosted drawer comes after the local one.
-    expect(local.compareDocumentPosition(hosted) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    for (const drawer of [local, hosted]) {
-      expect((drawer.closest('details') as HTMLDetailsElement).open).toBe(false);
-    }
-
     const values = snippets();
     expect(values).toContain(
       `claude mcp add skills-tools-knowledge --env HEXIS_URL="${window.location.origin}" -- npx -y @bevel-software/hexis-mcp`,
@@ -197,6 +223,27 @@ describe('the interactive tab: local first, hosted second, each with its own add
     expect(parsed.env.HEXIS_URL).toBe(window.location.origin);
     // Keyless = interactive: the browser-sign-in mode carries no key env.
     expect(parsed.env.HEXIS_CONNECTION_KEY).toBeUndefined();
+  });
+
+  /**
+   * The two things that stop this configuration working on a machine where it
+   * is otherwise correct: the wrong Node major, and a client that cannot see
+   * `npx` because it was launched from the Dock rather than from a shell. The
+   * SNIPPET must not try to fix the second one — an absolute path is specific
+   * to one machine, and baking one in would break every reader whose PATH was
+   * fine — so the prose beside it is the only place this can be said.
+   */
+  it('warns Desktop agents about Node and PATH without touching the snippet', () => {
+    mount(PUBLIC_URL);
+    const desktop = screen
+      .getByText('Desktop agents: Claude Code, Claude Desktop, Cursor, Windsurf, Cline and similar')
+      .closest('details') as HTMLElement;
+    expect(within(desktop).getByText(/Needs Node 22\.13\+ or 24/)).toBeInTheDocument();
+    expect(within(desktop).getByText(/cannot see your shell's PATH/)).toBeInTheDocument();
+    expect(within(desktop).getByText('which npx')).toBeInTheDocument();
+    // The snippet still spawns the bare `npx`, for every client that can find it.
+    const json = snippets().find((v) => v.includes('mcpServers') && v.includes('"command"'));
+    expect(JSON.parse(json!).mcpServers['skills-tools-knowledge'].command).toBe('npx');
   });
 
   /**
@@ -265,22 +312,22 @@ describe('the key-bearing snippets quote the deployment too', () => {
   });
 
   /**
-   * The modal leads with the local server too — the recommended block comes
-   * first, with the REAL key in both snippets (unlike the interactive tab's
-   * placeholder). And it is the one place the page's own origin is right:
+   * The modal follows the tab's order — the hosted endpoint first, the local
+   * server second — with the REAL key in both local snippets (unlike the
+   * interactive tab, which carries none). And it is the one place the page's own origin is right:
    * hexis-mcp takes the workspace's address — the one the browser provably
    * loaded this app from — and resolves the MCP endpoint from it itself,
    * so the configured `mcpUrl` (possibly a proxy serving only the MCP path)
    * must appear in neither snippet.
    */
-  it('leads with the local server, handing it the origin and the minted key', async () => {
+  it('hands the local server the origin and the minted key, after the hosted endpoint', async () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await revealAKey(user);
-    const local = screen.getByText('Desktop agents — the local server (recommended)');
-    const hosted = screen.getByText('Web agents and pipelines — the hosted endpoint');
-    // DOCUMENT_POSITION_FOLLOWING: the hosted block comes after the local one.
-    expect(local.compareDocumentPosition(hosted) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const hosted = screen.getByText('Claude, ChatGPT and pipelines — the hosted endpoint');
+    const local = screen.getByText('Desktop agents — the local server');
+    // DOCUMENT_POSITION_FOLLOWING: the local block comes after the hosted one.
+    expect(hosted.compareDocumentPosition(local) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const values = snippets();
 
     // 7. the Claude Code stdio one-liner
@@ -297,20 +344,22 @@ describe('the key-bearing snippets quote the deployment too', () => {
   });
 
   /**
-   * The modal holds the SAME three drawers as the interactive tab, in the
-   * same order, and every one of them arrives closed: the key is what the
+   * The modal's three drawers run in the interactive tab's order — hosted
+   * endpoint for Claude and ChatGPT, Desktop agents, marketplace — and every
+   * one of them arrives closed: the key is what the
    * dialog hands over, and the configs wait until the reader picks a side.
    */
-  it('folds the configs into the tab\'s three drawers, all closed', async () => {
+  it('folds the configs into three drawers in the tab\'s order, all closed', async () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await revealAKey(user);
     const dialog = screen.getByRole('alertdialog');
     const summaries = [
-      'Desktop agents — the local server (recommended)',
-      'Web agents and pipelines — the hosted endpoint',
+      'Claude, ChatGPT and pipelines — the hosted endpoint',
+      'Desktop agents — the local server',
       'Skills as native plugins — the marketplace',
     ].map((text) => within(dialog).getByText(text));
+    expect(Array.from(dialog.querySelectorAll('details > summary'))).toEqual(summaries);
     for (const summary of summaries) {
       expect(summary.tagName).toBe('SUMMARY');
       expect((summary.closest('details') as HTMLDetailsElement).open).toBe(false);
@@ -395,7 +444,7 @@ describe('the Marketplaces tab', () => {
   /**
    * The registration steps live on pages inside Claude's ADMIN settings, and
    * now in Deployment configuration here. This page has no admin branch left:
-   * the five actions every person takes, one at a time, and none of the
+   * the six actions every person takes, one at a time, and none of the
    * registration screenshots.
    */
   it('gives everyone only the personal steps, and none of the admin screenshots', async () => {
@@ -418,23 +467,31 @@ describe('the Marketplaces tab', () => {
     expect(alts.some((a) => a.includes('admin settings'))).toBe(false);
   });
 
-  it('pairs every screenshot with its instruction and lets the reader move through all five', async () => {
+  it('pairs every screenshot with its instruction and lets the reader move through all six', async () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
     const cowork = await openCowork(user);
     const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
-    const expected = [
-      ['Select repository', 'Connect to URL'],
-      ['Plugins tab', 'select the Plugins tab'],
-      ['Add marketplace', 'choose Add marketplace'],
-      ['URL field', 'Paste the Marketplace URL'],
-      ['Hexis all row', 'choose the Hexis all row'],
+    // One shot a slide, except the connector: that step is one action read
+    // across two screens — the row that says Not added and the dialog the
+    // button opens — so splitting it would put the check that it worked on a
+    // different slide from the control that does it.
+    const expected: [string[], string][] = [
+      [['Select repository'], 'Connect to URL'],
+      [['Plugins tab'], 'select the Plugins tab'],
+      [['Add marketplace'], 'choose Add marketplace'],
+      [['URL field'], 'Paste the Marketplace URL'],
+      [['Hexis all row'], 'choose the Hexis all row'],
+      [['Not added', 'Add custom connector dialog'], 'Add for your team'],
     ];
 
-    for (const [alt, instruction] of expected) {
-      expect(within(carousel).getAllByRole('img')).toHaveLength(1);
-      expect(within(carousel).getByRole('img').getAttribute('alt')).toContain(alt);
+    for (const [alts, instruction] of expected) {
+      const shown = within(carousel)
+        .getAllByRole('img')
+        .map((el) => el.getAttribute('alt') ?? '');
+      expect(shown).toHaveLength(alts.length);
+      alts.forEach((alt, index) => expect(shown[index]).toContain(alt));
       expect(carousel).toHaveTextContent(instruction);
       if (within(carousel).queryByRole('button', { name: 'Next' })) {
         await user.click(within(carousel).getByRole('button', { name: 'Next' }));
@@ -444,8 +501,59 @@ describe('the Marketplaces tab', () => {
     expect(within(carousel).getByRole('button', { name: 'Review again' })).toBeTruthy();
     await user.click(within(carousel).getByRole('button', { name: 'Go to step 3: Marketplace' }));
     expect(within(carousel).getByRole('group')).toHaveAccessibleName(
-      'Step 3 of 5: Choose Add marketplace',
+      'Step 3 of 6: Choose Add marketplace',
     );
+  });
+
+  /**
+   * Installing the plugin brings the skills and leaves the knowledge base
+   * disconnected, which is where this tutorial used to stop. The last slide
+   * is the connector, and End reaches it: the carousel is reachable from the
+   * keyboard, and the step a reader most needs is the one furthest away.
+   */
+  it('ends on the connector step, reachable with End, naming Add for your team', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = await openCowork(user);
+    const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
+
+    await user.click(within(carousel).getByRole('button', { name: 'Next' }));
+    fireEvent.keyDown(carousel, { key: 'End' });
+
+    expect(within(carousel).getByRole('group')).toHaveAccessibleName(
+      'Step 6 of 6: Add the hexis connector',
+    );
+    expect(within(carousel).getByRole('button', { name: 'Review again' })).toBeTruthy();
+    expect(within(carousel).getByText('6 / 6')).toBeTruthy();
+
+    // What the step has to say, in the reader's own words: the plugin does
+    // not bring the connector, the row that proves it, the button, and the
+    // check that it worked.
+    expect(carousel).toHaveTextContent('does not connect its MCP server');
+    expect(carousel).toHaveTextContent('Not added');
+    expect(carousel).toHaveTextContent('Add for your team');
+    expect(carousel).toHaveTextContent('Add custom connector');
+    expect(carousel).toHaveTextContent('approve the sign-in on this deployment');
+    expect(carousel).toHaveTextContent('no longer reads');
+    expect(carousel).toHaveTextContent('Without organization-admin rights');
+
+    // Both of its screens are drawings rather than captures, and the slide
+    // says so under each one: a reader comparing their own Claude to a
+    // sketch should not be left deciding they are on the wrong screen. One
+    // note per shot.
+    expect(within(carousel).getAllByText(/Illustration, not a capture/)).toHaveLength(2);
+
+    // And Home goes back to the first, so End is not a one-way door. The
+    // first slide is a real capture, so the same press is what shows the
+    // note is per-shot rather than part of the shell. One press proving
+    // both: a second one here would only be re-entering a state the press
+    // before it had already produced.
+    fireEvent.keyDown(carousel, { key: 'Home' });
+    expect(within(carousel).getByRole('group')).toHaveAccessibleName(
+      'Step 1 of 6: Select this deployment in Claude Code',
+    );
+    expect(within(carousel).queryByText(/Illustration, not a capture/)).toBeNull();
   });
 
   /**
@@ -462,7 +570,7 @@ describe('the Marketplaces tab', () => {
     const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
 
     expect(within(carousel).getByRole('group')).toHaveAttribute('aria-live', 'polite');
-    expect(within(carousel).getByText('1 / 5')).not.toHaveAttribute('aria-live');
+    expect(within(carousel).getByText('1 / 6')).not.toHaveAttribute('aria-live');
   });
 
   /**
@@ -481,7 +589,7 @@ describe('the Marketplaces tab', () => {
     const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
 
     const advance = within(carousel).getByRole('button', { name: 'Next' });
-    for (let step = 0; step < 4; step += 1) {
+    for (let step = 0; step < 5; step += 1) {
       await user.click(within(carousel).getByRole('button', { name: 'Next' }));
     }
 
@@ -492,7 +600,7 @@ describe('the Marketplaces tab', () => {
     // And it still works as the control it now says it is.
     await user.click(restart);
     expect(within(carousel).getByRole('group')).toHaveAccessibleName(
-      'Step 1 of 5: Select this deployment in Claude Code',
+      'Step 1 of 6: Select this deployment in Claude Code',
     );
   });
 
@@ -701,16 +809,17 @@ describe('the one-click install link', () => {
 
   /**
    * ChatGPT sits beside Claude, with the honest difference: no prefill
-   * exists, so the button opens the settings pane and the copy under it
+   * exists, so the button opens the settings root and the copy under it
    * names the connector to type. Same gate — an endpoint Anthropic cannot
    * reach is one OpenAI cannot reach.
    */
   it('offers Add to ChatGPT beside it, naming what to call the connector', () => {
     mount(PUBLIC_URL);
     const link = screen.getByRole('link', { name: 'Add to ChatGPT' });
-    // The whole href, not just the origin: the settings-pane anchor is the
-    // only part that makes the link worth clicking.
-    expect(link).toHaveAttribute('href', 'https://chatgpt.com/#settings/Connectors');
+    // The whole href, not just the origin: it opens the settings root, not a
+    // pane anchor — ChatGPT renamed the connectors pane, so no anchor reliably
+    // lands there, and the steps beside the button start from Settings.
+    expect(link).toHaveAttribute('href', 'https://chatgpt.com/#settings');
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
     expect(screen.getByText('Skills, Tools and Knowledge')).toBeInTheDocument();
@@ -802,5 +911,62 @@ describe('tabs', () => {
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
     expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
+  });
+});
+
+/**
+ * Adding a marketplace installs nothing in Codex, and the compiled plugin's
+ * server entry carries no credentials: the block has to carry the install and
+ * the sign-in, and the page has to say why the sign-in is there.
+ */
+describe('the Codex block', () => {
+  const REMOTE = 'https://key:<external-api-key>@kb.acme.com/git/marketplace.git';
+  const note = /Codex signs in through your browser once: the login line is needed because the plugin's server entry carries no credentials\./;
+
+  function codexLines(remote: string): string[] {
+    return [
+      `codex plugin marketplace add ${remote}`,
+      'codex plugin add skills-and-knowledge@hexis',
+      'codex mcp login hexis',
+      'codex exec --skip-git-repo-check "Call the hexis MCP server\'s list_tools tool and print the tool names it returns."',
+    ];
+  }
+
+  it('adds, installs, signs in and checks, in that order, and says why it signs in', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const drawer = screen.getByTestId('marketplace-section');
+    const codex = within(drawer)
+      .getAllByRole('textbox')
+      .map((el) => (el as HTMLTextAreaElement).value)
+      .find((v) => v.startsWith('codex '));
+    expect(codex?.split('\n')).toEqual(codexLines(REMOTE));
+    expect(within(drawer).getByText(note)).toBeTruthy();
+    // The other two commands are exactly what they were.
+    const values = within(drawer).getAllByRole('textbox').map((el) => (el as HTMLTextAreaElement).value);
+    expect(values).toContain(`claude plugin marketplace add ${REMOTE} && claude plugin install hexis-all@hexis`);
+    expect(values).toContain(`npx skills add ${REMOTE} --all -y`);
+  });
+
+  it('copies the whole block, not its first line', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    // Stubbed after userEvent.setup(), which installs a clipboard of its own.
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Copy: Codex' }));
+    expect(writeText).toHaveBeenCalledWith(codexLines(REMOTE).join('\n'));
+  });
+
+  it('is the same block in the connection-keys dialog, with the key filled in', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await revealAKey(user);
+    const dialog = screen.getByRole('alertdialog');
+    const block = within(dialog).getByRole('textbox', { name: 'Codex marketplace command' }) as HTMLTextAreaElement;
+    expect(block.value.split('\n')).toEqual(codexLines(`https://key:${KEY}@kb.acme.com/git/marketplace.git`));
+    expect(within(dialog).getByText(note)).toBeTruthy();
   });
 });

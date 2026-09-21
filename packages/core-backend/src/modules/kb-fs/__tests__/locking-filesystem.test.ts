@@ -351,6 +351,132 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
   });
 });
 
+describe('LockingFilesystem — the caller judges under the lock', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const layer = (workflow: IWorkflowService): LockingFilesystem =>
+    new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+
+  it('writeFile runs the check with the lock HELD and before any byte lands', async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/Foo.md'), 'before\n');
+
+    const workflow = makeWorkflow();
+    const order: string[] = [];
+    (workflow.acquireLock as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      order.push('acquire');
+      return { acquired: true, lock: { holderName: 'Alice' } };
+    });
+
+    await layer(workflow).writeFile('knowledge-base/Foo.md', 'after\n', undefined, async () => {
+      order.push('check');
+      // The check reads the state the write is about to replace.
+      expect(await fs.readFile(path.join(root, 'knowledge-base/Foo.md'), 'utf-8')).toBe('before\n');
+    });
+
+    expect(order).toEqual(['acquire', 'check']);
+    expect(await fs.readFile(path.join(root, 'knowledge-base/Foo.md'), 'utf-8')).toBe('after\n');
+  });
+
+  it("a writeFile check that throws writes nothing, releases UNTOUCHED, and gives the caller its own error", async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/Foo.md'), 'theirs\n');
+
+    const workflow = makeWorkflow();
+    const refusal = new Error('already exists');
+    await expect(
+      layer(workflow).writeFile('knowledge-base/Foo.md', 'mine\n', undefined, () => {
+        throw refusal;
+      }),
+    ).rejects.toBe(refusal);
+
+    expect(await fs.readFile(path.join(root, 'knowledge-base/Foo.md'), 'utf-8')).toBe('theirs\n');
+    // Untouched, never no-commit: a discard would reset the path to HEAD and
+    // destroy whatever save left those bytes there.
+    expect(workflow.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/Foo.md', USER);
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(workflow.releaseLock).not.toHaveBeenCalled();
+  });
+
+  it('writeFiles runs its check once EVERY lock is held, and lands only what the check keeps', async () => {
+    const workflow = makeWorkflow();
+    const acquired: string[] = [];
+    (workflow.acquireLock as ReturnType<typeof vi.fn>).mockImplementation(async (_w, _b, p: string) => {
+      acquired.push(p);
+      return { acquired: true, lock: { holderName: 'Alice' } };
+    });
+
+    const writes = [
+      { path: 'knowledge-base/a.md', content: 'A' },
+      { path: 'knowledge-base/b.md', content: 'B' },
+      { path: 'knowledge-base/c.md', content: 'C' },
+    ];
+    await layer(workflow).writeFiles(writes, 'batch', [], async (pending) => {
+      // Every path of the batch is locked before the check gets to judge any.
+      expect([...acquired].sort()).toEqual(['knowledge-base/a.md', 'knowledge-base/b.md', 'knowledge-base/c.md']);
+      expect(pending.map((w) => w.path)).toEqual(writes.map((w) => w.path));
+      return pending.filter((w) => w.path !== 'knowledge-base/b.md');
+    });
+
+    expect(await fs.readFile(path.join(root, 'knowledge-base/a.md'), 'utf-8')).toBe('A');
+    expect(await fs.readFile(path.join(root, 'knowledge-base/c.md'), 'utf-8')).toBe('C');
+    await expect(fs.access(path.join(root, 'knowledge-base/b.md'))).rejects.toThrow();
+    // The dropped path stays OUT of the commit's scope — an unscoped commit
+    // there would sweep in whatever another save left dirty on it — and
+    // releases untouched, because this batch never wrote a byte to it.
+    expect(workflow.commitChanges).toHaveBeenCalledWith('ws-feat', USER, 'batch', [
+      'knowledge-base/a.md',
+      'knowledge-base/c.md',
+    ]);
+    expect(workflow.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/b.md', USER);
+  });
+
+  it('a writeFiles check that drops EVERY write commits nothing and releases everything untouched', async () => {
+    const workflow = makeWorkflow();
+    const change = await layer(workflow).writeFiles(
+      [{ path: 'knowledge-base/a.md', content: 'A' }],
+      'batch',
+      [],
+      async () => [],
+    );
+
+    expect(change).toBeNull();
+    await expect(fs.access(path.join(root, 'knowledge-base/a.md'))).rejects.toThrow();
+    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(workflow.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/a.md', USER);
+  });
+
+  it('a writeFiles check that THROWS refuses the whole batch, untouched', async () => {
+    const workflow = makeWorkflow();
+    const refusal = new Error('nope');
+    await expect(
+      layer(workflow).writeFiles(
+        [{ path: 'knowledge-base/a.md', content: 'A' }, { path: 'knowledge-base/b.md', content: 'B' }],
+        'batch',
+        [],
+        async () => {
+          throw refusal;
+        },
+      ),
+    ).rejects.toBe(refusal);
+
+    await expect(fs.access(path.join(root, 'knowledge-base/a.md'))).rejects.toThrow();
+    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(workflow.releaseLockUntouched).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('LockingFilesystem — creator read grants on creation', () => {
   let root: string;
 
@@ -365,18 +491,13 @@ describe('LockingFilesystem — creator read grants on creation', () => {
   function makeCreatorAccess() {
     return {
       planForCreate: vi.fn().mockResolvedValue(null),
-      grantInExtractedFile: vi.fn().mockResolvedValue(null),
       noteAccessFileWritten: vi.fn(),
     };
   }
 
-  it('writeFile runs new content through a frontmatter plan before it lands', async () => {
+  it('writeFile asks the planner about the new file and lands the content untouched', async () => {
     const workflow = makeWorkflow();
     const creatorAccess = makeCreatorAccess();
-    creatorAccess.planForCreate.mockResolvedValue({
-      kind: 'frontmatter',
-      apply: (c: string) => `---\nread: Alice <alice@example.com>\n---\n${c}`,
-    });
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
@@ -388,9 +509,9 @@ describe('LockingFilesystem — creator read grants on creation', () => {
       'knowledge-base/KnowledgeBase/new.md',
       'file',
     );
-    expect(await fs.readFile(path.join(root, 'knowledge-base/KnowledgeBase/new.md'), 'utf-8')).toBe(
-      '---\nread: Alice <alice@example.com>\n---\n# New\n',
-    );
+    // No plan kind rewrites file content any more: the one grant that exists
+    // is seeded into a new root folder's access.md, never into the file.
+    expect(await fs.readFile(path.join(root, 'knowledge-base/KnowledgeBase/new.md'), 'utf-8')).toBe('# New\n');
   });
 
   it('writeFile seeds a subtree access.md (own lock cycle) before the file itself', async () => {
@@ -594,6 +715,31 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     expect(workflow.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/A.md', USER);
     expect(workflow.releaseLock).not.toHaveBeenCalled();
     expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+  }, 10_000);
+
+  it('a DELETE batch whose later lock is contended deletes nothing — a folder never half-disappears', async () => {
+    // The all-or-none property `delete_folder` relies on, asserted on disk:
+    // every lock is taken before the first delete, so a contended path means
+    // no file under the folder is gone and nothing is committed.
+    await fs.mkdir(path.join(root, 'knowledge-base/Archive'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/Archive/a.md'), 'a');
+    await fs.writeFile(path.join(root, 'knowledge-base/Archive/b.md'), 'b');
+    const workflow = makeWorkflow();
+    (workflow.acquireLock as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ acquired: true, lock: { holderUserId: 'user-1', holderName: 'Alice' } })
+      .mockResolvedValue({ acquired: false, lock: { holderUserId: 'bob', holderName: 'Bob' } });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+
+    await expect(
+      fsLayer.writeFiles([], 'Delete Archive', ['knowledge-base/Archive/a.md', 'knowledge-base/Archive/b.md']),
+    ).rejects.toThrow(/locked by Bob/);
+
+    expect(await fs.readFile(path.join(root, 'knowledge-base/Archive/a.md'), 'utf-8')).toBe('a');
+    expect(await fs.readFile(path.join(root, 'knowledge-base/Archive/b.md'), 'utf-8')).toBe('b');
+    expect(workflow.commitChanges).not.toHaveBeenCalled();
   }, 10_000);
 
   it('a seed write that dies MID-WRITE restores the pre-image and releases UNTOUCHED', async () => {
@@ -1158,5 +1304,116 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
     await fsLayer.copyFile(DRAFT, `${KB}/KnowledgeBase/copy.yaml`);
     expect(validateWrite.appliesTo).toHaveBeenCalledWith(`${KB}/KnowledgeBase/copy.yaml`);
     expect(validateWrite).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A move or a copy through this layer never replaces what is at its
+ * destination. The tools above it look first, for the sentence; this is the
+ * guarantee underneath, which holds for a name claimed after that look — so
+ * these call straight onto a taken name, which is what losing the race
+ * amounts to.
+ */
+describe('LockingFilesystem — a destination that is taken is refused, never replaced', () => {
+  const SOURCE = `${KB}/KnowledgeBase/source.md`;
+  const TAKEN = `${KB}/KnowledgeBase/taken.md`;
+  let root: string;
+  let fsLayer: LockingFilesystem;
+
+  const onDisk = (rel: string) => path.join(root, rel);
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    await fs.mkdir(path.join(root, KB, 'KnowledgeBase'), { recursive: true });
+    await fs.writeFile(onDisk(SOURCE), 'source');
+    fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow: makeWorkflow(), workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('refuses a move onto a taken name with the clash sentence, and keeps both files', async () => {
+    await fs.writeFile(onDisk(TAKEN), 'taken');
+
+    await expect(fsLayer.moveFile(SOURCE, TAKEN)).rejects.toMatchObject({
+      name: 'DestinationTakenError',
+      status: 409,
+      message: 'A file named taken.md already exists in KnowledgeBase.',
+    });
+
+    expect(await fs.readFile(onDisk(TAKEN), 'utf-8')).toBe('taken');
+    expect(await fs.readFile(onDisk(SOURCE), 'utf-8')).toBe('source');
+  });
+
+  it('refuses a copy onto a taken name with the same sentence, and copies nothing', async () => {
+    await fs.writeFile(onDisk(TAKEN), 'taken');
+
+    await expect(fsLayer.copyFile(SOURCE, TAKEN)).rejects.toMatchObject({
+      name: 'DestinationTakenError',
+      message: 'A file named taken.md already exists in KnowledgeBase.',
+    });
+
+    expect(await fs.readFile(onDisk(TAKEN), 'utf-8')).toBe('taken');
+  });
+
+  /**
+   * The refusal must not cost a bystander their file. The destination of a
+   * lost race holds the WINNER's just-landed move, whose commit is still
+   * queued (the worker publishes it out of band). A discarding release resets
+   * that path to HEAD — it cannot know the dirty bytes are not the loser's —
+   * so unwinding the loser that way deletes the winner's file. The refusal
+   * writes nothing (the no-clobber call fails without creating anything), so
+   * every lock it unwinds releases untouched.
+   */
+  it('releases UNTOUCHED when the destination is taken, so a lost race cannot eat the winner', async () => {
+    const workflow = makeWorkflow();
+    const layer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    await fs.writeFile(onDisk(TAKEN), 'the winner of the race');
+
+    await expect(layer.moveFile(SOURCE, TAKEN)).rejects.toMatchObject({ name: 'DestinationTakenError' });
+
+    // Both ends of the move: the destination is the one holding the winner's
+    // bytes, and the source was not written either.
+    for (const p of [SOURCE, TAKEN]) {
+      expect(workflow.releaseLockUntouched, p).toHaveBeenCalledWith('ws-feat', 'feat', p, USER);
+    }
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(workflow.releaseLock).not.toHaveBeenCalled();
+    expect(await fs.readFile(onDisk(TAKEN), 'utf-8')).toBe('the winner of the race');
+  });
+
+  it.skipIf(process.platform === 'win32')('answers the clash sentence when a DANGLING link holds the name', async () => {
+    // A link to nothing still owns the directory entry, so the exclusive
+    // create fails — and an existence probe that follows links would say the
+    // name is free and let the raw filesystem error out as a 500 instead.
+    await fs.symlink(onDisk(`${KB}/KnowledgeBase/gone.md`), onDisk(TAKEN));
+
+    await expect(fsLayer.copyFile(SOURCE, TAKEN)).rejects.toMatchObject({
+      name: 'DestinationTakenError',
+      message: 'A file named taken.md already exists in KnowledgeBase.',
+    });
+    await expect(fsLayer.moveFile(SOURCE, TAKEN)).rejects.toMatchObject({
+      name: 'DestinationTakenError',
+      message: 'A file named taken.md already exists in KnowledgeBase.',
+    });
+
+    expect((await fs.lstat(onDisk(TAKEN))).isSymbolicLink()).toBe(true);
+    expect(await fs.readFile(onDisk(SOURCE), 'utf-8')).toBe('source');
+  });
+
+  it('moves and copies onto a free name exactly as before', async () => {
+    await fsLayer.copyFile(SOURCE, `${KB}/KnowledgeBase/copy.md`);
+    await fsLayer.moveFile(SOURCE, `${KB}/KnowledgeBase/moved.md`);
+
+    expect(await fs.readFile(onDisk(`${KB}/KnowledgeBase/copy.md`), 'utf-8')).toBe('source');
+    expect(await fs.readFile(onDisk(`${KB}/KnowledgeBase/moved.md`), 'utf-8')).toBe('source');
+    await expect(fs.access(onDisk(SOURCE))).rejects.toBeDefined();
   });
 });

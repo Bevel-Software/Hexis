@@ -3,7 +3,7 @@ import { NodeFs } from '../../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_KB_LAYOUT, configureKbLayout } from '@bevel-software/platform-shared';
+import { DEFAULT_KB_LAYOUT, configureKbLayout, pluginDisplayNameOf } from '@bevel-software/platform-shared';
 import { KbPluginSource } from '../kb-plugin-source.js';
 
 /**
@@ -57,6 +57,12 @@ describe('KbPluginSource — bundles', () => {
     await write('plugins/departments/engineering/shared/unnamed/plugin.bundle.json', JSON.stringify({ sourceSkillRoots: ['../escape', 'skills/x'] }));
     // A bundle whose name is not its folder's, with no display name of its own.
     await write('plugins/departments/business/finance/ledger-folder/plugin.bundle.json', JSON.stringify({ name: 'ledger' }));
+    // A declared display name with padding around it — the one field of the
+    // presentation block that is also a name.
+    await write(
+      'plugins/functional/cluster-a/padded/plugin.bundle.json',
+      JSON.stringify({ name: 'padded', interface: { displayName: '  Padded Plugin  ', category: 'Ops' } }),
+    );
     await write('plugins/broken/plugin.bundle.json', '{ not json');
   });
   afterEach(async () => {
@@ -67,10 +73,14 @@ describe('KbPluginSource — bundles', () => {
   it('finds bundles at any depth and reads them as plugins that link skill roots', async () => {
     const { plugins, warnings } = await new KbPluginSource(new NodeFs()).discover(kb);
     const byName = new Map(plugins.map((p) => [p.name, p]));
-    expect([...byName.keys()].sort()).toEqual(['close', 'example-plugin', 'ledger', 'unnamed']);
-    // The shared contract: a declared display name, else the FOLDER — never the identity.
+    expect([...byName.keys()].sort()).toEqual(['close', 'example-plugin', 'ledger', 'padded', 'unnamed']);
+    // The bundle dialect's own rule — a declared display name, else the
+    // FOLDER — which this foreign, read-only format keeps. It is resolved
+    // INTO the manifest the reader synthesizes, so the shared manifest-only
+    // reader says the same thing about a bundle that discovery does.
     expect(byName.get('example-plugin')!.displayName).toBe('Example Plugin');
     expect(byName.get('ledger')!.displayName).toBe('ledger-folder');
+    expect(pluginDisplayNameOf(byName.get('ledger')!.manifest)).toBe('ledger-folder');
 
     const example = byName.get('example-plugin')!;
     expect(example.folder).toBe('plugins/functional/cluster-a/example-plugin');
@@ -86,7 +96,22 @@ describe('KbPluginSource — bundles', () => {
       version: '1.3.1',
       description: 'What this plugin is for',
       displayName: 'Example Plugin',
+      // The presentation block rides along whole, for the compiled Codex manifest.
+      interface: { displayName: 'Example Plugin', category: 'Productivity' },
     });
+    // One answer, in both fields: the presentation block is carried whole,
+    // but the name inside it is the trimmed one the manifest and discovery
+    // report — the compile step fills that field only when it is blank, so a
+    // padded spelling left here would ship a Codex manifest calling the
+    // plugin something the catalog does not.
+    const padded = byName.get('padded')!;
+    expect(padded.displayName).toBe('Padded Plugin');
+    expect(padded.manifest).toMatchObject({
+      displayName: 'Padded Plugin',
+      interface: { displayName: 'Padded Plugin', category: 'Ops' },
+    });
+    expect(pluginDisplayNameOf(padded.manifest)).toBe('Padded Plugin');
+
     // An unnamed bundle takes its folder's name; a bad root is dropped with a warning.
     expect(byName.get('unnamed')!.linkedRoots).toEqual(['skills/x']);
     expect(warnings.some((w) => w.includes('../escape'))).toBe(true);
@@ -102,6 +127,8 @@ describe('KbPluginSource — bundles', () => {
     });
     expect(JSON.parse(example.mcpJsonText!)).toEqual({ mcpServers: example.mcpServers });
     expect(warnings.some((w) => w.includes('unknown server "ghost"'))).toBe(true);
+    // `Jira` and `Confluence` cannot be server names, so both run under their ids — and the author is told.
+    expect(warnings.filter((w) => w.includes('cannot be a server name'))).toHaveLength(2);
     // An empty profile is valid and selects nothing.
     expect(plugins.find((p) => p.name === 'close')!.mcpServers).toBeNull();
   });
@@ -226,7 +253,7 @@ describe('KbPluginSource — one walk, both shapes', () => {
     ]);
   });
 
-  it('the manifest name is the identity and the folder only the label — unless the name is no identifier', async () => {
+  it('reads both names from the manifest and neither from the folder — the name standing in only when there is none', async () => {
     await write('Plugins/GTM/plugin.json', JSON.stringify({ name: 'go-to-market', displayName: 'Go To Market' }));
     await write('Plugins/Numeric/plugin.json', '{"name":42}');
     // A name nested deeper than any stack would serialise: the warning must
@@ -236,11 +263,19 @@ describe('KbPluginSource — one walk, both shapes', () => {
     await write('Plugins/Plain/plugin.json', '{}');
     const { plugins, warnings } = await new KbPluginSource(new NodeFs()).discover(kb);
     expect(plugins.map((p) => [p.name, p.displayName, p.folder])).toEqual([
+      // Both fields present: both are read, and `Plugins/GTM` says nothing.
       ['go-to-market', 'Go To Market', 'Plugins/GTM'],
-      ['nested', 'Nested', 'Plugins/Nested'],
-      ['numeric', 'Numeric', 'Plugins/Numeric'],
-      ['ops', 'Ops', 'Plugins/Ops'],
-      ['plain', 'Plain', 'Plugins/Plain'],
+      // The three below name nothing usable at all — the shape the folder
+      // stands in as the IDENTITY for, out loud. What they are called follows
+      // that identity; the folder is never read for the label directly, which
+      // is why `Nested` shows as `nested`.
+      ['nested', 'nested', 'Plugins/Nested'],
+      ['numeric', 'numeric', 'Plugins/Numeric'],
+      // A name that is no identifier cannot BE the identity — the folder
+      // stands in for that too — but it is still what the manifest SAYS the
+      // plugin is called, so it is the display name.
+      ['ops', 'Not An Identifier', 'Plugins/Ops'],
+      ['plain', 'plain', 'Plugins/Plain'],
     ]);
     // Every PRESENT name that is no identifier is said out loud — whatever its type.
     expect(warnings).toEqual([

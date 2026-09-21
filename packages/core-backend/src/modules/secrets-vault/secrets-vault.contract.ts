@@ -45,6 +45,20 @@ export interface SecretConfigStatus {
   adminConfigured: boolean;
   userConfigured: boolean;
   /**
+   * How the SHARED row is stored, or `null` when there is none. A `.tool` can be
+   * edited to turn a plain key into an OAuth variable (or back) while the old row
+   * survives, and the two kinds are not interchangeable: an OAuth flow reads the
+   * client secret off an `oauth` row and `resolve` reads a value off a `static`
+   * one. A caller that asks "is this set up?" has to mean "set up AS THE KIND THE
+   * MANUAL NOW DECLARES", or it offers an Authorize the flow will refuse.
+   *
+   * Required, not optional: "the field was left out" and "there is no row" have
+   * to be the same answer, or a caller that trusts it cannot be strict.
+   */
+  adminKind: SecretKind | null;
+  /** How the CALLER's own row is stored, or `null` when they have none. Same reason. */
+  userKind: SecretKind | null;
+  /**
    * For an OAuth-backed per-user row: whether the caller has completed sign-in (a
    * token exists). `undefined` for static rows / when the caller has no row. Lets
    * the pre-check treat "row present but not authorized" as still-missing.
@@ -102,7 +116,47 @@ export interface CreateOAuthSecretInput {
   provider: OAuthProviderConfig;
 }
 
+/** Secrets stored under one manual's name, counted — never a value, never whose. */
+export interface NamespaceSecretCount {
+  /** Typed values and shared client secrets. */
+  keys: number;
+  /** Per-user OAuth rows — somebody signed in (or started to). */
+  signIns: number;
+}
+
+/**
+ * Whether a vault key belongs to the namespace `prefix` (`utcpNamespacePrefix`).
+ *
+ * A bare `startsWith` is not enough: namespacing doubles every underscore, so
+ * manual `foo`'s prefix `foo_` is also the start of manual `foo_bar`'s
+ * `foo__bar_`. A remainder starting with `_` therefore belongs to a longer
+ * name.
+ *
+ * `_X` IS a legal variable name, so `foo` declaring `_bar_KEY` stores under
+ * `foo__bar_KEY` — the very key `foo_bar` declaring `KEY` stores under. The
+ * UTCP encoding makes those one row with two honest claimants, and no rule
+ * applied to the key can tell them apart. This predicate therefore answers NO
+ * for every `_`-leading remainder, with no exception for a declaring manual:
+ * the only thing it is used for is counting and WIPING a whole namespace, and
+ * an ambiguous row left standing is recoverable where one wrongly deleted is
+ * not. (Establishing that no colliding manual exists is not an option either
+ * — the tool catalog omits what it could not read, so its silence is not
+ * proof.)
+ */
+export function isKeyInNamespace(key: string, prefix: string): boolean {
+  if (!key.startsWith(prefix)) return false;
+  const rest = key.slice(prefix.length);
+  return rest.length > 0 && !rest.startsWith('_');
+}
+
 export interface ISecretsVaultService {
+  /** Count every user's secrets under one namespace prefix — see {@link isKeyInNamespace}. */
+  countNamespace(prefix: string): Promise<NamespaceSecretCount>;
+  /**
+   * Delete every secret under one namespace prefix — the shared rows and every
+   * user's. What deleting a tool wipes; returns what it removed.
+   */
+  removeNamespace(prefix: string): Promise<NamespaceSecretCount>;
   /** The caller's secrets (values omitted). */
   list(userId: string): Promise<SecretSummary[]>;
   /** One secret's summary, or null if it isn't the caller's. */
@@ -183,7 +237,26 @@ export interface ISecretsVaultService {
    * token (refreshed on demand). Returns null when missing or not-yet-authorized.
    */
   resolve(userId: string, key: string): Promise<string | null>;
+
+  /**
+   * Refresh the caller's OAuth token for `key` NOW, ignoring its stored expiry —
+   * for when a downstream server has just rejected the token (401 /
+   * `invalid_token`), which outranks whatever lifetime it was issued with.
+   * Callers own the pacing (the MCP proxy allows one per user+manual per
+   * minute); this method refreshes every time it is asked.
+   */
+  forceRefresh(userId: string, key: string): Promise<ForcedRefreshOutcome>;
 }
+
+/**
+ * What a {@link ISecretsVaultService.forceRefresh} did:
+ *   - `refreshed` — fresh tokens are stored; a retry will use them.
+ *   - `rejected` — the grant is dead (provider 400/401, or no refresh token):
+ *     the token set was wiped, client secret kept; the user must re-authorize.
+ *   - `transient` — network/timeout/5xx: tokens kept, a later call tries again.
+ *   - `skipped` — nothing to refresh (no such OAuth row, or not signed in).
+ */
+export type ForcedRefreshOutcome = 'refreshed' | 'rejected' | 'transient' | 'skipped';
 
 /** Thrown when input fails validation. Routes map to 422. */
 export class InvalidSecretError extends Error {
@@ -267,4 +340,24 @@ export function missingScopes(required: string[] | undefined, granted: string | 
 
 export function scopesCovered(required: string[] | undefined, granted: string | undefined): boolean {
   return missingScopes(required, granted).length === 0;
+}
+
+/**
+ * Is the stored row the KIND the manual now declares — i.e. would the thing the
+ * UI is about to offer actually work?
+ *
+ * A `.tool` can be edited to turn a plain key into an OAuth variable, or back,
+ * and the row set for the previous shape survives the edit. The two are not
+ * interchangeable: `beginToolOAuthByKey` refuses a `static` shared row, and
+ * `resolve` hands an OAuth row's ACCESS TOKEN to a variable whose consumer
+ * wants the value. So "a row exists" is never "this variable is set up", and
+ * every surface that asks the second question pairs the presence flag with the
+ * kind rather than re-deriving the rule.
+ */
+export function configuredAs(
+  want: SecretKind,
+  present: boolean | undefined,
+  stored: SecretKind | null | undefined,
+): boolean {
+  return present === true && stored === want;
 }

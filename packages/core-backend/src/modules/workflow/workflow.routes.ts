@@ -25,6 +25,8 @@ const crLog = logger('cr');
 import type {
   AuthUser,
   ChangeInput,
+  ChangeRequest,
+  ChangeRequestApplyFailureKind,
   IWorkflowService,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
@@ -36,6 +38,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { assertValidRelativePath } from '../kb-fs/branch-name.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
@@ -48,6 +51,9 @@ function toHttpError(
   log.error('unhandled error:', { err });
   return { status: 500, body: { error: 'Internal server error' } };
 }
+
+/** What a viewer who cannot read every touched file reads in place of a refusal's reason. */
+export const APPLY_FAILURE_REASON_WITHHELD = 'The reason names files you do not have access to read.';
 
 function parsePrNumber(raw: string): number | null {
   if (!/^\d+$/.test(raw)) return null;
@@ -153,6 +159,67 @@ export function createWorkflowRoutes(
       return false;
     }
     return true;
+  }
+
+  /**
+   * A saved apply refusal is git's or the gate's own text, and it names files
+   * ("Waiting on approval for Plugins/x/SKILL.md …"). Every viewer still learns
+   * THAT the apply failed, who tried and when; the reason itself only reaches a
+   * viewer who can read every file the request touches. Anyone else — an
+   * unauthenticated read, or a reader of the folder's `access.md` but not its
+   * content — gets a withheld line instead. Fails closed: an access lookup that
+   * errors withholds, and so does a request with NO resolved touched paths,
+   * since read access to its files cannot be proven. Returns copies; the
+   * cached objects are never touched.
+   */
+  async function scopeApplyFailures<T extends ChangeRequest>(
+    req: express.Request,
+    items: T[],
+    knownUser?: AuthUser,
+  ): Promise<T[]> {
+    const failing = items.filter((c) => c.lastApplyFailure);
+    if (failing.length === 0) return items;
+    let readable: Map<string, boolean> | null = null;
+    try {
+      const user = knownUser ?? (req.userId ? await authService.getUserById(req.userId) : null);
+      if (user) {
+        const workspace = await workspaceService.getOrCreateForUser(user);
+        const paths = [...new Set(failing.flatMap((c) => c.touchedNodePaths))];
+        readable = paths.length > 0 ? await accessControl.canReadBatch(workspace.id, user.email, paths) : new Map();
+      }
+    } catch (err) {
+      log.warn('apply-failure read scope lookup failed; withholding reasons:', { err });
+      readable = null;
+    }
+    return items.map((c) => {
+      const failure = c.lastApplyFailure;
+      if (!failure) return c;
+      const mayRead = readable !== null && readsEveryPath(readable, c.touchedNodePaths);
+      return mayRead ? c : { ...c, lastApplyFailure: { ...failure, reason: APPLY_FAILURE_REASON_WITHHELD } };
+    });
+  }
+
+  /**
+   * The one predicate both scopes apply: a non-empty path set, every path
+   * readable. An empty set proves nothing, so it never grants the reason.
+   */
+  function readsEveryPath(readable: Map<string, boolean>, paths: string[]): boolean {
+    return paths.length > 0 && paths.every((p) => readable.get(p) === true);
+  }
+
+  /**
+   * Whether `user` may read the reason of a refusal on a request touching
+   * `paths` — the clicker's own answer on the bus is scoped exactly like the
+   * persisted one the read endpoints serve. Fails closed.
+   */
+  async function mayReadApplyFailureReason(user: AuthUser, workspaceId: string, paths: string[]): Promise<boolean> {
+    if (paths.length === 0) return false;
+    try {
+      return readsEveryPath(await accessControl.canReadBatch(workspaceId, user.email, paths), paths);
+    } catch (err) {
+      log.warn('apply-failure read scope lookup failed; withholding the reason:', { err });
+      return false;
+    }
   }
 
   // ── Branches ──────────────────────────────────────────────────────────────
@@ -537,7 +604,7 @@ export function createWorkflowRoutes(
   router.get('/workflow/change-requests', async (req, res) => {
     const fresh = isTruthyQuery(req.query.fresh);
     try {
-      res.json(await workflow.listChangeRequests({ fresh }));
+      res.json(await scopeApplyFailures(req, await workflow.listChangeRequests({ fresh })));
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -552,7 +619,7 @@ export function createWorkflowRoutes(
     // the list changed, and a cached answer would hide their own change.
     const fresh = isTruthyQuery(req.query.fresh);
     try {
-      res.json(await workflow.listChangeRequestsAuthoredBy(user.email, { fresh }));
+      res.json(await scopeApplyFailures(req, await workflow.listChangeRequestsAuthoredBy(user.email, { fresh }), user));
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -565,7 +632,73 @@ export function createWorkflowRoutes(
     const fresh = isTruthyQuery(req.query.fresh);
     try {
       const workspace = await workspaceService.getOrCreateForUser(user);
-      res.json(await workflow.listChangeRequestsForUser(workspace.id, user.email, { fresh }));
+      res.json(
+        await scopeApplyFailures(req, await workflow.listChangeRequestsForUser(workspace.id, user.email, { fresh }), user),
+      );
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * A KB-repo-relative folder from the request, or null (400 sent) when it is
+   * not a path git may be handed. The contract is `assertValidRelativePath`'s
+   * — the one every path reaching git meets (relative, no drive letter, no
+   * backslash, no `.`/`..`, no leading `-`, at most 1024 characters) — plus
+   * what a folder spelling adds: no empty segment and no control character.
+   * A malformed spelling matches no request, so letting it through would
+   * answer "nothing to remove" instead of saying the path is wrong.
+   */
+  function folderParam(raw: unknown, res: express.Response): string | null {
+    const folder = typeof raw === 'string' ? raw.replace(/\/+$/, '') : '';
+    let valid = true;
+    try {
+      assertValidRelativePath(folder);
+    } catch {
+      valid = false;
+    }
+    if (
+      !valid
+      || folder.split('/').includes('')
+      || [...folder].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f)
+    ) {
+      res.status(400).json({ error: 'path must be a folder inside the knowledge base' });
+      return null;
+    }
+    return folder;
+  }
+
+  /**
+   * Before a folder delete: the open change requests proposing files under
+   * the folder, and whether the caller may take those files out of each.
+   * Registered before `/:number`, which would otherwise claim the segment.
+   */
+  router.get('/workflow/change-requests/under-folder', async (req, res) => {
+    const folder = folderParam(req.query.path, res);
+    if (folder === null) return;
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      res.json({ requests: await workflow.changeRequestsUnderFolder(folder, user) });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * "Delete folder and its proposed changes", the request half: every file
+   * under the folder leaves every open request proposing it, and a request
+   * left empty is withdrawn. All or nothing on permission (403).
+   */
+  router.post('/workflow/change-requests/under-folder/remove', async (req, res) => {
+    const folder = folderParam((req.body ?? {}).path, res);
+    if (folder === null) return;
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      res.json({ results: await workflow.removeFolderFromChangeRequests(folder, user) });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -584,7 +717,8 @@ export function createWorkflowRoutes(
         res.status(404).json({ error: 'change request not found' });
         return;
       }
-      res.json(cr);
+      const [scoped] = await scopeApplyFailures(req, [cr]);
+      res.json(scoped);
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -646,7 +780,8 @@ export function createWorkflowRoutes(
           crLog.warn(`lazy empty-close of #${num} failed (non-fatal):`, { err });
         }
       }
-      res.json(detail);
+      const [scoped] = await scopeApplyFailures(req, [detail]);
+      res.json(scoped);
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -754,6 +889,70 @@ export function createWorkflowRoutes(
       }
       const workspace = await workspaceService.getOrCreateForBranch(cr.branch);
       res.json(await workflow.updateFromTarget(workspace.id, user, num));
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * One file as it stood at the request's fork point — the "before" side of
+   * every diff of the request. `sha` is the detail's `mergeBaseSha` when the
+   * caller holds one (the dialog: its diff and its file list then describe
+   * the same fork point); the git layer refuses any commit that is not on the
+   * target's history. Without `sha` the request's CURRENT fork point is
+   * resolved here (the file page's change boxes, which see only summaries).
+   * Answers `{ content, forkSha }`; `forkSha: null` means the branches share
+   * no history, so there is no fork point to read. `path` is repo-relative. Read authority comes from the target branch's
+   * access tree (`origin/<base>`), the tree the fork point belongs to; an
+   * unresolvable verdict is a denial.
+   */
+  router.get('/workflow/change-requests/:number/fork-point-file', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    const repoPath = typeof req.query.path === 'string' ? req.query.path : '';
+    const sha = typeof req.query.sha === 'string' ? req.query.sha : '';
+    if (!repoPath) {
+      res.status(400).json({ error: 'path is required' });
+      return;
+    }
+    // Repo-relative ONLY. The git layer strips a leading `<kbDirName>/`, so a
+    // prefixed spelling would be authorized under one path and read as
+    // another — refused rather than normalised.
+    if (repoPath.startsWith(`${kbDirName}/`)) {
+      res.status(400).json({ error: 'path must be repository-relative' });
+      return;
+    }
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      const cr = await workflow.getChangeRequest(num);
+      if (!cr) {
+        res.status(404).json({ error: 'change request not found' });
+        return;
+      }
+      const workspace = await workspaceService.getOrCreateForUser(user);
+      const allowed = await accessControl.canReadAtRef(
+        workspace.id,
+        `origin/${cr.base}`,
+        user.email,
+        repoPath,
+      );
+      if (allowed !== true) {
+        res.status(403).json({ error: `You don't have permission to read "${repoPath}".` });
+        return;
+      }
+      const forkSha =
+        sha || (await workflow.changeRequestForkPoint(workspace.id, cr.base, cr.branch));
+      if (!forkSha) {
+        res.json({ content: null, forkSha: null });
+        return;
+      }
+      const content = await workflow.fileAtForkPoint(workspace.id, cr.base, forkSha, repoPath);
+      res.json({ content, forkSha });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -1002,8 +1201,41 @@ export function createWorkflowRoutes(
     // the result over the event bus: `change-request-merged` on success (emitted
     // by the workflow service; the PR viewer refreshes off it), and a
     // user-scoped `change-request-merge-failed` on a gate block / conflict /
-    // merge error so the UI that kicked it off can react.
+    // merge error so the UI that kicked it off can react. A failure on a
+    // request that exists is ALSO persisted and broadcast (`recordApplyFailure`)
+    // — the request stays open, and its author and other viewers must see why.
+    // Nothing is cleared as an attempt starts: a caller the merge then refuses
+    // must not be able to erase the verdict everyone else reads. A landed apply
+    // needs no clearing (only an open request reports a refusal), and a newer
+    // refusal simply overwrites the old one.
     res.status(202).json({ status: 'merging', number: num });
+    const attempt = workflow.beginApplyAttempt(num);
+    // What the clicker's reason is scoped against, once the request is loaded.
+    // Unset (a failure before that) means read access is unproven: withheld.
+    let readScope: { workspaceId: string; paths: string[] } | null = null;
+    const reportFailure = async (reason: string, kind: ChangeRequestApplyFailureKind, persist = true) => {
+      const conflicts = kind === 'conflicts';
+      const at = new Date();
+      // The raw reason is persisted below and scoped per viewer on read; the
+      // clicker's direct answer must not bypass that scope.
+      const clickerMayRead =
+        readScope !== null && (await mayReadApplyFailureReason(user, readScope.workspaceId, readScope.paths));
+      events.emit({
+        kind: 'change-request-merge-failed',
+        forUserId: user.id,
+        number: num,
+        reason: clickerMayRead ? reason : APPLY_FAILURE_REASON_WITHHELD,
+        conflicts,
+        at: at.toISOString(),
+      });
+      if (!persist) return;
+      try {
+        await workflow.recordApplyFailure(num, { reason, kind, at }, user, attempt);
+      } catch (err) {
+        // The clicker already has the reason; only the other viewers lose it.
+        log.warn(`could not record the failed apply of change request #${num}:`, { err });
+      }
+    };
     void (async () => {
       try {
         const workspace = await workspaceService.getOrCreateForUser(user);
@@ -1022,6 +1254,7 @@ export function createWorkflowRoutes(
           });
           return;
         }
+        readScope = { workspaceId: workspace.id, paths: detail.touchedNodePaths };
         const outcome = await workflow.mergeChangeRequest(
           num,
           user,
@@ -1034,25 +1267,26 @@ export function createWorkflowRoutes(
           { bypass },
         );
         if (outcome.kind === 'conflicts-need-resolution') {
-          events.emit({
-            kind: 'change-request-merge-failed',
-            forUserId: user.id,
-            number: num,
-            reason: 'This draft conflicts with the target and needs resolving first.',
-            conflicts: true,
-          });
+          await reportFailure('This draft conflicts with the target and needs resolving first.', 'conflicts');
         }
         // Success path: `workflow.mergeChangeRequest` emits `change-request-merged`.
       } catch (err) {
-        const { body: errBody } = toHttpError(err);
+        const { status, body: errBody } = toHttpError(err);
         log.error(`async merge of change request #${num} failed:`, { err });
-        events.emit({
-          kind: 'change-request-merge-failed',
-          forUserId: user.id,
-          number: num,
-          reason: typeof errBody.error === 'string' ? errBody.error : 'Merge failed',
-          conflicts: false,
-        });
+        // A refusal of the CALLER (not allowed, nothing to act on) says nothing
+        // about the request itself — it goes to the clicker alone.
+        const aboutTheCaller = status === 401 || status === 403 || status === 404;
+        // The gate's refusal carries the reasons it still waits on; an approval
+        // can answer it. Anything else (a push, the roles.yaml guard, an internal
+        // error) an approval does not touch.
+        const gateRefusal = Array.isArray(errBody.mergeBlockedReasons);
+        await reportFailure(
+          typeof errBody.error === 'string' ? errBody.error : 'Merge failed',
+          gateRefusal ? 'gate' : 'error',
+          !aboutTheCaller,
+        );
+      } finally {
+        workflow.endApplyAttempt(num, attempt);
       }
     })();
   });

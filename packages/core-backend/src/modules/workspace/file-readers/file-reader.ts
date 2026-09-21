@@ -9,6 +9,7 @@
  * branch on extensions themselves.
  */
 import { fileExtension } from './doc-extract.types.js';
+import { sanitizedPath } from '../../../shared/printable.js';
 
 /**
  * What reading a file produces, before the tool layer shapes it for MCP:
@@ -26,11 +27,11 @@ export type ReadResult =
 /**
  * `path` as interpolated into a ONE-LINE notice or refusal: CR/LF are shown
  * as escapes rather than obeyed (the same rule as `extractionMarker`), so a
- * filename cannot forge extra output lines.
+ * filename cannot forge extra output lines. The rule itself lives in
+ * `shared/printable`, because the missing-path refusals (`not-found.ts`) need
+ * the same one and the shared layer is the only one both can reach.
  */
-export function displayPath(path: string): string {
-  return path.replace(/[\r\n]/g, (c) => (c === '\r' ? '\\r' : '\\n'));
-}
+export const displayPath = sanitizedPath;
 
 /**
  * Any text interpolated into a ONE-LINE notice — a path, or an extractor's
@@ -38,6 +39,13 @@ export function displayPath(path: string): string {
  * carry CR/LF of the document's choosing.
  */
 export const oneLine = displayPath;
+
+/**
+ * What a file IS, as the binary capability contract names it in a refusal:
+ * `text` (the text tools own it), `document` (read_file extracts it; the
+ * legacy .doc/.ppt/.xls count too), `image`, `archive`, or any other `binary`.
+ */
+export type FileKind = 'text' | 'document' | 'image' | 'archive' | 'binary';
 
 /** A per-format file reader. Register implementations in `createFileReaderRegistry`. */
 export interface FileReader {
@@ -54,6 +62,14 @@ export interface FileReader {
   greppableText?(bytes: Buffer, path: string): Promise<string | null>;
   /** May the agent TEXT-editing tools (write_file/write_files/edit_file) touch this file? */
   readonly textEditable: boolean;
+  /** The kind this reader's extensions name — what a `binary_not_writable` refusal reports. */
+  readonly fileKind: FileKind;
+  /**
+   * The MIME type this reader's extensions name for `path` — what `file_stat`
+   * reports as `mime` — or undefined when it names none (the fallback reader
+   * on an unknown extension; stat then sniffs the content).
+   */
+  mimeFor?(path: string): string | undefined;
   /**
    * Format-specific copy for the write-refusal thrown when `textEditable` is
    * false (see `assertNotDocumentEdit` in workspace.tools.ts). Absent = the
@@ -95,6 +111,11 @@ export class FileReaderRegistry {
         this.byExtension.set(ext, reader);
       }
     }
+  }
+
+  /** Every extension some reader claims (lowercase, with the dot); the fallback owns the rest. */
+  ownedExtensions(): string[] {
+    return [...this.byExtension.keys()];
   }
 
   /** The reader owning `path`'s extension (lowercased by `fileExtension`), or the fallback. */

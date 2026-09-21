@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -60,6 +60,8 @@ vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolPage } from '../components/tool-page/ToolPage';
+import { NAME_MIN_WIDTH } from '../components/NameWithBadges';
+import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 
 const GITHUB: ToolSecrets = {
   slug: 'heyreach',
@@ -184,6 +186,32 @@ describe('ToolPage: frame', () => {
     expect(screen.queryByText(/Tool · /)).toBeNull();
     expect(await screen.findByText('Runs LinkedIn outreach campaigns.')).toBeInTheDocument();
     expect(screen.getByText('Managed by the Admins.')).toBeInTheDocument();
+  });
+
+  it('holds a long tool name to a readable width, and says the rest on hover', async () => {
+    // The card's rule, on the page header — the half of it a one-row band
+    // can keep. The name truncates and says the rest on hover; it does not
+    // take a floor, because the band has no second line to hand anything.
+    const long = 'disposable-weather-lookup-for-the-northern-hemisphere-v2beta';
+    secretsMock.listToolSecrets.mockResolvedValue([{ ...GITHUB, name: long }]);
+    toolsMock.getToolDetail.mockResolvedValue({ ...DETAIL, name: long });
+    renderPage();
+
+    // Whole in the DOM, so a screen reader reads all of it; whole in `title`,
+    // so the reader who only has the ellipsis can finish it.
+    const title = await screen.findByRole('heading', { name: long, level: 1 });
+    expect(title).toHaveAttribute('title', long);
+    expect(title.className).toContain('truncate');
+
+    // And NOT the floor. The band is one row tall, the same row the sidebar's
+    // header holds, so there is no second line for a floor to push anything
+    // onto — a floor here only made the title wider than the band and sent it
+    // out of the bottom of it at every phone width. The row says so itself:
+    // it cannot wrap, and it clips.
+    expect(title.className).not.toContain(NAME_MIN_WIDTH);
+    const row = title.parentElement as HTMLElement;
+    expect(row.className).toContain('flex-nowrap');
+    expect(row.className).toContain('overflow-hidden');
   });
 
   it('shows no kicker for a legacy ungrouped path either', async () => {
@@ -371,7 +399,12 @@ describe('ToolPage: OAuth round-trip', () => {
     window.history.replaceState(null, '', '/skills-and-tools/tools/heyreach#authorized=sec_1');
     renderPage();
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Signed in to heyreach.');
+    // Scoped by NAME: the `⋯` menu carries its own (empty) status region for
+    // the copy-link answer, so "the only status on the page" is no longer a
+    // way to name the sign-in banner.
+    expect(
+      (await screen.findAllByRole('status')).map((s) => s.textContent),
+    ).toContain('Signed in to heyreach.');
     // Consumed, so a refresh doesn't re-announce it.
     await waitFor(() => expect(window.location.hash).toBe(''));
     expect(window.location.pathname).toBe('/skills-and-tools/tools/heyreach');
@@ -403,12 +436,62 @@ describe('ToolPage: OAuth round-trip', () => {
     );
     renderPage();
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Signed in to heyreach.');
+    // Scoped by NAME: the `⋯` menu carries its own (empty) status region for
+    // the copy-link answer, so "the only status on the page" is no longer a
+    // way to name the sign-in banner.
+    expect(
+      (await screen.findAllByRole('status')).map((s) => s.textContent),
+    ).toContain('Signed in to heyreach.');
     await waitFor(() => expect(window.location.hash).toBe(''));
     expect(window.location.search).toBe('?server=heyreach');
     expect(window.location.pathname).toBe(
       '/workspace/main/knowledge-base/Plugins/Everyone/mcp.json',
     );
+  });
+
+  /**
+   * The Library is a second store, and the sign-in happened outside both of
+   * them. Everything that says "needs setup" — the cards, the plugin banner,
+   * the sidebar count — was loaded before the browser left for the provider,
+   * so the page the reader goes back to is the one that gets it wrong.
+   */
+  describe('telling the Library', () => {
+    const heard = vi.fn();
+    beforeEach(() => {
+      heard.mockReset();
+      window.addEventListener(TOOL_CREDENTIALS_STALE_EVENT, heard);
+    });
+    afterEach(() => window.removeEventListener(TOOL_CREDENTIALS_STALE_EVENT, heard));
+
+    it('announces a successful return', async () => {
+      window.history.replaceState(null, '', '/skills-and-tools/tools/heyreach#authorized=sec_1');
+      renderPage();
+
+      // `All`, because the page carries more than one live region (the
+      // sections announce their own loading) — the one this waits on is the
+      // sign-in's.
+      expect((await screen.findAllByRole('status')).map((s) => s.textContent)).toContain(
+        'Signed in to heyreach.',
+      );
+      await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
+    });
+
+    it('announces a failed one too — the page wrote nothing either way', async () => {
+      // Not a failed save: this page stored nothing, and the outcome it was
+      // handed is the only evidence about a grant somebody else decided. The
+      // honest move on both is to go and re-read.
+      window.history.replaceState(null, '', '/skills-and-tools/tools/heyreach#error=Access%20denied');
+      renderPage();
+
+      await screen.findByRole('alert');
+      await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
+    });
+
+    it('stays quiet on an ordinary visit, with no fragment to consume', async () => {
+      renderPage();
+      await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+      expect(heard).not.toHaveBeenCalled();
+    });
   });
 });
 

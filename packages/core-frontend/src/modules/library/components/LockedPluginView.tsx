@@ -1,12 +1,13 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { cn } from '../../../lib/utils';
+import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { Badge, Button, Surface } from '../../../shared/components';
-import { pathForPluginsIndex } from '../routes/library-paths';
-import { ownersTextOf, primaryFolderOf } from '../utils/plugin-summary';
+import { adminNamesOf, ownersTextOf, primaryFolderOf } from '../utils/plugin-summary';
 import { AlreadyReadableError, requestPluginAccess, type PluginSummary } from '../services/plugins.api';
 import { firstNames, joinNames } from '../utils/names';
 import { useLibraryToast } from '../state/toast.context';
 import { LockGlyph } from './LockGlyph';
+import { PluginBreadcrumb } from './plugin-page-parts';
 
 /**
  * A plugin you cannot read, as a place you can still stand in.
@@ -21,6 +22,16 @@ import { LockGlyph } from './LockGlyph';
  *
  * It is the SAME frame as the member view — breadcrumb, h1, run-by lede — so
  * the two never read as different products. Only the middle changes.
+ *
+ * ASKING HAS THREE STATES, and the button carries two of them. It reads
+ * "Requesting…" and refuses further clicks from the moment it is pressed
+ * until the server answers; the "Requested" card replaces it on that answer,
+ * which the server gives as soon as it has RECORDED the request rather than
+ * once the change request exists. If the git work that follows the answer
+ * fails, the next load has `requestFailure` set and no request standing, so
+ * the button is back with a sentence above it naming what went wrong —
+ * pressing it again continues the recorded request rather than opening a
+ * second one.
  *
  * `Manage access` is the escape hatch for a locked-out platform Admin. Admin
  * rescue applies to WRITING `access.md`, not to reading the folder, so an Admin
@@ -50,6 +61,10 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
   const adminsText = ownersTextOf(plugin);
   const primaryFolder = primaryFolderOf(plugin);
   const pending = plugin.hasRequested || requested;
+  // The server could not finish the last request. It says so only while there
+  // is no request standing — `hasRequested` and this are never both true —
+  // so the sentence always sits above a button the person can press again.
+  const failure = pending ? null : (plugin.requestFailure ?? null);
 
   async function request() {
     setRequesting(true);
@@ -79,18 +94,20 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
 
   return (
     <div className="pb-14">
-      <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-detail text-ink-faint">
-        <Link to={pathForPluginsIndex()} className="rounded-xs hover:text-ink">
-          Everything
-        </Link>
-        <span aria-hidden="true">›</span>
-        <span aria-current="page" className="truncate text-ink-muted">
+      {/* The same band every other page title bar is on, so a plugin you
+          cannot open still lines its heading up with the nav beside it — and
+          the page's FIRST row, with the breadcrumb on the band rather than
+          above it, for the same reason. `PluginBreadcrumb` is the one an
+          openable plugin page uses; a locked page is still a plugin page, and
+          two copies of one trail drift the first time either is touched. */}
+      <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-2.5')}>
+        <PluginBreadcrumb />
+        <h1
+          className="min-w-0 truncate text-display font-semibold"
+          title={plugin.displayName || plugin.name}
+        >
           {plugin.displayName || plugin.name}
-        </span>
-      </nav>
-
-      <div className="mt-1.5 flex items-center gap-2.5">
-        <h1 className="text-display font-semibold">{plugin.displayName || plugin.name}</h1>
+        </h1>
         <Badge tone="outline" size="sm">
           <LockGlyph className="size-3 shrink-0" />
           Locked
@@ -103,6 +120,22 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
           for access; a name would tell you what is inside. */}
       <p className="mt-1 text-ui text-ink-muted">{countsLine(plugin)}</p>
 
+      {/* The in-flight word for assistive tech, matching `LinkSkillPanel`.
+          The button says "Requesting…" too, but pressing it disables it and a
+          disabled button drops focus, so that label change is never read out.
+          The acknowledgement is the whole point of this ticket, and it has to
+          reach somebody who cannot see the label.
+
+          `pending`, not `requesting`, is what ends it. The success path never
+          clears `requesting` — deliberately, so the button cannot flicker back
+          to life between the answer and the swap to the Requested card — which
+          left this region presenting "Requesting access to …" for as long as
+          the page stayed up. A screen-reader user arriving at the region after
+          the card had rendered was told the request was still going. */}
+      <span role="status" aria-live="polite" aria-label="Request progress" className="sr-only">
+        {requesting && !pending ? `Requesting access to ${plugin.displayName || plugin.name}…` : ''}
+      </span>
+
       <div className="mt-5">
         {pending ? (
           <Surface tone="sunken" radius="lg" elevation="none" padded className="max-w-lg">
@@ -111,9 +144,21 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
             </p>
           </Surface>
         ) : (
-          <Button variant="primary" disabled={requesting} onClick={() => void request()}>
-            Subscribe to its skills and tools
-          </Button>
+          <>
+            {failure && (
+              <p className="mb-2.5 max-w-lg text-body text-ink-muted">
+                {`Your request to join ${plugin.displayName || plugin.name} could not be sent: ${failure}. Try again.`}
+              </p>
+            )}
+            {/* The label is the acknowledgement. Nothing else on the page can
+                say "we heard you" in the render that follows the click — the
+                server's answer is a round-trip away, and the whole reason the
+                click used to look like a freeze is that this button greyed out
+                and kept its word. */}
+            <Button variant="primary" disabled={requesting} onClick={() => void request()}>
+              {requesting ? 'Requesting…' : 'Subscribe to this plugin'}
+            </Button>
+          </>
         )}
       </div>
 
@@ -138,22 +183,5 @@ function countsLine(plugin: Pick<PluginSummary, 'skillCount' | 'toolCount'>): st
   const skills = `${plugin.skillCount} ${plugin.skillCount === 1 ? 'skill' : 'skills'}`;
   const tools = `${plugin.toolCount} ${plugin.toolCount === 1 ? 'tool' : 'tools'}`;
   return `${skills} · ${tools}. Visible once you have access.`;
-}
-
-/**
- * The people `ownersTextOf` names, as a list.
- *
- * Mirrors that helper's chain exactly — owners, else writers, else nobody — so
- * the sentence and the count of subjects in it can never disagree. It is a
- * separate function only because the toast needs the NAMES (to take first
- * names) and the verb needs the COUNT, and prose gives back neither.
- */
-function adminNamesOf(plugin: Pick<PluginSummary, 'owners' | 'writers'>): string[] {
-  const owners = [...plugin.owners.users.map((u) => u.name), ...plugin.owners.roles];
-  const named = owners.filter((s) => s.length > 0);
-  if (named.length > 0) return named;
-  return [...plugin.writers.users.map((u) => u.name), ...plugin.writers.roles].filter(
-    (s) => s.length > 0,
-  );
 }
 

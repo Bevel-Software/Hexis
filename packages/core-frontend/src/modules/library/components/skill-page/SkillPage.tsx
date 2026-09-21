@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { cn } from '../../../../lib/utils';
+import { HEADER_BAND, HEADER_BAND_LEAD, PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
 import { ArrowLeft, History } from 'lucide-react';
 import {
   DEFAULT_BRANCH,
@@ -9,6 +11,7 @@ import {
 import '../../library.css';
 import {
   Badge,
+  Banner,
   Button,
   IconButton,
   Surface,
@@ -28,9 +31,16 @@ import { useWorkspaceImageResolver } from '../../../workspace/hooks/useWorkspace
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
 import { useFileAccess } from '../../../access/hooks/useFileAccess';
 import { proposeChange, suggestionBranchFor } from '../../services/library.api';
-import { getOrCreateWorkspace, writeFile } from '../../../workspace/services/workspace.api';
+import {
+  getOrCreateWorkspace,
+  writeFile,
+  type SkillToolWarning,
+} from '../../../workspace/services/workspace.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
-import { useApplyChangeRequest } from '../../../change-requests/hooks/useApplyChangeRequest';
+import {
+  refusalLine,
+  useApplyChangeRequest,
+} from '../../../change-requests/hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
 import { useDefaultBranchFile, useFileOnBranch } from '../../../change-requests/hooks/useFileOnBranch';
 import { useLibrary } from '../../state/library-data';
@@ -284,6 +294,20 @@ export function SkillPage({
     Boolean((location.state as { startEditing?: boolean } | null)?.startEditing),
   );
   const [busyCr, setBusyCr] = useState<number | null>(null);
+  /**
+   * What the last save on this page said about the skill's `allowed-tools`
+   * (entries that look like platform tools but name none the saver can see),
+   * or `null` while nothing has been saved here — then the banner speaks from
+   * the loaded skill's own `warnings`, so a skill left pointing at a manual
+   * that was since retired says so on open. Advisory either way: a save has
+   * already landed. A save's answer wins over the load's because a proposal's
+   * content lives on another branch than the skill on screen; an approval
+   * rewrites the skill underneath (see `onApplied`) and hands the word back to
+   * the reload. Per-page state, and the route mounts this component with
+   * `key={name}`, so moving to another skill starts from that skill's own.
+   */
+  const [savedWarnings, setSavedWarnings] = useState<SkillToolWarning[] | null>(null);
+  const toolWarnings = savedWarnings ?? skill?.warnings ?? [];
 
   /**
    * The file on screen as a workspace path, `<kbDirName>/<skill>/<file>`: the
@@ -390,6 +414,10 @@ export function SkillPage({
     onApplied() {
       toast('Approved: the skill now reads with that change.');
       setRevision((r) => r + 1);
+      // The merge just rewrote the skill, `allowed-tools` included, so the
+      // advisory from this page's last save is about text that is no longer
+      // there. The reload below answers for the merged skill instead.
+      setSavedWarnings(null);
       data.reload();
       // The pane renders `skill.body`, which this hook holds and the merge just
       // changed. Without re-reading it the page keeps showing the pre-merge
@@ -428,7 +456,7 @@ export function SkillPage({
   const raw = active === 'SKILL.md' ? rawOnMain : detail.fileContent(active);
 
   /** Every open change request's version of the file on screen. */
-  const crDiffs = useCrFileDiffs(skillCrs, fileRepoPath, rawOnMain, revision);
+  const crDiffs = useCrFileDiffs(skillCrs, fileRepoPath, revision);
 
   /** The change requests with something to say about THIS file. */
   const boxes = useMemo(
@@ -516,7 +544,10 @@ export function SkillPage({
    */
   async function saveDirect(content: string) {
     const { workspace } = await getOrCreateWorkspace(DEFAULT_BRANCH);
-    await writeFile(workspace.id, `${workspace.kbDirName}/${fileRepoPath}`, content);
+    const saved = await writeFile(workspace.id, `${workspace.kbDirName}/${fileRepoPath}`, content);
+    // Only a SKILL.md save has a say: a bundled file's answer carries no
+    // warnings, and taking it as "none" would hide the loaded skill's.
+    if (active === 'SKILL.md') setSavedWarnings(saved?.warnings ?? []);
     setEditing(false);
     setRevision((r) => r + 1);
     toast('Saved: the skill now reads with your change.');
@@ -525,7 +556,7 @@ export function SkillPage({
 
   async function submitProposal(content: string) {
     if (!user) throw new Error('Sign in to propose a change.');
-    await proposeChange({
+    const proposed = await proposeChange({
       skillName: name,
       repoRelativePath: fileRepoPath,
       content,
@@ -533,6 +564,7 @@ export function SkillPage({
       userName: user.name,
       existingCr: ownCr,
     });
+    if (active === 'SKILL.md') setSavedWarnings(proposed?.warnings ?? []);
     setEditing(false);
     setRevision((r) => r + 1);
     toast(`Sent to ${ownerName}: nothing changes until they approve it.`);
@@ -625,10 +657,16 @@ export function SkillPage({
   // second layout when the detail request settles.
   return (
     <Article>
-      {backLink}
-
-      <header className="mt-4">
-        <div className="flex items-center gap-3">
+      <header>
+        {/* The shared header band — one height for this title bar and the
+            sidebar's header row beside it, so a skill page opens on the same
+            line a file page and the Library's own pages do. The way back
+            rides ON the band, as its leading item: a back link in a row above
+            would push this row down off that line, which is the whole seam.
+            (The error and not-found returns above still lead with it on its
+            own row — they have no title bar to hold a line with.) */}
+        <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-3')}>
+          <div className={HEADER_BAND_LEAD}>{backLink}</div>
           {/* `tabIndex={-1}` keeps the heading out of the tab order while
               letting `.focus()` land on it — where focus goes when closing
               the log finds no clock to hand back to. No focus ring: it is a
@@ -636,7 +674,10 @@ export function SkillPage({
           <h1
             ref={titleRef}
             tabIndex={-1}
-            className="min-w-0 text-display font-semibold text-ink focus:outline-none"
+            // `title` because `truncate` hides the rest of a long skill name,
+            // and a heading you cannot finish reading needs somewhere to say it.
+            title={skill?.name ?? name}
+            className="min-w-0 truncate text-display font-semibold text-ink focus:outline-none"
           >
             {skill?.name ?? name}
           </h1>
@@ -662,6 +703,8 @@ export function SkillPage({
             Repeating it above the pane said the same sentence twice on the
             first screenful. */}
       </header>
+
+      <ToolWarningsBanner warnings={toolWarnings} />
 
       {/* Not before the folder is known: Accept grants ON the folder and
           Manage access opens it, and both are no-ops against ''. */}
@@ -899,7 +942,8 @@ export function SkillPage({
           // `[]` is the hook's "overtaken" answer — the proposal and the file
           // now say the same thing — and is distinct from `null`, which only
           // means a side has not arrived yet.
-          const fileDiff = crDiffs.get(cr.number) ?? null;
+          const read = crDiffs.get(cr.number) ?? null;
+          const fileDiff = read === 'unreadable' ? null : read;
           return (
             <ChangeBox
               key={cr.number}
@@ -910,16 +954,11 @@ export function SkillPage({
               canDecide={canWrite && !mine}
               diff={fileDiff}
               binary={isBinaryFile(active)}
+              unreadable={read === 'unreadable'}
               upToDate={fileDiff !== null && fileDiff.length === 0}
               blocked={blockedCrs.has(cr.number)}
               conflictPrompt={conflictResolutionPrompt(cr)}
-              // A conflict already speaks through `blocked`; repeating it as a
-              // refusal line would say the same thing twice in one box.
-              refusal={
-                applying.refusals.get(cr.number)?.conflicts === false
-                  ? (applying.refusals.get(cr.number)?.reason ?? null)
-                  : null
-              }
+              refusal={refusalLine(cr, applying.refusals)}
               owner={ownerName}
               busy={busyCr === cr.number || applying.activeCr === cr.number}
               phase={applying.activeCr === cr.number ? applying.phase : 'idle'}
@@ -1010,6 +1049,26 @@ function IntegrationsSection({
         })}
       </div>
     </section>
+  );
+}
+
+/**
+ * The skill page's status line for `allowed-tools` entries the platform could
+ * not resolve. A warning, never a block: the list also names the client's own
+ * tools, which the server cannot know, so it only speaks about names that look
+ * like its own.
+ */
+function ToolWarningsBanner({ warnings }: { warnings: SkillToolWarning[] }) {
+  if (warnings.length === 0) return null;
+  return (
+    <Banner tone="wait" role="status" className="mt-4">
+      <p className="font-semibold">Some tools this skill lists are not available</p>
+      <ul className="mt-1 list-disc pl-5">
+        {warnings.map((w) => (
+          <li key={w.entry}>{w.message}</li>
+        ))}
+      </ul>
+    </Banner>
   );
 }
 

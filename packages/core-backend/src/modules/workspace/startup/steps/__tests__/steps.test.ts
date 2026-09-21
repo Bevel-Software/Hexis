@@ -9,10 +9,12 @@ import { KbStartupRunner } from '../../kb-startup-runner.js';
 import { NodeGitRunner } from '../../../../workflow/git/node-git-runner.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../../on-server-start.js';
 import { GroupsToPluginsStep } from '../groups-to-plugins.step.js';
+import { PluginDisplayNamesStep } from '../plugin-display-names.step.js';
 import { PluginManifestsStep } from '../plugin-manifests.step.js';
 import { PersonalSpacesStep } from '../personal-spaces.step.js';
 import { RolesYamlStep } from '../roles-yaml.step.js';
 import { renderRolesYaml } from '../../../../access-model/render-roles-yaml.js';
+import { mergeGroupsIntoRoles, parseRolesYaml } from '../../../../access-model/access-grammar.js';
 import { TemplateFilesStep } from '../template-files.step.js';
 import { buildSeedTree } from '../seed-tree.js';
 import { defaultKbTemplateDir } from '../../../../../assets.js';
@@ -65,7 +67,11 @@ afterEach(async () => {
 });
 
 /** A populated upstream carrying `files`: one commit, both protected refs. Returns the seed clone. */
-async function seedUpstream(files: Record<string, string>): Promise<string> {
+async function seedUpstream(
+  files: Record<string, string>,
+  /** Symlinks to seed beside them: path in the repo → the target it points at. */
+  symlinks: Record<string, string> = {},
+): Promise<string> {
   const seed = path.join(root, '.seed');
   await fs.mkdir(seed, { recursive: true });
   await git(seed, ['init', '-b', DEFAULT_BRANCH]);
@@ -73,6 +79,11 @@ async function seedUpstream(files: Record<string, string>): Promise<string> {
     const abs = path.join(seed, rel);
     await fs.mkdir(path.dirname(abs), { recursive: true });
     await fs.writeFile(abs, content, 'utf8');
+  }
+  for (const [rel, target] of Object.entries(symlinks)) {
+    const abs = path.join(seed, rel);
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.symlink(target, abs);
   }
   await git(seed, ['add', '-A']);
   await git(seed, ['commit', '-m', 'init']);
@@ -113,6 +124,10 @@ async function checkout(branch: string): Promise<string> {
 
 async function exists(dir: string, rel: string): Promise<boolean> {
   return fs.access(path.join(dir, rel)).then(() => true, () => false);
+}
+
+async function readJson(dir: string, rel: string): Promise<Record<string, any>> {
+  return JSON.parse(await fs.readFile(path.join(dir, rel), 'utf8'));
 }
 
 const norm = (text: string) => text.replace(/\r\n?/g, '\n');
@@ -194,6 +209,47 @@ describe('TemplateFilesStep', () => {
   });
 
   /**
+   * The placement rule. A tester's agent filed a ticket into a plugin folder
+   * and explained itself: it had found no convention saying where tickets go,
+   * and Plugins was where it already held write rights. The guide named the
+   * three roots but never said which KIND of file belongs in which — so the
+   * section has to survive into the guide agents actually read, which is this
+   * written file (an MCP session reads the branch's copy of it), under the
+   * deployment's own root names rather than the placeholders.
+   */
+  it('writes the "Where a new file goes" placement rule, named for the deployment\'s roots', async () => {
+    configureKbLayout({ knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' });
+    await seedUpstream({ 'marker.txt': 'seeded' });
+    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const agents = norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'));
+    const start = agents.indexOf('## Where a new file goes\n');
+    expect(start, 'the written guide has no placement section').toBeGreaterThan(-1);
+    // The section alone, so a phrase matched elsewhere in the guide cannot
+    // stand in for a rule that is missing here.
+    const section = agents.slice(start).split('\n## ')[0]!;
+
+    // A document goes to the knowledge root, a shared skill to the skills
+    // root or the plugin's own skills folder, machinery inside a plugin.
+    expect(section).toContain('`Docs/`');
+    expect(section).toContain('`Abilities/`');
+    expect(section).toContain('Extensions/<Plugin>/skills/<skill>/SKILL.md');
+    expect(section).toContain('Extensions/<Plugin>/software.bevel.hexis/tools/');
+    for (const kind of ['notes', 'reports', 'tickets', 'mcp.json', 'plugin.json']) {
+      expect(section, kind).toContain(kind);
+    }
+    // And the two rules the tester's agent broke.
+    expect(section).toMatch(/never holds a document/);
+    expect(section).toMatch(/\bask\b/);
+
+    // Rendered, not raw: a leftover placeholder would name a folder that is
+    // not there in a section whose whole job is naming the right folder.
+    expect(section).not.toContain('{{');
+    expect(section).not.toContain('KnowledgeBase/');
+  });
+
+  /**
    * The step is built at boot, while the process still runs the defaults; the
    * save that completes first-run setup applies the admin's names afterwards.
    * A root list snapshotted at construction scaffolded `Skills/` beside the
@@ -248,6 +304,46 @@ describe('TemplateFilesStep', () => {
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'))).toContain('**Agents never create roles.**');
+  });
+
+  it('documents giving a role to a group, with a valid example, in the guide the step writes', async () => {
+    const guide = await template('AGENTS.md');
+    const section = guide.split(/\n(?=#{2,3} )/).find((s) => s.startsWith('### Giving a role to a group')) ?? '';
+    const prose = section.replace(/\s+/g, ' ');
+    expect(prose).toContain('`- group:<Name>`');
+    expect(prose).toContain('case- and whitespace-insensitively against the active group source');
+    expect(prose).toContain('validation error');
+    expect(prose).toContain('names the entry');
+    expect(prose).toContain("removes the role's contribution for everyone in the group");
+    // A bare name resolves to a same-named group first, so role denials use `role/`.
+    expect(prose).toContain('`deny role/Reviewer`');
+    // Closeness first: a person's own entry wins only inside the same access.md.
+    expect(prose).toContain('The nearest `access.md` that says anything about the person decides');
+    expect(prose).toContain('in the SAME `access.md` as the denial keeps that access');
+    expect(prose).toContain('A group under `Admin` makes every member a full admin');
+    expect(prose).toContain('change request');
+    for (const tool of ['create_branch', 'edit_file', 'commit_change', 'open_change_request']) {
+      expect(prose).toContain(`\`${tool}\``);
+    }
+
+    // The example parses as a roles.yaml whose group entry names a real group.
+    const example = /```yaml\n([\s\S]*?)```/.exec(section)?.[1] ?? '';
+    expect(example).toContain('- group:Platform Team');
+    const parsed = parseRolesYaml(example);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const groups = new Map([['platform team', { displayName: 'Platform Team', emails: new Set(['pat@example.com']) }]]);
+    expect(mergeGroupsIntoRoles(parsed.index, groups, 'groups.yaml')).toEqual([]);
+    // The example hands out an ordinary role, never Admin.
+    expect(parsed.index.byEmail.get('pat@example.com')?.has('reviewer')).toBe(true);
+    expect(parsed.index.byEmail.get('pat@example.com')?.has('role/admin')).toBe(false);
+
+    // What the step writes — the file agents read through the MCP server — carries it.
+    await seedUpstream({ ...(await fullScaffold()), 'AGENTS.md': guide.replace(section, '') });
+    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    const written = norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), 'AGENTS.md'), 'utf8'));
+    expect(written).toContain('### Giving a role to a group');
+    expect(written).toContain(example);
   });
 
   it('rejects .git — any case — as a reserved root name', async () => {
@@ -400,6 +496,25 @@ describe('TemplateFilesStep', () => {
     const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
     expect(lines).not.toContain('Plugins/');
     expect(lines).toContain('AGENTS.md');
+  });
+
+  it('never seeds a template entry that links into a git folder', async () => {
+    // A template that IS a working tree (this repo in a Docker build) can hold
+    // a link into its own .git. The name rule cannot see it; the target can.
+    const customTemplate = path.join(root, 'custom-template-gitlink');
+    await fs.cp(TEMPLATE_DIR, customTemplate, { recursive: true });
+    await fs.mkdir(path.join(customTemplate, '.git'), { recursive: true });
+    await fs.writeFile(path.join(customTemplate, '.git', 'config'), '[credential]\n\thelper = store\n');
+    await fs.symlink(path.join('.git', 'config'), path.join(customTemplate, 'notes.md'));
+
+    const dir = path.join(root, 'seeded-gitlink');
+    await fs.mkdir(dir, { recursive: true });
+    await buildSeedTree(new NodeFs(), customTemplate, [], ['admin@example.com'])(dir);
+
+    await expect(fs.readFile(path.join(dir, 'notes.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.readdir(path.join(dir, '.git'))).rejects.toMatchObject({ code: 'ENOENT' });
+    // The rest of the template still seeded.
+    expect(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8')).toContain('#');
   });
 
   it('seeds a binary template file byte for byte and keeps a script executable — text is what decodes', async () => {
@@ -841,6 +956,155 @@ describe('PluginManifestsStep', () => {
   });
 });
 
+describe('PluginDisplayNamesStep', () => {
+  /**
+   * The one-time repair behind the display-name rule: a manifest is now the
+   * only thing any reader consults for what a plugin is called, so every
+   * manifest written under the old rule — which stored the field only when
+   * the folder was spelled differently from the identifier — has to be told
+   * what its plugin was already called, or it would appear to rename itself
+   * on the boot that introduces the rule.
+   */
+  it('writes the folder\'s spelling into the manifests that lack the field, and touches nothing else', async () => {
+    const scaffold = await fullScaffold();
+    await seedUpstream({
+      ...scaffold,
+      // Spelled differently from its identifier and saying nothing about it:
+      // exactly the plugin that would start showing `sales-team`.
+      'Plugins/Sales Team/plugin.json': '{\n  "name": "sales-team",\n  "version": "1.2.0"\n}\n',
+      'Plugins/Sales Team/access.md': '---\n---\nread:\n  - everyone\n',
+      // Nested just as deep as discovery looks.
+      'Plugins/Teams/EU Field/plugin.json': '{"name":"eu-field"}',
+      // Already spelled as its identifier: called the same thing under both
+      // rules, so there is nothing the folder knows that the manifest does not.
+      'Plugins/imported-tools/plugin.json': '{"name":"imported-tools"}',
+      // Already carries the field — the author's own answer, never overwritten,
+      // even though the folder disagrees with both of its names.
+      'Plugins/Ops Desk/plugin.json': '{"name":"ops","displayName":"Operations"}',
+      // A bundle: a foreign repository's file this platform reads, never writes.
+      'Plugins/functional/cluster/example/plugin.bundle.json': '{"name":"example"}',
+    });
+
+    await makeRunner([new PluginDisplayNamesStep(new NodeFs())]).runAll();
+
+    for (const branch of PROTECTED) {
+      const dir = await checkout(branch);
+      // Backfilled from the folder — what the plugin was called the moment
+      // before the boot — with everything else in the manifest kept, and the
+      // field where the renderer puts it.
+      const sales = await readJson(dir, 'Plugins/Sales Team/plugin.json');
+      expect(sales).toEqual({ name: 'sales-team', displayName: 'Sales Team', version: '1.2.0' });
+      expect(Object.keys(sales)).toEqual(['name', 'displayName', 'version']);
+      expect(await readJson(dir, 'Plugins/Teams/EU Field/plugin.json')).toEqual({
+        name: 'eu-field',
+        displayName: 'EU Field',
+      });
+      // Untouched, byte for byte.
+      expect(await fs.readFile(path.join(dir, 'Plugins/imported-tools/plugin.json'), 'utf8')).toBe(
+        '{"name":"imported-tools"}',
+      );
+      expect(await fs.readFile(path.join(dir, 'Plugins/Ops Desk/plugin.json'), 'utf8')).toBe(
+        '{"name":"ops","displayName":"Operations"}',
+      );
+      expect(await fs.readFile(path.join(dir, 'Plugins/functional/cluster/example/plugin.bundle.json'), 'utf8')).toBe(
+        '{"name":"example"}',
+      );
+    }
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+    expect(log).toContain('Record the display names of 2 plugins in their manifests');
+    expect(log).toContain('Plugins/Sales Team: displayName "Sales Team"');
+
+    // Idempotent: every manifest it would touch now carries the field.
+    await makeRunner([new PluginDisplayNamesStep(new NodeFs())]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + one backfill commit
+  });
+
+  /**
+   * The three shapes the plain "lacks the field, folder differs" reading gets
+   * wrong: a field that is present and says nothing, a manifest naming the
+   * folder's own spelling without being an identifier, and a `plugin.json`
+   * that is not this platform's file to write.
+   */
+  it('repairs a blank field, leaves a manifest that already shows its folder, and never writes through a link', async () => {
+    const scaffold = await fullScaffold();
+    await seedUpstream(
+      {
+        ...scaffold,
+        // Present but BLANK. The new reader falls through it to `name` where
+        // the old one fell through to the folder, so leaving it be is leaving
+        // the rename this step exists to prevent: blank is absent, and repaired.
+        'Plugins/Growth Team/plugin.json': '{"name":"growth-team","displayName":"   "}',
+        // A `name` that is no identifier but IS the folder's spelling: the
+        // identity is the slug `my-plugin`, and what people see is already
+        // "My Plugin". The folder knows nothing the manifest does not.
+        'Plugins/My Plugin/plugin.json': '{"name":"My Plugin"}',
+        // An own `__proto__` key — `JSON.parse` makes it one. Copied as DATA:
+        // assignment would have set the object's prototype instead, dropping
+        // the field and letting a prototype `displayName` stand in for the
+        // one being written.
+        'Plugins/Odd One/plugin.json': '{"name":"odd-one","__proto__":{"displayName":"from the prototype"}}',
+        // A bundle makes this folder a plugin; the `plugin.json` beside it is
+        // a LINK, which discovery does not count as a native manifest.
+        'Plugins/Kit Pro/plugin.bundle.json': '{"name":"kit"}',
+        'vendor-manifest.json': '{"name":"kit"}',
+      },
+      { 'Plugins/Kit Pro/plugin.json': '../../vendor-manifest.json' },
+    );
+
+    await makeRunner([new PluginDisplayNamesStep(new NodeFs())]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await readJson(dir, 'Plugins/Growth Team/plugin.json')).toEqual({
+      name: 'growth-team',
+      displayName: 'Growth Team',
+    });
+    // Untouched, byte for byte.
+    expect(await fs.readFile(path.join(dir, 'Plugins/My Plugin/plugin.json'), 'utf8')).toBe('{"name":"My Plugin"}');
+    expect(await fs.readFile(path.join(dir, 'Plugins/Odd One/plugin.json'), 'utf8')).toBe(
+      '{\n  "name": "odd-one",\n  "displayName": "Odd One",\n  "__proto__": {\n    "displayName": "from the prototype"\n  }\n}\n',
+    );
+    // Still a link, and the file it points at is still the vendor's own.
+    expect((await fs.lstat(path.join(dir, 'Plugins/Kit Pro/plugin.json'))).isSymbolicLink()).toBe(true);
+    expect(await fs.readFile(path.join(dir, 'vendor-manifest.json'), 'utf8')).toBe('{"name":"kit"}');
+
+    const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+    expect(log).toContain('Record the display names of 2 plugins in their manifests');
+    expect(log).toContain('Plugins/Growth Team: displayName "Growth Team"');
+    expect(log).not.toContain('Kit Pro');
+
+    // Idempotent over all of it: the next boot finds nothing to write.
+    await makeRunner([new PluginDisplayNamesStep(new NodeFs())]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + one backfill commit
+  });
+
+  it('leaves a plugin the manifests step just made alone — that manifest already says it', async () => {
+    const scaffold = await fullScaffold();
+    await seedUpstream({
+      ...scaffold,
+      // Legacy: no manifest at all. The manifests step renders one, which the
+      // renderer has already given both names; the backfill then finds nothing.
+      'Plugins/Sales Team/access.md': '---\n---\nread:\n  - everyone\n',
+    });
+
+    await makeRunner([new PluginManifestsStep(new NodeFs()), new PluginDisplayNamesStep(new NodeFs())]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await readJson(dir, 'Plugins/Sales Team/plugin.json')).toEqual({
+      $schema: 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json',
+      name: 'sales-team',
+      displayName: 'Sales Team',
+    });
+    // ONE commit — the backfill declared nothing of its own to caption.
+    const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+    expect(log).toContain('Add plugin manifests to a legacy plugin folder');
+    expect(log).not.toContain('Record the display name');
+  });
+});
+
 describe('PersonalSpacesStep', () => {
   // A personal folder as the previous template seeded it: the owner's grants
   // and nothing else — private only while nothing above grants read.
@@ -860,10 +1124,10 @@ describe('PersonalSpacesStep', () => {
       // with the folder), and a shared plugin: untouched.
       'Plugins/personal-u2/access.md': '---\nread: []\n---\nread:\n  - deny everyone\n  - Bo <bo@x.io>\n',
       'Plugins/personal-u3/access.md': '---\nread: []\n---\nread:\n  - everyone\nowner:\n  - Cy <cy@x.io>\n',
-      // Entries that say nothing about READ — a denial under write, a
-      // download grant — leave the space open to an inherited `read:
-      // everyone`, so it is closed like any other.
-      'Plugins/personal-u4/access.md': '---\nread: []\n---\nwrite:\n  - deny everyone\ndownload:\n  - everyone\nowner:\n  - Di <di@x.io>\n',
+      // Entries that say nothing about READ — a denial under write — leave the
+      // space open to an inherited `read: everyone`, so it is closed like any
+      // other.
+      'Plugins/personal-u4/access.md': '---\nread: []\n---\nwrite:\n  - deny everyone\nowner:\n  - Di <di@x.io>\n',
       // The old seed's frontmatter grants are carried into the body ONLY where
       // the body has no word on that person: a denial someone wrote there
       // stands, and is not overridden by the older grant.
@@ -872,6 +1136,10 @@ describe('PersonalSpacesStep', () => {
       // same-scope grant wins, and write folds into read) is OPEN: the file
       // stays open with it, and nothing is written.
       'Plugins/personal-u6/access.md': '---\nread: []\n---\nread:\n  - deny everyone\nwrite:\n  - everyone\nowner:\n  - Fy <fy@x.io>\n',
+      // `download: everyone` is a deliberate opening now that download folds
+      // into read: the space is already settled OPEN, so nothing is written —
+      // the same treatment `write: everyone` gets above.
+      'Plugins/personal-u7/access.md': '---\nread: []\n---\ndownload:\n  - everyone\nowner:\n  - Gi <gi@x.io>\n',
       'Plugins/GTM/plugin.json': '{"name":"gtm"}',
       'Plugins/GTM/access.md': '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
     });
@@ -906,7 +1174,6 @@ describe('PersonalSpacesStep', () => {
       expect(u4.slice(0, u4.indexOf('\n---\n', 4))).toBe('---\nread:\n  - deny everyone\n  - Di <di@x.io>');
       expect(u4.trimEnd().endsWith('\nread:\n  - deny everyone')).toBe(true);
       expect(u4).toContain('write:\n  - deny everyone');
-      expect(u4).toContain('download:\n  - everyone');
       expect(u4).toContain('owner:\n  - Di <di@x.io>');
       const u5 = norm(await fs.readFile(path.join(dir, 'Plugins/personal-u5/access.md'), 'utf8'));
       const u5Body = u5.slice(u5.indexOf('\n---\n', 4) + 5);
@@ -918,6 +1185,11 @@ describe('PersonalSpacesStep', () => {
       expect(u5.slice(0, u5.indexOf('\n---\n', 4))).toBe('---\nread:\n  - Ed <ed@x.io>\n  - deny everyone\nowner:\n  - Ed <ed@x.io>');
       expect(norm(await fs.readFile(path.join(dir, 'Plugins/personal-u6/access.md'), 'utf8'))).toBe(
         '---\nread: []\n---\nread:\n  - deny everyone\nwrite:\n  - everyone\nowner:\n  - Fy <fy@x.io>\n',
+      );
+      // Untouched: `download: everyone` settles read as GRANTED (download folds
+      // into read), so the step reads the space as opened on purpose.
+      expect(norm(await fs.readFile(path.join(dir, 'Plugins/personal-u7/access.md'), 'utf8'))).toBe(
+        '---\nread: []\n---\ndownload:\n  - everyone\nowner:\n  - Gi <gi@x.io>\n',
       );
       expect(norm(await fs.readFile(path.join(dir, 'Plugins/GTM/access.md'), 'utf8'))).toBe(
         '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
@@ -1039,10 +1311,6 @@ describe('GroupsToPluginsStep', () => {
 describe('GroupsToPluginsStep — migration edge cases', () => {
   async function migrate(): Promise<void> {
     await makeRunner([new GroupsToPluginsStep(new NodeFs())]).runAll();
-  }
-
-  async function readJson(dir: string, rel: string): Promise<Record<string, any>> {
-    return JSON.parse(await fs.readFile(path.join(dir, rel), 'utf8'));
   }
 
   /** What the runner's `partial` warning carried — the named refusals. */

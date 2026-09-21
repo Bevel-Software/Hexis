@@ -1,8 +1,8 @@
-import { PR_STALE_EVENT } from '../../../core/events';
+import { PR_STALE_EVENT, TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode,  } from 'react';
 import { LibraryContext } from './library-context';
 import { SKILLS_DIR } from '@bevel-software/platform-shared';
-import { pluginNameForPath } from '../utils/plugin-summary';
+import { pluginNameForPath, pluginsHoldingTool } from '../utils/plugin-summary';
 import type { PluginMembership } from '../services/library.api';
 
 /**
@@ -73,10 +73,12 @@ export interface LibraryItem {
   plugin: string | null;
   /** Under the shared `Skills/` root — see `LibraryFilterable.shared`. */
   shared?: boolean;
-  /** Every plugin holding a skill, inline or linked (skills only). */
+  /**
+   * Every plugin holding the item, inline or linked. A skill's comes from the
+   * server, which keeps the link index; a TOOL's is derived here from where
+   * its file sits and which roots each plugin links (`pluginsHoldingTool`).
+   */
   plugins?: PluginMembership[];
-  /** A skill's governance lifecycle (`metadata.lifecycle`), when declared. */
-  lifecycle?: string;
   /** Repo-root-relative path — the skill's folder, or the `.tool` file. */
   path: string;
   /**
@@ -198,7 +200,6 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       plugin: pluginOfItem(s.path, s.plugins, pluginSummaries),
       shared: isSharedPath(s.path),
       plugins: s.plugins ?? [],
-      lifecycle: s.lifecycle,
       path: s.path,
       version: s.version,
       status: skillStatus(
@@ -235,19 +236,28 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
         mine: s.isAuthor,
       },
     }));
-    const toolItems: LibraryItem[] = data.tools.map((t) => ({
-      kind: 'integration',
-      id: t.slug,
-      name: t.name,
-      // The browser tool surface exposes no human description for a `.tool`
-      // manual yet (see report) — the card stays clean; detail lives behind it.
-      description: '',
-      owned: data.ownedTools.has(t.slug),
-      canWrite: t.canWrite,
-      plugin: pluginOfItem(t.path, undefined, pluginSummaries),
-      path: t.path,
-      status: toolStatus(t),
-    }));
+    const toolItems: LibraryItem[] = data.tools.map((t) => {
+      // A tool's memberships are DERIVED, not served — the tool surface knows
+      // where the file is, the summaries know which roots each plugin links,
+      // and `pluginsHoldingTool` is the one place those two meet. With them a
+      // tool under a linked root is on the plugin's page, pill and all, the
+      // way a linked skill is.
+      const plugins = pluginsHoldingTool(t.path, pluginSummaries);
+      return {
+        kind: 'integration',
+        id: t.slug,
+        name: t.name,
+        // The browser tool surface exposes no human description for a `.tool`
+        // manual yet (see report) — the card stays clean; detail lives behind it.
+        description: '',
+        owned: data.ownedTools.has(t.slug),
+        canWrite: t.canWrite,
+        plugin: pluginOfItem(t.path, plugins, pluginSummaries),
+        plugins,
+        path: t.path,
+        status: toolStatus(t),
+      };
+    });
     return [...skillItems, ...pendingItems, ...toolItems];
   }, [
     data.skills,
@@ -290,6 +300,18 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     const onStale = () => reloadAll();
     window.addEventListener(PR_STALE_EVENT, onStale);
     return () => window.removeEventListener(PR_STALE_EVENT, onStale);
+  }, [reloadAll]);
+
+  // A credential landing anywhere in the app is a catalog change here: every
+  // "needs setup" in the Library — the cards, the plugin page's banner, the
+  // sidebar count — is derived from the tool rows this catalog carries, and
+  // they were loaded before the save. The tool page re-probes itself, which is
+  // why the bug only ever showed up one click LATER: on the page the reader
+  // went back to.
+  useEffect(() => {
+    const onCredentials = () => reloadAll();
+    window.addEventListener(TOOL_CREDENTIALS_STALE_EVENT, onCredentials);
+    return () => window.removeEventListener(TOOL_CREDENTIALS_STALE_EVENT, onCredentials);
   }, [reloadAll]);
 
   const value = useMemo(
@@ -353,16 +375,18 @@ export function workspaceHasNoPlugins(lib: LibraryContextValue): boolean {
  * concern, not a setup one, and belong to a different surface.
  */
 export interface PluginAttention {
-  /** Everything that needs a person: integrations to set up plus broken links. */
+  /** Everything that needs a person: integrations to set up, broken links, and what the definition left out. */
   total: number;
   /** The broken-link part alone — what turns the count orange. */
   brokenLinks: number;
+  /** What the platform could not keep of the plugin's definition — a server, a skill root — as the server reports it. */
+  warnings: number;
 }
 
 export function attentionOf(
   items: readonly LibraryItem[],
   plugin: string,
-  summaries: readonly Pick<PluginSummary, 'name' | 'brokenLinks'>[] = [],
+  summaries: readonly Pick<PluginSummary, 'name' | 'brokenLinks' | 'warnings'>[] = [],
 ): PluginAttention {
   // One pass for the links, returned beside the total: every caller wants
   // both, and computing the part again for the tone would filter the whole
@@ -371,7 +395,10 @@ export function attentionOf(
   const integrations = items.filter(
     (i) => isInPlugin(i, plugin) && i.kind === 'integration' && i.status.state !== 'ok',
   ).length;
-  return { total: integrations + brokenLinks, brokenLinks };
+  // Amber, like an integration to set up: it needs a person who can edit
+  // the plugin's files, and blocks nobody but the users of what is missing.
+  const warnings = summaries.find((s) => s.name === plugin)?.warnings?.length ?? 0;
+  return { total: integrations + brokenLinks + warnings, brokenLinks, warnings };
 }
 
 /**

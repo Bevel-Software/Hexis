@@ -57,6 +57,9 @@ vi.mock('../../change-requests/services/change-requests.api', () => ({
   listOpenChangeRequests: vi.fn(async () => []),
   listMyChangeRequests: vi.fn(async () => []),
   readFileOnBranch: apiMock.readFileOnBranch,
+  // No fork point: the change boxes fall back to the default branch, which is
+  // what these tests diff against.
+  readFileAtForkPoint: vi.fn(async () => ({ content: null, forkSha: null })),
 }));
 vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: apiMock.mergePullRequest }));
 vi.mock('../../pr/services/pr-cancel.api', () => ({
@@ -402,6 +405,7 @@ beforeEach(() => {
         isApproved: false,
         approvedBy: [],
         eligibleApprovers: { roles: ['Newsroom'], users: [] },
+        inMergeGate: true,
       },
     ],
   });
@@ -653,6 +657,83 @@ describe('SkillPage', () => {
     expect(await screen.findByText(/Saved: the skill now reads with your change/)).toBeInTheDocument();
     // Direct means DIRECT: nothing rode the proposal path.
     expect(apiMock.proposeChange).not.toHaveBeenCalled();
+  });
+
+  it('a save whose allowed-tools name unknown platform tools lands, and says so in the status area', async () => {
+    accessMock.result = {
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    };
+    apiMock.getOrCreateWorkspace.mockResolvedValue({
+      workspace: { id: 'target-company-state', kbDirName: 'knowledge-base' },
+    });
+    apiMock.writeFile.mockResolvedValue({
+      warnings: [
+        {
+          entry: 'hubspot.serch',
+          message: '"hubspot.serch" in allowed-tools is not a tool you can use here. Did you mean "hubspot.search"?',
+          suggestion: 'hubspot.search',
+        },
+      ],
+    });
+    renderPage(true);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const box = await screen.findByRole('textbox', { name: 'Edit SKILL.md' });
+    fireEvent.change(box, { target: { value: '---\nallowed-tools: Bash hubspot.serch\n---\n' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    // Never a block: the save still closes the editor and confirms.
+    expect(await screen.findByText(/Saved: the skill now reads with your change/)).toBeInTheDocument();
+    const status = (await screen.findByText('Some tools this skill lists are not available')).closest('[role="status"]');
+    expect(status).not.toBeNull();
+    expect(within(status as HTMLElement).getByText(/Did you mean "hubspot.search"/)).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Edit SKILL.md' })).toBeNull();
+  });
+
+  it('warnings the skill already carries show on open, before any save', async () => {
+    // A manual retired after the skill was written: nobody saved anything, so
+    // the only way the page can know is from the skill it loads.
+    apiMock.getSkill.mockResolvedValue({
+      ...skillDetail,
+      warnings: [{ entry: 'legacy_crm', message: '"legacy_crm" in allowed-tools is not a tool you can use here.' }],
+    });
+    renderPage(true);
+
+    const status = (await screen.findByText('Some tools this skill lists are not available')).closest('[role="status"]');
+    expect(status).not.toBeNull();
+    expect(within(status as HTMLElement).getByText(/"legacy_crm" in allowed-tools/)).toBeInTheDocument();
+  });
+
+  it('saving a bundled file leaves the loaded warnings in place', async () => {
+    // Only a SKILL.md save has an answer about allowed-tools. A bundled file's
+    // save answers with none, and taking that for "none" would clear a banner
+    // that is about the skill, not about sources.yaml.
+    accessMock.result = {
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    };
+    apiMock.getOrCreateWorkspace.mockResolvedValue({
+      workspace: { id: 'target-company-state', kbDirName: 'knowledge-base' },
+    });
+    apiMock.writeFile.mockResolvedValue({});
+    apiMock.getSkill.mockResolvedValue({
+      ...skillDetail,
+      warnings: [{ entry: 'legacy_crm', message: '"legacy_crm" in allowed-tools is not a tool you can use here.' }],
+    });
+    renderPage(true);
+    await screen.findByText('Some tools this skill lists are not available');
+
+    fireEvent.click(screen.getByRole('tab', { name: 'sources.yaml' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const box = await screen.findByRole('textbox', { name: 'Edit sources.yaml' });
+    fireEvent.change(box, { target: { value: 'watchlist:\n  - topic: robotics\n' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText(/Saved: the skill now reads with your change/)).toBeInTheDocument();
+    expect(screen.getByText('Some tools this skill lists are not available')).toBeInTheDocument();
   });
 
   it('arriving with startEditing in router state opens the editor without a click', async () => {
@@ -975,12 +1056,14 @@ describe('SkillPage: deciding on a change', () => {
           isApproved: false,
           approvedBy: [],
           eligibleApprovers: { roles: ['Newsroom'], users: [] },
+          inMergeGate: true,
         },
         {
           path: 'Skills/newsletter/sources.yaml',
           isApproved: false,
           approvedBy: [],
           eligibleApprovers: { roles: [], users: [] },
+          inMergeGate: false,
         },
       ],
     });
@@ -1496,7 +1579,7 @@ describe('SkillPage: Share', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
     const dialog = await screen.findByRole('dialog', { name: 'Manage access' });
 
-    fireEvent.change(await screen.findByPlaceholderText(/add people, groups, or roles/i), {
+    fireEvent.change(await screen.findByPlaceholderText(/add people, groups, roles or plugins/i), {
       target: { value: 'gtm' },
     });
     fireEvent.click(await screen.findByRole('button', { name: /GTM Team/ }));

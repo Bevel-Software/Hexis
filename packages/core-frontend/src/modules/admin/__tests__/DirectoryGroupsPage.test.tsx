@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
 import { DirectoryGroupsPage } from '../components/DirectoryGroupsPage';
 import { AdminContext } from '../state/admin.context';
 import {
@@ -87,7 +88,10 @@ function addButtonFor(input: HTMLElement) {
 function renderPage(opts: {
   isAdmin?: boolean;
   directoryPanel?: (props: GroupsDirectoryPanelProps) => React.ReactElement;
+  /** Where the page is opened — `?group=` lands it on one group. */
+  path?: string;
 } = {}) {
+  const path = opts.path ?? '/directory-groups';
   const registry = opts.directoryPanel
     ? { ...EMPTY_REGISTRY, groupsDirectoryPanel: opts.directoryPanel }
     : EMPTY_REGISTRY;
@@ -105,7 +109,9 @@ function renderPage(opts: {
           runRolesRecovery: async () => {},
         }}
       >
-        <DirectoryGroupsPage />
+        <MemoryRouter initialEntries={[path]}>
+          <DirectoryGroupsPage />
+        </MemoryRouter>
       </AdminContext.Provider>
     </AppRegistryContext.Provider>,
   );
@@ -453,5 +459,131 @@ describe('DirectoryGroupsPage', () => {
       await screen.findByText(/Group members are emails — 'group:' references aren't allowed/),
     ).toBeInTheDocument();
     expect(addGroupMember).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `?group=` — the landing the Library sidebar's "Manage members" links to. The
+ * group lives in the URL, so the same link lands the same way after a reload
+ * or in someone else's browser.
+ */
+describe('DirectoryGroupsPage: opened on a named group', () => {
+  const scrolled: Element[] = [];
+  const proto = window.HTMLElement.prototype as HTMLElement & { scrollIntoView?: (o?: unknown) => void };
+  let before: typeof proto.scrollIntoView;
+  beforeEach(() => {
+    scrolled.length = 0;
+    before = proto.scrollIntoView;
+    proto.scrollIntoView = function (this: Element) {
+      scrolled.push(this);
+    };
+    return () => {
+      proto.scrollIntoView = before;
+    };
+  });
+
+  it("manual mode: scrolls the group's card into view and focuses its add-member field", async () => {
+    renderPage({ path: '/directory-groups?group=Design' });
+    const input = await screen.findByRole('combobox', { name: 'Add member to Design' });
+    await waitFor(() => expect(input).toHaveFocus());
+    const card = input.closest('[data-group]')!;
+    expect(card).toHaveAttribute('data-group', 'design');
+    expect(card).toHaveAttribute('aria-current', 'true');
+    expect(scrolled).toEqual([card]);
+    // Only the named card is marked.
+    const product = screen.getByRole('combobox', { name: 'Add member to Product' });
+    expect(product.closest('[data-group]')).not.toHaveAttribute('aria-current');
+  });
+
+  it('matches the display name without regard to case', async () => {
+    renderPage({ path: '/directory-groups?group=PRODUCT' });
+    const input = await screen.findByRole('combobox', { name: 'Add member to Product' });
+    await waitFor(() => expect(input).toHaveFocus());
+  });
+
+  it('matches by canonical name when it differs from the display name', async () => {
+    vi.mocked(getGroupsRoster).mockResolvedValue({
+      ...MANUAL_ROSTER,
+      groups: [{ ...MANUAL_ROSTER.groups[0]!, canonical: 'gtm-team', displayName: 'GTM Team' }],
+    });
+    renderPage({ path: '/directory-groups?group=GTM-TEAM' });
+    const input = await screen.findByRole('combobox', { name: 'Add member to GTM Team' });
+    await waitFor(() => expect(input).toHaveFocus());
+  });
+
+  it('a name with spaces survives the query string', async () => {
+    vi.mocked(getGroupsRoster).mockResolvedValue({
+      ...MANUAL_ROSTER,
+      groups: [{ ...MANUAL_ROSTER.groups[0]!, canonical: 'gtm-team', displayName: 'GTM Team' }],
+    });
+    const { pathForGroupMembers } = await import('../components/group-members-path');
+    expect(pathForGroupMembers('GTM Team')).toBe('/directory-groups?group=GTM+Team');
+    renderPage({ path: pathForGroupMembers('GTM Team') });
+    const input = await screen.findByRole('combobox', { name: 'Add member to GTM Team' });
+    await waitFor(() => expect(input).toHaveFocus());
+  });
+
+  it('idp mode: brings the synced row into view under the read-only notice', async () => {
+    vi.mocked(getGroupsRoster).mockResolvedValue(IDP_ROSTER);
+    renderPage({ path: '/directory-groups?group=Sales' });
+    const name = await screen.findByText('Sales');
+    const row = name.closest('li')!;
+    expect(row).toHaveAttribute('aria-current', 'true');
+    // The scroll is an effect, so it can land a tick after the row does —
+    // asserting on it synchronously made this the one flaky case here. (The
+    // manual-mode test above is already shielded by its focus `waitFor`.)
+    await waitFor(() => expect(scrolled).toEqual([row]));
+    expect(
+      screen.getByText(/Groups are synced from your identity provider and are read-only here/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /Add member/ })).not.toBeInTheDocument();
+  });
+
+  it('says so when the named group is not in the roster', async () => {
+    renderPage({ path: '/directory-groups?group=Ghosts' });
+    expect(await screen.findByText('No group named “Ghosts”.')).toBeInTheDocument();
+    expect(scrolled).toEqual([]);
+  });
+
+  it('idp mode: says so when the named group is not synced, even with a directory connected', async () => {
+    vi.mocked(getGroupsRoster).mockResolvedValue(IDP_ROSTER);
+    renderPage({
+      path: '/directory-groups?group=Ghosts',
+      directoryPanel: ({ onConnectedChange }) => (
+        <button onClick={() => onConnectedChange(true)}>simulate-connect</button>
+      ),
+    });
+    await userEvent.click(await screen.findByRole('button', { name: 'simulate-connect' }));
+    expect(screen.getByText('No group named “Ghosts”.')).toBeInTheDocument();
+  });
+
+  it('connected but not yet synced: no missing-group notice', async () => {
+    renderPage({
+      path: '/directory-groups?group=Ghosts',
+      directoryPanel: ({ onConnectedChange }) => (
+        <button onClick={() => onConnectedChange(true)}>simulate-connect</button>
+      ),
+    });
+    await userEvent.click(await screen.findByRole('button', { name: 'simulate-connect' }));
+    expect(screen.getByText(/An identity provider is connected/)).toBeInTheDocument();
+    expect(screen.queryByText(/No group named/)).not.toBeInTheDocument();
+  });
+
+  it('a broken synced groups file: the banner explains, no missing-group notice', async () => {
+    vi.mocked(getGroupsRoster).mockResolvedValue({
+      mode: 'idp',
+      groups: [],
+      groupsHealth: { ok: false, file: 'synced-groups.yaml', reason: 'bad indentation on line 3' },
+    });
+    renderPage({ path: '/directory-groups?group=Sales' });
+    expect(await screen.findByRole('alert')).toHaveTextContent('synced-groups.yaml');
+    expect(screen.queryByText(/No group named/)).not.toBeInTheDocument();
+  });
+
+  it('without a group, nothing is focused or scrolled', async () => {
+    renderPage();
+    await screen.findByRole('combobox', { name: 'Add member to Product' });
+    expect(scrolled).toEqual([]);
+    expect(screen.queryByText(/No group named/)).not.toBeInTheDocument();
   });
 });

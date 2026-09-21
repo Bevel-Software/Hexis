@@ -9,21 +9,29 @@ import '../change-requests.css';
 import { Banner, Button, Surface } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
+import { PR_STALE_EVENT } from '../../../core/events';
 import { AuthContext } from '../../auth/state/auth.context';
 import { fetchPrDetail } from '../../pr/services/pr-detail.api';
+import { useEventBus } from '../../workflow/state/event-bus.context';
 import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/pr-approvals.api';
 import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
+import { refreshChangeRequestFromTarget } from '../../pr/services/pr-merge.api';
+import { GitApiError } from '../../git/services/git.api';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
+import { describeReadFailure } from '../services/denied-file.api';
+import { deniedSentence, readErrorLead, type ReadFailure } from '../utils/readFailure';
 import { changeAuthorName } from '../utils/author';
 import { conflictResolutionPrompt } from '../utils/conflict';
 import { ConflictHelp } from './ConflictHelp';
 import { useDefaultBranchFileRead } from '../hooks/useFileOnBranch';
+import { useForkPointFileRead } from '../hooks/useForkPointFile';
 import { diffLines, type DiffLine } from '../utils/diff';
-import { hasFileViewer, isBinaryFile } from '../../workspace/components/renderers';
+import { hasFileViewer, isBinaryFile, rendersAsText } from '../../workspace/components/renderers';
 import { BranchFileDownload, BranchFilePreview } from './BranchFilePreview';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 import { CrFileTree, type CrTreeFileState } from './CrFileTree';
+import { hasOwnApproval } from '../utils/approval';
 
 /**
  * Extra context for the file list — NOT a filter. The dialog always shows
@@ -42,6 +50,17 @@ export interface ChangeRequestScope {
 interface ChangeRequestDialogProps {
   cr: PullRequestSummary;
   scope?: ChangeRequestScope;
+  /**
+   * The file to land on, repo-relative — for a surface that opened the
+   * dialog ABOUT one file (a proposed row in the explorer). Without it the
+   * dialog lands on the request's first changed file, as it always has.
+   *
+   * Read once, as the initial selection: the reader is free to click away,
+   * and re-imposing the caller's file on every render would take the dialog
+   * back off them. A caller that needs to re-point an OPEN dialog remounts it
+   * (key on the path), which is what the explorer does.
+   */
+  initialPath?: string;
   onClose(): void;
   /** Applying is the only verdict this view reaches. Declining a change
    *  request lives on the skill page, beside the request's own row. */
@@ -66,15 +85,35 @@ interface ChangeRequestDialogProps {
 export function ChangeRequestDialog({
   cr,
   scope,
+  initialPath,
   onClose,
   onResolved,
 }: ChangeRequestDialogProps) {
   const [detail, setDetail] = useState<PullRequestDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [branchContents, setBranchContents] = useState<Record<string, string | null>>({});
-  /** Files whose branch copy could not be read — shown as such, never guessed at. */
-  const [unreadable, setUnreadable] = useState<Set<string>>(new Set());
+  /**
+   * Files whose branch copy could not be read, and WHY — shown as such, never
+   * guessed at. A flag alone made a refusal and an outage the same sentence,
+   * and a reviewer who was simply not allowed to see a file went looking for
+   * a problem with the platform.
+   */
+  const [branchFailure, setBranchFailure] = useState<Map<string, ReadFailure>>(new Map());
   const [blocked, setBlocked] = useState(false);
+  /**
+   * Bumped when the request's branch has moved under the dialog (an Update
+   * merged into it), so the open file's branch copy is read again. Clearing
+   * the cached copy alone is not a read: the effect below only runs when its
+   * dependencies change, and the selection has not — the pane sat on
+   * "Loading…" forever.
+   */
+  const [branchRevision, setBranchRevision] = useState(0);
+  /**
+   * The same, for the OTHER side — the fork point, or the target's tip. Moved
+   * only by the Retry link beside a failed read, which has to re-fetch
+   * whichever of the two copies was the one that failed and cannot know which.
+   */
+  const [baseRevision, setBaseRevision] = useState(0);
 
   const isTop = useModalLayer(true);
   useEffect(() => {
@@ -88,11 +127,20 @@ export function ChangeRequestDialog({
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [isTop, onClose]);
 
+  /**
+   * Every detail read takes a number; only the newest read may publish. The
+   * opening read, an event re-read and a post-revert read can overlap, and an
+   * older answer resolving last would put back state a newer one replaced —
+   * a merged request shown pending again, a cleared refusal back on screen.
+   */
+  const detailSeq = useRef(0);
+
   useEffect(() => {
     let cancelled = false;
+    const seq = ++detailSeq.current;
     fetchPrDetail(cr.number)
       .then((d) => {
-        if (!cancelled) setDetail(d);
+        if (!cancelled && seq === detailSeq.current) setDetail(d);
       })
       .catch((err) => {
         if (!cancelled) {
@@ -103,6 +151,33 @@ export function ChangeRequestDialog({
       cancelled = true;
     };
   }, [cr.number]);
+
+  // Somebody else's apply of THIS request just failed or landed. Re-read the
+  // detail so a reader with the dialog open sees the refusal the clicker saw
+  // (or that there is nothing left to decide), not the state from when it
+  // opened. Fresh: the event exists because the cached answer just went stale.
+  const bus = useEventBus();
+  useEffect(() => {
+    if (!bus) return;
+    let cancelled = false;
+    const reread = (e: { number: number }) => {
+      if (e.number !== cr.number) return;
+      const seq = ++detailSeq.current;
+      fetchPrDetail(cr.number, { fresh: true })
+        .then((d) => {
+          if (!cancelled && seq === detailSeq.current) setDetail(d);
+        })
+        .catch(() => undefined);
+    };
+    const offs = [
+      bus.subscribe('change-request-apply-failed', reread),
+      bus.subscribe('change-request-merged', reread),
+    ];
+    return () => {
+      cancelled = true;
+      for (const off of offs) off();
+    };
+  }, [bus, cr.number]);
 
   // EVERYTHING is repo-relative, scoped or not — the scope's baseFiles are
   // lifted to full paths, and every touched file lists whatever folder it is
@@ -141,10 +216,25 @@ export function ChangeRequestDialog({
    * the landing happens on the render the detail arrives rather than one render
    * later. `picked` staying null is what keeps "I haven't chosen yet" distinct
    * from "I chose the first file".
+   *
+   * A caller that opened the dialog ABOUT a file seeds the pick with it: the
+   * row the user clicked IS a choice, made before the dialog existed, and
+   * seeding is what makes it survive the detail arriving. The seed holds
+   * while the detail is in flight — that is the landing this exists for.
+   *
+   * Once the detail is here it decides: a pick the request does not contain
+   * is DROPPED for the ordinary first-file landing. A `?cr=&file=` link
+   * outlives the request it was copied from — the file gets renamed, reverted
+   * out of the request, or the link is simply old — and keeping such a seed
+   * would read a path off the branch that is not part of the request at all,
+   * leaving the pane reporting an unreadable or stale file. Nothing selected
+   * is the honest version of that, and the request still opens.
    */
-  const [picked, setPicked] = useState<string | null>(null);
+  const [picked, setPicked] = useState<string | null>(initialPath ?? null);
+  const pickHolds =
+    detail === null || (picked !== null && (changedFiles.has(picked) || mainFiles.includes(picked)));
   const selected =
-    picked ?? allFiles.find((f) => changedFiles.has(f)) ?? allFiles[0] ?? '';
+    (pickHolds ? picked : null) ?? allFiles.find((f) => changedFiles.has(f)) ?? allFiles[0] ?? '';
   const setSelected = setPicked;
 
   /**
@@ -162,22 +252,62 @@ export function ChangeRequestDialog({
   // Markdown renders as a DOCUMENT with red/green change blocks — the same
   // `MarkdownDiffViewer` the review flow and version history use — because the
   // person deciding on a knowledge or skill change reads prose, not source.
-  // Everything else keeps the marked-source view below.
-  const selectedIsMarkdown = /\.md$/i.test(selected);
+  // Everything else keeps the marked-source view below — including a `.md` the
+  // file page shows as text (the access rules file), whose `#` comments would
+  // otherwise read as headings on both the proposed and the current side.
+  const selectedIsMarkdown = /\.md$/i.test(selected) && !rendersAsText(selected);
 
-  const asked = useRef<Set<string>>(new Set());
+  // Each read holds a token; forgetting a path (Update, a revert) drops its
+  // token, so a read that was still in flight lands on nothing instead of
+  // writing pre-update content over the read that replaced it.
+  const asked = useRef<Map<string, object>>(new Map());
   useEffect(() => {
     // `selected` is '' until the detail names any file in an unscoped dialog —
     // nothing to read yet. Binary files are never read at all (above).
     if (selected && !selectedIsBinary && !asked.current.has(selected)) {
-      asked.current.add(selected);
+      const token = {};
+      asked.current.set(selected, token);
+      const current = () => asked.current.get(selected) === token;
       readFileOnBranch(cr.branch, selected)
-        .then((content) => setBranchContents((c) => ({ ...c, [selected]: content })))
+        .then((content) => {
+          if (current()) setBranchContents((c) => ({ ...c, [selected]: content }));
+        })
         // NOT `''`. An unreadable branch copy stored as empty would diff as
         // "every line deleted" — a change request that erases the file.
-        .catch(() => setUnreadable((s) => new Set(s).add(selected)));
+        //
+        // The failure is described before it is published: naming the folder
+        // to ask about is a second read, and the pane stays on "Loading…"
+        // until it settles rather than saying "couldn't be read" and then
+        // rewriting it as "you don't have access" a moment later.
+        .catch((err: unknown) =>
+          describeReadFailure(err, cr.branch, selected).then((failure) => {
+            if (current()) setBranchFailure((m) => new Map(m).set(selected, failure));
+          }),
+        );
     }
-  }, [selected, selectedIsBinary, cr.branch]);
+  }, [selected, selectedIsBinary, cr.branch, branchRevision]);
+
+  /**
+   * Read the selected file again, both sides — the Retry link the retryable
+   * form of the pane's failure sentence carries. The cached copy AND the
+   * `asked` token have to go: the effect above only re-reads a path it has no
+   * token for, and only when a revision moves it.
+   */
+  function retrySelectedRead() {
+    asked.current.delete(selected);
+    setBranchFailure((m) => {
+      const next = new Map(m);
+      next.delete(selected);
+      return next;
+    });
+    setBranchContents((c) => {
+      const next = { ...c };
+      delete next[selected];
+      return next;
+    });
+    setBranchRevision((r) => r + 1);
+    setBaseRevision((r) => r + 1);
+  }
 
   const isAdded = addedFiles.includes(selected);
 
@@ -218,14 +348,43 @@ export function ChangeRequestDialog({
   /** A rename described without a `previousPath` — no before-side to read. */
   const renameWithoutOldPath = move !== null && move.from === null;
 
+  const touchesSelected = changedFiles.has(selected);
+
   // Raw-vs-raw: the skills API hands back SKILL.md's PARSED body (frontmatter
   // stripped), and diffing that against a raw branch read renders the
   // frontmatter as a deletion and the whole file as changed.
-  const mainRead = useDefaultBranchFileRead(
+  const beforePath =
     isAdded || renameWithoutOldPath || !selected || selectedIsBinary
       ? null
-      : (movedFrom ?? selected),
+      : (movedFrom ?? selected);
+  /**
+   * WHICH "before". A file the request touches is read at the request's FORK
+   * POINT — what its author started from — so the diff shows exactly what the
+   * author changed. Read against the target's tip, an edit somebody made on
+   * the target after the proposal appeared inside this request as a deletion,
+   * and the reader feared applying it would undo that edit. The target having
+   * moved on is said by the notice above the files instead.
+   *
+   * A file the request does NOT touch has no fork-point question: it reads as
+   * it stands. So does a request whose branches share no history (no fork
+   * point to read) — the old reading, which is the only one left.
+   */
+  const forkSha = detail?.mergeBaseSha ?? null;
+  const readAtFork = touchesSelected && forkSha !== null;
+  const forkRead = useForkPointFileRead(
+    cr.number,
+    readAtFork ? forkSha : null,
+    readAtFork ? beforePath : null,
+    // The fork point belongs to the TARGET's tree, which is also the tree the
+    // route checks read authority against — so it is the tree to name a
+    // governing folder from when the read comes back refused.
+    { targetBranch: cr.base || DEFAULT_BRANCH, revision: baseRevision },
   );
+  const tipRead = useDefaultBranchFileRead(
+    detail !== null && !readAtFork ? beforePath : null,
+    baseRevision,
+  );
+  const mainRead = readAtFork ? forkRead : tipRead;
   const mainRaw = mainRead.content;
   const branchRaw = branchContents[selected] ?? null;
 
@@ -249,6 +408,14 @@ export function ChangeRequestDialog({
   const oldPathUnreadable = isRename && mainMissing;
   /** Any other file whose default-branch copy could not be read. */
   const baseUnreadable = !isRename && mainMissing;
+  /**
+   * Why that copy could not be read. The read always records a reason when it
+   * settles as a failure; the fallback covers the one path into
+   * `mainMissing` that never made a read at all (a rename with no old path),
+   * which `baseUnreadable` already excludes but the types cannot know.
+   */
+  const baseFailure: ReadFailure =
+    mainRead.failure ?? { kind: 'error', reason: 'the read did not complete' };
 
   /**
    * BOTH sides or nothing.
@@ -284,7 +451,6 @@ export function ChangeRequestDialog({
         : null,
     [selectedIsMarkdown, bothSidesIn, selected, isAdded, mainRaw, branchRaw],
   );
-  const touchesSelected = changedFiles.has(selected);
 
   /**
    * The branch this request is against — where the CURRENT version of
@@ -370,6 +536,20 @@ export function ChangeRequestDialog({
   const readsUnmarked = !selectedIsMarkdown && detail !== null && !touchesSelected;
   const rawFallback = oldPathUnreadable ? branchRaw : readsUnmarked ? (mainRaw ?? branchRaw) : null;
 
+  /**
+   * Why the selected file cannot be shown — `null` when it can.
+   *
+   * ONE value, read by the pane and by the file row alike. A failure only
+   * gets the last word when there is nothing left to show: a file this
+   * request doesn't touch reads fine from whichever copy arrived. Which SIDE
+   * failed no longer changes the sentence — the reader's question is why they
+   * can't see it, and that answer is the same — so the base copy's denial has
+   * to reach the row exactly as the branch copy's does, or a file the pane
+   * calls refused would sit in the tree with no lock.
+   */
+  const selectedFailure: ReadFailure | null =
+    branchFailure.get(selected) ?? (baseUnreadable && !readsUnmarked ? baseFailure : null);
+
   /** Per-file approval verdicts, straight from the detail. */
   const approvalByPath = useMemo(
     () => new Map((detail?.approvals ?? []).map((a) => [a.path, a])),
@@ -381,14 +561,21 @@ export function ChangeRequestDialog({
    * either already approved or approvable BY THIS VIEWER (they hold write on
    * it, so their click completes the gate). Anything less and Apply was a
    * button that walked into "Waiting on approval for …" — offering a verdict
-   * the viewer cannot actually deliver.
+   * the viewer cannot actually deliver. Only files the merge gate binds can
+   * hold it up; the rest neither warn nor block on the server, but the viewer
+   * still has to hold at least one file of the request to be offered Apply.
+   * And only while the request is OPEN: somebody else may apply or decline it
+   * with this dialog still up, and the re-read that tells the reader so must
+   * not leave a second merge a click away.
    */
   const canApply =
     detail !== null &&
+    detail.state === 'open' &&
     detail.approvals.length > 0 &&
-    detail.approvals.every((a) => a.isApproved || a.viewerCanApprove);
+    detail.approvals.filter((a) => a.inMergeGate).every((a) => a.isApproved || a.viewerCanApprove) &&
+    detail.approvals.some((a) => a.isApproved || a.viewerCanApprove);
 
-  /** Approve / revert verbs — per file, from the tree. */
+  /** Approve / revert verbs — approve from the file header and the footer, revert from the tree. */
   const [verbBusy, setVerbBusy] = useState(false);
   const [verbError, setVerbError] = useState<string | null>(null);
   useEffect(() => {
@@ -404,6 +591,28 @@ export function ChangeRequestDialog({
         ? await unapprovePrFile(cr.number, path)
         : await approvePrFile(cr.number, path);
       setDetail((d) => (d ? { ...d, approvals } : d));
+    } catch (err) {
+      setVerbError(err instanceof Error ? err.message : "Couldn't record that.");
+    } finally {
+      setVerbBusy(false);
+    }
+  }
+
+  /**
+   * Every file still waiting on this viewer, approved one after another —
+   * sequential, so the approvals the server hands back after each call are
+   * the ones the next reads, and a failure stops the run with one banner
+   * instead of one per file.
+   */
+  async function approveAllMine(paths: string[]) {
+    if (!detail || verbBusy) return;
+    setVerbBusy(true);
+    setVerbError(null);
+    try {
+      for (const path of paths) {
+        const approvals = await approvePrFile(cr.number, path);
+        setDetail((d) => (d ? { ...d, approvals } : d));
+      }
     } catch (err) {
       setVerbError(err instanceof Error ? err.message : "Couldn't record that.");
     } finally {
@@ -434,7 +643,12 @@ export function ChangeRequestDialog({
         return next;
       });
       setPicked(null);
-      setDetail(await fetchPrDetail(cr.number));
+      const seq = ++detailSeq.current;
+      const next = await fetchPrDetail(cr.number);
+      if (seq === detailSeq.current) setDetail(next);
+      // The selection can land back on this same path (a scope base file), and
+      // a cleared cache is only re-read when the read effect runs again.
+      setBranchRevision((r) => r + 1);
     } catch (err) {
       setVerbError(err instanceof Error ? err.message : "Couldn't revert this file.");
     } finally {
@@ -443,24 +657,83 @@ export function ChangeRequestDialog({
   }
 
   // Tolerant read (not useAuth): the dialog renders in tests without the
-  // provider, and the email only sharpens the withdraw affordance.
+  // provider, and the email only sharpens the undo affordance.
   const viewerEmail = useContext(AuthContext)?.user?.email ?? '';
+
+  /**
+   * The header's approve button, for the selected file: `approve` when it is
+   * the viewer's to approve and they have not, `undo` once their own current
+   * confirmation is on it, `null` when they cannot approve it at all.
+   */
+  const selectedApproval = touchesSelected ? approvalByPath.get(selected) : undefined;
+  const headerVerb: 'approve' | 'undo' | null = !selectedApproval?.viewerCanApprove
+    ? null
+    : hasOwnApproval(selectedApproval, viewerEmail)
+      ? 'undo'
+      : 'approve';
+
+  /** Files waiting on THIS viewer — theirs to approve and not yet approved. */
+  const mine = useMemo(
+    () =>
+      (detail?.approvals ?? [])
+        .filter(
+          (a) =>
+            a.inMergeGate && a.viewerCanApprove && !a.isApproved && changedFiles.has(a.path),
+        )
+        .map((a) => a.path),
+    [detail, changedFiles],
+  );
+  /**
+   * Who the unapproved files wait on, when none of them is the viewer's —
+   * the tree badge's wording, gathered across the request. Files outside the
+   * merge gate hold nothing up and name nobody.
+   */
+  const waitingOn = useMemo(() => {
+    const names = new Set<string>();
+    for (const a of detail?.approvals ?? []) {
+      if (!a.inMergeGate || a.isApproved || a.viewerCanApprove) continue;
+      for (const r of a.eligibleApprovers.roles) names.add(r);
+      for (const u of a.eligibleApprovers.users) names.add(u.name || u.email);
+    }
+    return [...names];
+  }, [detail]);
 
   /** The tree's per-file state, in the file list's order. */
   const treeFiles: CrTreeFileState[] = useMemo(() => {
     const statusByPath = new Map((detail?.files ?? []).map((f) => [f.path, f.status]));
-    return allFiles.map((path) => ({
-      path,
-      changed: changedFiles.has(path),
-      added: addedFiles.includes(path),
-      status: statusByPath.get(path),
-      approval: approvalByPath.get(path),
-    }));
-  }, [detail, allFiles, changedFiles, addedFiles, approvalByPath]);
+    return allFiles.map((path) => {
+      // Only files the reader has actually opened can carry the lock: the
+      // dialog reads one copy at a time, so a denial is a fact about a file
+      // that has been asked for, never a guess about the rest of the list.
+      // For the open file that means the SAME failure the pane is showing,
+      // base copy included — a refusal of the before-side is still a refusal
+      // of this file, and the row says so with the pane's own sentence.
+      const failure = path === selected ? selectedFailure : branchFailure.get(path);
+      return {
+        path,
+        changed: changedFiles.has(path),
+        added: addedFiles.includes(path),
+        status: statusByPath.get(path),
+        approval: approvalByPath.get(path),
+        deniedNote: failure?.kind === 'denied' ? deniedSentence(failure.folder) : undefined,
+      };
+    });
+  }, [
+    detail,
+    allFiles,
+    changedFiles,
+    addedFiles,
+    approvalByPath,
+    branchFailure,
+    selected,
+    selectedFailure,
+  ]);
 
   /** The footer's verdicts: apply plainly, apply by covering, or wait. */
   const allApproved =
-    detail !== null && detail.approvals.length > 0 && detail.approvals.every((a) => a.isApproved);
+    detail !== null &&
+    detail.approvals.length > 0 &&
+    detail.approvals.filter((a) => a.inMergeGate).every((a) => a.isApproved);
 
   /** Admin-only: delete the request and its branch, with an armed confirm. */
   const [deleteArmed, setDeleteArmed] = useState(false);
@@ -497,6 +770,54 @@ export function ChangeRequestDialog({
     },
   });
   const applyBusy = applying.activeCr === cr.number;
+
+  /**
+   * Update: merge the target into this request's branch on the server, so the
+   * proposal sits on the text as it stands now. Success re-reads everything —
+   * the head, the fork point, and every file cached from before — and the
+   * "has changed" notice clears with the fresh detail. A conflict is the same
+   * answer an apply conflict is (git refused; nothing was merged), and gets
+   * the same help: the prompt for the author's agent.
+   */
+  const [updating, setUpdating] = useState(false);
+  async function updateFromTarget() {
+    if (updating) return;
+    setUpdating(true);
+    setError(null);
+    try {
+      await refreshChangeRequestFromTarget(cr.number);
+      // The branch moved, so every list and every change box behind this
+      // dialog is out of date — including their fork points, which this is
+      // the only thing that moves.
+      window.dispatchEvent(new Event(PR_STALE_EVENT));
+      // The branch has moved: every copy read so far predates the merge.
+      // Forget them now, before anything else can fail, so the dialog never
+      // goes on showing the pre-update text for a branch the server merged.
+      asked.current.clear();
+      setBranchContents({});
+      setBranchFailure(new Map());
+      try {
+        // Re-read in the same render the fresh detail (and so the fresh fork
+        // point) lands in.
+        const seq = ++detailSeq.current;
+        const next = await fetchPrDetail(cr.number, { fresh: true });
+        if (seq === detailSeq.current) setDetail(next);
+      } catch {
+        setError("Updated, but couldn't reload this change request. Close it and open it again.");
+      } finally {
+        setBranchRevision((r) => r + 1);
+      }
+    } catch (err) {
+      const conflicts =
+        err instanceof GitApiError &&
+        err.status === 409 &&
+        (err.body as { kind?: unknown } | undefined)?.kind === 'change-request-conflicts';
+      if (conflicts) setBlocked(true);
+      else setError(err instanceof Error ? err.message : "Couldn't update this change request.");
+    } finally {
+      setUpdating(false);
+    }
+  }
   // Name the step: recording approvals and merging are separately slow, and one
   // label over both makes the longer half look stalled.
   const applyLabel = applying.phase === 'approving' ? 'Approving…' : 'Applying…';
@@ -610,6 +931,20 @@ export function ChangeRequestDialog({
           </Banner>
         )}
 
+        {/* A refusal from an attempt this dialog did not make — another
+            owner's, an admin's, or this reader's own in another tab. Its own
+            attempt speaks through `error` / `blocked` above instead. */}
+        {!error && !blocked && !applyBusy && detail?.lastApplyFailure && (
+          <Banner tone="danger" role="alert" className="mx-8 mt-4">
+            <b className="font-semibold">
+              {detail.lastApplyFailure.byName
+                ? `${detail.lastApplyFailure.byName} could not apply this`
+                : 'The last apply did not land'}
+            </b>
+            : {detail.lastApplyFailure.reason}
+          </Banner>
+        )}
+
         {blocked && (
           <Banner tone="wait" role="alert" className="mx-8 mt-4">
             <b className="font-semibold">Can't apply</b>: files changed after {firstName} wrote
@@ -618,6 +953,33 @@ export function ChangeRequestDialog({
             <div className="mt-2.5">
               <ConflictHelp prompt={conflictResolutionPrompt(cr)} />
             </div>
+          </Banner>
+        )}
+
+        {/* The target moved on after this was proposed. The diff below does not
+            show that (it is read from the fork point), so it is said here —
+            with Update for the author and anyone who may apply it. Nothing at
+            all when the request is up to date. The button goes once an Update
+            has conflicted: the conflict help above is the way forward, and a
+            second click would only fail the same way. */}
+        {detail !== null && detail.behind && (
+          <Banner tone="neutral" role="status" className="mx-8 mt-4">
+            <span className="flex flex-wrap items-center gap-3">
+              <span className="min-w-0 flex-1">
+                <span className="font-mono">{detail.base || targetBranch}</span> has changed since
+                this was proposed
+              </span>
+              {detail.viewerCanUpdate && !blocked && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={updating || applyBusy}
+                  onClick={() => void updateFromTarget()}
+                >
+                  {updating ? 'Updating…' : 'Update'}
+                </Button>
+              )}
+            </span>
           </Banner>
         )}
 
@@ -650,9 +1012,8 @@ export function ChangeRequestDialog({
               selected={selected}
               currentUserEmail={viewerEmail}
               onSelect={(p) => setSelected(p)}
-              onToggleApprove={(p, approved) => void toggleApprove(p, approved)}
               onRevert={(p) => void revertFile(p)}
-              busy={verbBusy}
+              busy={verbBusy || applyBusy}
             />
           </Surface>
 
@@ -670,6 +1031,19 @@ export function ChangeRequestDialog({
                       : ' · what changes is marked'
                     : ' · not touched by this request'}
               </span>
+              {/* Where the reviewer is reading, labelled — the tree's check is
+                  status only. Right after the header text in the tab order. */}
+              {headerVerb && (
+                <Button
+                  variant={headerVerb === 'approve' ? 'primary' : 'outline'}
+                  size="tiny"
+                  className="ml-auto shrink-0"
+                  disabled={verbBusy || applyBusy}
+                  onClick={() => void toggleApprove(selected, headerVerb === 'undo')}
+                >
+                  {headerVerb === 'approve' ? 'Approve this file' : 'Approved – Undo'}
+                </Button>
+              )}
             </div>
             {/* The move, named. A rename's diff is otherwise unexplainable —
                 either it reads as an ordinary edit to a file that isn't there
@@ -746,7 +1120,7 @@ export function ChangeRequestDialog({
                     />
                   </div>
                 )
-              ) : mdPayload !== null && !unreadable.has(selected) ? (
+              ) : mdPayload !== null && !branchFailure.has(selected) ? (
                 // An untouched file arrives here too and simply renders as a
                 // clean document — identical sides diff to all-same blocks —
                 // so the reader gets prose everywhere, marked or not.
@@ -773,16 +1147,8 @@ export function ChangeRequestDialog({
               <MarkedFile
                 diff={diff}
                 raw={rawFallback}
-                unreadable={
-                  // A failure only gets the last word when there is nothing
-                  // left to show: a file this request doesn't touch reads
-                  // fine from whichever copy arrived.
-                  unreadable.has(selected)
-                    ? 'branch'
-                    : baseUnreadable && !readsUnmarked
-                      ? 'base'
-                      : undefined
-                }
+                failure={selectedFailure}
+                onRetry={retrySelectedRead}
               />
               )}
             </div>
@@ -793,7 +1159,32 @@ export function ChangeRequestDialog({
 
         {/* The verdict. Fixed to the bottom of the surface — a decision the
             reader has to scroll to find is one they will make without reading. */}
-        <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-line bg-sunken px-8 py-4">
+        <div className="mt-4 border-t border-line bg-sunken px-8 py-4">
+          {/* What is the viewer's to approve, above the verdict: a count and
+              one button for all of them, or who everyone is waiting on. */}
+          {!blocked && detail !== null && allFiles.length > 0 && (mine.length > 0 || !canApply) && (
+            <div className="mb-3 flex flex-wrap items-center gap-3">
+              <p className="text-meta font-medium text-ink">
+                {mine.length > 0
+                  ? `Your approval is needed on ${mine.length} file${mine.length === 1 ? '' : 's'}`
+                  : waitingOn.length > 0
+                    ? `Waiting on ${waitingOn.join(', ')}`
+                    : (detail.mergeWarnings[0] ??
+                      'Waiting on approval from the files’ owners — applying is theirs to do.')}
+              </p>
+              {mine.length > 1 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={verbBusy || applyBusy}
+                  onClick={() => void approveAllMine(mine)}
+                >
+                  Approve all mine
+                </Button>
+              )}
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-3">
           <p className="mr-auto max-w-[52ch] text-meta text-ink-muted">
             {blocked
               ? `Nothing changes for anyone until ${firstName} proposes it again against the current text.`
@@ -801,10 +1192,9 @@ export function ChangeRequestDialog({
                 ? ''
                 : allFiles.length === 0
                   ? 'Applying would change nothing, so the button stays away.'
-                  : canApply
+                  : canApply && mine.length === 0
                     ? 'Every agent that connects after this picks it up. There is no staged rollout.'
-                    : detail.mergeWarnings[0] ??
-                      'Waiting on approval from the files’ owners — applying is theirs to do.'}
+                    : ''}
           </p>
           {/* Admins carry the moderation verb: delete the request AND its
               branch, armed on the first click. `viewerCanBypassMerge` is the
@@ -844,12 +1234,13 @@ export function ChangeRequestDialog({
             <Button
               variant="primary"
               size="sm"
-              disabled={applyBusy}
+              disabled={applyBusy || verbBusy}
               onClick={() => applying.apply(cr)}
             >
               {applyBusy ? applyLabel : allApproved ? 'Apply changes' : 'Bypass approval and apply'}
             </Button>
           )}
+          </div>
         </div>
       </Surface>
     </div>
@@ -883,24 +1274,46 @@ function authorsReason(body: string | undefined): string | null {
  *
  * Markdown never reaches this view when both sides are in — it renders
  * through `MarkdownDiffViewer` above. This is the presentation for the files
- * that ARE source (yaml, scripts, config), plus the loading and unreadable
+ * that ARE source (yaml, scripts, config, the access rules file), plus the loading and unreadable
  * states for everything.
  */
 function MarkedFile({
   diff,
   raw,
-  unreadable,
+  failure,
+  onRetry,
 }: {
   diff: DiffLine[] | null;
   raw: string | null;
-  /** Which side failed to read — the change request's copy, or the default branch's. */
-  unreadable?: 'branch' | 'base';
+  /**
+   * Why the copy this pane needs could not be read — `null` when it could.
+   * Two forms, whichever side failed: a refusal, which a person has to lift,
+   * and everything else, which another attempt might.
+   */
+  failure?: ReadFailure | null;
+  /** Re-fetch this file. Offered only beside the retryable form. */
+  onRetry(): void;
 }) {
-  if (unreadable) {
+  if (failure) {
     return (
       <p className="py-6 text-center text-detail text-ink-faint">
-        This file's copy on {unreadable === 'branch' ? 'the change request' : 'the current text'}{' '}
-        couldn't be read, so there is no honest before and after to show.
+        {failure.kind === 'denied' ? (
+          deniedSentence(failure.folder)
+        ) : (
+          <>
+            {readErrorLead(failure.reason)}{' '}
+            {/* The retry IS the sentence's last words — a reader told to try
+                again should not then have to find where. */}
+            <button
+              type="button"
+              className="underline underline-offset-2 transition-colors hover:text-ink"
+              onClick={onRetry}
+            >
+              Try again
+            </button>
+            .
+          </>
+        )}
       </p>
     );
   }

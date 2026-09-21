@@ -10,13 +10,16 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { isAbsence, type IFsProbe, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IPluginIndexService } from '../plugins/plugins.contract.js';
 import '@utcp/http'; // side effect: register the 'http' call-template type
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
 import { type IToolManualService, EXTERNAL_KB_MANUAL_NAME } from './tool-manuals.contract.js';
 import { McpServerEditError, type McpServerEditService, type McpServerWrite } from './mcp-server-edit.service.js';
+import { ToolDeleteError, type ToolDeleteService } from './tool-delete.service.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
 import '../tool-auth/tool-auth.middleware.js'; // Express Request augmentation (req.toolAuth)
+import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 
 /** Resolve a connection-key/internal-token user id to its email (per-caller ACL). */
 export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
@@ -53,6 +56,13 @@ export function createToolManualsAgentRoutes(
     accessControl: IAccessControl;
     kbDirName: string;
     disk: ITreeWalker & IFsProbe;
+    /**
+     * Resolves a plugin IDENTITY (its manifest name) to its folder, so a
+     * plugin nested below the root — `Plugins/departments/eng/ado` — is
+     * archived by the one name every client knows it by. Without it only a
+     * folder directly under the root can be named.
+     */
+    pluginIndex?: Pick<IPluginIndexService, 'catalog'>;
   },
 ): express.Router {
   const router = express.Router();
@@ -100,11 +110,24 @@ export function createToolManualsAgentRoutes(
       if (!folder || folder === '.' || folder === '..' || /[/\\]/.test(folder)) {
         return void res.status(422).json({ error: 'Not a plugin folder name' });
       }
-      const { workspaceService, accessControl, kbDirName, disk } = archiveDeps;
+      const { workspaceService, accessControl, kbDirName, disk, pluginIndex } = archiveDeps;
       const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
       await workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
       const wsDir = await workspaceService.getWorkspacePath(wsId);
-      const pluginDir = path.join(wsDir, kbDirName, PLUGINS_DIR, folder);
+      // The name is a folder directly under the root, as it always was — or,
+      // when no such folder exists, a plugin's IDENTITY, which the index maps
+      // to its folder at any depth (`Plugins/departments/eng/ado`). Identity
+      // second, so a folder that spells a nested plugin's name keeps meaning
+      // the folder.
+      let pluginRel = `${PLUGINS_DIR}/${folder}`;
+      let pluginDir = path.join(wsDir, kbDirName, PLUGINS_DIR, folder);
+      if (pluginIndex && (await disk.lstatOrNull(pluginDir))?.isDirectory() !== true) {
+        const byIdentity = (await pluginIndex.catalog()).find((p) => p.name === folder)?.folders[0];
+        if (byIdentity) {
+          pluginRel = byIdentity;
+          pluginDir = path.join(wsDir, kbDirName, ...byIdentity.split('/'));
+        }
+      }
       // SYMLINKS ARE NOT SUPPORTED IN PLUGINS, anywhere. Access control
       // resolves rules by path, and a symlink is a second path to the same
       // content — a standing invitation for the spelling the ACL judged and
@@ -125,7 +148,7 @@ export function createToolManualsAgentRoutes(
       // Only an absent folder is a non-event; anything else (EACCES, EIO)
       // silently missing from the archive would hand the client an
       // incomplete plugin stamped as success — so a hole is the error.
-      await disk.walk(pluginDir, { skip: (e) => e.name === '.git', unreadable: 'throw' }, [
+      await disk.walk(pluginDir, { skip: (e) => hasGitInternalsSegment(e.name), unreadable: 'throw' }, [
         {
           onFile(dir, name) {
             rels.push(dir ? `${dir}/${name}` : name);
@@ -144,7 +167,7 @@ export function createToolManualsAgentRoutes(
       const verdicts = await accessControl.canReadBatch(
         wsId,
         email,
-        rels.map((r) => `${PLUGINS_DIR}/${folder}/${r}`),
+        rels.map((r) => `${pluginRel}/${r}`),
       );
       const zip = new AdmZip();
       let included = 0;
@@ -165,7 +188,7 @@ export function createToolManualsAgentRoutes(
       if (pluginRealBase === null) return void res.status(404).json({ error: 'Not found' });
       for (const rel of rels) {
         // Fail closed, per file — only an explicit `true` verdict is included.
-        if (verdicts.get(`${PLUGINS_DIR}/${folder}/${rel}`) !== true) continue;
+        if (verdicts.get(`${pluginRel}/${rel}`) !== true) continue;
         const abs = path.join(pluginDir, ...rel.split('/'));
         // The no-symlink rule, re-checked at read time over the WHOLE path.
         // The open below guards only the final component — a PARENT directory
@@ -260,6 +283,8 @@ export function createToolManualsAgentRoutes(
  * Browser-facing tool-manual routes (mounted under the JWT auth middleware):
  *   GET  /tools           — the caller's accessible `.tool` manuals (summaries).
  *   POST /tools/preview    — validate a draft `.tool` for the renderer.
+ *   GET  /tools/:slug/dependents — what deleting this tool would affect.
+ *   DELETE /tools/:slug    — delete the manual (or the mcp.json server entry).
  *   GET  /tools/:slug      — one readable manual with description + capabilities
  *                            (the tool page). Registered LAST so no future
  *                            literal sibling is shadowed by the param segment;
@@ -268,8 +293,45 @@ export function createToolManualsAgentRoutes(
 export function createToolManualsBrowserRoutes(
   toolManualService: IToolManualService,
   serverEdit?: { service: McpServerEditService; getUser: (userId: string) => Promise<AuthUser | undefined> },
+  toolDelete?: { service: ToolDeleteService; getUser: (userId: string) => Promise<AuthUser | undefined> },
 ): express.Router {
   const router = express.Router();
+
+  /**
+   * What depends on a tool, and the delete itself — the owner's verb, gated in
+   * the service on the same `canOwner` verdict the plugin delete enforces.
+   *
+   * Both answer 404 for a tool the caller cannot read (indistinguishable from
+   * an unknown slug, as everywhere in this file) and 403 for one they can read
+   * but do not own — at that point the tool's existence is not a secret from
+   * them, and "you are not an owner" is the only useful thing to say.
+   */
+  router.get('/tools/:slug/dependents', async (req, res) => {
+    if (!toolDelete) return void res.status(404).json({ error: 'Not available' });
+    const email = req.userEmail;
+    if (!email) return void res.status(401).json({ error: 'Not authenticated' });
+    try {
+      res.json(await toolDelete.service.dependents(email, String(req.params.slug)));
+    } catch (err) {
+      if (err instanceof ToolDeleteError) return void res.status(err.status).json({ error: err.message });
+      log.error('dependents failed:', { err });
+      res.status(500).json({ error: 'Failed to read what depends on this tool' });
+    }
+  });
+
+  router.delete('/tools/:slug', async (req, res) => {
+    if (!toolDelete) return void res.status(404).json({ error: 'Not available' });
+    if (!req.userId) return void res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const user = await toolDelete.getUser(req.userId);
+      if (!user) return void res.status(401).json({ error: 'Not authenticated' });
+      res.json(await toolDelete.service.deleteTool(user, String(req.params.slug)));
+    } catch (err) {
+      if (err instanceof ToolDeleteError) return void res.status(err.status).json({ error: err.message });
+      log.error('tool delete failed:', { err });
+      res.status(500).json({ error: 'Failed to delete the tool' });
+    }
+  });
 
   /**
    * Server-scoped read/write of one MCP server — the tool page's edit form.
@@ -317,7 +379,13 @@ export function createToolManualsBrowserRoutes(
     const email = req.userEmail;
     if (!email) return void res.status(401).json({ error: 'Not authenticated' });
     try {
-      res.json({ tools: await toolManualService.listAccessible(email) });
+      // `invalid` rides along with the catalog, out of ONE scan: a `.tool` the
+      // scan refused is the ONE reason a tool can be missing here, and a
+      // listing that dropped it in silence is indistinguishable from a
+      // workspace that never had it. Both halves therefore describe the same
+      // snapshot — a file cannot be absent from both because it was written
+      // between two reads.
+      res.json(await toolManualService.listAccessibleCatalog(email));
     } catch (err) {
       log.error('list failed:', { err });
       res.status(500).json({ error: 'Internal error' });

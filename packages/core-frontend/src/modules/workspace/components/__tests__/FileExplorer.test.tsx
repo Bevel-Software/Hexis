@@ -1,14 +1,23 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, cleanup, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { configureBranchModel, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { FileExplorer } from '../FileExplorer';
-import { WorkspaceContext, type UploadError, type WorkspaceContextValue } from '../../state/workspace.context';
+import {
+  KNOWLEDGE_UPLOAD_TARGET,
+  WorkspaceContext,
+  type UploadError,
+  type UploadNotice,
+  type UploadTarget,
+  type WorkspaceContextValue,
+} from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
+import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
+import { PR_STALE_EVENT } from '../../../../core/events';
 
 // authFetch is the bearer-token wrapper around window.fetch. The Download
 // click test asserts the URL + ?download=1 flag, so we mock it at the
@@ -17,6 +26,16 @@ const mockAuthFetch = vi.fn();
 vi.mock('../../../../lib/api', () => ({
   authFetch: (...args: unknown[]) => mockAuthFetch(...args),
 }));
+
+// The author-cancel the sidebar's Withdraw reuses — the same function the
+// file page's change box calls. The tree's job is to call it with the right
+// request number and let the refetch take the rows away; the cancel itself
+// is the pr module's.
+const cancelMocks = vi.hoisted(() => ({
+  cancelPullRequest: vi.fn(),
+  deleteChangeRequest: vi.fn(),
+}));
+vi.mock('../../../pr/services/pr-cancel.api', () => cancelMocks);
 
 // The sheet itself is covered by the access module's own tests; here only
 // WHICH workspace and proposal the tree hands it matters.
@@ -91,7 +110,11 @@ interface RenderOptions {
   dispatchUpload?: ReturnType<typeof vi.fn>;
   clearUploadError?: ReturnType<typeof vi.fn>;
   isUploading?: boolean;
+  /** Which tree the banner belongs to — the Knowledge explorer by default. */
+  uploadTarget?: UploadTarget;
   uploadError?: UploadError | null;
+  uploadNotice?: UploadNotice | null;
+  clearUploadNotice?: ReturnType<typeof vi.fn>;
   fileTree?: FileTreeEntry | null;
   createFile?: ReturnType<typeof vi.fn>;
   deleteEntry?: ReturnType<typeof vi.fn>;
@@ -103,6 +126,34 @@ interface RenderOptions {
   openChangeRequestPaths?: string[];
   /** The caller's own open requests: workspace-relative path → CR number. */
   minePaths?: Map<string, number>;
+  /**
+   * Whether the signed-in person is an admin. Only the platform-file rows
+   * read it: an admin may drag a MISPLACED one back where the platform reads
+   * it, so the row lets that drag start and the server decides the rest.
+   * Omitted means no `AdminProvider` at all, which is nobody's admin.
+   */
+  isAdmin?: boolean;
+  /**
+   * Which of those requests the caller AUTHORED. Defaults to all of them,
+   * which is the real shape today — suggestion rows are synthesized from
+   * `/mine`. A test wanting an owner's view of SOMEONE ELSE'S proposal passes
+   * a narrower set, which is the only way to decouple the two here.
+   */
+  mineNumbers?: number[];
+  /**
+   * The files the synthesized request carries. One drop can become one
+   * request over several files, and withdrawing takes all of them; defaults
+   * to just the path the row is for.
+   */
+  crFiles?: string[];
+  /** The URL the tree mounts at — a reload lands on whatever the query says. */
+  initialEntries?: string[];
+}
+
+/** The router's current query, so a test can read what a click put there. */
+function LocationProbe() {
+  const { search } = useLocation();
+  return <span data-testid="location-search">{search}</span>;
 }
 
 function renderExplorer(opts: RenderOptions = {}) {
@@ -113,9 +164,12 @@ function renderExplorer(opts: RenderOptions = {}) {
   const moveEntry = opts.moveEntry ?? vi.fn().mockResolvedValue(undefined);
   // Distinguish "caller wants null tree" from "caller didn't pass anything".
   const fileTree = 'fileTree' in opts ? opts.fileTree ?? null : EMPTY_TREE;
+  const bannerTarget = opts.uploadTarget ?? KNOWLEDGE_UPLOAD_TARGET;
   const workspace: WorkspaceContextValue = makeWorkspaceFixture({
     fileTree,
-    uploadError: opts.uploadError ?? null,
+    uploadErrors: opts.uploadError ? new Map([[bannerTarget, opts.uploadError]]) : new Map(),
+    uploadNotices: opts.uploadNotice ? new Map([[bannerTarget, opts.uploadNotice]]) : new Map(),
+    clearUploadNotice: opts.clearUploadNotice ?? (() => {}),
     isUploading: opts.isUploading ?? false,
     openFilePath: opts.openFilePath ?? null,
     refreshFileTree: async () => fileTree,
@@ -126,9 +180,10 @@ function renderExplorer(opts: RenderOptions = {}) {
     moveEntry,
     ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
   });
-  const ui = (ws: WorkspaceContextValue) => (
-      <MemoryRouter>
+  const ui = (ws: WorkspaceContextValue, mine: Map<string, number>) => (
+      <MemoryRouter initialEntries={opts.initialEntries ?? ['/']}>
         <AuthContext.Provider value={makeAuth()}>
+          <AdminContext.Provider value={{ isAdmin: opts.isAdmin === true } as AdminContextValue}>
           <WorkspaceContext.Provider value={ws}>
             <GitContext.Provider value={makeGit()}>
                 <OpenChangeRequestsContext.Provider
@@ -138,7 +193,7 @@ function renderExplorer(opts: RenderOptions = {}) {
                     // synthesize a summary for every minePaths entry so the
                     // shared dialog has something to open.
                     forPath: (p) => {
-                      const n = opts.minePaths?.get(p);
+                      const n = mine.get(p);
                       return n === undefined
                         ? []
                         : ([
@@ -149,25 +204,28 @@ function renderExplorer(opts: RenderOptions = {}) {
                               base: 'main',
                               state: 'open',
                               createdAt: '2026-08-01T00:00:00.000Z',
-                              touchedNodePaths: [p],
+                              touchedNodePaths: opts.crFiles ?? [p],
                               author: { login: 'user-x' },
                               review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
                               url: '',
                             },
                           ] as never);
                     },
-                    minePaths: opts.minePaths ?? new Map(),
-                    mineNumbers: new Set(opts.minePaths?.values() ?? []),
+                    minePaths: mine,
+                    mineNumbers: new Set(opts.mineNumbers ?? [...mine.values()]),
                   }}
                 >
                   <FileExplorer />
+                  <LocationProbe />
                 </OpenChangeRequestsContext.Provider>
             </GitContext.Provider>
           </WorkspaceContext.Provider>
+          </AdminContext.Provider>
         </AuthContext.Provider>
       </MemoryRouter>
   );
-  const result = render(ui(workspace));
+  const minePaths = opts.minePaths ?? new Map<string, number>();
+  const result = render(ui(workspace, minePaths));
   return {
     moveEntry,
     dispatchUpload,
@@ -176,7 +234,17 @@ function renderExplorer(opts: RenderOptions = {}) {
     deleteEntry,
     ...result,
     /** Re-render the same explorer as though the user switched workspace. */
-    switchWorkspace: (workspaceId: string) => result.rerender(ui({ ...workspace, workspaceId })),
+    switchWorkspace: (workspaceId: string) =>
+      result.rerender(ui({ ...workspace, workspaceId }, minePaths)),
+    /**
+     * What the refetch behind a PR_STALE_EVENT does to a tree whose request
+     * is gone: `/mine` stops listing it, so its paths leave `minePaths`. The
+     * same mounted tree, re-rendered — never a reload.
+     */
+    requestWithdrawn: (crNumber: number) => {
+      const next = new Map([...minePaths].filter(([, n]) => n !== crNumber));
+      result.rerender(ui(workspace, next));
+    },
   };
 }
 
@@ -312,6 +380,93 @@ describe('FileExplorer toolbar', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  // The reported banner: "Couldn't add knowledge-base/K…" — one truncated
+  // line whose reason lived in a `title` tooltip. Everything the user needs
+  // is in the banner now, wrapping over as many lines as it takes.
+  it('shows the whole reason in the banner, wrapped, with no tooltip-only text', () => {
+    const reason =
+      'You don\u2019t have permission to write to Knowledge/Legal. '
+      + 'The folder is owned by the Legal group, and its access rules grant write '
+      + 'to that group only.';
+    renderExplorer({ uploadError: { filename: 'quarterly-report.pdf', reason } });
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent("Couldn't add quarterly-report.pdf");
+    // In full, not cut at the width of one line.
+    expect(alert.textContent).toContain(reason);
+    // Nothing is hidden behind a hover: no part of the message lives in a
+    // `title`, and nothing is clipped to a single line.
+    const titles = [...alert.querySelectorAll('[title]')].map((el) => el.getAttribute('title') ?? '');
+    expect(titles.some((t) => t.includes('permission'))).toBe(false);
+    expect(alert.querySelectorAll('.truncate')).toHaveLength(0);
+    expect(alert.querySelector('.whitespace-pre-wrap')).not.toBeNull();
+  });
+
+  // The next step comes from the STATUS, so the backend can reword its
+  // refusals — as it has — without the banner's advice going wrong. The
+  // reasons here are deliberately not the ones the old wording-matcher knew.
+  it('ends the error banner with what to do about it', () => {
+    renderExplorer({
+      uploadError: {
+        filename: 'brief.docx',
+        reason: 'Knowledge/Legal is owned by the Legal group; writing needs the Legal role',
+        status: 403,
+      },
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent('Try another folder or ask its owner.');
+    cleanup();
+
+    renderExplorer({
+      uploadError: { filename: 'huge.bin', reason: 'File exceeds 52428800 byte limit', status: 413 },
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent('try a smaller one');
+    cleanup();
+
+    renderExplorer({ uploadError: { filename: 'note.md', reason: 'Upstream is unreachable' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('Try again, or pick another folder.');
+  });
+
+  // One shared piece of state, one banner per page: a drop into the Library's
+  // Skills tree must not paint its banner over the Knowledge explorer.
+  it('ignores banners stamped with another tree', () => {
+    renderExplorer({
+      uploadTarget: 'library:Skills',
+      uploadError: { filename: 'note.md', reason: 'nope' },
+      uploadNotice: { kind: 'suggestion', message: 'became a suggestion' },
+    });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('upload-notice')).not.toBeInTheDocument();
+  });
+
+  it('renders exactly one notice for its own tree', () => {
+    renderExplorer({
+      uploadNotice: {
+        kind: 'suggestion',
+        message: "You can't write to that folder, so the upload became a suggestion.",
+      },
+    });
+    const notices = screen.getAllByTestId('upload-notice');
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toHaveTextContent('became a suggestion');
+  });
+
+  // Nothing to dismiss about an upload that has not finished; the result
+  // notice that replaces it is the one the user closes.
+  it('offers no dismiss on the in-progress notice and one on the result', async () => {
+    const user = userEvent.setup();
+    renderExplorer({ uploadNotice: { kind: 'progress', message: 'Adding report.pdf to Ops…' } });
+    expect(screen.getByTestId('upload-notice')).toHaveTextContent('Adding report.pdf to Ops');
+    expect(screen.queryByRole('button', { name: /Dismiss upload notice/i })).not.toBeInTheDocument();
+    cleanup();
+
+    const clearUploadNotice = vi.fn();
+    renderExplorer({
+      uploadNotice: { kind: 'suggestion', message: 'became a suggestion' },
+      clearUploadNotice,
+    });
+    await user.click(screen.getByRole('button', { name: /Dismiss upload notice/i }));
+    expect(clearUploadNotice).toHaveBeenCalledTimes(1);
+  });
+
   it('routes root-level drag-and-drop through dispatchUpload (parity with the button)', async () => {
     const dispatchUpload = vi.fn().mockResolvedValue(undefined);
     renderExplorer({ dispatchUpload });
@@ -369,69 +524,285 @@ describe('FileExplorer right-click: Download menu (per-path access)', () => {
     ],
   };
 
+  /** The `/access` body, with only the verdict this menu reads varying. */
+  function accessBody(canDownload: boolean) {
+    return {
+      canRead: true,
+      canWrite: true,
+      canDownload,
+      canOwner: false,
+      eligible: { roles: [], users: [] },
+      readers: { restricted: false, roles: [], users: [] },
+      owners: { roles: [], users: [] },
+      downloaders: { roles: [], users: [] },
+      sources: {},
+    };
+  }
+
+  /**
+   * One `authFetch` for two very different calls: the menu's access preflight
+   * on open, and the download itself on click. Routed by URL so a test can
+   * state the verdict and the download outcome independently — which is the
+   * whole point of the late-403 case, where they disagree.
+   */
+  function routeAuthFetch(opts: { canDownload: boolean; download?: unknown }) {
+    mockAuthFetch.mockImplementation((url: string) =>
+      Promise.resolve(
+        url.includes('/access?')
+          ? { ok: true, status: 200, json: async () => accessBody(opts.canDownload), text: async () => '' }
+          : opts.download,
+      ),
+    );
+  }
+
+  /** The access lookups made so far, in order. */
+  const accessCalls = () =>
+    mockAuthFetch.mock.calls.map((c) => c[0] as string).filter((u) => u.includes('/access?'));
+  /** The download requests made so far — everything that is not a lookup. */
+  const downloadCalls = () =>
+    mockAuthFetch.mock.calls.map((c) => c[0] as string).filter((u) => !u.includes('/access?'));
+
+  /**
+   * The blob-URL pair the download path uses. `Object.assign` rather than a
+   * cast: happy-dom's URL has no object-URL methods to widen, and the cast
+   * every caller used to write is the one thing a helper should absorb.
+   */
+  function stubObjectUrls(url = 'blob:fake-url') {
+    const createObjectURL = vi.fn(() => url);
+    const revokeObjectURL = vi.fn();
+    Object.assign(globalThis.URL, { createObjectURL, revokeObjectURL });
+    return { createObjectURL, revokeObjectURL };
+  }
+
   function renderWithTree() {
     return renderExplorer({ fileTree: TREE_WITH_BOTH });
   }
 
-  // Under the path-scoped `download:` verb model there is no global
-  // preflight: the menu items always render. The backend returns 403 at
-  // click time for users without permission on that specific path; the
-  // click handler surfaces it via an alert.
+  /** Right-click a row and wait for the menu's access lookup to land. */
+  async function openMenuOn(label: string) {
+    fireEvent.contextMenu(screen.getByText(label));
+    await act(async () => {});
+  }
 
-  it('shows Download on files (no preflight gate)', () => {
+  it('asks for the entry access once when the menu opens, and enables Download', async () => {
+    routeAuthFetch({ canDownload: true });
+    renderWithTree();
+    await openMenuOn('brief.md');
+
+    expect(accessCalls()).toHaveLength(1);
+    expect(accessCalls()[0]).toContain('/api/workspace/ws-1/access?path=brief.md');
+    expect(accessCalls()[0]).toContain('kind=file');
+    const item = screen.getByRole('menuitem', { name: 'Download' });
+    expect(item).not.toHaveAttribute('aria-disabled');
+    expect(item).not.toHaveAttribute('title');
+  });
+
+  it('disables Download with the reason on a file the caller may only read', async () => {
+    routeAuthFetch({ canDownload: false });
+    renderWithTree();
+    await openMenuOn('brief.md');
+
+    const item = screen.getByRole('menuitem', { name: 'Download' });
+    expect(item).toHaveAttribute('aria-disabled', 'true');
+    expect(item).toHaveAttribute('title', "You don't have download permission for this item");
+    // Nothing is attempted on a click, and the menu stays open saying why.
+    fireEvent.click(item);
+    expect(downloadCalls()).toHaveLength(0);
+    expect(screen.getByRole('menuitem', { name: 'Download' })).toBeInTheDocument();
+  });
+
+  it('disables Download as zip with the reason on a folder, asked as a folder', async () => {
+    routeAuthFetch({ canDownload: false });
+    renderWithTree();
+    await openMenuOn('reports');
+
+    expect(accessCalls()).toHaveLength(1);
+    expect(accessCalls()[0]).toContain('path=reports');
+    expect(accessCalls()[0]).toContain('kind=folder');
+    const item = screen.getByRole('menuitem', { name: 'Download as zip' });
+    expect(item).toHaveAttribute('aria-disabled', 'true');
+    expect(item).toHaveAttribute('title', "You don't have download permission for this item");
+    fireEvent.click(item);
+    expect(downloadCalls()).toHaveLength(0);
+  });
+
+  /**
+   * `aria-disabled`, not `disabled`, is what keeps the reason reachable — so
+   * the item is still focusable, and refusing the ACTIVATION (not the click
+   * event) is what has to stop the keyboard path.
+   */
+  it('cannot be triggered from the keyboard while it is disabled', async () => {
+    const user = userEvent.setup();
+    routeAuthFetch({ canDownload: false });
+    renderWithTree();
+    await openMenuOn('brief.md');
+
+    const item = screen.getByRole('menuitem', { name: 'Download' });
+    item.focus();
+    expect(document.activeElement).toBe(item);
+    await user.keyboard('{Enter}');
+    await user.keyboard(' ');
+    expect(downloadCalls()).toHaveLength(0);
+    // The menu did not close either: nothing happened at all.
+    expect(screen.getByRole('menuitem', { name: 'Download' })).toBeInTheDocument();
+  });
+
+  // The control for the test above: the same keys DO activate the item when
+  // the verdict allows it, so the refusal above is the guard working and not
+  // a menu that simply cannot be driven from the keyboard.
+  it('activates Download from the keyboard when the verdict allows it', async () => {
+    const user = userEvent.setup();
+    routeAuthFetch({
+      canDownload: true,
+      download: { ok: true, status: 200, blob: async () => new Blob(['bytes']), text: async () => '' },
+    });
+    stubObjectUrls();
+    renderWithTree();
+    await openMenuOn('brief.md');
+
+    screen.getByRole('menuitem', { name: 'Download' }).focus();
+    await act(async () => {
+      await user.keyboard('{Enter}');
+    });
+    expect(downloadCalls()).toHaveLength(1);
+  });
+
+  it('leaves Download enabled while the lookup is still in flight', async () => {
+    // Never resolves: the verdict is unknown for the whole test.
+    mockAuthFetch.mockImplementation(() => new Promise(() => {}));
     renderWithTree();
     fireEvent.contextMenu(screen.getByText('brief.md'));
-    expect(screen.getByText('Download')).toBeInTheDocument();
+
+    const item = screen.getByRole('menuitem', { name: 'Download' });
+    expect(item).not.toHaveAttribute('aria-disabled');
   });
 
-  it('shows Download as zip on folders (no preflight gate)', () => {
+  it('leaves Download enabled when the lookup itself fails', async () => {
+    mockAuthFetch.mockImplementation((url: string) =>
+      url.includes('/access?')
+        ? Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'boom' }), text: async () => 'boom' })
+        : Promise.resolve({ ok: true, status: 200, blob: async () => new Blob(['b']), text: async () => '' }),
+    );
     renderWithTree();
-    fireEvent.contextMenu(screen.getByText('reports'));
-    expect(screen.getByText('Download as zip')).toBeInTheDocument();
+    await openMenuOn('brief.md');
+
+    expect(screen.getByRole('menuitem', { name: 'Download' })).not.toHaveAttribute('aria-disabled');
   });
 
-  it('surfaces a 403 from the backend as an alert when the user lacks download on the clicked path', async () => {
-    mockAuthFetch.mockResolvedValue({
-      ok: false,
-      status: 403,
-      text: async () => '{"error":"Download permission required"}',
+  /**
+   * The late 403 — permission changed between the menu opening and the click.
+   * It is reported where the row is, never through `window.alert`: a modal
+   * popup for a refused download stops the whole app to say one line.
+   */
+  it('shows an inline notice, not an alert, when a download is refused after the menu opened', async () => {
+    routeAuthFetch({
+      canDownload: true,
+      download: { ok: false, status: 403, text: async () => '{"error":"Download permission required"}' },
     });
     const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
     try {
       renderWithTree();
-      fireEvent.contextMenu(screen.getByText('brief.md'));
+      await openMenuOn('brief.md');
       await act(async () => {
-        fireEvent.click(screen.getByText('Download'));
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }));
       });
-      expect(alertSpy).toHaveBeenCalledTimes(1);
-      const msg = alertSpy.mock.calls[0][0] as string;
-      expect(msg).toContain('brief.md');
-      expect(msg).toContain('403');
+
+      expect(alertSpy).not.toHaveBeenCalled();
+      const notice = await screen.findByTestId('tree-download-error');
+      expect(notice).toHaveAttribute('role', 'alert');
+      expect(notice.textContent).toContain('brief.md');
+      expect(notice.textContent).toContain("You don't have download permission for this item");
+
+      // Dismissible, like every other banner in this tree.
+      fireEvent.click(screen.getByRole('button', { name: /Dismiss download error/i }));
+      expect(screen.queryByTestId('tree-download-error')).toBeNull();
     } finally {
       alertSpy.mockRestore();
     }
   });
 
-  it('calls /file/raw?download=1 with the entry path and saves the blob', async () => {
-    mockAuthFetch.mockResolvedValue({
-      ok: true,
-      status: 200,
-      blob: async () => new Blob(['bytes']),
-      text: async () => '',
+  it('reports a non-403 download failure inline too', async () => {
+    routeAuthFetch({
+      canDownload: true,
+      download: { ok: false, status: 500, text: async () => 'boom' },
     });
-    const createObjectURL = vi.fn(() => 'blob:fake-url');
-    const revokeObjectURL = vi.fn();
-    (globalThis.URL as any).createObjectURL = createObjectURL;
-    (globalThis.URL as any).revokeObjectURL = revokeObjectURL;
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    try {
+      renderWithTree();
+      await openMenuOn('brief.md');
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }));
+      });
+      expect(alertSpy).not.toHaveBeenCalled();
+      const notice = await screen.findByTestId('tree-download-error');
+      expect(notice.textContent).toContain('500');
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
+  /**
+   * Two downloads for the same row can overlap — the menu closes on click but
+   * the ROW does not, so a second Download is one reopen away — and the two
+   * can land out of order. The notice speaks for the LATEST attempt only:
+   * a slow refusal arriving after a fast success would otherwise report a
+   * failed download the user had just watched succeed.
+   */
+  it('ignores a superseded download outcome instead of reporting a stale failure', async () => {
+    let releaseRefusal: () => void = () => {};
+    const slowRefusal = new Promise<unknown>((resolve) => {
+      releaseRefusal = () =>
+        resolve({ ok: false, status: 403, text: async () => '{"error":"Download permission required"}' });
+    });
+    let downloadsSeen = 0;
+    mockAuthFetch.mockImplementation((url: string) => {
+      if (url.includes('/access?')) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => accessBody(true), text: async () => '' });
+      }
+      downloadsSeen += 1;
+      // First click hangs, second answers at once — the out-of-order case.
+      return downloadsSeen === 1
+        ? slowRefusal
+        : Promise.resolve({ ok: true, status: 200, blob: async () => new Blob(['bytes']), text: async () => '' });
+    });
+    stubObjectUrls();
 
     renderWithTree();
-    fireEvent.contextMenu(screen.getByText('brief.md'));
+    await openMenuOn('brief.md');
     await act(async () => {
-      fireEvent.click(screen.getByText('Download'));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }));
+    });
+    // Reopen and click again while the first attempt is still in flight.
+    await openMenuOn('brief.md');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }));
+    });
+    expect(downloadCalls()).toHaveLength(2);
+    expect(screen.queryByTestId('tree-download-error')).toBeNull();
+
+    // The stale refusal lands last. It belongs to a download two clicks ago.
+    await act(async () => {
+      releaseRefusal();
+      await slowRefusal;
+    });
+    expect(screen.queryByTestId('tree-download-error')).toBeNull();
+  });
+
+  it('calls /file/raw?download=1 with the entry path and saves the blob', async () => {
+    routeAuthFetch({
+      canDownload: true,
+      download: { ok: true, status: 200, blob: async () => new Blob(['bytes']), text: async () => '' },
+    });
+    const { createObjectURL, revokeObjectURL } = stubObjectUrls();
+
+    renderWithTree();
+    await openMenuOn('brief.md');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }));
     });
 
-    expect(mockAuthFetch).toHaveBeenCalledTimes(1);
-    const url = mockAuthFetch.mock.calls[0][0] as string;
+    expect(downloadCalls()).toHaveLength(1);
+    const url = downloadCalls()[0];
     expect(url).toContain('/api/workspace/ws-1/file/raw');
     expect(url).toContain('path=brief.md');
     expect(url).toContain('download=1');
@@ -442,16 +813,11 @@ describe('FileExplorer right-click: Download menu (per-path access)', () => {
   });
 
   it('calls /folder/zip?download=1 and triggers a <folder>.zip save when clicking Download as zip on a folder', async () => {
-    mockAuthFetch.mockResolvedValue({
-      ok: true,
-      status: 200,
-      blob: async () => new Blob(['PK', 'bytes']),
-      text: async () => '',
+    routeAuthFetch({
+      canDownload: true,
+      download: { ok: true, status: 200, blob: async () => new Blob(['PK', 'bytes']), text: async () => '' },
     });
-    const createObjectURL = vi.fn(() => 'blob:fake-zip-url');
-    const revokeObjectURL = vi.fn();
-    (globalThis.URL as any).createObjectURL = createObjectURL;
-    (globalThis.URL as any).revokeObjectURL = revokeObjectURL;
+    stubObjectUrls('blob:fake-zip-url');
 
     // Spy on anchor `.download` to confirm we save as <folder>.zip.
     const anchorDownloadValues: string[] = [];
@@ -473,13 +839,13 @@ describe('FileExplorer right-click: Download menu (per-path access)', () => {
     // level and contaminates later tests.
     try {
       renderWithTree();
-      fireEvent.contextMenu(screen.getByText('reports'));
+      await openMenuOn('reports');
       await act(async () => {
-        fireEvent.click(screen.getByText('Download as zip'));
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }));
       });
 
-      expect(mockAuthFetch).toHaveBeenCalledTimes(1);
-      const url = mockAuthFetch.mock.calls[0][0] as string;
+      expect(downloadCalls()).toHaveLength(1);
+      const url = downloadCalls()[0];
       expect(url).toContain('/api/workspace/ws-1/folder/zip');
       expect(url).toContain('path=reports');
       expect(url).toContain('download=1');
@@ -803,18 +1169,95 @@ describe('FileExplorer rows: the prototype tree', () => {
     expect(row.querySelectorAll('svg')).toHaveLength(0);
   });
 
-  it('gives a childless folder no caret and does not toggle it', async () => {
+  it('gives a childless folder the caret, like any folder', () => {
     renderExplorer({ fileTree: TREE });
+    // Without the caret an empty folder reads as a file.
     const empty = screen.getByText('reports').closest('button')!;
-    expect(empty.querySelectorAll('svg')).toHaveLength(0);
-    // Nothing to open, so no claim about being open: `aria-expanded` is
-    // for a control that can expand — and a click changes nothing.
-    expect(empty).not.toHaveAttribute('aria-expanded');
-    fireEvent.click(empty);
-    expect(empty).not.toHaveAttribute('aria-expanded');
+    expect(empty.querySelectorAll('svg')).toHaveLength(1);
+    expect(empty).toHaveAttribute('aria-expanded');
 
     const withKids = screen.getByText('docs').closest('button')!;
     expect(withKids.querySelectorAll('svg')).toHaveLength(1);
+  });
+
+  it('shows one muted, inert "Empty" row under an open empty folder', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [
+        {
+          name: 'outer',
+          relativePath: 'outer',
+          type: 'directory',
+          children: [{ name: 'reports', relativePath: 'outer/reports', type: 'directory', children: [] }],
+        },
+      ],
+    };
+    renderExplorer({ fileTree: tree });
+    // Depth 2 starts closed, so nothing says "Empty" until it is opened.
+    const reports = screen.getByText('reports').closest('button')!;
+    expect(reports).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('Empty')).not.toBeInTheDocument();
+
+    fireEvent.click(reports);
+    expect(reports).toHaveAttribute('aria-expanded', 'true');
+    const emptyRows = screen.getAllByText('Empty');
+    expect(emptyRows).toHaveLength(1);
+    const emptyRow = emptyRows[0].closest('[data-tree-empty]') as HTMLElement;
+    expect(emptyRow).toHaveClass('text-ink-faint');
+    // A statement, not a row: no controls, no path, nothing to focus.
+    expect(emptyRow.querySelector('button, [tabindex], svg')).toBeNull();
+    expect(emptyRow).not.toHaveAttribute('data-tree-path');
+    // One indent step deeper than the folder, where a first child would sit.
+    expect(emptyRow.style.paddingLeft).toBe(`${parseInt(reports.parentElement!.style.paddingLeft) + 13}px`);
+
+    fireEvent.click(reports);
+    expect(screen.queryByText('Empty')).not.toBeInTheDocument();
+  });
+
+  it('truncates a long file name in the middle, keeping its last 8 characters', () => {
+    const name = 'Sidebar-Rows-Say-What-They-Are.md';
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [{ name, relativePath: name, type: 'file' }],
+    };
+    renderExplorer({ fileTree: tree });
+    const row = screen.getByRole('button', { name });
+    const lead = row.querySelector('[data-name-lead]')!;
+    const tail = row.querySelector('[data-name-tail]')!;
+    // The lead is what shrinks behind an ellipsis; the tail never does.
+    expect(lead.textContent).toBe('Sidebar-Rows-Say-What-The');
+    expect(lead).toHaveClass('truncate');
+    expect(tail.textContent).toBe('y-Are.md');
+    expect(tail).toHaveClass('flex-none');
+    expect(tail).not.toHaveClass('truncate');
+    // Together they are the whole name, so a name that fits is unchanged.
+    expect(`${lead.textContent}${tail.textContent}`).toBe(name);
+  });
+
+  it('renders a short file name whole, in one piece', () => {
+    renderExplorer({ fileTree: TREE });
+    const name = screen.getByText('brief.md');
+    expect(name.tagName).toBe('SPAN');
+    expect(name).toHaveClass('truncate');
+    expect(name.closest('button')!.querySelector('[data-name-tail]')).toBeNull();
+  });
+
+  it('keeps end truncation for a folder name — no extension to protect', () => {
+    const folder = 'a-very-long-folder-name-that-will-not-fit';
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [{ name: folder, relativePath: folder, type: 'directory', children: [] }],
+    };
+    renderExplorer({ fileTree: tree });
+    const name = screen.getByText(folder);
+    expect(name).toHaveClass('truncate');
+    expect(name.closest('button')!.querySelector('[data-name-tail]')).toBeNull();
   });
 
   it('marks directory rows with aria-expanded and the open file with aria-current', () => {
@@ -825,7 +1268,9 @@ describe('FileExplorer rows: the prototype tree', () => {
   });
 
   // The one prototype context-menu item the platform never had.
-  it('offers Copy path in the context menu and writes the entry path', async () => {
+  // Root-anchored, so the text pasted into a Markdown link opens the file from
+  // any folder rather than resolving against the linking file's own folder.
+  it('offers Copy path in the context menu and writes the root-anchored entry path', async () => {
     const writeText = vi.fn(async () => {});
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText },
@@ -837,7 +1282,31 @@ describe('FileExplorer rows: the prototype tree', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: /Copy path/i }));
     });
-    expect(writeText).toHaveBeenCalledWith('brief.md');
+    expect(writeText).toHaveBeenCalledWith('/brief.md');
+  });
+
+  it('copies a nested entry as its full root-anchored path', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    renderExplorer({ fileTree: TREE });
+
+    fireEvent.contextMenu(screen.getByText('a.md'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Copy path/i }));
+    });
+    expect(writeText).toHaveBeenCalledWith('/docs/a.md');
+  });
+
+  it('does not offer Copy path on the workspace root, which would copy "/."', () => {
+    renderExplorer({ fileTree: TREE });
+    fireEvent.contextMenu(screen.getByText('reports'));
+    expect(screen.getByRole('menuitem', { name: /Copy path/i })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.contextMenu(screen.getAllByText('.')[0]);
+    expect(screen.queryByRole('menuitem', { name: /Copy path/i })).not.toBeInTheDocument();
   });
 
   it('offers Copy path on a folder row too', () => {
@@ -1062,6 +1531,161 @@ describe('FileExplorer rows: the prototype tree', () => {
   });
 });
 
+// ── Taking a suggestion back from the row that shows it ──
+//
+// Withdraw already existed — on the file page's change box, and in the
+// change-request dialog. Neither is where the accent-coloured row leads, and
+// the notice that announced the suggestion said nothing about undoing it, so
+// the reporter concluded an accidental upload was permanent. The row's
+// right-click menu is where the user looks; this is that menu.
+describe('FileExplorer: withdrawing my own suggestion from its row', () => {
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: 'docs',
+        relativePath: 'docs',
+        type: 'directory',
+        children: [{ name: 'a.md', relativePath: 'docs/a.md', type: 'file' }],
+      },
+      { name: 'brief.md', relativePath: 'brief.md', type: 'file' },
+    ],
+  };
+  const PROPOSED = 'docs/new-idea.md';
+  const proposedRow = () =>
+    screen.getByTitle('Proposed by you: opens the change request').closest('button')!;
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+    cancelMocks.cancelPullRequest.mockReset();
+    cancelMocks.cancelPullRequest.mockResolvedValue({ ok: true });
+  });
+
+  it('offers Withdraw suggestion on a proposed row of my own request', () => {
+    renderExplorer({ fileTree: TREE, minePaths: new Map([[PROPOSED, 12]]) });
+    fireEvent.contextMenu(proposedRow(), { clientX: 40, clientY: 40 });
+    expect(screen.getByRole('menuitem', { name: /Withdraw suggestion/i })).toBeInTheDocument();
+  });
+
+  /**
+   * The rows are synthesized from `/mine` today, so this is the gate holding
+   * the line rather than a case the tree can reach — which is exactly why it
+   * is tested. An owner seeing another user's proposal must be offered no
+   * Withdraw: their "no" is Decline, and it stays in the dialog.
+   */
+  it('offers no Withdraw on a proposed row from someone else’s request', () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([[PROPOSED, 12]]),
+      // The row is there; the request is not the caller's.
+      mineNumbers: [],
+    });
+    fireEvent.contextMenu(proposedRow(), { clientX: 40, clientY: 40 });
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /Withdraw/i })).toBeNull();
+    // And nothing else about the row changed.
+    expect(screen.getByRole('menuitem', { name: /Manage access/i })).toBeInTheDocument();
+  });
+
+  it('names the file in the confirmation when the request carries one', async () => {
+    renderExplorer({ fileTree: TREE, minePaths: new Map([[PROPOSED, 12]]) });
+    fireEvent.contextMenu(proposedRow(), { clientX: 40, clientY: 40 });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Withdraw suggestion/i }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Withdraw suggestion' });
+    expect(dialog).toHaveTextContent('Withdraw new-idea.md?');
+  });
+
+  /**
+   * Withdrawal is per REQUEST: a multi-file drop became one change request,
+   * and cancelling it cancels all of it. The user right-clicked one row, so
+   * the count is said before they confirm — not discovered afterwards.
+   */
+  it('says the whole suggestion goes when the request carries several files', async () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([[PROPOSED, 12]]),
+      crFiles: ['docs/new-idea.md', 'docs/budget.csv', 'docs/plan.md'],
+    });
+    fireEvent.contextMenu(proposedRow(), { clientX: 40, clientY: 40 });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Withdraw suggestion/i }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Withdraw suggestion' });
+    expect(dialog).toHaveTextContent('This withdraws the whole suggestion: 3 files');
+    // The single-file sentence must not also be there — it would name one of
+    // the three and contradict the count.
+    expect(dialog).not.toHaveTextContent('new-idea.md');
+  });
+
+  it('cancels the request and the row goes, without a reload', async () => {
+    const view = renderExplorer({ fileTree: TREE, minePaths: new Map([[PROPOSED, 12]]) });
+    const stale = vi.fn();
+    window.addEventListener(PR_STALE_EVENT, stale);
+    try {
+      fireEvent.contextMenu(proposedRow(), { clientX: 40, clientY: 40 });
+      fireEvent.click(screen.getByRole('menuitem', { name: /Withdraw suggestion/i }));
+      const dialog = await screen.findByRole('dialog', { name: 'Withdraw suggestion' });
+
+      // Nothing is sent until Confirm.
+      expect(cancelMocks.cancelPullRequest).not.toHaveBeenCalled();
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Withdraw' }));
+      });
+
+      // The existing author-cancel path, called with the REQUEST number —
+      // not the path, and not a new endpoint of the tree's own.
+      expect(cancelMocks.cancelPullRequest).toHaveBeenCalledWith(12);
+      // The signal every consumer of the request list listens for. This is
+      // what takes the row away: `/mine` stops carrying the request.
+      expect(stale).toHaveBeenCalled();
+
+      view.requestWithdrawn(12);
+      expect(screen.queryByTitle('Proposed by you: opens the change request')).toBeNull();
+      expect(screen.queryByText('new-idea.md')).toBeNull();
+    } finally {
+      window.removeEventListener(PR_STALE_EVENT, stale);
+    }
+  });
+
+  /**
+   * Already applied, or declined meanwhile. The rows must still re-read from
+   * the server — a refused cancel means the row was describing something no
+   * longer open, and leaving it there is the one outcome worse than the error.
+   */
+  it('refreshes the rows even when the cancel is refused', async () => {
+    cancelMocks.cancelPullRequest.mockRejectedValue(new Error('Change request #12 is already merged'));
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const stale = vi.fn();
+    window.addEventListener(PR_STALE_EVENT, stale);
+    try {
+      renderExplorer({ fileTree: TREE, minePaths: new Map([[PROPOSED, 12]]) });
+      fireEvent.contextMenu(proposedRow(), { clientX: 40, clientY: 40 });
+      fireEvent.click(screen.getByRole('menuitem', { name: /Withdraw suggestion/i }));
+      const dialog = await screen.findByRole('dialog', { name: 'Withdraw suggestion' });
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Withdraw' }));
+      });
+
+      await waitFor(() => expect(alertSpy).toHaveBeenCalled());
+      expect(String(alertSpy.mock.calls[0][0])).toMatch(/already merged/);
+      expect(stale).toHaveBeenCalled();
+    } finally {
+      window.removeEventListener(PR_STALE_EVENT, stale);
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('leaves an ordinary row’s menu without a Withdraw', () => {
+    renderExplorer({ fileTree: TREE, minePaths: new Map([[PROPOSED, 12]]) });
+    fireEvent.contextMenu(screen.getByText('brief.md'), { clientX: 40, clientY: 40 });
+    expect(screen.queryByRole('menuitem', { name: /Withdraw/i })).toBeNull();
+    expect(screen.getByRole('menuitem', { name: /Delete/i })).toBeInTheDocument();
+  });
+});
+
 // ── The right-click menu has to land on screen ──
 //
 // The panel is `position: fixed`, so whatever falls past the bottom edge of
@@ -1236,6 +1860,7 @@ describe('FileExplorer right-click: the viewport stub cleans up after itself', (
 // follows the destination, plus whatever else about it is worth knowing.
 describe('FileExplorer: delete and move ask first', () => {
   const DRAG_MIME = 'application/x-workspace-path';
+  const DRAG_KIND_MIME = 'application/x-workspace-kind';
   const KB = 'knowledge-base';
   const TREE: FileTreeEntry = {
     name: '.',
@@ -1279,9 +1904,51 @@ describe('FileExplorer: delete and move ask first', () => {
   };
   const CONTRACT = `${KB}/KnowledgeBase/Legal/contract.pdf`;
 
+  /** One side of the prospective-access answer. */
+  type Side = { read?: unknown[]; write?: unknown[] };
+  const group = (name: string) => ({ kind: 'group', name });
+  const person = (name: string, email: string) => ({ kind: 'person', name, email });
+
+  /**
+   * Answer the move dialog's access lookup with these before/after holders,
+   * and everything else (the destination-writable preflight) with a writable
+   * verdict — the warnings suite covers that one on its own.
+   */
+  function answerAccess(before: Side, after: Side, opts: { canWrite?: boolean } = {}) {
+    const side = (s: Side) => ({ read: s.read ?? [], write: s.write ?? [] });
+    mockAuthFetch.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.includes('/access/prospective')) {
+        return { ok: true, json: async () => ({ before: side(before), after: side(after) }) };
+      }
+      if (u.includes('/access?')) {
+        return { ok: true, json: async () => ({ canWrite: opts.canWrite ?? true }) };
+      }
+      // Anything else is another case's call, left unanswered as it was
+      // before the move dialog asked about access at all.
+      return undefined;
+    });
+  }
+
+  /** The move dialog once its access lookup has landed. */
+  async function openMoveDialog(rowName: string, sourcePath: string) {
+    await dropOn(rowName, sourcePath);
+    await waitFor(() =>
+      expect(
+        mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),
+      ).toBe(true),
+    );
+    // Let the answer render.
+    await act(async () => {});
+    return screen.getByRole('dialog');
+  }
+
   beforeEach(() => {
     cleanup();
     mockAuthFetch.mockReset();
+    // Most cases are not about the access change; default to one that found
+    // nothing so the dialog settles instead of sitting on its fallback note.
+    answerAccess({}, {});
   });
   // The branch model is module-global; put back what the shared test setup
   // applied, so a case that protects `main` does not leak into the next suite.
@@ -1297,10 +1964,14 @@ describe('FileExplorer: delete and move ask first', () => {
     fireEvent.click(screen.getByText('Legal'));
   }
 
-  async function dropOn(rowName: string, sourcePath: string) {
+  async function dropOn(rowName: string, sourcePath: string, kind: 'file' | 'directory' = 'file') {
     await act(async () => {
       fireEvent.drop(screen.getByText(rowName), {
-        dataTransfer: { getData: (t: string) => (t === DRAG_MIME ? sourcePath : ''), files: [] },
+        dataTransfer: {
+          getData: (t: string) =>
+            t === DRAG_MIME ? sourcePath : t === DRAG_KIND_MIME ? kind : '',
+          files: [],
+        },
       });
     });
   }
@@ -1346,13 +2017,10 @@ describe('FileExplorer: delete and move ask first', () => {
   });
 
   describe('move', () => {
-    it('states that access follows the destination, and moves on Confirm', async () => {
+    it('says nobody loses or gains access when the lookup finds no change, and moves on Confirm', async () => {
       const { moveEntry } = renderExplorer({ fileTree: TREE });
-      await dropOn('Sales', CONTRACT);
-      const dialog = screen.getByRole('dialog');
-      expect(dialog).toHaveTextContent(
-        "Move contract.pdf to Sales? Access to it will follow Sales' rules from now on.",
-      );
+      const dialog = await openMoveDialog('Sales', CONTRACT);
+      expect(dialog).toHaveTextContent("Move contract.pdf to Sales? Nobody's access changes.");
       // A move between two folders of the same root, on a draft: nothing else to say.
       expect(screen.queryAllByRole('note')).toHaveLength(0);
       expect(moveEntry).not.toHaveBeenCalled();
@@ -1362,22 +2030,18 @@ describe('FileExplorer: delete and move ask first', () => {
       expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Sales/contract.pdf`);
     });
 
-    it("uses 's for a destination that does not end in s", async () => {
-      renderExplorer({ fileTree: TREE });
-      openLegal();
-      await dropOn('Old', CONTRACT);
-      expect(screen.getByRole('dialog')).toHaveTextContent("Access to it will follow Old's rules from now on.");
-    });
-
     it('sends nothing on Cancel', async () => {
       const { moveEntry } = renderExplorer({ fileTree: TREE });
-      await dropOn('Sales', CONTRACT);
+      await openMoveDialog('Sales', CONTRACT);
       await act(async () => {
         fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
       });
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
       expect(moveEntry).not.toHaveBeenCalled();
-      expect(mockAuthFetch).not.toHaveBeenCalled();
+      // The lookup describes the move; it never performs any part of it.
+      expect(
+        mockAuthFetch.mock.calls.every((c) => String(c[0]).includes('/access')),
+      ).toBe(true);
     });
 
     it('drops an open confirmation when the workspace changes under it', async () => {
@@ -1403,17 +2067,25 @@ describe('FileExplorer: delete and move ask first', () => {
       expect(moveEntry).not.toHaveBeenCalled();
     });
 
-    it('warns that a platform-managed file is read differently once moved', async () => {
-      renderExplorer({ fileTree: TREE });
-      await dropOn('Sales', `${KB}/KnowledgeBase/Legal/access.md`);
-      expect(screen.getByRole('note')).toHaveTextContent(
-        'access.md is a platform-managed file; moving it changes how the platform reads it.',
-      );
+    it('never asks about a platform file: the move is refused, not confirmed', async () => {
+      // There used to be a warning here ("moving it changes how the platform
+      // reads it") on a move the dialog then went ahead with. Moving one out
+      // of its folder breaks the workspace, so it is not a choice to confirm.
+      const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+      try {
+        const { moveEntry } = renderExplorer({ fileTree: TREE });
+        await dropOn('Sales', `${KB}/KnowledgeBase/Legal/access.md`);
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+        expect(moveEntry).not.toHaveBeenCalled();
+        expect(alertSpy).toHaveBeenCalledWith('access.md is a platform file and stays in its folder.');
+      } finally {
+        alertSpy.mockRestore();
+      }
     });
 
     it('warns when the move crosses from one root into another', async () => {
       renderExplorer({ fileTree: TREE });
-      await dropOn('Data', CONTRACT);
+      await openMoveDialog('Data', CONTRACT);
       expect(screen.getByRole('note')).toHaveTextContent(
         'This moves it out of KnowledgeBase/ into Data/ — the two roots are handled differently.',
       );
@@ -1421,25 +2093,344 @@ describe('FileExplorer: delete and move ask first', () => {
 
     it('warns that a move into a folder the caller cannot write will be refused', async () => {
       configureBranchModel({ defaultBranch: 'main', protectedBranches: ['main'] });
-      mockAuthFetch.mockResolvedValue({ ok: true, json: async () => ({ canWrite: false }) });
+      answerAccess({}, {}, { canWrite: false });
       renderExplorer({ fileTree: TREE, workspaceId: 'main' });
       await dropOn('Sales', CONTRACT);
       expect(await screen.findByRole('note')).toHaveTextContent(
         "You can't write to Sales — the move will be refused.",
       );
       // The lookup is the folder's, repo-relative — what the access route resolves.
-      expect(String(mockAuthFetch.mock.calls[0][0])).toContain(
+      const writable = mockAuthFetch.mock.calls
+        .map((c) => String(c[0]))
+        .find((u) => u.includes('/access?'));
+      expect(writable).toContain(
         `/api/workspace/main/access?path=${encodeURIComponent('KnowledgeBase/Sales')}&kind=folder`,
       );
     });
 
     it('adds no refusal warning when the caller can write the destination', async () => {
       configureBranchModel({ defaultBranch: 'main', protectedBranches: ['main'] });
-      mockAuthFetch.mockResolvedValue({ ok: true, json: async () => ({ canWrite: true }) });
       renderExplorer({ fileTree: TREE, workspaceId: 'main' });
-      await dropOn('Sales', CONTRACT);
-      await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+      await openMoveDialog('Sales', CONTRACT);
       expect(screen.queryAllByRole('note')).toHaveLength(0);
+    });
+  });
+
+  /**
+   * A rename or a drop onto a name that is taken is refused by the server —
+   * nothing is overwritten — and the sentence it sends ("A file named X
+   * already exists in Y.") is what the sidebar shows, where the action was.
+   * Neither refusal goes through `window.alert`, and neither moves a row.
+   */
+  describe('a destination that is already taken', () => {
+    const TAKEN = 'A file named nda.md already exists in Legal.';
+
+    async function startRename(rowName: string) {
+      fireEvent.contextMenu(screen.getByText(rowName));
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: /Rename/i }));
+      });
+      return screen.getByRole('textbox') as HTMLInputElement;
+    }
+
+    async function typeAndSubmit(input: HTMLInputElement, name: string) {
+      await act(async () => {
+        fireEvent.change(input, { target: { value: name } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+      });
+    }
+
+    it('shows the refusal in the rename box and keeps the box open on the name that was typed', async () => {
+      const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+      try {
+        const moveEntry = vi.fn().mockRejectedValue(new Error(TAKEN));
+        renderExplorer({ fileTree: TREE, moveEntry });
+        openLegal();
+
+        const input = await startRename('contract.pdf');
+        await typeAndSubmit(input, 'nda.md');
+
+        expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/nda.md`);
+        expect(screen.getByTestId('rename-error')).toHaveTextContent(TAKEN);
+        // Still open, still holding what was typed: the name is there to fix.
+        expect(screen.getByRole('textbox')).toHaveValue('nda.md');
+        expect(alertSpy).not.toHaveBeenCalled();
+      } finally {
+        alertSpy.mockRestore();
+      }
+    });
+
+    it('sends the rename once more after the name is changed, and closes the box when it lands', async () => {
+      const moveEntry = vi.fn()
+        .mockRejectedValueOnce(new Error(TAKEN))
+        .mockResolvedValueOnce(undefined);
+      renderExplorer({ fileTree: TREE, moveEntry });
+      openLegal();
+
+      const input = await startRename('contract.pdf');
+      await typeAndSubmit(input, 'nda.md');
+      expect(screen.getByTestId('rename-error')).toBeInTheDocument();
+
+      // Editing clears the refusal — the new name has not been refused.
+      await act(async () => {
+        fireEvent.change(screen.getByRole('textbox'), { target: { value: 'deal.pdf' } });
+      });
+      expect(screen.queryByTestId('rename-error')).not.toBeInTheDocument();
+
+      await act(async () => {
+        fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+      });
+      expect(moveEntry).toHaveBeenLastCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/deal.pdf`);
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    });
+
+    it('ignores edits made while the rename is in flight, so the answer lands on the name it was about', async () => {
+      // A name typed while the request is out would be thrown away by the row
+      // unmounting on success, and a refusal coming back would appear under a
+      // name it was never about. The box is frozen for that window instead.
+      let land: (() => void) | undefined;
+      const moveEntry = vi.fn().mockImplementation(
+        () => new Promise<void>((resolve) => { land = resolve; }),
+      );
+      renderExplorer({ fileTree: TREE, moveEntry });
+      openLegal();
+
+      const input = await startRename('contract.pdf');
+      await typeAndSubmit(input, 'nda.md');
+      expect(moveEntry).toHaveBeenCalledTimes(1);
+
+      const inFlight = screen.getByRole('textbox') as HTMLInputElement;
+      expect(inFlight).toHaveAttribute('readonly');
+      await act(async () => {
+        fireEvent.change(inFlight, { target: { value: 'something-else.md' } });
+        fireEvent.keyDown(inFlight, { key: 'Enter' });
+      });
+      // Neither the edit nor the second Enter took: one request, one name.
+      expect(screen.getByRole('textbox')).toHaveValue('nda.md');
+      expect(moveEntry).toHaveBeenCalledTimes(1);
+
+      await act(async () => { land?.(); });
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+      expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/nda.md`);
+    });
+
+    it('an ordinary rename closes the box and moves the file, as before', async () => {
+      const moveEntry = vi.fn().mockResolvedValue(undefined);
+      renderExplorer({ fileTree: TREE, moveEntry });
+      openLegal();
+
+      const input = await startRename('contract.pdf');
+      await typeAndSubmit(input, 'agreement.pdf');
+
+      expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/agreement.pdf`);
+      expect(screen.queryByTestId('rename-error')).not.toBeInTheDocument();
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    });
+
+    it('a refused drop says so under the row and leaves both entries where they were', async () => {
+      const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+      try {
+        const clash = 'A file named contract.pdf already exists in Sales.';
+        const moveEntry = vi.fn().mockRejectedValue(new Error(clash));
+        renderExplorer({ fileTree: TREE, moveEntry });
+        openLegal();
+
+        await dropOn('Sales', CONTRACT);
+        await act(async () => {
+          fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+        });
+
+        expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Sales/contract.pdf`);
+        const notice = screen.getByTestId('tree-move-error');
+        expect(notice).toHaveTextContent(clash);
+        expect(notice).toHaveAttribute('role', 'alert');
+        expect(alertSpy).not.toHaveBeenCalled();
+        // The dragged row and the row it was dropped on both stayed.
+        expect(screen.getByText('contract.pdf')).toBeInTheDocument();
+        expect(screen.getByText('Sales')).toBeInTheDocument();
+
+        await act(async () => {
+          fireEvent.click(screen.getByRole('button', { name: 'Dismiss move error' }));
+        });
+        expect(screen.queryByTestId('tree-move-error')).not.toBeInTheDocument();
+      } finally {
+        alertSpy.mockRestore();
+      }
+    });
+
+    it('a drop that lands says nothing', async () => {
+      renderExplorer({ fileTree: TREE });
+      openLegal();
+
+      await dropOn('Sales', CONTRACT);
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+
+      expect(screen.queryByTestId('tree-move-error')).not.toBeInTheDocument();
+    });
+  });
+
+  // The move warning this replaced said only that access would follow the
+  // destination's rules. A tester read that and could not tell what it meant
+  // for anyone, so the dialog now names who loses and who gains — by the
+  // group, role or person the grant names, never expanded into members.
+  describe('move: who loses and who gains access', () => {
+    it('names the group that loses access and the one that gains it', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess(
+        { read: [group('Engineering')], write: [group('Engineering')] },
+        { read: [group('Product')] },
+      );
+      const dialog = await openMoveDialog('Sales', CONTRACT);
+
+      expect(dialog).toHaveTextContent('Move contract.pdf to Sales?');
+      expect(dialog).not.toHaveTextContent("Nobody's access changes.");
+      expect(screen.getByText('Will lose access:')).toBeInTheDocument();
+      expect(screen.getByText('Engineering: can no longer open')).toBeInTheDocument();
+      expect(screen.getByText('Engineering: can no longer edit')).toBeInTheDocument();
+      expect(screen.getByText('Will gain access:')).toBeInTheDocument();
+      expect(screen.getByText('Product: can open')).toBeInTheDocument();
+    });
+
+    it('shows only the lose block when nobody gains', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess({ write: [group('Engineering')] }, {});
+      await openMoveDialog('Sales', CONTRACT);
+
+      expect(screen.getByText('Engineering: can no longer edit')).toBeInTheDocument();
+      expect(screen.queryByText('Will gain access:')).not.toBeInTheDocument();
+    });
+
+    it('shows only the gain block when nobody loses', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess({}, { read: [group('Product')] });
+      await openMoveDialog('Sales', CONTRACT);
+
+      expect(screen.getByText('Product: can open')).toBeInTheDocument();
+      expect(screen.queryByText('Will lose access:')).not.toBeInTheDocument();
+    });
+
+    it('names a directly granted person, not the group they might be in', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess({ read: [person('Ali Raza', 'ali@bevel.software')] }, {});
+      await openMoveDialog('Sales', CONTRACT);
+
+      expect(screen.getByText('Ali Raza: can no longer open')).toBeInTheDocument();
+    });
+
+    it('shows six lines and folds the rest into "and N more"', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess({ read: Array.from({ length: 9 }, (_, i) => group(`Team ${i + 1}`)) }, {});
+      await openMoveDialog('Sales', CONTRACT);
+
+      expect(screen.getByText('Team 6: can no longer open')).toBeInTheDocument();
+      expect(screen.queryByText('Team 7: can no longer open')).not.toBeInTheDocument();
+      expect(screen.getByText('and 3 more')).toBeInTheDocument();
+    });
+
+    it('asks the destination FOLDER, repo-relative, for the file being moved', async () => {
+      renderExplorer({ fileTree: TREE, workspaceId: 'main' });
+      await openMoveDialog('Sales', CONTRACT);
+
+      const url = mockAuthFetch.mock.calls
+        .map((c) => String(c[0]))
+        .find((u) => u.includes('/access/prospective'))!;
+      expect(url).toContain('/api/workspace/main/access/prospective');
+      expect(url).toContain(`from=${encodeURIComponent('KnowledgeBase/Legal/contract.pdf')}`);
+      expect(url).toContain(`toDir=${encodeURIComponent('KnowledgeBase/Sales')}`);
+    });
+
+    it('falls back to the one-sentence form, with a note, when the lookup fails — and Move stays enabled', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE });
+      mockAuthFetch.mockImplementation(async (url: string) => {
+        if (String(url).includes('/access/prospective')) throw new Error('network down');
+        return { ok: true, json: async () => ({ canWrite: true }) };
+      });
+      // The lookup is still made; it just never answers usefully.
+      const dialog = await openMoveDialog('Sales', CONTRACT);
+
+      expect(dialog).toHaveTextContent(
+        "Move contract.pdf to Sales? Access to it will follow Sales' rules from now on.",
+      );
+      expect(screen.getByRole('note')).toHaveTextContent("Couldn't work out the access change.");
+      expect(screen.queryByText('Will lose access:')).not.toBeInTheDocument();
+
+      const move = screen.getByRole('button', { name: 'Move' });
+      expect(move).toBeEnabled();
+      await act(async () => {
+        fireEvent.click(move);
+      });
+      expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Sales/contract.pdf`);
+    });
+
+    it('leaves Move enabled while the lookup is still out', async () => {
+      renderExplorer({ fileTree: TREE });
+      mockAuthFetch.mockImplementation(async (url: string) =>
+        String(url).includes('/access/prospective')
+          ? new Promise(() => {}) // never settles — the two-second budget is the caller's
+          : { ok: true, json: async () => ({ canWrite: true }) },
+      );
+      await dropOn('Sales', CONTRACT);
+
+      expect(screen.getByRole('button', { name: 'Move' })).toBeEnabled();
+      expect(screen.getByRole('dialog')).toHaveTextContent('Move contract.pdf to Sales?');
+      expect(screen.queryByRole('note')).not.toBeInTheDocument();
+    });
+
+    it('names a group and a role that share a name as two separate lines', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess(
+        { read: [group('Engineering'), { kind: 'role', name: 'Engineering' }] },
+        {},
+      );
+      await openMoveDialog('Sales', CONTRACT);
+
+      // Two principals whose lines READ the same are still two principals; the
+      // block shows both rather than collapsing them into one.
+      expect(screen.getAllByText('Engineering: can no longer open')).toHaveLength(2);
+    });
+
+    it('asks nothing about a folder being dragged, and says only what it always said', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE });
+      // A folder's access is its own access.md plus every file under it — not
+      // the question this lookup answers, so it is not asked.
+      await dropOn('Sales', `${KB}/KnowledgeBase/Legal/Old`, 'directory');
+
+      const dialog = screen.getByRole('dialog');
+      expect(dialog).toHaveTextContent(
+        "Move Old to Sales? Access to it will follow Sales' rules from now on.",
+      );
+      expect(screen.queryByText('Will lose access:')).not.toBeInTheDocument();
+      expect(screen.queryByText("Couldn't work out the access change.")).not.toBeInTheDocument();
+      expect(
+        mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),
+      ).toBe(false);
+
+      // And it is still an ordinary move.
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+      expect(moveEntry).toHaveBeenCalledWith(
+        `${KB}/KnowledgeBase/Legal/Old`,
+        `${KB}/KnowledgeBase/Sales/Old`,
+      );
+    });
+
+    it('never decorates the next move with the last one’s answer', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess({ read: [group('Engineering')] }, {});
+      await openMoveDialog('Sales', CONTRACT);
+      expect(screen.getByText('Engineering: can no longer open')).toBeInTheDocument();
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      });
+      answerAccess({}, { read: [group('Product')] });
+      await openMoveDialog('Data', CONTRACT);
+
+      expect(screen.queryByText('Engineering: can no longer open')).not.toBeInTheDocument();
+      expect(screen.getByText('Product: can open')).toBeInTheDocument();
     });
   });
 
@@ -1495,5 +2486,737 @@ describe('FileExplorer: delete and move ask first', () => {
       });
       expect(deleteEntry).not.toHaveBeenCalled();
     });
+  });
+});
+
+// A folder holding files proposed in open change requests. Its delete used to
+// ask the plain question, count the proposed rows as files it would take, and
+// leave them behind: the folder came straight back holding only the proposed
+// rows, and deleting THAT reached the server for a path the branch did not
+// have. The dialog now names the requests and asks what to do with them.
+describe('FileExplorer: deleting a folder with proposed files', () => {
+  const KB = 'knowledge-base';
+  const REPORTS = `${KB}/Data/Reports`;
+  const PROPOSED = `${REPORTS}/proposed.md`;
+  /** One committed file on the branch; `proposed.md` exists only in request #12. */
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: KB,
+        relativePath: KB,
+        type: 'directory',
+        children: [
+          {
+            name: 'Data',
+            relativePath: `${KB}/Data`,
+            type: 'directory',
+            children: [
+              {
+                name: 'Reports',
+                relativePath: REPORTS,
+                type: 'directory',
+                children: [{ name: 'committed.md', relativePath: `${REPORTS}/committed.md`, type: 'file' }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  /** The branch after "Delete folder only": the folder is gone, the proposal is not. */
+  const TREE_WITHOUT_REPORTS: FileTreeEntry = {
+    ...TREE,
+    children: [
+      { name: KB, relativePath: KB, type: 'directory', children: [{ name: 'Data', relativePath: `${KB}/Data`, type: 'directory', children: [] }] },
+    ],
+  };
+
+  const request = (over: Record<string, unknown> = {}) => ({
+    number: 12,
+    title: 'Quarterly numbers',
+    authorName: 'Razvan',
+    mine: true,
+    paths: ['Data/Reports/proposed.md'],
+    mayRemove: true,
+    ...over,
+  });
+  const json = (body: unknown, status = 200) => ({
+    ok: status < 400,
+    status,
+    json: async () => body,
+  });
+
+  const removal = (over: Record<string, unknown> = {}) => ({
+    number: 12,
+    removedPaths: ['Data/Reports/proposed.md'],
+    withdrawn: true,
+    stillProposed: [],
+    keptForSaves: false,
+    ...over,
+  });
+
+  function answer(requests: unknown[], results: unknown[] = [removal()]) {
+    mockAuthFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.startsWith('/api/workflow/change-requests/under-folder?')) return json({ requests });
+      if (url === '/api/workflow/change-requests/under-folder/remove' && init?.method === 'POST') {
+        return json({ results });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+  }
+
+  const renderWithProposal = (fileTree: FileTreeEntry = TREE) =>
+    renderExplorer({
+      fileTree,
+      minePaths: new Map([[PROPOSED, 12]]),
+      openChangeRequestPaths: [PROPOSED],
+    });
+
+  async function chooseDelete(rowName: string) {
+    fireEvent.contextMenu(screen.getByText(rowName));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Delete/i }));
+    });
+  }
+
+  let alertSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+    alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    alertSpy.mockRestore();
+  });
+
+  it('names the open requests and offers the three actions, counting only the files on this branch', async () => {
+    answer([request()]);
+    renderWithProposal();
+    await chooseDelete('Reports');
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(dialog).toHaveTextContent('#12 “Quarterly numbers” by you (1 proposed file)'));
+    expect(dialog).toHaveTextContent('Delete Reports and its 1 file?');
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/workflow/change-requests/under-folder?path=Data%2FReports');
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Delete folder only' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Delete folder and its proposed changes' })).toBeEnabled();
+  });
+
+  it('"Delete folder only" deletes the branch copy and leaves the requests alone', async () => {
+    answer([request()]);
+    const retracted = vi.fn();
+    window.addEventListener('bevel:suggestions-retracted', retracted);
+    const { deleteEntry } = renderWithProposal();
+    try {
+      await chooseDelete('Reports');
+      const onlyFolder = await screen.findByRole('button', { name: 'Delete folder only' });
+      await act(async () => {
+        fireEvent.click(onlyFolder);
+      });
+      expect(deleteEntry).toHaveBeenCalledWith(REPORTS);
+      expect(mockAuthFetch).not.toHaveBeenCalledWith(
+        '/api/workflow/change-requests/under-folder/remove',
+        expect.anything(),
+      );
+      // The requests stay open, so their proposed rows stay listed.
+      expect(retracted).not.toHaveBeenCalled();
+      expect(alertSpy).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('bevel:suggestions-retracted', retracted);
+    }
+  });
+
+  it('"Delete folder and its proposed changes" deletes the branch copy, then empties the requests, then clears the markers', async () => {
+    answer([request()]);
+    const events: string[] = [];
+    const onRetract = (e: Event) =>
+      events.push(`retract:${(e as CustomEvent<{ folder: string }>).detail.folder}`);
+    const onStale = () => events.push('stale');
+    window.addEventListener('bevel:suggestions-retracted', onRetract);
+    window.addEventListener('bevel:pr-stale', onStale);
+    const deleteEntry = vi.fn(async () => {
+      events.push('delete');
+    });
+    renderExplorer({
+      fileTree: TREE,
+      deleteEntry,
+      minePaths: new Map([[PROPOSED, 12]]),
+      openChangeRequestPaths: [PROPOSED],
+    });
+    try {
+      await chooseDelete('Reports');
+      const both = await screen.findByRole('button', { name: 'Delete folder and its proposed changes' });
+      await waitFor(() => expect(both).toBeEnabled());
+      await act(async () => {
+        fireEvent.click(both);
+      });
+      await waitFor(() => expect(events).toContain('stale'));
+      expect(deleteEntry).toHaveBeenCalledWith(REPORTS);
+      const removeCall = mockAuthFetch.mock.calls.find(
+        ([url]) => url === '/api/workflow/change-requests/under-folder/remove',
+      );
+      expect(JSON.parse((removeCall?.[1] as RequestInit).body as string)).toEqual({ path: 'Data/Reports' });
+      // Branch first, requests second, markers last.
+      expect(events).toEqual(['delete', 'retract:Data/Reports', 'stale']);
+      expect(alertSpy).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('bevel:suggestions-retracted', onRetract);
+      window.removeEventListener('bevel:pr-stale', onStale);
+    }
+  });
+
+  it('says what the removal left behind: a file proposed meanwhile, a request kept open for a save still landing', async () => {
+    answer(
+      [request(), request({ number: 40, mine: false, authorName: 'Ana', paths: ['Data/Reports/q3.md'] })],
+      [
+        removal({ withdrawn: false, stillProposed: ['Data/Reports/notes.md'] }),
+        removal({ number: 40, removedPaths: ['Data/Reports/q3.md'], withdrawn: false, keptForSaves: true }),
+      ],
+    );
+    renderWithProposal();
+    await chooseDelete('Reports');
+    const both = await screen.findByRole('button', { name: 'Delete folder and its proposed changes' });
+    await waitFor(() => expect(both).toBeEnabled());
+    await act(async () => {
+      fireEvent.click(both);
+    });
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(1));
+    const message = String(alertSpy.mock.calls[0]![0]);
+    expect(message).toContain('Deleted Reports and its proposed changes, except:');
+    expect(message).toContain('#12 still proposes Data/Reports/notes.md — added while the folder was being deleted.');
+    expect(message).toContain('#40 stays open: a save to it was still landing.');
+  });
+
+  it('does not touch the requests when the branch delete was called off', async () => {
+    answer([request()]);
+    const deleteEntry = vi.fn().mockResolvedValue(false);
+    renderExplorer({
+      fileTree: TREE,
+      deleteEntry,
+      minePaths: new Map([[PROPOSED, 12]]),
+      openChangeRequestPaths: [PROPOSED],
+    });
+    await chooseDelete('Reports');
+    const both = await screen.findByRole('button', { name: 'Delete folder and its proposed changes' });
+    await act(async () => {
+      fireEvent.click(both);
+    });
+    expect(deleteEntry).toHaveBeenCalled();
+    expect(mockAuthFetch).not.toHaveBeenCalledWith(
+      '/api/workflow/change-requests/under-folder/remove',
+      expect.anything(),
+    );
+  });
+
+  it('disables the second action with the reason when one request is not the caller’s to change', async () => {
+    answer([
+      request(),
+      request({
+        number: 40,
+        title: 'Colleague draft',
+        authorName: 'Ana',
+        mine: false,
+        paths: ['Data/Reports/q3.md'],
+        mayRemove: false,
+        reason: '#40 was proposed by Ana; only its author, an admin or someone who can write every file it proposes here can change it.',
+      }),
+    ]);
+    renderWithProposal();
+    await chooseDelete('Reports');
+    const both = await screen.findByRole('button', { name: 'Delete folder and its proposed changes' });
+    expect(both).toBeDisabled();
+    expect(screen.getByRole('note')).toHaveTextContent('#40 was proposed by Ana');
+    expect(screen.getByRole('dialog')).toHaveTextContent('#40 “Colleague draft” by Ana (1 proposed file)');
+    expect(screen.getByRole('button', { name: 'Delete folder only' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+  });
+
+  it('never reaches the server for a folder that only proposed files put in the tree (the reproduction case)', async () => {
+    answer([request()]);
+    const { deleteEntry } = renderWithProposal(TREE_WITHOUT_REPORTS);
+    // The proposal alone keeps the folder in the tree.
+    await chooseDelete('Reports');
+    const onlyFolder = await screen.findByRole('button', { name: 'Delete folder only' });
+    expect(screen.getByRole('dialog')).toHaveTextContent('Delete Reports and its 0 files?');
+    await act(async () => {
+      fireEvent.click(onlyFolder);
+    });
+    expect(deleteEntry).not.toHaveBeenCalled();
+    expect(alertSpy).not.toHaveBeenCalled();
+  });
+
+  it('opens the plain delete at once for a folder no request touches, and keeps it when the check agrees', async () => {
+    answer([]);
+    renderExplorer({ fileTree: TREE });
+    await chooseDelete('Reports');
+    expect(screen.getByRole('dialog')).toHaveTextContent('Delete Reports and its 1 file?');
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
+    await waitFor(() =>
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/workflow/change-requests/under-folder?path=Data%2FReports'),
+    );
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Delete folder only' })).not.toBeInTheDocument();
+  });
+
+  it('still asks about proposals when the shared request list has not shown any (loading or failed)', async () => {
+    answer([request()]);
+    // No proposed paths in the shared list, yet the server knows of #12.
+    renderExplorer({ fileTree: TREE });
+    await chooseDelete('Reports');
+    expect(await screen.findByRole('button', { name: 'Delete folder and its proposed changes' })).toBeEnabled();
+    expect(screen.getByRole('dialog')).toHaveTextContent('#12 “Quarterly numbers” by you (1 proposed file)');
+  });
+
+  it('says nothing about a failed check for a folder the shared list shows no proposals under', async () => {
+    mockAuthFetch.mockResolvedValue(json({ error: 'boom' }, 500));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      renderExplorer({ fileTree: TREE });
+      await chooseDelete('Reports');
+      await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+      expect(screen.queryByText(/Couldn't check which change requests/)).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('still offers the plain delete, with a note, when the requests cannot be checked', async () => {
+    mockAuthFetch.mockResolvedValue(json({ error: 'boom' }, 500));
+    const { deleteEntry } = renderWithProposal();
+    await chooseDelete('Reports');
+    await screen.findByText(/Couldn't check which change requests propose files here/);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    });
+    expect(deleteEntry).toHaveBeenCalledWith(REPORTS);
+  });
+});
+
+/**
+ * Read is default-deny, so an empty explorer has two causes that look the
+ * same: nothing is shared with the caller, or nothing exists yet. The listing
+ * root's `withheld` count tells them apart; the explorer says which, and says
+ * nothing once a single entry is on screen.
+ */
+describe('FileExplorer: an empty tree says why', () => {
+  const KBD = 'knowledge-base';
+  const dirAt = (rel: string, children: FileTreeEntry[] = []): FileTreeEntry => ({
+    name: rel.split('/').pop()!,
+    relativePath: rel,
+    type: 'directory',
+    children,
+  });
+  const fileAt = (rel: string): FileTreeEntry => ({ name: rel.split('/').pop()!, relativePath: rel, type: 'file' });
+  /** A seeded knowledge base: the reserved roots, forced visible, with `kb` under KnowledgeBase. */
+  const seeded = (kb: FileTreeEntry[], extra: Partial<FileTreeEntry> = {}, loose: FileTreeEntry[] = []): FileTreeEntry => ({
+    ...dirAt('.', [
+      dirAt(KBD, [
+        dirAt(`${KBD}/KnowledgeBase`, kb),
+        dirAt(`${KBD}/Plugins`),
+        dirAt(`${KBD}/Skills`),
+        ...loose,
+      ]),
+    ]),
+    ...extra,
+  });
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+  });
+  afterEach(() => {
+    configureBranchModel({
+      defaultBranch: 'target-company-state',
+      protectedBranches: ['current-company-state', 'target-company-state'],
+    });
+  });
+
+  it('says nothing is shared when entries were withheld and none are visible', () => {
+    renderExplorer({ fileTree: seeded([], { withheld: 12 }) });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(
+      'Nothing here is shared with you yet. Ask an admin to grant you access.',
+    );
+    expect(screen.queryByText(/This knowledge base is empty/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('tree-empty-create-hint')).not.toBeInTheDocument();
+  });
+
+  it('says the knowledge base is empty, with the create hint, when nothing was withheld and the caller may write', () => {
+    // A draft branch: writable without asking.
+    renderExplorer({ fileTree: seeded([]), workspaceId: 'alice%2Fdraft' });
+    const notice = screen.getByTestId('tree-empty-notice');
+    expect(notice).toHaveTextContent(/^This knowledge base is empty\./);
+    expect(screen.getByTestId('tree-empty-create-hint')).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing here is shared/)).not.toBeInTheDocument();
+    expect(mockAuthFetch).not.toHaveBeenCalled();
+  });
+
+  it('still says "empty" when the only root entry is .bevelignore', () => {
+    renderExplorer({ fileTree: seeded([], {}, [fileAt(`${KBD}/.bevelignore`)]), workspaceId: 'alice%2Fdraft' });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+  });
+
+  it('leaves the create hint out when the caller may not write at the root', async () => {
+    mockAuthFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ canWrite: false }) });
+    renderExplorer({ fileTree: seeded([]), workspaceId: 'target-company-state' });
+    await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+    const url = mockAuthFetch.mock.calls[0][0] as string;
+    expect(url).toContain('/access?path=KnowledgeBase&kind=folder');
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+    expect(screen.queryByTestId('tree-empty-create-hint')).not.toBeInTheDocument();
+  });
+
+  it('asks about the KB clone folder, not the workspace root, for a tree that predates the split', async () => {
+    mockAuthFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ canWrite: false }) });
+    renderExplorer({ fileTree: dirAt('.', [dirAt(KBD)]), workspaceId: 'target-company-state' });
+    await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+    expect(mockAuthFetch.mock.calls[0][0] as string).toContain(`/access?path=${KBD}&kind=folder`);
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+    expect(screen.queryByTestId('tree-empty-create-hint')).not.toBeInTheDocument();
+  });
+
+  it('shows the create hint on a protected branch once the root is known writable', async () => {
+    mockAuthFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ canWrite: true }) });
+    renderExplorer({ fileTree: seeded([]), workspaceId: 'target-company-state' });
+    expect(await screen.findByTestId('tree-empty-create-hint')).toBeInTheDocument();
+  });
+
+  it('shows neither message with one visible entry, withheld or not', () => {
+    renderExplorer({ fileTree: seeded([fileAt(`${KBD}/KnowledgeBase/Handbook.md`)], { withheld: 3 }) });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+    cleanup();
+    renderExplorer({ fileTree: seeded([dirAt(`${KBD}/KnowledgeBase/Finance`)]) });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+  });
+
+  it('shows nothing while the tree is still loading', () => {
+    renderExplorer({ fileTree: null });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+  });
+});
+
+// The sidebar refuses a platform file's drag and its rename itself, with the
+// sentence the server refuses with. It is not a second opinion: the same
+// predicate decides on both sides (`@bevel-software/platform-shared`), so the
+// tree can answer without a round trip and cannot answer differently.
+describe('FileExplorer: platform files stay put', () => {
+  const DRAG_MIME = 'application/x-workspace-path';
+  const KB = 'knowledge-base';
+  const sentence = (name: string) => `${name} is a platform file and stays in its folder.`;
+
+  const file = (p: string): FileTreeEntry => ({
+    name: p.slice(p.lastIndexOf('/') + 1),
+    relativePath: p,
+    type: 'file',
+  });
+
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: KB,
+        relativePath: KB,
+        type: 'directory',
+        children: [
+          file(`${KB}/access.md`),
+          file(`${KB}/roles.yaml`),
+          file(`${KB}/.bevelignore`),
+          file(`${KB}/AGENTS.md`),
+          // Read from the repository root and nowhere else, so a nested one
+          // is ordinary content — the server says the same.
+          file(`${KB}/Handbook/AGENTS.md`),
+          file(`${KB}/Handbook/notes.md`),
+          { name: 'Sales', relativePath: `${KB}/Sales`, type: 'directory', children: [] },
+        ],
+      },
+    ],
+  };
+
+  const PLATFORM = ['access.md', 'roles.yaml', '.bevelignore', 'AGENTS.md'];
+
+  let alertSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+    alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    alertSpy.mockRestore();
+  });
+
+  function row(name: string): HTMLElement {
+    return screen.getAllByText(name)[0].closest('button')!;
+  }
+
+  it.each(PLATFORM)('%s cannot be dragged: the row refuses to start one', (name) => {
+    renderExplorer({ fileTree: TREE });
+    expect(row(name)).toHaveAttribute('draggable', 'false');
+  });
+
+  it.each(PLATFORM)('a drop carrying %s is refused with the sentence, and nothing is sent', async (name) => {
+    const { moveEntry } = renderExplorer({ fileTree: TREE });
+    await act(async () => {
+      fireEvent.drop(screen.getByText('Sales'), {
+        dataTransfer: {
+          getData: (t: string) => (t === DRAG_MIME ? `${KB}/${name}` : ''),
+          files: [],
+        },
+      });
+    });
+    expect(alertSpy).toHaveBeenCalledWith(sentence(name));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(moveEntry).not.toHaveBeenCalled();
+  });
+
+  it.each(PLATFORM)('the Rename action on %s says the sentence and opens nothing', async (name) => {
+    const { moveEntry } = renderExplorer({ fileTree: TREE });
+    fireEvent.contextMenu(row(name));
+    const rename = screen.getByRole('menuitem', { name: /Rename/i });
+    expect(rename).toHaveAttribute('aria-disabled', 'true');
+    expect(rename).toHaveAttribute('title', sentence(name));
+    await act(async () => {
+      fireEvent.click(rename);
+    });
+    // No rename box: the row still shows its name, and nothing was sent.
+    expect(screen.getAllByText(name)[0]).toBeInTheDocument();
+    expect(moveEntry).not.toHaveBeenCalled();
+  });
+
+  it('an ordinary file is untouched: it drags, and Rename is on offer', async () => {
+    const { moveEntry } = renderExplorer({ fileTree: TREE });
+    expect(row('notes.md')).toHaveAttribute('draggable', 'true');
+    fireEvent.contextMenu(row('notes.md'));
+    const rename = screen.getByRole('menuitem', { name: /Rename/i });
+    expect(rename).not.toHaveAttribute('aria-disabled');
+    await act(async () => {
+      fireEvent.drop(screen.getByText('Sales'), {
+        dataTransfer: {
+          getData: (t: string) => (t === DRAG_MIME ? `${KB}/Handbook/notes.md` : ''),
+          files: [],
+        },
+      });
+    });
+    expect(alertSpy).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toHaveTextContent('Move notes.md to Sales?');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+    });
+    expect(moveEntry).toHaveBeenCalledWith(`${KB}/Handbook/notes.md`, `${KB}/Sales/notes.md`);
+  });
+
+  // The recovery the refusal must not swallow: an admin putting a MISPLACED
+  // platform file back where the platform reads it. The row cannot know the
+  // destination, so it keeps only what it is sure of — the root's own copy
+  // never moves, and nobody but an admin moves any of them — and lets the
+  // server answer the rest, which is the only place the answer lives.
+  describe('an admin may drag a misplaced one back', () => {
+    const MISPLACED: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [
+        {
+          name: KB,
+          relativePath: KB,
+          type: 'directory',
+          children: [
+            file(`${KB}/access.md`),
+            file(`${KB}/Misplaced/.bevelignore`),
+            { name: 'Sales', relativePath: `${KB}/Sales`, type: 'directory', children: [] },
+          ],
+        },
+      ],
+    };
+
+    function misplacedRow(): HTMLElement {
+      return screen.getAllByText('.bevelignore')[0].closest('button')!;
+    }
+
+    it('the misplaced row drags, and the drop asks rather than refusing', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: MISPLACED, isAdmin: true });
+      expect(misplacedRow()).toHaveAttribute('draggable', 'true');
+      await act(async () => {
+        fireEvent.drop(screen.getByText('Sales'), {
+          dataTransfer: {
+            getData: (t: string) => (t === DRAG_MIME ? `${KB}/Misplaced/.bevelignore` : ''),
+            files: [],
+          },
+        });
+      });
+      expect(alertSpy).not.toHaveBeenCalled();
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+      expect(moveEntry).toHaveBeenCalledWith(
+        `${KB}/Misplaced/.bevelignore`,
+        `${KB}/Sales/.bevelignore`,
+      );
+    });
+
+    it('a drop that means the top level lands in the clone, not beside it', async () => {
+      // The restore the root-only names need: a drop on the tree's own root
+      // row, which resolves to no folder. Sent bare, that move would put
+      // `.bevelignore` BESIDE the clone — out of the repository, where nothing
+      // reads it and git never sees it again — so it resolves to the clone's
+      // root instead. (The split explorer draws the clone's roots and its
+      // loose files but no row for the clone itself, so there the repository
+      // root is reached from the API and the agent's tool, not by dragging.)
+      const { moveEntry } = renderExplorer({ fileTree: MISPLACED, isAdmin: true });
+      await act(async () => {
+        fireEvent.drop(screen.getByRole('button', { name: '.' }), {
+          dataTransfer: {
+            getData: (t: string) => (t === DRAG_MIME ? `${KB}/Misplaced/.bevelignore` : ''),
+            files: [],
+          },
+        });
+      });
+      expect(alertSpy).not.toHaveBeenCalled();
+      expect(screen.getByRole('dialog')).toHaveTextContent('to the top level');
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+      expect(moveEntry).toHaveBeenCalledWith(`${KB}/Misplaced/.bevelignore`, `${KB}/.bevelignore`);
+    });
+
+    it("the root's own copy still cannot be dragged, admin or not", () => {
+      renderExplorer({ fileTree: MISPLACED, isAdmin: true });
+      expect(row('access.md')).toHaveAttribute('draggable', 'false');
+    });
+
+    it('a non-admin gets no exception: the misplaced row is refused like any other', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: MISPLACED, isAdmin: false });
+      expect(misplacedRow()).toHaveAttribute('draggable', 'false');
+      await act(async () => {
+        fireEvent.drop(screen.getByText('Sales'), {
+          dataTransfer: {
+            getData: (t: string) => (t === DRAG_MIME ? `${KB}/Misplaced/.bevelignore` : ''),
+            files: [],
+          },
+        });
+      });
+      expect(alertSpy).toHaveBeenCalledWith(sentence('.bevelignore'));
+      expect(moveEntry).not.toHaveBeenCalled();
+    });
+
+    it('a rename is never the recovery, so an admin is refused it', async () => {
+      renderExplorer({ fileTree: MISPLACED, isAdmin: true });
+      fireEvent.contextMenu(misplacedRow());
+      const rename = screen.getByRole('menuitem', { name: /Rename/i });
+      expect(rename).toHaveAttribute('aria-disabled', 'true');
+      expect(rename).toHaveAttribute('title', sentence('.bevelignore'));
+    });
+  });
+
+  it('a FOLDER named like a platform file refuses the rename too, not just the drag', () => {
+    // The server reads the path, not the kind. Offering Rename here opened an
+    // editor that could only fail on the round trip.
+    const WITH_FOLDER: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [
+        {
+          name: KB,
+          relativePath: KB,
+          type: 'directory',
+          children: [
+            { name: 'access.md', relativePath: `${KB}/access.md`, type: 'directory', children: [] },
+          ],
+        },
+      ],
+    };
+    renderExplorer({ fileTree: WITH_FOLDER });
+    // The folder row's draggable sits on the wrapper around the name button.
+    expect(screen.getByText('access.md').closest('[draggable]')).toHaveAttribute('draggable', 'false');
+    fireEvent.contextMenu(row('access.md'));
+    const rename = screen.getByRole('menuitem', { name: /Rename/i });
+    expect(rename).toHaveAttribute('aria-disabled', 'true');
+    expect(rename).toHaveAttribute('title', sentence('access.md'));
+  });
+
+  it('a nested AGENTS.md is content, not a platform file: it drags like any other row', () => {
+    renderExplorer({ fileTree: TREE });
+    // Both rows are named AGENTS.md; the nested one is the second.
+    const rows = screen.getAllByText('AGENTS.md').map((n) => n.closest('button')!);
+    const nested = rows.find((r) => r.getAttribute('data-tree-path') === `${KB}/Handbook/AGENTS.md`);
+    expect(nested).toHaveAttribute('draggable', 'true');
+  });
+});
+
+/**
+ * A proposed row is a link to the request's view of ONE file. Clicking it has
+ * to arrive there, and the URL has to carry enough for a reload to arrive
+ * there too — a request bundling twenty proposals otherwise opens on whatever
+ * file happens to be first.
+ */
+describe('FileExplorer: a proposed row opens its request at that file', () => {
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+    // The dialog's detail read goes through authFetch; an unresolved promise
+    // keeps it on its loading state, which is all these assertions need.
+    mockAuthFetch.mockImplementation(() => new Promise(() => {}));
+  });
+
+  const TREE_WITH_DOCS: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [{ name: 'docs', relativePath: 'docs', type: 'directory', children: [] }],
+  };
+
+  const search = () => screen.getByTestId('location-search').textContent;
+
+  it('puts the request and the clicked file in the URL', async () => {
+    renderExplorer({
+      fileTree: TREE_WITH_DOCS,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+    });
+    fireEvent.click(screen.getByTitle('Proposed by you: opens the change request').closest('button')!);
+
+    expect(
+      await screen.findByRole('dialog', { name: /Change request: Suggested change/ }),
+    ).toBeInTheDocument();
+    expect(search()).toBe('?cr=12&file=docs%2Fnew-idea.md');
+  });
+
+  it('opens straight from the URL, so a reload lands on the same file', async () => {
+    renderExplorer({
+      fileTree: TREE_WITH_DOCS,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+      initialEntries: ['/workspace/main?cr=12&file=docs%2Fnew-idea.md'],
+    });
+    // No click: the query alone opened it.
+    expect(
+      await screen.findByRole('dialog', { name: /Change request: Suggested change/ }),
+    ).toBeInTheDocument();
+  });
+
+  it('drops both parameters when the dialog closes', async () => {
+    renderExplorer({
+      fileTree: TREE_WITH_DOCS,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+      initialEntries: ['/workspace/main?cr=12&file=docs%2Fnew-idea.md'],
+    });
+    const dialog = await screen.findByRole('dialog', { name: /Change request: Suggested change/ });
+    fireEvent.click(within(dialog).getByRole('button', { name: /close/i }));
+    await waitFor(() => expect(search()).toBe(''));
+  });
+
+  it('opens nothing for a request the caller does not have', async () => {
+    renderExplorer({
+      fileTree: TREE_WITH_DOCS,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+      initialEntries: ['/workspace/main?cr=999&file=docs%2Fnew-idea.md'],
+    });
+    await waitFor(() => expect(screen.getByTestId('location-search')).toBeInTheDocument());
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 });

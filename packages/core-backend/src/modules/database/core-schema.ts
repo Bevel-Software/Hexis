@@ -147,6 +147,16 @@ export const changeRequests = pgTable('change_requests', {
   authorName: text('author_name').notNull(),
   state: text('state').notNull().default('open'), // 'open' | 'merged' | 'closed'
   mergedSha: text('merged_sha'),
+  // The last apply attempt that did not land (null when none, or once a gate
+  // input it depended on changed). Persisted rather than only pushed to the
+  // clicker so every viewer of the still-open request — its author first —
+  // sees the refusal.
+  applyFailureReason: text('apply_failure_reason'),
+  applyFailureConflicts: boolean('apply_failure_conflicts'),
+  applyFailedAt: timestamp('apply_failed_at'),
+  applyFailedByName: text('apply_failed_by_name'),
+  /** What refused the last apply: 'gate' (approvals), 'conflicts' (git), 'error' (anything else). */
+  applyFailureKind: text('apply_failure_kind'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at'),
   closedAt: timestamp('closed_at'),
@@ -560,3 +570,100 @@ export const githubFacadeCodes = pgTable('github_facade_codes', {
   consumedAt: timestamp('consumed_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
+
+/**
+ * Join requests as the platform RECORDS them, distinct from the change
+ * request that eventually carries one.
+ *
+ * A join request used to be nothing but a change request: the endpoint did
+ * the branch, the clone, the grant commit, the push and the change request
+ * before it answered, so the row and the answer were the same event. The
+ * first request from a person is a full clone, which is many seconds on a
+ * real repository, and the click looked like a freeze. The record is what
+ * lets the click be answered first: the route writes a row and returns, and
+ * the git work runs after, against the row.
+ *
+ * Which makes the row the durable statement "this person asked", and the
+ * only one — the change request is a CONSEQUENCE of it, recorded back here
+ * as `change_request_number` once it exists. That is the whole reason this
+ * is a table and not a queue in memory: a process that dies between the
+ * answer and the push must leave the ask behind, and the boot sweep re-runs
+ * every row still `pending`.
+ *
+ *   pending   asked, and the git work has not finished (or has not started)
+ *   opened    the change request exists; its number is here
+ *   failed    the git work refused, and `failure_reason` says what it said
+ *
+ * `(requester_email, plugin_key)` is UNIQUE, which is what makes two tabs and
+ * two clicks one request: the second ask upserts the same row. A `failed` row
+ * is revived to `pending` by the next ask rather than replaced, so a retry
+ * continues the recorded request instead of opening a second one.
+ *
+ * `plugin_key` is the plugin's primary FOLDER below the plugins root — the
+ * same key the join BRANCH is cut from, so a record and its branch cannot
+ * drift, and renaming the plugin's identity (which moves no folder) orphans
+ * no record.
+ */
+export const pluginJoinRequests = pgTable('plugin_join_requests', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  requesterEmail: text('requester_email').notNull(), // lowercased at insert
+  /** Denormalised for the commit/change-request authorship, like `file_locks.holder_name`. */
+  requesterName: text('requester_name').notNull(),
+  pluginKey: text('plugin_key').notNull(),
+  status: text('status').notNull().default('pending'),
+  /** What the git work said when it refused — shown to the requester verbatim. */
+  failureReason: text('failure_reason'),
+  changeRequestNumber: integer('change_request_number'),
+  /**
+   * When a process took this row's git work, and the whole of the mutual
+   * exclusion over it.
+   *
+   * A redeploy runs two processes for as long as the changeover takes, and
+   * both sweep. Their single-flight maps are per-process, so without this
+   * they would clone, commit and push the same branch against the same shared
+   * workspace at the same time. Claiming is one conditional UPDATE — the row
+   * is taken only if nobody holds it — so the loser simply does not run.
+   *
+   * A CLAIM EXPIRES, because a process can die holding one and the request
+   * would otherwise be owed forever. The window has to exceed the longest
+   * honest attempt, which is a first-ever request's full clone; past it, the
+   * next sweep or click takes the row over. A row that was never claimed at
+   * all — recorded a moment before the process died — is claimable at once,
+   * which is the common restart case.
+   */
+  claimedAt: timestamp('claimed_at'),
+  /**
+   * WHICH claim `claimed_at` is the liveness of — a fencing token, fresh on
+   * every claim.
+   *
+   * A timestamp alone says a row is held; it cannot say by whom. So a worker
+   * that misses the stale window — a long GC pause, a host that froze, a
+   * network partition that outlived three beats — carries on believing it
+   * holds the row that somebody else has since taken, and its `markOpened`
+   * or `markFailed`, addressed by id alone, lands on the NEW attempt: the
+   * second worker's run is settled by the first worker's outcome, or a row
+   * mid-flight is stamped `failed` under it. Two change requests for one
+   * request is the same race a step earlier.
+   *
+   * Every write that decides or holds the row therefore names the token it
+   * believes it holds, and matches nothing if the token has moved on. A
+   * superseded worker's writes become no-ops rather than corruption, and it
+   * learns it was superseded from its next beat returning false — which is
+   * also how it learns the row was DELETED out from under it, the shape
+   * account erasure takes.
+   */
+  claimToken: uuid('claim_token'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  // One request per person per plugin — the DB's rule, not a caller's. Also
+  // the index the plugin listing's by-requester read is served from.
+  requesterPluginUnq: uniqueIndex('plugin_join_requests_requester_plugin_unq')
+    .on(t.requesterEmail, t.pluginKey),
+  // The boot sweep: every row still `pending`, without a full scan.
+  byStatus: index('plugin_join_requests_by_status').on(t.status),
+  statusCheck: check(
+    'plugin_join_requests_status',
+    sql`${t.status} IN ('pending', 'opened', 'failed')`,
+  ),
+}));

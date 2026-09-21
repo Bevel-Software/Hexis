@@ -20,6 +20,7 @@ import { useGitState } from '../modules/git/hooks/useGitState';
 import { useAutoPullUpdates } from '../modules/git/hooks/useAutoPullUpdates';
 import { EventBusProvider } from '../modules/workflow/state/EventBusProvider';
 import { EventBusFocusBinder } from '../modules/workflow/state/EventBusFocusBinder';
+import { ChangeRequestStaleBinder } from '../modules/workflow/state/ChangeRequestStaleBinder';
 import { Toolbar } from '../modules/toolbar/components/Toolbar';
 import { DemoBanner } from '../modules/layout/components/DemoBanner';
 import { FileExplorer } from '../modules/workspace/components/FileExplorer';
@@ -157,6 +158,7 @@ function AuthenticatedAppInner() {
   return (
     <WorkspaceContext.Provider value={workspaceState}>
       <EventBusFocusBinder />
+      <ChangeRequestStaleBinder />
       <GitContext.Provider value={gitState}>
         <AutoUpdateContext.Provider value={autoUpdateState}>
           <AdminProvider>

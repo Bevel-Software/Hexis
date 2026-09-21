@@ -17,6 +17,7 @@ import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
 import { KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
 import { GroupsToPluginsStep } from '../modules/workspace/startup/steps/groups-to-plugins.step.js';
+import { PluginDisplayNamesStep } from '../modules/workspace/startup/steps/plugin-display-names.step.js';
 import { PluginManifestsStep } from '../modules/workspace/startup/steps/plugin-manifests.step.js';
 import { PersonalSpacesStep } from '../modules/workspace/startup/steps/personal-spaces.step.js';
 import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-files.step.js';
@@ -50,18 +51,25 @@ import { DocExtractService } from '../modules/workspace/file-readers/doc-extract
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
-import { OidcAuthProvider } from '../modules/auth/oidc-auth-provider.js';
+import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
 import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
-import { AccessControlService } from '../modules/access/access-control.service.js';
+import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
+import { ChangeReadGate } from '../modules/access/change-read-gate.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
+import { UserAccessRemovalService } from '../modules/access/user-access-removal.service.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
+import { ToolDeleteService } from '../modules/tool-manuals/tool-delete.service.js';
 import {
   PluginIndexService,
+  pluginFolderBelowRoot,
   PluginProvisionService,
   JoinRequestsService,
+  PluginJoinRequestJobs,
+  JoinRequestNotReadyError,
+  DbJoinRequestStore,
   PluginLinkIndex,
   PluginLinksService,
   PluginRenameService,
@@ -178,6 +186,8 @@ export interface CoreServices {
   docExtractService: DocExtractService;
   accessControl: AccessControlService;
   creatorAccess: CreatorAccessService;
+  /** Read-before-write, for the surfaces that ask ahead of the lock (see `access-model/change-gate.ts`). */
+  changeGate: ChangeReadGate;
   sessionOntologyService: SessionOntologyService;
   routineWritePolicy: RoutineWritePolicyService;
   skillService: SkillService;
@@ -190,9 +200,18 @@ export interface CoreServices {
    */
   readAgentPreamble: AgentPreambleReader;
   mcpServerEditService: McpServerEditService;
+  /** Deleting one tool — the owner's verb (see ToolDeleteService). */
+  toolDeleteService: ToolDeleteService;
   pluginIndexService: PluginIndexService;
   pluginProvisionService: PluginProvisionService;
   joinRequestsService: JoinRequestsService;
+  /**
+   * Records a join request and finishes it in the background. Its `sweep()`
+   * runs once at boot — see `createCoreServer`, after the knowledge-base
+   * startup phase — so a request recorded before a restart is completed or
+   * marked failed after it rather than lost.
+   */
+  pluginJoinRequestJobs: PluginJoinRequestJobs;
   /** Which plugins hold which skills (inline or linked) — see `PluginLinkIndex`. */
   pluginLinkIndex: PluginLinkIndex;
   /** Link / unlink / repair shared skills into plugins. */
@@ -224,6 +243,8 @@ export interface CoreServices {
   adminAccess: AdminAccessService;
   /** Manual-mode groups CRUD + the manual→IdP retirement half. */
   groupsAdminService: GroupsAdminService;
+  /** Removes a deleted account's address from roles, groups and access rules. */
+  userAccessRemovalService: UserAccessRemovalService;
   /**
    * Build the debounced directory → `synced-groups.yaml` materializer for a
    * directory source an OVERLAY provides (e.g. a SCIM mirror fed by the IdP's
@@ -363,6 +384,11 @@ export async function createCoreServices(
   const kbStartupSteps = [
     new GroupsToPluginsStep(disk),
     new PluginManifestsStep(disk),
+    // After the manifests step: a folder that only just got its manifest got
+    // one the renderer wrote, which already carries the display name — the
+    // backfill then has nothing to do for it. Ordered the other way, the
+    // backfill would walk a tree still missing those manifests.
+    new PluginDisplayNamesStep(disk),
     new PersonalSpacesStep(disk),
     new TemplateFilesStep(disk, extraDirs),
     new RolesYamlStep(disk, [config.adminEmail]),
@@ -406,10 +432,15 @@ export async function createCoreServices(
     [config.adminEmail],
     gitRunner,
   );
-  // Creator read-grant on creation: read is default-deny, so every surface
-  // that creates KB files/folders (human routes, agent tools, upload apply)
-  // consults this planner to keep creations visible to their creator.
+  // Creator read-grant on creation: read is default-deny and the roots grant
+  // it to nobody, so every surface that starts a new folder at a root (human
+  // routes, agent tools, upload apply) consults this planner to keep the new
+  // folder visible to its creator.
   const creatorAccess = new CreatorAccessService(workspaceService, accessControl, kbDirName, disk);
+  // Read-before-write: the gate every lock acquire asks, on every branch —
+  // nothing is created, changed or removed where its author cannot read,
+  // except that new folder at a root (see `access-model/change-gate.ts`).
+  const changeGate = new ChangeReadGate(workspaceService, accessControl, kbDirName, disk);
 
   // Ontology-session boundary: records each agent run's touched ontologies and
   // blocks writes once a run has crossed ontologies. Postgres-backed so the
@@ -481,11 +512,16 @@ export async function createCoreServices(
   // A fresh clone has already fetched every ref — let the git layer skip the
   // redundant implicit `git fetch` on the first `listBranches` after bootstrap.
   workspaceService.setWorkspaceClonedListener((id) => gitService.noteWorkspaceFetched(id));
+  // A branch listing is also the platform's memory of which branch names it
+  // has ever heard of — what tells a deleted branch (410) from one that never
+  // existed (404) when a bootstrap finds no such ref on origin.
+  gitService.setBranchesListedListener((names) => workspaceService.noteBranchesListed(names));
   const pullRequestService = new PullRequestService(
     db,
     workspaceService,
     accessControl,
     gitService,
+    config.configuredPublicFrontendUrl,
   );
   const diffService = new DiffService(
     workspaceService,
@@ -550,6 +586,7 @@ export async function createCoreServices(
     fileLockService,
     pendingCommitsService,
     kbDirName,
+    changeGate,
     eventBus,
     fileChangeNotifier,
     // Exposed as `workflowService.hooks` — the SAME instance GitService and
@@ -563,6 +600,38 @@ export async function createCoreServices(
   // only needs to read files at refs and to close a request whose proposals
   // have all landed.
   const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
+  // The OTHER half of a join request: the row the subscribe endpoint writes
+  // before it answers, and the branch/clone/commit/push/change-request work
+  // that runs against it afterwards. The row is what lets the click be
+  // answered in a database round-trip instead of a clone, and what survives a
+  // restart with the request still owed.
+  const pluginJoinRequestJobs = new PluginJoinRequestJobs(new DbJoinRequestStore(db), {
+    workflow: workflowService,
+    workspaceService,
+    kbDirName,
+    // A record keys on the plugin's primary FOLDER below the root, which the
+    // catalog is the only thing that can turn back into a path and a name
+    // people read. Null once nothing answers to the key — a deleted plugin,
+    // a moved folder — which the job records as a failure the requester sees.
+    //
+    // An EMPTY catalog is not that. Discovery degrades to empty whenever it
+    // cannot read the knowledge base — a boot that has not finished cloning,
+    // a remote that blipped — and answering "null" then would tell everyone
+    // with a request outstanding that their plugin is gone, permanently, for
+    // a fault that healed in seconds. A request is only refused when the
+    // catalog has something to say and this key is absent from it; when it
+    // has nothing to say at all, the failure is raised as a transient one, so
+    // the row stays `pending` for the next sweep to retry.
+    target: async (pluginKey) => {
+      const catalog = await pluginIndexService.catalog();
+      if (catalog.length === 0) {
+        throw new JoinRequestNotReadyError('the plugin catalog is not available yet');
+      }
+      const entry = catalog.find((g) => pluginFolderBelowRoot(g.folders[0]) === pluginKey);
+      return entry ? { folder: entry.folders[0], displayName: entry.displayName } : null;
+    },
+    requester: (email) => authService.getUserByEmail(email),
+  });
   // Links land as ordinary default-branch commits and change what the plugin
   // index counts, so a link drops that cache too.
   const pluginLinksService = new PluginLinksService(
@@ -664,14 +733,16 @@ export async function createCoreServices(
 
   // Catalog freshness: the skill / tool-manual / plugin-index caches all scan
   // the DEFAULT branch's working tree, and all three go stale on the same
-  // events (a commit, a working-tree write, a merge). Wired in one place so a
-  // new way of reaching the default branch cannot refresh two of them and
-  // leave the third serving last minute's answer.
+  // events (a commit, a working-tree write, a merge) — as does the access
+  // model they are filtered through. Wired in one place so a new way of
+  // reaching the default branch cannot refresh two of them and leave the
+  // third serving last minute's answer.
   registerCatalogCacheInvalidation({
     eventBus,
     fileChangeNotifier,
     kbDirName,
     catalogs: [toolManualService, skillService, pluginIndexService, pluginLinkIndex],
+    accessControl,
   });
 
   // Admin = `Admin` role in roles.yaml, resolved through the access model on the
@@ -712,6 +783,24 @@ export async function createCoreServices(
   // Register the `bevel-secrets` UTCP variable loader against this vault so any
   // UTCP client can resolve `${VAR}` from the caller's secrets at tool-call time.
   registerBevelSecretsVariableLoader(secretsVaultService);
+
+  // Deleting ONE tool from its page — the owner's verb, the other end of the
+  // promise that made them the owner. Built here because it is the one service
+  // that spans both halves of a tool: the definition (a `.tool` file or an
+  // mcp.json entry) and the credentials stored under its name, which is why it
+  // can only exist once the vault does.
+  const toolDeleteService = new ToolDeleteService(
+    workspaceService,
+    workflowService,
+    accessControl,
+    toolManualService,
+    skillService,
+    pluginIndexService,
+    pluginSource,
+    secretsVaultService,
+    kbDirName,
+    disk,
+  );
 
   // The credential probe: whether a tool's stored credential actually WORKS, as
   // distinct from whether one is stored. Built here — after the vault and the
@@ -865,6 +954,7 @@ export async function createCoreServices(
     events: eventBus,
     kbDirName: kbDirName,
     creatorAccess,
+    loadActiveGroups,
   });
   const toolHandlerFactory = createToolHandlerFactory(resolveToolContext);
   const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService);
@@ -929,29 +1019,29 @@ export async function createCoreServices(
 
   // SSO providers. The array REFERENCE is shared with the caller's port — an
   // overlay pushes its own plugins into it after construction (they mount when
-  // the server is built, later). Core contributes the generic OIDC provider
-  // when the env configures one.
+  // the server is built, later). Core contributes the generic OIDC provider.
   const authProviders = ports.authProviders ?? [];
-  // Resolved through settings, so an admin can configure SSO from the setup
-  // screen instead of the environment. Env still wins, so a deployment that
-  // sets these keeps behaving exactly as it did.
-  const oidcIssuerUrl = settings.resolve('oidcIssuerUrl');
-  const oidcClientId = settings.resolve('oidcClientId');
-  const oidcClientSecret = settings.resolve('oidcClientSecret');
-  if (oidcIssuerUrl && oidcClientId && oidcClientSecret) {
-    authProviders.push(
-      new OidcAuthProvider({
-        issuerUrl: oidcIssuerUrl,
-        clientId: oidcClientId,
-        clientSecret: oidcClientSecret,
-        scopes: settings.resolve('oidcScopes') || 'openid profile email',
-        label: settings.resolve('oidcProviderLabel') || 'Single sign-on',
-        publicBackendUrl: config.publicBackendUrl,
-        publicFrontendUrl: config.publicFrontendUrl,
-        cookieSecure: config.publicBackendUrl.startsWith('https'),
-      }),
-    );
-  }
+  // Registered unconditionally and resolved through settings on every use, so
+  // an admin can configure SSO from the setup screen — or change it — without
+  // a restart; the provider advertises itself only while the configuration is
+  // complete. Env still wins, so a deployment that sets these keeps behaving
+  // exactly as it did.
+  authProviders.push(
+    new OidcAuthProvider({
+      settings: () => oidcSettingsFrom(settings),
+      publicBackendUrl: config.publicBackendUrl,
+      publicFrontendUrl: config.publicFrontendUrl,
+      cookieSecure: config.publicBackendUrl.startsWith('https'),
+      // A real sign-in proves the values that sign-in used. Recorded against
+      // those — under their own key — so it says nothing about any saved
+      // since, and cannot overwrite what was recorded about them.
+      onSignedIn: async ({ issuerUrl, clientId, clientSecret }) => {
+        const credentials = { issuerUrl, clientId, clientSecret };
+        if ((await settings.oidcVerificationOf(credentials)) === 'verified') return;
+        await settings.recordOidcVerification('verified', credentials);
+      },
+    }),
+  );
 
   // Materializer factory for an overlay-provided directory source: every
   // provisioning burst regenerates `synced-groups.yaml` on the default branch
@@ -989,6 +1079,19 @@ export async function createCoreServices(
     () => DEFAULT_BRANCH,
     eventBus,
   );
+  // Account deletion's optional half: the erased address out of roles.yaml,
+  // groups.yaml and every access rule, in one commit on the default branch.
+  // The deployment owner is never removed this way.
+  const userAccessRemovalService = new UserAccessRemovalService(
+    workspaceService,
+    workflowService,
+    accessControl,
+    disk,
+    kbDirName,
+    () => DEFAULT_BRANCH,
+    eventBus,
+    [config.adminEmail],
+  );
 
   return {
     config,
@@ -997,6 +1100,7 @@ export async function createCoreServices(
     commitWorker,
     disk,
     mcpServerEditService,
+    toolDeleteService,
     workspaceService,
     kbStartupRunner,
     settings,
@@ -1005,6 +1109,7 @@ export async function createCoreServices(
     docExtractService,
     accessControl,
     creatorAccess,
+    changeGate,
     sessionOntologyService,
     routineWritePolicy,
     skillService,
@@ -1014,6 +1119,7 @@ export async function createCoreServices(
     pluginIndexService,
     pluginProvisionService,
     joinRequestsService,
+    pluginJoinRequestJobs,
     pluginLinkIndex,
     pluginLinksService,
     pluginRenameService,
@@ -1038,6 +1144,7 @@ export async function createCoreServices(
     recoveryBot,
     adminAccess,
     groupsAdminService,
+    userAccessRemovalService,
     createSyncedGroupsMaterializer,
     updateCheckService,
     secretsVaultService,

@@ -18,6 +18,7 @@
  */
 
 import type { AuthUser } from '../auth/types.js';
+import type { ChangeRequestApplyFailureKind } from '../git/pr.types.js';
 import type {
   AcquireLockResult,
   Branch,
@@ -33,6 +34,9 @@ import type {
   ChangedFile,
   FileApproval,
   FileLock,
+  FolderChangeRequest,
+  FolderChangeRequestRemoval,
+  MergeBranchOutcome,
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
@@ -222,6 +226,27 @@ export interface IWorkflowService {
     path: string,
     sha: string,
   ): Promise<{ baseline: string | null; current: string | null }>;
+  /**
+   * One file as it stood at a change request's fork point (`sha`, which must
+   * lie on the target branch's history) — the "before" side of the request
+   * dialog's diff. `null` when the path did not exist there. Access is the
+   * caller's to check.
+   */
+  fileAtForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    sha: string,
+    path: string,
+  ): Promise<string | null>;
+  /**
+   * A change request's current fork point: the merge base of the freshly
+   * fetched target and source branches, or `null` when they share no history.
+   */
+  changeRequestForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+  ): Promise<string | null>;
 
   // ── File locks (new — currently NotImplementedWorkflowError) ──────────────
 
@@ -254,13 +279,37 @@ export interface IWorkflowService {
    * `releaseLockUntouched`) — `releaseLock` rejects rather than ever enqueue
    * a commit for a hold that was never allowed to write. Internal callers
    * only; never plumbed from a route.
+   *
+   * Every non-coordination acquire also passes the READ-BEFORE-WRITE gate, on
+   * every branch: the caller must be able to read the path (for a new path,
+   * where it lands), or the path must start a new folder directly under one
+   * of the three roots (knowledge, skills, plugins). Nothing is created,
+   * changed or removed where its author cannot see it, whatever write rules
+   * say; a refusal is an `AccessDeniedError` whose `access.unreadable` names
+   * the place. A write that passed only as a platform-file restore is not
+   * asked — that rescue exists for a destination whose rules deny the admin
+   * making it.
+   *
+   * `opts.platformRestore` CLAIMS that this acquire is the destination side of
+   * an admin putting a misplaced platform file back (`access.md`, `roles.yaml`,
+   * `.bevelignore`, `AGENTS.md`), and names the move's `source` — the path the
+   * file is coming FROM, in the same spelling as `path`.
+   *
+   * It is a claim, not an authorisation. The implementation re-asks both
+   * halves of it: that source→path is a restore at all (a misplaced copy
+   * going back under its own name, never the root's own copy coming out —
+   * `isPlatformRestoreShape`), and that the access module
+   * (`canRestorePlatformFile`) lets this caller land this exact path. Only
+   * both yeses let the acquire past the write gate, so a caller that omits or
+   * fakes the source gains nothing: the gate never takes the route's word for
+   * which move this is.
    */
   acquireLock(
     workspaceId: string,
     branch: string,
     path: string,
     user: AuthUser,
-    opts?: { coordination?: boolean },
+    opts?: { coordination?: boolean; platformRestore?: { source: string } },
   ): Promise<AcquireLockResult>;
   /** Heartbeat to keep an acquired lock alive past its current TTL. */
   heartbeatLock(workspaceId: string, branch: string, path: string, user: AuthUser): Promise<FileLock>;
@@ -402,9 +451,12 @@ export interface IWorkflowService {
   ): Promise<ChangeRequestDetail>;
 
   /**
-   * Re-run `targetBranch → sourceBranch` merge on an existing change request.
-   * Used when the target has advanced since the change request was opened.
-   * Throws `NotImplementedWorkflowError` until the backing merge path lands.
+   * Re-run `targetBranch → sourceBranch` merge on an existing change request
+   * and push it — the request dialog's Update, offered when the target has
+   * advanced since the request was opened. Only the request's author or
+   * someone who may apply it (`viewerCanUpdate`) may run it (403 otherwise).
+   * A conflicting merge is aborted, leaving the branch exactly as it was, and
+   * surfaces as `ChangeRequestConflictsError` (409).
    */
   updateFromTarget(workspaceId: string, user: AuthUser, number: number): Promise<ChangeRequestDetail>;
 
@@ -463,6 +515,22 @@ export interface IWorkflowService {
   closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean>;
 
   /**
+   * The open change requests proposing files under a KB-repo-relative
+   * folder, each with whether the caller may take those files out of it
+   * (their own request, they are an admin, or they may write every file it
+   * proposes under the folder).
+   */
+  changeRequestsUnderFolder(folder: string, user: AuthUser): Promise<FolderChangeRequest[]>;
+
+  /**
+   * Take every file under the folder out of every open change request
+   * proposing one; a request left empty is withdrawn. All or nothing: refused
+   * (403), with nothing touched, when the caller may not act on even one of
+   * them.
+   */
+  removeFolderFromChangeRequests(folder: string, user: AuthUser): Promise<FolderChangeRequestRemoval[]>;
+
+  /**
    * Close every open change request either of whose branches no longer exists
    * — source or target, since a proposal needs both ends. Such a request
    * cannot be read, reviewed, applied or declined — it is a tombstone, and it
@@ -518,4 +586,51 @@ export interface IWorkflowService {
     workspaceId: string,
     opts?: { bypass?: boolean },
   ): Promise<MergeChangeRequestOutcome>;
+
+  /** Start an apply attempt on a request; the token scopes `recordApplyFailure`. */
+  beginApplyAttempt(number: number): number;
+
+  /** End an attempt `beginApplyAttempt` started, whatever its outcome. */
+  endApplyAttempt(number: number, attempt: number): void;
+
+  /**
+   * Persist why an apply did not land on the (still open) request, and
+   * announce `change-request-apply-failed` to every session so the author and
+   * other viewers re-read it — not only the user who clicked. Resolves false,
+   * recording and announcing nothing, when `attempt` is no longer the latest
+   * or the request is no longer open.
+   */
+  recordApplyFailure(
+    number: number,
+    failure: { reason: string; kind: ChangeRequestApplyFailureKind; at?: Date },
+    user: AuthUser,
+    attempt: number,
+  ): Promise<boolean>;
+
+  /**
+   * Merge `sourceBranch` into `targetBranch` directly, authored as `user`,
+   * and publish the target. The agent path for merging branches — it never
+   * lands a change request:
+   *
+   *   - refused (`OpenChangeRequestBlocksMergeError`, naming the request) when
+   *     a change request from `sourceBranch` into `targetBranch` is open; a
+   *     person merges that one in the app. The reverse direction — the target
+   *     into the source, the sync that keeps a draft current — is allowed.
+   *   - refused (`WorkflowDomainError`, `kind: 'protected-merge-target'`,
+   *     status 403, listing the denied paths) when `targetBranch` is protected
+   *     and `user` could not commit every file the merge changes directly to
+   *     it. Decided against the target commit the merge is built on, not a
+   *     workspace `HEAD` that may be behind it.
+   *   - refused (`WorkflowDomainError`, `kind: 'protected-merge-changes-roles'`,
+   *     status 403) when `targetBranch` is protected and the merge would
+   *     change its `roles.yaml` — whoever the caller is. Roles never change
+   *     through a merge; a change request's merge restores the target's copy
+   *     first, and this path refuses instead. Roles are changed in the app.
+   *   - refused (`WorkflowDomainError`, `kind: 'merge-target-busy'`, status
+   *     409) when `targetBranch`'s workspace still holds unshared edits: the
+   *     merge resets it to the published tip, which would discard them.
+   *
+   * Conflicts write nothing and come back as `conflicts-need-resolution`.
+   */
+  mergeBranch(user: AuthUser, sourceBranch: string, targetBranch: string): Promise<MergeBranchOutcome>;
 }

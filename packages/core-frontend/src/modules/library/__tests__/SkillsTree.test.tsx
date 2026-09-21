@@ -106,11 +106,13 @@ describe('SkillsTree', () => {
     const createDirectory = vi.fn().mockResolvedValue(undefined);
     const dispatchUpload = vi.fn().mockResolvedValue(undefined);
     renderTree('/skills-and-tools', { fileTree: noSkills, createDirectory, dispatchUpload });
-    // The row is there, empty: nothing beneath it, and — with nothing to
-    // open — no claim to be expanded either.
+    // The row is there, empty: nothing beneath it but the muted "Empty" row
+    // the open folder shows — a folder, caret and all, not a file.
     const skills = row('Skills');
     expect(skills).toBeInTheDocument();
-    expect(skills).not.toHaveAttribute('aria-expanded');
+    expect(skills).toHaveAttribute('aria-expanded', 'true');
+    expect(skills.querySelectorAll('svg')).toHaveLength(1);
+    expect(screen.getByText('Empty')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Engineering' })).not.toBeInTheDocument();
     // What writes is offered; what would read a folder that is not there is not.
     fireEvent.contextMenu(skills);
@@ -126,10 +128,15 @@ describe('SkillsTree', () => {
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(createDirectory).toHaveBeenCalledWith(`${KB}/Skills/Marketing`);
 
-    // So does a drop.
+    // So does a drop — stamped with the tree that took it, so the upload's
+    // banners appear here and not in the Plugins tree below.
     const dropped = new File(['x'], 'SKILL.md');
     fireEvent.drop(skills, { dataTransfer: { getData: () => '', items: undefined, files: [dropped] } });
-    expect(dispatchUpload).toHaveBeenCalledWith({ kind: 'files', files: [dropped] }, `${KB}/Skills`);
+    expect(dispatchUpload).toHaveBeenCalledWith(
+      { kind: 'files', files: [dropped] },
+      `${KB}/Skills`,
+      'library:Skills',
+    );
   });
 
   it('renders nothing while the tree has not loaded', () => {
@@ -144,7 +151,11 @@ describe('SkillsTree', () => {
     fireEvent.drop(row('Skills'), {
       dataTransfer: { getData: () => '', items: undefined, files: [dropped] },
     });
-    expect(dispatchUpload).toHaveBeenCalledWith({ kind: 'files', files: [dropped] }, `${KB}/Skills`);
+    expect(dispatchUpload).toHaveBeenCalledWith(
+      { kind: 'files', files: [dropped] },
+      `${KB}/Skills`,
+      'library:Skills',
+    );
   });
 
   it('cannot be dragged away — a reserved root stays where the platform put it', () => {
@@ -262,7 +273,11 @@ describe('PluginsTree', () => {
     const none = dir('.', [dir(KB, [dir(`${KB}/KnowledgeBase`, [])])]);
     renderPlugins('/skills-and-tools', { fileTree: none });
     expect(row('Plugins')).toBeInTheDocument();
-    expect(row('Plugins')).not.toHaveAttribute('aria-expanded');
+    expect(row('Plugins')).toHaveAttribute('aria-expanded', 'true');
+    // The same row component as Knowledge: an open empty folder says so.
+    expect(screen.getByText('Empty')).toBeInTheDocument();
+    fireEvent.click(row('Plugins'));
+    expect(screen.queryByText('Empty')).not.toBeInTheDocument();
   });
 
   it("offers New plugin on every folder's menu when wired — after the tree's own create items — and on no file's", () => {
@@ -320,5 +335,31 @@ describe('SkillsTree: menu', () => {
     renderTree('/skills-and-tools');
     fireEvent.contextMenu(row('Engineering'));
     expect(within(screen.getByRole('menu', { name: 'Actions for Engineering' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
+  });
+});
+
+/** The Skills tree reads the same filtered listing as Knowledge's explorer, so it answers the same way. */
+describe('SkillsTree: an empty tree says why', () => {
+  const EMPTY_KB = (extra: Partial<FileTreeEntry> = {}): FileTreeEntry => ({
+    ...dir('.', [dir(KB, [dir(`${KB}/KnowledgeBase`, []), dir(`${KB}/Plugins`, []), dir(`${KB}/Skills`, [])])]),
+    ...extra,
+  });
+
+  it('says nothing is shared when entries were withheld', () => {
+    renderTree('/skills-and-tools', { fileTree: EMPTY_KB({ withheld: 4 }) });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(
+      'Nothing here is shared with you yet. Ask an admin to grant you access.',
+    );
+  });
+
+  it('says the knowledge base is empty, with the create hint for a writer, when nothing was withheld', () => {
+    renderTree('/skills-and-tools', { fileTree: EMPTY_KB() });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(/^This knowledge base is empty\./);
+    expect(screen.getByTestId('tree-empty-create-hint')).toBeInTheDocument();
+  });
+
+  it('shows neither message once one entry is visible', () => {
+    renderTree('/skills-and-tools', { fileTree: { ...TREE, withheld: 2 } });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
   });
 });

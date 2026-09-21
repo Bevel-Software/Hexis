@@ -5,6 +5,7 @@ import { localManualTemplates, remoteManualTemplate, REMOTE_MANUAL_NAME } from '
 import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { discoverTools, getSkillPrompt, listSkillPrompts, listedTools, withoutRemoteMetaTools } from '../server.js';
 import {
+  ConnectionKeyRejectedError,
   DeploymentError,
   fetchAgentInstructions,
   fetchAllManuals,
@@ -137,6 +138,28 @@ describe('discoverTools', () => {
     expect([...repo.keys()]).toEqual([`${REMOTE_MANUAL_NAME}.read_file`]);
     expect(tools.map((t) => t.mcpName)).toEqual(['read_file']);
   });
+
+  it('purges a retired tool an OLDER deployment still advertises', async () => {
+    // This server can be pointed at a deployment that predates the removal.
+    // A discovered `merge_change_request` left registered would be resolved
+    // by the call handler and dispatched — an agent merging a change request
+    // after all. It must not survive discovery, in the registry or the list.
+    const repo = new Map<string, UtcpTool>();
+    for (const name of ['read_file', 'merge_change_request']) {
+      repo.set(
+        `${REMOTE_MANUAL_NAME}.${name}`,
+        { name: `${REMOTE_MANUAL_NAME}.${name}`, description: '', inputs: { type: 'object' } } as unknown as UtcpTool,
+      );
+    }
+    const client = {
+      registerManual: async () => ({ success: true }),
+      getTools: async () => [...repo.values()],
+      config: { tool_repository: { removeTool: async (n: string) => repo.delete(n) } },
+    };
+    const tools = await discoverTools(client as never, { name: REMOTE_MANUAL_NAME } as never, []);
+    expect([...repo.keys()]).toEqual([`${REMOTE_MANUAL_NAME}.read_file`]);
+    expect(tools.map((t) => t.mcpName)).toEqual(['read_file']);
+  });
 });
 
 describe('withoutRemoteMetaTools', () => {
@@ -149,6 +172,11 @@ describe('withoutRemoteMetaTools', () => {
       tool('grep'),
     ]);
     expect(kept.map((t) => t.mcpName)).toEqual(['read_file', 'grep']);
+  });
+
+  it('drops a retired tool the deployment still advertises', () => {
+    const kept = withoutRemoteMetaTools([tool('read_file'), tool('merge_change_request'), tool('merge_branch')]);
+    expect(kept.map((t) => t.mcpName)).toEqual(['read_file', 'merge_branch']);
   });
 });
 
@@ -277,26 +305,44 @@ describe('resolveDeployment', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })));
   }
 
-  it('reads the endpoint and the agent-instructions flag from the one config fetch', async () => {
-    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: true });
-    expect(await resolveDeployment(config)).toEqual({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: true });
+  it('reads the endpoint and both capability flags from the one config fetch', async () => {
+    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: true, catalogRevision: true });
+    expect(await resolveDeployment(config)).toEqual({
+      mcpUrl: 'https://x.example/api/mcp',
+      agentInstructions: true,
+      catalogRevision: true,
+    });
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('treats an absent flag as an older deployment', async () => {
     stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp' });
-    expect((await resolveDeployment(config)).agentInstructions).toBe(false);
+    const resolved = await resolveDeployment(config);
+    expect(resolved.agentInstructions).toBe(false);
+    expect(resolved.catalogRevision).toBe(false);
   });
 
-  it('only a literal true advertises the capability', async () => {
-    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: 'yes' });
-    expect((await resolveDeployment(config)).agentInstructions).toBe(false);
+  /**
+   * Both flags are capabilities, not probes: an unknown `/api/*` path on an
+   * older deployment falls through to the JWT mounts and answers 401, which a
+   * caller would read as a dead credential. So anything that is not a literal
+   * `true` has to mean "not there".
+   */
+  it('only a literal true advertises a capability', async () => {
+    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: 'yes', catalogRevision: 1 });
+    const resolved = await resolveDeployment(config);
+    expect(resolved.agentInstructions).toBe(false);
+    expect(resolved.catalogRevision).toBe(false);
   });
 
   it('still falls back to <base>/api/mcp on a deployment too old to advertise either', async () => {
     stubConfigEndpoint({ branchModel: { defaultBranch: 'main' } });
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    expect(await resolveDeployment(config)).toEqual({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: false });
+    expect(await resolveDeployment(config)).toEqual({
+      mcpUrl: 'https://x.example/api/mcp',
+      agentInstructions: false,
+      catalogRevision: false,
+    });
   });
 });
 
@@ -318,6 +364,13 @@ describe('fetchAgentInstructions', () => {
     expect(await fetchAgentInstructions(config)).toBeUndefined();
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('without an "instructions" string'));
+  });
+
+  it('lets a rejected connection key through instead of degrading quietly', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })));
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(fetchAgentInstructions(config)).rejects.toBeInstanceOf(ConnectionKeyRejectedError);
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it('a 500 logs one line and resolves to undefined', async () => {
@@ -343,6 +396,24 @@ describe('getJson unauthorized messaging', () => {
   it('blames the connection key only on a request that actually carried it', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })));
     await expect(fetchAllManuals(config)).rejects.toThrow(/connection key was rejected/);
+  });
+
+  it('says exactly what to do with a rejected key, naming the deployment and never the key', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })));
+    const err = (await fetchAllManuals({ ...config, baseUrl: 'https://x.example/hexis' }).catch((e: unknown) => e)) as Error;
+    expect(err).toBeInstanceOf(DeploymentError);
+    expect(err.message).toBe(
+      'The connection key was rejected by https://x.example/hexis. Mint a new one in External agent access. ' +
+        '(Claude Code hides this message; run `claude mcp get <name>` or start the command in a terminal to see it.)',
+    );
+    expect(err.message).not.toContain('bevel_k');
+  });
+
+  it('does not tell a key holder to mint a new key over a 403 — the key is valid', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 403 })));
+    const err = (await fetchAllManuals(config).catch((e: unknown) => e)) as Error;
+    expect(err.message).toMatch(/denied access \(HTTP 403\)/);
+    expect(err.message).not.toMatch(/Mint a new one/);
   });
 
   it('keeps the key out of the story when the failing request carried no credentials', async () => {

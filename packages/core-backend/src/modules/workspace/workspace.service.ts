@@ -6,18 +6,35 @@ import path from 'node:path';
 import AdmZip from 'adm-zip';
 import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '@bevel-software/platform-shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { validateRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import {
+  validateRelativePath,
+  validateFilename,
+  DEFAULT_BRANCH,
+  FOLDER_PLACEHOLDER,
+  isFolderPlaceholder,
+  entryExistsMessage,
+  type ExistingEntryKind,
+} from '@bevel-software/platform-shared';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
+import {
+  DestinationTakenError,
+  inspectDestination,
+  renameNoReplace,
+} from '../../shared/rename-no-replace.js';
 import type { IGitRunner } from '../../shared/git.contract.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
+import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import {
+  GitInternalsError,
+  PathNotFoundError,
   PathTraversalError,
   UnreadableArchiveError,
   WorkflowValidationError,
 } from '../../shared/domain-errors.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
 import {
+  BranchNotFoundError,
   RemoteBranchGoneError,
   WorkflowDomainError,
   isMissingRemoteBranchFailure,
@@ -88,6 +105,29 @@ export class FolderTooLargeError extends Error {
   constructor(public readonly limitBytes: number) {
     super(`Folder exceeds the ${limitBytes}-byte download size limit`);
     this.name = 'FolderTooLargeError';
+  }
+}
+
+/**
+ * A rename or move would land on a name something else already has. 409, like
+ * every other precondition the caller has to clear first: nothing was moved,
+ * and the entry already there is untouched.
+ *
+ * Lives here rather than in `shared/domain-errors.ts` because the sentence is
+ * built by `entryExistsMessage` and that file deliberately imports no VALUE
+ * from `@bevel-software/platform-shared`, only a type. It still extends
+ * `WorkflowDomainError`, so the routes' `sendError` maps it to 409 with
+ * `{ kind: 'entry-exists', … }` without knowing this class exists.
+ */
+export class EntryExistsError extends WorkflowDomainError {
+  readonly kind = 'entry-exists' as const;
+  constructor(readonly entryKind: ExistingEntryKind, readonly destination: string) {
+    super(entryExistsMessage(entryKind, destination), 409, {
+      kind: 'entry-exists',
+      entryKind,
+      destination,
+    });
+    this.name = 'EntryExistsError';
   }
 }
 
@@ -180,8 +220,12 @@ async function assertConditionalWriteMatches(
  * returns a verdict map keyed by those paths (`path → readable`). Injected by
  * the route from the access service so `WorkspaceService` stays access-agnostic
  * (it gets a function, not the access module). See `modules/access-model/kb-read-filter.ts`.
+ *
+ * `'unlisted'` hides an entry WITHOUT counting it as withheld: a listing
+ * decision (the admin-only `.bevelignore`) rather than content the caller's
+ * read rules keep from them, so it must not tell them something is being kept.
  */
-export type ReadTreeFilter = (wsRelPaths: string[]) => Promise<Map<string, boolean>>;
+export type ReadTreeFilter = (wsRelPaths: string[]) => Promise<Map<string, boolean | 'unlisted'>>;
 
 export class WorkspaceService implements IWorkspaceService {
   /** Maps branch → absolute directory path. Lazily populated. */
@@ -205,6 +249,11 @@ export class WorkspaceService implements IWorkspaceService {
    * {@link withPathTurn} for what takes a turn and why.
    */
   private readonly writeTurns = new Map<string, Promise<void>>();
+  /**
+   * The folder structure changes in flight, keyed by RESOLVED absolute folder
+   * path — see {@link withFolderTurn}.
+   */
+  private readonly folderTurns = new Map<string, Promise<void>>();
   /**
    * The turns the CURRENT async context already holds. Taking one it holds
    * runs straight through instead of waiting for itself, which is what lets a
@@ -271,6 +320,77 @@ export class WorkspaceService implements IWorkspaceService {
 
   setWorkspaceClonedListener(listener: (workspaceId: string) => void): void {
     this.onWorkspaceCloned = listener;
+  }
+
+  /**
+   * Every branch name this process has been shown to be real: named by a
+   * listing of origin's branches, or registered as a clone of ours. Together
+   * with the clones still on disk this is the whole of what the platform
+   * KNOWS about branch names — and the difference between "your link is to a
+   * branch that was deleted" (410) and "there is no branch by that name"
+   * (404).
+   *
+   * Names ACCUMULATE and are never removed, and the two halves of that are
+   * the same rule: the evidence we need is evidence about a branch that is
+   * no longer there. Replacing the set on each listing would forget a
+   * deleted branch at the moment its deletion becomes the thing we have to
+   * report; evicting an old name would silently turn a long-dead branch back
+   * into "never existed"; dropping a clone's name when its workspace is swept
+   * would do that to a branch we cloned ourselves. So nothing here is ever
+   * dropped. Growth is one short string per distinct branch name origin has
+   * ever shown this process — kilobytes for any real repository, and reset
+   * by a restart.
+   *
+   * In memory only, by the spec's decision — no new persistence. A restart
+   * forgets a deleted branch whose clone was already retired, and that name
+   * then reads as unknown, which is exactly what the platform then knows.
+   */
+  private readonly branchesEverHeardOf = new Set<string>();
+
+  /**
+   * Record the branch names a listing returned. Called by the git layer after
+   * every `listBranches` (wired in the composition root), which is the one
+   * place the platform ever sees origin's set of branches.
+   */
+  noteBranchesListed(names: readonly string[]): void {
+    for (const name of names) this.branchesEverHeardOf.add(name);
+  }
+
+  /**
+   * Register a branch's clone directory — the only writer of `branchDirs`, so
+   * that every clone this process opens (fresh, adopted off disk, or handed
+   * over by a concurrent bootstrap) also leaves its branch name in
+   * `branchesEverHeardOf`. `branchDirs` is a cache of live clones and loses the
+   * branch when its workspace is swept; the name left behind is the record
+   * that the branch was real, and outlives the clone.
+   */
+  private registerBranchDir(branch: string, workspaceDir: string): void {
+    this.branchDirs.set(branch, workspaceDir);
+    this.branchesEverHeardOf.add(branch);
+  }
+
+  /**
+   * Has the platform ever heard of this branch? A clone of it — registered in
+   * this process, remembered from one, or sitting on disk from a previous one
+   * — or a listing that named it. Only asked on the failure path, where
+   * origin has just answered that it has no such ref: a yes means the branch
+   * was deleted (410), a no means it never existed as far as the platform is
+   * concerned (404).
+   */
+  private async hasHeardOfBranch(branch: string): Promise<boolean> {
+    if (this.branchDirs.has(branch)) return true;
+    if (this.branchesEverHeardOf.has(branch)) return true;
+    try {
+      await fs.access(path.join(this.workspacesRoot, workspaceIdForBranch(branch), this.kbDirName, '.git'));
+      return true;
+    } catch (err) {
+      // Only "there is nothing there" answers the question. A permission or
+      // I/O fault means we could not look, and a storage failure of ours must
+      // not be reported to the caller as a branch that never existed: it
+      // stays the 500 the operator reads.
+      if (isAbsence(err)) return false;
+      throw err;
+    }
   }
 
   /**
@@ -502,7 +622,7 @@ export class WorkspaceService implements IWorkspaceService {
       // pulls it. Once per branch per process — the cached paths above return
       // before reaching here.
       await this.normalizeCloneConfig(repoDir, branch);
-      this.branchDirs.set(branch, workspaceDir);
+      this.registerBranchDir(branch, workspaceDir);
       return this.buildWorkspaceInfo(branch, workspaceDir);
     } catch {
       // Not on disk — bootstrap below.
@@ -521,7 +641,7 @@ export class WorkspaceService implements IWorkspaceService {
     const existingBootstrap = this.inFlightBootstraps.get(branch);
     if (existingBootstrap) {
       await existingBootstrap;
-      this.branchDirs.set(branch, workspaceDir);
+      this.registerBranchDir(branch, workspaceDir);
       return this.buildWorkspaceInfo(branch, workspaceDir);
     }
     this.inFlightBootstraps.set(branch, bootstrap);
@@ -531,7 +651,7 @@ export class WorkspaceService implements IWorkspaceService {
       // naturally; seeding the remote is the KB startup phase's job, at boot.
       await fs.mkdir(workspaceDir, { recursive: true });
       await this.cloneProcessMapForBranch(workspaceDir, branch);
-      this.branchDirs.set(branch, workspaceDir);
+      this.registerBranchDir(branch, workspaceDir);
       resolveBootstrap();
     } catch (err) {
       this.branchDirs.delete(branch);
@@ -801,13 +921,30 @@ export class WorkspaceService implements IWorkspaceService {
       // Roll back partial state so the next bootstrap retries cleanly.
       await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
       // A branch origin does not have is a fact about the branch, not a
-      // failure of ours: the host deleted it (and the sync retired the
-      // clone), or the link was to a branch that never existed. Typed, so the
-      // routes answer 410 with the branch named and the browser can say "this
-      // branch no longer exists" instead of "something went wrong".
+      // failure of ours — but WHICH fact depends on whether the platform ever
+      // knew the name. A branch it cloned or listed and origin no longer has
+      // was deleted (410, "this branch no longer exists"); a name it has
+      // never seen is simply not a branch (404), and saying "no longer exists
+      // on the remote" to a typo tells the reader it once did.
       if (isMissingRemoteBranchFailure(redacted)) {
-        log.info(`branch "${branch}" does not exist on origin — nothing to clone`);
-        throw new RemoteBranchGoneError(branch);
+        let everHeardOf: boolean;
+        try {
+          everHeardOf = await this.hasHeardOfBranch(branch);
+        } catch (probeErr) {
+          // We could not read our own storage, so we cannot say which of the
+          // two stories this is — and guessing either one states something
+          // about the branch that we do not know. Our failure, so: 500.
+          log.error(`Could not tell whether branch "${branch}" was ever known here:`, {
+            detail: redactError(probeErr),
+          });
+          throw new Error(`Failed to clone process map: ${redacted}`);
+        }
+        if (everHeardOf) {
+          log.info(`branch "${branch}" is gone from origin — nothing to clone`);
+          throw new RemoteBranchGoneError(branch);
+        }
+        log.info(`branch "${branch}" has never existed here — nothing to clone`);
+        throw new BranchNotFoundError(branch);
       }
       log.error(`Failed to clone for branch "${branch}":`, { detail: redacted });
       throw new Error(`Failed to clone process map: ${redacted}`);
@@ -841,16 +978,20 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   async readFile(workspaceId: string, relativePath: string): Promise<string> {
+    assertNoGitInternalsSegment(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await this.assertNotThroughLink(absolutePath, workspaceDir);
     return fs.readFile(absolutePath, 'utf-8');
   }
 
   async readFileBinary(workspaceId: string, relativePath: string): Promise<Buffer> {
+    assertNoGitInternalsSegment(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await this.assertNotThroughLink(absolutePath, workspaceDir);
     return fs.readFile(absolutePath);
@@ -954,8 +1095,10 @@ export class WorkspaceService implements IWorkspaceService {
    * no streaming API); the cap therefore doubles as a peak-heap bound.
    */
   async createFolderZip(workspaceId: string, relativePath: string): Promise<Buffer> {
+    assertNoGitInternalsSegment(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absoluteRoot = path.resolve(workspaceDir, relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absoluteRoot);
     this.assertWithinWorkspace(absoluteRoot, workspaceDir);
     const stat = await fs.stat(absoluteRoot);
     if (!stat.isDirectory()) {
@@ -1006,6 +1149,7 @@ export class WorkspaceService implements IWorkspaceService {
     relativePath: string,
   ): Promise<string | null> {
     this.assertValidGitRef(ref);
+    assertNoGitInternalsSegment(relativePath);
     this.assertValidRepoRelativePath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const repoDir = path.join(workspaceDir, this.kbDirName);
@@ -1030,15 +1174,25 @@ export class WorkspaceService implements IWorkspaceService {
    * Run `git fetch --prune origin` for this branch's clone. Results are
    * cached for `FETCH_CACHE_TTL_MS`; concurrent callers share the same
    * in-flight fetch to avoid fetch storms when e.g. the CR list poll fans out.
+   *
+   * `force` skips the TTL — for a caller that KNOWS the remote just moved
+   * (an event-driven `?fresh=1` read, which bypasses its own cache for the
+   * same reason) and would otherwise answer from refs older than the change
+   * it is being asked about. It keeps the in-flight join, which is the half
+   * that actually prevents storms: ten forced callers in the same tick still
+   * share one fetch.
    */
-  async ensureRemotesFetched(workspaceId: string, opts: { strict?: boolean } = {}): Promise<void> {
+  async ensureRemotesFetched(
+    workspaceId: string,
+    opts: { strict?: boolean; force?: boolean } = {},
+  ): Promise<void> {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const repoDir = path.join(workspaceDir, this.kbDirName);
     const now = Date.now();
     // The TTL is stamped only by a SUCCESSFUL fetch, so a fresh window is
     // itself the proof a strict caller wants.
     const last = this.lastFetchAt.get(repoDir) ?? 0;
-    if (now - last < FETCH_CACHE_TTL_MS) return;
+    if (!opts.force && now - last < FETCH_CACHE_TTL_MS) return;
 
     const inFlight = this.inFlightFetches.get(repoDir);
     if (inFlight) {
@@ -1092,6 +1246,7 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   async deleteFile(workspaceId: string, relativePath: string): Promise<void> {
+    assertNoGitInternalsSegment(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
@@ -1099,8 +1254,10 @@ export class WorkspaceService implements IWorkspaceService {
     // landing between a conditional write's compare and its write would let
     // that write recreate the file the delete had just removed. The diff
     // baseline is updated inside the same turn, so two mutations of one path
-    // update it in the order they landed on disk.
+    // update it in the order they landed on disk. The resolved git check runs
+    // inside the turn too (see `withPathTurn`), so it cannot reorder callers.
     await this.withResolvedPathTurn(absolutePath, async () => {
+      await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
       await fs.rm(absolutePath, { recursive: true, force: true });
       await this.diffService?.markUserDeleted(workspaceId, relativePath);
     });
@@ -1136,10 +1293,14 @@ export class WorkspaceService implements IWorkspaceService {
    * serializes it against the app's own editors.
    */
   async moveEntry(workspaceId: string, oldRelativePath: string, newRelativePath: string): Promise<void> {
+    assertNoGitInternalsSegment(oldRelativePath);
+    assertNoGitInternalsSegment(newRelativePath);
     assertValidPath(newRelativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const oldAbsolute = path.resolve(workspaceDir, oldRelativePath);
     const newAbsolute = path.resolve(workspaceDir, newRelativePath);
+    await assertNotGitInternals(workspaceDir, oldRelativePath, oldAbsolute);
+    await assertNotGitInternals(workspaceDir, newRelativePath, newAbsolute);
     this.assertWithinWorkspace(oldAbsolute, workspaceDir);
     this.assertWithinWorkspace(newAbsolute, workspaceDir);
     // Both ends: a link on the way to either end would carry the rename
@@ -1147,12 +1308,49 @@ export class WorkspaceService implements IWorkspaceService {
     // is not something the app moves around, any more than reads it.
     await this.assertNotThroughLink(oldAbsolute, workspaceDir);
     await this.assertNotThroughLink(newAbsolute, workspaceDir);
+    // Before `mkdir`, so a refused move leaves no empty folder behind — and
+    // it is the look that produces the sentence naming what is in the way.
+    await this.assertDestinationFree(oldAbsolute, newAbsolute, newRelativePath);
     await fs.mkdir(path.dirname(newAbsolute), { recursive: true });
-    await fs.rename(oldAbsolute, newAbsolute);
+    // The move itself cannot replace anything either, so a destination that
+    // appears between the look above and this line is refused rather than
+    // eaten (`shared/rename-no-replace.ts`). This path takes no lock on
+    // purpose — see the note above — so the atomicity has to come from the
+    // filesystem call.
+    try {
+      await renameNoReplace(oldAbsolute, newAbsolute, newRelativePath);
+    } catch (err) {
+      if (err instanceof DestinationTakenError) {
+        throw new EntryExistsError(err.entryKind, newRelativePath);
+      }
+      throw err;
+    }
     if (this.diffService) {
       await this.diffService.markUserDeleted(workspaceId, oldRelativePath);
       await this.diffService.syncFromDisk(workspaceId, newRelativePath);
     }
+  }
+
+  /**
+   * Refuse a move onto a name that is taken. `fs.rename` REPLACES an existing
+   * file on every platform — that is how renaming a `.docx` onto an existing
+   * `.md` handed the markdown file the Word bytes — so the destination is
+   * looked at first, and a move never overwrites a file or merges into a
+   * folder.
+   *
+   * Judged by `inspectDestination`, which reads a case-only rename on a
+   * case-insensitive filesystem — where `notes.md` → `Notes.md` finds the
+   * SOURCE at the destination — as the rename that was asked for rather than a
+   * clash, and everything else as a clash. It is the same reading the move
+   * itself uses, so the sentence and the refusal cannot drift apart.
+   */
+  private async assertDestinationFree(
+    oldAbsolute: string,
+    newAbsolute: string,
+    newRelativePath: string,
+  ): Promise<void> {
+    const verdict = await inspectDestination(oldAbsolute, newAbsolute);
+    if (verdict.state === 'taken') throw new EntryExistsError(verdict.kind, newRelativePath);
   }
 
   /**
@@ -1169,9 +1367,11 @@ export class WorkspaceService implements IWorkspaceService {
     relativePath: string,
     expectedContent: string,
   ): Promise<void> {
+    assertNoGitInternalsSegment(relativePath);
     assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await assertConditionalWriteMatches(absolutePath, relativePath,expectedContent);
   }
@@ -1202,11 +1402,60 @@ export class WorkspaceService implements IWorkspaceService {
    * them as one would be a worse bug than the race it would close.
    */
   async withPathTurn<T>(workspaceId: string, relativePath: string, op: () => Promise<T>): Promise<T> {
+    assertNoGitInternalsSegment(relativePath);
     assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
-    return this.withResolvedPathTurn(absolutePath, op);
+    // The resolved check reads the disk, and how long that takes depends on
+    // the spelling. Run before the queue, it let a later call overtake an
+    // earlier one for the same file; inside the turn, callers keep their order
+    // and `op` still never runs on a path that resolves into the git folder.
+    return this.withResolvedPathTurn(absolutePath, async () => {
+      await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
+      return op();
+    });
+  }
+
+  /**
+   * One folder structure change at a time per SUBTREE: an explicit folder
+   * delete and the placeholder that keeps an emptied folder. Two turns wait
+   * for each other when one folder is, or sits inside, the other, so keeping
+   * a folder can never run in the middle of deleting it (and write the
+   * placeholder back into a folder whose delete already enumerated its
+   * files), and a delete never starts while a folder under it is being kept.
+   * Not re-entrant: take it once, and never around another folder's turn.
+   *
+   * The reach of the guarantee, like {@link withPathTurn}'s: within this
+   * process, over this process's clones. Across instances the workflow lock
+   * rows coordinate — the placeholder write takes its own path's lock, as the
+   * folder delete takes each file's — and each clone's changes meet in git,
+   * as any write into a folder another instance deletes already does.
+   */
+  async withFolderTurn<T>(workspaceId: string, relativeDir: string, op: () => Promise<T>): Promise<T> {
+    assertValidPath(relativeDir);
+    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    const absoluteDir = path.resolve(workspaceDir, relativeDir);
+    this.assertWithinWorkspace(absoluteDir, workspaceDir);
+    const overlaps = (held: string) =>
+      held === absoluteDir ||
+      held.startsWith(absoluteDir + path.sep) ||
+      absoluteDir.startsWith(held + path.sep);
+    // Check-and-claim with no await in between, so two callers cannot both
+    // find the subtree free.
+    for (;;) {
+      const waiting = [...this.folderTurns].filter(([held]) => overlaps(held)).map(([, turn]) => turn);
+      if (waiting.length === 0) break;
+      await Promise.all(waiting);
+    }
+    let release!: () => void;
+    this.folderTurns.set(absoluteDir, new Promise<void>((resolve) => (release = resolve)));
+    try {
+      return await op();
+    } finally {
+      this.folderTurns.delete(absoluteDir);
+      release();
+    }
   }
 
   /**
@@ -1276,11 +1525,14 @@ export class WorkspaceService implements IWorkspaceService {
     content: string,
     options?: { failIfExists?: boolean; expectedContent?: string },
   ): Promise<void> {
+    assertNoGitInternalsSegment(relativePath);
     assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await this.withResolvedPathTurn(absolutePath, async () => {
+      // Inside the turn, beside the link check (see `withPathTurn`).
+      await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
       await this.assertNotThroughLink(absolutePath, workspaceDir);
       // Compare BEFORE creating anything. The parent chain used to be made
       // first, so a refused save at `x/new-folder/note.md` left an empty
@@ -1316,19 +1568,49 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   async createDirectory(workspaceId: string, relativePath: string): Promise<void> {
+    assertNoGitInternalsSegment(relativePath);
     assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await this.assertNotThroughLink(absolutePath, workspaceDir);
     await fs.mkdir(absolutePath, { recursive: true });
     const entries = await fs.readdir(absolutePath);
     if (entries.length === 0) {
-      await fs.writeFile(path.join(absolutePath, '.gitkeep'), '', 'utf-8');
+      await fs.writeFile(path.join(absolutePath, FOLDER_PLACEHOLDER), '', 'utf-8');
     }
   }
 
+  /**
+   * Write the empty-folder placeholder into `relativeDir` when that folder
+   * exists and holds nothing; true when it wrote one. Unlike
+   * {@link createDirectory} it never creates the folder: one that is gone was
+   * deleted explicitly and stays gone. A folder reached through a link is
+   * refused like any write through one, so the placeholder cannot land
+   * outside the workspace.
+   */
+  async writeFolderPlaceholder(workspaceId: string, relativeDir: string): Promise<boolean> {
+    assertValidPath(relativeDir);
+    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    const absoluteDir = path.resolve(workspaceDir, relativeDir);
+    this.assertWithinWorkspace(absoluteDir, workspaceDir);
+    const placeholder = path.join(absoluteDir, FOLDER_PLACEHOLDER);
+    await this.assertNotThroughLink(placeholder, workspaceDir);
+    let entries: string[];
+    try {
+      entries = await fs.readdir(absoluteDir);
+    } catch (err) {
+      if (isAbsence(err)) return false;
+      throw err;
+    }
+    if (entries.length > 0) return false;
+    await fs.writeFile(placeholder, '', { flag: 'wx' });
+    return true;
+  }
+
   async writeFileBinary(workspaceId: string, relativePath: string, data: Uint8Array): Promise<void> {
+    assertNoGitInternalsSegment(relativePath);
     assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
@@ -1338,6 +1620,7 @@ export class WorkspaceService implements IWorkspaceService {
     // parent chain too, so a folder delete serialized before this turn
     // cannot remove the parent between its creation and the write.
     await this.withResolvedPathTurn(absolutePath, async () => {
+      await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
       await this.assertNotThroughLink(absolutePath, workspaceDir);
       await fs.mkdir(path.dirname(absolutePath), { recursive: true });
       await fs.writeFile(absolutePath, data);
@@ -1363,8 +1646,11 @@ export class WorkspaceService implements IWorkspaceService {
      */
     guardWrite?: (wsRelativePath: string) => Promise<void>,
   ): Promise<UnzipResult> {
+    assertNoGitInternalsSegment(zipRelativePath);
+    if (destDirRelativePath !== undefined) assertNoGitInternalsSegment(destDirRelativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const zipAbsolute = path.resolve(workspaceDir, zipRelativePath);
+    await assertNotGitInternals(workspaceDir, zipRelativePath, zipAbsolute);
     this.assertWithinWorkspace(zipAbsolute, workspaceDir);
     if (!zipRelativePath.toLowerCase().endsWith('.zip')) {
       throw new WorkflowValidationError('Only .zip files can be extracted');
@@ -1377,15 +1663,39 @@ export class WorkspaceService implements IWorkspaceService {
     const destRel = destDirRelativePath ?? inferredDest;
     if (destRel) assertValidPath(destRel);
     const destAbsolute = destRel ? path.resolve(workspaceDir, destRel) : workspaceDir;
+    await assertNotGitInternals(workspaceDir, destRel, destAbsolute);
     this.assertWithinWorkspace(destAbsolute, workspaceDir);
     // Neither the archive nor the destination may sit behind a link; each
     // entry's own target is checked again below, once it is known.
     await this.assertNotThroughLink(zipAbsolute, workspaceDir);
     if (destAbsolute !== workspaceDir) await this.assertNotThroughLink(destAbsolute, workspaceDir);
 
+    // The archive is READ ONCE, here, and the reader is handed those bytes —
+    // it is never given the path to open for itself. Two reasons, and the
+    // first is why this is not a `stat` followed by `new AdmZip(path)`:
+    //
+    //  - The zip reader cannot tell absence from corruption. On a path with
+    //    nothing at it `AdmZip` throws "ADM-ZIP: Invalid filename", which would
+    //    be dressed up as an unreadable archive (422) and blame the bytes for
+    //    a name that never existed. Only the read knows which it was.
+    //  - A separate probe answers about a DIFFERENT moment than the open. An
+    //    archive deleted in between passed the probe and then failed the open,
+    //    and the caller got the 422 the probe existed to prevent. One read is
+    //    one moment, so there is no in-between to lose.
+    //
+    // `AdmZip` from a buffer costs nothing extra: given a path it reads the
+    // whole file in anyway.
+    let zipBytes: Buffer;
+    try {
+      zipBytes = await fs.readFile(zipAbsolute);
+    } catch (err) {
+      if (isAbsence(err)) throw new PathNotFoundError(zipRelativePath);
+      throw err;
+    }
+
     let zip: AdmZip;
     try {
-      zip = new AdmZip(zipAbsolute);
+      zip = new AdmZip(zipBytes);
     } catch (err) {
       throw new UnreadableArchiveError(err instanceof Error ? err.message : String(err));
     }
@@ -1421,6 +1731,12 @@ export class WorkspaceService implements IWorkspaceService {
 
       if (!rawName || rawName.startsWith('/') || /(^|\/)\.\.($|\/)/.test(rawName)) {
         skipped.push({ path: rawName || '(empty)', reason: 'Invalid path' });
+        continue;
+      }
+
+      // An archive never writes into the git folder, whatever the entry's spelling.
+      if (hasGitInternalsSegment(rawName)) {
+        skipped.push({ path: rawName, reason: new GitInternalsError().message });
         continue;
       }
 
@@ -1468,9 +1784,10 @@ export class WorkspaceService implements IWorkspaceService {
       // destination must not redirect this entry's bytes. Reported like the
       // other per-entry refusals, so one such entry does not fail the rest.
       try {
+        await assertNotGitInternals(workspaceDir, trimmed, targetAbsolute);
         await this.assertNotThroughLink(targetAbsolute, workspaceDir);
       } catch (err) {
-        if (err instanceof PathTraversalError) {
+        if (err instanceof PathTraversalError || err instanceof GitInternalsError) {
           skipped.push({ path: rawName, reason: err.message });
           continue;
         }
@@ -1752,7 +2069,7 @@ export class WorkspaceService implements IWorkspaceService {
     const workspaceDir = this.workspaceDirWithinRoot(workspaceId);
     try {
       await fs.access(path.join(workspaceDir, this.kbDirName, '.git'));
-      this.branchDirs.set(branch, workspaceDir);
+      this.registerBranchDir(branch, workspaceDir);
       return workspaceDir;
     } catch {
       // Fall through to lazy bootstrap.
@@ -1787,11 +2104,17 @@ export class WorkspaceService implements IWorkspaceService {
       name: string;
       relativePath: string;
       readable: boolean;
+      /** Hidden by a listing decision, not a read rule: dropping it withholds nothing. */
+      unlisted: boolean;
       children: (FileTreeEntry | DirNode)[];
     }
     const relOf = (abs: string) => path.relative(workspaceRoot, abs).replace(/\\/g, '/');
-    const top: DirNode = { name: path.basename(root), relativePath: relOf(root) || '.', readable: true, children: [] };
+    const top: DirNode = { name: path.basename(root), relativePath: relOf(root) || '.', readable: true, unlisted: false, children: [] };
     const nodes = new Map<string, DirNode>([['', top]]);
+    // Entries the caller's read rules kept out — counted, never named. Only an
+    // entry the filter judged unreadable counts: `.bevelignore`d and `.git`
+    // entries never reach it, and an `'unlisted'` one is kept from no one.
+    let withheld = 0;
 
     await this.disk.walk(root, explorerWalk(), [
       {
@@ -1811,14 +2134,23 @@ export class WorkspaceService implements IWorkspaceService {
           // dropped. No filter → identical to the pre-feature tree (regression-safe).
           const verdict = readFilter && entries.length > 0 ? await readFilter(rels) : null;
           const readable = (rel: string) => verdict === null || verdict.get(rel) === true;
+          const unlisted = (rel: string) => verdict !== null && verdict.get(rel) === 'unlisted';
           entries.forEach((entry, i) => {
             const entryRel = rels[i]!;
             if (entry.isDirectory()) {
-              const child: DirNode = { name: entry.name, relativePath: entryRel, readable: readable(entryRel), children: [] };
+              const child: DirNode = {
+                name: entry.name,
+                relativePath: entryRel,
+                readable: readable(entryRel),
+                unlisted: unlisted(entryRel),
+                children: [],
+              };
               nodes.set(rel ? `${rel}/${entry.name}` : entry.name, child);
               node.children.push(child);
             } else if (readable(entryRel)) {
               node.children.push({ name: entry.name, relativePath: entryRel, type: 'file' });
+            } else if (!unlisted(entryRel)) {
+              withheld++;
             }
           });
         },
@@ -1835,6 +2167,7 @@ export class WorkspaceService implements IWorkspaceService {
         }
         const sub = finish(child);
         if (child.readable || (sub.children?.length ?? 0) > 0) children.push(sub);
+        else if (!child.unlisted) withheld++;
       }
       children.sort((a, b) => {
         if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
@@ -1842,7 +2175,10 @@ export class WorkspaceService implements IWorkspaceService {
       });
       return { name: node.name, relativePath: node.relativePath, type: 'directory', children };
     };
-    return finish(top);
+    const tree = finish(top);
+    // Only when something was withheld, so an unfiltered — or all-readable —
+    // listing stays exactly the tree it always was.
+    return withheld > 0 ? { ...tree, withheld } : tree;
   }
 }
 
@@ -1856,7 +2192,10 @@ export class WorkspaceService implements IWorkspaceService {
  */
 function explorerWalk(): TreeWalkOptions {
   return {
-    skip: (e) => (e.name === '.git' && e.isDirectory()) || (e.name === '.gitkeep' && e.isFile()),
+    // Any spelling of the git folder (`.GIT`, `.git.`) — the same rule the path
+    // guards apply, so a download or listing never carries what they refuse —
+    // and the empty-folder placeholder, which is never content.
+    skip: (e) => hasGitInternalsSegment(e.name) || (isFolderPlaceholder(e.name) && e.isFile()),
     ignore: true,
     unreadable: 'throw',
   };

@@ -4,9 +4,15 @@ import '@utcp/cli';
 import {
   HexisLocalVariableLoader,
   bindLocalVariableResolver,
+  dropLocalVariableCache,
   resetLocalVariableResolver,
 } from '../local-variables.js';
-import { fetchLocalOnlyManuals, fetchLocalToolVariables, type LocalManualInfo } from '../deployment.js';
+import {
+  ConnectionKeyRejectedError,
+  fetchLocalOnlyManuals,
+  fetchLocalToolVariables,
+  type LocalManualInfo,
+} from '../deployment.js';
 import type { HexisMcpConfig } from '../config.js';
 
 const config = { baseUrl: 'https://x.example', connectionKey: 'bevel_k' } as HexisMcpConfig;
@@ -85,6 +91,11 @@ describe('fetchLocalToolVariables', () => {
     expect(await fetchLocalToolVariables(config, 'git')).toEqual({ ok: false, values: {} });
   });
 
+  it('lets a rejected key through instead of degrading it to unset secrets', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })));
+    await expect(fetchLocalToolVariables(config, 'git')).rejects.toBeInstanceOf(ConnectionKeyRejectedError);
+  });
+
   it('reports a malformed response as a failure rather than as an unset secret', async () => {
     // Protocol drift and an unset secret look identical to a caller otherwise,
     // and only one of them is fixed by visiting the Secrets page.
@@ -109,6 +120,16 @@ describe('HexisLocalVariableLoader', () => {
     stubVariables({ git: { variables: { GITHUB_TOKEN: 'ghp_x' } } });
     const loader = bind(local({ git: { slug: 'git', path: 'p' } }));
     expect(await loader.get('git_GITHUB_TOKEN')).toBe('ghp_x');
+  });
+
+  it('fails the lookup with the plain sentence when the key was revoked mid-run', async () => {
+    // Falling through to process.env would run the tool without its secrets
+    // and hide why; the call fails in the rejected key's own words instead.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })));
+    const loader = bind(local({ git: { slug: 'git', path: 'p' } }));
+    await expect(loader.get('git_GITHUB_TOKEN')).rejects.toThrow(
+      'The connection key was rejected by https://x.example. Mint a new one in External agent access.',
+    );
   });
 
   it('answers null for anything that is not a local manual', async () => {
@@ -234,6 +255,35 @@ describe('HexisLocalVariableLoader', () => {
     expect(await loader.get('git_TOKEN')).toBe('ghp_x');
     resetLocalVariableResolver(id);
     expect(await loader.get('git_TOKEN')).toBeNull();
+  });
+
+  /**
+   * A catalog refresh swaps the local manuals under a LIVE binding. A manual
+   * that kept its name but changed its file may declare other variables, or
+   * answer to another slug: what was resolved against the old definition must
+   * not be handed to the new tools for the rest of the cache's life — and the
+   * binding itself stays, because the client that holds its id is not rebuilt.
+   */
+  it('drops what a binding cached when its local manuals are swapped, and keeps the binding', async () => {
+    const before = stubVariables({ git: { variables: { TOKEN: 'from-the-old-file' } } });
+    const manuals = local({ git: { slug: 'git', path: 'Plugins/Everyone/git.tool' } });
+    const id = bindLocalVariableResolver(config, manuals);
+    const loader = new HexisLocalVariableLoader(id);
+    expect(await loader.get('git_TOKEN')).toBe('from-the-old-file');
+    expect(await loader.get('git_TOKEN')).toBe('from-the-old-file');
+    expect(before).toHaveLength(1); // the second read was the cache
+
+    // The refresh: the deployment now answers for the redefined manual, the
+    // live map is updated in place, and the cache is dropped with the old set.
+    const after = stubVariables({ git: { variables: { TOKEN: 'from-the-new-file' } } });
+    manuals.set('git', { slug: 'git', path: 'Plugins/Everyone/git.tool' });
+    dropLocalVariableCache(id);
+    expect(await loader.get('git_TOKEN')).toBe('from-the-new-file');
+    expect(after).toHaveLength(1);
+  });
+
+  it('dropping the cache of a released or unknown binding is a no-op', () => {
+    expect(() => dropLocalVariableCache('never-bound')).not.toThrow();
   });
 
   it('releasing one binding leaves the others alone', async () => {

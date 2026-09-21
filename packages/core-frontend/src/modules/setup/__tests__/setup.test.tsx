@@ -42,7 +42,7 @@ const SETTINGS: SettingStatus[] = [
   { key: 'pluginsDir', envVar: 'KB_PLUGINS_DIR', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'defaultBranch', envVar: 'DEFAULT_BRANCH', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'protectedBranches', envVar: 'PROTECTED_BRANCHES', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
-  { key: 'oidcClientSecret', envVar: 'OIDC_CLIENT_SECRET', section: 'sign-in', source: 'unset', configured: false, secret: true, restartToApply: true },
+  { key: 'oidcClientSecret', envVar: 'OIDC_CLIENT_SECRET', section: 'sign-in', source: 'unset', configured: false, secret: true, restartToApply: false },
 ];
 
 /**
@@ -142,11 +142,15 @@ describe('SetupScreen', () => {
   });
 
   /**
-   * The first-run host of the Marketplace section: marked optional, skippable,
-   * and never in the way — setup finishes without anyone touching it, and
-   * nothing in it is fetched or saved on the way.
+   * The first-run host of the Marketplace section: marked optional and never
+   * in the way — setup finishes without anyone touching it, and nothing in it
+   * is fetched or saved on the way. There is no skip control to press: an
+   * admin ignores the section the way they ignore single sign-on, by leaving
+   * it alone. Because "Save and continue" now sits BELOW this section and is
+   * tied to the form by `form=`, this also proves that out-of-form submit
+   * still saves.
    */
-  it('offers the Marketplace section as optional, and finishes setup with it skipped', async () => {
+  it('offers the Marketplace section as optional, and finishes setup having ignored it', async () => {
     facade.fetchGitHubFacade.mockClear();
     facade.setMarketplaceRegistration.mockClear();
     await renderScreen();
@@ -154,9 +158,7 @@ describe('SetupScreen', () => {
     expect(section).toHaveTextContent('Optional');
     expect(screen.getByRole('heading', { name: 'Marketplace' })).toBeInTheDocument();
     expect(screen.getByText('Register this deployment with your Claude organization')).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole('button', { name: 'Skip for now' }));
-    expect(screen.getByTestId('marketplace-deployment-section')).toHaveTextContent('Marketplace skipped');
+    expect(screen.queryByRole('button', { name: 'Skip for now' })).toBeNull();
 
     api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
     await userEvent.type(screen.getByLabelText('Repository address'), 'https://example.com/kb.git');

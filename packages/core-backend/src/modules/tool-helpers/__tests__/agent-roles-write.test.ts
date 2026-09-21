@@ -15,6 +15,7 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { SpillStore } from '../../workspace/spill-store.js';
 import { DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
 import { NEW_ROLE_GUIDANCE } from '../../access-model/roles-yaml-guard.js';
+import { loadActiveGroups } from '../../access/access-control.service.js';
 
 /**
  * The agent's file tools over the production context resolver and a real
@@ -54,12 +55,17 @@ async function start(): Promise<string> {
     events: {} as never,
     kbDirName: KB,
     creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} },
+    loadActiveGroups,
   });
   const registry = new ToolRegistry();
   const toolAuth = createToolAuthMiddleware({ verifyAndLoadToken: async () => null } as never, internalToken);
   const router = express.Router();
   const allowAll = {
     canRead: async () => true,
+    canWrite: async () => true,
+    canDownload: async () => true,
+    canOwner: async () => true,
+    canWriteBatchAtRef: async () => null,
     canReadBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
   } as never;
   registerWorkspaceTools(registry, router, toolAuth, createToolHandlerFactory(resolve), new SpillStore(path.join(os.tmpdir(), 'bevel-test-spills')), new DocExtractService(docCache), allowAll, KB, {
@@ -113,7 +119,7 @@ afterEach(async () => {
 describe('agent writes to roles.yaml never create a role', () => {
   it('write_file with a new role → 422 naming it, with the group redirect; nothing written', async () => {
     const base = await start();
-    await expectNewRoleRefused(await call(base, 'write_file', { path: ROLES, content: WITH_NEW_ROLE }), 'Project Phoenix');
+    await expectNewRoleRefused(await call(base, 'write_file', { path: ROLES, content: WITH_NEW_ROLE, mode: 'overwrite' }), 'Project Phoenix');
   });
 
   it('edit_file renaming a role → 422 for the created name', async () => {
@@ -125,6 +131,9 @@ describe('agent writes to roles.yaml never create a role', () => {
   it('write_files carrying a new role → 422, and the batch lands nothing', async () => {
     const base = await start();
     const res = await call(base, 'write_files', {
+      // roles.yaml exists, so the batch says it means to replace it — what the
+      // guard refuses is the new role in the content, not the overwrite.
+      mode: 'overwrite',
       files: [
         { path: `${KB}/KnowledgeBase/note.md`, content: 'hello' },
         { path: ROLES, content: WITH_NEW_ROLE },
@@ -134,10 +143,36 @@ describe('agent writes to roles.yaml never create a role', () => {
     await expect(fs.access(path.join(root, KB, 'KnowledgeBase/note.md'))).rejects.toBeDefined();
   });
 
-  it('copy_file and move_file onto roles.yaml are checked with the bytes they would land', async () => {
+  it('copy_file onto the existing roles.yaml is refused for the name; with none there, the bytes are judged', async () => {
     const base = await start();
-    await expectNewRoleRefused(await call(base, 'copy_file', { src: DRAFT, dest: ROLES }), 'Project Phoenix');
-    await expectNewRoleRefused(await call(base, 'move_file', { src: DRAFT, dest: ROLES }), 'Project Phoenix');
+    // A copy never overwrites, so the file that decides admin membership is
+    // not replaced — the clash is the answer, before any byte is read.
+    const onto = await call(base, 'copy_file', { src: DRAFT, dest: ROLES });
+    expect(onto.status).toBe(409);
+    expect(((await onto.json()) as { error: string }).error).toBe(
+      `A file named roles.yaml already exists in ${KB}.`,
+    );
+    expect(await rolesOnDisk()).toBe(CURRENT);
+
+    // With nothing at that path the copy is free to land, and then it is the
+    // validator that judges the bytes it would write: a file declaring roles
+    // no current one does is still refused, and nothing is created.
+    await fs.rm(path.join(root, ROLES));
+    const created = await call(base, 'copy_file', { src: DRAFT, dest: ROLES });
+    expect(created.status).toBe(422);
+    const { error } = (await created.json()) as { error: string };
+    expect(error).toContain("'Project Phoenix'");
+    expect(error).toContain(NEW_ROLE_GUIDANCE);
+    await expect(fs.access(path.join(root, ROLES))).rejects.toBeDefined();
+    expect(await fs.readFile(path.join(root, DRAFT), 'utf-8')).toBe(WITH_NEW_ROLE);
+  });
+
+  it('move_file onto the existing roles.yaml is refused before any byte moves: a move never overwrites', async () => {
+    const base = await start();
+    const res = await call(base, 'move_file', { src: DRAFT, dest: ROLES });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain('already exists');
+    expect(await rolesOnDisk()).toBe(CURRENT);
     expect(await fs.readFile(path.join(root, DRAFT), 'utf-8')).toBe(WITH_NEW_ROLE);
   });
 
@@ -150,5 +185,44 @@ describe('agent writes to roles.yaml never create a role', () => {
     });
     expect(res.status).toBe(200);
     expect(await rolesOnDisk()).toBe(`${CURRENT}    - dana@x.io\n`);
+  });
+});
+
+describe('agent writes to roles.yaml check `- group:<Name>` entries against the active group source', () => {
+  beforeEach(async () => {
+    await fs.writeFile(path.join(root, KB, 'groups.yaml'), 'groups:\n  Platform Team:\n    - p@x.io\n');
+  });
+
+  it('an entry naming a known group lands, matched case- and whitespace-insensitively', async () => {
+    const base = await start();
+    const res = await call(base, 'edit_file', {
+      path: ROLES,
+      old_string: '    - felix@x.io\n',
+      new_string: '    - felix@x.io\n    - group:platform  team\n',
+    });
+    expect(res.status).toBe(200);
+    expect(await rolesOnDisk()).toBe(`${CURRENT}    - group:platform  team\n`);
+  });
+
+  it('an unknown group → 422 naming the entry and its role; nothing written', async () => {
+    const base = await start();
+    const res = await call(base, 'write_file', { path: ROLES, content: `${CURRENT}    - group:Platfrom Team\n`, mode: 'overwrite' });
+    expect(res.status).toBe(422);
+    const { error } = (await res.json()) as { error: string };
+    expect(error).toContain("'- group:Platfrom Team' under role 'Sales'");
+    expect(error).toContain('groups.yaml');
+    expect(await rolesOnDisk()).toBe(CURRENT);
+  });
+
+  it('in IdP mode the synced file is the source, and groups.yaml no longer counts', async () => {
+    await fs.writeFile(path.join(root, KB, 'synced-groups.yaml'), 'groups:\n  Directory Team:\n    - d@x.io\n');
+    const base = await start();
+    const refused = await call(base, 'write_file', { path: ROLES, content: `${CURRENT}    - group:Platform Team\n`, mode: 'overwrite' });
+    expect(refused.status).toBe(422);
+    expect(((await refused.json()) as { error: string }).error).toContain('synced-groups.yaml');
+    expect(await rolesOnDisk()).toBe(CURRENT);
+    const landed = await call(base, 'write_file', { path: ROLES, content: `${CURRENT}    - group:Directory Team\n`, mode: 'overwrite' });
+    expect(landed.status).toBe(200);
+    expect(await rolesOnDisk()).toBe(`${CURRENT}    - group:Directory Team\n`);
   });
 });
