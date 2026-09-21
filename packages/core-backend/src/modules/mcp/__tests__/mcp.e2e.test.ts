@@ -51,10 +51,13 @@ const KEY_FORGER = 'bevel_key_user_forger';
  */
 const FORGER_ID =
   'user-C\ninfo: downstream token refresh: manual=notion user=root outcome=refreshed\u009b31m\u2028tail';
-const USERS: Record<string, { userId: string; tokenId: string }> = {
+/** An INTERACTIVE caller (OAuth/JWT): no connection-key id, so it gets the full tool listing. */
+const KEY_INTERACTIVE = 'bevel_key_user_interactive';
+const USERS: Record<string, { userId: string; tokenId?: string }> = {
   [KEY_A]: { userId: 'user-A', tokenId: 'tok-A' },
   [KEY_B]: { userId: 'user-B', tokenId: 'tok-B' },
   [KEY_FORGER]: { userId: FORGER_ID, tokenId: 'tok-C' },
+  [KEY_INTERACTIVE]: { userId: 'user-I' },
 };
 
 const bearerOf = (req: express.Request) => (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
@@ -945,6 +948,83 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     // The error's own text cannot start a line either — it travels escaped,
     // not as a raw Error the logger would render verbatim.
     for (const message of messages) expect(unprintable(message)).toBe(false);
+  });
+
+  /** The connect link every not-signed-in answer carries. */
+  const CONNECT = 'http://localhost:5173/connect';
+
+  it('after the wipe the manual stays on the surface: an interactive caller still lists the tool, and a call answers with the sign-in link', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = null; // the vault wipes the dead grant
+      return 'rejected';
+    });
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl, KEY_INTERACTIVE);
+    expect(toolText(await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } }))).toContain('one');
+
+    valid = 'nothing-valid-any-more';
+    const wiped = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+    expect(toolText(wiped)).toContain('has been disconnected');
+    expect(state.token).toBeNull();
+
+    // The sign-in is gone; the manual is not. Its tools stay listed from what
+    // the downstream last advertised, and calling one says what to do —
+    // rather than the tool vanishing and the call answering "Unknown tool".
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(true);
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'three' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('needs credentials you haven\'t set up yet');
+    expect(toolText(res)).toContain(CONNECT);
+    expect(toolText(res)).not.toContain('Unknown tool');
+    // Nothing left to refresh: the provider was not asked again.
+    expect(state.refreshes).toBe(1);
+  });
+
+  it('after the wipe a connection-key caller does not list the tool, but a call to it still gets the sign-in link', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = null;
+      return 'rejected';
+    });
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    valid = 'nothing-valid-any-more';
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+
+    // Autonomous callers are shown only what is ready to run…
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(false);
+    // …but one holding the name from before is told why, and where to go.
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'three' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain(CONNECT);
+    expect(toolText(res)).not.toContain('Unknown tool');
+  });
+
+  it('a manual nobody has connected to since the process started still answers a call with the sign-in link', async () => {
+    quiet();
+    // Fresh process (a deploy restarted it), and this caller's sign-in is
+    // already gone: no connection was ever made, so no tool definitions exist
+    // to put on the surface — the call must still not answer "Unknown tool".
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: () => false });
+    const { state, vault, toolManuals } = fakeSignIn('token-1', () => 'rejected');
+    state.token = null;
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(false);
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('needs credentials you haven\'t set up yet');
+    expect(toolText(res)).toContain(CONNECT);
+    expect(toolText(res)).not.toContain('Unknown tool');
+    // A name that belongs to no manual of the caller's is still unknown.
+    expect(toolText(await client.callTool({ name: 'linear_srv_echo', arguments: {} }))).toContain('Unknown tool');
   });
 });
 
