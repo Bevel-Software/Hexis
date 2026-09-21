@@ -7,6 +7,7 @@ import {
   joinBranchFor,
   type AuthUser,
   type ChangeRequest,
+  type ChangeRequestState,
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -282,17 +283,6 @@ export function createPluginsRoutes(
   const openJoinCr = (mine: ChangeRequest[], email: string, plugin: string): ChangeRequest | null =>
     mine.find((cr) => cr.state === 'open' && cr.branch === joinBranchFor(email, plugin)) ?? null;
 
-  /**
-   * Whether the change request an `opened` record names still stands, as far
-   * as this listing knows. A request the listing does not name at all is
-   * taken as standing: the row was marked seconds ago and the listing is
-   * cached, and the card must not flicker to a button right after a request
-   * landed. Only a request the listing knows and knows to be closed ends it.
-   */
-  const requestStillOpen = (mine: ChangeRequest[], record: JoinRequestRecord): boolean => {
-    const named = mine.find((cr) => cr.number === record.changeRequestNumber);
-    return named === undefined || named.state === 'open';
-  };
 
   router.get('/plugins', async (req, res) => {
     const email = req.userEmail;
@@ -339,6 +329,25 @@ export function createPluginsRoutes(
       } catch (err) {
         log.warn(`recorded join requests unavailable: ${err instanceof Error ? err.message : String(err)}`);
       }
+      // Whether the change request each `opened` record names still stands —
+      // from the request's own row, because the listing above is open-only
+      // and cached, so a declined request is merely absent from it. Null when
+      // the rows could not be read: an `opened` record then keeps the benefit
+      // of the doubt, since the alternative is a button over a request that
+      // may well still be standing.
+      let standing: Map<number, ChangeRequestState> | null = null;
+      try {
+        standing = await joinRequestJobs.changeRequestStates(
+          [...recorded.values()].flatMap((r) =>
+            r.status === 'opened' && r.changeRequestNumber !== null ? [r.changeRequestNumber] : [],
+          ),
+        );
+      } catch (err) {
+        log.warn(`join request states unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const stillOpen = (record: JoinRequestRecord): boolean =>
+        standing === null ||
+        (record.changeRequestNumber !== null && standing.get(record.changeRequestNumber) === 'open');
 
       const plugins: PluginSummary[] = [];
       for (const g of catalog) {
@@ -359,11 +368,11 @@ export function createPluginsRoutes(
         // names is still open — once a manager declines it, or it is settled
         // and the access later taken back, the ask is over and the person may
         // make it again, exactly as they could when the change request was
-        // the only record. The listing decides that; a request the listing
-        // does not know yet (marked seconds ago, listing cached) still counts.
+        // the only record. The request's own row decides that (see
+        // `standing`), never the open-only listing.
         const requested =
           record?.status === 'pending' ||
-          (record?.status === 'opened' && requestStillOpen(mine, record)) ||
+          (record?.status === 'opened' && stillOpen(record)) ||
           joinCr !== null;
         plugins.push({
           name: g.name,
@@ -510,8 +519,9 @@ export function createPluginsRoutes(
       }
       // A record whose change request has since been declined or settled is
       // an ask that was answered; this click is a new one, and the row goes
-      // back to `pending` for it. Costs a fresh listing on that path only —
-      // a first ask, and a retry after a failure, are still one statement.
+      // back to `pending` for it. Costs one read of that request's row, on
+      // that path only — a first ask, and a retry after a failure, are still
+      // one statement.
       const record = await joinRequestJobs.reviveIfAnswered(
         await joinRequestJobs.record(user, joinKeyOf(plugin)),
       );

@@ -178,6 +178,10 @@ async function makeHarness(opts: HarnessOpts = {}) {
   // request are one-to-one. The git it eventually does is the workflow stub
   // above, as it always was.
   const joinRequestStore = new FakeJoinRequestStore();
+  // The change requests the store can see are the ones the listing is told
+  // about, state and all — so a test that lists a closed request is also
+  // telling the record it names that the request is over.
+  for (const c of opts.authoredCrs ?? []) joinRequestStore.changeRequests.set(c.number, c.state);
   const joinRequestJobs = new PluginJoinRequestJobs(joinRequestStore, {
     workflow,
     workspaceService,
@@ -714,23 +718,23 @@ describe('/api/plugins routes', () => {
   it('a declined request is over: the listing hands the button back, and the next click asks again on the same record', async () => {
     // Before the record existed, "requested" came from the open change request
     // alone, so a decline handed the button back. The record must not change
-    // that: an `opened` row whose request is closed is an answered ask.
-    const h = await makeHarness({
-      readable: { [ALI]: ['Plugins/Finance/access.md'] },
-      authoredCrs: [cr({ branch: joinBranchFor(ALI, 'Finance'), number: 9, state: 'closed' })],
-    });
+    // that: an `opened` row whose request is closed is an answered ask. And
+    // the answer has to come from the request's ROW — the authored listing
+    // is open-only, so it never lists a closed request; a fixture that put
+    // the closed request in the listing would pass a check that reads the
+    // wrong source. The listing here is empty, as it is in production.
+    const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     server = h.server;
-    const [answered] = [
-      h.joinRequestStore.seed({
-        requesterEmail: ALI,
-        requesterName: 'Ali Baba',
-        pluginKey: 'Finance',
-        status: 'opened',
-        failureReason: null,
-        changeRequestNumber: 9,
-        claimedAt: null,
-      }),
-    ];
+    h.joinRequestStore.changeRequests.set(9, 'closed');
+    const answered = h.joinRequestStore.seed({
+      requesterEmail: ALI,
+      requesterName: 'Ali Baba',
+      pluginKey: 'Finance',
+      status: 'opened',
+      failureReason: null,
+      changeRequestNumber: 9,
+      claimedAt: null,
+    });
 
     const { plugins } = await listPlugins(h.baseUrl);
     expect(plugins[0]).toMatchObject({
@@ -751,12 +755,14 @@ describe('/api/plugins routes', () => {
     expect(h.workflow.openChangeRequest).toHaveBeenCalledTimes(1);
   });
 
-  it('an opened record the listing does not know yet still counts as requested', async () => {
-    // Marked seconds ago, listing cached: the benefit of the doubt goes to
-    // the record, or the card would flicker to the button right after a
-    // request landed.
+  it('an opened record whose request is still open counts, before the open listing knows it', async () => {
+    // Marked seconds ago, the open listing cached without it: the request's
+    // row says it is open, and that is what decides — not the listing, which
+    // would otherwise flicker the card to a button right after a request
+    // landed.
     const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     server = h.server;
+    h.joinRequestStore.changeRequests.set(9, 'open');
     h.joinRequestStore.seed({
       requesterEmail: ALI,
       requesterName: 'Ali Baba',

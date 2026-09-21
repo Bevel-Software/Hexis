@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { ChangeRequestState } from '@bevel-software/platform-shared';
 import type {
   ClaimedJoinRequest,
   JoinRequestRecord,
@@ -18,6 +19,13 @@ import type {
 export class FakeJoinRequestStore implements JoinRequestStore {
   private readonly rows = new Map<string, JoinRequestRecord>();
   private nextId = 1;
+  /**
+   * The `change_requests` rows this store can see, by number — what
+   * `changeRequestStates` answers from. A test seeds the ones it needs; a
+   * request a job opens through `markOpened` is added as `open`, since in
+   * the real table the row exists by the time the record names it.
+   */
+  readonly changeRequests = new Map<number, ChangeRequestState>();
 
   /**
    * Seed a row as if it had been written before this process started.
@@ -136,6 +144,7 @@ export class FakeJoinRequestStore implements JoinRequestStore {
     row.failureReason = null;
     row.claimedAt = null;
     row.claimToken = null;
+    if (!this.changeRequests.has(changeRequestNumber)) this.changeRequests.set(changeRequestNumber, 'open');
   }
 
   async markFailed(id: string, claimToken: string, reason: string): Promise<void> {
@@ -158,6 +167,15 @@ export class FakeJoinRequestStore implements JoinRequestStore {
       row.claimToken = null;
     }
     return { ...row };
+  }
+
+  async changeRequestStates(numbers: readonly number[]): Promise<Map<number, ChangeRequestState>> {
+    const out = new Map<number, ChangeRequestState>();
+    for (const n of numbers) {
+      const state = this.changeRequests.get(n);
+      if (state !== undefined) out.set(n, state);
+    }
+    return out;
   }
 
   private rowById(id: string): JoinRequestRecord | undefined {

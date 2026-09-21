@@ -1,6 +1,7 @@
-import { and, eq, isNotNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
+import type { ChangeRequestState } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
-import { pluginJoinRequests } from '../database/schema.js';
+import { changeRequests, pluginJoinRequests } from '../database/schema.js';
 
 /**
  * A join request as the platform recorded it — the durable "this person
@@ -121,6 +122,16 @@ export interface JoinRequestStore {
    * or not this call changed it; null when it is gone.
    */
   reopen(id: string, changeRequestNumber: number): Promise<JoinRequestRecord | null>;
+  /**
+   * The state of each named change request, read from its own row: `open`,
+   * `merged` or `closed`, with a number that has no row absent from the map.
+   *
+   * From the row and not from a listing, because every listing is OPEN-ONLY
+   * and cached — the one question this answers is whether an `opened`
+   * record's request is still standing, and a listing of open requests can
+   * only ever say yes or stay silent. The row says no.
+   */
+  changeRequestStates(numbers: readonly number[]): Promise<Map<number, ChangeRequestState>>;
 }
 
 export class DbJoinRequestStore implements JoinRequestStore {
@@ -308,6 +319,15 @@ export class DbJoinRequestStore implements JoinRequestStore {
       )
       .returning();
     return row ? toRecord(row) : this.byId(id);
+  }
+
+  async changeRequestStates(numbers: readonly number[]): Promise<Map<number, ChangeRequestState>> {
+    if (numbers.length === 0) return new Map();
+    const rows = await this.db
+      .select({ number: changeRequests.number, state: changeRequests.state })
+      .from(changeRequests)
+      .where(inArray(changeRequests.number, [...numbers]));
+    return new Map(rows.map((r) => [r.number, r.state as ChangeRequestState]));
   }
 }
 
