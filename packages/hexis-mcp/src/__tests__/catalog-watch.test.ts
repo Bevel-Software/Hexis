@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { HexisMcpConfig } from '../config.js';
 import { CatalogRevisionUnsupportedError, DeploymentError } from '../deployment.js';
 import {
-  CATALOG_CHECK_INTERVAL_MS,
   CATALOG_CHECK_MIN_INTERVAL_MS,
   createCatalogCheck,
 } from '../catalog-watch.js';
@@ -12,8 +11,8 @@ import {
  * moved.
  *
  * It asks nothing on its own — the server decides WHEN to check (on activity,
- * and on a heartbeat for the connection that has none; see `server.ts`). What
- * is asserted here is what a check does once asked. Mostly restraint: it fires
+ * never on a timer; see `server.ts`). What is asserted here is what a check
+ * does once asked. Mostly restraint: it fires
  * on a real change and on nothing else — a spurious fire re-registers an MCP
  * session, closing whatever it held, on every connected laptop — it collapses
  * a burst onto one read, and it survives a deployment that is briefly
@@ -285,8 +284,8 @@ describe('createCatalogCheck', () => {
    * It matters because a refresh runs inside a check and costs seconds. If the
    * window were counted from the settle, a two-second throttle plus a
    * two-and-a-half-second re-registration would be a four-and-a-half-second
-   * window, and the two-second heartbeat driving this would have every second
-   * tick refused by a throttle nobody chose.
+   * window, and a person calling tools right after a commit would wait on a
+   * throttle nobody chose.
    */
   it('counts its window from the start of a check, not the end of a slow one', async () => {
     const t = clock();
@@ -315,29 +314,22 @@ describe('createCatalogCheck', () => {
   });
 
   /**
-   * THE FIVE-SECOND BUDGET, as arithmetic rather than as a hope.
+   * THE BUDGET FOR A CONNECTION IN USE, as arithmetic rather than as a hope.
    *
-   * The guide promises a committed manual is live within five seconds. Two of
-   * this package's constants spend that budget, and staging is what proved
-   * they have to be counted together rather than chosen separately:
-   *
-   *   - the HEARTBEAT is how long an idle connection waits before it asks;
-   *   - the THROTTLE is the ceiling on staleness for a connection that just
-   *     asked — a check landing immediately before a commit reads the old
-   *     catalog and opens a fresh window, so nothing can be noticed until it
-   *     expires.
-   *
-   * Whichever runs, the wait is at most one of them; then one digest read and
-   * the re-registration a change costs, which measured ~2.4s against a hosted
-   * deployment. At five seconds the throttle ALONE put the first sighting at
-   * ~7.6s. Two leaves the rest of the budget for the work.
+   * A person who commits a manual and keeps calling tools on the same
+   * connection should see it within about five seconds. The THROTTLE is the
+   * ceiling on staleness there — a check landing immediately before the commit
+   * reads the old catalog and opens a fresh window, so nothing can be noticed
+   * until it expires — then one digest read and the re-registration a change
+   * costs, which measured ~2.4s against a hosted deployment. At five seconds
+   * the throttle ALONE put the first sighting at ~7.6s. Two leaves the rest of
+   * the budget for the work. (An idle connection is outside this budget by
+   * design: it asks nothing until its next use.)
    */
-  it('leaves room inside the five seconds the guide promises', () => {
+  it('leaves room inside the five seconds a connection in use is promised', () => {
     expect(CATALOG_CHECK_MIN_INTERVAL_MS).toBeGreaterThan(0);
-    expect(CATALOG_CHECK_INTERVAL_MS).toBeGreaterThan(0);
     // ~2.4s of re-registration, measured, plus a digest read.
     const refreshCost = 2_600;
-    expect(Math.max(CATALOG_CHECK_MIN_INTERVAL_MS, CATALOG_CHECK_INTERVAL_MS) + refreshCost)
-      .toBeLessThanOrEqual(5_000);
+    expect(CATALOG_CHECK_MIN_INTERVAL_MS + refreshCost).toBeLessThanOrEqual(5_000);
   });
 });

@@ -48,7 +48,7 @@ import {
   fetchAgentInstructions,
   type LocalManualInfo,
 } from './deployment.js';
-import { CATALOG_CHECK_INTERVAL_MS, createCatalogCheck, type CatalogCheck } from './catalog-watch.js';
+import { createCatalogCheck, type CatalogCheck } from './catalog-watch.js';
 import { materializePlugin, prepareStdioSpec, type StdioServerSpec } from './materialize.js';
 import { REMOTE_MANUAL_NAME, localManualTemplates, remoteManualTemplate } from './manuals.js';
 import {
@@ -74,14 +74,6 @@ const SERVER_NAME = 'hexis-mcp';
  * has to expire INSIDE it to be the thing that acts first.
  */
 export const DISCOVERY_SHUTDOWN_GRACE_MS = 5_000;
-
-/**
- * The longest delay Node's timers can hold (2^31-1 ms, ~24.9 days). A larger
- * one is not clamped by the runtime but WRAPS — `setInterval` fires it after a
- * single millisecond — so anything built from caller-supplied milliseconds is
- * capped here first.
- */
-const MAX_TIMER_MS = 2_147_483_647;
 
 /**
  * A timer that does not, by existing, keep this process alive. The bounded
@@ -392,26 +384,19 @@ export async function createHexisMcpServer(
   version: string,
   options: {
     /**
-     * Whether, and how often, to check that the deployment's tools and skills
-     * are still the ones this server registered.
-     *
-     * Two triggers, and both are needed. ACTIVITY — a tool call finishing, a
-     * `tools/list` arriving — is the better one: a listing awaits its check,
-     * so the list it hands back is the current one rather than a promise of a
-     * better one. A HEARTBEAT (`heartbeatMs`, default
-     * `CATALOG_CHECK_INTERVAL_MS`) covers the connection that is idle, which
-     * generates no activity and is exactly who the tool-list-changed
-     * notification exists for.
-     *
-     * `minIntervalMs` (default `CATALOG_CHECK_MIN_INTERVAL_MS`) is the least
-     * time between two checks whichever trigger asked, so the two never cost
-     * two reads. `false` turns the whole thing off, freezing the toolset at
-     * what discovery found (what this did before the check existed);
-     * `heartbeatMs: 0` keeps activity checks and drops the heartbeat. Here
-     * for tests and embedding hosts — the CLI exposes none of it, because the
-     * defaults are the contract the knowledge base's guide states.
+     * Whether, and how often at most, to check that the deployment's tools
+     * and skills are still the ones this server registered. The check runs on
+     * ACTIVITY — a tool call finishing, a `tools/list` arriving — never on a
+     * timer: an idle connection asks the deployment nothing, so a deployment
+     * with fifty connected laptops nobody is using answers nothing (see
+     * `catalog-watch.ts`). `minIntervalMs` (default
+     * `CATALOG_CHECK_MIN_INTERVAL_MS`) is the least time between two checks.
+     * `false` turns it off, which freezes this server's toolset at what
+     * discovery found (what it did before the check existed). Here for tests
+     * and embedding hosts — the CLI does not expose it, because the default
+     * is the contract the knowledge base's guide states.
      */
-    catalogCheck?: false | { minIntervalMs?: number; heartbeatMs?: number };
+    catalogCheck?: false | { minIntervalMs?: number };
   } = {},
 ): Promise<HexisMcpHandle> {
   const { mcpUrl, agentInstructions, catalogRevision: catalogRevisionAdvertised } = await resolveDeployment(config);
@@ -490,12 +475,6 @@ export async function createHexisMcpServer(
   let server: Server | null = null;
   /** The catalog checker, once discovery has a baseline to check against. */
   let catalogCheck: CatalogCheck | null = null;
-  /**
-   * The heartbeat that checks an IDLE connection. Activity drives the rest,
-   * but a client that connects and then waits produces none — and that is
-   * exactly the client the tool-list-changed notification exists for.
-   */
-  let catalogHeartbeat: ReturnType<typeof setInterval> | null = null;
   /**
    * The local-only manuals this process CURRENTLY has registered, by UTCP
    * name, and what the deployment says about each. Both are LIVE maps, mutated
@@ -900,33 +879,10 @@ export async function createHexisMcpServer(
         : {}),
       onChanged: refreshCatalog,
     });
-    // The heartbeat, for the connection that is NOT being used. Activity
-    // covers the rest and covers it better — a listing awaits its check, so
-    // the list handed back is current — but an idle connection generates no
-    // activity, and an idle connection is precisely who the tool-list-changed
-    // notification is for. Without this, a client that connects and waits is
-    // never told anything, which is what staging found.
-    //
-    // `unref`'d: a heartbeat must never be the reason a host process refuses
-    // to exit. Not awaited, and `check()` never rejects, so a tick cannot
-    // surface as an unhandled rejection. The checker's own throttle means a
-    // tick landing next to a busy connection's activity check costs nothing.
-    //
-    // CLAMPED to Node's timer ceiling. A delay above 2^31-1 ms does not become
-    // a long timer — it overflows and fires after ONE millisecond, so an
-    // embedding host asking for "check once a day" would get a hot loop
-    // hammering the deployment. Clamped rather than refused: the caller asked
-    // for "hardly ever", and ~24.9 days is the longest this runtime can say.
-    const heartbeatMs = Math.min(
-      options.catalogCheck?.heartbeatMs ?? CATALOG_CHECK_INTERVAL_MS,
-      MAX_TIMER_MS,
-    );
-    if (heartbeatMs > 0) {
-      catalogHeartbeat = setInterval(() => {
-        if (catalogCheck && !closed) void catalogCheck.check();
-      }, heartbeatMs);
-      catalogHeartbeat.unref?.();
-    }
+    // No timer. The check runs on activity only — a tool call finishing, a
+    // listing arriving — so an idle connection costs the deployment nothing.
+    // A client that connects and then waits is told about a change at its
+    // next use, which is when a stale toolset would first cost it anything.
   };
 
   /**
@@ -968,8 +924,6 @@ export async function createHexisMcpServer(
     // First, because everything below tears down what a refresh would run
     // against. A poll already in flight finds `closed` at the gate and
     // registers nothing.
-    if (catalogHeartbeat) clearInterval(catalogHeartbeat);
-    catalogHeartbeat = null;
     catalogCheck?.stop();
     catalogCheck = null;
     // No further renewals or credential swaps once we are going down: the

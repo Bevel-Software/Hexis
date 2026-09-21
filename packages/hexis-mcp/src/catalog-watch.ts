@@ -15,25 +15,25 @@
  * and the MCP protocol has no upstream subscription — hence a check, and the
  * cheapest one possible: a single digest read.
  *
- * THIS MODULE DECIDES WHAT A CHECK DOES, NOT WHEN ONE HAPPENS. `server.ts`
- * owns the triggers, and there are two. ACTIVITY — a tool call finishing, a
- * `tools/list` arriving — is the better one: it is exactly the moment a stale
- * toolset costs anything, and a listing awaits its check, so the list handed
- * back is the current one. A HEARTBEAT covers the connection that has no
- * activity, which is not an edge case: an editor sitting open is the normal
- * state of a connection, and the tool-list-changed notification exists
- * precisely for a client that is not asking. A build that checked on activity
- * alone told such a client nothing at all — which is how this reached staging
- * and failed there.
+ * ON ACTIVITY, NOT ON A TIMER. A laptop with a connected client that nobody is
+ * using would otherwise ask its deployment the same question every few seconds
+ * for hours, and a deployment with fifty such laptops would answer it forever
+ * for no one. The check runs when the connection does something — a tool call
+ * finishing, a `tools/list` arriving — because that is exactly the moment a
+ * stale toolset costs anything, and a listing awaits its check, so the list
+ * handed back is the current one. Between two such moments nothing is asked:
+ * an idle connection learns of a change at its next use, not before. (A
+ * heartbeat was tried and taken out again: two seconds per idle connection
+ * is a load that scales with laptops, for a notification nobody was waiting
+ * on.) `server.ts` owns the trigger; this module decides what a check does.
  *
- * What this module contributes to the cost of that is the THROTTLE: whichever
- * trigger asked, two checks inside one window collapse onto one digest read,
- * so a chain of twenty calls costs one check and a heartbeat landing beside a
- * listing costs nothing extra.
+ * What this module contributes to the cost is the THROTTLE: two checks inside
+ * one window collapse onto one digest read, so a chain of twenty calls costs
+ * one check, not twenty.
  *
  * Errors are survivable by design. A deployment that restarts, a laptop that
  * sleeps, a VPN that drops: the check fails, says so ONCE, and asks again on
- * the next trigger. The one unrecoverable answer is a deployment too old to
+ * the next activity. The one unrecoverable answer is a deployment too old to
  * serve the route, which stops the checker for good.
  */
 import { printable } from '@bevel-software/platform-mcp-core';
@@ -49,34 +49,17 @@ import type { HexisMcpConfig } from './config.js';
  * notification — collapses onto one digest read; the second and later calls in
  * the window see the answer the first one got.
  *
- * It is also a CEILING ON STALENESS, which is what sets its size. A check that
- * runs just before a commit reads the old catalog and opens a fresh window, so
- * the change cannot be noticed until the window expires; add the digest read
- * and the re-registration and that is the whole delay a person experiences.
- * At five seconds this alone put the first sighting at ~7.6s against a
- * deployment that had the manual in ~1s — the budget spent on a throttle. Two
- * seconds leaves the rest of the five for the work.
+ * It is also a CEILING ON STALENESS for a connection in use, which is what
+ * sets its size. A check that runs just before a commit reads the old catalog
+ * and opens a fresh window, so the change cannot be noticed until the window
+ * expires; add the digest read and the re-registration and that is the whole
+ * delay a person working on that connection experiences. At five seconds this
+ * alone put the first sighting at ~7.6s against a deployment that had the
+ * manual in ~1s. Two seconds keeps a busy connection to one small read per
+ * window while a person who commits a manual and keeps calling tools sees it
+ * on the next call after the window.
  */
 export const CATALOG_CHECK_MIN_INTERVAL_MS = 2_000;
-
-/**
- * How often an OTHERWISE IDLE connection checks anyway.
- *
- * Activity alone is not enough, and staging is where that showed: a client
- * that connects and then waits — the normal state of an editor sitting open —
- * generates no activity, so a purely activity-driven check never runs, and the
- * tool-list-changed notification after a commit is never sent. The whole point
- * of the notification is to reach a client that is NOT asking; a design that
- * only checks when it asks has nothing to notify.
- *
- * So the connection also checks on a heartbeat. Two seconds, because the
- * promise is five: the heartbeat's wait plus one digest read plus the
- * re-registration a change costs has to fit inside that, and a heartbeat of
- * five would spend the whole budget before the first question was asked.
- * The cost of an idle connection is one small digest read every two seconds,
- * which is what it was before the activity check existed.
- */
-export const CATALOG_CHECK_INTERVAL_MS = 2_000;
 
 /** A running checker. `stop()` is idempotent and never throws. */
 export interface CatalogCheck {
@@ -156,13 +139,13 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
    * When the last check STARTED — the throttle counts from there, not from
    * when it settled.
    *
-   * From the start, because the window has to be a cadence the budget can be
+   * From the start, because the window has to be a cadence a delay can be
    * computed from. Counting from the settle adds the check's own duration to
    * every window, and a refresh runs INSIDE a check: one that re-registers
    * costs a couple of seconds, so a two-second window becomes four or more,
-   * and a heartbeat ticking every two seconds has every second tick refused
-   * by a throttle that has silently grown. `inFlight` already stops two checks
-   * overlapping, so nothing here needs the settle to serialise them.
+   * and a person calling tools right after a commit waits that much longer
+   * for a throttle that has silently grown. `inFlight` already stops two
+   * checks overlapping, so nothing here needs the settle to serialise them.
    */
   let lastStartedAt: number | null = null;
   /** The check in flight, so concurrent callers join it rather than stacking. */
