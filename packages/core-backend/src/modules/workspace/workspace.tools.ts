@@ -53,6 +53,7 @@ import {
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import { PROPOSAL_ROUTE_NOTE, rethrowAsWriteDenial } from './write-denial.js';
+import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
@@ -635,6 +636,13 @@ export function registerWorkspaceTools(
    * Advisory only — it never refuses the write.
    */
   skillSaveCheck?: SkillSaveCheck,
+  /**
+   * Read-before-write, for the `write-denied` answer's "may you propose this
+   * instead?" — the same verdict the lock applies on the draft the proposal
+   * would be made on. Optional so tool harnesses need not wire it; the read
+   * verdict alone then decides, which differs only at a root.
+   */
+  changeGate?: IChangeReadGate,
 ): void {
   /**
    * The one extension→reader registry every read-shaped decision routes
@@ -806,7 +814,12 @@ export function registerWorkspaceTools(
    * found are the same answer in the same shape, and there is one place that
    * decides what that shape is.
    */
-  const writeRefusal = async (branch: string, path: string): Promise<AccessDeniedError> => {
+  const writeRefusal = async (
+    branch: string,
+    path: string,
+    /** What `path` is — a folder the move or delete was judged on, or a file. See `AccessDeniedDetails.targetKind`. */
+    targetKind: 'file' | 'dir' = 'file',
+  ): Promise<AccessDeniedError> => {
     const rel = toKbRelative(path, kbDirName);
     const eligible = rel === null
       ? null
@@ -815,6 +828,7 @@ export function registerWorkspaceTools(
       path,
       eligibleRoles: eligible?.roles ?? [],
       eligibleUsers: eligible?.users ?? [],
+      targetKind,
     });
   };
 
@@ -1107,6 +1121,7 @@ export function registerWorkspaceTools(
               { tool: spec.name, branch: args.branch, userEmail: ctx.user.email, userId: ctx.user.id },
               accessControl,
               kbDirName,
+              changeGate,
             );
           }
         },
@@ -2027,7 +2042,7 @@ export function registerWorkspaceTools(
         const { files, content, managed, linked, blocked, impact } = await judge();
         if (managed !== undefined) throw new ToolError(managed, 400);
         if (linked !== undefined) throw new ToolError(linked, 400);
-        if (blocked.length > 0) throw await writeRefusal(branch, blocked[0]);
+        if (blocked.length > 0) throw await writeRefusal(branch, blocked[0], blocked[0] === path ? 'dir' : 'file');
         if (content.length > 0 && a.confirm !== true) {
           return {
             ...impact,
@@ -2234,7 +2249,13 @@ export function registerWorkspaceTools(
       };
       if (a.dryRun === true) return { ...impact, dryRun: true, moved: false };
       if (managed) throw new ToolError(reason!, 400);
-      if (blocked.length > 0) throw await writeRefusal(branch, blocked[0]);
+      // A folder move is judged on its two folder paths and every file under
+      // them: a refusal on one of the folder paths says so, because a folder
+      // directly under a root is proposable where a file there is not.
+      if (blocked.length > 0) {
+        const folderPath = kind === 'folder' && (blocked[0] === src || blocked[0] === dest);
+        throw await writeRefusal(branch, blocked[0], folderPath ? 'dir' : 'file');
+      }
       if (collision) throw new ToolError(reason!, 409);
       if (accessChanges && a.confirm !== true) {
         return {

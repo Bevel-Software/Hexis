@@ -10,6 +10,7 @@ import type { FileLockService } from '../file-lock.service.js';
 import type { PendingCommitsService } from '../pending-commits.service.js';
 import type { Database } from '../../database/connection.js';
 import { WorkflowService } from '../workflow.service.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
 /**
  * A branch is load-bearing for a change request at EITHER end.
@@ -103,6 +104,7 @@ function makeService(db: Database, git: Partial<GitService>) {
     {} as FileLockService,
     {} as PendingCommitsService,
     'knowledge-base',
+    openChangeGate(),
   );
 }
 

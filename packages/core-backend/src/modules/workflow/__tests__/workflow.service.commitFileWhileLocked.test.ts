@@ -11,6 +11,7 @@ import { WorkflowEventBus } from '../event-bus.js';
 import { WorkflowService } from '../workflow.service.js';
 import type { Database } from '../../database/connection.js';
 import { WorkflowValidationError } from '../../../shared/domain-errors.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
 /**
  * `commitFileWhileLocked` (autosave checkpoint) has subtler semantics
@@ -113,6 +114,7 @@ function makeFacade(git: GitService, locks: FileLockService, events: WorkflowEve
     locks,
     pending,
     'knowledge-base',
+    openChangeGate(),
     events,
   );
 }

@@ -120,26 +120,47 @@ function fileNameOf(path: string): string {
 }
 
 /**
+ * The upload's target is a folder the caller cannot read. Raised by the
+ * suggestion routing so the drop is refused up front, in the server's own
+ * words, instead of being carried to the suggestions branch where the same
+ * read-before-write gate would refuse every file one by one.
+ */
+class UnreadableUploadTargetError extends Error {
+  readonly folder: string;
+  constructor(folder: string) {
+    super(
+      `You don't have read access to "${folder}"; only what you can read can be created, changed or removed.`,
+    );
+    this.name = 'UnreadableUploadTargetError';
+    this.folder = folder;
+  }
+}
+
+/**
  * What the progress notice calls this drop: one file by name, several by
  * count, and the folder it is going into. Read off the INPUT rather than the
  * walk, because the walk has not started yet — saying something on the first
  * tick is the whole point.
  */
 function describeUpload(input: UploadInput, targetDirectory: string): string {
-  let what: string;
-  if (input.kind === 'files') {
-    what = input.files.length === 1 ? input.files[0]!.name : `${input.files.length} files`;
-  } else if (input.kind === 'paths') {
-    what = input.items.length === 1
-      ? fileNameOf(input.items[0]!.relativePath)
-      : `${input.items.length} files`;
-  } else {
-    what = input.entries.length === 1
-      ? input.entries[0]!.name || 'the dropped item'
-      : `${input.entries.length} items`;
-  }
+  const what = describeUploaded(input);
   const where = targetDirectory ? fileNameOf(targetDirectory) : null;
   return where ? `${what} to ${where}` : what;
+}
+
+/** The dropped things alone — one by name, several by count — for a banner that names them. */
+function describeUploaded(input: UploadInput): string {
+  if (input.kind === 'files') {
+    return input.files.length === 1 ? input.files[0]!.name : `${input.files.length} files`;
+  }
+  if (input.kind === 'paths') {
+    return input.items.length === 1
+      ? fileNameOf(input.items[0]!.relativePath)
+      : `${input.items.length} files`;
+  }
+  return input.entries.length === 1
+    ? input.entries[0]!.name || 'the dropped item'
+    : `${input.entries.length} items`;
 }
 
 const EMPTY_ERRORS: ReadonlyMap<UploadTarget, UploadError> = new Map();
@@ -776,6 +797,15 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * free-for-all, and paths outside the KB are the user's own workspace.
    * (The branch is recovered from the workspace id, which is the encoded
    * branch name for every branch workspace.)
+   *
+   * A folder the caller cannot READ is not routed anywhere: it throws
+   * `UnreadableUploadTargetError`, and the drop is refused up front. The
+   * server's read-before-write gate would refuse the same files on the
+   * suggestions branch, one by one, after provisioning it. Only a definite
+   * "no" refuses — an answer without the field falls through to the server,
+   * as an unanswerable question does. A folder directly under a root is left
+   * to the server too: a folder drop there starts a new folder, which is the
+   * one place the gate lets a person who cannot read the root create.
    */
   const resolveSuggestionRouting = useCallback(
     async (targetDirectory: string): Promise<KnowledgeSuggestionTarget | null> => {
@@ -786,6 +816,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       const repoRelative = targetDirectory.slice(prefix.length);
       if (!repoRelative) return null;
       const access = await fetchFileAccess(workspaceId, repoRelative);
+      if (access.canRead === false && repoRelative.includes('/')) {
+        throw new UnreadableUploadTargetError(repoRelative);
+      }
       if (access.canWrite) return null;
       return ensureKnowledgeSuggestionWorkspace(authUser);
     },
@@ -845,10 +878,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // upload normally: the backend's write gate stays the authority and
     // refuses with its own words.
     let suggestion: KnowledgeSuggestionTarget | null = null;
+    // A target the caller cannot read: refused below, before any byte moves,
+    // with the server's own sentence in the banner.
+    let unreadableTarget: UnreadableUploadTargetError | null = null;
     try {
       suggestion = await resolveSuggestionRouting(targetDirectory);
     } catch (err) {
-      console.warn('[workspace] suggestion routing check failed:', err);
+      if (err instanceof UnreadableUploadTargetError) unreadableTarget = err;
+      else console.warn('[workspace] suggestion routing check failed:', err);
     }
     // An ordinary upload says what it is doing with ROWS — the optimistic
     // overlay below puts them in the tree within the frame. The progress
@@ -997,6 +1034,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     };
 
     try {
+      // Refused before any byte moves: the banner carries the server's own
+      // sentence and the 403 its gate would have answered, so the next-step
+      // advice is the same one a refused single file gets. The `finally`
+      // below shows it and settles the counters.
+      if (unreadableTarget) {
+        firstError = { filename: describeUploaded(input), reason: unreadableTarget.message, status: 403 };
+        return;
+      }
       if (input.kind === 'files') {
         const files = input.files.filter((f) => !isUploadNoise(f.name));
         total = files.length;

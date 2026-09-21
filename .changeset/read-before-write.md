@@ -1,0 +1,13 @@
+---
+'@bevel-software/platform-core-backend': minor
+'@bevel-software/platform-core-frontend': minor
+'@bevel-software/platform-shared': minor
+---
+
+You can only change what you can read. Nothing is created, changed, moved into or removed from a folder the person cannot read — on every branch, drafts included, whatever the folder's write rules say. Until now a proposal could be made into a folder its author could not see, where it vanished from them the moment it landed; the platform tried to keep such files visible with an automatic per-file read grant, which only markdown could carry, and warned before adding a file that could not carry one. Both are gone: the read check happens where every write is already checked, at the lock, so the explorer, uploads, archive extraction and every agent file tool refuse the same way, with a message that names the folder the person cannot read. Proposing is not offered for such a change either.
+
+The one exception is a new folder directly under the knowledge, skills or plugins root. Anyone may start one, whatever the root's rules grant them, and the new folder's `access.md` is seeded with the creator's own read grant so what they put there is visible to them — the same way a new plugin is provisioned. A loose file directly at a root has no folder to carry that grant and is not excepted.
+
+Two consequences to know about. A person who held a write grant somewhere without a read grant (a nearer `deny read`, or a write given to someone the folder never let read) can no longer write there; the Manage access dialog shows what each person can actually do. And an admin excluded from reading a subfolder cannot change it either — the Admin write floor covers only the repository root's own files, which stay repairable from inside the app.
+
+The agent guide (`AGENTS.md`) states the rule and the exception.
