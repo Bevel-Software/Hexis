@@ -65,6 +65,12 @@ export interface PageActionsProps {
   onRename?: () => void;
   /** Names the thing, for the `+` tooltip and the accessible names. */
   addLabel?: string;
+  /**
+   * What the delete item CALLS the act. A place is deleted as a plugin; the
+   * tool page reuses this menu, and an item there reading "Delete plugin"
+   * would name the wrong thing entirely.
+   */
+  deleteLabel?: string;
 }
 
 export function PageActions({
@@ -74,6 +80,7 @@ export function PageActions({
   onDelete,
   onRename,
   addLabel = 'Add a skill or tool',
+  deleteLabel = 'Delete plugin',
 }: PageActionsProps) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState<null | 'ok' | 'fail'>(null);
@@ -154,7 +161,7 @@ export function PageActions({
                 >
                   <span className="flex items-center gap-2.5">
                     <Trash2 size={14} />
-                    Delete plugin
+                    {deleteLabel}
                   </span>
                 </MenuItem>
               )}

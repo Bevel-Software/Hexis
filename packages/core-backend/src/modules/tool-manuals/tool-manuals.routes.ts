@@ -15,6 +15,7 @@ import '@utcp/http'; // side effect: register the 'http' call-template type
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
 import { type IToolManualService, EXTERNAL_KB_MANUAL_NAME } from './tool-manuals.contract.js';
 import { McpServerEditError, type McpServerEditService, type McpServerWrite } from './mcp-server-edit.service.js';
+import { ToolDeleteError, type ToolDeleteService } from './tool-delete.service.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
 import '../tool-auth/tool-auth.middleware.js'; // Express Request augmentation (req.toolAuth)
@@ -282,6 +283,8 @@ export function createToolManualsAgentRoutes(
  * Browser-facing tool-manual routes (mounted under the JWT auth middleware):
  *   GET  /tools           — the caller's accessible `.tool` manuals (summaries).
  *   POST /tools/preview    — validate a draft `.tool` for the renderer.
+ *   GET  /tools/:slug/dependents — what deleting this tool would affect.
+ *   DELETE /tools/:slug    — delete the manual (or the mcp.json server entry).
  *   GET  /tools/:slug      — one readable manual with description + capabilities
  *                            (the tool page). Registered LAST so no future
  *                            literal sibling is shadowed by the param segment;
@@ -290,8 +293,45 @@ export function createToolManualsAgentRoutes(
 export function createToolManualsBrowserRoutes(
   toolManualService: IToolManualService,
   serverEdit?: { service: McpServerEditService; getUser: (userId: string) => Promise<AuthUser | undefined> },
+  toolDelete?: { service: ToolDeleteService; getUser: (userId: string) => Promise<AuthUser | undefined> },
 ): express.Router {
   const router = express.Router();
+
+  /**
+   * What depends on a tool, and the delete itself — the owner's verb, gated in
+   * the service on the same `canOwner` verdict the plugin delete enforces.
+   *
+   * Both answer 404 for a tool the caller cannot read (indistinguishable from
+   * an unknown slug, as everywhere in this file) and 403 for one they can read
+   * but do not own — at that point the tool's existence is not a secret from
+   * them, and "you are not an owner" is the only useful thing to say.
+   */
+  router.get('/tools/:slug/dependents', async (req, res) => {
+    if (!toolDelete) return void res.status(404).json({ error: 'Not available' });
+    const email = req.userEmail;
+    if (!email) return void res.status(401).json({ error: 'Not authenticated' });
+    try {
+      res.json(await toolDelete.service.dependents(email, String(req.params.slug)));
+    } catch (err) {
+      if (err instanceof ToolDeleteError) return void res.status(err.status).json({ error: err.message });
+      log.error('dependents failed:', { err });
+      res.status(500).json({ error: 'Failed to read what depends on this tool' });
+    }
+  });
+
+  router.delete('/tools/:slug', async (req, res) => {
+    if (!toolDelete) return void res.status(404).json({ error: 'Not available' });
+    if (!req.userId) return void res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const user = await toolDelete.getUser(req.userId);
+      if (!user) return void res.status(401).json({ error: 'Not authenticated' });
+      res.json(await toolDelete.service.deleteTool(user, String(req.params.slug)));
+    } catch (err) {
+      if (err instanceof ToolDeleteError) return void res.status(err.status).json({ error: err.message });
+      log.error('tool delete failed:', { err });
+      res.status(500).json({ error: 'Failed to delete the tool' });
+    }
+  });
 
   /**
    * Server-scoped read/write of one MCP server — the tool page's edit form.

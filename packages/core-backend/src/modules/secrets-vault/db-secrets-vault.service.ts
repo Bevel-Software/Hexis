@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('vault');
-import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, like, or } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { secrets } from '../database/schema.js';
 import { TokenCrypto } from '../../shared/token-crypto.js';
@@ -17,6 +17,8 @@ import {
   type CreateOAuthSecretInput,
   type OAuthProviderConfig,
   type VariableScopeResolver,
+  type NamespaceSecretCount,
+  isKeyInNamespace,
   type ForcedRefreshOutcome,
   InvalidSecretError,
   SecretNotFoundError,
@@ -255,6 +257,71 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       .returning({ id: secrets.id });
     if (res.length === 0) throw new SecretNotFoundError(key);
     this.notifyMutation(userId);
+  }
+
+  async countNamespace(prefix: string): Promise<NamespaceSecretCount> {
+    return tally(await this.namespaceRows(prefix));
+  }
+
+  async removeNamespace(prefix: string): Promise<NamespaceSecretCount> {
+    // Scanned and deleted until a pass finds NOTHING. The membership rule
+    // (`isKeyInNamespace`) cannot be said in SQL, so the ids have to be read
+    // before they are deleted — and a row written in that window would
+    // otherwise outlive the namespace it belongs to, which is precisely the
+    // orphan this method exists to prevent. Bounded, so a writer looping
+    // against us cannot hold the request open.
+    //
+    // What it reports and notifies is what the DELETE itself returned, row by
+    // row — never the scan's copy, which a same-key upsert may have changed
+    // the `kind` of in between.
+    const gone: { userId: string | null; kind: string }[] = [];
+    try {
+      for (let pass = 0; pass < 5; pass++) {
+        const rows = await this.namespaceRows(prefix);
+        if (rows.length === 0) break;
+        const deleted = await this.db
+          .delete(secrets)
+          .where(inArray(secrets.id, rows.map((r) => r.id)))
+          .returning({ userId: secrets.userId, kind: secrets.kind });
+        gone.push(...deleted);
+      }
+    } finally {
+      // In `finally`, because a pass that throws does not un-delete the passes
+      // before it: those rows are gone, and a listener that never heard would
+      // serve a cached connection for a credential that no longer exists.
+      this.notifyNamespaceGone(gone);
+    }
+    return tally(gone);
+  }
+
+  /**
+   * Tell the tiers a namespace deletion actually touched. The `null` sentinel
+   * means "everyone's pooled connection" — earned only by a SHARED row going,
+   * never by one user's secret.
+   */
+  private notifyNamespaceGone(gone: readonly { userId: string | null }[]): void {
+    if (gone.length === 0) return;
+    if (gone.some((r) => r.userId === null)) this.notifyMutation(null);
+    for (const userId of new Set(gone.map((r) => r.userId).filter((u): u is string => u !== null))) {
+      this.notifyMutation(userId);
+    }
+  }
+
+  /**
+   * The rows under a namespace, across every user. `LIKE` narrows in the
+   * database (its `_` and `%` escaped — `_` is in nearly every prefix); the
+   * exact membership rule, which `LIKE` cannot say, is applied here.
+   */
+  private async namespaceRows(
+    prefix: string,
+  ): Promise<{ id: string; key: string; userId: string | null; kind: string }[]> {
+    if (!prefix) return [];
+    const pattern = `${prefix.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    const rows = await this.db
+      .select({ id: secrets.id, key: secrets.key, userId: secrets.userId, kind: secrets.kind })
+      .from(secrets)
+      .where(like(secrets.key, pattern));
+    return rows.filter((r) => isKeyInNamespace(r.key, prefix));
   }
 
   async statusFor(userId: string, keys: string[]): Promise<SecretConfigStatus[]> {
@@ -984,4 +1051,10 @@ export class DbSecretsVaultService implements ISecretsVaultService {
 /** PKCE S256: base64url(sha256(verifier)). */
 function sha256base64url(verifier: string): string {
   return createHash('sha256').update(verifier).digest('base64url');
+}
+
+/** A namespace's rows, counted by what a person would call them. */
+function tally(rows: { userId: string | null; kind: string }[]): NamespaceSecretCount {
+  const signIns = rows.filter((r) => r.userId !== null && r.kind === 'oauth').length;
+  return { keys: rows.length - signIns, signIns };
 }

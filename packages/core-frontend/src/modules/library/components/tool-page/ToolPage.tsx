@@ -8,14 +8,18 @@ import { announceToolCredentialsChanged } from '../../../../core/events';
 import { useToolPage } from '../../hooks/useToolPage';
 import { useToolSource } from '../../hooks/useToolSource';
 import { McpServerSection } from './McpServerSection';
-import { libraryHomeForItemPath, LIBRARY_ROOT } from '../../routes/library-paths';
+import { libraryHomeForItemPath, pathForPlugin, LIBRARY_ROOT } from '../../routes/library-paths';
 import { useLibrary } from '../../state/library-data';
-import { pluginLabel, pluginNameForPath } from '../../utils/plugin-summary';
+import { pluginHoldingPath, pluginLabel, pluginNameForPath } from '../../utils/plugin-summary';
 import { readOAuthFragment } from '../../utils/oauth-fragment';
 import type { ToolCapability } from '../../services/tools.api';
 import type { LibrarySkillSummary } from '../../services/library.api';
 import { ToolConnectionSection } from './ToolConnectionSection';
 import { ToolLogo } from '../ToolLogo';
+import { PageActions } from '../PageActions';
+import { DeleteToolDialog } from './DeleteToolDialog';
+import { copyToClipboard } from '../../utils/clipboard';
+import { useLibraryToast } from '../../state/toast.context';
 import { NameWithBadges } from '../NameWithBadges';
 
 /**
@@ -62,6 +66,8 @@ export function ToolPage({
    * endpoint must not survive the change.
    */
   const [serverRevision, setServerRevision] = useState(0);
+  /** Whether the tool's delete confirmation is up. */
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   useEffect(() => {
     // Consume the OAuth `#…` fragment, KEEPING the query string: on an
@@ -94,6 +100,17 @@ export function ToolPage({
       {`‹ ${home.label}`}
     </Button>
   );
+  const toast = useLibraryToast();
+  // Ownership of the plugin the tool LIVES IN — not of the tool file, which
+  // has no rules of its own. The same folder verdict the backend re-derives,
+  // so the menu item and the endpoint agree about who may delete.
+  //
+  // AND its links have to be ours to write: a plugin read from an external
+  // format is edited in its own repository, and the DELETE route refuses one
+  // (422). Offering the item to its owner would be offering a button whose
+  // only outcome is that refusal.
+  const holder = toolPath ? pluginHoldingPath(toolPath, data.pluginSummaries) : null;
+  const canDelete = (holder?.isOwner ?? false) && (holder?.linksAreManaged ?? false);
 
   if (page.loading) {
     return <div className="py-16 text-center text-ui text-ink-muted">Loading…</div>;
@@ -194,7 +211,19 @@ export function ToolPage({
             PLUGIN — a tool inherits its folder's `access.md`, so an editor on
             this page would either duplicate the plugin's one or quietly write a
             per-file override that nobody looking at the plugin would see. The
-            plugin's `Share` panel is the single place. */}
+            plugin's `Share` panel is the single place.
+
+            The `⋯` menu, though, is the same one the plugin page carries, in
+            the same spot — Delete belongs where people already look for it.
+            `onAdd` is absent: there is nothing to add to a tool. */}
+        <PageActions
+          onCopyLink={() => copyToClipboard(window.location.href)}
+          // The OWNER's verb, and the same verdict the DELETE route enforces
+          // (ownership of the plugin holding the tool) — so the item appears
+          // for exactly the people the backend will let through.
+          onDelete={canDelete ? () => setDeleteOpen(true) : undefined}
+          deleteLabel="Delete tool"
+        />
       </header>
 
       {actionError && (
@@ -254,6 +283,23 @@ export function ToolPage({
           make this tool — the `.tool`, or the plugin `mcp.json` that declares
           the server. */}
       <SourceSection path={tool.path} />
+
+      {deleteOpen && (
+        <DeleteToolDialog
+          slug={tool.slug}
+          name={tool.name}
+          onClose={() => setDeleteOpen(false)}
+          onDeleted={(plugin) => {
+            toast(`Deleted ${tool.name}.`);
+            // This page's subject just ceased to exist — the plugin it lived
+            // in is the honest landing, as the plugin delete lands on the
+            // index. Reloads follow so the cards and the sidebar agree.
+            navigate(pathForPlugin(plugin));
+            data.reload();
+            data.reloadPlugins();
+          }}
+        />
+      )}
     </Article>
   );
 }
