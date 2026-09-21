@@ -215,4 +215,26 @@ describe('KB layout — the agent guide\'s file name', () => {
     configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
     expect(agentsFilePointerSentence()).toContain('HEXIS.md');
   });
+
+  /**
+   * A guide name is a FILE NAME: spaces, brackets and parentheses all pass
+   * `validateFilename`, and all of them mean something in an inline link. The
+   * sentence has to survive them — and has to keep the name LITERALLY, because
+   * the startup step decides whether to append it by looking for that name in
+   * the customer's text (`reconcileLegacyGuide`). A percent-encoded name would
+   * never be found there, and every boot would append another copy.
+   */
+  test('the pointer sentence links correctly for a name full of markdown punctuation', () => {
+    const name = 'Our [Agent] Guide (v2).md';
+    expect(validateAgentsFileName(name)).toBeNull();
+    const sentence = agentsFilePointerSentence(name);
+    // The label cannot end early: the brackets in it are escaped…
+    expect(sentence).toContain('[Our \\[Agent\\] Guide (v2).md]');
+    // …and the destination is the angle-bracket form, which holds spaces and
+    // parentheses, with the name in it exactly as it is on disk.
+    expect(sentence).toContain(`(<./${name}>)`);
+    expect(sentence).toContain(name);
+    // The ordinary name reads as it always has — no brackets, no escapes.
+    expect(agentsFilePointerSentence('AGENTS.md')).toContain('[AGENTS.md](./AGENTS.md)');
+  });
 });

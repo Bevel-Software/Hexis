@@ -193,12 +193,47 @@ export function agentsFileOf(layout: KbLayout): string {
  * startup step appends it. A sentence written twice is a sentence that drifts,
  * and a drifted one appends a SECOND copy to every customer file on the boot
  * after the drift — which is the one thing this whole feature exists to stop.
+ *
+ * A guide name is a FILE NAME, not an identifier: everything `validateFilename`
+ * admits can appear in it, brackets, parentheses and spaces included. So the
+ * link is built rather than interpolated — see {@link markdownLinkLabel} and
+ * {@link markdownLinkDestination} — and the destination keeps the name
+ * LITERALLY, never percent-encoded. The startup step decides whether to append
+ * this sentence by looking for the guide's name in the customer's text; a name
+ * that appeared only in an encoded form would never be found there, and every
+ * boot would append another copy.
  */
 export function agentsFilePointerSentence(agentsFile: string = AGENTS_FILE): string {
   return (
-    `Read [${agentsFile}](./${agentsFile}) before working in this knowledge base — ` +
+    `Read [${markdownLinkLabel(agentsFile)}](${markdownLinkDestination(`./${agentsFile}`)}) ` +
+    'before working in this knowledge base — ' +
     "it is the platform's guide to its layout, files and rules."
   );
+}
+
+/**
+ * `text` as an inline link's LABEL: the characters that would end the label or
+ * start emphasis or code inside it, backslash-escaped. Nothing else is touched
+ * — a filename is read by people, and `AGENTS\.md` helps no one.
+ */
+function markdownLinkLabel(text: string): string {
+  return text.replace(/[\\[\]`*_]/g, (c) => `\\${c}`);
+}
+
+/**
+ * `target` as an inline link's DESTINATION.
+ *
+ * Bare when it can be — which is the ordinary case and the only one anybody
+ * sees — and wrapped in angle brackets when a space or a parenthesis would
+ * otherwise end the destination early. The angle-bracket form is the
+ * CommonMark spelling for exactly this (§6.3): everything up to the closing
+ * `>` is the destination, and the only characters it cannot hold are `<`, `>`
+ * and a newline — none of which a name that passed {@link validateFilename}
+ * can contain. So the name survives verbatim either way, which is what the
+ * "is it already there?" check upstream depends on.
+ */
+function markdownLinkDestination(target: string): string {
+  return /[\s()]/.test(target) ? `<${target}>` : target;
 }
 
 /**
@@ -318,6 +353,31 @@ export function validateKbLayout(layout: KbLayout): string | null {
   return null;
 }
 
+/** Everything that has asked to hear when the layout is applied. */
+const layoutListeners = new Set<() => void>();
+
+/**
+ * Be told when {@link configureKbLayout} runs — for the few things that cannot
+ * read a live binding at the moment they are used.
+ *
+ * Almost nothing needs this: the roots and the guide's name are `let` bindings
+ * read inside function bodies, so code that follows the rule follows the
+ * layout for free. The exception is a value BUILT ONCE and handed to something
+ * that keeps it — the tool catalog's descriptions, which are validated into
+ * frozen-ish defs at registration and then served to agents from a map. Boot
+ * applies the layout before they are built, but the save that completes
+ * FIRST-RUN SETUP applies it afterwards (see `setup.routes.ts`, which must, so
+ * the KB phase that runs in the same request scaffolds the names the admin
+ * just chose) — and without this the catalog would go on naming `AGENTS.md`
+ * until someone restarted the server.
+ *
+ * Listeners run in registration order, after the bindings are updated and only
+ * when the layout was accepted.
+ */
+export function onKbLayoutApplied(listener: () => void): void {
+  layoutListeners.add(listener);
+}
+
 /**
  * Apply the layout. Called once during boot on each side; throws on an invalid
  * one so a bad deployment setting fails beside the rest of the wiring rather
@@ -330,6 +390,7 @@ export function configureKbLayout(layout: KbLayout): void {
   SKILLS_DIR = layout.skillsDir.trim();
   PLUGINS_DIR = layout.pluginsDir.trim();
   AGENTS_FILE = agentsFileOf(layout);
+  for (const listener of layoutListeners) listener();
 }
 
 /** The layout currently in effect. */

@@ -34,11 +34,18 @@ the manifest. Each is idempotent, so a second start writes nothing.
 three root folder names, and the agent guide's file name beside them, are
 entered on the setup screen and the Deployment settings page.
 
-Nothing changes for you at the upgrade. On the first start, each of the three
+Nothing changes for most deployments: on the first start, each of the three
 still set in your environment is imported once into its saved setting and the
-log names the variable to delete. If a saved value already differs from the
-variable, the saved value wins and the start warns that the variable is
-ignored. Delete the variables from your `.env` at your convenience.
+log names the variable to delete. Delete the variables from your `.env` at your
+convenience.
+
+One deployment shape does change at the upgrade. Where a value is ALREADY saved
+from the app and the variable is still set to something else, the two disagreed
+— and until this release the variable won. From now on the saved value wins,
+the start warns that the variable is ignored, and those names take effect at
+that boot. The import only runs where nothing is saved, so editing `.env`
+cannot hand precedence back: if the variable's names are the ones you want,
+enter them on the Deployment settings page.
 
 A plugin is named by its manifest: the `name` in `plugin.json` is what the
 marketplace publishes, what the plugin's page address uses, and what grants

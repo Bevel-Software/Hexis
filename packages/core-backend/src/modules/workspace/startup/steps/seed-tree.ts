@@ -152,6 +152,18 @@ class KbSeedTree {
       await this.copyTemplateFile(name, dest, AGENTS_FILE);
       return;
     }
+    // TWO template entries, ONE destination. A custom template that happens to
+    // carry a root file under the name THIS deployment gave its guide
+    // (`HEXIS.md` in the template, `HEXIS.md` in the setting) would be copied
+    // over the guide the branch above just wrote, or under it, depending on
+    // which order the walk happened to reach them in — and an empty deployment
+    // would be seeded with whichever won. The MANAGED guide wins, always: it
+    // is the file the platform owns, refreshes from the packaged template on
+    // every start and tells every agent to read. The twin is skipped, on the
+    // same reasoning as the packable spelling above.
+    if (relDir === '' && name === AGENTS_FILE && (await this.templates.carries(LEGACY_AGENTS_FILE))) {
+      return;
+    }
     await this.copyTemplateFile(relDir ? path.join(relDir, name) : name, dest);
   }
 

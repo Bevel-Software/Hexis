@@ -390,12 +390,30 @@ export class TemplateFilesStep implements OnServerStart {
     branch: KbBranch,
     opts: { agentsFile: string; announceKept: boolean },
   ): Promise<string[]> {
+    const legacyPath = path.join(repoDir, LEGACY_AGENTS_FILE);
+    // `lstat` first, and a REGULAR FILE or nothing at all.
+    //
+    // Nothing there is the ordinary case: no customer file means nothing to
+    // remove and nothing to point at the guide — the platform never creates an
+    // `AGENTS.md` for this.
+    //
+    // Anything that is not a plain file is left exactly as it is. A SYMLINK is
+    // the case that matters: reading one follows it, so a link pointing at a
+    // knowledge base's managed guide — or at any other file carrying the
+    // header — would read as "ours" and the removal would take the customer's
+    // entry; writing one follows it too, and the pointer sentence would land
+    // in a file at the other end that nobody asked us to edit. Links are never
+    // followed anywhere else in the platform, and they are not followed here.
+    // A directory under the name is the same answer for the same reason.
+    const found = await this.disk.lstatOrNull(legacyPath);
+    if (found === null || !found.isFile()) return [];
+
     let current: string;
     try {
-      current = await fs.readFile(path.join(repoDir, LEGACY_AGENTS_FILE), 'utf8');
+      current = await this.disk.readTextFile(legacyPath);
     } catch (err) {
-      // No customer file: nothing to remove, and nothing to point at the guide
-      // — the platform never creates an `AGENTS.md` for this.
+      // Gone between the probe and the read — a concurrent delete reads as the
+      // absence it is, on the same terms as the probe above.
       if (isAbsence(err)) return [];
       throw err;
     }
@@ -554,23 +572,42 @@ const PLATFORM_RULE_COMMENT = '# Added by the platform: the conventions doc is n
 const AGENTS_RULE_COMMENT = "# The platform's agent guide.";
 
 /**
- * The template line that has ALWAYS sat directly above the guide's rule in the
- * packaged `.bevelignore` — the last of the repo-hygiene entries.
+ * The repo-hygiene BLOCK of the packaged `.bevelignore`, exactly as every
+ * release that shipped a bare guide rule wrote it, in order, ending at the
+ * line that has always sat directly above that rule.
  *
  * It stands in for a comment on knowledge bases seeded before there was one.
  * The guide's rule shipped in the template body from the first seed, bare,
  * like the plugins-root rule did — but unlike that one it must not be dropped
  * wholesale, because an operator who writes `AGENTS.md` into their own ignore
- * file is saying something the platform has no business overruling. So
- * provenance is the position the template put it in: a bare rule sitting
- * anywhere else in the file is the operator's and stays.
+ * file is saying something the platform has no business overruling.
+ *
+ * So provenance is the block the template put it in, and the WHOLE block is
+ * asked for. The single line above it is not enough: `.gitattributes` is an
+ * entry anyone might list, and a hand-written file that happens to name
+ * `AGENTS.md` under it would have had its rule read as the platform's and
+ * deleted. Three lines in the template's own order and wording are not
+ * something an operator arrives at by coincidence — and a file that does
+ * carry them carries the platform's block, however it got there.
  */
-const TEMPLATE_LINE_ABOVE_AGENTS_RULE = '.gitattributes';
+const TEMPLATE_HYGIENE_BLOCK_ABOVE_AGENTS_RULE: readonly string[] = [
+  '# Repo hygiene files that clutter the tree without being node content.',
+  '.gitignore',
+  '.gitattributes',
+];
+
+/** Whether the lines kept so far END with that block — i.e. the next line is the slot. */
+function followsTemplateHygieneBlock(kept: readonly string[]): boolean {
+  const block = TEMPLATE_HYGIENE_BLOCK_ABOVE_AGENTS_RULE;
+  if (kept.length < block.length) return false;
+  return kept.slice(-block.length).every((line, i) => line.trim() === block[i]);
+}
 
 /**
  * `text` without the `AGENTS.md` line THE PLATFORM WROTE — under its own
- * comment (either spelling), or in the slot the packaged template has always
- * put it in — and without that comment.
+ * comment (either spelling), or in the slot at the end of the template's own
+ * repo-hygiene block ({@link TEMPLATE_HYGIENE_BLOCK_ABOVE_AGENTS_RULE}) — and
+ * without that comment.
  *
  * Called only when the guide has been renamed, which is what makes the line
  * wrong: it hides a file the platform no longer owns. A `!AGENTS.md` negation
@@ -584,14 +621,14 @@ export function withoutPlatformAgentsRule(text: string): string {
     const ours =
       line.trim() === LEGACY_AGENTS_FILE &&
       above !== undefined &&
-      (isPlatformRuleComment(above) || above.trim() === TEMPLATE_LINE_ABOVE_AGENTS_RULE);
+      (isPlatformRuleComment(above) || followsTemplateHygieneBlock(kept));
     if (!ours) {
       kept.push(line);
       continue;
     }
-    // The template's own line above the rule is content, not a marker: it
-    // hides `.gitattributes` and stays. Only a comment the platform wrote
-    // goes with the rule it introduced.
+    // The hygiene block above the rule is content, not a marker: those lines
+    // hide `.gitignore` and `.gitattributes` and stay. Only a comment the
+    // platform wrote goes with the rule it introduced.
     if (!isPlatformRuleComment(above)) continue;
     kept.pop();
     // The blank line that opened an appended block goes with it; the template's

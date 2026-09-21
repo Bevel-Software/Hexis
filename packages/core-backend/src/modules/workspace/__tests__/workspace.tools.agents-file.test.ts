@@ -26,8 +26,7 @@ import { registerWorkspaceTools } from '../workspace.tools.js';
 const KB_DIR = 'knowledge-base';
 
 /** Every workspace tool's description, keyed by name, under the layout in effect. */
-async function descriptions(): Promise<Map<string, string>> {
-  const registry = new ToolRegistry();
+async function descriptions(registry: ToolRegistry = new ToolRegistry()): Promise<Map<string, string>> {
   const router = express.Router();
   const auth = ((_req: unknown, _res: unknown, next: () => void) => next()) as unknown as ToolAuth;
   registerWorkspaceTools(
@@ -49,6 +48,11 @@ async function descriptions(): Promise<Map<string, string>> {
     new RoutineWritePolicyService(),
     {} as never,
   );
+  return listed(registry);
+}
+
+/** What the catalog says NOW, with nothing registered again. */
+async function listed(registry: ToolRegistry): Promise<Map<string, string>> {
   const tools = await registry.listExternal();
   return new Map(tools.map((t) => [t.name, t.description ?? '']));
 }
@@ -99,5 +103,26 @@ describe('the conventions note every workspace tool carries', () => {
     const byName = await descriptions();
     expect(byName.get('file_stat')).toContain('`access.md`, `roles.yaml`, `.bevelignore`, `AGENTS.md`');
     expect(byName.get('delete_file')).toContain('`roles.yaml` or `AGENTS.md` at the repository root');
+  });
+
+  /**
+   * First-run setup on a fresh deployment: the tools are mounted at boot, under
+   * the defaults, and the save that COMPLETES setup applies the admin's names
+   * in that same request — without a restart, deliberately, so the KB phase it
+   * runs next scaffolds the names they chose. A catalog built once at boot
+   * would go on naming `AGENTS.md` to every agent that connected afterwards.
+   */
+  it('follows a layout applied after the tools were mounted', async () => {
+    const registry = new ToolRegistry();
+    const atMount = await descriptions(registry);
+    expect(atMount.get('grep')).toContain('read `AGENTS.md` at the KB root');
+
+    configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+
+    const now = await listed(registry);
+    expect(now.get('grep')).toContain('read `HEXIS.md` at the KB root, then `AGENTS.md` if it also exists');
+    expect(now.get('file_stat')).toContain('`access.md`, `roles.yaml`, `.bevelignore`, `HEXIS.md`');
+    expect(now.get('delete_file')).toContain('`roles.yaml` or `HEXIS.md` at the repository root');
+    expect(now.get('move_file')).toContain('`roles.yaml` or `HEXIS.md` at the repository root');
   });
 });

@@ -46,6 +46,7 @@ import {
   isPlatformFile,
   isPlatformFolder,
   isProtectedBranch,
+  onKbLayoutApplied,
   platformFileCreationRefusal,
   platformFileNames,
   platformFileRefusal,
@@ -1090,7 +1091,16 @@ export function registerWorkspaceTools(
 
   const mount = (spec: {
     name: string;
-    description: string;
+    /**
+     * A FUNCTION for a description that names something the layout decides —
+     * the guide's file name, the platform files it belongs to. Those are
+     * applied at boot, but also by the save that completes first-run setup,
+     * which happens AFTER these tools are mounted; a plain string would
+     * snapshot whatever was in effect at mount time and go on telling agents
+     * to read `AGENTS.md` on a deployment that just named its guide something
+     * else. Rebuilt from the function whenever the layout is applied (below).
+     */
+    description: string | (() => string);
     inputs: JsonSchema;
     outputs?: JsonSchema;
     write: boolean;
@@ -1106,17 +1116,18 @@ export function registerWorkspaceTools(
     handler: ToolHandler;
   }): void => {
     const path = `/api/agent/tools/${spec.name}`;
+    // Every workspace entrypoint carries the agent-guide reminder, every file
+    // tool the one content rule, and every tool a permission can refuse the
+    // proposal route — appended once here so no tool (especially the
+    // read-only ones a session hits first) can miss them.
+    const describe = (): string =>
+      (typeof spec.description === 'function' ? spec.description() : spec.description) +
+      (spec.proposable ? PROPOSAL_ROUTE_NOTE : '') +
+      (spec.fileTool === false ? '' : CONTENT_RULE) +
+      kbConventionsNote();
     const def = toolDef({
       name: spec.name,
-      // Every workspace entrypoint carries the agent-guide reminder, every file
-      // tool the one content rule, and every tool a permission can refuse the
-      // proposal route — appended once here so no tool (especially the
-      // read-only ones a session hits first) can miss them.
-      description:
-        spec.description +
-        (spec.proposable ? PROPOSAL_ROUTE_NOTE : '') +
-        (spec.fileTool === false ? '' : CONTENT_RULE) +
-        kbConventionsNote(),
+      description: describe(),
       path,
       inputs: spec.inputs,
       outputs: spec.outputs,
@@ -1124,6 +1135,16 @@ export function registerWorkspaceTools(
     });
     registry.registerInternalTool(def);
     if (!spec.internalOnly) registry.registerExternalTool(def);
+    // The catalog FOLLOWS the layout. The conventions reminder above names the
+    // guide, and several descriptions name it again as a platform file, so the
+    // save that completes first-run setup — which applies the names the admin
+    // just chose, in that same request, without a restart — must be able to
+    // move the text with them. Rewritten in place: the registry holds this
+    // object, both surfaces hold the same one, and re-registering would be a
+    // duplicate name.
+    onKbLayoutApplied(() => {
+      def.description = describe();
+    });
     // Internal-only tools (e.g. `execute_command`) keep their route mounted —
     // our agent calls it over the same loopback — but gate it to internal-source
     // callers so an external connection key can't invoke it by name.
@@ -1328,7 +1349,7 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'file_stat',
-    description:
+    description: () =>
       'Get a file/directory\'s metadata (name, type, size, …) without returning content. A file also reports `contentMode`: `text` (read, write and edit it as text), `document` (read returns an extraction; replace it by upload) or `binary` (bytes: copy, move, delete, or replace by upload), plus `kind` (`text` | `document` | `image` | `binary`), `mime`, `mimeSource` and `textEditable` — decided by the same file readers read_file, grep and the write tools use, so an extensionless text file is `text/plain`.' +
       ' Every entry also reports what you may DO with it. ' +
       `\`managed\` is true for a platform item — a platform file (${platformFileList()}) or a platform folder (the repository root or a reserved root folder such as \`KnowledgeBase/\`); managed items are never movable or deletable through these tools. ` +
@@ -1929,7 +1950,7 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'delete_file',
-    description:
+    description: () =>
       'Delete ONE workspace file (a symbolic link is refused: links are never followed or removed). Committed + pushed as you. Its folder stays, even when this was its last file. Files only: a folder is refused with a pointer to `delete_folder`. ' +
       `A platform file (\`access.md\` or \`.bevelignore\` in any folder, \`roles.yaml\` or \`${AGENTS_FILE}\` at the repository root) and git metadata are refused.` +
       ONTOLOGY_BOUNDARY_NOTE,
@@ -2147,7 +2168,7 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'move_file',
-    description:
+    description: () =>
       'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Lands as a delete + create, committed + pushed as you. ' +
       `Rules: the destination must not exist — a move never overwrites a file or merges into a folder; a platform file (\`access.md\` or \`.bevelignore\` in any folder, \`roles.yaml\` or \`${AGENTS_FILE}\` at the repository root) is refused with "<name> is a platform file and stays in its folder." — a folder that moves takes its own platform files along, still in their folder; a platform folder (the repository root or a reserved root folder such as \`KnowledgeBase/\`) and git metadata are refused; a move cannot create a platform file or folder at \`dest\` either (renaming a note to \`access.md\` is refused); a path through a symbolic link is refused, since links are never followed; on a protected branch you must be able to write both ends — for a folder, every file under it at its old and its new path. ` +
       'Access follows the destination folder. Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination. ' +

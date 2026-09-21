@@ -48,6 +48,17 @@ export interface SettingDef {
    * was copied into a service at construction is not.
    */
   restartToApply?: boolean;
+  /**
+   * What an UNSET setting already means to the code that reads it — the
+   * layout's defaults, the pointer consent's "on unless turned off".
+   *
+   * Only `restartToApply` settings need it, and only for one question: saving
+   * a value the deployment is ALREADY running on changes nothing, so it owes
+   * no restart. Without it, ticking a box that was ticked all along, or typing
+   * `AGENTS.md` into a field that was showing `AGENTS.md`, tells the admin to
+   * restart for a change that never happened.
+   */
+  unsetMeans?: string;
 }
 
 /**
@@ -136,18 +147,21 @@ export const CORE_SETTINGS: SettingDef[] = [
     section: 'knowledge-base',
     validate: validateKbRootName,
     restartToApply: true,
+    unsetMeans: DEFAULT_KB_LAYOUT.knowledgeBaseDir,
   },
   {
     key: 'skillsDir',
     section: 'knowledge-base',
     validate: validateKbRootName,
     restartToApply: true,
+    unsetMeans: DEFAULT_KB_LAYOUT.skillsDir,
   },
   {
     key: 'pluginsDir',
     section: 'knowledge-base',
     validate: validateKbRootName,
     restartToApply: true,
+    unsetMeans: DEFAULT_KB_LAYOUT.pluginsDir,
   },
   {
     /**
@@ -159,6 +173,7 @@ export const CORE_SETTINGS: SettingDef[] = [
     section: 'knowledge-base',
     validate: (v) => validateAgentsFileName(v),
     restartToApply: true,
+    unsetMeans: DEFAULT_KB_LAYOUT.agentsFile,
   },
   {
     /**
@@ -174,6 +189,8 @@ export const CORE_SETTINGS: SettingDef[] = [
     section: 'knowledge-base',
     validate: (v) => (v === 'true' || v === 'false' ? null : 'Use "true" or "false".'),
     restartToApply: true,
+    // On unless explicitly turned off — the reading `resolveAgentsFileLink` applies.
+    unsetMeans: 'true',
   },
 
 
@@ -564,11 +581,11 @@ export class DeploymentSettingsService {
     /** The settings this save changed that a running server cannot pick up. */
     const restartKeys: string[] = [];
     for (const { key, value, def } of toWrite) {
-      // Compared against the EFFECTIVE value: a layout root that was unset
-      // was already running on its default, so saving that default changes
-      // nothing a restart would pick up.
-      const effective =
-        this.resolve(key) || (DEFAULT_KB_LAYOUT as Record<string, string | undefined>)[key] || '';
+      // Compared against the EFFECTIVE value: a setting that was unset was
+      // already running on whatever its readers make of "unset" — the layout
+      // roots on their defaults, the pointer consent on — so saving that same
+      // answer changes nothing a restart would pick up.
+      const effective = this.resolve(key) || def.unsetMeans || '';
       if (def.restartToApply && effective !== value) restartKeys.push(key);
       const encrypted = def.secret === true;
       const stored = encrypted ? this.crypto!.encrypt(value) : value;

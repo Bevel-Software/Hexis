@@ -275,6 +275,31 @@ describe('DeploymentSettingsService — KB layout', () => {
   });
 
   /**
+   * A restart is owed for a CHANGE, and saving what a deployment is already
+   * running on is not one. Both of these settings mean something while unset —
+   * the guide is `AGENTS.md`, the pointer is on — so the first save of that
+   * same answer changes nothing the process would pick up at a restart.
+   */
+  it('owes no restart for saving the value an unset setting already meant', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    // The checkbox arrives ticked, and ticked is what an unset one already is.
+    expect((await settings.save({ agentsFileLink: 'true' }, null)).restartKeys).not.toContain(
+      'agentsFileLink',
+    );
+    expect((await settings.save({ agentsFile: 'AGENTS.md' }, null)).restartKeys).not.toContain(
+      'agentsFile',
+    );
+    expect((await settings.save({ skillsDir: 'Skills' }, null)).restartKeys).not.toContain('skillsDir');
+    // And the setting still reads as it did.
+    expect(settings.resolveAgentsFileLink()).toBe(true);
+    // Turning it off from there IS a change, and still reports one.
+    expect((await settings.save({ agentsFileLink: 'false' }, null)).restartKeys).toContain(
+      'agentsFileLink',
+    );
+  });
+
+  /**
    * The trio rule is judged on the layout the save WOULD produce: a plugins
    * folder renamed to collide with the skills folder already in effect is a
    * collision even though the batch names only one of them.
