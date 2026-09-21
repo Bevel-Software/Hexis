@@ -916,7 +916,7 @@ describe('WorkflowService.mergeBranch — an agent merges branches, never an ope
     const access = makeAccessControl();
     (access.canWriteBatchAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(opts.canWrite === undefined ? null : opts.canWrite);
     const workspaceService = makeWorkspaceService();
-    const svc = new WorkflowService(makeDb([OPEN_REQUEST]), git, makePrs(), makeReviewWorkflow(), workspaceService, access, makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    const svc = new WorkflowService(makeDb([OPEN_REQUEST]), git, makePrs(), makeReviewWorkflow(), workspaceService, access, makeFileLockService(), makePendingCommits(), 'knowledge-base', openChangeGate());
     const merge = (git as unknown as { mergeChangeRequest: ReturnType<typeof vi.fn> }).mergeChangeRequest;
     return { svc, git, access, merge };
   }
