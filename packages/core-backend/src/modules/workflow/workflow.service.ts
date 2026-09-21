@@ -571,11 +571,13 @@ export class WorkflowService implements IWorkflowService {
    * and nothing else. The pull itself reports the change, since it is the
    * only code that can observe it under the workspace mutex.
    */
-  private async pullWorkspace(workspaceId: string): Promise<void> {
+  private async pullWorkspace(workspaceId: string): Promise<boolean> {
     const { treeChanged } = await this.git.pull(workspaceId);
     if (treeChanged && branchForWorkspaceId(workspaceId) === DEFAULT_BRANCH) {
       this.events?.emit({ kind: 'fs-tree-changed', workspaceId, branch: DEFAULT_BRANCH });
+      return true;
     }
+    return false;
   }
 
   async updateFromRemote(workspaceId: string, user?: AuthUser): Promise<void> {
@@ -3041,10 +3043,12 @@ export class WorkflowService implements IWorkflowService {
    */
   private async pullMergeTarget(targetBranch: string, user: AuthUser): Promise<void> {
     let targetWorkspaceId: string | undefined;
+    /** Whether the pull below already announced the new tree. See the emit after it. */
+    let announced = false;
     try {
       const targetWorkspace = await this.workspaceService.getOrCreateForBranch(targetBranch);
       targetWorkspaceId = targetWorkspace.id;
-      await this.pullWorkspace(targetWorkspace.id);
+      announced = await this.pullWorkspace(targetWorkspace.id);
     } catch (err) {
       // Still best-effort for the merge response (the merge already landed
       // on origin) — but a rebase CONFLICT here means the target workspace
@@ -3058,6 +3062,39 @@ export class WorkflowService implements IWorkflowService {
       mergeLog.warn(`post-merge pull of target "${targetBranch}" failed — its workspace may be momentarily behind origin`, {
         err,
       });
+    }
+    // THE MERGE ITSELF CHANGED THE TREE, and the pull above almost never says
+    // so. Both callers — applying a change request, and an agent merging a
+    // branch — run `git merge --no-ff` in this very workspace and push the
+    // result, so by the time we pull, the clone is already at origin: the pull
+    // reports "up to date", `treeChanged` is false, and nothing is announced —
+    // while the working tree holds a `.tool` or a `SKILL.md` that was not
+    // there a second ago.
+    //
+    // Nothing else covers it. `change-request-merged` carries no branch and no
+    // workspace, so the catalog subscriber cannot act on it; a later
+    // `POST /api/sync/<branch>` answers "up-to-date" without pulling, for the
+    // same reason. So an approved tool stayed invisible — to every open MCP
+    // connection and every browser — until some unrelated write to the default
+    // branch happened to drop the caches, or the catalogs' own TTL ran out.
+    // That is the merge path of "whichever path made the commit".
+    //
+    // Emitted only when the pull did not already: on the rare path where the
+    // clone WAS behind (someone else pushed between the merge and the pull),
+    // the pull announced the same tree and a second event buys a duplicate
+    // re-scan and a duplicate browser refetch.
+    //
+    // A pull that FAILED is still announced, and that is not a guess about a
+    // tree nobody reconciled. The merge ran in THIS workspace — the target
+    // branch's own, resolved above — before pushing, so the merged bytes were
+    // on that disk before the pull was attempted, and a pull that could not
+    // run cannot un-merge them. (For a change request, `targetBranch` is the
+    // branch the merge acted on: `preserveBaseRolesYaml` refuses the merge
+    // outright if it disagrees with the request's own base.) The failure the
+    // pull reports is about OTHER people's commits not arriving, which leaves
+    // the catalogs no staler than they were.
+    if (!announced && targetWorkspaceId && targetBranch === DEFAULT_BRANCH) {
+      this.events?.emit({ kind: 'fs-tree-changed', workspaceId: targetWorkspaceId, branch: DEFAULT_BRANCH });
     }
   }
 

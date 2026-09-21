@@ -403,12 +403,14 @@ export async function createHexisMcpServer(
      * Whether, and how often at most, to check that the deployment's tools
      * and skills are still the ones this server registered. The check runs on
      * ACTIVITY — a tool call finishing, a `tools/list` arriving — never on a
-     * timer, and `minIntervalMs` (default `CATALOG_CHECK_MIN_INTERVAL_MS`, see
-     * `catalog-watch.ts`) is the least time between two of them. `false`
-     * turns it off, which freezes this server's toolset at what discovery
-     * found (what it did before the check existed). Here for tests and
-     * embedding hosts — the CLI does not expose it, because the default is
-     * the contract the knowledge base's guide states.
+     * timer: an idle connection asks the deployment nothing, so a deployment
+     * with fifty connected laptops nobody is using answers nothing (see
+     * `catalog-watch.ts`). `minIntervalMs` (default
+     * `CATALOG_CHECK_MIN_INTERVAL_MS`) is the least time between two checks.
+     * `false` turns it off, which freezes this server's toolset at what
+     * discovery found (what it did before the check existed). Here for tests
+     * and embedding hosts — the CLI does not expose it, because the default
+     * is the contract the knowledge base's guide states.
      */
     catalogCheck?: false | { minIntervalMs?: number };
   } = {},
@@ -893,6 +895,10 @@ export async function createHexisMcpServer(
         : {}),
       onChanged: refreshCatalog,
     });
+    // No timer. The check runs on activity only — a tool call finishing, a
+    // listing arriving — so an idle connection costs the deployment nothing.
+    // A client that connects and then waits is told about a change at its
+    // next use, which is when a stale toolset would first cost it anything.
   };
 
   /**
