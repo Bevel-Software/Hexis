@@ -165,6 +165,15 @@ export interface ResolvedDeployment {
    * would report a dead credential for a route that is merely not there.
    */
   catalogRevision: boolean;
+  /**
+   * Whether the deployment also PUSHES that fingerprint, over
+   * `GET /api/agent/catalog-events`. When it does, this process subscribes and
+   * hears about a commit the moment it lands instead of at its next activity;
+   * when it does not — an older deployment — the activity checks are the whole
+   * mechanism, exactly as before. Absence is the only signal, for the reason
+   * given above.
+   */
+  catalogEvents: boolean;
 }
 
 /**
@@ -175,11 +184,17 @@ export interface ResolvedDeployment {
 export async function resolveDeployment(config: HexisMcpConfig): Promise<ResolvedDeployment> {
   const body = (await getJson(`${config.baseUrl}/api/config`, {
     label: 'the deployment config',
-  })) as { mcpUrl?: unknown; agentInstructions?: unknown; catalogRevision?: unknown };
+  })) as {
+    mcpUrl?: unknown;
+    agentInstructions?: unknown;
+    catalogRevision?: unknown;
+    catalogEvents?: unknown;
+  };
   return {
     mcpUrl: mcpUrlFromConfig(config, body),
     agentInstructions: body?.agentInstructions === true,
     catalogRevision: body?.catalogRevision === true,
+    catalogEvents: body?.catalogEvents === true,
   };
 }
 

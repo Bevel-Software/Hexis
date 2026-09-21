@@ -333,3 +333,141 @@ describe('createCatalogCheck', () => {
     expect(CATALOG_CHECK_MIN_INTERVAL_MS + refreshCost).toBeLessThanOrEqual(5_000);
   });
 });
+
+/**
+ * The other road a revision arrives by: the deployment volunteered it, over
+ * the stream `catalog-events.ts` holds open. Everything the check's own body
+ * guarantees has to hold identically here — a change is owed once, a failure
+ * leaves it owed, teardown stops it — because a change must not be handled
+ * differently depending on which road brought it.
+ */
+describe('CatalogCheck.notice — a revision the deployment announced', () => {
+  it('refreshes without asking the deployment anything', async () => {
+    const onChanged = vi.fn();
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged });
+
+    await check.notice('rev-2');
+
+    expect(onChanged).toHaveBeenCalledExactlyOnceWith('rev-2');
+    // The whole point: no digest read. A bridge that answered an announcement
+    // by going and asking would have made the stream a poll with extra steps.
+    expect(fetchCatalogRevision).not.toHaveBeenCalled();
+  });
+
+  it('ignores an announcement of the revision it already serves', async () => {
+    const onChanged = vi.fn();
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged });
+
+    // The invalidation behind a real announcement carries no paths, so every
+    // ordinary note's commit announces too. Re-registering every connected
+    // client's whole toolset for one is the cost this must not have.
+    await check.notice('rev-1');
+    await check.notice('rev-1');
+
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it('keeps the change owed when the refresh fails, and settles it on the next one', async () => {
+    const onChanged = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('the deployment is restarting'))
+      .mockResolvedValue(undefined);
+    const log = vi.fn();
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged, log });
+
+    await check.notice('rev-2');
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls.flat().join(' ')).toContain('refreshing the toolset after a workspace change failed');
+
+    // `applied` never advanced, so the SAME revision is still a change. A
+    // bridge that had recorded it would serve the old toolset until some
+    // later commit happened to move the catalog again.
+    await check.notice('rev-2');
+    expect(onChanged).toHaveBeenCalledTimes(2);
+    expect(onChanged).toHaveBeenLastCalledWith('rev-2');
+  });
+
+  it('runs one refresh at a time, in the order the revisions arrived', async () => {
+    const order: string[] = [];
+    let release = (): void => {};
+    const first = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onChanged = vi.fn(async (revision: string) => {
+      order.push(`start ${revision}`);
+      if (revision === 'rev-2') await first;
+      order.push(`end ${revision}`);
+    });
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged });
+
+    const a = check.notice('rev-2');
+    const b = check.notice('rev-3');
+    release();
+    await Promise.all([a, b]);
+
+    // Two announcements landing together must not have their re-registrations
+    // overlap: each one deregisters every manual this process holds before
+    // putting them back, and two doing that at once is how a client ends up
+    // with a name registered twice or not at all.
+    expect(order).toEqual(['start rev-2', 'end rev-2', 'start rev-3', 'end rev-3']);
+  });
+
+  it('opens a throttle window, so the listing a notification provokes asks nothing', async () => {
+    const t = clock();
+    const onChanged = vi.fn();
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', onChanged, now: t.now });
+
+    await check.notice('rev-2');
+    // An announcement is at least as fresh as anything this process could go
+    // and read, so the `tools/list` it provokes has nothing left to ask. Every
+    // change, times every connected client, is the round trip this saves.
+    await check.check();
+    expect(fetchCatalogRevision).not.toHaveBeenCalled();
+
+    t.advance(CATALOG_CHECK_MIN_INTERVAL_MS);
+    fetchCatalogRevision.mockResolvedValue('rev-2');
+    await check.check();
+    expect(fetchCatalogRevision).toHaveBeenCalledTimes(1);
+  });
+
+  it('makes a throttled listing wait for the refresh already running', async () => {
+    const t = clock();
+    let release = (): void => {};
+    const refreshing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let finished = false;
+    const onChanged = vi.fn(async () => {
+      await refreshing;
+      finished = true;
+    });
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', onChanged, now: t.now });
+
+    const announced = check.notice('rev-2');
+    // A listing arriving while the announcement's refresh is still running is
+    // inside the throttle window, so it asks nothing — but returning ahead of
+    // the refresh would hand back the toolset that refresh is replacing.
+    const listing = check.check();
+    let listingDone = false;
+    void listing.then(() => (listingDone = true));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(listingDone).toBe(false);
+
+    release();
+    await Promise.all([announced, listing]);
+    expect(finished).toBe(true);
+  });
+
+  it('does nothing once stopped', async () => {
+    const onChanged = vi.fn();
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged });
+
+    check.stop();
+    await check.notice('rev-2');
+
+    // Teardown is exactly when a late announcement lands: the stream is being
+    // closed, and a refresh started here would re-register manuals on a server
+    // that is already going down.
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+});

@@ -43,14 +43,32 @@ export function registerCatalogCacheInvalidation(deps: {
    * were unified to prevent.
    */
   accessControl: { invalidate(workspaceId: string): void };
+  /**
+   * Told at the same instant the caches are dropped, for the clients that
+   * cannot re-read on demand: the local `hexis-mcp` bridges holding a
+   * long-lived connection (see `core/catalog-events.ts`).
+   *
+   * HERE rather than in a subscriber of its own, deliberately. "The released
+   * catalog may have changed" already has exactly one correct enumeration of
+   * the ways it can happen, and it is the one above; a second list beside it
+   * would drift the first time someone adds a road to the default branch —
+   * which is how the merge case was missed in the first place. Optional, so a
+   * deployment that serves no such clients wires nothing.
+   */
+  onInvalidated?: () => void;
 }): () => void {
-  const { eventBus, fileChangeNotifier, kbDirName, catalogs, accessControl } = deps;
+  const { eventBus, fileChangeNotifier, kbDirName, catalogs, accessControl, onInvalidated } = deps;
   const invalidateAll = () => {
     for (const c of catalogs) c.invalidate();
     // Scoped to the branch the catalogs read, and no wider: a drop here costs
     // the next reader one model load, so it must not reach workspaces this
     // event says nothing about.
     accessControl.invalidate(workspaceIdForBranch(DEFAULT_BRANCH));
+    // After the drops, never before: a bridge that hears this asks for the
+    // catalog immediately, and asking a cache that is still holding the old
+    // scan is how it would be handed the very answer this event says is
+    // stale.
+    onInvalidated?.();
   };
 
   // Subscriber A — COMMIT-time freshness: a committed change drops the affected

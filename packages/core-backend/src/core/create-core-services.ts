@@ -136,6 +136,7 @@ import { UpdateCheckService } from '../modules/update-check/update-check.service
 import { resolveAppVersion } from '../version.js';
 import { noopRecoveryAgent, type CorePorts } from './core-ports.js';
 import { registerCatalogCacheInvalidation } from './catalog-cache-invalidation.js';
+import { createCatalogChangeSignal, type CatalogChangeSignal } from './catalog-events.js';
 
 /**
  * Everything the CORE composition builds: the core services `createCoreServer`
@@ -188,6 +189,13 @@ export interface CoreServices {
   skillService: SkillService;
   pendingSkillsService: PendingSkillsService;
   toolManualService: ToolManualService;
+  /**
+   * Fires when the released catalog may have moved — the push side of
+   * `GET /api/agent/catalog-revision`. Wired to the very invalidation that
+   * drops the catalog caches, so the two can never disagree about what
+   * counts as a change.
+   */
+  catalogChanges: CatalogChangeSignal;
   /**
    * Reads the admin's `mcp-description.md` on the default branch with
    * platform rights: the one reader behind every MCP session's instructions
@@ -691,12 +699,17 @@ export async function createCoreServices(
   // model they are filtered through. Wired in one place so a new way of
   // reaching the default branch cannot refresh two of them and leave the
   // third serving last minute's answer.
+  // The same fact, pushed to the clients that cannot ask for it: the local
+  // `hexis-mcp` bridges holding a connection nobody can call into. See
+  // `core/catalog-events.ts` for why a push and not a poll.
+  const catalogChanges = createCatalogChangeSignal();
   registerCatalogCacheInvalidation({
     eventBus,
     fileChangeNotifier,
     kbDirName,
     catalogs: [toolManualService, skillService, pluginIndexService, pluginLinkIndex],
     accessControl,
+    onInvalidated: catalogChanges.notify,
   });
 
   // Admin = `Admin` role in roles.yaml, resolved through the access model on the
@@ -1050,6 +1063,7 @@ export async function createCoreServices(
     skillService,
     pendingSkillsService,
     toolManualService,
+    catalogChanges,
     readAgentPreamble: readPreamble,
     pluginIndexService,
     pluginProvisionService,

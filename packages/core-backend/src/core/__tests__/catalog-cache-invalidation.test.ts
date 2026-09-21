@@ -22,12 +22,18 @@ function setup() {
     { invalidate: vi.fn() },
   ];
   const accessControl = { invalidate: vi.fn() };
+  /** What the caches looked like at the instant the bridges were told. */
+  const announcedWith: number[] = [];
+  const onInvalidated = vi.fn(() => {
+    announcedWith.push(catalogs[0]!.invalidate.mock.calls.length);
+  });
   const off = registerCatalogCacheInvalidation({
     eventBus,
     fileChangeNotifier,
     kbDirName: KB_DIR,
     catalogs,
     accessControl,
+    onInvalidated,
   });
   /** How many times EVERY catalog was dropped — they are only ever dropped together. */
   const drops = () => {
@@ -35,7 +41,7 @@ function setup() {
     expect(new Set(counts).size).toBe(1);
     return counts[0];
   };
-  return { eventBus, fileChangeNotifier, drops, off, accessControl };
+  return { eventBus, fileChangeNotifier, drops, off, accessControl, onInvalidated, announcedWith };
 }
 
 describe('registerCatalogCacheInvalidation', () => {
@@ -222,5 +228,79 @@ describe('registerCatalogCacheInvalidation', () => {
       byUser: USER,
     });
     expect(drops()).toBe(0);
+  });
+
+  /**
+   * The push side. A bridge on someone's laptop cannot be asked to poll (see
+   * `core/catalog-events.ts`), so it is TOLD — and it is told from here,
+   * rather than from a second enumeration of the ways a catalog goes stale
+   * sitting next to this one. Two lists drift the first time someone adds a
+   * road to the default branch, which is exactly how the merge case was
+   * missed.
+   */
+  describe('telling the connected bridges', () => {
+    it('fires on every occasion the caches are dropped, and no other', () => {
+      const { eventBus, fileChangeNotifier, onInvalidated } = setup();
+
+      fileChangeNotifier.emit({
+        workspaceId: 'ws',
+        branch: DEFAULT_BRANCH,
+        paths: [`${KB_DIR}/Plugins/Engineering/coding/SKILL.md`],
+        byUser: USER,
+      });
+      expect(onInvalidated).toHaveBeenCalledTimes(1);
+
+      eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws', branch: DEFAULT_BRANCH });
+      expect(onInvalidated).toHaveBeenCalledTimes(2);
+
+      eventBus.emit({ kind: 'git-sync-recovered', workspaceId: 'ws', branch: DEFAULT_BRANCH });
+      expect(onInvalidated).toHaveBeenCalledTimes(3);
+
+      // Nothing this deployment's released catalog can see: another branch,
+      // and a commit outside the folders the catalogs read.
+      eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws2', branch: 'agent/draft' });
+      fileChangeNotifier.emit({
+        workspaceId: 'ws',
+        branch: DEFAULT_BRANCH,
+        paths: [`${KB_DIR}/KnowledgeBase/note.md`],
+        byUser: USER,
+      });
+      expect(onInvalidated).toHaveBeenCalledTimes(3);
+    });
+
+    it('fires AFTER the caches are dropped, never before', () => {
+      const { eventBus, announcedWith, drops } = setup();
+
+      eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws', branch: DEFAULT_BRANCH });
+
+      // A bridge that hears this asks for the catalog immediately. Told first,
+      // it would be handed the very scan this event says is stale — and would
+      // then record that stale answer as the current one and stop asking.
+      expect(drops()).toBe(1);
+      expect(announcedWith).toEqual([1]);
+    });
+
+    it('is optional — a deployment with no such clients wires nothing', () => {
+      const eventBus = new WorkflowEventBus();
+      const fileChangeNotifier = new FileChangeNotifier();
+      const catalog = { invalidate: vi.fn() };
+      registerCatalogCacheInvalidation({
+        eventBus,
+        fileChangeNotifier,
+        kbDirName: KB_DIR,
+        catalogs: [catalog],
+        accessControl: { invalidate: vi.fn() },
+      });
+
+      expect(() => eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws', branch: DEFAULT_BRANCH })).not.toThrow();
+      expect(catalog.invalidate).toHaveBeenCalledTimes(1);
+    });
+
+    it('detaches with the rest on unsubscribe', () => {
+      const { eventBus, off, onInvalidated } = setup();
+      off();
+      eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws', branch: DEFAULT_BRANCH });
+      expect(onInvalidated).not.toHaveBeenCalled();
+    });
   });
 });

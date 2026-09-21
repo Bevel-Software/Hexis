@@ -82,5 +82,19 @@ export function publicConfig({ marketplaceGitUrl, mcpUrl }: PublicConfigAddresse
      * there.
      */
     catalogRevision: true as const,
+    /**
+     * This deployment also PUSHES that fingerprint, over
+     * `GET /api/agent/catalog-events` (see core/catalog-events.ts). The bridge
+     * subscribes when this is advertised and falls back to asking on activity
+     * when it is not — which is what an older deployment looks like, and what
+     * a proxy that will not carry an event stream reduces this one to.
+     *
+     * A capability flag rather than a probe, for the same reason as the two
+     * above: an unknown `/api/*` path on an older deployment falls through to
+     * the JWT mounts and answers 401, and a subscriber reading that as a dead
+     * credential would send the user to mint a key for a route that is simply
+     * not there.
+     */
+    catalogEvents: true as const,
   };
 }
