@@ -27,7 +27,7 @@ import { DeletePluginDialog } from './DeletePluginDialog';
 import { PageActions } from './PageActions';
 import { copyToClipboard } from '../utils/clipboard';
 import { LockedPluginView } from './LockedPluginView';
-import { PendingSkillReview } from './PendingSkillReview';
+import { PendingItemReview } from './PendingItemReview';
 
 /**
  * One plugin, as a place: `/skills-and-tools/plugins/:plugin`.
@@ -71,7 +71,7 @@ export function PluginPage() {
   const [manageTarget, setManageTarget] = useState<FileTreeEntry | null>(null);
   /** Bumped when an access edit lands, so the join-request surface refetches. */
   const [accessRevision, setAccessRevision] = useState(0);
-  /** The proposed skill being reviewed, if the reader opened one. */
+  /** The proposal — skill or tool — being reviewed, if the reader opened one. */
   const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
   /**
    * Whether the join-requests banner is actually on screen. The empty band's
@@ -164,8 +164,8 @@ export function PluginPage() {
    * Both kinds open a PAGE — `skills/:name` has landed, so the contract this
    * function used to carry is discharged and the dialog is gone. Kept identical
    * to `LibraryPage.openItem` on purpose: a card must do the same thing
-   * wherever you clicked it — including the proposed-skill case, which opens
-   * its change request because it has no page to open.
+   * wherever you clicked it — including the proposed case, skill or tool,
+   * which opens its change request because it has no page to open.
    */
   function openItem(item: LibraryItem) {
     if (item.pending) {
@@ -507,13 +507,14 @@ export function PluginPage() {
       />
 
       {reviewing && (
-        <PendingSkillReview
+        <PendingItemReview
           item={reviewing}
           onClose={() => setReviewing(null)}
           onResolved={() => {
             setReviewing(null);
-            // One reload moves it off the review shelf and into the catalog;
-            // the plugin index follows because its skill count just changed.
+            // One reload moves the proposal — skill or tool — off the review
+            // shelf and into the catalog; the plugin index follows because the
+            // plugin's own count just changed.
             data.reload();
             data.reloadPlugins();
           }}

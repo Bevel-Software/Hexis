@@ -1679,8 +1679,10 @@ export class WorkflowService implements IWorkflowService {
     // nothing on disk moved.
   }
 
-  hasQueuedCommit(workspaceId: string, branch: string, targetPath: string): Promise<boolean> {
-    return this.pendingCommits.hasLiveRowFor(workspaceId, branch, targetPath);
+  hasQueuedCommit(workspaceId: string, branch: string, rawPath: string): Promise<boolean> {
+    // The row was stored under the canonical identity (`releaseLock`), so the
+    // question is asked under it too — whatever spelling the caller has.
+    return this.pendingCommits.hasLiveRowFor(workspaceId, branch, canonicalFileIdentity(rawPath));
   }
 
   hasUnpushedCommits(workspaceId: string): Promise<boolean> {

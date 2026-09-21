@@ -17,7 +17,6 @@ import type { Database } from '../../database/connection.js';
 import { changeRequests, prComments, prFileApprovals, prMergeLog } from '../../database/schema.js';
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import { isAccessMdPath } from '../../access-model/access-grammar.js';
 import type { GitService } from '../git/git.service.js';
 import {
   ChangeRequestConflictsError,
@@ -38,8 +37,6 @@ import type {
 // commit on the branch.
 const MERGE_METHOD = 'merge' as const;
 const EVERYONE_CANONICAL = 'everyone';
-/** Repo-relative path of the access-config file the resolver gates as Admin-only. */
-const ROLES_YAML = 'roles.yaml';
 
 function redactTokens(msg: string): string {
   const tokens = [process.env.GITHUB_TOKEN, process.env.GH_TOKEN].filter(
@@ -150,33 +147,19 @@ function assertValidUuid(value: unknown, fieldName: string): asserts value is st
 }
 
 /**
- * The access-config files the resolver treats as Admin-only to write
- * (`roles.yaml` decides admin membership; any `access.md` decides per-path
- * grants). These are NOT `.md` KB nodes but ARE the most security-critical
- * files in the repo, so the approval gate must bind them too — without this a
- * `roles.yaml`-only change request rides into a protected branch with no
- * approval and no admin check, letting its author self-promote to Admin.
- * Mirrors the resolver's own `relativePath === 'roles.yaml' || isAccessMdPath`
- * special-cases (access-control.service.ts). Paths are repo-relative, the same
- * form GitHub reports a PR's changed files in.
+ * Approval enforcement binds every touched file that has someone eligible to
+ * approve it per the access tree — Markdown notes, the access-config files
+ * (`roles.yaml`, `access.md`), extensionless and binary files alike. The
+ * extension plays no part: a `report.pdf` or a `Makefile` in an owned folder
+ * is as much its owners' decision as a note beside it, and an extension check
+ * let a request touching only such files merge with no approval at all. Files
+ * with no eligible approvers are outside the gate — nobody could approve them,
+ * so counting them would deadlock the request. Shared between the gate and
+ * any call-site that needs the "does this participate in approvals" question
+ * answered consistently.
  */
-function isAccessConfigPath(p: string): boolean {
-  return p === ROLES_YAML || isAccessMdPath(p);
-}
-
-/**
- * Approval enforcement binds markdown KB nodes AND the access-config files
- * (`roles.yaml`, `access.md`) that have someone eligible to approve them per
- * the access tree. Files with no eligible approvers, and other non-md files,
- * are outside the gate — they neither warn nor block. Shared between the gate
- * and any call-site that needs the "does this participate in approvals"
- * question answered consistently.
- */
-function isGateRelevant(a: Pick<FileApprovalState, 'path' | 'eligibleApprovers'>): boolean {
-  const hasEligible =
-    a.eligibleApprovers.roles.length > 0 || a.eligibleApprovers.users.length > 0;
-  const lower = a.path.toLowerCase();
-  return hasEligible && (lower.endsWith('.md') || isAccessConfigPath(a.path));
+function isGateRelevant(a: Pick<FileApprovalState, 'eligibleApprovers'>): boolean {
+  return a.eligibleApprovers.roles.length > 0 || a.eligibleApprovers.users.length > 0;
 }
 
 /** Human-friendly label for the eligible-approver set, used in gate warnings. */
@@ -191,6 +174,48 @@ function eligibleLabel(a: FileApprovalState): string {
     );
   }
   return parts.join('; ') || 'someone with write access';
+}
+
+/**
+ * The gate split by what can override it: `hardReasons` (closed, merged, no
+ * files) refuse every merge; `warnings` (missing approvals) refuse too, but
+ * an admin may merge past them with the bypass flag.
+ */
+function evaluateGateParts(input: MergeGateInput): { hardReasons: string[]; warnings: string[] } {
+  const reasons: string[] = [];
+  const warnings: string[] = [];
+
+  if (input.state === 'merged') {
+    reasons.push('This pull request has already been merged.');
+  } else if (input.state === 'closed') {
+    reasons.push('This pull request is closed.');
+  }
+
+  // Empty approvals = empty files array = nothing to approve. That's not
+  // mergeable either — a PR that touches no files shouldn't be opened in
+  // the first place, let alone merged.
+  if (input.approvals.length === 0 && input.state === 'open') {
+    reasons.push('This pull request has no file changes to approve.');
+  }
+
+  // Ownership enforcement binds every file with an eligible approver,
+  // whatever its extension; files nobody can approve are silent. For the
+  // gate-relevant files, "owner hasn't approved the current head" is a
+  // missing approval — it blocks, and only an admin bypass merges past it.
+  for (const a of input.approvals) {
+    if (!isGateRelevant(a)) continue;
+    if (a.isApproved) continue;
+
+    const hasStale = a.approvedBy.some((e) => e.isStale);
+    const label = eligibleLabel(a);
+    if (hasStale) {
+      warnings.push(`${label} need to re-approve ${a.path} after the latest push.`);
+    } else {
+      warnings.push(`Waiting on approval for ${a.path} from ${label}.`);
+    }
+  }
+
+  return { hardReasons: reasons, warnings };
 }
 
 function assertValidPath(p: unknown): asserts p is string | undefined {
@@ -516,41 +541,17 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     return this.getApprovalStates(prNumber, files, headSha, baseBranch, prAuthorIdHash, workspaceId, user.email);
   }
 
+  /**
+   * Pure in `this`: the whole verdict comes out of `evaluateGateParts`, a
+   * module-level function. Call-sites borrow this off the prototype against a
+   * bare object to get the real gate without a service, so keep it that way —
+   * reaching for an instance field here breaks them with a TypeError.
+   */
   evaluateMergeGate(input: MergeGateInput): MergeGateResult {
-    const reasons: string[] = [];
-    const warnings: string[] = [];
-
-    if (input.state === 'merged') {
-      reasons.push('This pull request has already been merged.');
-    } else if (input.state === 'closed') {
-      reasons.push('This pull request is closed.');
-    }
-
-    // Empty approvals = empty files array = nothing to approve. That's not
-    // mergeable either — a PR that touches no files shouldn't be opened in
-    // the first place, let alone merged.
-    if (input.approvals.length === 0 && input.state === 'open') {
-      reasons.push('This pull request has no file changes to approve.');
-    }
-
-    // Ownership enforcement only binds markdown KB nodes. Non-md files (TS,
-    // JSON, images, etc.) and ownerless md files are silent — they neither
-    // warn nor block. For the remaining gate-relevant files, "owner hasn't
-    // approved the current head" is surfaced as a *warning* the caller can
-    // bypass explicitly, not a hard block.
-    for (const a of input.approvals) {
-      if (!isGateRelevant(a)) continue;
-      if (a.isApproved) continue;
-
-      const hasStale = a.approvedBy.some((e) => e.isStale);
-      const label = eligibleLabel(a);
-      if (hasStale) {
-        warnings.push(`${label} need to re-approve ${a.path} after the latest push.`);
-      } else {
-        warnings.push(`Waiting on approval for ${a.path} from ${label}.`);
-      }
-    }
-
+    // A missing approval is both: a blocking reason (the request is not
+    // mergeable while it remains) and a warning (the admin bypass names it).
+    const { hardReasons, warnings } = evaluateGateParts(input);
+    const reasons = [...hardReasons, ...warnings];
     return { mergeable: reasons.length === 0, reasons, warnings };
   }
 
@@ -571,11 +572,11 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     if (!workspaceId) throw new WorkflowValidationError('workspace id is required');
 
     // Server-side re-validation — never trust the frontend's cached gate.
-    // Hard blocks always refuse. Soft warnings refuse unless the caller opted
-    // into bypass; with bypass, the bypassed warnings get inlined in the merge
-    // commit body so git history captures the decision.
-    const gate = this.evaluateMergeGate({ prNumber, state, approvals });
-    if (!gate.mergeable) throw new MergeBlockedError(gate.reasons);
+    // Hard blocks always refuse. Missing approvals refuse unless the caller
+    // opted into bypass; with bypass, the bypassed warnings get inlined in the
+    // merge commit body so git history captures the decision.
+    const gate = evaluateGateParts({ prNumber, state, approvals });
+    if (gate.hardReasons.length > 0) throw new MergeBlockedError(gate.hardReasons);
     if (gate.warnings.length > 0 && !opts.bypass) {
       throw new MergeBlockedError(gate.warnings);
     }

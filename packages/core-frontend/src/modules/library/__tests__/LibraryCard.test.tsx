@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { LibraryCard, type LibraryCardProps } from '../components/LibraryCard';
+import { NAME_MIN_WIDTH } from '../components/NameWithBadges';
 import { displayFirstName, personalPluginName } from '../utils/personal-plugin';
 
 /**
@@ -141,6 +142,77 @@ describe('LibraryCard', () => {
     // it is not usable.
     card({ status: { state: 'warn', text: 'Needs slack' }, pending: { authorName: 'Ali', mine: true } });
     expect(screen.queryByText('Needs slack')).not.toBeInTheDocument();
+  });
+
+  /**
+   * A proposed TOOL — a `.tool` manual or an `mcp.json` server that exists only
+   * on an open change request, the same hole the skill card above fixed. It
+   * wears the same review badge and the same dashed outline, because it is the
+   * same fact.
+   *
+   * What it does NOT wear is the connection line. That is the one thing a
+   * released tool card always states, and on a proposal it would send the
+   * reader off to fill in a credential for a file nobody has approved.
+   */
+  it('marks a proposed tool in review without claiming it is connected', () => {
+    card({
+      kind: 'integration',
+      flavor: 'mcp',
+      id: 'tickets',
+      name: 'tickets',
+      // The connection state a released tool always states. On a proposal
+      // "Needs setup" would send the reader off to configure a credential for
+      // a server nobody has approved.
+      status: { state: 'warn', text: 'Needs setup' },
+      pending: { authorName: 'Ali Raza', mine: false },
+    });
+    expect(screen.getByText('In review')).toBeInTheDocument();
+    expect(screen.getByText(/From Ali Raza: waiting on you/)).toBeInTheDocument();
+    expect(screen.queryByText('Needs setup')).not.toBeInTheDocument();
+    // The flavour badge is untouched by any of that: silencing the connection
+    // line is about a credential that cannot exist yet, not about hiding which
+    // file the request adds.
+    expect(screen.getByText('MCP server')).toBeInTheDocument();
+    // Dashed: the card is an outline of a tool rather than one, and that reads
+    // before any text does.
+    expect(screen.getByTestId('library-card-integration-tickets').className).toContain(
+      'border-dashed',
+    );
+  });
+
+  /**
+   * A proposed tool is the most crowded card in the library: a monogram, its
+   * flavour, and `In review`, all beside a name. That crowding is what once
+   * rendered `prometheus_metrics` as `p…` in a 260px track — every badge is
+   * `shrink-0`, so the truncating name paid for all of them.
+   *
+   * `NameWithBadges` is the fix, and it is the shared one rather than this
+   * card's: the name keeps a floor and the badges wrap under it instead. So
+   * what is worth pinning HERE is that a proposal actually reaches that
+   * protection — it is the card with the most to lose, and a floor granted
+   * only while badges are present is a floor a proposal must not fall out of.
+   *
+   * jsdom has no layout, so none of this can be asserted in pixels. The floor
+   * is a class, and the class can be.
+   */
+  it('gives a proposed tool’s name the floor, and still says how it is declared', () => {
+    card({
+      kind: 'integration',
+      flavor: 'utcp',
+      id: 'prometheus_metrics',
+      name: 'prometheus_metrics',
+      status: { state: 'ok', text: 'Connected' },
+      pending: { authorName: 'Ali Raza', mine: true },
+    });
+    const name = screen.getByText('prometheus_metrics');
+    expect(name.className).toContain(NAME_MIN_WIDTH);
+    // Whatever the row clips is one hover away.
+    expect(name).toHaveAttribute('title', 'prometheus_metrics');
+    // Both chips, because the row no longer has to choose between them: an
+    // approver is deciding on a FILE, so which file it is belongs beside the
+    // badge saying the tool is not here yet.
+    expect(screen.getByText('In review')).toBeInTheDocument();
+    expect(screen.getByText('UTCP manual')).toBeInTheDocument();
   });
 
   it('does not call a proposal yours to own', () => {

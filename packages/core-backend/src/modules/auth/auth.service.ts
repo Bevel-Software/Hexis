@@ -417,6 +417,28 @@ export class AuthService {
   }
 
   /**
+   * The account at this ADDRESS, or null when none answers to it.
+   *
+   * By address rather than by id because some work outlives the session that
+   * asked for it: a recorded plugin join request carries the requester's
+   * email — the same key its branch is cut from — and the sweep that resumes
+   * it after a restart has no session and no id to resolve the author from.
+   * Canonicalised on the way in, like every other lookup here, so the stored
+   * spelling of an address is never what decides whether it is found.
+   */
+  async getUserByEmail(email: string): Promise<AuthUser | null> {
+    const [user] = await this.db
+      .select()
+      .from(users)
+      .where(eq(users.email, canonicalEmail(email ?? '')))
+      .limit(1);
+
+    if (!user) return null;
+
+    return this.toClientUser(user);
+  }
+
+  /**
    * Conclude the connect-your-agent onboarding for `userId`. Idempotent by
    * construction (an UPDATE to the value it already has), so the welcome
    * page's Done and the reminder pill's dismiss can both call it without

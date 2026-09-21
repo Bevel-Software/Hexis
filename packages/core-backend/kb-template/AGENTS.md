@@ -404,7 +404,9 @@ File-level write access decides how a change lands on the default branch:
   **write or owner on every file the change touches** may commit **directly**
   to the default branch.
 - Without that access, the change goes through a **branch + change request**,
-  approved by an owner / write-access holder of the affected files.
+  approved by an owner / write-access holder of the affected files — every
+  affected file with an eligible approver needs that approval, whatever its
+  type (notes, binary files, files without an extension).
 - Agents carry exactly their user's access, never more. Before writing to the
   default branch, **ask the user** whether to write directly or go through the
   review flow — and prefer a change request when in doubt, when the change is

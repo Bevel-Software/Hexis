@@ -71,6 +71,20 @@
       "when": 1789649918539,
       "tag": "0009_change_request_apply_failure_kind",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1789813372971,
+      "tag": "0010_plugin_join_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1789903776474,
+      "tag": "0011_plugin_join_request_claim",
+      "breakpoints": true
     }
   ]
 }

@@ -190,8 +190,8 @@ export interface FileApprovalState {
    * approval. Always `false` when `eligibleApprovers` is empty — with no
    * eligible set, nobody can satisfy the check.
    * Whether the gate *cares* about this file is a separate concern handled
-   * by the merge-gate logic: non-md files and files with no eligible
-   * approvers are silently excluded from the gate, so `isApproved: false`
+   * by the merge-gate logic: files with no eligible approvers, whatever
+   * their type, are silently excluded from the gate, so `isApproved: false`
    * on one of them does not block merge.
    */
   isApproved: boolean;
@@ -231,21 +231,21 @@ export interface PullRequestDetail extends PullRequestSummary {
    */
   approvals: FileApprovalState[];
   /**
-   * True iff no *hard* block applies — the PR is open, has files, and isn't
-   * merged/closed. Soft warnings (missing owner approvals on md files) do
-   * **not** set this to false; the UI handles them via the bypass dialog.
-   * The button is disabled only when this is false.
+   * True iff no blocking reason remains — the PR is open, has files, isn't
+   * merged/closed, and every file with an eligible approver (of any file
+   * type) holds a current approval. False while any approval is missing; an
+   * admin may still merge past missing approvals with the bypass flag.
    */
   mergeableInBevel: boolean;
   /**
-   * Hard-block reasons — merging is impossible until these resolve (PR state,
-   * no files, etc.). Empty when the PR can be merged (possibly after bypass).
+   * Blocking reasons — hard blocks (PR state, no files) followed by each
+   * missing approval. Empty exactly when `mergeableInBevel` is true.
    */
   mergeBlockedReasons: string[];
   /**
-   * Soft warnings — md files with an owner who hasn't approved (or whose
-   * approval is stale). Merging is allowed but the UI asks for an explicit
-   * bypass confirmation first. Non-md files and ownerless md files are silent.
+   * The missing approvals alone — files of any type with an eligible approver
+   * who hasn't approved (or whose approval is stale). An admin bypass merges
+   * past exactly these and records them. Files nobody can approve are silent.
    */
   mergeWarnings: string[];
   /**

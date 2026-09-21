@@ -54,6 +54,7 @@ import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
 import { oidcRedirectUri } from '../modules/auth/oidc-auth-provider.js';
 import { repositoryConnectionCheck } from '../modules/settings/connection-check.js';
+import { rootFolderListerFor } from '../modules/settings/git-root-folders.js';
 import {
   createKbSyncRoutes,
   isSyncRawBodyPath,
@@ -349,6 +350,25 @@ export async function createCoreServer(
       }
     })
     .catch((err) => crLog.warn('deleted-branch sweep failed:', { err }));
+
+  // Recorded join requests that are still owed, resumed — now, and then on a
+  // timer. SEQUENCED AFTER the startup phase for the same reason as the sweep
+  // above: the work needs the default-branch clone the runner maintains and
+  // the plugin catalog read from it, and a sweep that ran first would refuse
+  // every row for a knowledge base that simply was not ready — telling people
+  // their request could not be sent when nothing had gone wrong with it.
+  //
+  // ON A TIMER rather than at boot alone, because boot cannot cover the
+  // redeploy: this process sweeps while the outgoing one still holds a
+  // record, skips it (correctly — two servers must not do git on one branch),
+  // and the outgoing process then exits mid-work. Nothing else would look at
+  // that row again. The requester cannot prompt it either: a pending record
+  // shows them the "Requested" card, not a button.
+  //
+  // Not awaited, and nothing to report here but the failure to read the table
+  // at all: a first request from a person is a full clone, nothing else at
+  // boot depends on it, and each row records its own outcome.
+  core.pluginJoinRequestJobs.startSweeping();
 
   // Auth routes (unprotected — login endpoint must be accessible)
   app.use(
@@ -649,10 +669,9 @@ export async function createCoreServer(
     core.pluginIndexService,
     core.accessControl,
     core.workflowService,
-    core.workspaceService,
     core.joinRequestsService,
+    core.pluginJoinRequestJobs,
     core.pluginProvisionService,
-    core.kbDirName,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
     core.pluginLinksService,
     core.pluginRenameService,
@@ -714,19 +733,23 @@ export async function createCoreServer(
         url: syncUrl.toString(),
         lastSync: () => core.kbSyncService.lastSync(),
       },
-      // The connection probe's git runs through the deployment's one runner.
+      // The connection probe's git — and the root-folder listing's — runs
+      // through the deployment's one runner.
       repositoryConnectionCheck(core.gitRunner),
-      undefined,
+      rootFolderListerFor(core.gitRunner),
       oidcRedirectUri(core.config.publicBackendUrl),
     ),
   );
-  app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService, {
-    service: core.mcpServerEditService,
-    getUser: async (userId) => {
-      const u = await core.authService.getUserById(userId);
-      return u ? ({ id: u.id, email: u.email, name: u.name } as AuthUser) : undefined;
-    },
-  }));
+  const toolPageUser = async (userId: string): Promise<AuthUser | undefined> => {
+    const u = await core.authService.getUserById(userId);
+    return u ? ({ id: u.id, email: u.email, name: u.name } as AuthUser) : undefined;
+  };
+  app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(
+    core.toolManualService,
+    { service: core.mcpServerEditService, getUser: toolPageUser },
+    { service: core.toolDeleteService, getUser: toolPageUser },
+    core.pendingToolsService,
+  ));
   app.use('/api', core.authMiddleware, createSecretsVaultRoutes(secretsVaultRoutesDeps));
   // The authed tail of the MCP OAuth flow: /connect calls these to describe
   // the pending authorization and, on Finish, to mint the one-time code. The
