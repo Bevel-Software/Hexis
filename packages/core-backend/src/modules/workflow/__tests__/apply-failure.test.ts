@@ -24,6 +24,7 @@ import { coreMigrationsDir } from '../../../assets.js';
 import { WorkflowService } from '../workflow.service.js';
 import { APPLY_FAILURE_REASON_WITHHELD, createWorkflowRoutes } from '../workflow.routes.js';
 import { WorkflowDomainError, WorkflowValidationError } from '../../../shared/domain-errors.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
 /**
  * A failed apply used to reach ONE person: the merge route answered the user
@@ -382,6 +383,7 @@ function service(
     {} as FileLockService,
     {} as PendingCommitsService,
     'knowledge-base',
+    openChangeGate(),
     { emit } as unknown as WorkflowEventBus,
   );
   return { svc, prs };

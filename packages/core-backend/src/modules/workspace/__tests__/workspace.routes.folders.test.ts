@@ -29,7 +29,6 @@ const USER = { id: 'user-1', email: 'alice@example.com', name: 'Alice' };
 
 const stubCreatorAccess: ICreatorAccess = {
   planForCreate: async () => null,
-  grantInExtractedFile: async () => null,
   noteAccessFileWritten: () => {},
 };
 

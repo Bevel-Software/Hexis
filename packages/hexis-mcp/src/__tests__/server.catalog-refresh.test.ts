@@ -179,9 +179,15 @@ afterEach(() => {
 
 const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** A connected client, its notification log, and the teardown for both. */
+/**
+ * A connected client, its notification log, and the teardown for both.
+ *
+ * Every check in these tests is one the connection's own activity asked for:
+ * there is no timer, so a test that sees a check knows which listing or call
+ * did the work.
+ */
 async function start(
-  catalogCheck: false | { minIntervalMs?: number } = { minIntervalMs: 0 },
+  catalogCheck: false | { minIntervalMs?: number } = {},
 ): Promise<{
   client: Client;
   notifications: string[];
@@ -193,7 +199,9 @@ async function start(
     stderr.push(args.map(String).join(' '));
   });
   const config: HexisMcpConfig = { baseUrl: base, connectionKey: 'bevel_test' };
-  const handle = await createHexisMcpServer(config, '0.0.0', { catalogCheck });
+  const handle = await createHexisMcpServer(config, '0.0.0', {
+    catalogCheck: catalogCheck === false ? false : { minIntervalMs: 0, ...catalogCheck },
+  });
   await handle.ready;
 
   const notifications: string[] = [];
@@ -360,10 +368,14 @@ describe('a manual added on the deployment reaches an already-connected client',
   });
 
   /**
-   * The whole point of checking on activity rather than on a timer: a laptop
-   * whose client nobody is using asks its deployment NOTHING.
+   * NO TIMER. An idle connection asks the deployment nothing: a laptop with a
+   * client nobody is using must not poll its deployment every few seconds for
+   * hours, and fifty of them must not do it together. The connection learns
+   * of a change at its next use — a listing or a call — which is the first
+   * moment a stale toolset would have cost it anything. Nothing is touched
+   * here after `start` returns.
    */
-  it('asks the deployment nothing while the connection is idle', { timeout: 60_000 }, async () => {
+  it('asks nothing while the connection is idle, and catches up at its next use', { timeout: 60_000 }, async () => {
     commit(['ping']);
     const s = await start();
     try {
@@ -371,9 +383,16 @@ describe('a manual added on the deployment reaches an already-connected client',
       // baseline, not a check.
       const atStartup = revisionReads.length;
       expect(atStartup).toBe(1);
+
+      commit(['ping', 'serper_search']);
       await settle(400);
+
       expect(revisionReads.length).toBe(atStartup);
       expect(s.notifications).toEqual([]);
+
+      // The next use is a listing, which runs its own check and waits for it.
+      expect(await listed(s.client)).toContain('serper_search');
+      expect(revisionReads.length).toBe(atStartup + 1);
     } finally {
       await s.shutdown();
     }

@@ -491,18 +491,13 @@ describe('LockingFilesystem — creator read grants on creation', () => {
   function makeCreatorAccess() {
     return {
       planForCreate: vi.fn().mockResolvedValue(null),
-      grantInExtractedFile: vi.fn().mockResolvedValue(null),
       noteAccessFileWritten: vi.fn(),
     };
   }
 
-  it('writeFile runs new content through a frontmatter plan before it lands', async () => {
+  it('writeFile asks the planner about the new file and lands the content untouched', async () => {
     const workflow = makeWorkflow();
     const creatorAccess = makeCreatorAccess();
-    creatorAccess.planForCreate.mockResolvedValue({
-      kind: 'frontmatter',
-      apply: (c: string) => `---\nread: Alice <alice@example.com>\n---\n${c}`,
-    });
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
@@ -514,9 +509,9 @@ describe('LockingFilesystem — creator read grants on creation', () => {
       'knowledge-base/KnowledgeBase/new.md',
       'file',
     );
-    expect(await fs.readFile(path.join(root, 'knowledge-base/KnowledgeBase/new.md'), 'utf-8')).toBe(
-      '---\nread: Alice <alice@example.com>\n---\n# New\n',
-    );
+    // No plan kind rewrites file content any more: the one grant that exists
+    // is seeded into a new root folder's access.md, never into the file.
+    expect(await fs.readFile(path.join(root, 'knowledge-base/KnowledgeBase/new.md'), 'utf-8')).toBe('# New\n');
   });
 
   it('writeFile seeds a subtree access.md (own lock cycle) before the file itself', async () => {

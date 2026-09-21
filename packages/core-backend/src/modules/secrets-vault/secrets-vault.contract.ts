@@ -237,7 +237,26 @@ export interface ISecretsVaultService {
    * token (refreshed on demand). Returns null when missing or not-yet-authorized.
    */
   resolve(userId: string, key: string): Promise<string | null>;
+
+  /**
+   * Refresh the caller's OAuth token for `key` NOW, ignoring its stored expiry —
+   * for when a downstream server has just rejected the token (401 /
+   * `invalid_token`), which outranks whatever lifetime it was issued with.
+   * Callers own the pacing (the MCP proxy allows one per user+manual per
+   * minute); this method refreshes every time it is asked.
+   */
+  forceRefresh(userId: string, key: string): Promise<ForcedRefreshOutcome>;
 }
+
+/**
+ * What a {@link ISecretsVaultService.forceRefresh} did:
+ *   - `refreshed` — fresh tokens are stored; a retry will use them.
+ *   - `rejected` — the grant is dead (provider 400/401, or no refresh token):
+ *     the token set was wiped, client secret kept; the user must re-authorize.
+ *   - `transient` — network/timeout/5xx: tokens kept, a later call tries again.
+ *   - `skipped` — nothing to refresh (no such OAuth row, or not signed in).
+ */
+export type ForcedRefreshOutcome = 'refreshed' | 'rejected' | 'transient' | 'skipped';
 
 /** Thrown when input fails validation. Routes map to 422. */
 export class InvalidSecretError extends Error {

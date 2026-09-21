@@ -55,6 +55,7 @@ import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-pr
 import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
 import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
+import { ChangeReadGate } from '../modules/access/change-read-gate.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { UserAccessRemovalService } from '../modules/access/user-access-removal.service.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
@@ -181,6 +182,8 @@ export interface CoreServices {
   docExtractService: DocExtractService;
   accessControl: AccessControlService;
   creatorAccess: CreatorAccessService;
+  /** Read-before-write, for the surfaces that ask ahead of the lock (see `access-model/change-gate.ts`). */
+  changeGate: ChangeReadGate;
   sessionOntologyService: SessionOntologyService;
   routineWritePolicy: RoutineWritePolicyService;
   skillService: SkillService;
@@ -418,10 +421,15 @@ export async function createCoreServices(
     [config.adminEmail],
     gitRunner,
   );
-  // Creator read-grant on creation: read is default-deny, so every surface
-  // that creates KB files/folders (human routes, agent tools, upload apply)
-  // consults this planner to keep creations visible to their creator.
+  // Creator read-grant on creation: read is default-deny and the roots grant
+  // it to nobody, so every surface that starts a new folder at a root (human
+  // routes, agent tools, upload apply) consults this planner to keep the new
+  // folder visible to its creator.
   const creatorAccess = new CreatorAccessService(workspaceService, accessControl, kbDirName, disk);
+  // Read-before-write: the gate every lock acquire asks, on every branch —
+  // nothing is created, changed or removed where its author cannot read,
+  // except that new folder at a root (see `access-model/change-gate.ts`).
+  const changeGate = new ChangeReadGate(workspaceService, accessControl, kbDirName, disk);
 
   // Ontology-session boundary: records each agent run's touched ontologies and
   // blocks writes once a run has crossed ontologies. Postgres-backed so the
@@ -567,6 +575,7 @@ export async function createCoreServices(
     fileLockService,
     pendingCommitsService,
     kbDirName,
+    changeGate,
     eventBus,
     fileChangeNotifier,
     // Exposed as `workflowService.hooks` — the SAME instance GitService and
@@ -1057,6 +1066,7 @@ export async function createCoreServices(
     docExtractService,
     accessControl,
     creatorAccess,
+    changeGate,
     sessionOntologyService,
     routineWritePolicy,
     skillService,

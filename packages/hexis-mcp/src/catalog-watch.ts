@@ -1,6 +1,6 @@
 /**
  * Notice when the deployment's catalog changes, under a connection nobody can
- * push to — and only when that connection is actually being used.
+ * push to.
  *
  * The hosted endpoint is stateless — every request there rebuilds its tool
  * surface from the live registry, so a manual committed a second ago is in the
@@ -20,9 +20,16 @@
  * for hours, and a deployment with fifty such laptops would answer it forever
  * for no one. The check runs when the connection does something — a tool call
  * finishing, a `tools/list` arriving — because that is exactly the moment a
- * stale toolset costs anything. Between two such moments nothing is asked.
- * Bursts are throttled: a chain of twenty calls in two seconds costs one
- * check, not twenty.
+ * stale toolset costs anything, and a listing awaits its check, so the list
+ * handed back is the current one. Between two such moments nothing is asked:
+ * an idle connection learns of a change at its next use, not before. (A
+ * heartbeat was tried and taken out again: two seconds per idle connection
+ * is a load that scales with laptops, for a notification nobody was waiting
+ * on.) `server.ts` owns the trigger; this module decides what a check does.
+ *
+ * What this module contributes to the cost is the THROTTLE: two checks inside
+ * one window collapse onto one digest read, so a chain of twenty calls costs
+ * one check, not twenty.
  *
  * Errors are survivable by design. A deployment that restarts, a laptop that
  * sleeps, a VPN that drops: the check fails, says so ONCE, and asks again on
@@ -40,12 +47,19 @@ import type { HexisMcpConfig } from './config.js';
  * The least time between two checks. A burst of activity — a `call_tool_chain`
  * fanning out into a dozen calls, a client re-listing right after a
  * notification — collapses onto one digest read; the second and later calls in
- * the window see the answer the first one got. Short enough that a person
- * committing a manual and then calling a tool sees the new one on the call
- * after next at the latest, long enough that a busy connection costs the
- * deployment one small read per window rather than one per call.
+ * the window see the answer the first one got.
+ *
+ * It is also a CEILING ON STALENESS for a connection in use, which is what
+ * sets its size. A check that runs just before a commit reads the old catalog
+ * and opens a fresh window, so the change cannot be noticed until the window
+ * expires; add the digest read and the re-registration and that is the whole
+ * delay a person working on that connection experiences. At five seconds this
+ * alone put the first sighting at ~7.6s against a deployment that had the
+ * manual in ~1s. Two seconds keeps a busy connection to one small read per
+ * window while a person who commits a manual and keeps calling tools sees it
+ * on the next call after the window.
  */
-export const CATALOG_CHECK_MIN_INTERVAL_MS = 5_000;
+export const CATALOG_CHECK_MIN_INTERVAL_MS = 2_000;
 
 /** A running checker. `stop()` is idempotent and never throws. */
 export interface CatalogCheck {
@@ -56,9 +70,12 @@ export interface CatalogCheck {
    * can await it, and a caller that does not (a finished tool call) can let it
    * run. Never rejects: every failure is logged and carried to the next check.
    *
-   * Throttled: a check within {@link CATALOG_CHECK_MIN_INTERVAL_MS} of the last
-   * completed one, or while one is already running, joins that one instead of
-   * asking again.
+   * Throttled from the last check's START, not its finish: a call within
+   * {@link CATALOG_CHECK_MIN_INTERVAL_MS} of the last check STARTING, or while
+   * one is still running, joins that check instead of asking again. Counting
+   * from the start keeps the window a cadence a budget can be computed from —
+   * a refresh runs inside a check, so counting from the finish would add the
+   * re-registration's seconds to every window.
    */
   check(): Promise<void>;
   stop(): void;
@@ -118,8 +135,19 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
   let applied: string | null = initialRevision;
   /** False until a check has established what `applied` means. See `initialRevision`. */
   let baselineKnown = initialRevision !== null;
-  /** When the last check SETTLED — the throttle counts from there. */
-  let lastSettledAt: number | null = null;
+  /**
+   * When the last check STARTED — the throttle counts from there, not from
+   * when it settled.
+   *
+   * From the start, because the window has to be a cadence a delay can be
+   * computed from. Counting from the settle adds the check's own duration to
+   * every window, and a refresh runs INSIDE a check: one that re-registers
+   * costs a couple of seconds, so a two-second window becomes four or more,
+   * and a person calling tools right after a commit waits that much longer
+   * for a throttle that has silently grown. `inFlight` already stops two
+   * checks overlapping, so nothing here needs the settle to serialise them.
+   */
+  let lastStartedAt: number | null = null;
   /** The check in flight, so concurrent callers join it rather than stacking. */
   let inFlight: Promise<void> | null = null;
   /** So a deployment that is down for an hour writes one line, not one per call. */
@@ -196,10 +224,11 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
     // owed in the future: whatever the caller's clock is, a negative gap can
     // only mean it was adjusted, and refusing checks until it catches up would
     // hold the toolset stale for exactly the size of the adjustment.
-    if (lastSettledAt !== null) {
-      const sinceLast = now() - lastSettledAt;
+    if (lastStartedAt !== null) {
+      const sinceLast = now() - lastStartedAt;
       if (sinceLast >= 0 && sinceLast < minIntervalMs) return Promise.resolve();
     }
+    lastStartedAt = now();
     inFlight = run()
       .catch((err: unknown) => {
         // `run` handles its own failures; this is the belt for a bug in it,
@@ -207,7 +236,6 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
         log(`[hexis-mcp] the catalog check failed unexpectedly: ${reason(err)}`);
       })
       .finally(() => {
-        lastSettledAt = now();
         inFlight = null;
       });
     return inFlight;
