@@ -469,7 +469,7 @@ export async function createCoreServer(
   // `get_skill`. Warnings only; it never refuses a save.
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kbDirName);
   registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kbDirName);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate);
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
@@ -588,6 +588,7 @@ export async function createCoreServer(
     core.adminAccess,
     core.disk,
     allowedToolsChecker,
+    core.changeGate,
   ));
   // Workflow is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes

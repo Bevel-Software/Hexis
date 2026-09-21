@@ -199,6 +199,15 @@ export type MergeChangeRequestOutcome =
   | { kind: 'conflicts-need-resolution'; conflictedPaths: string[] };
 
 /**
+ * What a direct branch-to-branch merge (`mergeBranch`) did: landed as `sha`
+ * on the target (the target's own tip when it already contained the source),
+ * or stopped on conflicts, nothing written.
+ */
+export type MergeBranchOutcome =
+  | { kind: 'merged'; sha: string }
+  | { kind: 'conflicts-need-resolution'; conflictedPaths: string[] };
+
+/**
  * What a remote sync did to one branch's clone. One entry per branch in the
  * `POST /api/sync` response, so a pipeline can read exactly which branch
  * moved, which was already current, and which needs a person.

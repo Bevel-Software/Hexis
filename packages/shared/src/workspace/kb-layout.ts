@@ -540,6 +540,19 @@ export function reservedRootDirNames(): ReadonlySet<string> {
   return new Set([KNOWLEDGE_BASE_DIR, SKILLS_DIR, PLUGINS_DIR, DATA_DIR, AGENTS_DIR, PIPELINES_DIR]);
 }
 
+/**
+ * The roots anyone may start a new folder in — knowledge, skills and plugins
+ * — whatever the root's own `access.md` grants them. Everywhere else a change
+ * needs read access to where it lands (the "read before write" rule); a new
+ * folder directly under one of these three is the one place that rule does
+ * not apply, because the new folder carries its creator's own grant. A
+ * function, like {@link reservedRootDirNames}, because the names are
+ * configurable.
+ */
+export function creatableRootDirNames(): ReadonlySet<string> {
+  return new Set([KNOWLEDGE_BASE_DIR, SKILLS_DIR, PLUGINS_DIR]);
+}
+
 /** The `Knowledge/` marker subfolder of an ontology (holds the graph nodes). */
 export const KNOWLEDGE_DIR = 'Knowledge';
 

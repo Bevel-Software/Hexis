@@ -10,6 +10,7 @@ import type { PendingCommitsService } from '../pending-commits.service.js';
 import type { Database } from '../../database/connection.js';
 import { hashEmail } from '../../../shared/email-identity.js';
 import { WorkflowService } from '../workflow.service.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
 /**
  * Deleting a folder that holds proposed files: which open change requests the
@@ -138,6 +139,7 @@ function makeHarness(requests: PullRequestSummary[], access: Access = {}) {
     fileLocks,
     pendingCommits,
     'knowledge-base',
+    openChangeGate(),
   );
   // Which request an UPDATE is closing is not recoverable from the drizzle
   // condition, so note it on the way in.

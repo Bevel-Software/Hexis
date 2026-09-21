@@ -138,6 +138,28 @@ describe('discoverTools', () => {
     expect([...repo.keys()]).toEqual([`${REMOTE_MANUAL_NAME}.read_file`]);
     expect(tools.map((t) => t.mcpName)).toEqual(['read_file']);
   });
+
+  it('purges a retired tool an OLDER deployment still advertises', async () => {
+    // This server can be pointed at a deployment that predates the removal.
+    // A discovered `merge_change_request` left registered would be resolved
+    // by the call handler and dispatched — an agent merging a change request
+    // after all. It must not survive discovery, in the registry or the list.
+    const repo = new Map<string, UtcpTool>();
+    for (const name of ['read_file', 'merge_change_request']) {
+      repo.set(
+        `${REMOTE_MANUAL_NAME}.${name}`,
+        { name: `${REMOTE_MANUAL_NAME}.${name}`, description: '', inputs: { type: 'object' } } as unknown as UtcpTool,
+      );
+    }
+    const client = {
+      registerManual: async () => ({ success: true }),
+      getTools: async () => [...repo.values()],
+      config: { tool_repository: { removeTool: async (n: string) => repo.delete(n) } },
+    };
+    const tools = await discoverTools(client as never, { name: REMOTE_MANUAL_NAME } as never, []);
+    expect([...repo.keys()]).toEqual([`${REMOTE_MANUAL_NAME}.read_file`]);
+    expect(tools.map((t) => t.mcpName)).toEqual(['read_file']);
+  });
 });
 
 describe('withoutRemoteMetaTools', () => {
@@ -150,6 +172,11 @@ describe('withoutRemoteMetaTools', () => {
       tool('grep'),
     ]);
     expect(kept.map((t) => t.mcpName)).toEqual(['read_file', 'grep']);
+  });
+
+  it('drops a retired tool the deployment still advertises', () => {
+    const kept = withoutRemoteMetaTools([tool('read_file'), tool('merge_change_request'), tool('merge_branch')]);
+    expect(kept.map((t) => t.mcpName)).toEqual(['read_file', 'merge_branch']);
   });
 });
 

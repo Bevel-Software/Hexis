@@ -13,6 +13,7 @@ import { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowService } from '../workflow.service.js';
 import type { Database } from '../../database/connection.js';
 import { RolesYamlPreservationError } from '../../../shared/domain-errors.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
 /**
  * Focused tests for the roles.yaml-preservation guard inside
@@ -120,6 +121,7 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
       git, prs, reviewWorkflow, workspaceService, ac,
       fileLocks, {} as unknown as PendingCommitsService,
       KB_DIR,
+      openChangeGate(),
     );
     // Conflicts are now surfaced by the local merge inside `reviewWorkflow.mergePr`
     // (mocked to resolve here), so there's no provider "mergeable" pre-check to stub.
