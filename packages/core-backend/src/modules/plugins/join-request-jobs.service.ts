@@ -273,6 +273,32 @@ export class PluginJoinRequestJobs {
     });
   }
 
+  /**
+   * An `opened` record whose change request is no longer open is an ask that
+   * was ANSWERED — declined by a manager, withdrawn, or settled and the
+   * access since taken back — and the click that finds it is a new ask. Put
+   * the row back to `pending` so the caller can carry it; hand back every
+   * other record unchanged.
+   *
+   * The listing is asked FRESH here, on purpose. This is the rare path — the
+   * page shows no button while a request stands, so a click can only land
+   * here after the request has ended — and a cached listing that still knew
+   * the request as open would hand the person the closed request's number
+   * and start nothing, which is the shape of a request that can never be made
+   * again. A request the fresh listing does not name at all is left standing:
+   * that proves nothing about it, and a second change request is the worse
+   * mistake.
+   */
+  async reviveIfAnswered(record: JoinRequestRecord): Promise<JoinRequestRecord> {
+    if (record.status !== 'opened' || record.changeRequestNumber === null) return record;
+    const mine = await this.deps.workflow.listChangeRequestsAuthoredBy(record.requesterEmail, {
+      fresh: true,
+    });
+    const named = mine.find((cr) => cr.number === record.changeRequestNumber);
+    if (named === undefined || named.state === 'open') return record;
+    return (await this.store.reopen(record.id, record.changeRequestNumber)) ?? record;
+  }
+
   /** Every request this person has recorded — what the plugin listing reads. */
   async recordsFor(email: string): Promise<JoinRequestRecord[]> {
     return this.store.forRequester(email);

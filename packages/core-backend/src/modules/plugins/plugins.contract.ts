@@ -108,11 +108,13 @@ export interface PluginSummary {
   /** What discovery left out of this plugin and why — see `PluginCatalogEntry.warnings`. */
   warnings: string[];
   /**
-   * The caller has asked to join this plugin: a recorded request that has not
-   * failed, or an open join change request on their deterministic join
-   * branch. The RECORD is what makes this true the moment the subscribe call
-   * is answered — the change request may still be seconds away. Always false
-   * for a member.
+   * The caller has asked to join this plugin and the ask still stands: a
+   * recorded request that is pending, one whose change request is still
+   * open, or an open join change request on their deterministic join branch.
+   * The RECORD is what makes this true the moment the subscribe call is
+   * answered — the change request may still be seconds away. False again
+   * once that change request is declined or settled: the ask is over, and
+   * the person may make it again. Always false for a member.
    */
   hasRequested: boolean;
   /** The join CR's number once it exists (deep-links the UI); null before that. */

@@ -711,6 +711,65 @@ describe('/api/plugins routes', () => {
     warn.mockRestore();
   });
 
+  it('a declined request is over: the listing hands the button back, and the next click asks again on the same record', async () => {
+    // Before the record existed, "requested" came from the open change request
+    // alone, so a decline handed the button back. The record must not change
+    // that: an `opened` row whose request is closed is an answered ask.
+    const h = await makeHarness({
+      readable: { [ALI]: ['Plugins/Finance/access.md'] },
+      authoredCrs: [cr({ branch: joinBranchFor(ALI, 'Finance'), number: 9, state: 'closed' })],
+    });
+    server = h.server;
+    const [answered] = [
+      h.joinRequestStore.seed({
+        requesterEmail: ALI,
+        requesterName: 'Ali Baba',
+        pluginKey: 'Finance',
+        status: 'opened',
+        failureReason: null,
+        changeRequestNumber: 9,
+        claimedAt: null,
+      }),
+    ];
+
+    const { plugins } = await listPlugins(h.baseUrl);
+    expect(plugins[0]).toMatchObject({
+      name: 'finance',
+      hasRequested: false,
+      requestNumber: null,
+      requestFailure: null,
+    });
+
+    const res = await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
+    expect(await res.json()).toEqual({ ok: true, state: 'pending', number: null });
+    await h.joinRequestJobs.drain();
+
+    const rows = h.joinRequestStore.all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(answered.id);
+    expect(rows[0]).toMatchObject({ status: 'opened', changeRequestNumber: 42 });
+    expect(h.workflow.openChangeRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('an opened record the listing does not know yet still counts as requested', async () => {
+    // Marked seconds ago, listing cached: the benefit of the doubt goes to
+    // the record, or the card would flicker to the button right after a
+    // request landed.
+    const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
+    server = h.server;
+    h.joinRequestStore.seed({
+      requesterEmail: ALI,
+      requesterName: 'Ali Baba',
+      pluginKey: 'Finance',
+      status: 'opened',
+      failureReason: null,
+      changeRequestNumber: 9,
+      claimedAt: null,
+    });
+    const { plugins } = await listPlugins(h.baseUrl);
+    expect(plugins[0]).toMatchObject({ name: 'finance', hasRequested: true, requestNumber: 9 });
+  });
+
   it('degrades hasRequested to false when the CR lookup throws', async () => {
     const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     (h.workflow.listChangeRequestsAuthoredBy as ReturnType<typeof vi.fn>).mockRejectedValueOnce(

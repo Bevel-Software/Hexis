@@ -111,6 +111,16 @@ export interface JoinRequestStore {
    * stamped on the attempt that replaced it.
    */
   markFailed(id: string, claimToken: string, reason: string): Promise<void>;
+  /**
+   * The change request an `opened` row named is over — declined, withdrawn,
+   * or settled and the access since taken back — so the ask is owed again:
+   * the row goes back to `pending`, unclaimed and unnumbered, for the next
+   * job to carry. Conditional on the row still being `opened` ON THAT
+   * NUMBER, so an attempt that has since re-pointed the row at a newer
+   * request is left alone. Returns the row as it stands afterwards, whether
+   * or not this call changed it; null when it is gone.
+   */
+  reopen(id: string, changeRequestNumber: number): Promise<JoinRequestRecord | null>;
 }
 
 export class DbJoinRequestStore implements JoinRequestStore {
@@ -276,6 +286,28 @@ export class DbJoinRequestStore implements JoinRequestStore {
         updatedAt: new Date(),
       })
       .where(and(eq(pluginJoinRequests.id, id), eq(pluginJoinRequests.claimToken, claimToken)));
+  }
+
+  async reopen(id: string, changeRequestNumber: number): Promise<JoinRequestRecord | null> {
+    const [row] = await this.db
+      .update(pluginJoinRequests)
+      .set({
+        status: 'pending',
+        changeRequestNumber: null,
+        failureReason: null,
+        claimedAt: null,
+        claimToken: null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(pluginJoinRequests.id, id),
+          eq(pluginJoinRequests.status, 'opened'),
+          eq(pluginJoinRequests.changeRequestNumber, changeRequestNumber),
+        ),
+      )
+      .returning();
+    return row ? toRecord(row) : this.byId(id);
   }
 }
 

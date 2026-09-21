@@ -147,6 +147,19 @@ export class FakeJoinRequestStore implements JoinRequestStore {
     row.claimToken = null;
   }
 
+  async reopen(id: string, changeRequestNumber: number): Promise<JoinRequestRecord | null> {
+    const row = this.rowById(id);
+    if (!row) return null;
+    if (row.status === 'opened' && row.changeRequestNumber === changeRequestNumber) {
+      row.status = 'pending';
+      row.changeRequestNumber = null;
+      row.failureReason = null;
+      row.claimedAt = null;
+      row.claimToken = null;
+    }
+    return { ...row };
+  }
+
   private rowById(id: string): JoinRequestRecord | undefined {
     return this.all().find((r) => r.id === id);
   }

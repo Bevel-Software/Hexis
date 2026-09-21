@@ -282,6 +282,18 @@ export function createPluginsRoutes(
   const openJoinCr = (mine: ChangeRequest[], email: string, plugin: string): ChangeRequest | null =>
     mine.find((cr) => cr.state === 'open' && cr.branch === joinBranchFor(email, plugin)) ?? null;
 
+  /**
+   * Whether the change request an `opened` record names still stands, as far
+   * as this listing knows. A request the listing does not name at all is
+   * taken as standing: the row was marked seconds ago and the listing is
+   * cached, and the card must not flicker to a button right after a request
+   * landed. Only a request the listing knows and knows to be closed ends it.
+   */
+  const requestStillOpen = (mine: ChangeRequest[], record: JoinRequestRecord): boolean => {
+    const named = mine.find((cr) => cr.number === record.changeRequestNumber);
+    return named === undefined || named.state === 'open';
+  };
+
   router.get('/plugins', async (req, res) => {
     const email = req.userEmail;
     if (!email) {
@@ -341,10 +353,18 @@ export function createPluginsRoutes(
         const joinCr = member ? null : openJoinCr(mine, email, joinKeyOf(g));
         const record = member ? undefined : recorded.get(joinKeyOf(g));
         // A record that FAILED is not a request: the git work refused, so the
-        // page owes the person the button back and the reason. Anything else
-        // — pending, opened — is one, whether or not its change request has
-        // appeared yet.
-        const requested = (record !== undefined && record.status !== 'failed') || joinCr !== null;
+        // page owes the person the button back and the reason. A `pending`
+        // one is, whether or not its change request has appeared yet. An
+        // `opened` one is a request only for as long as the change request it
+        // names is still open — once a manager declines it, or it is settled
+        // and the access later taken back, the ask is over and the person may
+        // make it again, exactly as they could when the change request was
+        // the only record. The listing decides that; a request the listing
+        // does not know yet (marked seconds ago, listing cached) still counts.
+        const requested =
+          record?.status === 'pending' ||
+          (record?.status === 'opened' && requestStillOpen(mine, record)) ||
+          joinCr !== null;
         plugins.push({
           name: g.name,
           displayName: g.displayName,
@@ -363,7 +383,7 @@ export function createPluginsRoutes(
           isPrivate: g.isPrivate,
           warnings: g.warnings,
           hasRequested: requested,
-          requestNumber: record?.changeRequestNumber ?? joinCr?.number ?? null,
+          requestNumber: requested ? (record?.changeRequestNumber ?? joinCr?.number ?? null) : null,
           requestFailure: requested
             ? null
             : (record?.status === 'failed' ? (record.failureReason ?? 'it could not be completed') : null),
@@ -488,7 +508,13 @@ export function createPluginsRoutes(
         res.status(409).json({ error: 'You can already read this plugin', kind: 'already-readable' });
         return;
       }
-      const record = await joinRequestJobs.record(user, joinKeyOf(plugin));
+      // A record whose change request has since been declined or settled is
+      // an ask that was answered; this click is a new one, and the row goes
+      // back to `pending` for it. Costs a fresh listing on that path only —
+      // a first ask, and a retry after a failure, are still one statement.
+      const record = await joinRequestJobs.reviveIfAnswered(
+        await joinRequestJobs.record(user, joinKeyOf(plugin)),
+      );
       // `number` stays in the answer for a caller that already had a change
       // request; it is null while the git work has yet to open one, and the
       // `state` is what says which.
