@@ -955,6 +955,31 @@ describe('TemplateFilesStep', () => {
         );
       });
 
+      /**
+       * The sentence spells a punctuated name twice and neither spelling is
+       * the raw one — the label is escaped, the destination percent-encoded.
+       * A second boot must still see the guide as mentioned, or it appends
+       * another copy, and the boot after that a third.
+       */
+      it('appends once and only once, even when the name is nothing but punctuation', async () => {
+        const guide = 'Our [Agent] Guide (v2).md';
+        configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: guide });
+        await seedUpstream({ ...(await scaffoldWithoutGuide()), 'AGENTS.md': CUSTOMER_GUIDE });
+        const boot = () => makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+
+        await boot();
+        const once = norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), 'AGENTS.md'), 'utf8'));
+        expect(once).toBe(
+          `${CUSTOMER_GUIDE.replace(/\n+$/, '')}\n\n${agentsFilePointerSentence(guide)}\n`,
+        );
+
+        await boot();
+        const twice = norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), 'AGENTS.md'), 'utf8'));
+        expect(twice).toBe(once);
+        // And nothing was committed the second time round.
+        expect(twice.split('before working in this knowledge base').length - 1).toBe(1);
+      });
+
       it('writes nothing when the name appears anywhere in the text, in any wording', async () => {
         const theirs = `${CUSTOMER_GUIDE}\nThe platform keeps its own notes in HEXIS.md; read those too.\n`;
         const dir = await bootWith(theirs);

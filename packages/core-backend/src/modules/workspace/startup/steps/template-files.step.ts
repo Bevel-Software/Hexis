@@ -7,6 +7,7 @@ import {
   PLUGINS_DIR,
   SKILLS_DIR,
   agentsFilePointerSentence,
+  mentionsAgentsFile,
   validateKbRootName,
 } from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME, isAbsence, type IFsProbe } from '../../../../shared/fs.contract.js';
@@ -427,7 +428,10 @@ export class TemplateFilesStep implements OnServerStart {
     if (opts.announceKept) {
       branch.note('Keep AGENTS.md — it is not a platform template, so it is the knowledge base\'s own');
     }
-    if (!this.agentsFileLink() || current.includes(opts.agentsFile)) return [];
+    // Asked through the shared reading, not a raw `includes`: the sentence
+    // spells the name escaped and percent-encoded, so on a punctuated name the
+    // copy written last boot need not carry the raw name at all.
+    if (!this.agentsFileLink() || mentionsAgentsFile(current, opts.agentsFile)) return [];
     branch.write(LEGACY_AGENTS_FILE, withPointerSentence(current, opts.agentsFile));
     branch.note(`Add a pointer to ${opts.agentsFile} at the end of AGENTS.md`);
     return [LEGACY_AGENTS_FILE];

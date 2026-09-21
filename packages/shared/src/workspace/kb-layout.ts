@@ -195,17 +195,21 @@ export function agentsFileOf(layout: KbLayout): string {
  * after the drift — which is the one thing this whole feature exists to stop.
  *
  * A guide name is a FILE NAME, not an identifier: everything `validateFilename`
- * admits can appear in it, brackets, parentheses and spaces included. So the
- * link is built rather than interpolated — see {@link markdownLinkLabel} and
- * {@link markdownLinkDestination} — and the destination keeps the name
- * LITERALLY, never percent-encoded. The startup step decides whether to append
- * this sentence by looking for the guide's name in the customer's text; a name
- * that appeared only in an encoded form would never be found there, and every
- * boot would append another copy.
+ * admits can appear in it — spaces, brackets, parentheses, `#`, `%` — and each
+ * of those means something in an inline link. So the link is BUILT rather than
+ * interpolated: the label backslash-escaped ({@link markdownLinkLabel}), the
+ * destination percent-encoded ({@link agentsFileLinkPath}). A name that only
+ * parenthesised would break the destination; `#` would turn the rest of the
+ * name into a URL fragment, and the link would point at the customer's own
+ * file.
+ *
+ * Neither spelling need match the name as it is on disk, so nothing may ask
+ * whether this sentence is present by searching for the RAW name — see
+ * {@link mentionsAgentsFile}, which is how the startup step asks.
  */
 export function agentsFilePointerSentence(agentsFile: string = AGENTS_FILE): string {
   return (
-    `Read [${markdownLinkLabel(agentsFile)}](${markdownLinkDestination(`./${agentsFile}`)}) ` +
+    `Read [${markdownLinkLabel(agentsFile)}](${agentsFileLinkPath(agentsFile)}) ` +
     'before working in this knowledge base — ' +
     "it is the platform's guide to its layout, files and rules."
   );
@@ -221,19 +225,41 @@ function markdownLinkLabel(text: string): string {
 }
 
 /**
- * `target` as an inline link's DESTINATION.
+ * The guide as an inline link's DESTINATION: `./` and the name, percent-encoded.
  *
- * Bare when it can be — which is the ordinary case and the only one anybody
- * sees — and wrapped in angle brackets when a space or a parenthesis would
- * otherwise end the destination early. The angle-bracket form is the
- * CommonMark spelling for exactly this (§6.3): everything up to the closing
- * `>` is the destination, and the only characters it cannot hold are `<`, `>`
- * and a newline — none of which a name that passed {@link validateFilename}
- * can contain. So the name survives verbatim either way, which is what the
- * "is it already there?" check upstream depends on.
+ * `encodeURI` does most of it (a space, a bracket, and `%` itself, so an
+ * already-encoded-looking name is not decoded by a reader). Three more are
+ * encoded by hand because `encodeURI` leaves them and each one ENDS the path
+ * early: `#` opens a fragment, and `(`/`)` close the destination in
+ * CommonMark's bare form. `?` and the rest of the URL-significant set are
+ * already refused by {@link validateFilename}.
+ *
+ * An ordinary name has none of these and comes out exactly as it went in.
  */
-function markdownLinkDestination(target: string): string {
-  return /[\s()]/.test(target) ? `<${target}>` : target;
+function agentsFileLinkPath(agentsFile: string): string {
+  return `./${encodeURI(agentsFile).replace(/[#()]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`;
+}
+
+/**
+ * Whether `text` already points at the guide — the ONE question the startup
+ * step asks before appending {@link agentsFilePointerSentence} to a customer's
+ * own `AGENTS.md`.
+ *
+ * The plain name is the answer that matters: a mention in the customer's own
+ * words, a heading, a link they wrote, all count, and the platform stays out
+ * of a file it does not own. The other two spellings are the platform's OWN,
+ * and they are here for idempotence: the sentence writes the name escaped in
+ * the label and encoded in the destination, so on a punctuated name the file
+ * the last boot wrote need not contain the raw name at all. Asking only for
+ * that one would append a second copy on the next boot, and a third on the
+ * one after — the exact failure this feature exists to prevent.
+ */
+export function mentionsAgentsFile(text: string, agentsFile: string = AGENTS_FILE): boolean {
+  return (
+    text.includes(agentsFile) ||
+    text.includes(markdownLinkLabel(agentsFile)) ||
+    text.includes(agentsFileLinkPath(agentsFile))
+  );
 }
 
 /**

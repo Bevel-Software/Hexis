@@ -9,6 +9,7 @@ import {
   configureKbLayout,
   currentKbLayout,
   isPlatformFile,
+  mentionsAgentsFile,
   ontologyRoots,
   platformFileNames,
   pluginOfPath,
@@ -217,12 +218,10 @@ describe('KB layout — the agent guide\'s file name', () => {
   });
 
   /**
-   * A guide name is a FILE NAME: spaces, brackets and parentheses all pass
-   * `validateFilename`, and all of them mean something in an inline link. The
-   * sentence has to survive them — and has to keep the name LITERALLY, because
-   * the startup step decides whether to append it by looking for that name in
-   * the customer's text (`reconcileLegacyGuide`). A percent-encoded name would
-   * never be found there, and every boot would append another copy.
+   * A guide name is a FILE NAME: spaces, brackets, parentheses, `#` and `%`
+   * all pass `validateFilename`, and every one of them means something in an
+   * inline link. The label must not end early and the destination must still
+   * point at the file.
    */
   test('the pointer sentence links correctly for a name full of markdown punctuation', () => {
     const name = 'Our [Agent] Guide (v2).md';
@@ -230,11 +229,36 @@ describe('KB layout — the agent guide\'s file name', () => {
     const sentence = agentsFilePointerSentence(name);
     // The label cannot end early: the brackets in it are escaped…
     expect(sentence).toContain('[Our \\[Agent\\] Guide (v2).md]');
-    // …and the destination is the angle-bracket form, which holds spaces and
-    // parentheses, with the name in it exactly as it is on disk.
-    expect(sentence).toContain(`(<./${name}>)`);
-    expect(sentence).toContain(name);
-    // The ordinary name reads as it always has — no brackets, no escapes.
+    // …and the destination is percent-encoded, parentheses included — a bare
+    // `)` would close the link half way through the name.
+    expect(sentence).toContain('(./Our%20%5BAgent%5D%20Guide%20%28v2%29.md)');
+    // The ordinary name reads as it always has — no escapes, nothing encoded.
     expect(agentsFilePointerSentence('AGENTS.md')).toContain('[AGENTS.md](./AGENTS.md)');
+  });
+
+  test('the pointer sentence encodes a name that would otherwise open a URL fragment', () => {
+    // `#` is legal in a filename and opens a fragment in a URL: `./#2 Guide.md`
+    // links to the customer's OWN file with a fragment, not to the guide.
+    expect(validateAgentsFileName('#2 Guide.md')).toBeNull();
+    expect(agentsFilePointerSentence('#2 Guide.md')).toContain('(./%232%20Guide.md)');
+    // `%` is legal too, and an unencoded one is a malformed escape.
+    expect(agentsFilePointerSentence('100%.md')).toContain('(./100%25.md)');
+  });
+
+  /**
+   * The startup step asks this before appending, and it has to recognise the
+   * sentence the LAST boot wrote — whose spelling of the name is escaped in
+   * the label and encoded in the destination. Asking for the raw name alone
+   * would append a second copy on every boot after the first.
+   */
+  test('a file already carrying the pointer sentence counts as mentioning the guide', () => {
+    for (const name of ['AGENTS.md', 'Our [Agent] Guide (v2).md', '#2 Guide.md', '100%.md']) {
+      const appended = `# Acme\n\n${agentsFilePointerSentence(name)}\n`;
+      expect(mentionsAgentsFile(appended, name), name).toBe(true);
+    }
+    // A file that says nothing about the guide still reads as silent…
+    expect(mentionsAgentsFile('# Acme\n\nWrite tickets in the present tense.\n', 'HEXIS.md')).toBe(false);
+    // …and the customer's own plain mention counts, in their own words.
+    expect(mentionsAgentsFile('See HEXIS.md for the platform.', 'HEXIS.md')).toBe(true);
   });
 });
