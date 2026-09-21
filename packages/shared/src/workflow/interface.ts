@@ -36,6 +36,7 @@ import type {
   FileLock,
   FolderChangeRequest,
   FolderChangeRequestRemoval,
+  MergeBranchOutcome,
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
@@ -278,13 +279,37 @@ export interface IWorkflowService {
    * `releaseLockUntouched`) — `releaseLock` rejects rather than ever enqueue
    * a commit for a hold that was never allowed to write. Internal callers
    * only; never plumbed from a route.
+   *
+   * Every non-coordination acquire also passes the READ-BEFORE-WRITE gate, on
+   * every branch: the caller must be able to read the path (for a new path,
+   * where it lands), or the path must start a new folder directly under one
+   * of the three roots (knowledge, skills, plugins). Nothing is created,
+   * changed or removed where its author cannot see it, whatever write rules
+   * say; a refusal is an `AccessDeniedError` whose `access.unreadable` names
+   * the place. A write that passed only as a platform-file restore is not
+   * asked — that rescue exists for a destination whose rules deny the admin
+   * making it.
+   *
+   * `opts.platformRestore` CLAIMS that this acquire is the destination side of
+   * an admin putting a misplaced platform file back (`access.md`, `roles.yaml`,
+   * `.bevelignore`, `AGENTS.md`), and names the move's `source` — the path the
+   * file is coming FROM, in the same spelling as `path`.
+   *
+   * It is a claim, not an authorisation. The implementation re-asks both
+   * halves of it: that source→path is a restore at all (a misplaced copy
+   * going back under its own name, never the root's own copy coming out —
+   * `isPlatformRestoreShape`), and that the access module
+   * (`canRestorePlatformFile`) lets this caller land this exact path. Only
+   * both yeses let the acquire past the write gate, so a caller that omits or
+   * fakes the source gains nothing: the gate never takes the route's word for
+   * which move this is.
    */
   acquireLock(
     workspaceId: string,
     branch: string,
     path: string,
     user: AuthUser,
-    opts?: { coordination?: boolean },
+    opts?: { coordination?: boolean; platformRestore?: { source: string } },
   ): Promise<AcquireLockResult>;
   /** Heartbeat to keep an acquired lock alive past its current TTL. */
   heartbeatLock(workspaceId: string, branch: string, path: string, user: AuthUser): Promise<FileLock>;
@@ -581,4 +606,31 @@ export interface IWorkflowService {
     user: AuthUser,
     attempt: number,
   ): Promise<boolean>;
+
+  /**
+   * Merge `sourceBranch` into `targetBranch` directly, authored as `user`,
+   * and publish the target. The agent path for merging branches — it never
+   * lands a change request:
+   *
+   *   - refused (`OpenChangeRequestBlocksMergeError`, naming the request) when
+   *     a change request from `sourceBranch` into `targetBranch` is open; a
+   *     person merges that one in the app. The reverse direction — the target
+   *     into the source, the sync that keeps a draft current — is allowed.
+   *   - refused (`WorkflowDomainError`, `kind: 'protected-merge-target'`,
+   *     status 403, listing the denied paths) when `targetBranch` is protected
+   *     and `user` could not commit every file the merge changes directly to
+   *     it. Decided against the target commit the merge is built on, not a
+   *     workspace `HEAD` that may be behind it.
+   *   - refused (`WorkflowDomainError`, `kind: 'protected-merge-changes-roles'`,
+   *     status 403) when `targetBranch` is protected and the merge would
+   *     change its `roles.yaml` — whoever the caller is. Roles never change
+   *     through a merge; a change request's merge restores the target's copy
+   *     first, and this path refuses instead. Roles are changed in the app.
+   *   - refused (`WorkflowDomainError`, `kind: 'merge-target-busy'`, status
+   *     409) when `targetBranch`'s workspace still holds unshared edits: the
+   *     merge resets it to the published tip, which would discard them.
+   *
+   * Conflicts write nothing and come back as `conflicts-need-resolution`.
+   */
+  mergeBranch(user: AuthUser, sourceBranch: string, targetBranch: string): Promise<MergeBranchOutcome>;
 }

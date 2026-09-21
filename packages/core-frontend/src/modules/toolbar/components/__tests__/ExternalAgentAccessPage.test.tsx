@@ -444,7 +444,7 @@ describe('the Marketplaces tab', () => {
   /**
    * The registration steps live on pages inside Claude's ADMIN settings, and
    * now in Deployment configuration here. This page has no admin branch left:
-   * the five actions every person takes, one at a time, and none of the
+   * the six actions every person takes, one at a time, and none of the
    * registration screenshots.
    */
   it('gives everyone only the personal steps, and none of the admin screenshots', async () => {
@@ -467,23 +467,31 @@ describe('the Marketplaces tab', () => {
     expect(alts.some((a) => a.includes('admin settings'))).toBe(false);
   });
 
-  it('pairs every screenshot with its instruction and lets the reader move through all five', async () => {
+  it('pairs every screenshot with its instruction and lets the reader move through all six', async () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
     const cowork = await openCowork(user);
     const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
-    const expected = [
-      ['Select repository', 'Connect to URL'],
-      ['Plugins tab', 'select the Plugins tab'],
-      ['Add marketplace', 'choose Add marketplace'],
-      ['URL field', 'Paste the Marketplace URL'],
-      ['Hexis all row', 'choose the Hexis all row'],
+    // One shot a slide, except the connector: that step is one action read
+    // across two screens — the row that says Not added and the dialog the
+    // button opens — so splitting it would put the check that it worked on a
+    // different slide from the control that does it.
+    const expected: [string[], string][] = [
+      [['Select repository'], 'Connect to URL'],
+      [['Plugins tab'], 'select the Plugins tab'],
+      [['Add marketplace'], 'choose Add marketplace'],
+      [['URL field'], 'Paste the Marketplace URL'],
+      [['Hexis all row'], 'choose the Hexis all row'],
+      [['Not added', 'Add custom connector dialog'], 'Add for your team'],
     ];
 
-    for (const [alt, instruction] of expected) {
-      expect(within(carousel).getAllByRole('img')).toHaveLength(1);
-      expect(within(carousel).getByRole('img').getAttribute('alt')).toContain(alt);
+    for (const [alts, instruction] of expected) {
+      const shown = within(carousel)
+        .getAllByRole('img')
+        .map((el) => el.getAttribute('alt') ?? '');
+      expect(shown).toHaveLength(alts.length);
+      alts.forEach((alt, index) => expect(shown[index]).toContain(alt));
       expect(carousel).toHaveTextContent(instruction);
       if (within(carousel).queryByRole('button', { name: 'Next' })) {
         await user.click(within(carousel).getByRole('button', { name: 'Next' }));
@@ -493,8 +501,59 @@ describe('the Marketplaces tab', () => {
     expect(within(carousel).getByRole('button', { name: 'Review again' })).toBeTruthy();
     await user.click(within(carousel).getByRole('button', { name: 'Go to step 3: Marketplace' }));
     expect(within(carousel).getByRole('group')).toHaveAccessibleName(
-      'Step 3 of 5: Choose Add marketplace',
+      'Step 3 of 6: Choose Add marketplace',
     );
+  });
+
+  /**
+   * Installing the plugin brings the skills and leaves the knowledge base
+   * disconnected, which is where this tutorial used to stop. The last slide
+   * is the connector, and End reaches it: the carousel is reachable from the
+   * keyboard, and the step a reader most needs is the one furthest away.
+   */
+  it('ends on the connector step, reachable with End, naming Add for your team', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = await openCowork(user);
+    const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
+
+    await user.click(within(carousel).getByRole('button', { name: 'Next' }));
+    fireEvent.keyDown(carousel, { key: 'End' });
+
+    expect(within(carousel).getByRole('group')).toHaveAccessibleName(
+      'Step 6 of 6: Add the hexis connector',
+    );
+    expect(within(carousel).getByRole('button', { name: 'Review again' })).toBeTruthy();
+    expect(within(carousel).getByText('6 / 6')).toBeTruthy();
+
+    // What the step has to say, in the reader's own words: the plugin does
+    // not bring the connector, the row that proves it, the button, and the
+    // check that it worked.
+    expect(carousel).toHaveTextContent('does not connect its MCP server');
+    expect(carousel).toHaveTextContent('Not added');
+    expect(carousel).toHaveTextContent('Add for your team');
+    expect(carousel).toHaveTextContent('Add custom connector');
+    expect(carousel).toHaveTextContent('approve the sign-in on this deployment');
+    expect(carousel).toHaveTextContent('no longer reads');
+    expect(carousel).toHaveTextContent('Without organization-admin rights');
+
+    // Both of its screens are drawings rather than captures, and the slide
+    // says so under each one: a reader comparing their own Claude to a
+    // sketch should not be left deciding they are on the wrong screen. One
+    // note per shot.
+    expect(within(carousel).getAllByText(/Illustration, not a capture/)).toHaveLength(2);
+
+    // And Home goes back to the first, so End is not a one-way door. The
+    // first slide is a real capture, so the same press is what shows the
+    // note is per-shot rather than part of the shell. One press proving
+    // both: a second one here would only be re-entering a state the press
+    // before it had already produced.
+    fireEvent.keyDown(carousel, { key: 'Home' });
+    expect(within(carousel).getByRole('group')).toHaveAccessibleName(
+      'Step 1 of 6: Select this deployment in Claude Code',
+    );
+    expect(within(carousel).queryByText(/Illustration, not a capture/)).toBeNull();
   });
 
   /**
@@ -511,7 +570,7 @@ describe('the Marketplaces tab', () => {
     const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
 
     expect(within(carousel).getByRole('group')).toHaveAttribute('aria-live', 'polite');
-    expect(within(carousel).getByText('1 / 5')).not.toHaveAttribute('aria-live');
+    expect(within(carousel).getByText('1 / 6')).not.toHaveAttribute('aria-live');
   });
 
   /**
@@ -530,7 +589,7 @@ describe('the Marketplaces tab', () => {
     const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
 
     const advance = within(carousel).getByRole('button', { name: 'Next' });
-    for (let step = 0; step < 4; step += 1) {
+    for (let step = 0; step < 5; step += 1) {
       await user.click(within(carousel).getByRole('button', { name: 'Next' }));
     }
 
@@ -541,7 +600,7 @@ describe('the Marketplaces tab', () => {
     // And it still works as the control it now says it is.
     await user.click(restart);
     expect(within(carousel).getByRole('group')).toHaveAccessibleName(
-      'Step 1 of 5: Select this deployment in Claude Code',
+      'Step 1 of 6: Select this deployment in Claude Code',
     );
   });
 

@@ -22,6 +22,7 @@ import { CodeModeUtcpClient } from '@utcp/code-mode';
 import {
   CODE_MODE_META_TOOLS,
   META_TOOL_NAMES,
+  RETIRED_TOOL_NAMES,
   dispatchMetaTool,
   dispatchToolCall,
   registerManual,
@@ -30,6 +31,7 @@ import {
   flattenManualTool,
   toListedTool,
   toolError,
+  retiredToolMessage,
   seedBevelHostedManualVars,
   printable,
   skillPromptText,
@@ -42,15 +44,18 @@ import {
   callKbTool,
   ConnectionKeyRejectedError,
   fetchAllManuals,
+  fetchCatalogRevision,
   fetchLocalOnlyManuals,
   resolveDeployment,
   fetchAgentInstructions,
   type LocalManualInfo,
 } from './deployment.js';
+import { createCatalogCheck, type CatalogCheck } from './catalog-watch.js';
 import { materializePlugin, prepareStdioSpec, type StdioServerSpec } from './materialize.js';
 import { REMOTE_MANUAL_NAME, localManualTemplates, remoteManualTemplate } from './manuals.js';
 import {
   bindLocalVariableResolver,
+  dropLocalVariableCache,
   registerLocalVariableLoader,
   localVariableLoaderConfig,
   resetLocalVariableResolver,
@@ -167,7 +172,7 @@ export async function discoverTools(
         'Check the URL and that the connection key is still valid.',
     );
   }
-  await removeRemoteMetaTools(client);
+  await removeUnservedRemoteTools(client);
   for (const manual of local) {
     const result = await registerManual(client, manual);
     if (!result.ok) {
@@ -179,14 +184,27 @@ export async function discoverTools(
 }
 
 /**
- * Purge the deployment's meta-tool copies from the registry. Runs at first
- * registration AND after every credential-renewal re-registration of the
+ * The names this server never serves from the deployment it proxies: the
+ * meta-tools (it serves its own trio, over the merged registry) and the
+ * retired tools (no agent surface serves those at all).
+ *
+ * A retired name is in here because this server can be pointed at an OLDER
+ * deployment that still advertises it. Discovery would then register a working
+ * copy, and `tools.find` would resolve and dispatch it — an agent merging a
+ * change request through a stale deployment, which is exactly what removing
+ * the tool was for. Purged from the registry so no chain can reach it either.
+ */
+const UNSERVED_REMOTE_TOOLS: ReadonlySet<string> = new Set([...META_TOOL_NAMES, ...RETIRED_TOOL_NAMES]);
+
+/**
+ * Purge the deployment's copies of those names from the registry. Runs at
+ * first registration AND after every credential-renewal re-registration of the
  * remote manual — re-registering rediscovers the deployment's copies, and a
  * copy left registered stays callable from chains against the remote registry
  * that cannot see a local-only tool (see `discoverTools`).
  */
-async function removeRemoteMetaTools(client: CodeModeUtcpClient): Promise<void> {
-  for (const name of META_TOOL_NAMES) {
+async function removeUnservedRemoteTools(client: CodeModeUtcpClient): Promise<void> {
+  for (const name of UNSERVED_REMOTE_TOOLS) {
     // A refused removal must not cost the caller: the listing filter below
     // still keeps the copy out of the MCP surface, so the degradation is
     // "chains can see it", not "the server never came up". Named, not silent.
@@ -203,10 +221,11 @@ async function removeRemoteMetaTools(client: CodeModeUtcpClient): Promise<void> 
 /**
  * Belt to `discoverTools`'s registry removal: whatever a repository
  * implementation declined to remove must still never reach the MCP listing,
- * where a remote `list_tools` would shadow — or duplicate — the local trio.
+ * where a remote `list_tools` would shadow — or duplicate — the local trio,
+ * and where a stale deployment's retired tool would be listed as callable.
  */
 export function withoutRemoteMetaTools(tools: ProxiedTool[]): ProxiedTool[] {
-  return tools.filter((t) => !META_TOOL_NAMES.has(t.mcpName));
+  return tools.filter((t) => !UNSERVED_REMOTE_TOOLS.has(t.mcpName));
 }
 
 /**
@@ -379,8 +398,24 @@ export function discoveryNoticeTool(reason: string): McpTool {
 export async function createHexisMcpServer(
   config: HexisMcpConfig,
   version: string,
+  options: {
+    /**
+     * Whether, and how often at most, to check that the deployment's tools
+     * and skills are still the ones this server registered. The check runs on
+     * ACTIVITY — a tool call finishing, a `tools/list` arriving — never on a
+     * timer: an idle connection asks the deployment nothing, so a deployment
+     * with fifty connected laptops nobody is using answers nothing (see
+     * `catalog-watch.ts`). `minIntervalMs` (default
+     * `CATALOG_CHECK_MIN_INTERVAL_MS`) is the least time between two checks.
+     * `false` turns it off, which freezes this server's toolset at what
+     * discovery found (what it did before the check existed). Here for tests
+     * and embedding hosts — the CLI does not expose it, because the default
+     * is the contract the knowledge base's guide states.
+     */
+    catalogCheck?: false | { minIntervalMs?: number };
+  } = {},
 ): Promise<HexisMcpHandle> {
-  const { mcpUrl, agentInstructions } = await resolveDeployment(config);
+  const { mcpUrl, agentInstructions, catalogRevision: catalogRevisionAdvertised } = await resolveDeployment(config);
   // Fetched here rather than alongside the manuals below: it is part of the
   // handshake's own answer, so it cannot wait behind `ready` the way the
   // catalog can.
@@ -430,6 +465,8 @@ export async function createHexisMcpServer(
    */
   let closed = false;
   let remoteManualRegistered = false;
+  /** One line per cleanup-failure streak, for the same reason as the watch's. */
+  let deregisterFailing = false;
   let inflightCalls = 0;
   /** The one re-registration allowed at a time: a credential swap or a recovery. */
   let reregisterInProgress: Promise<void> | null = null;
@@ -446,6 +483,25 @@ export async function createHexisMcpServer(
   let tools: ProxiedTool[] = [];
   /** Why discovery failed, if it did: the sentence every handler answers with. */
   let discoveryError: string | null = null;
+  /**
+   * The SDK server, declared up here rather than beside `shutdown`: the
+   * catalog refresh below sends notifications on it, and a closure defined
+   * before it would otherwise have nothing to reach.
+   */
+  let server: Server | null = null;
+  /** The catalog checker, once discovery has a baseline to check against. */
+  let catalogCheck: CatalogCheck | null = null;
+  /**
+   * The local-only manuals this process CURRENTLY has registered, by UTCP
+   * name, and what the deployment says about each. Both are LIVE maps, mutated
+   * in place by a catalog refresh rather than replaced: the variable resolver
+   * binding holds `localOnly` by reference and session recovery reads
+   * `localByName` through a closure, and either one seeing yesterday's set
+   * would resolve a new local tool's secrets — or its session — against a
+   * manual that no longer exists.
+   */
+  const localOnly = new Map<string, LocalManualInfo>();
+  const localByName = new Map<string, CallTemplate>();
   const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
   /**
    * Run `body` as THE re-registration in flight. `parksACall` marks the waiter
@@ -473,6 +529,47 @@ export async function createHexisMcpServer(
     reregisterInProgress = published;
     return run;
   };
+  /**
+   * Drop the remote manual's registration before it is re-made, and report
+   * whether anything may still be registered under that name afterwards:
+   * `false` ⇒ nothing is (it was removed, or it was not there to begin with),
+   * `true` ⇒ it may be, so the caller must not register over it and its next
+   * attempt has to try this again.
+   *
+   * ASKED, not remembered. The client is the only thing that knows what its
+   * repository holds, and it moves without us: a session recovery deregisters
+   * and re-registers this manual on its own, and a recovery whose registration
+   * failed leaves the name free while any belief we tracked would still say
+   * "registered". The client's answer cannot go stale that way — an absent
+   * manual is `false` from `deregisterManual`, not an error, so asking costs
+   * one lookup and never mistakes "already gone" for "could not remove".
+   *
+   * Shared by the credential swap and the catalog refresh, which must not
+   * disagree about what a failed cleanup means.
+   */
+  const deregisterManualNamed = async (live: CodeModeUtcpClient, name: string, why: string): Promise<boolean> => {
+    try {
+      // Closes the manual's MCP sessions — for a local stdio server, the child
+      // process it spawned — and drops its repository entries. Returns false
+      // for a manual that is not registered, which is exactly the state the
+      // caller wants and not a failure.
+      await live.deregisterManual(name);
+      deregisterFailing = false;
+      return false;
+    } catch (err) {
+      if (!deregisterFailing) {
+        deregisterFailing = true;
+        console.error(
+          `[hexis-mcp] deregistering the manual "${name}" ${why} failed: ${printable(err instanceof Error ? err.message : String(err))} ` +
+            'Leaving it registered and trying the cleanup again on the next attempt.',
+        );
+      }
+      return true;
+    }
+  };
+  const deregisterRemoteManual = (live: CodeModeUtcpClient, why: string): Promise<boolean> =>
+    deregisterManualNamed(live, REMOTE_MANUAL_NAME, why);
+
   const swapRemoteCredential = async (token: string): Promise<void> => {
     // The manual is registered only once discovery got that far, so the guard
     // also keeps this closure off a client that does not exist yet.
@@ -486,14 +583,11 @@ export async function createHexisMcpServer(
       // fails like any call racing a dying session would.
       const deadline = Date.now() + 15_000;
       while (inflightCalls - callsParkedForReregister > 0 && Date.now() < deadline) await sleep(50);
-      try {
-        // Closes the manual's MCP sessions and drops its repository entries.
-        await live.deregisterManual(REMOTE_MANUAL_NAME);
-      } catch (err) {
-        console.error(
-          `[hexis-mcp] deregistering the remote manual for the credential swap failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
+      // A cleanup that did not come off leaves the old registration in place;
+      // registering a second manual under the same name over it is worse than
+      // running one more request on the old credential, which the next renewal
+      // (or a recovery) will try again.
+      if (await deregisterRemoteManual(live, 'for the credential swap')) return;
       const result = await registerManual(live, remoteManualTemplate(mcpUrl, token));
       if (!result.ok) {
         console.error(
@@ -502,7 +596,7 @@ export async function createHexisMcpServer(
         );
         return;
       }
-      await removeRemoteMetaTools(live);
+      await removeUnservedRemoteTools(live);
       // The manual now holds a session this swap created. A call that lost its
       // own session around the swap — the two often land together, a redeploy
       // being exactly when a 401-triggered renewal happens — retries against
@@ -514,6 +608,143 @@ export async function createHexisMcpServer(
   if (config.renewConnectionKey) {
     config.onConnectionKeyRenewed = swapRemoteCredential;
   }
+
+  /**
+   * The deployment's catalog moved: re-register its manuals — the remote one
+   * and every local-only one — so the toolset this process serves is the
+   * current one, then TELL the client.
+   *
+   * Both halves matter and neither substitutes for the other. Re-registration
+   * is what makes the new tool callable here — the registered MCP session is
+   * where `tools/list` comes from, and it was built at startup. The
+   * notification is what makes a client that cached the list ask again; a
+   * client that ignores it keeps the stale list until it re-lists for its own
+   * reasons, which is why the guide says so plainly.
+   *
+   * Under the SAME gate as the credential swap and session recovery, so the
+   * three re-registration paths can never interleave, and with the same
+   * bounded drain: a wedged call must not hold the catalog stale forever.
+   *
+   * SCOPE: everything this process registered. The remote manual carries
+   * every `.tool`, every remote `mcp.json` entry and the KB tools themselves.
+   * The LOCAL-only manuals (`local: true`, `type: stdio`) are the ones this
+   * process exists to add, and they refresh the same way: each is
+   * deregistered — which closes the child process a stdio server spawned —
+   * the deployment's manual list is read again, a plugin whose files moved is
+   * materialized again from scratch, and the manuals are registered anew. A
+   * local server is therefore restarted by a change to it, on the connection
+   * the client already holds, rather than by a restart of this whole process.
+   * The drain above is what keeps that from interrupting a call in flight.
+   *
+   * BOTH notifications fire on any change, because one fingerprint covers both
+   * catalogs: a `.tool` commit re-lists prompts that did not move, and a
+   * `SKILL.md` commit re-lists tools that did not move. One extra round trip
+   * on a client that honours them, against a second poll to tell the two
+   * apart on every deployment that has neither.
+   */
+  const refreshCatalog = async (): Promise<void> => {
+    if (closed || !remoteManualRegistered) return;
+    const refreshed = await withReregisterGate(async (): Promise<boolean> => {
+      if (closed) return false; // shutdown landed while awaiting the gate
+      const live = client;
+      if (!live) return false; // discovery failed and released it while we queued
+      const deadline = Date.now() + 15_000;
+      while (inflightCalls - callsParkedForReregister > 0 && Date.now() < deadline) await sleep(50);
+      // Every registration this process holds comes off before anything goes
+      // back on. THROWN on a cleanup that did not come off, not pressed
+      // through: the change stays owed, so the checker attempts the whole
+      // thing again on the next call — cleanup included — rather than
+      // registering a second manual under a name the client may still hold.
+      // A local manual comes out of `localByName` only once it is really
+      // gone, so a retry knows what is still there to remove.
+      if (await deregisterRemoteManual(live, 'to pick up a catalog change')) {
+        throw new Error('the remote manual could not be deregistered; it may still be registered');
+      }
+      for (const name of [...localByName.keys()]) {
+        if (await deregisterManualNamed(live, name, 'to pick up a catalog change')) {
+          throw new Error(`the local manual "${name}" could not be deregistered; it may still be registered`);
+        }
+        localByName.delete(name);
+      }
+      // What the deployment serves NOW, read afresh — the manual list and
+      // which of them are local-only — prepared exactly as discovery prepares
+      // them. `materializePlugin` refreshes a plugin from scratch on every
+      // call, so a local server whose files were committed is spawned below
+      // from the committed files, in a root its old child no longer holds.
+      const [allManuals, localOnlyNow] = await Promise.all([
+        fetchAllManuals(config),
+        fetchLocalOnlyManuals(config),
+      ]);
+      const local = await prepareLocalManuals(
+        config,
+        localManualTemplates(allManuals, new Set(localOnlyNow.keys())),
+        localOnlyNow,
+      );
+      // In place: the variable-resolver binding holds this map by reference.
+      // And its cache goes with the old set: a manual that kept its name but
+      // changed its file may declare other variables or answer to another
+      // slug, and values resolved against the old definition must not be
+      // handed to the new tools for the rest of the cache's life.
+      localOnly.clear();
+      for (const [name, info] of localOnlyNow) localOnly.set(name, info);
+      if (bindingId) dropLocalVariableCache(bindingId);
+      // A manual added since startup may need the loopback variables startup
+      // seeded for the ones it knew about (see `buildClient`). Merged, never
+      // replaced: nothing a running manual resolves through goes away.
+      const seeded = seedBevelHostedManualVars(
+        local as unknown as { name?: unknown; url?: unknown }[],
+        config.baseUrl,
+        config.connectionKey,
+      );
+      const variables = (live.config as { variables?: Record<string, string> }).variables;
+      if (variables) {
+        for (const [key, value] of Object.entries(seeded)) if (!(key in variables)) variables[key] = value;
+      }
+      // The credential is read NOW, not captured: a renewal may have landed
+      // between the check and the gate, exactly as it may around a recovery.
+      const result = await registerManual(live, remoteManualTemplate(mcpUrl, config.connectionKey));
+      // THROWN, not logged and swallowed: the checker treats a rejection as
+      // "this change is still owed" and tries again on the next call. A
+      // registration fails for the reasons everything else here fails — a
+      // deployment mid-restart, a network that dropped — and swallowing it
+      // would leave the remote manual deregistered, with no tools at all,
+      // until some later commit happened to move the catalog again. The
+      // checker owns the operator line, so this one only carries the reason.
+      if (!result.ok) throw new Error(`re-registering the remote manual failed: ${result.error}`);
+      await removeUnservedRemoteTools(live);
+      noteManualReregistered(live, REMOTE_MANUAL_NAME);
+      // A local manual failing is isolated and logged, as at discovery: one
+      // unreachable local server must not cost the caller everything else.
+      for (const manual of local) {
+        const name = String(manual.name);
+        const registered = await registerManual(live, manual);
+        if (!registered.ok) {
+          console.error(`[hexis-mcp] skipping local tool "${name}": ${registered.error}`);
+          continue;
+        }
+        localByName.set(name, manual);
+        noteManualReregistered(live, name);
+      }
+      tools = withoutRemoteMetaTools(
+        (await live.getTools()).map((tool: UtcpTool) => flattenManualTool(tool, REMOTE_MANUAL_NAME)),
+      );
+      console.error(
+        `[hexis-mcp] the workspace's catalog changed — ${tools.length} tool(s) now served ` +
+          `(${localByName.size} local-only manual(s) registered here, the rest served by the workspace).`,
+      );
+      return true;
+    });
+    if (!refreshed || closed) return;
+    // Best-effort, and separately: a client connected over a transport that
+    // has already gone away must not turn a successful refresh into a failure.
+    const notifyFailed = (what: string) => (err: unknown) => {
+      console.error(
+        `[hexis-mcp] could not send the ${what}-list-changed notification: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    };
+    await server?.sendToolListChanged().catch(notifyFailed('tool'));
+    await server?.sendPromptListChanged().catch(notifyFailed('prompt'));
+  };
 
   /**
    * Release what discovery built: the UTCP client — whose close is the only
@@ -548,16 +779,39 @@ export async function createHexisMcpServer(
    * `shutdown`, which waits for this to come to rest before closing anything.
    */
   const discover = async (): Promise<void> => {
-    const [allManuals, localOnly] = await Promise.all([
+    // Read BEFORE the manuals, and awaited on its own rather than raced
+    // alongside them. The baseline must never be NEWER than the toolset this
+    // discovery registers: a commit landing between the two reads would then
+    // be inside the baseline and outside the toolset, and the first poll —
+    // seeing the revision it already holds — would report no change, leaving
+    // that commit's tool invisible until a restart. Read first, the error is
+    // the harmless one: a commit in the gap makes the baseline stale, the
+    // first poll calls it a change, and one refresh settles it.
+    //
+    // Only when the deployment ADVERTISES the route: an older one would answer
+    // the unknown path through its JWT mounts with a 401, which reads as a
+    // dead credential. Never fatal either way — a deployment that cannot
+    // answer it is one whose tools still work, frozen at what discovery found,
+    // and an unknown baseline costs exactly one refresh (see `createCatalogCheck`).
+    const baselineRevision = catalogRevisionAdvertised
+      ? await fetchCatalogRevision(config).then(
+          (r) => r,
+          () => null,
+        )
+      : null;
+    if (closed) return;
+    const [allManuals, localOnlyFound] = await Promise.all([
       fetchAllManuals(config),
       fetchLocalOnlyManuals(config),
     ]);
     if (closed) return;
+    for (const [name, info] of localOnlyFound) localOnly.set(name, info);
     const local = await prepareLocalManuals(
       config,
       localManualTemplates(allManuals, new Set(localOnly.keys())),
       localOnly,
     );
+    for (const manual of local) localByName.set(String(manual.name), manual);
     if (closed) return;
     // Read at registration time, not at entry: a renewal during the fetches
     // above must be the credential the remote manual registers with.
@@ -587,7 +841,6 @@ export async function createHexisMcpServer(
      * that got in first is awaited by `shutdown` before the client is closed, so
      * a local manual can never be registered (spawning a child) after teardown.
      */
-    const localByName = new Map(local.map((m) => [String(m.name), m]));
     installSessionRecovery(built.client, {
       withReregister: (_name, run) => withReregisterGate(run, true),
       manualTemplate: (name) => {
@@ -600,7 +853,7 @@ export async function createHexisMcpServer(
       // meta-tools, which must not be callable from a chain here (see
       // `discoverTools`) — the same purge first registration does.
       afterReregister: async (name) => {
-        if (name === REMOTE_MANUAL_NAME) await removeRemoteMetaTools(built.client);
+        if (name === REMOTE_MANUAL_NAME) await removeUnservedRemoteTools(built.client);
       },
       // No `log` override: the default writes to stderr, which is the only place
       // this stdio server may write — stdout is the MCP transport itself.
@@ -620,6 +873,32 @@ export async function createHexisMcpServer(
       `[hexis-mcp] ${config.baseUrl} — ${tools.length} tool(s) ready ` +
         `(${local.length} local-only manual(s) registered here, the rest served by the workspace).`,
     );
+
+    // Started LAST, and only on a discovery that got this far: there is
+    // nothing to refresh until there is a registered manual to re-register.
+    // A teardown that raced the line above finds `closed` and skips it, so
+    // this never outlives the server that owns it.
+    if (closed) return;
+    if (!catalogRevisionAdvertised) {
+      console.error(
+        '[hexis-mcp] this deployment predates catalog change detection (no catalogRevision in /api/config); ' +
+          'tools and skills added to it will not appear here until this server is restarted.',
+      );
+      return;
+    }
+    if (options.catalogCheck === false) return;
+    catalogCheck = createCatalogCheck({
+      config,
+      initialRevision: baselineRevision,
+      ...(options.catalogCheck?.minIntervalMs !== undefined
+        ? { minIntervalMs: options.catalogCheck.minIntervalMs }
+        : {}),
+      onChanged: refreshCatalog,
+    });
+    // No timer. The check runs on activity only — a tool call finishing, a
+    // listing arriving — so an idle connection costs the deployment nothing.
+    // A client that connects and then waits is told about a change at its
+    // next use, which is when a stale toolset would first cost it anything.
   };
 
   /**
@@ -655,10 +934,14 @@ export async function createHexisMcpServer(
     },
   );
 
-  let server: Server | null = null;
   const shutdown = async (): Promise<void> => {
     if (closed) return;
     closed = true;
+    // First, because everything below tears down what a refresh would run
+    // against. A poll already in flight finds `closed` at the gate and
+    // registers nothing.
+    catalogCheck?.stop();
+    catalogCheck = null;
     // No further renewals or credential swaps once we are going down: the
     // renewal lifecycle is closed FOR GOOD (timer disarmed, and a renewal
     // starting after this point — a straggling 401-retry — is refused, not
@@ -713,11 +996,29 @@ export async function createHexisMcpServer(
       { name: SERVER_NAME, version },
       // The same text the hosted endpoint sends on its handshake, so a client
       // connected here is told what the knowledge base is and to search it.
-      { capabilities: { tools: {}, prompts: {} }, ...(instructions !== undefined ? { instructions } : {}) },
+      //
+      // `listChanged` on both: a manual or a skill committed on the
+      // deployment's default branch reaches this connection without a
+      // reconnect (see `refreshCatalog`), and declaring the capability
+      // is what permits the notification that says so.
+      {
+        capabilities: { tools: { listChanged: true }, prompts: { listChanged: true } },
+        ...(instructions !== undefined ? { instructions } : {}),
+      },
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       await ready;
+      // A listing is the one moment a stale toolset is answered out loud, so
+      // the check is AWAITED here: the list handed back is the current one, a
+      // refresh included, rather than a notification's promise of a better
+      // one. Throttled inside, so a client re-listing after that very
+      // notification costs no second read. A plain `if`, not an optional
+      // call: with no checker (discovery still running, or an older
+      // deployment) or a server on its way out there is nothing to await, and
+      // an extra tick here would let a closing transport answer a parked
+      // listing before the guard below can say why.
+      if (catalogCheck && !closed) await catalogCheck.check();
       // The failure goes IN the listing, not into an empty one: an empty
       // toolset is what a tool-less workspace looks like, and a client that
       // shows one gives its reader nothing to act on.
@@ -762,6 +1063,11 @@ export async function createHexisMcpServer(
           // returns a truncation notice instead of a ref that resolves nowhere.
           return await dispatchMetaTool(live, name, request.params.arguments ?? {});
         }
+        // Before the lookup, never after it: pointed at an older deployment
+        // that still advertises a retired tool, a discovered copy would
+        // otherwise be found and dispatched — the removed behaviour, performed.
+        const retired = retiredToolMessage(name);
+        if (retired) return toolError(retired);
         const tool = tools.find((t) => t.mcpName === name);
         if (!tool) return toolError(`Unknown tool "${name}".`);
         const progressToken = request.params._meta?.progressToken;
@@ -777,6 +1083,12 @@ export async function createHexisMcpServer(
         );
       } finally {
         inflightCalls -= 1;
+        // The other moment: a call has just finished, so this connection is
+        // in use and its toolset is worth keeping current. Not awaited — the
+        // caller gets its result now, and a change found here arrives as a
+        // notification (and is in the next listing regardless). Throttled
+        // inside, so a chain fanning out into many calls costs one read.
+        if (catalogCheck && !closed) void catalogCheck.check();
       }
     });
 

@@ -12,9 +12,9 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { Database } from '../../database/connection.js';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { createAccessRoutes } from '../access.routes.js';
+import { usersDbDouble } from './users-db-double.js';
 
 /**
  * HTTP-level contract tests for the /api/access/roles routes: the admin gate
@@ -129,7 +129,7 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
   } as unknown as WorkflowService;
 
   const eventBus = { emit: vi.fn() } as unknown as WorkflowEventBus;
-  const db = {} as unknown as Database;
+  const db = usersDbDouble();
 
   const app = express();
   app.use(express.json());

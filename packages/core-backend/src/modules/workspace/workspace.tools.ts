@@ -44,14 +44,20 @@ import {
   isPlatformFile,
   isPlatformFolder,
   isProtectedBranch,
+  platformFileCreationRefusal,
   platformFileRefusal,
   platformFolderRefusal,
+  entryExistsMessage,
+  type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import { PROPOSAL_ROUTE_NOTE, rethrowAsWriteDenial } from './write-denial.js';
+import type { IChangeReadGate } from '../access-model/change-gate.js';
+import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
+import { DestinationTakenError, inspectDestination } from '../../shared/rename-no-replace.js';
 
 const log = logger('workspace-tools');
 
@@ -567,6 +573,42 @@ async function grepWalk(
   }
 }
 
+/** One `allowed-tools` entry a saved SKILL.md names that no visible tool matches. */
+export interface SkillSaveWarning {
+  entry: string;
+  message: string;
+  suggestion?: string;
+}
+
+/** The save-time skill check the write tools consult — satisfied by the skills module's `AllowedToolsChecker`. */
+export interface SkillSaveCheck {
+  checkSave(userEmail: string, path: string, content: string): Promise<SkillSaveWarning[]>;
+  /** The batch form: `result[i]` is for `files[i]`, and the catalog is read once. */
+  checkSaves(userEmail: string, files: readonly { path: string; content: string }[]): Promise<SkillSaveWarning[][]>;
+}
+
+const SAVE_WARNINGS_OUTPUT: JsonSchema = {
+  type: 'array',
+  description:
+    'Present only when the file is a SKILL.md whose `allowed-tools` names platform tools you cannot use: ' +
+    'each `{ entry, message, suggestion? }`. The write still happened.',
+  items: { type: 'object' },
+};
+
+/**
+ * The batch form of {@link SAVE_WARNINGS_OUTPUT}. A batch may save several
+ * skills at once, so each warning also carries the `path` it is about —
+ * without it the caller cannot tell which SKILL.md a warning names.
+ */
+const BATCH_SAVE_WARNINGS_OUTPUT: JsonSchema = {
+  type: 'array',
+  description:
+    'Present only when the batch wrote a SKILL.md whose `allowed-tools` names platform tools you cannot use: ' +
+    'each `{ path, entry, message, suggestion? }`, where `path` is the written file the warning is about. ' +
+    'The writes still happened.',
+  items: { type: 'object' },
+};
+
 /**
  * Workspace domain tools: the file primitives (replacing Mastra's auto-injected
  * Workspace tools) + unzip. Most just re-expose the SAME `LocalFilesystem`
@@ -588,6 +630,19 @@ export function registerWorkspaceTools(
   sessionOntologyGate: SessionOntologyGate,
   writePolicy: IRoutineWritePolicy,
   sessionSink: ISessionSink,
+  /**
+   * Save-time skill check (see `AllowedToolsChecker`): a write to a SKILL.md
+   * returns `warnings` for `allowed-tools` entries naming no visible tool.
+   * Advisory only — it never refuses the write.
+   */
+  skillSaveCheck?: SkillSaveCheck,
+  /**
+   * Read-before-write, for the `write-denied` answer's "may you propose this
+   * instead?" — the same verdict the lock applies on the draft the proposal
+   * would be made on. Optional so tool harnesses need not wire it; the read
+   * verdict alone then decides, which differs only at a root.
+   */
+  changeGate?: IChangeReadGate,
 ): void {
   /**
    * The one extension→reader registry every read-shaped decision routes
@@ -596,6 +651,17 @@ export function registerWorkspaceTools(
    * around the shared extraction cache.
    */
   const readers = createFileReaderRegistry(docExtract);
+
+  /** `{ warnings }` when a saved skill names tools nobody can resolve, else `{}` — spread into a write's result. */
+  const saveWarnings = async (
+    ctx: ToolContext,
+    path: string,
+    content: string,
+  ): Promise<{ warnings?: SkillSaveWarning[] }> => {
+    if (!skillSaveCheck) return {};
+    const warnings = await skillSaveCheck.checkSave(ctx.user.email, path, content);
+    return warnings.length > 0 ? { warnings } : {};
+  };
 
   /** Build the per-call read gate from the tool's branch input + caller identity. */
   const readGateFor = (branch: string, ctx: ToolContext): ReadGate => ({
@@ -748,7 +814,12 @@ export function registerWorkspaceTools(
    * found are the same answer in the same shape, and there is one place that
    * decides what that shape is.
    */
-  const writeRefusal = async (branch: string, path: string): Promise<AccessDeniedError> => {
+  const writeRefusal = async (
+    branch: string,
+    path: string,
+    /** What `path` is — a folder the move or delete was judged on, or a file. See `AccessDeniedDetails.targetKind`. */
+    targetKind: 'file' | 'dir' = 'file',
+  ): Promise<AccessDeniedError> => {
     const rel = toKbRelative(path, kbDirName);
     const eligible = rel === null
       ? null
@@ -757,6 +828,7 @@ export function registerWorkspaceTools(
       path,
       eligibleRoles: eligible?.roles ?? [],
       eligibleUsers: eligible?.users ?? [],
+      targetKind,
     });
   };
 
@@ -866,21 +938,53 @@ export function registerWorkspaceTools(
   };
 
   /**
-   * Whether `dest` names something other than `src` already on disk. Judged by
-   * file identity, not by spelling: a case-only rename finds its own source at
-   * `dest` on a case-insensitive disk (no collision), while on a case-sensitive
-   * disk `Deal.md` beside `deal.md` is a different file (a collision).
+   * What is already at `dest` — `file` or `folder` — or null when the name is
+   * free. The kind is what the refusal names, so the sentence says "A folder
+   * named …" of a folder.
+   *
+   * With `src`, the one case that is not a clash is the destination BEING the
+   * source — `deal.md` → `Deal.md` on a case-insensitive disk, where the two
+   * spellings are one entry. `inspectDestination` decides that, by the same
+   * reading the move itself uses, so the preflight and the move cannot answer
+   * differently: one inode is not enough (two hard links are one inode under
+   * two names a user sees separately), the parent has to list one entry for
+   * the two spellings. Without `src` — a copy, which creates a second entry
+   * rather than moving the first — anything at `dest` is a clash, the source's
+   * own alternate spelling included.
    */
-  const collides = async (root: string, src: string, dest: string): Promise<boolean> => {
+  const existingAt = async (
+    root: string,
+    dest: string,
+    src?: string,
+  ): Promise<ExistingEntryKind | null> => {
+    if (src !== undefined) {
+      const verdict = await inspectDestination(join(root, src), join(root, dest));
+      return verdict.state === 'taken' ? verdict.kind : null;
+    }
     let destStat: import('node:fs').Stats;
     try {
       destStat = await nodeFs.lstat(join(root, dest));
     } catch (err) {
-      if (isAbsence(err)) return false;
+      if (isAbsence(err)) return null;
       throw err;
     }
-    const srcStat = await nodeFs.lstat(join(root, src));
-    return srcStat.dev !== destStat.dev || srcStat.ino !== destStat.ino;
+    return destStat.isDirectory() ? 'folder' : 'file';
+  };
+
+  /**
+   * Run a move or a copy and answer a lost race the way the look before it
+   * would have: 409 with the one sentence. The filesystem refuses a taken
+   * destination atomically (see `shared/rename-no-replace.ts`), which is what
+   * makes the refusal true even when the name is claimed after the look; this
+   * only carries that refusal out as a tool error rather than a 500.
+   */
+  const asEntryExists = async <T>(run: () => Promise<T>): Promise<T> => {
+    try {
+      return await run();
+    } catch (err) {
+      if (err instanceof DestinationTakenError) throw new ToolError(err.message, 409);
+      throw err;
+    }
   };
 
   const kindOf = async (fs: LocalFilesystem, path: string): Promise<'file' | 'folder' | null> => {
@@ -1017,6 +1121,7 @@ export function registerWorkspaceTools(
               { tool: spec.name, branch: args.branch, userEmail: ctx.user.email, userId: ctx.user.id },
               accessControl,
               kbDirName,
+              changeGate,
             );
           }
         },
@@ -1122,7 +1227,8 @@ export function registerWorkspaceTools(
       // read is still a KB read. ONE registry dispatch picks the reader by
       // extension; everything below just maps its ReadResult onto the tool's
       // result shape.
-      const result = await readers.readerFor(p).read(asBytes(await fs.readFile(p)), p);
+      const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
+      const result = await readers.readerFor(p).read(bytes, p);
       // Images return the picture itself as an MCP image content block, so a
       // multimodal model SEES it. The handler returns the `McpImageResult`
       // sentinel; the MCP result shaping (`toCallToolResult` in
@@ -1279,9 +1385,8 @@ export function registerWorkspaceTools(
       await recordOntologyRead(sessionOntologyGate, ctx, p);
       await assertCanRead(readGateFor(branch, ctx), p);
       // Nothing there is a 404, and the placeholder — never content — gets
-      // exactly that answer.
-      const nothingThere = () => new ToolError(`There is no file or directory at "${displayPath(p)}".`, 404);
-      if (isFolderPlaceholder(p)) throw nothingThere();
+      // exactly that answer: the one every file tool gives (see not-found.ts).
+      if (isFolderPlaceholder(p)) throw notFound(p);
       const fs = await ctx.getFilesystem(branch);
       const root = await workspaceRoot(branch, ctx);
       // Judged before `stat`, which follows links: a link anywhere on the path
@@ -1297,7 +1402,7 @@ export function registerWorkspaceTools(
         if (viaLink !== undefined) {
           throw new ToolError(`"${p}" goes through the symbolic link "${viaLink}", which leads nowhere; the agent tools never follow links.`, 400);
         }
-        if (isAbsence(err)) throw nothingThere();
+        if (isAbsence(err)) throw notFound(p);
         throw err;
       }
       // The filesystem's own `mimeType` comes from a second extension table
@@ -1369,7 +1474,9 @@ export function registerWorkspaceTools(
       // `kind` and `mime` come from that same reader too, so stat never calls
       // a file binary that read_file returns as text.
       const reader = readers.readerFor(p);
-      const bytes = needsContent(reader) ? asBytes(await fs.readFile(p)) : undefined;
+      const bytes = needsContent(reader)
+        ? await orNotFound(p, async () => asBytes(await fs.readFile(p)))
+        : undefined;
       return { ...out, ...fileTypeOf(reader, p, bytes) };
     },
   });
@@ -1460,17 +1567,15 @@ export function registerWorkspaceTools(
         // That ordering holds even when the stat itself failed: a denied path
         // gets the 403, never the filesystem's complaint about it.
         await assertCanRead(gate, searchRoot);
-        if (kind === 'missing') {
-          throw new ToolError(
-            `Nothing to search: there is no file or directory at "${displayPath(searchRoot)}" in this workspace. ` +
-              `Paths are workspace-relative and content lives under \`${kbDirName}/\` — use list_files to find the right one.`,
-            404,
-          );
-        }
+        if (kind === 'missing') throw notFound(searchRoot, 'Nothing to search');
         // A named FILE is searched directly: routing it through the walk would
         // fail its readdir and answer an empty match list, which the caller
         // cannot tell from "the pattern is not in this file".
-        const outcome = await grepOneFile(fs, searchRoot, re, out, max, docs);
+        const outcome = await orNotFound(
+          searchRoot,
+          () => grepOneFile(fs, searchRoot, re, out, max, docs),
+          'Nothing to search',
+        );
         if (outcome === 'no-text') {
           fileNote =
             `"${displayPath(searchRoot)}" has no searchable text — it is an image, binary content, or a document ` +
@@ -1524,6 +1629,7 @@ export function registerWorkspaceTools(
           enum: ['created', 'replaced', 'updated'],
           description: 'What the write did: `created` (nothing was there), `replaced` (`mode: overwrite` over an existing file), `updated` (`mode: update`).',
         },
+        warnings: SAVE_WARNINGS_OUTPUT,
       },
       required: ['path', 'bytes', 'outcome'],
     },
@@ -1571,6 +1677,7 @@ export function registerWorkspaceTools(
         path: a.path,
         bytes: Buffer.byteLength(a.content as string, 'utf8'),
         outcome: (locked ?? preflight) as WriteOutcome,
+        ...(await saveWarnings(ctx, a.path as string, a.content as string)),
       };
     },
   });
@@ -1631,6 +1738,7 @@ export function registerWorkspaceTools(
             required: ['path', 'outcome'],
           },
         },
+        warnings: BATCH_SAVE_WARNINGS_OUTPUT,
       },
       required: ['count', 'files'],
     },
@@ -1714,7 +1822,29 @@ export function registerWorkspaceTools(
       if (writes.length > 0) {
         await batching.writeFiles(writes, `Write ${writes.length} file(s)`, [], recheck);
       }
-      return { count: outcomes.filter((o) => o.outcome !== 'refused').length, files: outcomes };
+      // Only the content that actually landed is checked: a refused entry wrote
+      // nothing, and a path the batch names twice (which `overwrite` allows) is
+      // judged by its LAST landed entry — the earlier one is not in the branch,
+      // so warning about it would describe text nobody can find. `outcomes[i]`
+      // is the entry for `files[i]`. One catalog read for the whole batch.
+      const landed: number[] = [];
+      for (let i = 0; i < files.length; i++) {
+        if (outcomes[i].outcome === 'refused') continue;
+        if (files.some((f, j) => j > i && f.path === files[i].path && outcomes[j].outcome !== 'refused')) continue;
+        landed.push(i);
+      }
+      const warnings: (SkillSaveWarning & { path: string })[] = [];
+      if (skillSaveCheck && landed.length > 0) {
+        const perFile = await skillSaveCheck.checkSaves(ctx.user.email, landed.map((i) => files[i]));
+        landed.forEach((i, k) => {
+          warnings.push(...(perFile[k] ?? []).map((w) => ({ path: files[i].path, ...w })));
+        });
+      }
+      return {
+        count: outcomes.filter((o) => o.outcome !== 'refused').length,
+        files: outcomes,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      };
     },
   });
 
@@ -1738,7 +1868,7 @@ export function registerWorkspaceTools(
     },
     outputs: {
       type: 'object',
-      properties: { path: str('The path edited (echoes the input).'), replaced: int('Number of occurrences replaced.') },
+      properties: { path: str('The path edited (echoes the input).'), replaced: int('Number of occurrences replaced.'), warnings: SAVE_WARNINGS_OUTPUT },
       required: ['path', 'replaced'],
     },
     write: true,
@@ -1753,8 +1883,10 @@ export function registerWorkspaceTools(
       const newStr = a.new_string as string;
       // The overwrite gate already read the file when its reader asked the
       // binary question — reuse those bytes instead of reading twice.
-      const existing = await assertNotBinaryOverwrite(readers,path, fs);
-      const content = asText(existing ?? (await fs.readFile(path)));
+      const content = await orNotFound(path, async () => {
+        const existing = await assertNotBinaryOverwrite(readers, path, fs);
+        return asText(existing ?? (await fs.readFile(path)));
+      });
       const count = oldStr ? content.split(oldStr).length - 1 : 0;
       if (count === 0) throw new ToolError('old_string not found in the file.', 400);
       if (count > 1 && a.replace_all !== true) {
@@ -1762,7 +1894,7 @@ export function registerWorkspaceTools(
       }
       const updated = a.replace_all === true ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
       await fs.writeFile(path, updated);
-      return { path, replaced: a.replace_all === true ? count : 1 };
+      return { path, replaced: a.replace_all === true ? count : 1, ...(await saveWarnings(ctx, path, updated)) };
     },
   });
 
@@ -1812,7 +1944,7 @@ export function registerWorkspaceTools(
       }
       await assertNoSymlinkOnPath(root, path, true);
       if ((await writeBlocked(branch, ctx, [path])).length > 0) throw await writeRefusal(branch, path);
-      await fs.deleteFile(path);
+      await orNotFound(path, () => fs.deleteFile(path), 'Nothing to delete');
       // Deleting content is not deleting structure: an emptied folder stays.
       await keepFolderOf(fs, ctx, branch, path, kbDirName);
       return { path, deleted: true };
@@ -1910,7 +2042,7 @@ export function registerWorkspaceTools(
         const { files, content, managed, linked, blocked, impact } = await judge();
         if (managed !== undefined) throw new ToolError(managed, 400);
         if (linked !== undefined) throw new ToolError(linked, 400);
-        if (blocked.length > 0) throw await writeRefusal(branch, blocked[0]);
+        if (blocked.length > 0) throw await writeRefusal(branch, blocked[0], blocked[0] === path ? 'dir' : 'file');
         if (content.length > 0 && a.confirm !== true) {
           return {
             ...impact,
@@ -2044,7 +2176,7 @@ export function registerWorkspaceTools(
       await assertNoSymlinkOnPath(root, src);
       await assertNoSymlinkOnPath(root, dest);
       const kind = await kindOf(fs, src);
-      if (kind === null) throw new ToolError(`"${src}" does not exist.`, 404);
+      if (kind === null) throw notFound(src, 'Nothing to move');
       const srcFiles = kind === 'folder' ? (await filesUnder(fs, src)).files : [src];
       // A restricted run is judged on what it would actually write: each file
       // at its old and its new path, not an extensionless folder path.
@@ -2059,11 +2191,32 @@ export function registerWorkspaceTools(
       const descendants = srcFiles.filter((f) => !isFolderPlaceholder(f)).length;
       // Neither end may be the platform's own: a move neither takes a platform
       // item away nor makes one (a note renamed to `access.md` would start
-      // governing its folder).
-      const destOnDisk = await onDiskSpelling(root, dest);
-      const destManaged = managedReason(destOnDisk, kind);
+      // governing its folder). The source end is judged here; the destination
+      // end waits for the write verdict below, because reading it at all is
+      // what the caller has to have earned.
       const srcManaged = managedReason(await onDiskSpelling(root, src), kind);
-      const collision = srcManaged === undefined && (await collides(root, src, dest));
+      // A folder move deletes every file under `src` and creates it again under
+      // `dest`, so every one of them is judged at both paths — a file its own
+      // rules deny you is not carried off because its folder is writable. The
+      // lock gate locks only the two folder paths, so this is the check.
+      const destFiles = srcFiles.map((f) => dest + f.slice(src.length));
+      // The write verdict comes FIRST, before anything that looks at the
+      // destination. "A file named Notes.md already exists in Sales." is a
+      // fact about a folder, and on a protected branch a caller who may not
+      // write there must not learn it from a refusal — answering existence
+      // first would make this tool an existence oracle for folders whose
+      // contents the caller cannot otherwise see. A source the platform owns
+      // is refused on the source alone and needs no destination at all.
+      const blocked = srcManaged !== undefined
+        ? []
+        : await writeBlocked(branch, ctx, [src, dest, ...srcFiles, ...destFiles]);
+      const mayReadDestination = blocked.length === 0;
+      const destOnDisk = mayReadDestination ? await onDiskSpelling(root, dest) : dest;
+      const destManaged = mayReadDestination ? managedReason(destOnDisk, kind) : undefined;
+      const occupiedBy = srcManaged === undefined && mayReadDestination
+        ? await existingAt(root, dest, src)
+        : null;
+      const collision = occupiedBy !== null;
       // Checked after the collision: onto an existing platform file, "already
       // exists" is the plainer answer.
       const createsManaged = srcManaged !== undefined || collision || destManaged === undefined
@@ -2071,22 +2224,18 @@ export function registerWorkspaceTools(
         : isGitMetadata(destOnDisk)
           ? destManaged
           : kind === 'file'
-            ? `${destOnDisk.slice(destOnDisk.lastIndexOf('/') + 1)} is a platform file name; a move cannot create a platform file.`
+            ? platformFileCreationRefusal(destOnDisk)
             : `"${destOnDisk}" is a platform folder; a move cannot create one.`;
       const managedWhy = srcManaged ?? createsManaged;
       const managed = managedWhy !== undefined;
-      // A folder move deletes every file under `src` and creates it again under
-      // `dest`, so every one of them is judged at both paths — a file its own
-      // rules deny you is not carried off because its folder is writable. The
-      // lock gate locks only the two folder paths, so this is the check.
-      const destFiles = srcFiles.map((f) => dest + f.slice(src.length));
-      const blocked = managed || collision ? [] : await writeBlocked(branch, ctx, [src, dest, ...srcFiles, ...destFiles]);
-      const reason = collision
-        ? `"${dest}" already exists; a move never overwrites a file or merges into a folder.`
-        : managed
-          ? managedWhy
-          : blocked.length > 0
-            ? `You may not write ${blocked.length === 1 ? `"${blocked[0]}"` : `${blocked.length} of the paths, e.g. "${blocked[0]}"`}, so the move cannot run.`
+      // Same order as the checks above: the write refusal outranks every
+      // answer that had to look at the destination to be written.
+      const reason = managed
+        ? managedWhy
+        : blocked.length > 0
+          ? `You may not write ${blocked.length === 1 ? `"${blocked[0]}"` : `${blocked.length} of the paths, e.g. "${blocked[0]}"`}, so the move cannot run.`
+          : occupiedBy !== null
+            ? entryExistsMessage(occupiedBy, dest)
             : undefined;
       const impact = {
         src,
@@ -2100,8 +2249,14 @@ export function registerWorkspaceTools(
       };
       if (a.dryRun === true) return { ...impact, dryRun: true, moved: false };
       if (managed) throw new ToolError(reason!, 400);
+      // A folder move is judged on its two folder paths and every file under
+      // them: a refusal on one of the folder paths says so, because a folder
+      // directly under a root is proposable where a file there is not.
+      if (blocked.length > 0) {
+        const folderPath = kind === 'folder' && (blocked[0] === src || blocked[0] === dest);
+        throw await writeRefusal(branch, blocked[0], folderPath ? 'dir' : 'file');
+      }
       if (collision) throw new ToolError(reason!, 409);
-      if (blocked.length > 0) throw await writeRefusal(branch, blocked[0]);
       if (accessChanges && a.confirm !== true) {
         return {
           ...impact,
@@ -2110,7 +2265,11 @@ export function registerWorkspaceTools(
           message: `Nothing was moved: your access at "${dest}" differs from "${src}", so this move requires confirm: true.`,
         };
       }
-      await fs.moveFile(src, dest);
+      // The look above is what produces the sentence; the filesystem's own
+      // no-replace move is what guarantees it. A destination created between
+      // the two — by another agent, or by the sidebar, which moves without
+      // taking this lock — comes back here as a refusal, not an overwrite.
+      await asEntryExists(() => fs.moveFile(src, dest));
       // Moving the last file — or a whole folder — out leaves the folder it
       // came from in place, like a delete.
       await keepFolderOf(fs, ctx, branch, src, kbDirName);
@@ -2120,13 +2279,15 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'copy_file',
-    description: 'Copy a workspace file to a new path. Committed + pushed as you.' + ONTOLOGY_BOUNDARY_NOTE,
+    description:
+      'Copy a workspace file to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you.'
+      + ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
         src: wsPath(kbDirName, 'Source path', false),
-        dest: wsPath(kbDirName, 'Destination path'),
+        dest: wsPath(kbDirName, 'Destination path — must not exist yet'),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'src', 'dest'],
@@ -2147,8 +2308,63 @@ export function registerWorkspaceTools(
       writePolicy.assertPathWritable(ctx.sessionId, a.dest as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.src as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.dest as string);
-      await (await ctx.getFilesystem(a.branch as string)).copyFile(a.src as string, a.dest as string);
-      return { src: a.src, dest: a.dest, copied: true };
+      const branch = a.branch as string;
+      const src = a.src as string;
+      const dest = a.dest as string;
+      // A copy lands bytes at a name of its own, so it is refused by the same
+      // rule a move is: nothing already at `dest` is replaced. To put new
+      // content into a file that exists, write it.
+      //
+      // The same plain-path rule a move applies to both its ends, applied
+      // here because the look at the destination comes before the filesystem's
+      // own containment check: a path with a `..` segment must not reach
+      // `lstat` outside the workspace, even to be told a name is taken.
+      assertPlainPath(dest);
+      // The write verdict comes FIRST, for the reason `move_file` gives at
+      // length: "already exists" is a fact about the destination folder, and a
+      // caller who may not write there must not be told it. The lock gate
+      // refuses this copy anyway — but only after the copy had already
+      // answered, which is exactly the oracle.
+      const blockedDest = await writeBlocked(branch, ctx, [dest]);
+      if (blockedDest.length > 0) throw await writeRefusal(branch, blockedDest[0]);
+      const occupiedBy = await existingAt(await workspaceRoot(branch, ctx), dest);
+      if (occupiedBy !== null) throw new ToolError(entryExistsMessage(occupiedBy, dest), 409);
+      // The copy itself lands exclusively (`COPYFILE_EXCL`, under the
+      // destination's lock), so a name taken between the look and the landing
+      // is refused with the same sentence rather than overwritten.
+      //
+      // Absence is only asked about once the copy has FAILED, and after the
+      // write verdict above: a caller who may not write here gets the same
+      // `write-denied` whether the source is there or not, exactly as from
+      // write_file, edit_file, move_file and delete_file. Probing the source up
+      // front would put a 404 in front of that 403 and make the refusal report
+      // whether a path the caller could not copy from exists.
+      //
+      // WHICH end the absence belongs to is then decided by probing the
+      // SOURCE, as move_file probes its own. A copy has exactly two ends, and
+      // the filesystem blames the source for both: `LocalFilesystem.copyFile`
+      // re-throws every ENOENT as `FileNotFoundError(src)`, and a destination
+      // segment that is a file escapes raw as ENOTDIR from the parent mkdir
+      // (`existingAt` above reads that as "nothing there" and lets the copy
+      // go on to say so). So a source that is really gone gets the 404 naming
+      // the source; a source sitting right there means the absence was the
+      // DESTINATION's, and it gets the same 404 naming the destination.
+      // Neither may escape as a 500 — that is the answer whose message carries
+      // the server's own absolute path. Anything that is not absence travels
+      // on as it always did.
+      const fs = await ctx.getFilesystem(branch);
+      try {
+        await asEntryExists(() => fs.copyFile(src, dest));
+      } catch (err) {
+        const missing = isAbsence(err) || (err as { name?: string }).name === 'FileNotFoundError';
+        if (missing) {
+          throw (await kindOf(fs, src)) === null
+            ? notFound(src, 'Nothing to copy')
+            : notFound(dest, 'Nowhere to copy to');
+        }
+        throw err;
+      }
+      return { src, dest, copied: true };
     },
   });
 
@@ -2191,29 +2407,38 @@ export function registerWorkspaceTools(
       // Reading the source archive pins/records the source ontology, so a session
       // can't unzip from ontology A into ontology B without the A read counting.
       await recordOntologyRead(sessionOntologyGate, ctx, zipPath);
-      return ctx.workspaceService.unzipFile(
-        workspaceIdForBranch(a.branch as string),
-        zipPath,
-        typeof a.destination === 'string' ? a.destination : undefined,
-        // Each extracted file is a write: a cross-ontology or write-blocked entry
-        // is skipped (not extracted), so an archive can't bypass the boundary — the
-        // extension policy applies per entry too, so a restricted run can't unzip a
-        // `.md` into the graph.
-        (wsRelPath) => {
-          // An entry that would land beside the repository is skipped with the
-          // corrected-path reason, like any other refused entry.
-          assertInsideRepo(wsRelPath, kbDirName);
-          // Extraction writes straight to disk, past the filesystem's roles.yaml
-          // gate — so an archive may not carry one at all.
-          if (isRolesYamlPath(wsRelPath, kbDirName)) {
-            throw new ToolError(
-              'roles.yaml is never extracted from an archive — change it with edit_file or write_file, where the change is checked.',
-              422,
-            );
-          }
-          writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
-          return assertOntologyWriteAllowed(sessionOntologyGate, ctx, wsRelPath);
-        },
+      // A .zip that is not there is a missing PATH, not an unreadable archive:
+      // the service now says so (PathNotFoundError) and the helper turns it
+      // into the same 404 every other file tool answers. Only that declared
+      // answer maps — a failure part-way through an extraction is not the
+      // archive going missing.
+      return orDeclaredNotFound(
+        () =>
+          ctx.workspaceService.unzipFile(
+            workspaceIdForBranch(a.branch as string),
+            zipPath,
+            typeof a.destination === 'string' ? a.destination : undefined,
+            // Each extracted file is a write: a cross-ontology or write-blocked entry
+            // is skipped (not extracted), so an archive can't bypass the boundary — the
+            // extension policy applies per entry too, so a restricted run can't unzip a
+            // `.md` into the graph.
+            (wsRelPath) => {
+              // An entry that would land beside the repository is skipped with the
+              // corrected-path reason, like any other refused entry.
+              assertInsideRepo(wsRelPath, kbDirName);
+              // Extraction writes straight to disk, past the filesystem's roles.yaml
+              // gate — so an archive may not carry one at all.
+              if (isRolesYamlPath(wsRelPath, kbDirName)) {
+                throw new ToolError(
+                  'roles.yaml is never extracted from an archive — change it with edit_file or write_file, where the change is checked.',
+                  422,
+                );
+              }
+              writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
+              return assertOntologyWriteAllowed(sessionOntologyGate, ctx, wsRelPath);
+            },
+          ),
+        'Nothing to extract',
       );
     },
   });

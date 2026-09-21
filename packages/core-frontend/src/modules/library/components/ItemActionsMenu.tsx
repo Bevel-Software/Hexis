@@ -120,7 +120,21 @@ export function ItemMenuFrame({
     <div
       role={offered ? 'group' : undefined}
       aria-label={offered ? label : undefined}
-      className={cn('group/itemmenu relative grid min-w-0', className)}
+      // `grid-cols-[minmax(0,1fr)]`, and `min-w-0` is not enough on its own.
+      // `min-w-0` bounds the grid BOX; the implicit column it lays out is
+      // still `auto`, whose minimum is the content's min-content — and the
+      // min-content of a row holding a `whitespace-nowrap` name is that name
+      // at full length. So a plugin row wearing a 60-character name laid
+      // itself out 605px wide inside a 200px column and simply hung out of it,
+      // whatever the window did. Naming the track with a floor of 0 is what
+      // makes the row the width of the column it is in — which is also what
+      // gives `NameWithBadges` a shortfall to react to: a row that is never
+      // short has no reason to move its badges to a second line.
+      //
+      // Cards are unaffected, measured: `CardGrid`'s track already carries an
+      // explicit minimum (`minmax(min(236px,100%),1fr)`), so a card was never
+      // sized by its own min-content in the first place.
+      className={cn('group/itemmenu relative grid min-w-0 grid-cols-[minmax(0,1fr)]', className)}
       onContextMenu={
         offered
           ? (e: ReactMouseEvent) => {

@@ -13,15 +13,20 @@ import {
   KNOWLEDGE_DIR,
   canonicalRelativePath,
   folderPlaceholderPath,
+  isPlatformFile,
+  isPlatformRestoreShape,
+  platformFileCreationRefusal,
+  platformFileRefusal,
   reservedRootDirNames,
 } from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
-import type { WorkspaceService } from './workspace.service.js';
+import { EntryExistsError, type WorkspaceService } from './workspace.service.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { canReadWorkspacePath, resolveReadableMap, toKbRelative } from '../access-model/kb-read-filter.js';
 import type { ICreatorAccess } from '../access-model/creator.js';
+import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { isRolesYamlPath, assertRolesYamlParsable } from '../access-model/roles-yaml-guard.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { PathTraversalError, WorkflowDomainError } from '../../shared/domain-errors.js';
@@ -31,6 +36,7 @@ import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { createGitInternalsRouteGuard } from './git-internals.middleware.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
+import type { SkillSaveCheck } from './workspace.tools.js';
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
 
@@ -79,6 +85,15 @@ export function createWorkspaceRoutes(
   creatorAccess: ICreatorAccess,
   adminAccess: IAdminAccessService,
   disk: ITreeWalker,
+  /** Save-time skill check: `PUT /file` on a SKILL.md answers with `warnings` (advisory, never a refusal). */
+  skillSaveCheck?: SkillSaveCheck,
+  /**
+   * Read-before-write, asked ahead of the lock where a route puts bytes on
+   * disk BEFORE it locks them (archive extraction). Every other route's writes
+   * meet the same gate inside `acquireLock`. Optional so route harnesses that
+   * exercise other behaviour need not wire it.
+   */
+  changeGate?: IChangeReadGate,
 ): express.Router {
   const router = express.Router();
   const gitInternalsRouteGuard = createGitInternalsRouteGuard(workspaceService);
@@ -134,6 +149,43 @@ export function createWorkspaceRoutes(
   }
 
   /**
+   * Whether a failed op is one that provably touched no bytes, so its lock
+   * may be released with the disk and the commit queue left exactly as they
+   * are (`releaseLockUntouched`) rather than reset to HEAD.
+   *
+   * This is not tidiness. A release that discards resets the PATH, not "this
+   * request's changes" — git has no notion of the latter — so when the path
+   * holds a landed save whose commit is still queued (commits run out of band
+   * in the pending-commits worker), the discard destroys that save. Two moves
+   * racing onto the same free name are exactly that situation: the winner
+   * lands and enqueues, the loser then takes the same destination lock, is
+   * refused because the name is now taken, and its unwind would throw the
+   * winner's file away. One refusal, two lost files.
+   *
+   * A destination-taken refusal qualifies because nothing it can do writes:
+   * the preflight throws before the move is attempted, and the move's own
+   * no-clobber calls (`link`, `mkdir`, `open` with `O_EXCL` — see
+   * `shared/rename-no-replace.ts`) fail without creating anything, with the
+   * folder claim rolling itself back. `LockingFilesystem.withLock` draws the
+   * same line for its `CheckRefusal`, in the same words: a refusal that wrote
+   * nothing releases untouched.
+   *
+   * Deliberately a closed list of refusal TYPES rather than a guess at what
+   * an op did. An unrecognised failure keeps the discarding release, which is
+   * the fail-closed side: at worst it throws away bytes nobody promised to
+   * keep, where the other mistake throws away bytes someone was told were
+   * saved.
+   *
+   * One type, not two: the move's lower-level `DestinationTakenError` never
+   * reaches this layer — `moveEntry` converts it into `EntryExistsError`, the
+   * refusal this surface answers 409 with — so recognising it here as well
+   * would be a branch nothing can take.
+   */
+  function wroteNothing(err: unknown): boolean {
+    return err instanceof EntryExistsError;
+  }
+
+  /**
    * Acquire the workflow lock for `(workspaceId, branch, targetPath)`, run
    * `op`, then release. Release commits + pushes the file as a one-file
    * change attributed to `user` — same pipeline the lock-aware filesystem
@@ -160,7 +212,17 @@ export function createWorkspaceRoutes(
      * `skipPush` option is gone — under the queue model commits +
      * pushes happen out of band in the worker, not inline here.)
      */
-    options?: { skipFsTreeEvent?: boolean },
+    options?: {
+      skipFsTreeEvent?: boolean;
+      /**
+       * This acquire is the destination side of an admin putting a misplaced
+       * platform file back, coming from `source`. Passed straight to
+       * `acquireLock`, which VERIFIES both halves — that the move is a restore
+       * at all, and that this caller may make it — rather than believing
+       * either. See the `IWorkflowService.acquireLock` contract.
+       */
+      platformRestore?: { source: string };
+    },
   ): Promise<T> {
     const branch = branchForWorkspaceId(workspaceId);
     // If the caller already holds the lock, do NOT acquire-and-release
@@ -196,7 +258,9 @@ export function createWorkspaceRoutes(
       eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
       return result;
     }
-    const acquired = await workflowService.acquireLock(workspaceId, branch, targetPath, user);
+    const acquired = await workflowService.acquireLock(workspaceId, branch, targetPath, user, {
+      platformRestore: options?.platformRestore,
+    });
     if (!acquired.acquired) {
       const holder = acquired.lock.holderName || 'another user';
       const err: Error & { status?: number } = new Error(
@@ -205,16 +269,22 @@ export function createWorkspaceRoutes(
       err.status = 409;
       throw err;
     }
-    // Two release modes, depending on whether the op succeeded:
+    // Three release modes, the same three `LockingFilesystem.withLock` uses,
+    // depending on what the op did:
     //
-    //   - op() FAILED  → drop the lock WITHOUT enqueueing a commit. The
-    //     op may have written partial bytes to disk before throwing
-    //     (write that errored mid-stream, etc.). A normal `releaseLock`
-    //     would enqueue a commit for whatever's on disk and the worker
-    //     would silently persist that partial state as a real committed
-    //     change. `releaseLockNoCommit` drops the lock row only —
-    //     partial disk state stays where it is but never becomes a
-    //     committed change with the user's name on it.
+    //   - op() FAILED having possibly WRITTEN → drop the lock WITHOUT
+    //     enqueueing a commit. The op may have written partial bytes to disk
+    //     before throwing (write that errored mid-stream, etc.). A normal
+    //     `releaseLock` would enqueue a commit for whatever's on disk and the
+    //     worker would silently persist that partial state as a real
+    //     committed change. `releaseLockNoCommit` resets the path to HEAD, so
+    //     partial bytes never become a committed change with the user's name
+    //     on it.
+    //
+    //   - op() FAILED having written NOTHING → `releaseLockUntouched`: drop
+    //     the lock row and leave both the disk and the commit queue exactly
+    //     as they are. See `wroteNothing` for which refusals qualify and why
+    //     the distinction is load-bearing rather than tidy.
     //
     //   - op() SUCCEEDED → release. The new releaseLock enqueues a
     //     pending-commit row (the actual `commitFile + push` runs out
@@ -228,10 +298,18 @@ export function createWorkspaceRoutes(
       result = await op();
       opSucceeded = true;
     } catch (err) {
+      const untouched = wroteNothing(err);
       try {
-        await workflowService.releaseLockNoCommit(workspaceId, branch, targetPath, user);
+        if (untouched) {
+          await workflowService.releaseLockUntouched(workspaceId, branch, targetPath, user);
+        } else {
+          await workflowService.releaseLockNoCommit(workspaceId, branch, targetPath, user);
+        }
       } catch (releaseErr) {
-        log.warn(`releaseLockNoCommit failed after op error for "${targetPath}":`, { err: releaseErr });
+        log.warn(
+          `${untouched ? 'releaseLockUntouched' : 'releaseLockNoCommit'} failed after op error for "${targetPath}":`,
+          { err: releaseErr },
+        );
       }
       throw err;
     }
@@ -589,31 +667,35 @@ export function createWorkspaceRoutes(
    * grant on the same new directory survives. Runs BEFORE the creation itself
    * so the explorer never shows-then-hides the new subtree; if the creation
    * subsequently fails, the leftover is an empty new folder readable only by
-   * its creator. Best-effort by contract: a failure here logs and never
-   * blocks the creation.
+   * its creator.
+   *
+   * A failure here FAILS the creation, and propagates as it is. The seed is
+   * planned only for a new folder at a root the creator cannot read — the one
+   * creation the read gate lets past an unreadable spot — so without the
+   * grant the folder would come into existence invisible to the person who
+   * made it, which is exactly what the gate exists to prevent. The seed's
+   * own lock passes that gate too: if the folder appeared under someone else
+   * between the plan and this write, the refusal is theirs to see, and
+   * nothing lands.
    */
   async function seedCreatorAccessMd(
     workspaceId: string,
     user: AuthUser,
     plan: { wsRelPath: string; apply: (current: string) => string },
   ): Promise<void> {
-    try {
-      await withLock(workspaceId, user, plan.wsRelPath, async () => {
-        let current = '';
-        try {
-          current = await workspaceService.readFile(workspaceId, plan.wsRelPath);
-        } catch {
-          // Not there yet — the normal case for a brand-new directory.
-        }
-        const next = plan.apply(current);
-        if (next !== current) {
-          await workspaceService.writeFile(workspaceId, plan.wsRelPath, next);
-        }
-      });
-      creatorAccess.noteAccessFileWritten(workspaceId);
-    } catch (err) {
-      log.warn(`creator access.md seed failed for "${plan.wsRelPath}":`, { err });
-    }
+    await withLock(workspaceId, user, plan.wsRelPath, async () => {
+      let current = '';
+      try {
+        current = await workspaceService.readFile(workspaceId, plan.wsRelPath);
+      } catch {
+        // Not there yet — the normal case for a brand-new directory.
+      }
+      const next = plan.apply(current);
+      if (next !== current) {
+        await workspaceService.writeFile(workspaceId, plan.wsRelPath, next);
+      }
+    });
+    creatorAccess.noteAccessFileWritten(workspaceId);
   }
 
   /**
@@ -974,6 +1056,43 @@ export function createWorkspaceRoutes(
     const user = await requireUser(req, res);
     if (!user) return;
     try {
+      // A platform file stays in the folder the platform reads it from —
+      // rename, move and drag all arrive here, and all three are refused.
+      // Moving one out is not a choice to confirm: once the root has no
+      // `access.md`, write on the root denies everyone and the move that
+      // would undo it is the move the gate refuses.
+      //
+      // The single exception is that repair: an admin putting a misplaced
+      // copy BACK. `isPlatformRestoreShape` says whether the MOVE is that
+      // repair — it is judged on the source's name and the destination, not
+      // on the source being a platform file where it currently sits, because
+      // a stray `roles.yaml` in a folder is ordinary content there and is
+      // still the copy the root is missing. `canRestorePlatformFile` then
+      // decides who may make it, and whether the disk agrees.
+      const oldRel = toKbRelative(oldPath, kbDirName);
+      const newRel = toKbRelative(newPath, kbDirName);
+      let platformRestore = false;
+      if (oldRel !== null && newRel !== null && isPlatformRestoreShape(oldRel, newRel)) {
+        platformRestore = await accessControl.canRestorePlatformFile(id, user.email, newRel);
+      }
+      // A platform file stays where the platform reads it …
+      if (oldRel !== null && isPlatformFile(oldRel) && !platformRestore) {
+        res.status(409).json({ error: platformFileRefusal(oldRel) });
+        return;
+      }
+      // … and nothing else becomes one. `moveEntry` is a plain rename, so
+      // without this a note renamed to `access.md` would come back as the
+      // folder's rules, and a note dragged ONTO the root's `access.md` would
+      // replace the rules that are there — neither of which the rule above,
+      // which reads only the SOURCE, says anything about. The agent's move
+      // tool has refused both since it shipped; this is the same sentence,
+      // from the same place. Only the restore lands on a platform path, and
+      // only where the file is missing (`canRestorePlatformFile` checked the
+      // disk; the destination lock below checks it again, under the lock).
+      if (newRel !== null && isPlatformFile(newRel) && !platformRestore) {
+        res.status(409).json({ error: platformFileCreationRefusal(newRel) });
+        return;
+      }
       // Move = rename on disk + commit on both sides. We lock-and-release
       // the destination first (commits the new file's appearance), then
       // lock-and-release the source path (commits its deletion). Two
@@ -994,10 +1113,45 @@ export function createWorkspaceRoutes(
       // not a single merge-style rename commit, but git's log/blame
       // rename detection still groups them visually after the fact.
       const [firstLock, secondLock] = oldPath < newPath ? [oldPath, newPath] : [newPath, oldPath];
-      await withLock(id, user, firstLock, () =>
-        withLock(id, user, secondLock, () =>
-          workspaceService.moveEntry(id, oldPath, newPath),
-        ),
+      // Only the DESTINATION side carries the restore claim. The source is an
+      // ordinary write the caller must already hold: the exception exists so a
+      // file can land where the platform reads it, not so an admin can take
+      // one out of a folder that denies them.
+      const restoreAt = (p: string) => ({
+        platformRestore: platformRestore && p === newPath ? { source: oldPath } : undefined,
+      });
+      // The restore was authorised against a destination that was missing when
+      // the access module looked. Both locks are in hand by the time this runs,
+      // so nothing else can take that path from under the rename — but between
+      // the two a writer still could, and a restore that lands on a platform
+      // file replaces the rules it came to bring back. So the last thing the
+      // move does before renaming is look again, inside the window it holds.
+      const move = async () => {
+        if (platformRestore) {
+          const workspaceDir = await workspaceService.getWorkspacePath(id);
+          const absoluteNew = path.resolve(workspaceDir, newPath);
+          assertWithinDirectory(absoluteNew, workspaceDir);
+          const taken = await fs.stat(absoluteNew).then(
+            () => true,
+            // Genuine absence is the only "free": anything else is not an
+            // answer, and an unanswered question does not clear the way onto
+            // a platform file.
+            (err: unknown) => !isAbsence(err),
+          );
+          if (taken) {
+            const err: Error & { status?: number } = new Error(platformFileRefusal(newPath));
+            err.status = 409;
+            throw err;
+          }
+        }
+        return workspaceService.moveEntry(id, oldPath, newPath);
+      };
+      await withLock(
+        id,
+        user,
+        firstLock,
+        () => withLock(id, user, secondLock, move, restoreAt(secondLock)),
+        restoreAt(firstLock),
       );
       // Moving the last entry out leaves its folder in place, like a delete.
       await keepFolderOf(id, user, oldPath);
@@ -1063,14 +1217,15 @@ export function createWorkspaceRoutes(
       await workspaceService.withPathTurn(id, filePath, async () => {
         // A stale `ifMatch` is refused before anything commits.
         if (ifMatch !== undefined) await workspaceService.assertContentMatches(id, filePath, ifMatch);
-        // Creator read grant: a brand-new file at a spot whose access chain
-        // doesn't grant the creator `read` would vanish from their own explorer
-        // (read is default-deny). Plan BEFORE the write: a new subtree gets its
-        // access.md seeded first; a loose .md carries the grant in its own
-        // frontmatter as part of this same single write.
+        // Creator read grant: a file that starts a new folder at a root the
+        // creator cannot read would vanish from their own explorer (read is
+        // default-deny). Plan BEFORE the write: the new folder gets its
+        // access.md seeded first. Anywhere else the lock's read gate has
+        // already decided — a creation the creator could not see is refused,
+        // and one they can see needs no grant.
         const plan = await creatorAccess.planForCreate(id, user, filePath, 'file');
         if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
-        const toWrite = plan?.kind === 'frontmatter' ? plan.apply(content) : content;
+        const toWrite = content;
         // `ifAbsent` = exclusive create: the service's `wx` write turns a
         // concurrent or stale create against an existing file into a 409
         // instead of a silent replace. `withLock`'s failure arm releases
@@ -1086,7 +1241,10 @@ export function createWorkspaceRoutes(
           }),
         );
       });
-      res.json({ status: 'written' });
+      // After the write, and only ever advisory: the check reports what the
+      // saved skill names, it has no say in whether it saved.
+      const warnings = skillSaveCheck ? await skillSaveCheck.checkSave(user.email, filePath, content) : [];
+      res.json({ status: 'written', ...(warnings.length > 0 ? { warnings } : {}) });
     } catch (err) {
       sendError(res, err);
     }
@@ -1155,6 +1313,23 @@ export function createWorkspaceRoutes(
     const user = await requireUser(req, res);
     if (!user) return;
     try {
+      // The destination is asked about BEFORE anything is extracted: this is
+      // the one route whose bytes land on disk ahead of the lock, so the
+      // lock's read gate would find them already there. Same verdict, same
+      // refusal, one step earlier. A destination inside a folder the caller
+      // cannot read is refused whole; a folder they can read — or a new
+      // folder directly under a root — extracts, and each file then meets
+      // the lock as any other write does.
+      //
+      // A new root folder gets its creator's access.md seeded first, as
+      // every other creation route does: extraction would otherwise bring
+      // the folder into existence itself, and the first file's lock would
+      // then find an existing folder the caller cannot read.
+      const inferred = path.posix.dirname(zipPath.replace(/\\/g, '/'));
+      const destDir = destination ?? (inferred === '.' ? '' : inferred);
+      const plan = await creatorAccess.planForCreate(id, user, destDir, 'dir');
+      if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
+      await changeGate?.assertMayChange(id, user.email, destDir, 'dir');
       // Extract first (all files land on disk), then sweep each extracted
       // file through a lock+release so it commits + pushes as its own
       // one-file change. Per-file commits mean the validator runs N times
@@ -1162,24 +1337,18 @@ export function createWorkspaceRoutes(
       // but correct for a 100-file zip. If a single file's release fails
       // (e.g. validator 422), the loop stops there so the user sees the
       // first concrete problem rather than a list of N similar failures.
-      const result = await workspaceService.unzipFile(id, zipPath, destination);
+      //
+      // Each entry is asked about before it is written, through the same
+      // gate: an archive can carry a path into a nested folder the caller
+      // cannot read, which the destination check above cannot see. Such an
+      // entry is skipped and reported, never written and then refused.
+      const result = await workspaceService.unzipFile(id, zipPath, destination, async (entryPath) => {
+        await changeGate?.assertMayChange(id, user.email, entryPath, 'file');
+      });
       for (const relFile of result.extracted) {
-        await withLock(id, user, relFile, async () => {
-          // The file is already on disk from the unzip; the release commits +
-          // pushes it. If the extraction landed a markdown node the creator
-          // can't read (default-deny chains), splice their read grant into
-          // its frontmatter first so the committed change already carries it.
-          // Best-effort: a failed grant write must not throw — withLock's
-          // failure path releases WITHOUT committing and would discard the
-          // extracted file from disk, turning a cosmetic grant failure into
-          // data loss.
-          try {
-            const granted = await creatorAccess.grantInExtractedFile(id, user, relFile);
-            if (granted !== null) await workspaceService.writeFile(id, relFile, granted);
-          } catch (err) {
-            log.warn(`creator grant on extracted "${relFile}" failed:`, { err });
-          }
-        });
+        // The file is already on disk from the unzip; the release commits +
+        // pushes it.
+        await withLock(id, user, relFile, async () => undefined);
       }
       res.json(result);
     } catch (err) {
@@ -1222,21 +1391,17 @@ export function createWorkspaceRoutes(
         chunks.push(buf);
       }
       const data = Buffer.concat(chunks);
-      // Creator read grant, mirroring PUT /file: seed a new subtree's
-      // access.md first, or fold the grant into an uploaded markdown file's
-      // frontmatter. Binary uploads into a pre-existing unreadable folder
-      // can't carry a per-file grant (no frontmatter) and proceed ungranted.
+      // Creator read grant, mirroring PUT /file: an upload that starts a new
+      // folder at a root seeds that folder's access.md first. An upload into
+      // a folder the caller cannot read never gets this far — the lock's read
+      // gate refuses it.
       const plan = await creatorAccess.planForCreate(id, user, filePath, 'file');
       if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
-      const toWrite =
-        plan?.kind === 'frontmatter'
-          ? Buffer.from(plan.apply(data.toString('utf8')), 'utf8')
-          : data;
       await withLock(
         id,
         user,
         filePath,
-        () => workspaceService.writeFileBinary(id, filePath, toWrite),
+        () => workspaceService.writeFileBinary(id, filePath, data),
         defer ? { skipFsTreeEvent: true } : undefined,
       );
       res.json({ status: 'uploaded' });

@@ -9,6 +9,7 @@ import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowEventBus } from '../event-bus.js';
 import { WorkflowService, syncConflictMessage } from '../workflow.service.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 import type { Database } from '../../database/connection.js';
 import {
   PullRebaseConflictError,
@@ -143,6 +144,7 @@ function makeFacade(
     locks,
     pending,
     'knowledge-base',
+    openChangeGate(),
     events,
   );
 }
