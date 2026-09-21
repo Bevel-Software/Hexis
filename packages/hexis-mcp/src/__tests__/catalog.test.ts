@@ -305,18 +305,12 @@ describe('resolveDeployment', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })));
   }
 
-  it('reads the endpoint and every capability flag from the one config fetch', async () => {
-    stubConfigEndpoint({
-      mcpUrl: 'https://x.example/api/mcp',
-      agentInstructions: true,
-      catalogRevision: true,
-      catalogEvents: true,
-    });
+  it('reads the endpoint and both capability flags from the one config fetch', async () => {
+    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: true, catalogRevision: true });
     expect(await resolveDeployment(config)).toEqual({
       mcpUrl: 'https://x.example/api/mcp',
       agentInstructions: true,
       catalogRevision: true,
-      catalogEvents: true,
     });
     expect(fetch).toHaveBeenCalledTimes(1);
   });
@@ -326,26 +320,19 @@ describe('resolveDeployment', () => {
     const resolved = await resolveDeployment(config);
     expect(resolved.agentInstructions).toBe(false);
     expect(resolved.catalogRevision).toBe(false);
-    expect(resolved.catalogEvents).toBe(false);
   });
 
   /**
-   * These flags are capabilities, not probes: an unknown `/api/*` path on an
+   * Both flags are capabilities, not probes: an unknown `/api/*` path on an
    * older deployment falls through to the JWT mounts and answers 401, which a
    * caller would read as a dead credential. So anything that is not a literal
    * `true` has to mean "not there".
    */
   it('only a literal true advertises a capability', async () => {
-    stubConfigEndpoint({
-      mcpUrl: 'https://x.example/api/mcp',
-      agentInstructions: 'yes',
-      catalogRevision: 1,
-      catalogEvents: 'true',
-    });
+    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: 'yes', catalogRevision: 1 });
     const resolved = await resolveDeployment(config);
     expect(resolved.agentInstructions).toBe(false);
     expect(resolved.catalogRevision).toBe(false);
-    expect(resolved.catalogEvents).toBe(false);
   });
 
   it('still falls back to <base>/api/mcp on a deployment too old to advertise either', async () => {
@@ -355,7 +342,6 @@ describe('resolveDeployment', () => {
       mcpUrl: 'https://x.example/api/mcp',
       agentInstructions: false,
       catalogRevision: false,
-      catalogEvents: false,
     });
   });
 });

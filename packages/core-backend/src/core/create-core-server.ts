@@ -18,7 +18,6 @@ import { createOAuthConsentRoutes } from '../modules/mcp/oauth/oauth-consent.rou
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { createManualRoutes } from '../modules/tool-registry/manual.routes.js';
 import { createCatalogRevisionRoutes } from './catalog-revision.js';
-import { createCatalogEventsRoutes } from './catalog-events.js';
 import {
   createToolManualsAgentRoutes,
   createToolManualsBrowserRoutes,
@@ -524,18 +523,6 @@ export async function createCoreServer(
     skills: core.skillService,
     manualAuth: core.manualAuthMiddleware,
     resolveUserEmail: async (userId) => (await core.authService.getUserById(userId))?.email,
-  }));
-  // The same fingerprint, PUSHED. The bridge holds the stream open and is
-  // told the instant a default-branch write moves its catalog, which is what
-  // lets an idle connection hear about a commit without asking on a timer —
-  // and what keeps a busy one inside the five seconds the guide promises.
-  // Same `manualAuth`, same digest, same router as the poll above.
-  toolsRouter.use(createCatalogEventsRoutes({
-    toolManuals: core.toolManualService,
-    skills: core.skillService,
-    manualAuth: core.manualAuthMiddleware,
-    resolveUserEmail: async (userId) => (await core.authService.getUserById(userId))?.email,
-    changes: core.catalogChanges,
   }));
   // The only core route that returns secret VALUES: a local `.tool`'s declared
   // variables, for the local MCP server that will execute it. It re-reads the

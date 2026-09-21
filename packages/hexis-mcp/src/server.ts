@@ -51,7 +51,6 @@ import {
   type LocalManualInfo,
 } from './deployment.js';
 import { createCatalogCheck, type CatalogCheck } from './catalog-watch.js';
-import { subscribeCatalogEvents, type CatalogEventsSubscription } from './catalog-events.js';
 import { materializePlugin, prepareStdioSpec, type StdioServerSpec } from './materialize.js';
 import { REMOTE_MANUAL_NAME, localManualTemplates, remoteManualTemplate } from './manuals.js';
 import {
@@ -414,24 +413,9 @@ export async function createHexisMcpServer(
      * is the contract the knowledge base's guide states.
      */
     catalogCheck?: false | { minIntervalMs?: number };
-    /**
-     * The subscription to the deployment's catalog-change stream — what tells
-     * an IDLE connection that a manual or a skill moved, without asking on a
-     * timer (see `catalog-events.ts`). On by default against any deployment
-     * that advertises `catalogEvents`; `false` turns it off, leaving the
-     * activity checks as the whole mechanism. Here for tests and embedding
-     * hosts — the CLI does not expose it, because the default is the contract
-     * the knowledge base's guide states.
-     */
-    catalogEvents?: false | { reconnectBaseMs?: number };
   } = {},
 ): Promise<HexisMcpHandle> {
-  const {
-    mcpUrl,
-    agentInstructions,
-    catalogRevision: catalogRevisionAdvertised,
-    catalogEvents: catalogEventsAdvertised,
-  } = await resolveDeployment(config);
+  const { mcpUrl, agentInstructions, catalogRevision: catalogRevisionAdvertised } = await resolveDeployment(config);
   // Fetched here rather than alongside the manuals below: it is part of the
   // handshake's own answer, so it cannot wait behind `ready` the way the
   // catalog can.
@@ -507,12 +491,6 @@ export async function createHexisMcpServer(
   let server: Server | null = null;
   /** The catalog checker, once discovery has a baseline to check against. */
   let catalogCheck: CatalogCheck | null = null;
-  /**
-   * The deployment's catalog-change stream, when it serves one. What makes an
-   * IDLE connection hear about a commit: the checker alone only ever runs on
-   * this connection's own activity.
-   */
-  let catalogEvents: CatalogEventsSubscription | null = null;
   /**
    * The local-only manuals this process CURRENTLY has registered, by UTCP
    * name, and what the deployment says about each. Both are LIVE maps, mutated
@@ -918,32 +896,9 @@ export async function createHexisMcpServer(
       onChanged: refreshCatalog,
     });
     // No timer. The check runs on activity only — a tool call finishing, a
-    // listing arriving — so an idle connection costs the deployment nothing
-    // to keep current.
-    //
-    // Which leaves the connection that is NOT in use, and a person who
-    // commits a `.tool` and waits for it: the deployment announces the change
-    // instead, over a stream this process subscribes to once and holds. Still
-    // no timer and still nothing asked while idle — one parked socket — but
-    // now a commit reaches an idle client in the moment it lands rather than
-    // at whatever hour that client is next used. A deployment that serves no
-    // such stream simply does not advertise it, and the checks above are then
-    // the whole mechanism, exactly as they were.
-    if (!catalogEventsAdvertised || options.catalogEvents === false) return;
-    const check = catalogCheck;
-    catalogEvents = subscribeCatalogEvents({
-      config,
-      ...(options.catalogEvents?.reconnectBaseMs !== undefined
-        ? { reconnectBaseMs: options.catalogEvents.reconnectBaseMs }
-        : {}),
-      onRevision: async (revision) => {
-        // `closed` re-read per announcement, not captured: the stream is torn
-        // down by `shutdown`, but an announcement already in flight when it
-        // lands would otherwise re-register manuals on a closing server.
-        if (closed) return;
-        await check.notice(revision);
-      },
-    });
+    // listing arriving — so an idle connection costs the deployment nothing.
+    // A client that connects and then waits is told about a change at its
+    // next use, which is when a stale toolset would first cost it anything.
   };
 
   /**
@@ -987,12 +942,6 @@ export async function createHexisMcpServer(
     // registers nothing.
     catalogCheck?.stop();
     catalogCheck = null;
-    // The stream first of all, because it is the one thing here that would
-    // otherwise keep asking: left running, it reconnects to a deployment this
-    // process no longer serves, and its announcements would arrive at a
-    // checker that is already gone.
-    catalogEvents?.stop();
-    catalogEvents = null;
     // No further renewals or credential swaps once we are going down: the
     // renewal lifecycle is closed FOR GOOD (timer disarmed, and a renewal
     // starting after this point — a straggling 401-retry — is refused, not

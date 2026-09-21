@@ -21,22 +21,11 @@
  * for no one. The check runs when the connection does something — a tool call
  * finishing, a `tools/list` arriving — because that is exactly the moment a
  * stale toolset costs anything, and a listing awaits its check, so the list
- * handed back is the current one. Between two such moments nothing is asked.
- * (A heartbeat was tried and taken out again, twice: two seconds per idle
- * connection is a load that scales with laptops, for a notification nobody
- * was waiting on.) `server.ts` owns the trigger; this module decides what a
- * check does.
- *
- * AND ON AN ANNOUNCEMENT. Activity alone left an idle connection hearing
- * nothing at all until its next use, which is not what the guide promises a
- * person who commits a `.tool` and waits. `catalog-events.ts` subscribes to
- * the deployment's own stream and hands what arrives to {@link
- * CatalogCheck.notice} — the same body, the same comparison, the same single
- * refresh, queued behind whatever a check is already applying. It asks the
- * deployment nothing on a timer and nothing when idle, so it costs what the
- * heartbeat cost minus the polling: one parked socket. Everything here still
- * works without it, one activity later, which is what an older deployment or
- * a proxy that will not carry an event stream reduces this to.
+ * handed back is the current one. Between two such moments nothing is asked:
+ * an idle connection learns of a change at its next use, not before. (A
+ * heartbeat was tried and taken out again: two seconds per idle connection
+ * is a load that scales with laptops, for a notification nobody was waiting
+ * on.) `server.ts` owns the trigger; this module decides what a check does.
  *
  * What this module contributes to the cost is the THROTTLE: two checks inside
  * one window collapse onto one digest read, so a chain of twenty calls costs
@@ -89,22 +78,6 @@ export interface CatalogCheck {
    * re-registration's seconds to every window.
    */
   check(): Promise<void>;
-  /**
-   * Apply a revision the DEPLOYMENT announced, without asking it anything.
-   *
-   * The subscription in `catalog-events.ts` is the fast road: a commit's
-   * fingerprint arrives here in the moment it lands, rather than at the next
-   * listing or call. It runs through the same body a check does — the same
-   * comparison against the same applied revision, the same single refresh,
-   * the same "still owed" on failure — so a change cannot be handled twice or
-   * differently depending on which road it came by, and an announcement
-   * landing next to a check queues behind it instead of racing it.
-   *
-   * Counts as a check for the throttle: a pushed revision is fresher than one
-   * this process could go and read, so the listing that a notification
-   * provokes has nothing left to ask.
-   */
-  notice(revision: string): Promise<void>;
   stop(): void;
 }
 
@@ -177,27 +150,6 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
   let lastStartedAt: number | null = null;
   /** The check in flight, so concurrent callers join it rather than stacking. */
   let inFlight: Promise<void> | null = null;
-  /**
-   * The observation being applied, if any. Every revision this process learns
-   * of — read by a check, announced by the deployment — goes through here one
-   * at a time, so two roads arriving together produce one refresh rather than
-   * two overlapping re-registrations of the same manuals. It is also what a
-   * listing awaits when the throttle sends it away: the answer it is about to
-   * hand back should be the one the refresh in flight is building.
-   */
-  let settling: Promise<void> | null = null;
-  /**
-   * Bumped by every announcement. A check's digest read takes a round trip,
-   * and an announcement can land inside it: the deployment volunteers a
-   * fingerprint the moment its catalog moves, so what it says is at least as
-   * fresh as what a read that started EARLIER is about to return. Applying
-   * that read afterwards would re-register against the older fingerprint and
-   * — worse — leave `applied` pointing at it, so the next check would find a
-   * "change" it has already made and the one after that would find none.
-   * A read that sees the epoch move discards what it read instead; the
-   * announcement it lost to is the fresher answer to the same question.
-   */
-  let announcements = 0;
   /** So a deployment that is down for an hour writes one line, not one per call. */
   let failing = false;
   /** The same restraint for a refresh that keeps failing against a live deployment. */
@@ -209,21 +161,37 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
 
   const reason = (err: unknown): string => printable(err instanceof Error ? err.message : String(err));
 
-  /**
-   * What a learned revision DOES — the only place that decides a change is
-   * owed, calls the handler and advances `applied`. Never rejects: a failed
-   * refresh leaves `applied` where it was, so the revision stays owed and the
-   * next check (or the next announcement) attempts it again.
-   */
-  const applyObservation = async (revision: string): Promise<void> => {
+  const run = async (): Promise<void> => {
+    let revision: string;
+    try {
+      revision = await fetchCatalogRevision(config);
+    } catch (err) {
+      if (err instanceof CatalogRevisionUnsupportedError) {
+        stop();
+        log(`[hexis-mcp] ${printable(err.message)}`);
+        return;
+      }
+      if (!failing) {
+        failing = true;
+        log(
+          `[hexis-mcp] could not check whether the workspace's tools changed: ${reason(err)} ` +
+            'Will try again on the next call; tools added meanwhile appear once it answers.',
+        );
+      }
+      return;
+    }
+    if (failing) {
+      failing = false;
+      log('[hexis-mcp] the workspace is answering again; its tools are being checked for changes.');
+    }
     // A baseline that startup could not read is not "no change": a commit
-    // between discovery and this observation would be invisible forever if the
+    // between discovery and this check would be invisible forever if the
     // first reading were simply adopted. One refresh of an unchanged catalog
     // is the price of never silently dropping that commit.
     const owed = !baselineKnown || applied !== revision;
-    // `stop()` can land while the fetch that produced this revision was in
-    // flight — teardown is exactly when it does. A handler called then would
-    // run against a server that is already closing.
+    // `stop()` can land while the fetch above is in flight — teardown is
+    // exactly when it does. A handler called then would run against a server
+    // that is already closing.
     if (owed && !stopped) {
       try {
         await onChanged(revision);
@@ -249,79 +217,16 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
     refreshFailing = false;
   };
 
-  /** Queue an observation behind whatever is already being applied. */
-  const observe = (revision: string): Promise<void> => {
-    const next = (settling ?? Promise.resolve()).then(() => applyObservation(revision));
-    settling = next;
-    void next.finally(() => {
-      if (settling === next) settling = null;
-    });
-    return next;
-  };
-
-  const run = async (): Promise<void> => {
-    const askedAt = announcements;
-    let revision: string;
-    try {
-      revision = await fetchCatalogRevision(config);
-    } catch (err) {
-      if (err instanceof CatalogRevisionUnsupportedError) {
-        stop();
-        log(`[hexis-mcp] ${printable(err.message)}`);
-        return;
-      }
-      if (!failing) {
-        failing = true;
-        log(
-          `[hexis-mcp] could not check whether the workspace's tools changed: ${reason(err)} ` +
-            'Will try again on the next call; tools added meanwhile appear once it answers.',
-        );
-      }
-      return;
-    }
-    if (failing) {
-      failing = false;
-      log('[hexis-mcp] the workspace is answering again; its tools are being checked for changes.');
-    }
-    // Overtaken while this read was in flight — see `announcements`. The
-    // announcement is already queued (or applied), so dropping this costs
-    // nothing and keeps the applied revision moving forward only.
-    if (announcements !== askedAt) return;
-    await observe(revision);
-  };
-
-  /**
-   * Everything learned SO FAR, applied — the check in flight, then whatever
-   * was queued behind it.
-   *
-   * What a listing actually needs. Awaiting `inFlight` alone answered as soon
-   * as the check settled, and an announcement that arrived while that check
-   * ran is queued BEHIND it: the list would be handed back from the toolset
-   * that queued refresh is in the middle of replacing. Two hops and no loop —
-   * a third arrival is a change that landed after the caller asked, and
-   * waiting for those in turn would let a busy workspace hold a listing open
-   * for as long as people keep committing.
-   */
-  const settled = async (): Promise<void> => {
-    if (inFlight) await inFlight;
-    const tail = settling;
-    if (tail) await tail;
-  };
-
   const check = (): Promise<void> => {
     if (stopped) return Promise.resolve();
-    if (inFlight) return settled();
+    if (inFlight) return inFlight;
     // A clock that went BACKWARD reads as an expired throttle, not a check
     // owed in the future: whatever the caller's clock is, a negative gap can
     // only mean it was adjusted, and refusing checks until it catches up would
     // hold the toolset stale for exactly the size of the adjustment.
     if (lastStartedAt !== null) {
       const sinceLast = now() - lastStartedAt;
-      // Sent away, but not empty-handed: a refresh may be running right now
-      // for a revision the deployment announced a moment ago, and a listing
-      // that returned ahead of it would hand back the toolset that refresh is
-      // in the middle of replacing.
-      if (sinceLast >= 0 && sinceLast < minIntervalMs) return settled();
+      if (sinceLast >= 0 && sinceLast < minIntervalMs) return Promise.resolve();
     }
     lastStartedAt = now();
     inFlight = run()
@@ -333,24 +238,8 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
       .finally(() => {
         inFlight = null;
       });
-    return settled();
+    return inFlight;
   };
 
-  const notice = (revision: string): Promise<void> => {
-    if (stopped) return Promise.resolve();
-    // A revision the deployment volunteered is at least as fresh as one this
-    // process could go and read, so it opens a throttle window exactly as a
-    // check does. Without that, the `tools/list` a notification provokes
-    // would spend a round trip re-asking a question that has just been
-    // answered — on every single change, to every connected client.
-    //
-    // The same "at least as fresh" is why the epoch moves here: a digest read
-    // that was already in flight is now answering an older question, and
-    // `run` drops it rather than applying it on top of this.
-    announcements += 1;
-    lastStartedAt = now();
-    return observe(revision);
-  };
-
-  return { check, notice, stop };
+  return { check, stop };
 }

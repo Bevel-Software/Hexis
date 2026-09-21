@@ -49,17 +49,6 @@ let deploymentLocal: string[] = [];
  */
 let advertisesCatalogRevision = true;
 /**
- * Whether the stub ADVERTISES the catalog-change stream, and every stream it
- * currently holds open. A real deployment writes the caller's fingerprint into
- * these the moment a default-branch write moves it; `commit()` below does the
- * same, which is the whole point — an IDLE connection has no activity to hang
- * a check on, so the announcement is the only thing that can reach it.
- */
-let advertisesCatalogEvents = true;
-const openStreams = new Set<http.ServerResponse>();
-/** Every stream OPENED, with its bearer, so a reconnect and its credential are checkable. */
-const streamOpens: (string | undefined)[] = [];
-/**
  * Whether the deployment's MCP endpoint is refusing — a redeploy, a proxy
  * blip. The catalog route keeps answering, so the check sees the change and
  * the re-registration that follows it is what fails.
@@ -69,38 +58,49 @@ let mcpUnavailable = false;
 let revision = 'rev-1';
 /** Every catalog-revision read's bearer, so the check's credential is checkable. */
 const revisionReads: (string | undefined)[] = [];
+/**
+ * EVERY request this process makes, by path, and how many of them are still
+ * open.
+ *
+ * `revisionReads` alone cannot answer "does an idle connection cost the
+ * deployment anything?", because it only sees one route. A mechanism that
+ * asked on some OTHER path — or, worse, opened one request and held it for the
+ * life of the connection — would leave that counter at rest and the suite
+ * green while every idle laptop in the estate pinned a socket on the
+ * deployment. That is not hypothetical: it is what shipped, and it took a
+ * proxy's access log outside the suite to see it. So the accounting is here
+ * now, and it is path-blind on purpose.
+ */
+const requests: string[] = [];
+/**
+ * The requests the stub has not answered yet, by path — a held socket is one
+ * that never leaves.
+ *
+ * `/api/mcp` is expected to be among them and is excluded where it matters:
+ * that is the MCP session the remote manual's registration created, which is
+ * what `tools/list` is BUILT from. It exists because the connection serves
+ * tools at all, is one per process rather than one per refresh, and is
+ * identical whether anyone is using the connection or not. Every OTHER held
+ * request is a mechanism that chose to hold it.
+ */
+const openRequests = new Map<http.ServerResponse, string>();
 
 /** Change what the deployment serves, exactly as a default-branch commit would. */
 function commit(tools: string[], local: string[] = deploymentLocal): void {
   deploymentTools = tools;
   deploymentLocal = local;
   revision = `rev-${tools.join('+')}|${local.join('+')}`;
-  // What a real deployment does at the same instant it drops its catalog
-  // caches: tell every bridge holding a stream. Announced unconditionally,
-  // including when the fingerprint did not move, because the invalidation
-  // behind it carries no paths — the bridge is the one that compares.
-  announce();
-}
-
-/**
- * Write the current fingerprint into every open stream.
- *
- * Skips a response that is no longer writable rather than relying on every
- * caller to have emptied `openStreams` first: a stream ended by a test (or by
- * the server hanging up) stays in the set until its `close` fires, and a
- * write to it would throw out of `commit()` — failing the test with an
- * ERR_STREAM_WRITE_AFTER_END instead of whatever it was actually asserting.
- */
-function announce(): void {
-  for (const stream of openStreams) {
-    if (stream.writableEnded || stream.destroyed) continue;
-    stream.write(`event: revision\ndata: ${JSON.stringify({ revision })}\n\n`);
-  }
 }
 
 beforeAll(async () => {
   httpServer = http.createServer((req, res) => {
     let body = '';
+    // Recorded on ARRIVAL and cleared when the response finishes, so a request
+    // the deployment never answers — the shape a long-lived stream takes —
+    // stays visible in `openRequests` for as long as it is held.
+    requests.push((req.url ?? '/').split('?')[0]!);
+    openRequests.set(res, (req.url ?? '/').split('?')[0]!);
+    res.on('close', () => openRequests.delete(res));
     req.on('data', (chunk: Buffer) => (body += chunk.toString('utf8')));
     req.on('end', () => {
       void (async () => {
@@ -113,22 +113,7 @@ beforeAll(async () => {
           return json(200, {
             mcpUrl: `${base}/api/mcp`,
             ...(advertisesCatalogRevision ? { catalogRevision: true } : {}),
-            ...(advertisesCatalogEvents ? { catalogEvents: true } : {}),
           });
-        }
-        if (pathname === '/api/agent/catalog-events') {
-          streamOpens.push(req.headers.authorization);
-          res.writeHead(200, {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache, no-transform',
-            Connection: 'keep-alive',
-          });
-          openStreams.add(res);
-          res.on('close', () => openStreams.delete(res));
-          // The opening revision, exactly as the route does: it is what closes
-          // the gap between the bridge's startup discovery and its subscription.
-          res.write(`event: revision\ndata: ${JSON.stringify({ revision })}\n\n`);
-          return;
         }
         if (pathname === '/api/agent/all-tools') {
           // Read at request time: a refresh after a commit must see the new
@@ -219,13 +204,11 @@ afterAll(async () => {
 afterEach(() => {
   vi.restoreAllMocks();
   revisionReads.length = 0;
-  streamOpens.length = 0;
+  requests.length = 0;
+  openRequests.clear();
   advertisesCatalogRevision = true;
-  advertisesCatalogEvents = true;
   mcpUnavailable = false;
   deploymentLocal = [];
-  for (const stream of openStreams) stream.end();
-  openStreams.clear();
 });
 
 const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -239,13 +222,6 @@ const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeou
  */
 async function start(
   catalogCheck: false | { minIntervalMs?: number } = {},
-  /**
-   * OFF unless a test asks for it. Every test above this line is about the
-   * activity path, and a stream running underneath would settle their changes
-   * before the listing or the call they are actually measuring ever happened —
-   * a green suite that had stopped testing what it names.
-   */
-  catalogEvents: false | { reconnectBaseMs?: number } = false,
 ): Promise<{
   client: Client;
   notifications: string[];
@@ -259,7 +235,6 @@ async function start(
   const config: HexisMcpConfig = { baseUrl: base, connectionKey: 'bevel_test' };
   const handle = await createHexisMcpServer(config, '0.0.0', {
     catalogCheck: catalogCheck === false ? false : { minIntervalMs: 0, ...catalogCheck },
-    catalogEvents,
   });
   await handle.ready;
 
@@ -457,6 +432,52 @@ describe('a manual added on the deployment reaches an already-connected client',
     }
   });
 
+  /**
+   * AND IT HOLDS NOTHING OPEN. The test above counts one route; this one
+   * counts every request on every path, and how many of them the deployment
+   * is still holding.
+   *
+   * The distinction is not academic. "An idle connection costs the deployment
+   * nothing" has two ways to fail, and only one of them moves a poll counter.
+   * A subscription — one request, opened once, held for the life of the
+   * connection — polls nothing and asks nothing on a timer, so every
+   * assertion the suite had stayed green while each idle laptop in the estate
+   * pinned a socket on the deployment for hours. That version shipped, and it
+   * took a proxy's access log outside the suite to notice. The criterion is
+   * explicit about it now ("no timer and no held socket per laptop"), so this
+   * is the assertion that would have caught it.
+   */
+  it('holds nothing open while idle, and asks nothing on any path', { timeout: 60_000 }, async () => {
+    /** Everything the deployment is still holding that is not the MCP session itself. */
+    const heldBeyondTheSession = (): string[] =>
+      [...openRequests.values()].filter((path) => path !== '/api/mcp');
+
+    commit(['ping']);
+    const s = await start();
+    try {
+      // Discovery is over: whatever it opened beyond the session, it has
+      // finished with.
+      expect(heldBeyondTheSession()).toEqual([]);
+      const atStartup = requests.length;
+
+      commit(['ping', 'serper_search']);
+      await settle(400);
+
+      // Not "no catalog reads" — NO REQUESTS AT ALL, on any path, by any
+      // name, and nothing new left hanging.
+      expect(requests.slice(atStartup)).toEqual([]);
+      expect(heldBeyondTheSession()).toEqual([]);
+      expect(s.notifications).toEqual([]);
+
+      // The change is not lost, only unasked-for: the next use collects it.
+      expect(await listed(s.client)).toContain('serper_search');
+      // …and that listing leaves nothing held open either.
+      expect(heldBeyondTheSession()).toEqual([]);
+    } finally {
+      await s.shutdown();
+    }
+  });
+
   it('stays quiet while the catalog does not move, however often it is used', { timeout: 60_000 }, async () => {
     commit(['ping']);
     const s = await start();
@@ -544,152 +565,6 @@ describe('a manual added on the deployment reaches an already-connected client',
       expect(await listed(s.client)).not.toContain('serper_search');
       expect(revisionReads.length).toBe(atStartup);
       expect(s.notifications).toEqual([]);
-    } finally {
-      await s.shutdown();
-    }
-  });
-});
-
-/**
- * The half the activity check cannot reach: a connection nobody is using.
- *
- * A client that connects and then sits there issues no listing and makes no
- * call, so there is no moment for a check to hang off — and the acceptance
- * criterion is about a person who commits a `.tool` and waits, which is
- * exactly that connection. A timer would cover it and was taken out twice,
- * for a reason that has not changed: two seconds per idle laptop, forever,
- * for a notification nobody was waiting on. So the deployment announces
- * instead, over a stream this process subscribes to once.
- *
- * What every test here proves it does NOT do is ask: `revisionReads` must not
- * move between startup and the notification, or the "idle costs the
- * deployment nothing" property has been quietly traded away for the latency.
- */
-describe('an idle connection hears about a commit', () => {
-  const waitFor = async (predicate: () => boolean, what: string, ms = 20_000): Promise<void> => {
-    const deadline = Date.now() + ms;
-    while (!predicate()) {
-      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-      await settle(20);
-    }
-  };
-
-  it('is told, and re-registers, with no listing and no call in between', { timeout: 60_000 }, async () => {
-    commit(['ping']);
-    const s = await start({}, {});
-    try {
-      await waitFor(() => streamOpens.length > 0, 'the catalog stream to be opened');
-      // Everything the connection has done, it has now done. From here it is
-      // idle: no listing, no call, nothing that a check could run behind.
-      const atStartup = revisionReads.length;
-
-      commit(['ping', 'serper_search']);
-
-      await waitFor(() => s.notifications.includes('tools/list_changed'), 'the tool-list-changed notification');
-      expect(s.notifications).toContain('prompts/list_changed');
-      // The refresh happened because the deployment SAID so. Not one extra
-      // digest read: nothing here polls.
-      expect(revisionReads.length).toBe(atStartup);
-      // And the toolset really did move, not just the notification.
-      expect(await listed(s.client)).toContain('serper_search');
-    } finally {
-      await s.shutdown();
-    }
-  });
-
-  it('subscribes with the connection key, and holds exactly one stream', { timeout: 60_000 }, async () => {
-    commit(['ping']);
-    const s = await start({}, {});
-    try {
-      await waitFor(() => streamOpens.length > 0, 'the catalog stream to be opened');
-      expect(streamOpens.at(-1)).toBe('Bearer bevel_test');
-      // Several changes in a row are several announcements on the SAME
-      // stream — a bridge that reopened per change would be a poll with extra
-      // steps.
-      commit(['ping', 'a']);
-      await waitFor(() => s.notifications.length > 0, 'the first notification');
-      const afterFirst = s.notifications.length;
-      commit(['ping', 'a', 'b']);
-      await waitFor(() => s.notifications.length > afterFirst, 'the second notification');
-      expect(streamOpens.length).toBe(1);
-    } finally {
-      await s.shutdown();
-    }
-  });
-
-  it('stops asking, and stops streaming, after shutdown', { timeout: 60_000 }, async () => {
-    commit(['ping']);
-    const s = await start({}, { reconnectBaseMs: 20 });
-    await waitFor(() => streamOpens.length > 0, 'the catalog stream to be opened');
-    await s.shutdown();
-    const afterShutdown = streamOpens.length;
-    // A subscription left running would reconnect to a deployment this
-    // process no longer serves, on a timer nobody can stop.
-    await settle(300);
-    expect(streamOpens.length).toBe(afterShutdown);
-    expect(openStreams.size).toBe(0);
-  });
-
-  it('reconnects when the stream drops, and catches what landed while it was gone', { timeout: 60_000 }, async () => {
-    commit(['ping']);
-    const s = await start({}, { reconnectBaseMs: 20 });
-    try {
-      await waitFor(() => streamOpens.length > 0, 'the catalog stream to be opened');
-      const atStartup = revisionReads.length;
-
-      // The deployment redeploys, a proxy times the connection out, a laptop
-      // sleeps: the stream ends with nobody having done anything wrong.
-      for (const stream of openStreams) stream.end();
-      openStreams.clear();
-      // And the commit lands while nothing is connected to hear it. The
-      // opening revision of the NEXT stream is what recovers it — which is
-      // why the route sends one at all.
-      commit(['ping', 'serper_search']);
-
-      await waitFor(() => s.notifications.includes('tools/list_changed'), 'the notification after the reconnect');
-      expect(streamOpens.length).toBeGreaterThan(1);
-      // Asserted BEFORE the listing below, which is itself activity and would
-      // earn a digest read of its own: what is being pinned here is that the
-      // reconnect recovered the change without one.
-      expect(revisionReads.length).toBe(atStartup);
-      expect(await listed(s.client)).toContain('serper_search');
-    } finally {
-      await s.shutdown();
-    }
-  });
-
-  it('ignores a keep-alive, and an announcement that changes nothing', { timeout: 60_000 }, async () => {
-    commit(['ping']);
-    const s = await start({}, {});
-    try {
-      await waitFor(() => streamOpens.length > 0, 'the catalog stream to be opened');
-      for (const stream of openStreams) stream.write(':\n\n');
-      // The invalidation behind a real announcement carries no paths, so an
-      // ordinary note's commit announces a fingerprint that did not move. Every
-      // connected bridge re-registering its whole toolset for that would be
-      // the cost this design exists to avoid.
-      announce();
-      announce();
-      await settle(300);
-      expect(s.notifications).toEqual([]);
-      expect(revisionReads.length).toBe(1);
-    } finally {
-      await s.shutdown();
-    }
-  });
-
-  it('does not subscribe to a deployment that does not advertise the stream', { timeout: 60_000 }, async () => {
-    advertisesCatalogEvents = false;
-    commit(['ping']);
-    const s = await start({}, {});
-    try {
-      commit(['ping', 'serper_search']);
-      await settle(200);
-      // Nothing was streamed, so nothing reached the idle connection…
-      expect(streamOpens).toEqual([]);
-      expect(s.notifications).toEqual([]);
-      // …and the activity path is untouched: the next listing still carries it.
-      expect(await listed(s.client)).toContain('serper_search');
     } finally {
       await s.shutdown();
     }

@@ -20,16 +20,6 @@ describe('GET /api/config payload', () => {
     expect(body.catalogRevision).toBe(true);
   });
 
-  /**
-   * And the PUSH side of it. Without this flag the bridge never subscribes,
-   * so an idle connection is told nothing until its next use — the whole
-   * latency this capability exists to remove — and it cannot be probed for
-   * instead, for the reason above.
-   */
-  it('advertises the catalog-events stream, on the same terms', () => {
-    expect(body.catalogEvents).toBe(true);
-  });
-
   it('carries the branch model and the two addresses it was handed', () => {
     expect(body.branchModel.defaultBranch).toBe(DEFAULT_BRANCH);
     expect(body.branchModel.protectedBranches).toContain(DEFAULT_BRANCH);
