@@ -53,6 +53,7 @@ import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
 import { oidcRedirectUri } from '../modules/auth/oidc-auth-provider.js';
 import { repositoryConnectionCheck } from '../modules/settings/connection-check.js';
+import { rootFolderListerFor } from '../modules/settings/git-root-folders.js';
 import {
   createKbSyncRoutes,
   isSyncRawBodyPath,
@@ -719,9 +720,10 @@ export async function createCoreServer(
         url: syncUrl.toString(),
         lastSync: () => core.kbSyncService.lastSync(),
       },
-      // The connection probe's git runs through the deployment's one runner.
+      // The connection probe's git — and the root-folder listing's — runs
+      // through the deployment's one runner.
       repositoryConnectionCheck(core.gitRunner),
-      undefined,
+      rootFolderListerFor(core.gitRunner),
       oidcRedirectUri(core.config.publicBackendUrl),
     ),
   );

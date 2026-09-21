@@ -183,6 +183,18 @@ describe('WorkflowService.releaseLock — new (enqueue, no synchronous commit)',
     expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual(['lock-released']);
   });
 
+  it('answers hasQueuedCommit under the canonical identity, whatever spelling the caller has', async () => {
+    // `releaseLock` stores the row under the canonical path; a caller that
+    // asks with another spelling of the same file must find it, or it would
+    // re-arm a retry vehicle that already exists.
+    const pending = makePending();
+    (pending.hasLiveRowFor as Mock).mockResolvedValue(true);
+    const svc = makeFacade(makeGit(), makeFileLocks(USER.id), pending, events);
+
+    await expect(svc.hasQueuedCommit('ws-1', 'feat/x', './knowledge-base//x.md')).resolves.toBe(true);
+    expect(pending.hasLiveRowFor).toHaveBeenCalledWith('ws-1', 'feat/x', 'knowledge-base/x.md');
+  });
+
   it('throws lock-not-held when the caller does not hold the lock', async () => {
     const git = makeGit();
     const locks = makeFileLocks('someone-else');
