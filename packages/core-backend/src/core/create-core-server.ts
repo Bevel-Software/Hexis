@@ -26,7 +26,12 @@ import {
 import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
-import { registerSkillsTools, createSkillsRoutes, createSkillAccessRequestRoutes } from '../modules/skills/index.js';
+import {
+  registerSkillsTools,
+  createSkillsRoutes,
+  createSkillAccessRequestRoutes,
+  AllowedToolsChecker,
+} from '../modules/skills/index.js';
 import {
   createPluginCreationRoutes,
   createPluginsRoutes,
@@ -440,9 +445,13 @@ export async function createCoreServer(
     recoveryBotEmail: RECOVERY_BOT_EMAIL,
     hooks: core.workflowService.hooks,
   };
+  // A skill's `allowed-tools`, checked against what the caller can see — on
+  // every save surface (agent write tools, the app's PUT /file) and on
+  // `get_skill`. Warnings only; it never refuses a save.
+  const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kbDirName);
   registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kbDirName);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink);
-  registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate);
+  registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
   registerPluginsTools(core.toolRegistry);
@@ -559,6 +568,8 @@ export async function createCoreServer(
     core.creatorAccess,
     core.adminAccess,
     core.disk,
+    allowedToolsChecker,
+    core.changeGate,
   ));
   // Workflow is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes
@@ -597,7 +608,7 @@ export async function createCoreServer(
   app.use(
     '/api',
     core.authMiddleware,
-    createSkillsRoutes(core.skillService, core.pendingSkillsService, core.pluginLinkIndex, core.accessControl),
+    createSkillsRoutes(core.skillService, core.pendingSkillsService, core.pluginLinkIndex, core.accessControl, allowedToolsChecker),
   );
   // Asking for write on a shared skill — the join-request machinery pointed
   // at a skill folder. Same JWT gate, same fail-closed shape.

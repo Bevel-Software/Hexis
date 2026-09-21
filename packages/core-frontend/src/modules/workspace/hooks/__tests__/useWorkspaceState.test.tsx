@@ -732,6 +732,52 @@ describe('dispatchUpload: suggestion routing', () => {
     }
   });
 
+  it('refuses an upload into a folder the caller cannot READ — no suggestion, no bytes, a banner', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canRead: false,
+      canWrite: false,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    const result = await mountProtected();
+    const file = new File(['hello'], 'brief.pdf', { type: 'application/pdf' });
+    await act(async () => {
+      await result.current.dispatchUpload(
+        { kind: 'files', files: [file] },
+        'knowledge-base/KnowledgeBase/Sealed',
+      );
+    });
+    // Nothing was provisioned and nothing moved: the same gate would have
+    // refused every file on the suggestions branch, one by one.
+    expect(proposeMocks.ensureKnowledgeSuggestionWorkspace).not.toHaveBeenCalled();
+    expect(apiMocks.uploadFile).not.toHaveBeenCalled();
+    // The refusal is in this tree's banner, with the server's sentence and
+    // the status its gate would have answered.
+    expect(errorIn(result.current)).toMatchObject({
+      filename: 'brief.pdf',
+      status: 403,
+      reason: 'You don\'t have read access to "KnowledgeBase/Sealed"; only what you can read can be created, changed or removed.',
+    });
+    expect(result.current.isUploading).toBe(false);
+  });
+
+  it('leaves a folder directly under a root to the server: a drop there may start a new folder', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canRead: false,
+      canWrite: false,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    const result = await mountProtected();
+    const file = new File(['hello'], 'note.md', { type: 'text/markdown' });
+    await act(async () => {
+      await result.current.dispatchUpload({ kind: 'files', files: [file] }, 'knowledge-base/KnowledgeBase');
+    });
+    // Routed as any no-write folder is; the server decides per file.
+    expect(proposeMocks.ensureKnowledgeSuggestionWorkspace).toHaveBeenCalled();
+    expect(errorIn(result.current)).toBeNull();
+  });
+
   it('uploads normally when the caller may write the folder', async () => {
     accessApiMock.fetchFileAccess.mockResolvedValue({
       canWrite: true,

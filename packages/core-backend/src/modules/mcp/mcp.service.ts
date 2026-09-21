@@ -36,6 +36,7 @@ import {
   flattenManualTool,
   toListedTool,
   toolError,
+  retiredToolMessage,
   needsAuthorizationResult,
   skillPromptText,
   type ProxiedTool,
@@ -134,6 +135,13 @@ interface RequestSurface {
    * one of their tools is answered with the /connect link, not "Unknown tool".
    */
   unavailable: UnavailableManual[];
+  /**
+   * Registered (rewritten, `utcpManualName`) name → catalog name, for every
+   * pooled manual of the caller's. A tool carries the registered name; the
+   * credential catalog (`userScopedKeysForManual`) keys by the catalog name.
+   * They differ only when the name holds a non-word character (`my-server`).
+   */
+  catalogNames: ReadonlyMap<string, string>;
 }
 
 /** A manual off the surface for want of a sign-in — see {@link RequestSurface.unavailable}. */
@@ -233,10 +241,13 @@ export class McpService {
    * "Unknown tool" instead of "sign in again on /connect". These definitions
    * keep the manual on the surface for such a caller; the call-time credential
    * check then answers with the link, and an interactive client is sent back
-   * through authorization. Definitions, never credentials or results, and
-   * bounded by the number of distinct manual definitions the process has seen.
+   * through authorization. Definitions, never credentials or results. Keyed
+   * by catalog name — one entry per manual, replaced when the manual is next
+   * discovered — and used only while the manual's definition is the one the
+   * tools were discovered from, so an edited `mcp.json` never serves the old
+   * server's tools.
    */
-  private readonly knownDownstreamTools = new Map<string, UtcpTool[]>();
+  private readonly knownDownstreamTools = new Map<string, { definition: string; tools: UtcpTool[] }>();
 
   // The downstream connection pool for `mcp` manuals — see the class doc.
   private readonly downstream: DownstreamPool<PooledDownstream>;
@@ -351,7 +362,7 @@ export class McpService {
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
-      const [{ tools }, { toolPrefix }] = await Promise.all([requestSurface(), agentInstructions()]);
+      const [{ tools, catalogNames }, { toolPrefix }] = await Promise.all([requestSurface(), agentInstructions()]);
       // A discovered tool whose name collides with a meta-tool would be
       // listed but never callable (the dispatcher routes the name to the
       // meta-tool first), so drop it from the listing entirely.
@@ -366,7 +377,7 @@ export class McpService {
           // A per-tool check that throws must NOT reject the whole list (which
           // would blank every tool) — fail that one tool closed and move on.
           listed.map((t) =>
-            this.missingUserSecrets(userId, t.manualName).then(
+            this.missingUserSecrets(userId, catalogNames.get(t.manualName) ?? t.manualName).then(
               (missing) => missing.length === 0,
               () => false,
             ),
@@ -419,20 +430,22 @@ export class McpService {
     });
 
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-      const { client, tools, unavailable } = await requestSurface();
+      const { client, tools, unavailable, catalogNames } = await requestSurface();
       const toolName = request.params.name;
       if (META_TOOL_NAMES.has(toolName)) {
         return this.dispatchMetaTool(client, toolName, request.params.arguments ?? {});
       }
       /**
-       * The needs-authorization answer, when the caller's sign-in for
-       * `manualName` is missing or broken; `null` to proceed. Stops before
-       * running a tool whose personal (user-scoped) credentials the caller
-       * hasn't provided — a setup link instead of a blank-credential request
-       * that would fail opaquely at the provider.
+       * The needs-authorization answer, when the caller's sign-in for the
+       * manual registered as `utcpName` is missing or broken; `null` to
+       * proceed. Stops before running a tool whose personal (user-scoped)
+       * credentials the caller hasn't provided — a setup link instead of a
+       * blank-credential request that would fail opaquely at the provider.
+       * The credential catalog keys manuals by their CATALOG name; a tool
+       * carries the registered (rewritten) one, so it is translated back.
        */
-      const needsAuthorization = async (manualName: string): Promise<CallToolResult | null> => {
-        const needsAuth = await this.checkUserSecrets(userId, toolName, manualName);
+      const needsAuthorization = async (utcpName: string): Promise<CallToolResult | null> => {
+        const needsAuth = await this.checkUserSecrets(userId, toolName, catalogNames.get(utcpName) ?? utcpName);
         if (!needsAuth) return null;
         // A sign-in that EXISTS but is broken (expired grant, abandoned
         // consent, missing scopes) on an interactive OAuth caller: revoke the
@@ -463,7 +476,7 @@ export class McpService {
           .filter((m) => toolName.startsWith(`${m.utcpName}_`))
           .sort((a, b) => b.utcpName.length - a.utcpName.length)[0];
         const answer = owner ? await needsAuthorization(owner.utcpName) : null;
-        return answer ?? toolError(`Unknown tool "${toolName}".`);
+        return answer ?? toolError(retiredToolMessage(toolName) ?? `Unknown tool "${toolName}".`);
       }
       const needsAuth = await needsAuthorization(proxied.manualName);
       if (needsAuth) return needsAuth;
@@ -515,7 +528,7 @@ export class McpService {
     const manuals = await this.fetchManualTemplates(loopbackBearer);
     const catalogMs = performance.now() - started;
     const client = await this.buildClient(loopbackBearer, userId, manuals);
-    const { tools, unavailable } = await this.discoverTools(client, manuals, userId);
+    const { tools, unavailable, catalogNames } = await this.discoverTools(client, manuals, userId);
     const totalMs = performance.now() - started;
     // Per user: on a shape change or once per interval, never per request —
     // see SurfaceLogThrottle for why both halves matter.
@@ -530,7 +543,7 @@ export class McpService {
           (decision.suppressed > 0 ? ` [+${decision.suppressed} identical rebuild(s) since last line]` : ''),
       );
     }
-    return { client, tools, unavailable };
+    return { client, tools, unavailable, catalogNames };
   }
 
   /**
@@ -686,9 +699,13 @@ export class McpService {
     client: CodeModeUtcpClient,
     manuals: CallTemplate[],
     userId: string,
-  ): Promise<{ tools: ProxiedTool[]; unavailable: UnavailableManual[] }> {
+  ): Promise<{ tools: ProxiedTool[]; unavailable: UnavailableManual[]; catalogNames: Map<string, string> }> {
     const routes = new Map<string, DownstreamRoute>();
     const unavailable: UnavailableManual[] = [];
+    const catalogNames = new Map<string, string>();
+    for (const m of manuals) {
+      if (m.call_template_type === 'mcp') catalogNames.set(utcpManualName(m), String(m.name));
+    }
     // The shared layer rewrites every manual name (`[^\w]` → `_`) and tools
     // route by the rewritten prefix, so two manuals whose names rewrite to one
     // identifier would silently share it. Sequential registration used to
@@ -768,7 +785,11 @@ export class McpService {
     if (kbFailure && !kbFailure.ok) throw new Error(`Bevel tool discovery failed: ${kbFailure.error}`);
     if (routes.size > 0) routeToDownstream(client, routes);
     const utcpTools = await client.getTools();
-    return { tools: utcpTools.map((tool: UtcpTool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME)), unavailable };
+    return {
+      tools: utcpTools.map((tool: UtcpTool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME)),
+      unavailable,
+      catalogNames,
+    };
   }
 
   /**
@@ -825,7 +846,7 @@ export class McpService {
       } finally {
         lease.release();
       }
-      this.knownDownstreamTools.set(definition, tools);
+      this.knownDownstreamTools.set(catalogName, { definition, tools });
       await attach(tools);
       return { ok: true };
     } catch (err) {
@@ -836,10 +857,10 @@ export class McpService {
       // from what the downstream last advertised, so a call answers with the
       // sign-in link — and never remember the failure, since re-authorizing is
       // one visit to /connect away and the next attempt costs no network.
-      if (await this.signInMissing(userId, manualName)) {
-        const known = this.knownDownstreamTools.get(definition);
-        if (known) {
-          await attach(known);
+      if (await this.signInMissing(userId, catalogName)) {
+        const known = this.knownDownstreamTools.get(catalogName);
+        if (known && known.definition === definition) {
+          await attach(known.tools);
           return { ok: true };
         }
         return { ok: false, error, retryable: true, signInMissing: true };
@@ -851,10 +872,10 @@ export class McpService {
     }
   }
 
-  /** Whether the caller's sign-in for `manualName` is missing or broken — a check that must never throw here. */
-  private async signInMissing(userId: string, manualName: string): Promise<boolean> {
+  /** Whether the caller's sign-in for the manual named `catalogName` is missing or broken — a check that must never throw here. */
+  private async signInMissing(userId: string, catalogName: string): Promise<boolean> {
     try {
-      return (await this.missingUserSecrets(userId, manualName)).length > 0;
+      return (await this.missingUserSecrets(userId, catalogName)).length > 0;
     } catch {
       return false;
     }

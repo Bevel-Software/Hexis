@@ -16,6 +16,7 @@ import { WorkflowEventBus } from '../event-bus.js';
 import { WorkflowService } from '../workflow.service.js';
 import { createWorkflowRoutes } from '../workflow.routes.js';
 import { makeFakeLockDb, type FakeLockDb } from './fake-file-lock-db.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
 /**
  * The lock routes over the real service and a real lock store: acquire,
@@ -79,6 +80,7 @@ async function makeHarness(): Promise<Harness> {
     new FileLockService(fake.db),
     pending,
     KB,
+    openChangeGate(),
     events,
   );
 

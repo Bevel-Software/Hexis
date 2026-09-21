@@ -11,6 +11,7 @@ import { WorkflowEventBus } from '../event-bus.js';
 import { WorkflowService } from '../workflow.service.js';
 import type { Database } from '../../database/connection.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
 /**
  * The write gate stays the single mechanism; the platform-file restore is an
@@ -53,6 +54,7 @@ function makeService(canRestorePlatformFile: IAccessControl['canRestorePlatformF
     { acquire, get: vi.fn(async () => null) } as unknown as FileLockService,
     {} as PendingCommitsService,
     KB,
+    openChangeGate(),
     new WorkflowEventBus(),
   );
   return { svc, acquire, accessControl };

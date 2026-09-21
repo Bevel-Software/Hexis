@@ -30,15 +30,6 @@ export function Out({ href, children }: { href: string; children: ReactNode }) {
   );
 }
 
-export function Step({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <li className="space-y-2 pl-1">
-      <div className="text-xs font-medium text-ink">{title}</div>
-      {children}
-    </li>
-  );
-}
-
 export function Prose({ children }: { children: ReactNode }) {
   return <p className="text-meta text-ink-muted leading-snug">{children}</p>;
 }

@@ -40,6 +40,13 @@ function stubWorkspaceService(workspaceDir: string): WorkspaceService {
   } as unknown as WorkspaceService;
 }
 
+/**
+ * The creator grant covers ONE creation: a new folder directly under one of
+ * the three roots, by someone the root does not let read. Everything else is
+ * the read-before-write gate's business (`change-read-gate.test.ts`): a
+ * creation the creator cannot see is refused there, and one they can see
+ * inherits its folder's rules and needs no grant.
+ */
 describe('CreatorAccessService.planForCreate', () => {
   let root: string;
   let repo: string;
@@ -50,6 +57,8 @@ describe('CreatorAccessService.planForCreate', () => {
     const workspaceDir = path.join(root, WS);
     repo = path.join(workspaceDir, KB);
     await fs.mkdir(path.join(repo, 'KnowledgeBase'), { recursive: true });
+    await fs.mkdir(path.join(repo, 'Skills'), { recursive: true });
+    await fs.mkdir(path.join(repo, 'Plugins'), { recursive: true });
     await write(repo, 'roles.yaml', ROLES_YAML);
     const ws = stubWorkspaceService(workspaceDir);
     svc = new CreatorAccessService(ws, new AccessControlService(ws, KB, new NodeFs()), KB, new NodeFs());
@@ -61,35 +70,17 @@ describe('CreatorAccessService.planForCreate', () => {
 
   it('returns null when the creator can already read via the folder chain', async () => {
     await write(repo, 'KnowledgeBase/access.md', '---\nread:\n  - everyone\n---\n');
-    const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/note.md`, 'file');
+    const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Projects`, 'dir');
     expect(plan).toBeNull();
   });
 
   it('a write grant folds into read — creating where you can write needs no grant', async () => {
     await write(repo, 'KnowledgeBase/access.md', '---\nwrite:\n  - Alice <alice@example.com>\n---\n');
-    const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/note.md`, 'file');
+    const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Projects`, 'dir');
     expect(plan).toBeNull();
   });
 
-  it('a loose .md in a pre-existing unreadable folder gets a frontmatter grant', async () => {
-    const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/note.md`, 'file');
-    expect(plan?.kind).toBe('frontmatter');
-    if (plan?.kind !== 'frontmatter') return;
-    const granted = plan.apply('# Hello\n');
-    expect(granted).toBe('---\nread: Alice <alice@example.com>\n---\n# Hello\n');
-  });
-
-  it('frontmatter grant splices into existing frontmatter without touching the body', async () => {
-    const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/node.md`, 'file');
-    expect(plan?.kind).toBe('frontmatter');
-    if (plan?.kind !== 'frontmatter') return;
-    const granted = plan.apply('---\nnodeType: Process\n---\nBody\n');
-    expect(granted).toContain('nodeType: Process');
-    expect(granted).toContain('read: Alice <alice@example.com>');
-    expect(granted).toContain('Body');
-  });
-
-  it('a new folder gets its own access.md seeded, naming the creator under read:', async () => {
+  it('a new folder directly under a root gets its own access.md seeded, naming the creator under read:', async () => {
     const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Projects`, 'dir');
     expect(plan?.kind).toBe('seed-access-md');
     if (plan?.kind !== 'seed-access-md') return;
@@ -101,6 +92,15 @@ describe('CreatorAccessService.planForCreate', () => {
     expect(seeded.startsWith('---\n# THIS BLOCK (the frontmatter) governs this access.md FILE only')).toBe(true);
     expect(seeded).toContain('\n---\n# THIS BLOCK (the body) governs the FOLDER');
     expect(seeded.endsWith('\nread:\n  - Alice <alice@example.com>\n')).toBe(true);
+  });
+
+  it('all three roots are creatable: skills and plugins seed the same way', async () => {
+    const skill = await svc.planForCreate(WS, ALICE, `${KB}/Skills/my-skill/SKILL.md`, 'file');
+    expect(skill?.kind).toBe('seed-access-md');
+    expect(skill?.wsRelPath).toBe(`${KB}/Skills/my-skill/access.md`);
+    const plugin = await svc.planForCreate(WS, ALICE, `${KB}/Plugins/team/mcp.json`, 'file');
+    expect(plugin?.kind).toBe('seed-access-md');
+    expect(plugin?.wsRelPath).toBe(`${KB}/Plugins/team/access.md`);
   });
 
   it('the seed MERGES into existing access.md text — a concurrent creator grant survives', async () => {
@@ -116,47 +116,57 @@ describe('CreatorAccessService.planForCreate', () => {
     expect(plan.apply(merged)).toBe(merged);
   });
 
-  it('a nested create seeds at the TOPMOST new directory, not the leaf', async () => {
+  it('a nested create seeds at the new TOP-LEVEL folder, not the leaf', async () => {
     const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/A/B/c.md`, 'file');
     expect(plan?.kind).toBe('seed-access-md');
     if (plan?.kind !== 'seed-access-md') return;
     expect(plan.wsRelPath).toBe(`${KB}/KnowledgeBase/A/access.md`);
   });
 
-  it('never targets a pre-existing directory: only new dirs are seeded', async () => {
+  it('plans nothing inside a folder that already exists — the read gate decides there', async () => {
     await fs.mkdir(path.join(repo, 'KnowledgeBase/Existing'), { recursive: true });
-    const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Existing/new.md`, 'file');
-    // Existing dir → the grant must land in the file's own frontmatter, not
-    // Existing/access.md (that would leak read on all its siblings).
-    expect(plan?.kind).toBe('frontmatter');
+    expect(await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Existing/new.md`, 'file')).toBeNull();
+    expect(await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Existing/Sub`, 'dir')).toBeNull();
+  });
+
+  it('plans nothing for a loose file directly at a root — it has no folder to carry a grant', async () => {
+    expect(await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/note.md`, 'file')).toBeNull();
+    expect(await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/pic.png`, 'file')).toBeNull();
+  });
+
+  it('plans nothing through a link standing where the new folder would be', async () => {
+    // Dangling on purpose: a stat that followed it would say "nothing there".
+    await fs.symlink(path.join(root, 'elsewhere'), path.join(repo, 'KnowledgeBase/Linked'));
+    expect(await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Linked/a.md`, 'file')).toBeNull();
+    expect(await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Linked`, 'dir')).toBeNull();
+  });
+
+  it('plans nothing under a root that is not one of the three', async () => {
+    expect(await svc.planForCreate(WS, ALICE, `${KB}/Data/Engineering`, 'dir')).toBeNull();
+    expect(await svc.planForCreate(WS, ALICE, `${KB}/Elsewhere/Thing/a.md`, 'file')).toBeNull();
   });
 
   it('returns null for paths that already exist (an edit, not a create)', async () => {
-    await write(repo, 'KnowledgeBase/existing.md', 'x');
-    const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/existing.md`, 'file');
+    await write(repo, 'KnowledgeBase/Mine/existing.md', 'x');
+    const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Mine/existing.md`, 'file');
     expect(plan).toBeNull();
   });
 
   it('returns null for access.md, roles.yaml, .gitkeep, and non-KB paths', async () => {
-    expect(await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/access.md`, 'file')).toBeNull();
+    expect(await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/New/access.md`, 'file')).toBeNull();
     expect(await svc.planForCreate(WS, ALICE, `${KB}/roles.yaml`, 'file')).toBeNull();
-    expect(await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/.gitkeep`, 'file')).toBeNull();
+    expect(await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/New/.gitkeep`, 'file')).toBeNull();
     expect(await svc.planForCreate(WS, ALICE, 'reserved-config.json', 'file')).toBeNull();
-  });
-
-  it('returns null (never throws) for a non-markdown loose file in an existing folder', async () => {
-    const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/pic.png`, 'file');
-    expect(plan).toBeNull();
   });
 
   it('returns null (never throws) when the access config is unusable', async () => {
     await fs.rm(path.join(repo, 'roles.yaml'));
-    const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/note.md`, 'file');
+    const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Projects`, 'dir');
     expect(plan).toBeNull();
   });
 
   it('sanitises a display name that would break the Name <email> entry shape', async () => {
-    const evil = { name: 'Al<ce # ', email: 'alice@example.com' };
+    const evil = { name: 'Al<ce # ', email: 'alice@example.com' };
     const plan = await svc.planForCreate(WS, evil, `${KB}/KnowledgeBase/Dir`, 'dir');
     expect(plan?.kind).toBe('seed-access-md');
     if (plan?.kind !== 'seed-access-md') return;
@@ -177,59 +187,5 @@ describe('CreatorAccessService.planForCreate', () => {
     ]);
     expect(batch.get('KnowledgeBase/Mine')).toBe(true);
     expect(batch.get('KnowledgeBase/Mine/anything.md')).toBe(true);
-  });
-
-  it('the frontmatter grant makes a loose file readable via the FULL check', async () => {
-    const ws = stubWorkspaceService(path.join(root, WS));
-    const access = new AccessControlService(ws, KB, new NodeFs());
-    const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/loose.md`, 'file');
-    expect(plan?.kind).toBe('frontmatter');
-    if (plan?.kind !== 'frontmatter') return;
-    await write(repo, 'KnowledgeBase/loose.md', plan.apply('# Loose\n'));
-    expect(await access.canRead(WS, ALICE.email, 'KnowledgeBase/loose.md')).toBe(true);
-  });
-});
-
-describe('CreatorAccessService.grantInExtractedFile', () => {
-  let root: string;
-  let repo: string;
-  let svc: CreatorAccessService;
-
-  beforeEach(async () => {
-    root = await mkTmpRoot();
-    const workspaceDir = path.join(root, WS);
-    repo = path.join(workspaceDir, KB);
-    await fs.mkdir(path.join(repo, 'KnowledgeBase'), { recursive: true });
-    await write(repo, 'roles.yaml', ROLES_YAML);
-    const ws = stubWorkspaceService(workspaceDir);
-    svc = new CreatorAccessService(ws, new AccessControlService(ws, KB, new NodeFs()), KB, new NodeFs());
-  });
-
-  afterEach(async () => {
-    await fs.rm(root, { recursive: true, force: true });
-  });
-
-  it('splices the creator grant into an on-disk .md the creator cannot read', async () => {
-    await write(repo, 'KnowledgeBase/extracted.md', '# From zip\n');
-    const text = await svc.grantInExtractedFile(WS, ALICE, `${KB}/KnowledgeBase/extracted.md`);
-    expect(text).toBe('---\nread: Alice <alice@example.com>\n---\n# From zip\n');
-  });
-
-  it('returns null when the file is already readable, non-markdown, or non-KB', async () => {
-    await write(repo, 'KnowledgeBase/access.md', '---\nread:\n  - everyone\n---\n');
-    await write(repo, 'KnowledgeBase/extracted.md', '# From zip\n');
-    expect(await svc.grantInExtractedFile(WS, ALICE, `${KB}/KnowledgeBase/extracted.md`)).toBeNull();
-    expect(await svc.grantInExtractedFile(WS, ALICE, `${KB}/KnowledgeBase/pic.png`)).toBeNull();
-    expect(await svc.grantInExtractedFile(WS, ALICE, 'reserved.md')).toBeNull();
-  });
-
-  it('gives a binary archived under a .md name no grant, so the bytes are never rewritten', async () => {
-    // A PDF header, a NUL and bytes that are not UTF-8: read as text and
-    // written back with a grant spliced in, this would come out corrupted.
-    const binary = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x00, 0xff, 0xfe, 0x80, 0x0a]);
-    const abs = path.join(repo, 'KnowledgeBase/extracted.md');
-    await fs.writeFile(abs, binary);
-    expect(await svc.grantInExtractedFile(WS, ALICE, `${KB}/KnowledgeBase/extracted.md`)).toBeNull();
-    expect(await fs.readFile(abs)).toEqual(binary);
   });
 });

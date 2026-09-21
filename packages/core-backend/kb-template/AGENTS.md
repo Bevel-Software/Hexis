@@ -254,6 +254,23 @@ Access to any path — reading it as much as writing it — is governed by
   strips a separate read grant. So `download: Ana <ana@x.io>` alone lets Ana
   open the node as well as download it, and a `deny download` beside an
   inherited read leaves her able to open it but not save it.
+- **You can only change what you can read.** Nothing is created, changed,
+  moved into or removed from a place the caller cannot read — on every
+  branch, drafts included, whatever `write:` rules say. A write tool refused
+  for this says so (`write-denied`, naming the unreadable folder), and
+  proposing is not offered either: a proposal into a folder its author cannot
+  see would vanish from them the moment it landed. Two exceptions. A NEW
+  FOLDER directly under `{{knowledgeBaseDir}}/`, `{{skillsDir}}/` or
+  `{{pluginsDir}}/`: anyone may start one, whatever the root's rules grant
+  them, and the new folder's `access.md` is seeded with the creator's own
+  `read:` grant so what they put there is visible to them (a loose FILE
+  directly at a root has no folder to carry that grant and is not excepted).
+  And an Admin — or the deployment owner — may change the files directly in
+  the repository root (`roles.yaml`, `access.md`, `groups.yaml`, `AGENTS.md`,
+  …) even when the root grants read to nobody: the same rescue the write
+  floor gives them, so a tree whose root rules lock everyone out stays
+  repairable from inside the app. That rescue stops at the root; a subfolder
+  an admin cannot read is closed to them like to anyone else.
 - **Resolution** walks repo root → file directory, accumulating per-principal
   state. User-level entries trump role-level entries. A role denial removes
   only that role's contribution; it does not undo grants from other roles.
@@ -392,6 +409,22 @@ File-level write access decides how a change lands on the default branch:
   default branch, **ask the user** whether to write directly or go through the
   review flow — and prefer a change request when in doubt, when the change is
   large, or when it touches content the user does not own.
+
+### An agent proposes and syncs; a person merges
+
+- **Propose** with `open_change_request`, then give the user the request's
+  `url`. Reviewing, approving and merging a change request happen in the app,
+  by a person — no agent tool approves a file, bypasses approval, or merges a
+  request. `merge_change_request` no longer exists.
+- **Sync** a draft with `merge_branch`, `source` = the branch the request
+  targets, `target` = the draft. This is allowed while the draft's request is
+  open, and is how you bring it up to date or surface conflicts to resolve on
+  the draft.
+- `merge_branch` refuses to merge a draft into the branch its open change
+  request targets — it names the request; ask the user to review it in the
+  app. Into a protected branch it merges only what you could commit there
+  directly, under the rule above — and never a change to `roles.yaml`, whoever
+  you are: roles are changed in the app, not merged in from a draft.
 
 ## Skills (`{{skillsDir}}/<scope>/…/<skill>/SKILL.md`, or `{{pluginsDir}}/<Plugin>/skills/<skill>/SKILL.md`)
 
