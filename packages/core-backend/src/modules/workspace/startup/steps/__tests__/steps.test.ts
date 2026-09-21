@@ -973,11 +973,42 @@ describe('TemplateFilesStep', () => {
           `${CUSTOMER_GUIDE.replace(/\n+$/, '')}\n\n${agentsFilePointerSentence(guide)}\n`,
         );
 
+        const head = (await git(await checkout(DEFAULT_BRANCH), ['rev-parse', 'HEAD'])).trim();
         await boot();
-        const twice = norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), 'AGENTS.md'), 'utf8'));
-        expect(twice).toBe(once);
-        // And nothing was committed the second time round.
-        expect(twice.split('before working in this knowledge base').length - 1).toBe(1);
+        const after = await checkout(DEFAULT_BRANCH);
+        expect(norm(await fs.readFile(path.join(after, 'AGENTS.md'), 'utf8'))).toBe(once);
+        // And the second boot committed nothing at all.
+        expect((await git(after, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+      });
+
+      /**
+       * The guide's name is a setting, and a setting can be changed twice. The
+       * sentence the last rename wrote points at a file that is no longer
+       * there, and the new name is nowhere in the text — so "is it mentioned?"
+       * says no and an unaimed sentence would be joined by a second one.
+       */
+      it('aims the sentence it already wrote at the new guide, rather than adding another', async () => {
+        configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+        await seedUpstream({ ...(await scaffoldWithoutGuide()), 'AGENTS.md': CUSTOMER_GUIDE });
+        await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+        expect(norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), 'AGENTS.md'), 'utf8'))).toContain(
+          agentsFilePointerSentence('HEXIS.md'),
+        );
+
+        // The admin renames the guide a second time.
+        configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'GUIDE.md' });
+        await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+
+        const dir = await checkout(DEFAULT_BRANCH);
+        const text = norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'));
+        // Their bytes, then ONE sentence, pointing at the guide that exists.
+        expect(text).toBe(
+          `${CUSTOMER_GUIDE.replace(/\n+$/, '')}\n\n${agentsFilePointerSentence('GUIDE.md')}\n`,
+        );
+        expect(text).not.toContain('HEXIS.md');
+        expect(await git(dir, ['log', '--format=%B', '-1'])).toContain(
+          'Point the sentence in AGENTS.md at GUIDE.md',
+        );
       });
 
       it('writes nothing when the name appears anywhere in the text, in any wording', async () => {

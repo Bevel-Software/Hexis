@@ -208,11 +208,61 @@ export function agentsFileOf(layout: KbLayout): string {
  * {@link mentionsAgentsFile}, which is how the startup step asks.
  */
 export function agentsFilePointerSentence(agentsFile: string = AGENTS_FILE): string {
-  return (
-    `Read [${markdownLinkLabel(agentsFile)}](${agentsFileLinkPath(agentsFile)}) ` +
-    'before working in this knowledge base — ' +
-    "it is the platform's guide to its layout, files and rules."
-  );
+  return `Read [${markdownLinkLabel(agentsFile)}](${agentsFileLinkPath(agentsFile)})${POINTER_SENTENCE_TAIL}`;
+}
+
+/**
+ * Everything of the sentence that does NOT depend on the guide's name — split
+ * out so the one definition above can also be RECOGNISED, by the pattern below,
+ * when the name it was written with is no longer the name in effect.
+ */
+const POINTER_SENTENCE_TAIL =
+  " before working in this knowledge base — it is the platform's guide to its layout, files and rules.";
+
+/**
+ * A pointer sentence the platform wrote, naming ANY guide.
+ *
+ * The label admits a backslash escape (`\[`, `\]`) because that is what
+ * {@link markdownLinkLabel} puts there; the destination cannot contain a `)`
+ * or a newline because {@link agentsFileLinkPath} encodes both. Anchored at
+ * both ends by text the platform fixed, so the shape is the provenance —
+ * a customer would have to reproduce our sentence word for word to be taken
+ * for us, which is the same bar the managed-guide header sets.
+ */
+const POINTER_SENTENCE_PATTERN = new RegExp(
+  `Read \\[(?:[^\\]\\n\\\\]|\\\\[\\s\\S])*\\]\\(\\.\\/[^)\\n]*\\)${escapeRegExp(POINTER_SENTENCE_TAIL)}`,
+  'g',
+);
+
+/** `text` as a literal inside a regular expression. */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * `text` with every pointer sentence THE PLATFORM WROTE aimed at `agentsFile`
+ * — or null when it holds none of ours.
+ *
+ * This is what a SECOND rename needs. The guide's name is a setting an admin
+ * may change again: a knowledge base whose `AGENTS.md` was given a sentence
+ * pointing at `HEXIS.md` and is then renamed to `GUIDE.md` must have that
+ * sentence aimed at the new file, not a second one appended beneath a first
+ * that now points at nothing. Asking only whether the NEW name is mentioned
+ * cannot see that — the old sentence does not mention it.
+ *
+ * Returning the text unchanged (rather than null) when the sentence is already
+ * right is deliberate: "ours and correct" and "not ours at all" are different
+ * answers, and only the caller knows that the second one means "consider
+ * appending".
+ */
+export function retargetAgentsFilePointer(text: string, agentsFile: string = AGENTS_FILE): string | null {
+  let found = false;
+  const wanted = agentsFilePointerSentence(agentsFile);
+  const updated = text.replace(POINTER_SENTENCE_PATTERN, () => {
+    found = true;
+    return wanted;
+  });
+  return found ? updated : null;
 }
 
 /**

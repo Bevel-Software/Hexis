@@ -14,6 +14,7 @@ import {
   platformFileNames,
   pluginOfPath,
   renderKbLayoutPlaceholders,
+  retargetAgentsFilePointer,
   reservedRootDirNames,
   validateAgentsFileName,
   validateKbLayout,
@@ -260,5 +261,35 @@ describe('KB layout — the agent guide\'s file name', () => {
     expect(mentionsAgentsFile('# Acme\n\nWrite tickets in the present tense.\n', 'HEXIS.md')).toBe(false);
     // …and the customer's own plain mention counts, in their own words.
     expect(mentionsAgentsFile('See HEXIS.md for the platform.', 'HEXIS.md')).toBe(true);
+  });
+
+  /**
+   * A second rename. The sentence written for the previous guide points at a
+   * file that is no longer there, and the new name appears nowhere in the
+   * text — so it has to be recognised by its SHAPE and aimed again.
+   */
+  test('a pointer sentence the platform wrote is retargeted, whatever guide it named', () => {
+    for (const before of ['HEXIS.md', 'Our [Agent] Guide (v2).md', '#2 Guide.md']) {
+      const text = `# Acme\n\n${agentsFilePointerSentence(before)}\n`;
+      expect(retargetAgentsFilePointer(text, 'GUIDE.md'), before).toBe(
+        `# Acme\n\n${agentsFilePointerSentence('GUIDE.md')}\n`,
+      );
+    }
+    // Already aimed right: ours, and unchanged — which is not the same answer
+    // as "none of ours here", and the caller tells them apart.
+    const current = `# Acme\n\n${agentsFilePointerSentence('GUIDE.md')}\n`;
+    expect(retargetAgentsFilePointer(current, 'GUIDE.md')).toBe(current);
+  });
+
+  test('leaves a file holding nothing of the platform\'s alone', () => {
+    // Null, not the text: there is nothing of ours to aim, so the caller goes
+    // on to ask whether the customer mentioned the guide themselves.
+    expect(retargetAgentsFilePointer('# Acme\n\nWrite tickets in the present tense.\n', 'GUIDE.md')).toBeNull();
+    // Their own link to their own file is not our sentence.
+    expect(retargetAgentsFilePointer('Read [notes](./notes.md) before working here.', 'GUIDE.md')).toBeNull();
+    // Our opening words, their sentence.
+    expect(
+      retargetAgentsFilePointer('Read [HEXIS.md](./HEXIS.md) when you have a moment.', 'GUIDE.md'),
+    ).toBeNull();
   });
 });

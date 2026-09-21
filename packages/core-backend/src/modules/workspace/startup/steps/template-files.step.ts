@@ -8,6 +8,7 @@ import {
   SKILLS_DIR,
   agentsFilePointerSentence,
   mentionsAgentsFile,
+  retargetAgentsFilePointer,
   validateKbRootName,
 } from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME, isAbsence, type IFsProbe } from '../../../../shared/fs.contract.js';
@@ -428,10 +429,27 @@ export class TemplateFilesStep implements OnServerStart {
     if (opts.announceKept) {
       branch.note('Keep AGENTS.md — it is not a platform template, so it is the knowledge base\'s own');
     }
+    // The admin's consent gates every write below, this file being theirs.
+    if (!this.agentsFileLink()) return [];
+
+    // A sentence of OURS already in the file is updated rather than joined by
+    // a second one. The guide's name can be changed again, and after a second
+    // rename the sentence this step wrote last time points at a file that is
+    // no longer there — which asking "is the new name mentioned?" cannot see,
+    // because the old sentence does not mention it.
+    const retargeted = retargetAgentsFilePointer(current, opts.agentsFile);
+    if (retargeted !== null) {
+      if (retargeted === current) return [];
+      branch.write(LEGACY_AGENTS_FILE, retargeted);
+      branch.note(`Point the sentence in AGENTS.md at ${opts.agentsFile}`);
+      return [LEGACY_AGENTS_FILE];
+    }
+
+    // Nothing of ours in there, so the question is the customer's own text.
     // Asked through the shared reading, not a raw `includes`: the sentence
     // spells the name escaped and percent-encoded, so on a punctuated name the
     // copy written last boot need not carry the raw name at all.
-    if (!this.agentsFileLink() || mentionsAgentsFile(current, opts.agentsFile)) return [];
+    if (mentionsAgentsFile(current, opts.agentsFile)) return [];
     branch.write(LEGACY_AGENTS_FILE, withPointerSentence(current, opts.agentsFile));
     branch.note(`Add a pointer to ${opts.agentsFile} at the end of AGENTS.md`);
     return [LEGACY_AGENTS_FILE];
