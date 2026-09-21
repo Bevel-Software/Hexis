@@ -50,9 +50,12 @@ describe('markdownLinkForPaste', () => {
       '/knowledge-base/KnowledgeBase//x.md',
       '/knowledge-base/KnowledgeBase/./x.md',
       '/knowledge-base/KnowledgeBase\\x.md',
+      '/knowledge-base/KnowledgeBase/Sales//',
     ]) {
       expect(markdownLinkForPaste(text, KB), text).toBeNull();
     }
+    // One trailing slash is a folder as copied, and links.
+    expect(markdownLinkForPaste('/knowledge-base/KnowledgeBase/Sales/', KB)).toBe('[Sales](/knowledge-base/KnowledgeBase/Sales/)');
   });
 
   it('leaves everything else alone', () => {

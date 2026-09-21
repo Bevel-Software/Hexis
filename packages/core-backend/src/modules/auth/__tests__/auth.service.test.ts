@@ -165,6 +165,22 @@ describe('AuthService.loginWithPassword — env bootstrap admin', () => {
     expect(accounts.find((a) => a.email === 'root@example.com')?.isEnvAdmin).toBe(false);
   });
 
+  // Not reported, but still that account: a hash stored for it while sign-in
+  // is off would be a credential the row is never meant to carry.
+  it('still refuses to store a password for the env admin while password login is disabled', async () => {
+    const cfg = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret', loginPasswordEnabled: false });
+    const { db: forCreate, captured } = makeFakeDb([[]]);
+    await expect(
+      new AuthService(forCreate, cfg).createAccount('root@example.com', 'Root', 'a-long-enough-password'),
+    ).rejects.toThrow('set in the deployment environment');
+    const { db: forChange } = makeFakeDb([[{ ...ROW, email: 'root@example.com', passwordHash: null }]]);
+    await expect(
+      new AuthService(forChange, cfg).changePassword(ROW.id, undefined, 'a-long-enough-password'),
+    ).rejects.toThrow('set in the deployment environment');
+    expect(captured.set).toHaveLength(0);
+    expect(captured.values).toHaveLength(0);
+  });
+
   it('is disabled entirely when either env var is empty', async () => {
     for (const cfg of [
       makeConfig({ adminEmail: 'root@example.com', adminPassword: '' }),

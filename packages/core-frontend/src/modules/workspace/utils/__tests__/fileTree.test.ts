@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
-import { omitPathFromTree, pathExistsInTree, subtreeHasVisibleEntries, suggestedPages, treeHasVisibleEntries } from '../fileTree';
+import {
+  mergePendingIntoTree,
+  omitPathFromTree,
+  pathExistsInTree,
+  subtreeHasVisibleEntries,
+  subtreeWithheld,
+  suggestedPages,
+  treeHasVisibleEntries,
+} from '../fileTree';
 
 /**
  * A Library tree is one root of the listing, empty on its own terms: a
@@ -47,6 +55,50 @@ describe('subtreeHasVisibleEntries', () => {
   it('is empty for a root the listing does not have', () => {
     expect(subtreeHasVisibleEntries(kb, 'knowledge-base/Agents')).toBe(false);
     expect(subtreeHasVisibleEntries(null, 'knowledge-base/Skills')).toBe(false);
+  });
+});
+
+/**
+ * What was kept out of ONE root is that root's own count, set by the server
+ * per folder: a Skills tree emptied by the read rules says "nothing shared",
+ * a Skills tree that is simply empty beside a withheld Knowledge does not.
+ */
+describe('subtreeWithheld', () => {
+  const kb: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    withheld: 7,
+    children: [
+      {
+        name: 'knowledge-base',
+        relativePath: 'knowledge-base',
+        type: 'directory',
+        withheld: 7,
+        children: [
+          { name: 'KnowledgeBase', relativePath: 'knowledge-base/KnowledgeBase', type: 'directory', withheld: 4, children: [] },
+          { name: 'Skills', relativePath: 'knowledge-base/Skills', type: 'directory', withheld: 3, children: [] },
+          { name: 'Plugins', relativePath: 'knowledge-base/Plugins', type: 'directory', children: [] },
+        ],
+      },
+    ],
+  };
+
+  it("reads one root's own count, not the listing's", () => {
+    expect(subtreeWithheld(kb, 'knowledge-base/Skills')).toBe(3);
+    expect(subtreeWithheld(kb, 'knowledge-base/Plugins')).toBe(0);
+    expect(subtreeWithheld(kb, 'knowledge-base')).toBe(7);
+  });
+
+  it('is 0 for a root the listing does not have', () => {
+    expect(subtreeWithheld(kb, 'knowledge-base/Agents')).toBe(0);
+    expect(subtreeWithheld(null, 'knowledge-base/Skills')).toBe(0);
+  });
+
+  it('survives the pending-upload overlay, which copies the tree', () => {
+    const merged = mergePendingIntoTree(kb, new Map([['knowledge-base/Plugins/new.md', { fullPath: 'knowledge-base/Plugins/new.md', type: 'file' }]]));
+    expect(subtreeWithheld(merged, 'knowledge-base/Skills')).toBe(3);
+    expect(merged.withheld).toBe(7);
   });
 });
 

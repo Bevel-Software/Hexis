@@ -247,17 +247,32 @@ export class AuthService {
    * rather than stored on its row? The single definition behind
    * {@link loginWithPassword} (which accepts only the environment password
    * for it), {@link changePassword} and {@link createAccount} (which both
-   * refuse to store a hash for it), {@link toClientUser} and
-   * {@link listAccounts}, so those five can never disagree about who the
-   * deployment admin is. `email` must already be canonical.
+   * refuse to store a hash for it), so those three can never disagree about
+   * who the deployment admin is. `email` must already be canonical.
+   *
+   * Independent of whether password sign-in is switched on: the refusals
+   * hold while it is off too, or a hash could be stored for that address in
+   * the meantime — a credential the row is never meant to carry. What a
+   * client is TOLD does follow the switch: {@link reportsAsEnvAdmin}.
    */
   private isEnvAdminEmail(email: string): boolean {
     return (
-      (this.config.loginPasswordEnabled ?? true) &&
       this.config.adminEmail.length > 0 &&
       this.config.adminPassword.length > 0 &&
       email === this.config.adminEmail
     );
+  }
+
+  /**
+   * Whether a client is told `email` is the deployment admin — behind
+   * {@link toClientUser} and {@link listAccounts}. The identity is
+   * {@link isEnvAdminEmail}; the switch is password sign-in: with
+   * `LOGIN_PASSWORD=false`, `ADMIN_PASSWORD` is a credential nothing accepts,
+   * and reporting the account as the environment's admin would send its
+   * owner to a login method the deployment does not offer.
+   */
+  private reportsAsEnvAdmin(email: string): boolean {
+    return (this.config.loginPasswordEnabled ?? true) && this.isEnvAdminEmail(email);
   }
 
   /**
@@ -270,7 +285,7 @@ export class AuthService {
    * sees the same answer whether it came from a fresh login or `/auth/me`.
    */
   private toClientUser(user: Parameters<typeof toAuthUser>[0]): AuthUser {
-    return { ...toAuthUser(user), isEnvAdmin: this.isEnvAdminEmail(user.email) };
+    return { ...toAuthUser(user), isEnvAdmin: this.reportsAsEnvAdmin(user.email) };
   }
 
   /**
@@ -338,7 +353,7 @@ export class AuthService {
       email: row.email,
       name: row.name,
       hasPassword: row.passwordHash != null,
-      isEnvAdmin: this.isEnvAdminEmail(row.email),
+      isEnvAdmin: this.reportsAsEnvAdmin(row.email),
       createdAt: row.createdAt,
     }));
   }

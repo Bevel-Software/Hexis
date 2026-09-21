@@ -63,25 +63,36 @@ export function oneLine(text: string): string {
  * the process's own and read best as the lines they are, so only the
  * message — and the head of the stack, which repeats it — is escaped. A
  * `cause` that is itself an error is treated the same way, since the console
- * prints it too. The original is never mutated: an error is often rethrown or
- * inspected after it was logged.
+ * prints it too (a chain that loops back on itself is cut where it loops).
+ * The original is never mutated: an error is often rethrown or inspected
+ * after it was logged.
  */
 export function oneLineError(err: Error): Error {
+  return escapedCopy(err, new Set());
+}
+
+function escapedCopy(err: Error, seen: Set<Error>): Error {
+  seen.add(err);
   const message = oneLine(err.message);
   const copy = Object.create(Object.getPrototypeOf(err) as object) as Error & { cause?: unknown };
   Object.defineProperty(copy, 'message', { value: message, enumerable: false, writable: true, configurable: true });
   Object.defineProperty(copy, 'name', { value: err.name, enumerable: false, writable: true, configurable: true });
   if (typeof err.stack === 'string') {
-    // Node's stack is `<name>: <message>` followed by `\n    at …` frames; the
-    // header is the caller's text, the frames are ours.
-    const frames = err.stack.indexOf('\n    at ');
+    // Node's stack is the error's own `toString()` — `<name>: <message>` —
+    // followed by `\n    at …` frames. The frames are looked for AFTER that
+    // header, not from the top: a message that itself holds a line shaped
+    // like a frame would otherwise move the boundary up and pass the rest of
+    // itself through raw. A stack that does not open with the header is not
+    // one this code knows the shape of, and is escaped whole.
+    const head = Error.prototype.toString.call(err);
+    const frames = err.stack.startsWith(head) ? err.stack.indexOf('\n    at ', head.length) : -1;
     const stack = frames === -1 ? oneLine(err.stack) : `${oneLine(err.stack.slice(0, frames))}${err.stack.slice(frames)}`;
     Object.defineProperty(copy, 'stack', { value: stack, enumerable: false, writable: true, configurable: true });
   }
   const cause = (err as { cause?: unknown }).cause;
   if (cause !== undefined) {
     Object.defineProperty(copy, 'cause', {
-      value: cause instanceof Error ? oneLineError(cause) : cause,
+      value: cause instanceof Error ? (seen.has(cause) ? '[circular]' : escapedCopy(cause, seen)) : cause,
       enumerable: false,
       writable: true,
       configurable: true,

@@ -154,6 +154,18 @@ describe('WorkspaceService.listFiles — read filter', () => {
       expect((await svc.listFiles(workspaceId, filter)).withheld).toBe(5);
     });
 
+    it('counts per folder as well: each folder that stays carries what was kept out beneath it', async () => {
+      const filter: ReadTreeFilter = async (ps) =>
+        new Map(ps.map((p) => [p, !(p.includes('Secret') || p.endsWith('hidden.md'))]));
+      const tree = await svc.listFiles(workspaceId, filter);
+      const byPath = new Map(tree.children!.map((c) => [c.relativePath, c]));
+      // Mixed/ lost its one file; Open/ lost nothing and says nothing.
+      expect(byPath.get('Mixed')?.withheld).toBe(1);
+      expect(byPath.get('Open')?.withheld).toBeUndefined();
+      // The root has the total: Secret/ (4, its subtree included) + Mixed/hidden.md.
+      expect(tree.withheld).toBe(5);
+    });
+
     it('does not count a closed folder kept as the way to a grant below it', async () => {
       // Scopes/ is closed but stays as a container; only Scopes/other.md is dropped.
       const filter: ReadTreeFilter = async (ps) =>

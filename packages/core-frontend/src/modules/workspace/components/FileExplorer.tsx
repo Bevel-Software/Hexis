@@ -44,7 +44,14 @@ import {
   type UploadTarget,
 } from '../state/workspace.context';
 import { rootAnchoredPath } from '../utils/pasteLink';
-import { findKbRoot, KB_ROOT_DIRS, pathExistsInTree, subtreeHasVisibleEntries, treeHasVisibleEntries } from '../utils/fileTree';
+import {
+  findKbRoot,
+  KB_ROOT_DIRS,
+  pathExistsInTree,
+  subtreeHasVisibleEntries,
+  subtreeWithheld,
+  treeHasVisibleEntries,
+} from '../utils/fileTree';
 import { uploadErrorNextStep } from '../utils/uploadError';
 import { useMergedWorkspaceTree } from '../hooks/useMergedWorkspaceTree';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
@@ -439,10 +446,6 @@ function ContextMenu({
   const { isPinned, togglePin, available: pinning } = usePinned();
   const openManageAccess = useManageAccess();
   const confirm = useTreeConfirm();
-  // Whether this listing had entries withheld by the caller's read rules: a
-  // folder delete then takes files the tree cannot count, and the question
-  // says so instead of naming a number that is too small.
-  const { withheld } = useMergedWorkspaceTree();
   const pinned = isPinned(entry.relativePath);
   const [unzipping, setUnzipping] = useState(false);
   // Asked only where a Download is on offer — a proposed row or an absent
@@ -515,7 +518,10 @@ function ContextMenu({
       // The folder it was in — the row itself is gone once the delete lands.
       focusAfterRun: () => rowForPath(entry.relativePath.split('/').slice(0, -1).join('/')),
       isProposed: (path) => suggestions.crFor(path) !== null,
-      partial: withheld > 0,
+      // Entries under THIS folder the caller's read rules kept out: the
+      // delete then takes files the tree cannot count, and the question says
+      // so instead of naming a number that is too small.
+      partial: (entry.withheld ?? 0) > 0,
       run: async () => {
         await deleteOnBranch();
       },
@@ -2017,12 +2023,13 @@ export const KB_EMPTY_MESSAGE = 'This knowledge base is empty.';
  */
 export function EmptyTreeNotice({ rootPath, scope = 'tree' }: { rootPath: string | null; scope?: 'tree' | 'root' }) {
   const { kbDirName } = useWorkspace();
-  const { tree, withheld } = useMergedWorkspaceTree();
-  const empty =
-    tree !== null &&
-    (scope === 'root' && rootPath !== null
-      ? !subtreeHasVisibleEntries(tree, rootPath)
-      : !treeHasVisibleEntries(tree, kbDirName));
+  const { tree, withheld: listingWithheld } = useMergedWorkspaceTree();
+  const oneRoot = scope === 'root' && rootPath !== null;
+  const empty = tree !== null && (oneRoot ? !subtreeHasVisibleEntries(tree, rootPath) : !treeHasVisibleEntries(tree, kbDirName));
+  // What was kept out of what THIS notice covers: one root's own count, or
+  // the listing's — a Skills tree emptied by the rules says so; a Skills tree
+  // that is simply empty beside a withheld Knowledge does not.
+  const withheld = oneRoot ? subtreeWithheld(tree, rootPath) : listingWithheld;
   // Asked only when the message would carry the hint: a withheld tree never does.
   const canWrite = useCanWriteFolder(empty && withheld === 0 ? rootPath : null);
   if (!empty) return null;

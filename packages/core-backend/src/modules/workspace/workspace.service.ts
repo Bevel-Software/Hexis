@@ -2107,14 +2107,17 @@ export class WorkspaceService implements IWorkspaceService {
       /** Hidden by a listing decision, not a read rule: dropping it withholds nothing. */
       unlisted: boolean;
       children: (FileTreeEntry | DirNode)[];
+      /**
+       * Files directly in it the caller's read rules kept out — counted, never
+       * named. Only an entry the filter judged unreadable counts:
+       * `.bevelignore`d and `.git` entries never reach it, and an `'unlisted'`
+       * one is kept from no one. Folders dropped below it are added in `finish`.
+       */
+      withheld: number;
     }
     const relOf = (abs: string) => path.relative(workspaceRoot, abs).replace(/\\/g, '/');
-    const top: DirNode = { name: path.basename(root), relativePath: relOf(root) || '.', readable: true, unlisted: false, children: [] };
+    const top: DirNode = { name: path.basename(root), relativePath: relOf(root) || '.', readable: true, unlisted: false, children: [], withheld: 0 };
     const nodes = new Map<string, DirNode>([['', top]]);
-    // Entries the caller's read rules kept out — counted, never named. Only an
-    // entry the filter judged unreadable counts: `.bevelignore`d and `.git`
-    // entries never reach it, and an `'unlisted'` one is kept from no one.
-    let withheld = 0;
 
     await this.disk.walk(root, explorerWalk(), [
       {
@@ -2144,28 +2147,40 @@ export class WorkspaceService implements IWorkspaceService {
                 readable: readable(entryRel),
                 unlisted: unlisted(entryRel),
                 children: [],
+                withheld: 0,
               };
               nodes.set(rel ? `${rel}/${entry.name}` : entry.name, child);
               node.children.push(child);
             } else if (readable(entryRel)) {
               node.children.push({ name: entry.name, relativePath: entryRel, type: 'file' });
             } else if (!unlisted(entryRel)) {
-              withheld++;
+              node.withheld++;
             }
           });
         },
       },
     ]);
 
-    /** Bottom-up: drop a folder the caller may not read once nothing readable turned up beneath it; sort each level. */
+    /**
+     * Bottom-up: drop a folder the caller may not read once nothing readable
+     * turned up beneath it; sort each level. Each folder that stays carries
+     * how many entries were withheld anywhere under it (a dropped folder
+     * counts as one, its own subtree's count included), so a tree drawn from
+     * ONE folder — the Library's, a delete's — can tell "empty" from "kept
+     * from you" for that folder rather than for the listing. Only when
+     * something was withheld, so an unfiltered — or all-readable — listing
+     * stays exactly the tree it always was.
+     */
     const finish = (node: DirNode): FileTreeEntry => {
       const children: FileTreeEntry[] = [];
+      let withheld = node.withheld;
       for (const child of node.children) {
         if ('type' in child) {
           children.push(child);
           continue;
         }
         const sub = finish(child);
+        withheld += sub.withheld ?? 0;
         if (child.readable || (sub.children?.length ?? 0) > 0) children.push(sub);
         else if (!child.unlisted) withheld++;
       }
@@ -2173,12 +2188,10 @@ export class WorkspaceService implements IWorkspaceService {
         if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
         return a.name.localeCompare(b.name);
       });
-      return { name: node.name, relativePath: node.relativePath, type: 'directory', children };
+      const entry: FileTreeEntry = { name: node.name, relativePath: node.relativePath, type: 'directory', children };
+      return withheld > 0 ? { ...entry, withheld } : entry;
     };
-    const tree = finish(top);
-    // Only when something was withheld, so an unfiltered — or all-readable —
-    // listing stays exactly the tree it always was.
-    return withheld > 0 ? { ...tree, withheld } : tree;
+    return finish(top);
   }
 }
 

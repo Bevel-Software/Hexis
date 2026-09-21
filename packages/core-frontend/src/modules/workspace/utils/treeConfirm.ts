@@ -99,9 +99,9 @@ const possessive = (name: string) => (/s$/i.test(name) ? `${name}'` : `${name}'s
 
 /**
  * The delete question. A folder's count is of the files this listing SHOWS:
- * when the caller's read rules kept entries out of the tree (`partial`), the
- * delete still takes every file under the folder, seen or not, so the
- * sentence says "everything in it" and gives the visible count as what it is.
+ * when the caller's read rules kept entries out of THIS folder (`partial`),
+ * the delete still takes every file under it, seen or not, so the sentence
+ * says "everything in it" and gives the visible count as what it is.
  */
 export function deleteSentence(
   entry: FileTreeEntry,
@@ -111,7 +111,7 @@ export function deleteSentence(
   if (entry.type === 'file') return `Delete ${entry.name}?`;
   const n = countFiles(entry, isProposed);
   const files = `${n} ${n === 1 ? 'file' : 'files'}`;
-  if (partial) return `Delete ${entry.name} and everything in it? (${files} you can see; the folder may hold more.)`;
+  if (partial) return `Delete ${entry.name} and everything in it? (${files} you can see; it holds more you can't.)`;
   return `Delete ${entry.name} and its ${files}?`;
 }
 

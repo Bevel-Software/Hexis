@@ -112,8 +112,9 @@ export class CreatorAccessService implements ICreatorAccess {
     } catch (err) {
       // A probe that failed (a permission error, an I/O error) is not "not
       // there": planning on that would seed a grant into a folder that may
-      // exist. Best-effort, as above — no plan, and the write's own gate
-      // decides what the creation may do.
+      // exist. Best-effort, as above — no plan. The read gate probes the same
+      // place next and fails the request outright rather than judge a tree
+      // it could not read, so nothing is created on a guess either.
       warnSkipped(rel, err);
       return null;
     }

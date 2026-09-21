@@ -51,6 +51,12 @@ describe('redactSecret', () => {
     );
     // Whole value present: scrubbed whole, once.
     expect(redactSecret('x ghp_abcdefghijklmnopqrstuv y', ['ghp_abcdefghijklmnopqrstuv'])).toBe('x *** y');
+    // Both in one text (the value in the URL, the elided form in the reply): both go.
+    expect(
+      redactSecret("fetch https://ghp_abcdefghijklmnopqrstuv@host/r: token 'ghp_abcdefghijklmnop…' rejected", [
+        'ghp_abcdefghijklmnopqrstuv',
+      ]),
+    ).toBe("fetch https://***@host/r: token '***…' rejected");
     // Only the vendor prefix in common: below the floor, untouched.
     expect(redactSecret('a ghp_other b', ['ghp_abcdefghijklmnopqrstuv'])).toBe('a ghp_other b');
   });

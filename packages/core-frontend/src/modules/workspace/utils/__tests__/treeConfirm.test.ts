@@ -32,9 +32,9 @@ describe('deleteSentence', () => {
     expect(deleteSentence(folder)).toBe('Delete Sales and its 2 files?');
   });
 
-  it('says "everything in it" when the listing had entries withheld', () => {
+  it('says "everything in it" when the folder had entries withheld', () => {
     expect(deleteSentence(folder, undefined, true)).toBe(
-      'Delete Sales and everything in it? (2 files you can see; the folder may hold more.)',
+      'Delete Sales and everything in it? (2 files you can see; it holds more you can\'t.)',
     );
   });
 });

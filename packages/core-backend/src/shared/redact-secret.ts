@@ -26,16 +26,18 @@ export function redactSecret(text: string, secrets: readonly (string | null | un
     .map((t) => t?.trim())
     .filter((t): t is string => !!t);
   let scrubbed = text;
-  for (const token of [...new Set(tokens)].sort((a, b) => b.length - a.length)) {
-    // The whole value when it is there; otherwise its longest echoed PREFIX.
-    // Git and the providers elide the middle of a token they quote back
-    // (`ghp_abcdef…`), and an exact match would leave that head on screen —
-    // enough of a secret to be one. Down to a floor, so a short common head
-    // (`ghp_`) does not garble every other token in the log.
-    if (scrubbed.includes(token)) {
-      scrubbed = scrubbed.replaceAll(token, '***');
-      continue;
-    }
+  const ordered = [...new Set(tokens)].sort((a, b) => b.length - a.length);
+  // Every whole value first, then every echoed PREFIX. Git and the providers
+  // elide the middle of a token they quote back (`ghp_abcdef…`), and an exact
+  // match would leave that head on screen — enough of a secret to be one.
+  // Both can be in one text (the value in a URL, the elided form in the
+  // host's reply), so the prefix pass runs whether or not the whole was
+  // found — but only once every whole value is gone, or the head two tokens
+  // share (`ghp_from…`) would garble the second before its own turn came.
+  // Down to a floor, so a short common head (`ghp_`) does not garble every
+  // other token in the log.
+  for (const token of ordered) scrubbed = scrubbed.replaceAll(token, '***');
+  for (const token of ordered) {
     for (let len = token.length - 1; len >= MIN_ECHOED_PREFIX_LENGTH; len--) {
       const prefix = token.slice(0, len);
       if (!scrubbed.includes(prefix)) continue;

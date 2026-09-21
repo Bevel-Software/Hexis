@@ -87,6 +87,37 @@ describe('createConsoleLogger', () => {
     expect(err.stack?.includes('\n[forged]')).toBe(true);
   });
 
+  /**
+   * The frames are looked for after the stack's header — the error's own
+   * `toString()` — not from the top: a message that carries a line shaped
+   * like a frame must not move the boundary up and pass the rest of itself
+   * through raw.
+   */
+  it('escapes a message that mimics a stack frame, whole', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const err = new Error('first\n    at fake (forged.js:1:1)\n[forged] admin signed in');
+    createConsoleLogger({ module: 'sync' }).error('failed', { err });
+    const logged = error.mock.calls[0]?.[1] as Error;
+    expect(logged.message).toBe('first\\n    at fake (forged.js:1:1)\\n[forged] admin signed in');
+    const header = logged.stack?.slice(0, logged.stack.indexOf('\n'));
+    expect(header).toBe('Error: first\\n    at fake (forged.js:1:1)\\n[forged] admin signed in');
+    // The frames that follow are the real ones; the forged one never became a line.
+    expect(logged.stack?.slice(header!.length).startsWith('\n    at ')).toBe(true);
+    expect(logged.stack?.includes('\n    at fake')).toBe(false);
+  });
+
+  it('cuts a cause chain that loops back on itself', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const a = new Error('a\nA');
+    const b = new Error('b\nB', { cause: a });
+    (a as Error & { cause?: unknown }).cause = b;
+    createConsoleLogger({ module: 'sync' }).error('failed', { err: a });
+    const logged = error.mock.calls[0]?.[1] as Error & { cause?: Error & { cause?: unknown } };
+    expect(logged.message).toBe('a\\nA');
+    expect(logged.cause?.message).toBe('b\\nB');
+    expect(logged.cause?.cause).toBe('[circular]');
+  });
+
   it('passes several fields as one inspectable object, other bindings included', () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     createConsoleLogger({ module: 'cr', workspaceId: 'ws-1' }).info('merged', { number: 7 });

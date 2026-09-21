@@ -71,6 +71,15 @@ export function subtreeHasVisibleEntries(tree: FileTreeEntry | null, rootPath: s
   return (root?.children ?? []).some((c) => c.type !== 'file' || c.name !== '.bevelignore');
 }
 
+/**
+ * How many entries the caller's read rules kept out of ONE folder's subtree —
+ * the folder's own `withheld`, which the server sets per directory. 0 for a
+ * folder the listing does not have, or one nothing was kept out of.
+ */
+export function subtreeWithheld(tree: FileTreeEntry | null, rootPath: string): number {
+  return (tree ? findByPath(tree, rootPath) : null)?.withheld ?? 0;
+}
+
 function findByPath(node: FileTreeEntry, relativePath: string): FileTreeEntry | null {
   if (node.relativePath === relativePath) return node;
   for (const child of node.children ?? []) {
@@ -220,10 +229,9 @@ export function mergePendingIntoTree(
 ): FileTreeEntry {
   if (pending.size === 0) return tree;
 
+  // A spread, so what the server set on a folder (`withheld`) survives the copy.
   const cloneNode = (node: FileTreeEntry): FileTreeEntry => ({
-    name: node.name,
-    relativePath: node.relativePath,
-    type: node.type,
+    ...node,
     children: node.children ? node.children.map(cloneNode) : undefined,
   });
   const root = cloneNode(tree);

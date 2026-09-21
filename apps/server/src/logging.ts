@@ -13,9 +13,10 @@ import {
  *
  * Here and not in the published package, by decision: the package owns the
  * contract and a dependency-free default, the shell that runs owns the
- * choice, and npm consumers inherit nothing. pino's default destination
- * writes synchronously, so a fatal line written just before `process.exit`
- * is on stdout before the process is gone; nothing here needs a flush.
+ * choice, and npm consumers inherit nothing. pino's default destination is
+ * asynchronous (a sonic-boom with `sync: false`), but pino registers an exit
+ * hook for it that flushes synchronously, so a fatal line written just before
+ * `process.exit` still reaches stdout; nothing here needs a flush of its own.
  *
  * `err` serializes through pino's standard error serializer, so a thrown
  * error arrives as `{ type, message, stack }` rather than `{}`.
