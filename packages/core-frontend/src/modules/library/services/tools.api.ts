@@ -125,6 +125,42 @@ export async function getMcpServer(slug: string): Promise<McpServerView | null> 
   return (await res.json()) as McpServerView;
 }
 
+/**
+ * What deleting a tool would affect — the dialog's whole content.
+ *
+ * Owner-only on the backend, which is the same verdict the page gates the menu
+ * item on: a 403 here means the affordance should never have been offered, and
+ * the dialog says so rather than pretending the delete is still possible.
+ */
+export interface ToolDependents {
+  slug: string;
+  name: string;
+  /** `manual` — a `.tool` file; `server` — one entry in a plugin's mcp.json. */
+  source: 'manual' | 'server';
+  /** Where the page returns once the tool is gone. */
+  plugin: { name: string; displayName: string };
+  /** Skills whose `allowed-tools` name this tool — their files are NOT touched. */
+  skills: { name: string; path: string }[];
+  /** Other plugins that carry it. */
+  plugins: { name: string; displayName: string }[];
+  /** Counts only — never a value, never whose. */
+  storedKeys: number;
+  signIns: number;
+}
+
+export async function getToolDependents(slug: string): Promise<ToolDependents> {
+  const res = await authFetch(`/api/tools/${encodeURIComponent(slug)}/dependents`);
+  if (!res.ok) await unwrap(res, "Couldn't read what depends on this tool.");
+  return (await res.json()) as ToolDependents;
+}
+
+/** Delete the tool. Answers the plugin it lived in — where the page goes next. */
+export async function deleteTool(slug: string): Promise<{ plugin: string }> {
+  const res = await authFetch(`/api/tools/${encodeURIComponent(slug)}`, { method: 'DELETE' });
+  if (!res.ok) await unwrap(res, "Couldn't delete the tool.");
+  return (await res.json()) as { plugin: string };
+}
+
 export async function putMcpServer(slug: string, write: McpServerWrite): Promise<{ name: string }> {
   const res = await authFetch(`/api/tools/${encodeURIComponent(slug)}/server`, {
     method: 'PUT',

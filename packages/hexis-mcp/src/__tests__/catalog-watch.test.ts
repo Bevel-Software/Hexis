@@ -1,19 +1,23 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { HexisMcpConfig } from '../config.js';
 import { CatalogRevisionUnsupportedError, DeploymentError } from '../deployment.js';
-import { CATALOG_CHECK_MIN_INTERVAL_MS, createCatalogCheck } from '../catalog-watch.js';
+import {
+  CATALOG_CHECK_MIN_INTERVAL_MS,
+  createCatalogCheck,
+} from '../catalog-watch.js';
 
 /**
  * The checker that tells a long-lived local server its deployment's catalog
- * moved — when, and only when, that server is being used.
+ * moved.
  *
- * Everything asserted here is about restraint. It asks nothing on its own: no
- * timer, so an idle connection costs the deployment nothing. It fires on a
- * real change and on nothing else — a spurious fire re-registers an MCP
- * session (closing whatever it held) on every connected laptop. It collapses a
- * burst of activity onto one read. And it survives a deployment that is
- * briefly unreachable without either giving up or writing a line per call for
- * the duration of the outage.
+ * It asks nothing on its own — the server decides WHEN to check (on activity,
+ * never on a timer; see `server.ts`). What is asserted here is what a check
+ * does once asked. Mostly restraint: it fires
+ * on a real change and on nothing else — a spurious fire re-registers an MCP
+ * session, closing whatever it held, on every connected laptop — it collapses
+ * a burst onto one read, and it survives a deployment that is briefly
+ * unreachable without either giving up or writing a line per call for the
+ * duration of the outage.
  */
 
 const { fetchCatalogRevision } = vi.hoisted(() => ({ fetchCatalogRevision: vi.fn() }));
@@ -274,12 +278,58 @@ describe('createCatalogCheck', () => {
   });
 
   /**
-   * The interval is a throttle on a BUSY connection, not a delay a person
-   * notices: someone who commits a manual and then calls a tool sees the new
-   * one on their next listing within a handful of seconds.
+   * The window is a CADENCE, counted from when a check started — so a check
+   * that took a while does not silently widen it.
+   *
+   * It matters because a refresh runs inside a check and costs seconds. If the
+   * window were counted from the settle, a two-second throttle plus a
+   * two-and-a-half-second re-registration would be a four-and-a-half-second
+   * window, and a person calling tools right after a commit would wait on a
+   * throttle nobody chose.
    */
-  it('throttles well inside what a person would call "right away"', () => {
-    expect(CATALOG_CHECK_MIN_INTERVAL_MS).toBeLessThanOrEqual(10_000);
+  it('counts its window from the start of a check, not the end of a slow one', async () => {
+    const t = clock();
+    fetchCatalogRevision.mockResolvedValueOnce('rev-2').mockResolvedValue('rev-2');
+    // A refresh that takes longer than the whole window.
+    const onChanged = vi.fn(async () => {
+      t.advance(2_500);
+    });
+    const check = createCatalogCheck({
+      config,
+      initialRevision: 'rev-1',
+      minIntervalMs: 2_000,
+      onChanged,
+      now: t.now,
+    });
+
+    await check.check(); // starts at 0, refreshes, settles at 2_500
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(fetchCatalogRevision).toHaveBeenCalledTimes(1);
+
+    // 2_500 on the clock: two seconds have passed SINCE THE CHECK STARTED, so
+    // the next one is due. Counted from the settle this would be refused until
+    // 4_500 — and the tick that was refused is the one a person is waiting on.
+    await check.check();
+    expect(fetchCatalogRevision).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * THE BUDGET FOR A CONNECTION IN USE, as arithmetic rather than as a hope.
+   *
+   * A person who commits a manual and keeps calling tools on the same
+   * connection should see it within about five seconds. The THROTTLE is the
+   * ceiling on staleness there — a check landing immediately before the commit
+   * reads the old catalog and opens a fresh window, so nothing can be noticed
+   * until it expires — then one digest read and the re-registration a change
+   * costs, which measured ~2.4s against a hosted deployment. At five seconds
+   * the throttle ALONE put the first sighting at ~7.6s. Two leaves the rest of
+   * the budget for the work. (An idle connection is outside this budget by
+   * design: it asks nothing until its next use.)
+   */
+  it('leaves room inside the five seconds a connection in use is promised', () => {
     expect(CATALOG_CHECK_MIN_INTERVAL_MS).toBeGreaterThan(0);
+    // ~2.4s of re-registration, measured, plus a digest read.
+    const refreshCost = 2_600;
+    expect(CATALOG_CHECK_MIN_INTERVAL_MS + refreshCost).toBeLessThanOrEqual(5_000);
   });
 });

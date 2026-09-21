@@ -108,7 +108,6 @@ async function makeHarness(opts: { canRead?: boolean; skillSaveCheck?: SkillSave
   });
   const stubCreatorAccess = {
     planForCreate,
-    grantInExtractedFile: async () => null,
     noteAccessFileWritten: () => {},
   } as unknown as ICreatorAccess;
 

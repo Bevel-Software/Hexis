@@ -432,6 +432,28 @@ export class ChangeRequestConflictsError extends WorkflowDomainError {
 }
 
 /**
+ * A direct branch merge was asked to do what an open change request is
+ * waiting for a person to do: merge `sourceBranch` into `targetBranch`.
+ * Carries the request's number so the caller can point the person at it.
+ */
+export class OpenChangeRequestBlocksMergeError extends WorkflowDomainError {
+  readonly kind = 'open-change-request-blocks-merge' as const;
+  constructor(
+    readonly sourceBranch: string,
+    readonly targetBranch: string,
+    readonly number: number,
+  ) {
+    super(
+      `Change request #${number} proposes merging "${sourceBranch}" into "${targetBranch}" and is still open. ` +
+        `A change request is merged by a person: ask the user to review #${number} in the app.`,
+      409,
+      { kind: 'open-change-request-blocks-merge', sourceBranch, targetBranch, number },
+    );
+    this.name = 'OpenChangeRequestBlocksMergeError';
+  }
+}
+
+/**
  * Caller tried to open a change request for a `(source, target)` pair that
  * already has one open. Spec rule: A→B blocks A→B (B→A is allowed). Carries
  * the existing CR number so the UI / agent can deep-link to it instead of

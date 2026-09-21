@@ -198,6 +198,13 @@ export interface ShutdownDeps {
   server: Pick<Server, 'close' | 'closeAllConnections'>;
   /** The lease loop from {@link holdCommitWorkerLease}: its stop finishes the in-flight commit and releases the lease. */
   commitWorker: Pick<LeaseLoopHandle, 'stop'>;
+  /**
+   * Background timers to cancel before the pool goes — the join-request
+   * sweep, today. Stopped after the server so nothing new is scheduled, and
+   * before the pool so a tick cannot fire a query into a closed client.
+   * Optional: a caller that has not built them yet passes nothing.
+   */
+  backgroundJobs?: { stopSweeping(): void };
   /** The database — its pool is ended last, once nothing above can still need it. */
   db: Pick<Database, '$client'>;
   log?: (message: string) => void;
@@ -275,6 +282,15 @@ export function createShutdown(
         'closing the server',
         log,
       );
+      // Immediately after the server, and BEFORE the commit worker is stopped.
+      // Stopping that worker awaits an in-flight commit and can spend most of
+      // the remaining budget doing it; a sweep tick firing inside that window
+      // reads the still-open pool and starts fresh clone/commit/push work that
+      // the `process.exit()` at the end of the sequence then kills mid-git.
+      // Nothing new can be recorded once the server is closed, so this is the
+      // earliest point the interval is dead weight. Synchronous and unfailing
+      // — it just clears an interval — so it needs no budget of its own.
+      deps.backgroundJobs?.stopSweeping();
       await bounded(deps.commitWorker.stop(), remaining(), 'stopping the commit worker', log);
       await bounded(deps.db.$client.end(), remaining(), 'ending the database pool', log);
 

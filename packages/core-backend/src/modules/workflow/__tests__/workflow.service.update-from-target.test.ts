@@ -9,6 +9,7 @@ import type { FileLockService } from '../file-lock.service.js';
 import type { PendingCommitsService } from '../pending-commits.service.js';
 import type { Database } from '../../database/connection.js';
 import { WorkflowService } from '../workflow.service.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 import {
   ChangeRequestConflictsError,
   PullRebaseConflictError,
@@ -69,6 +70,7 @@ function harness(opts: {
     {} as unknown as FileLockService,
     pendingCommits as unknown as PendingCommitsService,
     'knowledge-base',
+    openChangeGate(),
   );
   return { svc, git, prs, pendingCommits, refreshed };
 }

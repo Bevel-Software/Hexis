@@ -349,6 +349,25 @@ export async function createCoreServer(
     })
     .catch((err) => crLog.warn('deleted-branch sweep failed:', { err }));
 
+  // Recorded join requests that are still owed, resumed — now, and then on a
+  // timer. SEQUENCED AFTER the startup phase for the same reason as the sweep
+  // above: the work needs the default-branch clone the runner maintains and
+  // the plugin catalog read from it, and a sweep that ran first would refuse
+  // every row for a knowledge base that simply was not ready — telling people
+  // their request could not be sent when nothing had gone wrong with it.
+  //
+  // ON A TIMER rather than at boot alone, because boot cannot cover the
+  // redeploy: this process sweeps while the outgoing one still holds a
+  // record, skips it (correctly — two servers must not do git on one branch),
+  // and the outgoing process then exits mid-work. Nothing else would look at
+  // that row again. The requester cannot prompt it either: a pending record
+  // shows them the "Requested" card, not a button.
+  //
+  // Not awaited, and nothing to report here but the failure to read the table
+  // at all: a first request from a person is a full clone, nothing else at
+  // boot depends on it, and each row records its own outcome.
+  core.pluginJoinRequestJobs.startSweeping();
+
   // Auth routes (unprotected — login endpoint must be accessible)
   app.use(
     '/api',
@@ -450,7 +469,7 @@ export async function createCoreServer(
   // `get_skill`. Warnings only; it never refuses a save.
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kbDirName);
   registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kbDirName);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate);
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
@@ -569,6 +588,7 @@ export async function createCoreServer(
     core.adminAccess,
     core.disk,
     allowedToolsChecker,
+    core.changeGate,
   ));
   // Workflow is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes
@@ -635,10 +655,9 @@ export async function createCoreServer(
     core.pluginIndexService,
     core.accessControl,
     core.workflowService,
-    core.workspaceService,
     core.joinRequestsService,
+    core.pluginJoinRequestJobs,
     core.pluginProvisionService,
-    core.kbDirName,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
     core.pluginLinksService,
     core.pluginRenameService,
@@ -706,13 +725,16 @@ export async function createCoreServer(
       oidcRedirectUri(core.config.publicBackendUrl),
     ),
   );
-  app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService, {
-    service: core.mcpServerEditService,
-    getUser: async (userId) => {
-      const u = await core.authService.getUserById(userId);
-      return u ? ({ id: u.id, email: u.email, name: u.name } as AuthUser) : undefined;
-    },
-  }, core.pendingToolsService));
+  const toolPageUser = async (userId: string): Promise<AuthUser | undefined> => {
+    const u = await core.authService.getUserById(userId);
+    return u ? ({ id: u.id, email: u.email, name: u.name } as AuthUser) : undefined;
+  };
+  app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(
+    core.toolManualService,
+    { service: core.mcpServerEditService, getUser: toolPageUser },
+    { service: core.toolDeleteService, getUser: toolPageUser },
+    core.pendingToolsService,
+  ));
   app.use('/api', core.authMiddleware, createSecretsVaultRoutes(secretsVaultRoutesDeps));
   // The authed tail of the MCP OAuth flow: /connect calls these to describe
   // the pending authorization and, on Finish, to mint the one-time code. The

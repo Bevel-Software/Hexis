@@ -399,7 +399,12 @@ describe('ToolPage: OAuth round-trip', () => {
     window.history.replaceState(null, '', '/skills-and-tools/tools/heyreach#authorized=sec_1');
     renderPage();
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Signed in to heyreach.');
+    // Scoped by NAME: the `⋯` menu carries its own (empty) status region for
+    // the copy-link answer, so "the only status on the page" is no longer a
+    // way to name the sign-in banner.
+    expect(
+      (await screen.findAllByRole('status')).map((s) => s.textContent),
+    ).toContain('Signed in to heyreach.');
     // Consumed, so a refresh doesn't re-announce it.
     await waitFor(() => expect(window.location.hash).toBe(''));
     expect(window.location.pathname).toBe('/skills-and-tools/tools/heyreach');
@@ -431,7 +436,12 @@ describe('ToolPage: OAuth round-trip', () => {
     );
     renderPage();
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Signed in to heyreach.');
+    // Scoped by NAME: the `⋯` menu carries its own (empty) status region for
+    // the copy-link answer, so "the only status on the page" is no longer a
+    // way to name the sign-in banner.
+    expect(
+      (await screen.findAllByRole('status')).map((s) => s.textContent),
+    ).toContain('Signed in to heyreach.');
     await waitFor(() => expect(window.location.hash).toBe(''));
     expect(window.location.search).toBe('?server=heyreach');
     expect(window.location.pathname).toBe(
@@ -457,7 +467,12 @@ describe('ToolPage: OAuth round-trip', () => {
       window.history.replaceState(null, '', '/skills-and-tools/tools/heyreach#authorized=sec_1');
       renderPage();
 
-      await screen.findByRole('status');
+      // `All`, because the page carries more than one live region (the
+      // sections announce their own loading) — the one this waits on is the
+      // sign-in's.
+      expect((await screen.findAllByRole('status')).map((s) => s.textContent)).toContain(
+        'Signed in to heyreach.',
+      );
       await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
     });
 

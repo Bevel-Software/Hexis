@@ -52,7 +52,7 @@ async function baseUrlAs(
       throw new Error('/tools/:slug should not have matched "pending"');
     },
   } as unknown as IToolManualService;
-  app.use('/api', createToolManualsBrowserRoutes(toolManualService, undefined, pendingTools));
+  app.use('/api', createToolManualsBrowserRoutes(toolManualService, undefined, undefined, pendingTools));
   httpServer = await new Promise<HttpServer>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

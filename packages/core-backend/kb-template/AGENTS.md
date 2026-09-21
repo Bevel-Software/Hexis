@@ -254,6 +254,23 @@ Access to any path — reading it as much as writing it — is governed by
   strips a separate read grant. So `download: Ana <ana@x.io>` alone lets Ana
   open the node as well as download it, and a `deny download` beside an
   inherited read leaves her able to open it but not save it.
+- **You can only change what you can read.** Nothing is created, changed,
+  moved into or removed from a place the caller cannot read — on every
+  branch, drafts included, whatever `write:` rules say. A write tool refused
+  for this says so (`write-denied`, naming the unreadable folder), and
+  proposing is not offered either: a proposal into a folder its author cannot
+  see would vanish from them the moment it landed. Two exceptions. A NEW
+  FOLDER directly under `{{knowledgeBaseDir}}/`, `{{skillsDir}}/` or
+  `{{pluginsDir}}/`: anyone may start one, whatever the root's rules grant
+  them, and the new folder's `access.md` is seeded with the creator's own
+  `read:` grant so what they put there is visible to them (a loose FILE
+  directly at a root has no folder to carry that grant and is not excepted).
+  And an Admin — or the deployment owner — may change the files directly in
+  the repository root (`roles.yaml`, `access.md`, `groups.yaml`, `AGENTS.md`,
+  …) even when the root grants read to nobody: the same rescue the write
+  floor gives them, so a tree whose root rules lock everyone out stays
+  repairable from inside the app. That rescue stops at the root; a subfolder
+  an admin cannot read is closed to them like to anyone else.
 - **Resolution** walks repo root → file directory, accumulating per-principal
   state. User-level entries trump role-level entries. A role denial removes
   only that role's contribution; it does not undo grants from other roles.
@@ -393,6 +410,22 @@ File-level write access decides how a change lands on the default branch:
   review flow — and prefer a change request when in doubt, when the change is
   large, or when it touches content the user does not own.
 
+### An agent proposes and syncs; a person merges
+
+- **Propose** with `open_change_request`, then give the user the request's
+  `url`. Reviewing, approving and merging a change request happen in the app,
+  by a person — no agent tool approves a file, bypasses approval, or merges a
+  request. `merge_change_request` no longer exists.
+- **Sync** a draft with `merge_branch`, `source` = the branch the request
+  targets, `target` = the draft. This is allowed while the draft's request is
+  open, and is how you bring it up to date or surface conflicts to resolve on
+  the draft.
+- `merge_branch` refuses to merge a draft into the branch its open change
+  request targets — it names the request; ask the user to review it in the
+  app. Into a protected branch it merges only what you could commit there
+  directly, under the rule above — and never a change to `roles.yaml`, whoever
+  you are: roles are changed in the app, not merged in from a draft.
+
 ## Skills (`{{skillsDir}}/<scope>/…/<skill>/SKILL.md`, or `{{pluginsDir}}/<Plugin>/skills/<skill>/SKILL.md`)
 
 A skill is a folder holding a `SKILL.md` and whatever files it needs. Shared
@@ -424,7 +457,8 @@ skills are read from the workspace on every request, on either connection.
 See *A released tool or skill is live without a reconnect* under **Tool
 Manuals** for the one caveat (an MCP client that caches the prompt list it
 was given at connect time must re-list — the prompt-list-changed notification
-that tells it to arrives with the connection's next catalog check).
+that tells it to arrives with the connection's next catalog check, at its
+next use).
 
 **How skills reach agents.** Through the MCP server (`list_skills`,
 `get_skill`), or as native plugins: every user can clone a git remote from
@@ -590,7 +624,7 @@ Call the **`list_tool_setup`** tool to see, for every accessible tool — `.tool
 
 **Tools are served from the default branch only.** An `mcp.json` entry or `.tool` you write on a draft is committed to that draft and nowhere else: it is not listed, not callable and has no sign-in on the Connect page until the draft is merged. After declaring a tool on a draft, call `list_tool_setup` with `branch` set to that draft — `onBranchOnly` names what is still waiting there — and tell the user it goes live once the change request is merged. A tool that stays in `tools` is released, and a restart does not remove it or its sign-ins; if one disappears, check the caller's read access to the file that declares it.
 
-**A released tool or skill is live without a reconnect.** A commit on the default branch that adds, changes or removes a `.tool`, an `mcp.json`, a `plugin.json` or a `SKILL.md` drops the catalogs at once, whichever way the commit arrived (the app, the file tools, or a git push). The hosted endpoint is stateless — it reads the live catalog on every request, so the very next call sees the change. The local `hexis-mcp` server checks the workspace's catalog whenever its connection is used — when a tool call finishes, and when a client lists the tools (at most once every five seconds, and never while idle) — and re-registers what changed, local-only servers included. The change lands at the check that notices it: in the listing that ran it, or after the call that triggered it, so a new tool is callable from the call after that one, and a listing inside the five-second window still shows what the last check confirmed. From then on `list_tools`, `list_tool_setup` and `list_local_tools` answer with the new state on the connection you already have. Skills need no check at all: `list_skills` and `get_skill` read the workspace on every request, so a committed `SKILL.md` is in the very next answer, and the two resolve a skill the same way, so a skill you can load by name is a skill the listing shows.
+**A released tool or skill is live without a reconnect.** A commit on the default branch that adds, changes or removes a `.tool`, an `mcp.json`, a `plugin.json` or a `SKILL.md` drops the catalogs at once, whichever way the commit arrived: the app, the file tools, a git push, or an approved change request being applied. The hosted endpoint is stateless — it reads the live catalog on every request, so the very next call sees the change. The local `hexis-mcp` server checks the workspace's catalog whenever its connection is used — when a tool call finishes, and when a client lists the tools (at most once every two seconds, and never while idle, so an unused connection costs the workspace nothing) — and re-registers what changed, local-only servers included. The change lands at the check that notices it: in the listing that ran it, or after the call that triggered it, so a new tool is callable from the call after that one; on a connection in use that is within about five seconds of the commit, and an idle connection catches up at its next use. From then on `list_tools`, `list_tool_setup` and `list_local_tools` answer with the new state on the connection you already have — unless a tool call is still running on that connection, which holds the refresh until it finishes (see the caveat below). Skills need no check at all: `list_skills` and `get_skill` read the workspace on every request, so a committed `SKILL.md` is in the very next answer, and the two resolve a skill the same way, so a skill you can load by name is a skill the listing shows.
 
 The platform also sends the MCP tool-list-changed and prompt-list-changed notifications when it can. **A client that CACHES the list it got at connect time — rather than honouring those notifications — will not see the change: it must re-list, or reconnect.** That is a property of the client, not of the workspace; if a tool you just wrote is missing, call `list_tools` again before assuming anything is wrong. One caveat on the local `hexis-mcp` server: a refresh there waits for a tool call that is still running (up to 15 seconds), so a commit made mid-call lands once that call finishes — and a LOCAL-only server (`local: true`, or a `type: "stdio"` command) that changed is restarted by that refresh, so a call to it made in the same moment may see it come back.
 

@@ -11,6 +11,7 @@ import type { WorkflowEventBus } from '../event-bus.js';
 import type { Database } from '../../database/connection.js';
 import { WorkflowService, syncConflictMessage } from '../workflow.service.js';
 import { PullRebaseConflictError, RemoteBranchGoneError } from '../../../shared/domain-errors.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
 /**
  * `syncWorkspaceFromRemote` — the per-branch step a remote sync drives.
@@ -37,6 +38,7 @@ function build(opts: { sync: () => Promise<RemoteSyncPullResult> }) {
     {} as FileLockService,
     pendingCommits,
     'knowledge-base',
+    openChangeGate(),
     events,
   );
   return { svc, git, prs, pendingCommits, emit: events.emit as ReturnType<typeof vi.fn> };
@@ -258,6 +260,7 @@ describe('WorkflowService.retireRemoteGoneClone', () => {
       {} as Database, git, {} as PullRequestService, {} as IReviewWorkflowService,
       workspaceService, {} as IAccessControl, {} as FileLockService, {} as PendingCommitsService,
       'knowledge-base',
+      openChangeGate(),
     );
     return { svc, git, workspaceService };
   }
@@ -325,6 +328,7 @@ describe('WorkflowService.retireRemoteGoneClone — what can bring the branch ba
       {} as Database, git, {} as PullRequestService, {} as IReviewWorkflowService,
       workspaceService, {} as IAccessControl, {} as FileLockService, {} as PendingCommitsService,
       'knowledge-base',
+      openChangeGate(),
     );
     expect(await svc.retireRemoteGoneClone('ali%2Fx')).toBe(false);
     expect(workspaceService.deleteWorkspace).not.toHaveBeenCalled();
@@ -353,6 +357,7 @@ describe('WorkflowService.retireRemoteGoneClone — what can bring the branch ba
       {} as Database, git, {} as PullRequestService, {} as IReviewWorkflowService,
       workspaceService, {} as IAccessControl, {} as FileLockService, {} as PendingCommitsService,
       'knowledge-base',
+      openChangeGate(),
     );
     // Retirement enters first; a createBranch for the same name arrives while
     // it holds the lock and must wait until the delete has happened — never
