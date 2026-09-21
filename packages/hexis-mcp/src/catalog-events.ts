@@ -28,6 +28,7 @@
  */
 import { printable } from '@bevel-software/platform-mcp-core';
 import type { HexisMcpConfig } from './config.js';
+import { renewConnectionKeyNow } from './renewal.js';
 
 /**
  * How long to wait before reopening a stream that ended, doubling to
@@ -52,6 +53,26 @@ const RECONNECT_MAX_MS = 30_000;
  * seconds on a deployment that is perfectly fine.
  */
 const HEALTHY_STREAM_MS = 20_000;
+
+/**
+ * The blank line that ends an SSE frame — in every line ending the spec
+ * allows, not just the one our own deployment writes.
+ *
+ * A line may end with CRLF, LF or CR, so a frame boundary is any TWO of those
+ * in a row. Scanning for `\n\n` alone found nothing in a CRLF stream — the
+ * bytes there are `\r\n\r\n`, which contains no `\n\n` — so every frame
+ * stayed in the buffer until it hit the oversize cap, and the subscription
+ * reconnected forever without ever delivering a revision. A proxy that
+ * rewrites line endings is enough to produce that, so the parser has to read
+ * what the spec permits rather than what we happen to send.
+ *
+ * Listed longest-first, and deliberately WITHOUT `\r\n` on its own: that is
+ * one line ending, not two, and matching it would split every single line of
+ * a CRLF stream into its own frame. `\r\n\r` is left out for the opposite
+ * reason — it is the first three bytes of `\r\n\r\n`, and treating it as a
+ * boundary would cut a frame in half whenever a read happened to end there.
+ */
+const FRAME_BOUNDARY = /\r\n\r\n|\r\n\n|\n\r\n|\n\n|\r\r/;
 
 /** A running subscription. `stop()` is idempotent and never throws. */
 export interface CatalogEventsSubscription {
@@ -133,20 +154,41 @@ export function subscribeCatalogEvents(options: CatalogEventsOptions): CatalogEv
   const readStream = async (): Promise<void> => {
     const controller = new AbortController();
     abort = controller;
-    let res: Response;
-    try {
-      res = await fetch(`${config.baseUrl}/api/agent/catalog-events`, {
-        headers: {
-          // Read FRESH, not captured: a renewal may have replaced the key
-          // since the last attempt, and reopening with the retired one is how
-          // a subscription would 401 forever on a perfectly good deployment.
-          Authorization: `Bearer ${config.connectionKey}`,
-          Accept: 'text/event-stream',
-        },
+    const open = (bearer: string): Promise<Response> =>
+      fetch(`${config.baseUrl}/api/agent/catalog-events`, {
+        headers: { Authorization: `Bearer ${bearer}`, Accept: 'text/event-stream' },
         signal: controller.signal,
       });
+    let res: Response;
+    try {
+      // Read FRESH, not captured: a renewal may have replaced the key since
+      // the last attempt, and reopening with the retired one is how a
+      // subscription would 401 forever on a perfectly good deployment.
+      res = await open(config.connectionKey);
+      // OAUTH MODE'S EXPIRED BEARER. Every other request this process makes
+      // recovers from a 401 by renewing and retrying (`deployment.ts`), and
+      // this one has to as well — it is the ONLY request an idle connection
+      // makes, so nothing else would ever trigger the renewal on its behalf.
+      // Without this, a grant whose lifetime the deployment did not state
+      // (no `expiresInMs`, so no proactive timer either) leaves the stream
+      // reconnecting forever with a retired key, and the connection silently
+      // stops hearing about changes.
+      //
+      // Through the SINGLE FLIGHT, never `config.renewConnectionKey`
+      // directly: the refresh token rotates, and a second renewal racing a
+      // tool call's would present a just-retired one and kill the sign-in.
+      // ONE retry — a second 401 is an authorization that is gone, which no
+      // amount of refreshing fixes, so it falls through to the backoff below
+      // where it is reported once. Key mode has no renewal at all and lands
+      // there directly; its 401 is a revoked key, and the REST reads say so
+      // in the words that path owns.
+      if (res.status === 401 && config.renewConnectionKey) {
+        await res.body?.cancel().catch(() => {});
+        res = await open(await renewConnectionKeyNow(config));
+      }
     } catch (err) {
-      // An abort during teardown is not a failure to report.
+      // An abort during teardown is not a failure to report, and neither is a
+      // renewal refused because the config is shutting down.
       if (stopped) return;
       throw err;
     }
@@ -171,16 +213,16 @@ export function subscribeCatalogEvents(options: CatalogEventsOptions): CatalogEv
         // Frames are separated by a blank line. Anything after the last one
         // is a partial frame and stays in the buffer — a fingerprint split
         // across two TCP reads is ordinary, not an error.
-        let boundary = buffer.indexOf('\n\n');
-        while (boundary !== -1) {
-          const frame = buffer.slice(0, boundary);
-          buffer = buffer.slice(boundary + 2);
+        let boundary = FRAME_BOUNDARY.exec(buffer);
+        while (boundary !== null) {
+          const frame = buffer.slice(0, boundary.index);
+          buffer = buffer.slice(boundary.index + boundary[0].length);
           const revision = revisionOfFrame(frame);
           // Awaited, so two announcements in quick succession cannot have
           // their refreshes overlap: the caller serialises, but only if we
           // give it the chance to.
           if (revision !== null && !stopped) await deliver(revision);
-          boundary = buffer.indexOf('\n\n');
+          boundary = FRAME_BOUNDARY.exec(buffer);
         }
         // A deployment (or something in front of it) that streams without
         // ever ending a frame must not grow this without bound. Far above any
@@ -236,8 +278,9 @@ export function subscribeCatalogEvents(options: CatalogEventsOptions): CatalogEv
  */
 function revisionOfFrame(frame: string): string | null {
   const data = frame
-    .split('\n')
-    .map((line) => (line.endsWith('\r') ? line.slice(0, -1) : line))
+    // Every line ending the spec allows, for the same reason the boundary
+    // scan reads all three.
+    .split(/\r\n|\r|\n/)
     // Comments (`:` first) are the keep-alive, and `event:`/`id:` are not
     // ours to interpret — only `data:` carries a payload.
     .filter((line) => line.startsWith('data:'))

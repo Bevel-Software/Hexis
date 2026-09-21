@@ -330,7 +330,7 @@ describe('resolveDeployment', () => {
   });
 
   /**
-   * Both flags are capabilities, not probes: an unknown `/api/*` path on an
+   * These flags are capabilities, not probes: an unknown `/api/*` path on an
    * older deployment falls through to the JWT mounts and answers 401, which a
    * caller would read as a dead credential. So anything that is not a literal
    * `true` has to mean "not there".

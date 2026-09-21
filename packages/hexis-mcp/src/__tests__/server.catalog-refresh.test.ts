@@ -82,9 +82,18 @@ function commit(tools: string[], local: string[] = deploymentLocal): void {
   announce();
 }
 
-/** Write the current fingerprint into every open stream. */
+/**
+ * Write the current fingerprint into every open stream.
+ *
+ * Skips a response that is no longer writable rather than relying on every
+ * caller to have emptied `openStreams` first: a stream ended by a test (or by
+ * the server hanging up) stays in the set until its `close` fires, and a
+ * write to it would throw out of `commit()` — failing the test with an
+ * ERR_STREAM_WRITE_AFTER_END instead of whatever it was actually asserting.
+ */
 function announce(): void {
   for (const stream of openStreams) {
+    if (stream.writableEnded || stream.destroyed) continue;
     stream.write(`event: revision\ndata: ${JSON.stringify({ revision })}\n\n`);
   }
 }

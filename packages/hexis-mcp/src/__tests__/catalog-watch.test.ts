@@ -128,12 +128,22 @@ describe('createCatalogCheck', () => {
     fetchCatalogRevision.mockImplementationOnce(() => new Promise<string>((resolve) => (release = resolve)));
     const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged: vi.fn() });
 
-    const first = check.check();
-    const second = check.check();
-    expect(second).toBe(first);
+    // Asserted by BEHAVIOUR rather than by promise identity: what a second
+    // caller is owed is one read and an answer that waits for it, not the
+    // same object. (The two are now different objects — each caller waits for
+    // everything learned, which includes an announcement queued behind the
+    // read, and that tail is not the same promise for both.)
+    const settled: string[] = [];
+    const first = check.check().then(() => settled.push('first'));
+    const second = check.check().then(() => settled.push('second'));
     expect(fetchCatalogRevision).toHaveBeenCalledTimes(1);
+    await Promise.resolve();
+    expect(settled).toEqual([]); // neither answers while the read is open
+
     release('rev-1');
-    await first;
+    await Promise.all([first, second]);
+    expect(settled.sort()).toEqual(['first', 'second']);
+    expect(fetchCatalogRevision).toHaveBeenCalledTimes(1);
   });
 
   /**
@@ -456,6 +466,71 @@ describe('CatalogCheck.notice — a revision the deployment announced', () => {
     release();
     await Promise.all([announced, listing]);
     expect(finished).toBe(true);
+  });
+
+  /**
+   * A digest read takes a round trip, and an announcement can land inside it.
+   * What the deployment volunteered is at least as fresh as what a read that
+   * started earlier is about to return, so the read loses.
+   *
+   * The damage if it does not: the older fingerprint is applied on top, a
+   * second re-registration runs for nothing, and `applied` ends up pointing
+   * at a revision the catalog has already moved past — so the next check
+   * announces a change that was already made, and a refresh that failed
+   * halfway would leave the connection without its tools and no record that
+   * anything was owed.
+   */
+  it('drops a check reading that an announcement overtook', async () => {
+    let release: (value: string) => void = () => {};
+    fetchCatalogRevision.mockImplementationOnce(() => new Promise<string>((resolve) => (release = resolve)));
+    const onChanged = vi.fn();
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged });
+
+    const reading = check.check(); // in flight, will answer 'rev-2'
+    await check.notice('rev-3'); // the deployment says so first
+    expect(onChanged).toHaveBeenCalledExactlyOnceWith('rev-3');
+
+    release('rev-2');
+    await reading;
+
+    // No second refresh, and nothing regressed: an announcement of 'rev-3'
+    // now is correctly nothing to do.
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    await check.notice('rev-3');
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The same race from the LISTING's side. A `tools/list` that joined a check
+   * already running must not answer from the toolset an announcement queued
+   * behind that check is in the middle of replacing.
+   */
+  it('makes a listing wait for an announcement queued behind the check it joined', async () => {
+    let release: (value: string) => void = () => {};
+    fetchCatalogRevision.mockImplementationOnce(() => new Promise<string>((resolve) => (release = resolve)));
+    let finishRefresh = (): void => {};
+    const refreshing = new Promise<void>((resolve) => {
+      finishRefresh = resolve;
+    });
+    const onChanged = vi.fn(async () => {
+      await refreshing;
+    });
+    const check = createCatalogCheck({ config, initialRevision: 'rev-1', minIntervalMs: 0, onChanged });
+
+    const reading = check.check();
+    const announced = check.notice('rev-3'); // queued behind the read
+    const listing = check.check(); // joins; must wait for BOTH
+    let listingDone = false;
+    void listing.then(() => (listingDone = true));
+
+    release('rev-2');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The read has settled, but the announcement's refresh has not.
+    expect(listingDone).toBe(false);
+
+    finishRefresh();
+    await Promise.all([reading, announced, listing]);
+    expect(listingDone).toBe(true);
   });
 
   it('does nothing once stopped', async () => {

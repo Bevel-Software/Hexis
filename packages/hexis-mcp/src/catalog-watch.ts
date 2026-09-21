@@ -186,6 +186,18 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
    * hand back should be the one the refresh in flight is building.
    */
   let settling: Promise<void> | null = null;
+  /**
+   * Bumped by every announcement. A check's digest read takes a round trip,
+   * and an announcement can land inside it: the deployment volunteers a
+   * fingerprint the moment its catalog moves, so what it says is at least as
+   * fresh as what a read that started EARLIER is about to return. Applying
+   * that read afterwards would re-register against the older fingerprint and
+   * — worse — leave `applied` pointing at it, so the next check would find a
+   * "change" it has already made and the one after that would find none.
+   * A read that sees the epoch move discards what it read instead; the
+   * announcement it lost to is the fresher answer to the same question.
+   */
+  let announcements = 0;
   /** So a deployment that is down for an hour writes one line, not one per call. */
   let failing = false;
   /** The same restraint for a refresh that keeps failing against a live deployment. */
@@ -248,6 +260,7 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
   };
 
   const run = async (): Promise<void> => {
+    const askedAt = announcements;
     let revision: string;
     try {
       revision = await fetchCatalogRevision(config);
@@ -270,12 +283,34 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
       failing = false;
       log('[hexis-mcp] the workspace is answering again; its tools are being checked for changes.');
     }
+    // Overtaken while this read was in flight — see `announcements`. The
+    // announcement is already queued (or applied), so dropping this costs
+    // nothing and keeps the applied revision moving forward only.
+    if (announcements !== askedAt) return;
     await observe(revision);
+  };
+
+  /**
+   * Everything learned SO FAR, applied — the check in flight, then whatever
+   * was queued behind it.
+   *
+   * What a listing actually needs. Awaiting `inFlight` alone answered as soon
+   * as the check settled, and an announcement that arrived while that check
+   * ran is queued BEHIND it: the list would be handed back from the toolset
+   * that queued refresh is in the middle of replacing. Two hops and no loop —
+   * a third arrival is a change that landed after the caller asked, and
+   * waiting for those in turn would let a busy workspace hold a listing open
+   * for as long as people keep committing.
+   */
+  const settled = async (): Promise<void> => {
+    if (inFlight) await inFlight;
+    const tail = settling;
+    if (tail) await tail;
   };
 
   const check = (): Promise<void> => {
     if (stopped) return Promise.resolve();
-    if (inFlight) return inFlight;
+    if (inFlight) return settled();
     // A clock that went BACKWARD reads as an expired throttle, not a check
     // owed in the future: whatever the caller's clock is, a negative gap can
     // only mean it was adjusted, and refusing checks until it catches up would
@@ -286,7 +321,7 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
       // for a revision the deployment announced a moment ago, and a listing
       // that returned ahead of it would hand back the toolset that refresh is
       // in the middle of replacing.
-      if (sinceLast >= 0 && sinceLast < minIntervalMs) return settling ?? Promise.resolve();
+      if (sinceLast >= 0 && sinceLast < minIntervalMs) return settled();
     }
     lastStartedAt = now();
     inFlight = run()
@@ -298,7 +333,7 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
       .finally(() => {
         inFlight = null;
       });
-    return inFlight;
+    return settled();
   };
 
   const notice = (revision: string): Promise<void> => {
@@ -308,6 +343,11 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
     // check does. Without that, the `tools/list` a notification provokes
     // would spend a round trip re-asking a question that has just been
     // answered — on every single change, to every connected client.
+    //
+    // The same "at least as fresh" is why the epoch moves here: a digest read
+    // that was already in flight is now answering an older question, and
+    // `run` drops it rather than applying it on top of this.
+    announcements += 1;
     lastStartedAt = now();
     return observe(revision);
   };

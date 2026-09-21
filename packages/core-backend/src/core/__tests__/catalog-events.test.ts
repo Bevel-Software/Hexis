@@ -130,11 +130,45 @@ async function open(url: string): Promise<{
     const deadline = Date.now() + 5_000;
     while (frames.length < count) {
       if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await sleep(10);
     }
   };
-  return { frames, revisions, waitFor, close: () => abort.abort(), response };
+  /**
+   * Wait until nothing more is coming, for a NEGATIVE assertion.
+   *
+   * Not a flat sleep. A bare `setTimeout(150)` passes for two different
+   * reasons — nothing was announced, or the announcement had not arrived yet —
+   * and a change that put a delay in front of the route (a debounce, a
+   * scheduler) would keep every one of these green while the behaviour they
+   * describe was gone. So this first waits for the WORK a signal provokes to
+   * have happened (`didWork`, normally one catalog re-read), which is the
+   * event a delay would push out, and only then waits out a short quiet
+   * window. It is also several times faster when nothing is wrong.
+   */
+  const quiet = async (
+    didWork: () => boolean,
+    { windowMs = 30, deadlineMs = 3_000 }: { windowMs?: number; deadlineMs?: number } = {},
+  ): Promise<void> => {
+    const deadline = Date.now() + deadlineMs;
+    while (!didWork()) {
+      if (Date.now() > deadline) throw new Error('timed out waiting for the work a signal provokes');
+      await sleep(5);
+    }
+    let seen = frames.length;
+    let quietSince = Date.now();
+    while (Date.now() - quietSince < windowMs) {
+      if (Date.now() > deadline) return;
+      await sleep(5);
+      if (frames.length !== seen) {
+        seen = frames.length;
+        quietSince = Date.now();
+      }
+    }
+  };
+  return { frames, revisions, waitFor, quiet, close: () => abort.abort(), response };
 }
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe('GET /agent/catalog-events', () => {
   it('opens with the caller’s current fingerprint, ACL-filtered like the listings', async () => {
@@ -181,7 +215,7 @@ describe('GET /agent/catalog-events', () => {
 
   it('says nothing when the catalog did not actually move', async () => {
     const catalog: Catalog = { manuals: [manualLine('serper')], skills: [] };
-    const { url, signal } = await mount({ catalog, userId: 'u1' });
+    const { url, signal, catalogFingerprints } = await mount({ catalog, userId: 'u1' });
 
     const stream = await open(url);
     try {
@@ -191,10 +225,12 @@ describe('GET /agent/catalog-events', () => {
       // design — so an ordinary note saved in the knowledge base arrives here
       // too. Announcing it would re-register the whole toolset on every
       // connected laptop for a commit that touched no manual and no skill.
+      const atOpen = catalogFingerprints.mock.calls.length;
       signal.notify();
       signal.notify();
       signal.notify();
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      // The route READ the catalog (that is the work) and then wrote nothing.
+      await stream.quiet(() => catalogFingerprints.mock.calls.length > atOpen);
 
       expect(stream.frames).toHaveLength(1);
     } finally {
@@ -217,7 +253,7 @@ describe('GET /agent/catalog-events', () => {
       catalog.manuals = [manualLine('serper'), manualLine('weather')];
       for (let i = 0; i < 8; i += 1) signal.notify();
       await stream.waitFor(2, 'the announcement');
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await stream.quiet(() => true); // the announcement IS the work; only quiet is left
 
       expect(stream.frames).toHaveLength(2);
       expect(catalogFingerprints.mock.calls.length - atOpen).toBeLessThanOrEqual(2);
@@ -267,22 +303,36 @@ describe('GET /agent/catalog-events', () => {
     const stream = await open(url);
     await stream.waitFor(1, 'the opening revision');
     stream.close();
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The hang-up has to reach the server before its effect can be measured;
+    // the subscription releasing is what stops the reads below.
+    await sleep(50);
     const atClose = catalogFingerprints.mock.calls.length;
 
     // A subscription left behind would do a per-caller ACL walk on every
-    // default-branch write, forever, for a laptop that went home.
+    // default-branch write, forever, for a laptop that went home. Measured
+    // against a CONTROL: the same two signals on a live subscription do
+    // provoke a read, so a version of this that simply never re-read would
+    // fail rather than pass twice.
     catalog.manuals = [manualLine('serper'), manualLine('weather')];
     signal.notify();
     signal.notify();
-    await new Promise((resolve) => setTimeout(resolve, 150));
-
+    await sleep(50);
     expect(catalogFingerprints.mock.calls.length).toBe(atClose);
+
+    const live = await open(url);
+    try {
+      await live.waitFor(1, 'the opening revision of a second subscription');
+      const atOpen = catalogFingerprints.mock.calls.length;
+      signal.notify();
+      await live.quiet(() => catalogFingerprints.mock.calls.length > atOpen);
+    } finally {
+      live.close();
+    }
   });
 
   it('survives a catalog read that fails, and announces the next change', async () => {
     const catalog: Catalog = { manuals: [manualLine('serper')], skills: [] };
-    const { url, signal } = await mount({
+    const { url, signal, catalogFingerprints } = await mount({
       catalog,
       userId: 'u1',
       resolveUserEmail: async () => 'someone@example.com',
@@ -302,8 +352,9 @@ describe('GET /agent/catalog-events', () => {
           },
         } as never,
       ];
+      const atOpen = catalogFingerprints.mock.calls.length;
       signal.notify();
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await stream.quiet(() => catalogFingerprints.mock.calls.length > atOpen);
       expect(stream.frames).toHaveLength(1);
 
       catalog.skills = [skill()];

@@ -146,7 +146,7 @@ describe('subscribeCatalogEvents', () => {
     }
   });
 
-  it('reopens when the stream ends, and says so once', async () => {
+  it('reopens quietly when the stream ends', async () => {
     const log = vi.fn();
     const seen: string[] = [];
     const sub = subscribeCatalogEvents({
@@ -168,6 +168,70 @@ describe('subscribeCatalogEvents', () => {
 
       expect(seen).toEqual(['rev-after-reconnect']);
       expect(opens.length).toBeGreaterThan(1);
+      // QUIETLY: a stream ending cleanly is the normal life of a connection
+      // behind a proxy that caps how long one may live, and a line per
+      // reconnect would fill an operator's log with an event that means
+      // nothing. Only a stream that FAILED is worth a word (the next test).
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      sub.stop();
+    }
+  });
+
+  /**
+   * A proxy — or a deployment behind one — may write CRLF line endings; the
+   * SSE spec allows CRLF, LF or CR, and says a frame ends at a blank line.
+   * Scanning for `\n\n` alone found no boundary at all in a CRLF stream, so
+   * every frame accumulated until the oversize cap tore the connection down,
+   * and the subscription reconnected forever without delivering one revision.
+   */
+  it('reads frames from a stream that uses CRLF line endings', async () => {
+    const seen: string[] = [];
+    const sub = subscribeCatalogEvents({ config: config(), onRevision: (r) => void seen.push(r) });
+    try {
+      await waitFor(() => streams.size > 0, 'the stream to open');
+      for (const stream of streams) {
+        stream.write(':\r\n\r\n'); // a CRLF keep-alive
+        stream.write(`event: revision\r\ndata: ${JSON.stringify({ revision: 'rev-crlf' })}\r\n\r\n`);
+      }
+
+      await waitFor(() => seen.length === 1, 'the revision from the CRLF stream');
+      expect(seen).toEqual(['rev-crlf']);
+    } finally {
+      sub.stop();
+    }
+  });
+
+  /**
+   * OAUTH MODE'S EXPIRED BEARER. This is the only request an idle connection
+   * makes, so nothing else is around to notice the key has expired and renew
+   * it: a stream that simply reconnected on 401 would do so forever with a
+   * retired token, and the connection would stop hearing about changes
+   * without saying anything.
+   */
+  it('renews the bearer once when the deployment refuses it, and reopens with the new one', async () => {
+    refuseWith = 401;
+    const cfg: HexisMcpConfig = {
+      ...config(),
+      renewConnectionKey: async () => {
+        // The fresh grant, and the deployment stops refusing from here.
+        refuseWith = null;
+        return { token: 'bevel_renewed' };
+      },
+    };
+    const seen: string[] = [];
+    const sub = subscribeCatalogEvents({ config: cfg, onRevision: (r) => void seen.push(r), reconnectBaseMs: 10 });
+    try {
+      await waitFor(() => streams.size > 0, 'the stream to open after the renewal');
+      // The retry is immediate and carries the NEW bearer — not a reconnect a
+      // second later with the old one.
+      expect(opens[0]).toBe('Bearer bevel_test');
+      expect(opens[1]).toBe('Bearer bevel_renewed');
+      expect(cfg.connectionKey).toBe('bevel_renewed');
+
+      announce('rev-after-renewal');
+      await waitFor(() => seen.length === 1, 'a revision on the reopened stream');
+      expect(seen).toEqual(['rev-after-renewal']);
     } finally {
       sub.stop();
     }
