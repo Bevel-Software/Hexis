@@ -776,6 +776,30 @@ describe('/api/plugins routes', () => {
     expect(plugins[0]).toMatchObject({ name: 'finance', hasRequested: true, requestNumber: 9 });
   });
 
+  it('keeps an opened record standing when its request\'s state cannot be read', async () => {
+    // The third read the index makes, and the one whose failure must lean
+    // the other way: a request that may well still be open must not be
+    // handed back as a button, so an unreadable state is the benefit of the
+    // doubt — the person sees the card, not an invitation to ask twice.
+    const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
+    server = h.server;
+    h.joinRequestStore.seed({
+      requesterEmail: ALI,
+      requesterName: 'Ali Baba',
+      pluginKey: 'Finance',
+      status: 'opened',
+      failureReason: null,
+      changeRequestNumber: 9,
+      claimedAt: null,
+    });
+    vi.spyOn(h.joinRequestStore, 'changeRequestStates').mockRejectedValueOnce(new Error('db down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { status, plugins } = await listPlugins(h.baseUrl);
+    expect(status).toBe(200);
+    expect(plugins[0]).toMatchObject({ name: 'finance', hasRequested: true, requestNumber: 9 });
+    warn.mockRestore();
+  });
+
   it('degrades hasRequested to false when the CR lookup throws', async () => {
     const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     (h.workflow.listChangeRequestsAuthoredBy as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
