@@ -3,13 +3,15 @@ import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequ
 import { useLibrary, type LibraryItem } from '../state/library-data';
 
 /**
- * The review surface for a skill that does not exist yet.
+ * The review surface for a skill or a tool that does not exist yet.
  *
- * A released skill opens its own page, and the change requests against it hang
- * off the file they touch. A PROPOSED skill has neither — there is no page,
- * because there is no skill on the default branch to build one from — so the
+ * A released item opens its own page, and the change requests against it hang
+ * off the file they touch. A PROPOSED one has neither — there is no page,
+ * because there is nothing on the default branch to build one from — so the
  * card opens the change request itself, which is the whole of what there is to
- * read and the only place the decision can be made.
+ * read and the only place the decision can be made. That is also what keeps a
+ * proposal from being OPENED AS THE THING: a tool page would try to probe a
+ * connection for a manual the catalog has never seen.
  *
  * `ChangeRequestDialog` needs no adapting for this: it always lists every file
  * the request touches and diffs each against the default branch EXCEPT the
@@ -17,8 +19,13 @@ import { useLibrary, type LibraryItem } from '../state/library-data';
  * the proposal as one green document and its Apply button records the
  * approvals and merges. No scope either — a scope only ADDS a surface's
  * released files to the list, and a proposal has none by definition.
+ *
+ * A proposed MCP SERVER is the one case whose file is not wholly new: the
+ * server is a key added to a plugin's `mcp.json`, which may already exist. The
+ * dialog handles that as it handles any other edit — the diff against the
+ * default branch — so the reader sees the added entry in its context.
  */
-export function PendingSkillReview({
+export function PendingItemReview({
   item,
   onClose,
   onResolved,
@@ -49,7 +56,7 @@ function standInFor(
 ): PullRequestSummary {
   return {
     number: pending.changeRequestNumber,
-    title: `New skill: ${item.name}`,
+    title: `New ${item.kind === 'skill' ? 'skill' : 'tool'}: ${item.name}`,
     author: { login: '', name: pending.authorName },
     appAuthor: { name: pending.authorName },
     branch: pending.branch,

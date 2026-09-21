@@ -59,7 +59,7 @@ import { ChangeReadGate } from '../modules/access/change-read-gate.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { UserAccessRemovalService } from '../modules/access/user-access-removal.service.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
-import { ToolManualService } from '../modules/tool-manuals/index.js';
+import { PendingToolsService, ToolManualService } from '../modules/tool-manuals/index.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
 import { ToolDeleteService } from '../modules/tool-manuals/tool-delete.service.js';
 import {
@@ -193,6 +193,7 @@ export interface CoreServices {
   skillService: SkillService;
   pendingSkillsService: PendingSkillsService;
   toolManualService: ToolManualService;
+  pendingToolsService: PendingToolsService;
   /**
    * Reads the admin's `mcp-description.md` on the default branch with
    * platform rights: the one reader behind every MCP session's instructions
@@ -732,6 +733,17 @@ export async function createCoreServices(
     workflowService,
   );
 
+  // The same missing half, for tools: a `.tool` manual or an `mcp.json` server
+  // an agent proposes is nowhere in the product until its change request
+  // merges. Built here for the same reason — it needs the workflow service —
+  // and stateless for the same reason.
+  const pendingToolsService = new PendingToolsService(
+    workspaceService,
+    accessControl,
+    toolManualService,
+    workflowService,
+  );
+
   // Catalog freshness: the skill / tool-manual / plugin-index caches all scan
   // the DEFAULT branch's working tree, and all three go stale on the same
   // events (a commit, a working-tree write, a merge) — as does the access
@@ -1116,6 +1128,7 @@ export async function createCoreServices(
     skillService,
     pendingSkillsService,
     toolManualService,
+    pendingToolsService,
     readAgentPreamble: readPreamble,
     pluginIndexService,
     pluginProvisionService,

@@ -11,6 +11,7 @@ import { EmptySkillsNudge, PluginBreadcrumb, PluginItemSections, PageNote,
   RemoveLibraryItemDialog,
 } from './plugin-page-parts';
 import { PageActions } from './PageActions';
+import { PendingItemReview } from './PendingItemReview';
 import { cn } from '../../../lib/utils';
 import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { PersonalAddDialog } from './PersonalAddDialog';
@@ -60,6 +61,12 @@ export function PersonalPluginPage() {
    * at an ancestor is the setter itself.
    */
   const [manageTarget, setManageTarget] = useState<FileTreeEntry | null>(null);
+  /**
+   * The proposal whose change request is open in the review dialog — the same
+   * arrangement the gallery and the plugin page hold it in, so a Proposed card
+   * behaves identically on all three.
+   */
+  const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
 
   const name = personalPluginName();
   const items = useMemo(() => data.items.filter(isUngrouped), [data.items]);
@@ -75,8 +82,23 @@ export function PersonalPluginPage() {
   const skillItems = items.filter((i) => i.kind === 'skill');
   const toolItems = items.filter((i) => i.kind === 'integration');
 
-  /** Identical to the gallery's and the plugin page's — one behaviour per card. */
+  /**
+   * Identical to the gallery's and the plugin page's — one behaviour per card,
+   * wherever you clicked it.
+   *
+   * A PROPOSAL has no page to navigate to (its file is on a change request's
+   * branch, and every item page reads the default branch), so it opens its
+   * change request instead — the only thing there is to read about it. This
+   * page is no exception: a proposal reaches an ungrouped card when its
+   * declaration sits in no plugin folder, and the card itself says whether it
+   * is waiting on YOU. A card that names the reader as the reviewer and then
+   * does nothing when clicked is the one arrangement that cannot be right.
+   */
   function openItem(item: LibraryItem) {
+    if (item.pending) {
+      setReviewing(item);
+      return;
+    }
     if (kbDirName) navigate(urlForLibraryItem(kbDirName, item));
   }
 
@@ -179,6 +201,19 @@ export function PersonalPluginPage() {
             setManageTarget(null);
             // A grant can change who sees the skill — and whether it is still
             // in no plugin at all — so the catalog is re-read.
+            data.reload();
+          }}
+        />
+      )}
+
+      {reviewing && (
+        <PendingItemReview
+          item={reviewing}
+          onClose={() => setReviewing(null)}
+          onResolved={() => {
+            setReviewing(null);
+            // One reload moves it off the review shelf and into the catalog —
+            // where, once merged, it is a released item of your own.
             data.reload();
           }}
         />

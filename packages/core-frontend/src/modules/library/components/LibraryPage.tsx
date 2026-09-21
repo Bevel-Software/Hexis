@@ -16,7 +16,7 @@ import { offersManageAccess } from '../../access/manage-access-affordance';
 import { PluginItemSections } from './plugin-page-parts';
 import { PluginRows } from './PluginRows';
 import { ManagedPluginRequests } from './ManagedPluginRequests';
-import { PendingSkillReview } from './PendingSkillReview';
+import { PendingItemReview } from './PendingItemReview';
 
 /**
  * The Library gallery — Everything (the root), Owned by me, and a team's
@@ -65,7 +65,7 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
   const [query, setQuery] = useState('');
-  /** The proposed skill being reviewed, if the reader opened one. */
+  /** The proposal — skill or tool — being reviewed, if the reader opened one. */
   const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
   /**
    * What the gallery's ONE access dialog is open on — the folder of whichever
@@ -120,9 +120,10 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
 
   /**
    * Both kinds open a PAGE now — the skill page landed alongside the tool one.
-   * A PROPOSED skill is the exception: it has no page, because the skill page
-   * reads the default branch and the skill is not on it yet. Its card opens the
-   * change request instead, which is the only thing there is to read.
+   * A PROPOSAL is the exception, skill or tool alike: it has no page, because
+   * both pages read the default branch and the file is not on it yet. Its card
+   * opens the change request instead, which is the only thing there is to read
+   * — and the reason a Proposed card can never be opened AS the thing.
    */
   function openItem(item: LibraryItem) {
     if (item.pending) {
@@ -253,14 +254,14 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
       )}
 
       {reviewing && (
-        <PendingSkillReview
+        <PendingItemReview
           item={reviewing}
           onClose={() => setReviewing(null)}
           onResolved={() => {
             setReviewing(null);
-            // The skill leaves the review shelf and joins the catalog by the
-            // same reload — one load answers both, so the card cannot appear
-            // twice in the frame between them.
+            // The proposal — skill or tool alike — leaves the review shelf and
+            // joins the catalog by the same reload: one load answers both, so
+            // the card cannot appear twice in the frame between them.
             data.reload();
           }}
         />

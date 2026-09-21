@@ -735,6 +735,7 @@ export async function createCoreServer(
     core.toolManualService,
     { service: core.mcpServerEditService, getUser: toolPageUser },
     { service: core.toolDeleteService, getUser: toolPageUser },
+    core.pendingToolsService,
   ));
   app.use('/api', core.authMiddleware, createSecretsVaultRoutes(secretsVaultRoutesDeps));
   // The authed tail of the MCP OAuth flow: /connect calls these to describe
