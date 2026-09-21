@@ -26,6 +26,7 @@ import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { canReadWorkspacePath, resolveReadableMap, toKbRelative } from '../access-model/kb-read-filter.js';
 import type { ICreatorAccess } from '../access-model/creator.js';
+import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { isRolesYamlPath, assertRolesYamlParsable } from '../access-model/roles-yaml-guard.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { PathTraversalError, WorkflowDomainError } from '../../shared/domain-errors.js';
@@ -86,6 +87,13 @@ export function createWorkspaceRoutes(
   disk: ITreeWalker,
   /** Save-time skill check: `PUT /file` on a SKILL.md answers with `warnings` (advisory, never a refusal). */
   skillSaveCheck?: SkillSaveCheck,
+  /**
+   * Read-before-write, asked ahead of the lock where a route puts bytes on
+   * disk BEFORE it locks them (archive extraction). Every other route's writes
+   * meet the same gate inside `acquireLock`. Optional so route harnesses that
+   * exercise other behaviour need not wire it.
+   */
+  changeGate?: IChangeReadGate,
 ): express.Router {
   const router = express.Router();
   const gitInternalsRouteGuard = createGitInternalsRouteGuard(workspaceService);
@@ -659,31 +667,35 @@ export function createWorkspaceRoutes(
    * grant on the same new directory survives. Runs BEFORE the creation itself
    * so the explorer never shows-then-hides the new subtree; if the creation
    * subsequently fails, the leftover is an empty new folder readable only by
-   * its creator. Best-effort by contract: a failure here logs and never
-   * blocks the creation.
+   * its creator.
+   *
+   * A failure here FAILS the creation, and propagates as it is. The seed is
+   * planned only for a new folder at a root the creator cannot read — the one
+   * creation the read gate lets past an unreadable spot — so without the
+   * grant the folder would come into existence invisible to the person who
+   * made it, which is exactly what the gate exists to prevent. The seed's
+   * own lock passes that gate too: if the folder appeared under someone else
+   * between the plan and this write, the refusal is theirs to see, and
+   * nothing lands.
    */
   async function seedCreatorAccessMd(
     workspaceId: string,
     user: AuthUser,
     plan: { wsRelPath: string; apply: (current: string) => string },
   ): Promise<void> {
-    try {
-      await withLock(workspaceId, user, plan.wsRelPath, async () => {
-        let current = '';
-        try {
-          current = await workspaceService.readFile(workspaceId, plan.wsRelPath);
-        } catch {
-          // Not there yet — the normal case for a brand-new directory.
-        }
-        const next = plan.apply(current);
-        if (next !== current) {
-          await workspaceService.writeFile(workspaceId, plan.wsRelPath, next);
-        }
-      });
-      creatorAccess.noteAccessFileWritten(workspaceId);
-    } catch (err) {
-      log.warn(`creator access.md seed failed for "${plan.wsRelPath}":`, { err });
-    }
+    await withLock(workspaceId, user, plan.wsRelPath, async () => {
+      let current = '';
+      try {
+        current = await workspaceService.readFile(workspaceId, plan.wsRelPath);
+      } catch {
+        // Not there yet — the normal case for a brand-new directory.
+      }
+      const next = plan.apply(current);
+      if (next !== current) {
+        await workspaceService.writeFile(workspaceId, plan.wsRelPath, next);
+      }
+    });
+    creatorAccess.noteAccessFileWritten(workspaceId);
   }
 
   /**
@@ -1205,14 +1217,15 @@ export function createWorkspaceRoutes(
       await workspaceService.withPathTurn(id, filePath, async () => {
         // A stale `ifMatch` is refused before anything commits.
         if (ifMatch !== undefined) await workspaceService.assertContentMatches(id, filePath, ifMatch);
-        // Creator read grant: a brand-new file at a spot whose access chain
-        // doesn't grant the creator `read` would vanish from their own explorer
-        // (read is default-deny). Plan BEFORE the write: a new subtree gets its
-        // access.md seeded first; a loose .md carries the grant in its own
-        // frontmatter as part of this same single write.
+        // Creator read grant: a file that starts a new folder at a root the
+        // creator cannot read would vanish from their own explorer (read is
+        // default-deny). Plan BEFORE the write: the new folder gets its
+        // access.md seeded first. Anywhere else the lock's read gate has
+        // already decided — a creation the creator could not see is refused,
+        // and one they can see needs no grant.
         const plan = await creatorAccess.planForCreate(id, user, filePath, 'file');
         if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
-        const toWrite = plan?.kind === 'frontmatter' ? plan.apply(content) : content;
+        const toWrite = content;
         // `ifAbsent` = exclusive create: the service's `wx` write turns a
         // concurrent or stale create against an existing file into a 409
         // instead of a silent replace. `withLock`'s failure arm releases
@@ -1300,6 +1313,23 @@ export function createWorkspaceRoutes(
     const user = await requireUser(req, res);
     if (!user) return;
     try {
+      // The destination is asked about BEFORE anything is extracted: this is
+      // the one route whose bytes land on disk ahead of the lock, so the
+      // lock's read gate would find them already there. Same verdict, same
+      // refusal, one step earlier. A destination inside a folder the caller
+      // cannot read is refused whole; a folder they can read — or a new
+      // folder directly under a root — extracts, and each file then meets
+      // the lock as any other write does.
+      //
+      // A new root folder gets its creator's access.md seeded first, as
+      // every other creation route does: extraction would otherwise bring
+      // the folder into existence itself, and the first file's lock would
+      // then find an existing folder the caller cannot read.
+      const inferred = path.posix.dirname(zipPath.replace(/\\/g, '/'));
+      const destDir = destination ?? (inferred === '.' ? '' : inferred);
+      const plan = await creatorAccess.planForCreate(id, user, destDir, 'dir');
+      if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
+      await changeGate?.assertMayChange(id, user.email, destDir, 'dir');
       // Extract first (all files land on disk), then sweep each extracted
       // file through a lock+release so it commits + pushes as its own
       // one-file change. Per-file commits mean the validator runs N times
@@ -1307,24 +1337,18 @@ export function createWorkspaceRoutes(
       // but correct for a 100-file zip. If a single file's release fails
       // (e.g. validator 422), the loop stops there so the user sees the
       // first concrete problem rather than a list of N similar failures.
-      const result = await workspaceService.unzipFile(id, zipPath, destination);
+      //
+      // Each entry is asked about before it is written, through the same
+      // gate: an archive can carry a path into a nested folder the caller
+      // cannot read, which the destination check above cannot see. Such an
+      // entry is skipped and reported, never written and then refused.
+      const result = await workspaceService.unzipFile(id, zipPath, destination, async (entryPath) => {
+        await changeGate?.assertMayChange(id, user.email, entryPath, 'file');
+      });
       for (const relFile of result.extracted) {
-        await withLock(id, user, relFile, async () => {
-          // The file is already on disk from the unzip; the release commits +
-          // pushes it. If the extraction landed a markdown node the creator
-          // can't read (default-deny chains), splice their read grant into
-          // its frontmatter first so the committed change already carries it.
-          // Best-effort: a failed grant write must not throw — withLock's
-          // failure path releases WITHOUT committing and would discard the
-          // extracted file from disk, turning a cosmetic grant failure into
-          // data loss.
-          try {
-            const granted = await creatorAccess.grantInExtractedFile(id, user, relFile);
-            if (granted !== null) await workspaceService.writeFile(id, relFile, granted);
-          } catch (err) {
-            log.warn(`creator grant on extracted "${relFile}" failed:`, { err });
-          }
-        });
+        // The file is already on disk from the unzip; the release commits +
+        // pushes it.
+        await withLock(id, user, relFile, async () => undefined);
       }
       res.json(result);
     } catch (err) {
@@ -1367,21 +1391,17 @@ export function createWorkspaceRoutes(
         chunks.push(buf);
       }
       const data = Buffer.concat(chunks);
-      // Creator read grant, mirroring PUT /file: seed a new subtree's
-      // access.md first, or fold the grant into an uploaded markdown file's
-      // frontmatter. Binary uploads into a pre-existing unreadable folder
-      // can't carry a per-file grant (no frontmatter) and proceed ungranted.
+      // Creator read grant, mirroring PUT /file: an upload that starts a new
+      // folder at a root seeds that folder's access.md first. An upload into
+      // a folder the caller cannot read never gets this far — the lock's read
+      // gate refuses it.
       const plan = await creatorAccess.planForCreate(id, user, filePath, 'file');
       if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
-      const toWrite =
-        plan?.kind === 'frontmatter'
-          ? Buffer.from(plan.apply(data.toString('utf8')), 'utf8')
-          : data;
       await withLock(
         id,
         user,
         filePath,
-        () => workspaceService.writeFileBinary(id, filePath, toWrite),
+        () => workspaceService.writeFileBinary(id, filePath, data),
         defer ? { skipFsTreeEvent: true } : undefined,
       );
       res.json({ status: 'uploaded' });

@@ -50,6 +50,7 @@ import type {
   FolderChangeRequest,
   FolderChangeRequestRemoval,
   IWorkflowService,
+  MergeBranchOutcome,
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
@@ -83,6 +84,7 @@ import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
   ChangeRequestConflictsError,
   DuplicateChangeRequestError,
+  OpenChangeRequestBlocksMergeError,
   RolesYamlPreservationError,
   PullRebaseConflictError,
   PushNeedsAgentResolutionError,
@@ -92,6 +94,7 @@ import {
 } from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
 import { AccessDeniedError } from '../access-model/access-errors.js';
+import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
@@ -290,6 +293,13 @@ export class WorkflowService implements IWorkflowService {
     private readonly pendingCommits: PendingCommitsService,
     private readonly kbDirName: string,
     /**
+     * The read-before-write gate `acquireLock` asks on every branch (see
+     * `access-model/change-gate.ts`). Required, and checked at construction:
+     * a service without it would let a change land where its author cannot
+     * read, so there is no such service.
+     */
+    private readonly changeGate: IChangeReadGate,
+    /**
      * Event bus that fans state changes out to connected SSE sessions.
      * Optional so test harnesses / minimal boots can omit it — emits
      * become no-ops in that case (we null-guard each call). In a real
@@ -313,7 +323,13 @@ export class WorkflowService implements IWorkflowService {
      * exercise hooks) unchanged.
      */
     public readonly hooks: WorkflowHooks = new WorkflowHooks(),
-  ) {}
+  ) {
+    // The type already requires it; this holds for a caller the compiler did
+    // not see (plain JavaScript, a positional slip in a harness).
+    if (!changeGate || typeof changeGate.assertMayChange !== 'function') {
+      throw new Error('WorkflowService requires a read-before-write gate (IChangeReadGate)');
+    }
+  }
 
   // ── Branches ──────────────────────────────────────────────────────────────
 
@@ -894,6 +910,10 @@ export class WorkflowService implements IWorkflowService {
    * Always reads at-ref, never at the working tree, so a user can't broaden
    * their own access by editing `roles.yaml` / `access.md` in the same
    * session.
+   *
+   * Resolves to `'restore'` when the write passed ONLY as a platform-file
+   * restore — the caller then knows the destination denies this admin, and
+   * the read gate that follows stands aside for the same rescue.
    */
   private async assertCanWriteAtPath(
     workspaceId: string,
@@ -906,7 +926,7 @@ export class WorkflowService implements IWorkflowService {
      * never taken on trust — see `acquireLock`'s `opts`.
      */
     platformRestore?: { source: string },
-  ): Promise<void> {
+  ): Promise<'granted' | 'restore'> {
     // The lock route passes workspace-relative paths
     // (`knowledge-base/GTM/.../Foo.md`), but the access model is keyed by
     // *repo-relative* paths — `git ls-tree` runs inside the inner repo dir,
@@ -925,8 +945,8 @@ export class WorkflowService implements IWorkflowService {
       userEmail,
       [repoRelative],
     );
-    if (!result) return; // no config at ref → default-allow (bootstrap)
-    if (result.get(repoRelative)) return;
+    if (!result) return 'granted'; // no config at ref → default-allow (bootstrap)
+    if (result.get(repoRelative)) return 'granted';
     // The one write allowed past a destination that denies it: an admin
     // putting a platform file back where the platform reads it. The access
     // module decides who — a repository whose root `access.md` is the file
@@ -944,7 +964,7 @@ export class WorkflowService implements IWorkflowService {
       isPlatformRestoreShape(toRepoRelative(platformRestore.source), repoRelative) &&
       (await this.accessControl.canRestorePlatformFile(workspaceId, userEmail, repoRelative))
     ) {
-      return;
+      return 'restore';
     }
     const eligible = await this.accessControl.eligibleWritersAtRef(
       workspaceId,
@@ -989,14 +1009,24 @@ export class WorkflowService implements IWorkflowService {
     // the lock and the editor never opens. Once the lock is in hand, the
     // commit + push pipeline does not re-check (see `commitFile`).
     //
-    // **Protected branches only** (mirrors the legacy commit-time gate). On
-    // feature/draft branches anyone can write; canonical state changes go
-    // through change-request approval, which is where the real security
-    // boundary lives. Checking at HEAD (not at the working tree) so a user
-    // can't grant themselves access by editing `roles.yaml` in the same
+    // **Write gate — protected branches only** (mirrors the legacy commit-time
+    // gate). On feature/draft branches anyone can write; canonical state
+    // changes go through change-request approval, which is where the real
+    // security boundary lives. Checking at HEAD (not at the working tree) so a
+    // user can't grant themselves access by editing `roles.yaml` in the same
     // session.
     //
-    // **Coordination acquires skip the gate** (see the interface doc): the
+    // **Read gate — every branch.** Nothing is created, changed or removed
+    // where its author cannot read, drafts included: a proposal that lands in
+    // a folder its author cannot see would vanish from them the moment it was
+    // added, and a write grant only implies read — a nearer `deny read` can
+    // take the read away while the write stands. The one exception, a new
+    // folder directly under one of the three roots, and the reasons are in
+    // `access-model/change-gate.ts`. A write that passed only as a
+    // platform-file restore is not asked: that rescue exists exactly for a
+    // destination whose rules deny the admin making it.
+    //
+    // **Coordination acquires skip both gates** (see the interface doc): the
     // caller wants only mutual exclusion with the path's writer — e.g. the
     // roles admin holding machine-owned `synced-groups.yaml` steady across
     // its IdP-mode recheck — and will never write the path. Gating those on
@@ -1005,16 +1035,22 @@ export class WorkflowService implements IWorkflowService {
     // authority flows from the hold: the mode is persisted on the lock row
     // and `commitFileWhileLocked` / `releaseLock` refuse to treat a
     // coordination hold as write possession (see those methods).
-    if (isProtectedBranch(branch) && !opts?.coordination) {
-      // `assertCanWriteAtPath` throws AccessDeniedError on denial, with the
-      // eligible-writers payload so the frontend can render a useful refusal.
-      await this.assertCanWriteAtPath(
-        workspaceId,
-        branch,
-        user.email,
-        targetPath,
-        opts?.platformRestore,
-      );
+    if (!opts?.coordination) {
+      let via: 'granted' | 'restore' = 'granted';
+      if (isProtectedBranch(branch)) {
+        // `assertCanWriteAtPath` throws AccessDeniedError on denial, with the
+        // eligible-writers payload so the frontend can render a useful refusal.
+        via = await this.assertCanWriteAtPath(
+          workspaceId,
+          branch,
+          user.email,
+          targetPath,
+          opts?.platformRestore,
+        );
+      }
+      if (via !== 'restore') {
+        await this.changeGate.assertMayChange(workspaceId, user.email, targetPath, 'file');
+      }
     }
     const result = await this.fileLocks.acquire(workspaceId, branch, targetPath, user, opts);
     if (result.acquired) {
@@ -2988,17 +3024,29 @@ export class WorkflowService implements IWorkflowService {
       }
       throw err;
     }
-    // The merge landed on `origin/<baseBranch>`. Pull the
-    // TARGET branch's own workspace so its working tree doesn't fall behind the
-    // remote — the file tools serve the working tree (not origin), so without
-    // this a read right after a merge misses the just-merged change. Best-effort:
-    // the merge already succeeded on origin, so a pull hiccup must not fail the
-    // response (a later fetch/pull reconciles).
+    await this.pullMergeTarget(baseBranch, user);
+    this.prs.invalidateDetailCache(number);
+    this.events?.emit({ kind: 'change-request-merged', number });
+    // AFTER the event: the applying UI is waiting on `change-request-merged`,
+    // and branch retirement is git IO it must never wait behind.
+    await this.retireMergedSourceBranch(number, baseBranch, user);
+    return { kind: 'merged', result };
+  }
+
+  /**
+   * The merge landed on `origin/<targetBranch>`. Pull the TARGET branch's own
+   * workspace so its working tree doesn't fall behind the remote — the file
+   * tools serve the working tree (not origin), so without this a read right
+   * after a merge misses the just-merged change. Best-effort: the merge already
+   * succeeded on origin, so a pull hiccup must not fail the response (a later
+   * fetch/pull reconciles).
+   */
+  private async pullMergeTarget(targetBranch: string, user: AuthUser): Promise<void> {
     let targetWorkspaceId: string | undefined;
     /** Whether the pull below already announced the new tree. See the emit after it. */
     let announced = false;
     try {
-      const targetWorkspace = await this.workspaceService.getOrCreateForBranch(baseBranch);
+      const targetWorkspace = await this.workspaceService.getOrCreateForBranch(targetBranch);
       targetWorkspaceId = targetWorkspace.id;
       announced = await this.pullWorkspace(targetWorkspace.id);
     } catch (err) {
@@ -3011,16 +3059,17 @@ export class WorkflowService implements IWorkflowService {
       if (err instanceof PullRebaseConflictError && targetWorkspaceId) {
         await this.queuePullConflictRecovery(targetWorkspaceId, err, user);
       }
-      mergeLog.warn(`post-merge pull of target "${baseBranch}" failed — its workspace may be momentarily behind origin`, {
+      mergeLog.warn(`post-merge pull of target "${targetBranch}" failed — its workspace may be momentarily behind origin`, {
         err,
       });
     }
     // THE MERGE ITSELF CHANGED THE TREE, and the pull above almost never says
-    // so. `mergePr` runs `git merge --no-ff` in this very workspace and pushes
-    // the result, so by the time we pull, the clone is already at origin: the
-    // pull reports "up to date", `treeChanged` is false, and nothing is
-    // announced — while the working tree holds a `.tool` or a `SKILL.md` that
-    // was not there a second ago.
+    // so. Both callers — applying a change request, and an agent merging a
+    // branch — run `git merge --no-ff` in this very workspace and push the
+    // result, so by the time we pull, the clone is already at origin: the pull
+    // reports "up to date", `treeChanged` is false, and nothing is announced —
+    // while the working tree holds a `.tool` or a `SKILL.md` that was not
+    // there a second ago.
     //
     // Nothing else covers it. `change-request-merged` carries no branch and no
     // workspace, so the catalog subscriber cannot act on it; a later
@@ -3036,24 +3085,130 @@ export class WorkflowService implements IWorkflowService {
     // re-scan and a duplicate browser refetch.
     //
     // A pull that FAILED is still announced, and that is not a guess about a
-    // tree nobody reconciled. The merge ran in THIS workspace — `mergePr`
-    // resolves the target branch's own workspace and runs `git merge --no-ff`
-    // there before pushing — so the merged bytes were on that disk before the
-    // pull was attempted, and a pull that could not run cannot un-merge them.
-    // (`baseBranch` is the branch the merge acted on: `preserveBaseRolesYaml`
-    // refuses the merge outright if it disagrees with the change request's own
-    // base, so the workspace named here is the one that was rewritten.) The
-    // failure the pull reports is about OTHER people's commits not arriving,
-    // which leaves the catalogs no staler than they were.
-    if (!announced && targetWorkspaceId && baseBranch === DEFAULT_BRANCH) {
+    // tree nobody reconciled. The merge ran in THIS workspace — the target
+    // branch's own, resolved above — before pushing, so the merged bytes were
+    // on that disk before the pull was attempted, and a pull that could not
+    // run cannot un-merge them. (For a change request, `targetBranch` is the
+    // branch the merge acted on: `preserveBaseRolesYaml` refuses the merge
+    // outright if it disagrees with the request's own base.) The failure the
+    // pull reports is about OTHER people's commits not arriving, which leaves
+    // the catalogs no staler than they were.
+    if (!announced && targetWorkspaceId && targetBranch === DEFAULT_BRANCH) {
       this.events?.emit({ kind: 'fs-tree-changed', workspaceId: targetWorkspaceId, branch: DEFAULT_BRANCH });
     }
-    this.prs.invalidateDetailCache(number);
-    this.events?.emit({ kind: 'change-request-merged', number });
-    // AFTER the event: the applying UI is waiting on `change-request-merged`,
-    // and branch retirement is git IO it must never wait behind.
-    await this.retireMergedSourceBranch(number, baseBranch, user);
-    return { kind: 'merged', result };
+  }
+
+  async mergeBranch(user: AuthUser, sourceBranch: string, targetBranch: string): Promise<MergeBranchOutcome> {
+    if (sourceBranch === targetBranch) {
+      throw new WorkflowValidationError(`\`source\` and \`target\` are both "${sourceBranch}" — name two different branches.`);
+    }
+
+    // Under the lifecycle lock of BOTH branches, the same protocol
+    // `openChangeRequest` follows — and for the same window. That method holds
+    // these keys across its whole check-then-insert (an auto-merge and a push,
+    // seconds of it), so the "no open request" answer below is only sound
+    // while they are held: a bare read would let a person open the request
+    // mid-merge and the agent would land its content anyway, which is the one
+    // thing this tool exists to prevent. `runOnBranchPair` drops a protected
+    // target's key; the source key is held either way, and every competing
+    // request from this source takes it too.
+    return this.runOnBranchPair(sourceBranch, targetBranch, async () => {
+      // A person merges a change request. Only the request's OWN direction is
+      // blocked: the target merged into the source is how a draft under review
+      // stays current, and that must keep working while the request is open.
+      const [open] = await this.db
+        .select({ number: changeRequests.number })
+        .from(changeRequests)
+        .where(
+          and(
+            eq(changeRequests.sourceBranch, sourceBranch),
+            eq(changeRequests.targetBranch, targetBranch),
+            eq(changeRequests.state, 'open'),
+          ),
+        )
+        .limit(1);
+      if (open) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, open.number);
+
+      // The merge runs in the target's own workspace, like a change request's.
+      const targetWorkspaceId = (await this.workspaceService.getOrCreateForBranch(targetBranch)).id;
+      if (!(await this.git.remoteBranchExists(targetWorkspaceId, sourceBranch))) {
+        throw new WorkflowValidationError(`No branch named "${sourceBranch}" on the shared remote.`);
+      }
+
+      const result = await this.git.mergeChangeRequest(
+        targetWorkspaceId,
+        sourceBranch,
+        targetBranch,
+        {
+          subject: `Merge ${sourceBranch} into ${targetBranch}`,
+          body: `Merged via Bevel by ${user.name} <${user.email}>`,
+        },
+        user,
+        {
+          // The merge resets that workspace to the published target tip, which
+          // would throw away edits still on their way out. Refuse until they
+          // are shared — asked inside the merge's own reservation, so a save
+          // cannot land between the question and the reset.
+          requireCleanTarget: true,
+          // Into a protected branch, a merge is a commit of every file it
+          // changes: allowed only for a caller who could commit each of them
+          // directly (the same at-HEAD rule the write lock applies). The hook
+          // runs inside that reservation too, against the target tip this
+          // merge is built on rather than a workspace HEAD that may be behind
+          // it — so the rules read are the ones the merge is about to change.
+          //
+          // `changedPaths` is the authorizing set: roles.yaml kept (unlike a
+          // change request's merge, nothing strips it here — so its presence
+          // is what the hook refuses on) and both sides of a rename, since the
+          // old name is a file this merge deletes.
+          authorize: isProtectedBranch(targetBranch)
+            ? async ({ sha, changedPaths }) => {
+                if (changedPaths.length === 0) return;
+                // roles.yaml never changes through a merge. A change request's
+                // merge restores the target's copy on the source first
+                // (`preserveBaseRolesYaml`): a draft is a free-for-all, and the
+                // merge is what lands its content on a protected branch. This
+                // path lands draft content the same way, so it refuses rather
+                // than authorizing — even an admin, who could write the file
+                // directly, gets the app's roles surface for that, where the
+                // file is validated (parsable, groups that exist); the agent's
+                // own write tools refuse it under the same guard. A merged
+                // roles.yaml would bypass both, on the one file the access
+                // model cannot survive being wrong.
+                if (changedPaths.includes('roles.yaml')) {
+                  throw new WorkflowDomainError(
+                    `"${targetBranch}" is protected and this merge would change its roles.yaml. ` +
+                      `Roles never change through a merge: restore roles.yaml on "${sourceBranch}" to the version on ` +
+                      `"${targetBranch}" and merge again, and ask the user to change roles in the app.`,
+                    403,
+                    { kind: 'protected-merge-changes-roles', targetBranch, sourceBranch },
+                  );
+                }
+                const allowed = await this.accessControl.canWriteBatchAtRef(
+                  targetWorkspaceId,
+                  sha,
+                  user.email,
+                  changedPaths,
+                );
+                const denied = allowed ? changedPaths.filter((p) => !allowed.get(p)) : [];
+                if (denied.length === 0) return;
+                throw new WorkflowDomainError(
+                  `"${targetBranch}" is protected and you cannot commit directly to it: ` +
+                    `${denied.length} changed file(s) are outside your write access (${denied.join(', ')}). ` +
+                    `Open a change request from "${sourceBranch}" into "${targetBranch}" and ask the user to review it in the app.`,
+                  403,
+                  { kind: 'protected-merge-target', targetBranch, deniedPaths: denied },
+                );
+              }
+            : undefined,
+        },
+      );
+      if (result.kind === 'conflicts') {
+        return { kind: 'conflicts-need-resolution', conflictedPaths: result.paths };
+      }
+      await this.pullMergeTarget(targetBranch, user);
+      return { kind: 'merged', sha: result.sha };
+    });
   }
 
   /**

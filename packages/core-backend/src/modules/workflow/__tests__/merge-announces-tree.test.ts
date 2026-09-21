@@ -16,6 +16,7 @@ import type { PendingCommitsService } from '../pending-commits.service.js';
 import type { WorkflowEventBus } from '../event-bus.js';
 import type { Database } from '../../database/connection.js';
 import { WorkflowService } from '../workflow.service.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
 /**
  * APPLYING A CHANGE REQUEST ANNOUNCES THE TREE IT REWROTE.
@@ -120,6 +121,7 @@ function makeSvc(
     { acquire: vi.fn(), release: vi.fn() } as unknown as FileLockService,
     {} as unknown as PendingCommitsService,
     KB_DIR,
+    openChangeGate(),
     bus,
   );
   // Branch retirement is git IO past the announcement and irrelevant here.
