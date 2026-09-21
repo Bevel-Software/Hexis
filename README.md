@@ -44,8 +44,6 @@ open-source core of the Bevel platform.
   </a>
 </p>
 
-<sub>Unite was formerly known as Mercateo.</sub>
-
 ### For teams
 
 One place where engineers and non-technical people alike can browse and load
