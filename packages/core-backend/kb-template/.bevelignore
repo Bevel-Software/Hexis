@@ -11,7 +11,8 @@
 # Repo hygiene files that clutter the tree without being node content.
 .gitignore
 .gitattributes
-AGENTS.md
+# The platform's agent guide.
+{{agentsFile}}
 # The deployment preamble is edited from External agent access, not as a KB page.
 /mcp-description.md
 # The pre-rename name. Listed so a knowledge base carrying both files hides

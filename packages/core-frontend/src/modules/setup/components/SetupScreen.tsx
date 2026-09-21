@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { DEFAULT_KB_LAYOUT, type KbLayout } from '@bevel-software/platform-shared';
+import {
+  DEFAULT_KB_LAYOUT,
+  agentsFilePointerSentence,
+  type KbLayout,
+} from '@bevel-software/platform-shared';
 import { Banner, Button, Surface, TextField } from '../../../shared/components';
 import { tokenUsernameForHost } from '../utils/git-host';
 import { isRootFolderSuggestion, rootFolderState, type RootFolderState } from '../utils/root-folders';
@@ -124,6 +128,14 @@ const FIELDS: Record<
     help: 'The top-level folder that holds plugins. The three folder names must differ.',
     placeholder: 'Plugins',
   },
+  // Beside the folders, and not under Advanced, for the same reason they are
+  // not: a repository that already has an `AGENTS.md` of its own loses it to
+  // the platform's on the first boot unless this is answered first.
+  agentsFile: {
+    label: 'Agent guide file',
+    help: 'The file the platform writes its own guide to, at the top of the repository. Change it if your repository already has an AGENTS.md you want to keep — that file then stays yours, and the platform never writes to it. Must end in .md.',
+    placeholder: 'AGENTS.md',
+  },
   defaultBranch: {
     label: 'Main branch',
     help: 'The version everyone sees. Filled in from your repository when you test the connection.',
@@ -203,9 +215,26 @@ const OIDC_VERIFICATION_LABEL: Record<OidcVerification, string> = {
 };
 
 /** The three root folder fields, checked against the repository's listing. */
-const ROOT_FOLDER_KEYS: readonly (keyof KbLayout)[] = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'];
-const isRootFolderKey = (key: string): key is keyof KbLayout =>
+const ROOT_FOLDER_KEYS = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'] as const;
+const isRootFolderKey = (key: string): key is (typeof ROOT_FOLDER_KEYS)[number] =>
   (ROOT_FOLDER_KEYS as readonly string[]).includes(key);
+
+/**
+ * The knowledge-base LAYOUT fields — the three folders and the agent guide's
+ * file name — which render together, under the connection test whose listing
+ * the folders are checked against, rather than with the connection fields
+ * above it.
+ */
+const LAYOUT_KEYS: readonly (keyof KbLayout)[] = [...ROOT_FOLDER_KEYS, 'agentsFile'];
+const isLayoutKey = (key: string): boolean => (LAYOUT_KEYS as readonly string[]).includes(key);
+
+/**
+ * The consent that rides along with a renamed guide: keep the platform's
+ * one-sentence pointer in the customer's own `AGENTS.md`. Not a text field, so
+ * it has no {@link FIELDS} entry and is drawn by hand under the name it
+ * belongs to.
+ */
+const AGENTS_LINK_KEY = 'agentsFileLink';
 
 /** How a near-miss folder differs from the configured name, as the warning words it. */
 const VARIANT_DIFFERENCE: Record<Extract<RootFolderState, { kind: 'variant' }>['difference'], string> = {
@@ -956,6 +985,43 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
     );
   }
 
+  /**
+   * Under the guide's name, once it is no longer `AGENTS.md`: the exact
+   * sentence the platform would add to the customer's own `AGENTS.md`, and the
+   * consent to keep it there.
+   *
+   * Shown ONLY while the name differs, because that is the only time there is
+   * anything to point at — under the default name the guide IS `AGENTS.md`.
+   * The sentence is rendered by the same helper the server appends with, so
+   * what the admin reads here is what lands in their file, character for
+   * character.
+   */
+  function renderAgentsFileLink() {
+    const name = resolved('agentsFile') || DEFAULT_KB_LAYOUT.agentsFile;
+    if (name === DEFAULT_KB_LAYOUT.agentsFile) return null;
+    // Unset means on: the server reads an unanswered setting the same way.
+    const on = (draft[AGENTS_LINK_KEY] ?? settings.find((s) => s.key === AGENTS_LINK_KEY)?.value ?? 'true') !== 'false';
+    return (
+      <div className="mt-2 space-y-2" data-testid="agents-file-link">
+        <label className="flex cursor-pointer select-none items-start gap-2 text-detail text-ink">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={on}
+            onChange={(e) => set(AGENTS_LINK_KEY, e.target.checked ? 'true' : 'false')}
+          />
+          <span>Keep a pointer to {name} in your own AGENTS.md</span>
+        </label>
+        <CopyValue value={agentsFilePointerSentence(name)} label="Copy the pointer sentence" />
+        <p className="text-meta text-ink-faint">
+          While this is ticked, every start looks for “{name}” in your AGENTS.md and adds the
+          sentence at the end when it is not there — in your own words counts too. Nothing is added
+          if you have no AGENTS.md, and no file is ever created for it. Untick it to stop.
+        </p>
+      </div>
+    );
+  }
+
   function renderField(setting: SettingStatus) {
     const copy = FIELDS[setting.key];
     if (!copy) return null;
@@ -995,6 +1061,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
         )}
         <p className="mt-1 text-meta text-ink-faint">{copy.help}</p>
         {isRootFolderKey(setting.key) && renderRootFolderState(setting.key)}
+        {setting.key === 'agentsFile' && renderAgentsFileLink()}
         {setting.key === 'kbSyncSecret' && renderSyncPanel()}
         {/* Only AFTER setup: on first run there is nothing yet to lose, so
             the caution would be noise. Once a deployment is live, this field
@@ -1140,7 +1207,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                   .filter(
                     (f) =>
                       !FIELDS[f.key]?.advanced &&
-                      !isRootFolderKey(f.key) &&
+                      !isLayoutKey(f.key) &&
                       (section.id !== 'sign-in' || OIDC_KEYS.includes(f.key)),
                   )
                   .map((f) => renderField(f))}
@@ -1195,11 +1262,12 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                   </Surface>
                 )}
 
-                {/* The three root folders: in the main section, directly under
-                    the test whose listing they are checked against — the
+                {/* The layout: the three root folders and the agent guide's
+                    file name, in the main section, directly under the test
+                    whose listing the folders are checked against — the
                     connection fields above it stay next to the button that
                     proves them. */}
-                {fields.filter((f) => isRootFolderKey(f.key)).map((f) => renderField(f))}
+                {fields.filter((f) => isLayoutKey(f.key)).map((f) => renderField(f))}
 
                 {/* Everything a normal setup never touches, out of the way but
                     not hidden: a self-hosted git server does need the token

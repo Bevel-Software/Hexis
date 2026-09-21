@@ -1,6 +1,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { KNOWLEDGE_BASE_DIR, PLUGINS_DIR, SKILLS_DIR, validateKbRootName } from '@bevel-software/platform-shared';
+import {
+  AGENTS_FILE,
+  KNOWLEDGE_BASE_DIR,
+  LEGACY_AGENTS_FILE,
+  PLUGINS_DIR,
+  SKILLS_DIR,
+  agentsFilePointerSentence,
+  validateKbRootName,
+} from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME, isAbsence, type IFsProbe } from '../../../../shared/fs.contract.js';
 import { PREAMBLE_FILE } from '../../../agent-instructions/compose.js';
 import { TemplateSource } from './template-source.js';
@@ -16,7 +24,7 @@ const PREAMBLE_IGNORE_PATTERN = `/${PREAMBLE_FILE}`;
  * sample ontology is NOT (it only seeds a fully-empty repo, see seed-tree.ts).
  *
  * Two kinds:
- *  - {@link REQUIRED_FILES}: repo-root files added when the file is missing.
+ *  - {@link requiredFiles}: repo-root files added when the file is missing.
  *  - Reserved root dirs (core's two plus a distribution's `extraRootDirs`):
  *    when a dir is entirely absent it's created by adding its `<dir>/.gitkeep`.
  *    Keyed on the *directory's* existence, not the `.gitkeep` file — so a
@@ -27,23 +35,56 @@ const PREAMBLE_IGNORE_PATTERN = `/${PREAMBLE_FILE}`;
  * generated from `ADMIN_EMAIL` (see roles-yaml.step.ts), so a repo can't be
  * seeded with a stale hard-coded Admin list.
  */
-export const REQUIRED_FILES: readonly string[] = [
-  'access.md',
-  'AGENTS.md',
-  '.bevelignore',
-  '.gitignore',
-  // The deployment preamble every connected agent is told at session start
-  // (see modules/agent-instructions). Seeded ONCE and never refreshed: the
-  // content is the admin's, and the shipped template is one HTML comment, so
-  // a never-edited file sends nothing of its own.
-  PREAMBLE_FILE,
-];
+export function requiredFiles(): readonly string[] {
+  return [
+    'access.md',
+    // The managed agent guide, under whatever this deployment calls it. The
+    // PACKAGED template still carries it as `AGENTS.md` — one file, one
+    // spelling in the tarball — so the write target and the template source
+    // part company here and nowhere else (see {@link templateNameOf}).
+    AGENTS_FILE,
+    '.bevelignore',
+    '.gitignore',
+    // The deployment preamble every connected agent is told at session start
+    // (see modules/agent-instructions). Seeded ONCE and never refreshed: the
+    // content is the admin's, and the shipped template is one HTML comment, so
+    // a never-edited file sends nothing of its own.
+    PREAMBLE_FILE,
+  ];
+}
+
+/**
+ * The template's own name for a required file. The guide is the one file whose
+ * name on disk is a deployment's choice while its name in the template is
+ * fixed; everything else is spelled the same on both sides.
+ */
+function templateNameOf(repoRel: string): string {
+  return repoRel === AGENTS_FILE ? LEGACY_AGENTS_FILE : repoRel;
+}
+
+/**
+ * The sentence the managed guide carries about itself, and the ONLY thing that
+ * makes a root `AGENTS.md` provably the platform's rather than the customer's.
+ *
+ * Matched on this one phrase rather than on the whole header: the lines around
+ * it have changed between releases (they name the configured file now), and a
+ * knowledge base seeded by any of those releases is still ours to remove. A
+ * customer file would have to quote the platform's own claim about itself
+ * verbatim to be mistaken for one, and the consequence of the mistake is a
+ * deletion — which is why nothing looser will do.
+ */
+const MANAGED_GUIDE_MARKER = '**This file is managed by the platform.**';
+
+/** Whether `text` is a copy of the platform's managed guide, of any vintage. */
+export function isManagedGuide(text: string): boolean {
+  return text.includes(MANAGED_GUIDE_MARKER);
+}
 
 /**
  * Repo-root files the startup phase GENERATES rather than copies — today just
  * `roles.yaml`, rendered from `ADMIN_EMAIL` (see roles-yaml.step.ts and
  * seed-tree.ts). Reserved-root validation must treat these exactly like
- * {@link REQUIRED_FILES}: a root claiming a generated name is the same silent
+ * {@link requiredFiles}: a root claiming a generated name is the same silent
  * typo with the same silent outcome.
  */
 export const GENERATED_FILES: readonly string[] = ['roles.yaml'];
@@ -107,7 +148,7 @@ export function reservedRootDirs(extraRootDirs: readonly string[]): readonly str
     // outcome: the file is laid down first, so the dir check finds the path
     // taken and skips it, and the directory the caller asked for never appears
     // with nothing said about why.
-    if (REQUIRED_FILES.includes(dir) || GENERATED_FILES.includes(dir)) {
+    if (requiredFiles().includes(dir) || GENERATED_FILES.includes(dir)) {
       throw new Error(
         `Reserved KB root "${dir}" collides with a required or generated file of the same name`,
       );
@@ -118,8 +159,9 @@ export function reservedRootDirs(extraRootDirs: readonly string[]): readonly str
 
 /**
  * The template top-up as an {@link OnServerStart} step: add any missing base
- * scaffolding to every PROTECTED branch, and keep the managed AGENTS.md
- * current. Drafts are deliberately out of scope — whatever the protected
+ * scaffolding to every PROTECTED branch, and keep the managed agent guide
+ * current — under whatever this deployment calls it, and taking its own
+ * stale `AGENTS.md` with it when that name was handed back to the customer. Drafts are deliberately out of scope — whatever the protected
  * branches gain, drafts fork from; a scaffolding addition on a draft would
  * surface as noise in its change request's diff. (Unlike the Groups→Plugins
  * rename, a missing file diffs as one file, not the whole tree — so the
@@ -141,9 +183,16 @@ export class TemplateFilesStep implements OnServerStart {
    *                      claim a root without also shipping a template entry
    *                      for it.
    */
+  /**
+   * @param agentsFileLink Whether to keep the platform's pointer sentence in a
+   *                       customer-owned root `AGENTS.md` — a GETTER, because
+   *                       the setting behind it may be saved by the very
+   *                       first-run save that then runs this phase.
+   */
   constructor(
     private readonly disk: IFsProbe,
     private readonly extraRootDirs: readonly string[] = [],
+    private readonly agentsFileLink: () => boolean = () => true,
   ) {
     // Validated NOW, so a bad extra fails at boot beside the rest of the
     // wiring — but the list itself is NOT kept: the core roots are live
@@ -167,8 +216,12 @@ export class TemplateFilesStep implements OnServerStart {
     const templates = new TemplateSource(this.disk, templateDir);
     const repoDir = await branch.repoDir();
     const added: string[] = [];
+    // Read ONCE per branch: the name is a live binding, and a value re-read
+    // between the write and the ignore rule could disagree with itself.
+    const agentsFile = AGENTS_FILE;
+    const renamed = agentsFile !== LEGACY_AGENTS_FILE;
 
-    for (const rel of REQUIRED_FILES) {
+    for (const rel of requiredFiles()) {
       // `lstat`, not `exists`: a DIRECTORY or SYMLINK squatting a required
       // file's name would read as "present", and a skip-if-present check
       // would then report success over a knowledge base whose root access
@@ -183,9 +236,9 @@ export class TemplateFilesStep implements OnServerStart {
             'Remove or rename it — the platform requires this name to be a readable file.',
         );
       }
-      let content = await templates.read(rel);
+      let content = await templates.read(templateNameOf(rel));
       // The on-disk merge below only runs against an EXISTING ignore file; a
-      // freshly-declared one was merely assumed to carry the AGENTS.md rule —
+      // freshly-declared one was merely assumed to carry the guide's rule —
       // true of the packaged template, not necessarily of a distribution's
       // custom one. Make it true here, so the managed conventions doc is
       // hidden from the file tree from the first boot either way. The same is
@@ -202,26 +255,33 @@ export class TemplateFilesStep implements OnServerStart {
         content = withPlatformIgnorePatternRespelled(content, PREAMBLE_FILE, PREAMBLE_IGNORE_PATTERN);
         content = withoutIgnoreLine(
           withoutPlatformIgnorePattern(
-            withIgnorePattern(withIgnorePattern(content, 'AGENTS.md'), PREAMBLE_IGNORE_PATTERN),
+            withIgnorePattern(withIgnorePattern(content, agentsFile), PREAMBLE_IGNORE_PATTERN),
             `${SKILLS_DIR}/`,
           ),
           `${PLUGINS_DIR}/`,
         );
+        // …and a template (a distribution's, a stale packaged one) still
+        // hiding `AGENTS.md` while this deployment's guide is called something
+        // else would hide the CUSTOMER'S file from the first boot — the exact
+        // thing the rename exists to prevent.
+        if (renamed) content = withoutPlatformAgentsRule(content);
       }
       branch.write(rel, content);
       added.push(rel);
     }
 
-    // AGENTS.md or mcp-description.md left VISIBLE by a stale `.bevelignore`
+    // The guide or mcp-description.md left VISIBLE by a stale `.bevelignore`
     // is closed here — and
     // UNCONDITIONALLY, not only when the file was just added: a KB whose
-    // AGENTS.md predates the CLAUDE.md→AGENTS.md rename has an ignore file
+    // guide predates the CLAUDE.md→AGENTS.md rename has an ignore file
     // that lists the old name and knows nothing of the new one, so the
-    // conventions doc shows up in the file tree and the agent view.
+    // conventions doc shows up in the file tree and the agent view. A KB
+    // whose deployment has just RENAMED the guide is the same story one
+    // rename later: the rule names a file that is now the customer's.
     // Idempotent: an ignore file already carrying the rule — or absent, in
     // which case the template's copy declared above arrives with the rule in
     // it — changes nothing and produces no note. Deliberately checked by
-    // LINE PRESENCE, not effective outcome: a later `!AGENTS.md` negation is
+    // LINE PRESENCE, not effective outcome: a later `!<guide>` negation is
     // the operator explicitly choosing to SHOW the file, and hiding it is a
     // default this step provides, not a mandate it re-imposes every boot.
     //
@@ -249,21 +309,45 @@ export class TemplateFilesStep implements OnServerStart {
         // that booted the release shipping the unanchored spelling carries the
         // platform's own line, and that line hides a nested namesake too.
         respell: [[PREAMBLE_FILE, PREAMBLE_IGNORE_PATTERN]],
-        add: ['AGENTS.md', PREAMBLE_IGNORE_PATTERN],
+        add: [agentsFile, PREAMBLE_IGNORE_PATTERN],
         drop: [`${SKILLS_DIR}/`],
         dropEvery: [`${PLUGINS_DIR}/`],
+        // The guide's rule FOLLOWS its name. Once the guide is `HEXIS.md`, the
+        // root's `AGENTS.md` is the customer's own conventions file and they
+        // must be able to see and edit it in the app — so the platform's own
+        // line comes out, recognised the way the skills-root line was
+        // (see {@link withoutPlatformAgentsRule}); a rule an operator wrote by
+        // hand is theirs and stays.
+        dropAgentsRule: renamed,
       })),
     );
 
-    // AGENTS.md is MANAGED, not merely seeded: the platform owns its content,
+    // The guide is MANAGED, not merely seeded: the platform owns its content,
     // and a stale copy is replaced with the packaged template's every startup
     // phase. The file's own header says so, which is what makes overwriting
     // edits a stated contract instead of a surprise.
     let agentsRefreshed = false;
-    if (!added.includes('AGENTS.md') && (await templates.differsFrom(repoDir, 'AGENTS.md'))) {
-      branch.write('AGENTS.md', await templates.read('AGENTS.md'));
-      added.push('AGENTS.md');
+    if (
+      !added.includes(agentsFile) &&
+      (await templates.differsFrom(repoDir, agentsFile, LEGACY_AGENTS_FILE))
+    ) {
+      branch.write(agentsFile, await templates.read(LEGACY_AGENTS_FILE));
+      added.push(agentsFile);
       agentsRefreshed = true;
+    }
+
+    // What becomes of the `AGENTS.md` the platform used to own, now that the
+    // guide lives somewhere else. Nothing at all while the name is the default.
+    if (renamed) {
+      added.push(
+        ...(await this.reconcileLegacyGuide(repoDir, branch, {
+          agentsFile,
+          // Only on the boot the rename lands — the boot that first writes the
+          // guide under its new name. Said every boot after, the "kept" note
+          // would caption commits about other things forever.
+          announceKept: added.includes(agentsFile),
+        })),
+      );
     }
 
     added.push(...this.ensureRequiredDirs(repoDir, branch, await this.missingDirs(repoDir)));
@@ -273,9 +357,62 @@ export class TemplateFilesStep implements OnServerStart {
     // first to dirty the branch.
     branch.note(
       agentsRefreshed && added.length === 1
-        ? 'Update AGENTS.md to the current platform template'
+        ? `Update ${agentsFile} to the current platform template`
         : `Add missing KB scaffolding: ${added.join(', ')}`,
     );
+  }
+
+  /**
+   * The root `AGENTS.md` on a deployment whose guide is called something else:
+   * removed when the platform can PROVE it wrote it, otherwise left alone —
+   * and, while the admin keeps the link setting on, given the one sentence
+   * that points at the guide beside it.
+   *
+   * Removal is gated on the managed header and nothing else. An admin who
+   * renames the guide on a knowledge base the platform seeded would otherwise
+   * be left with stale platform content sitting under the very name they
+   * wanted for their own file; an admin who renames it on a repository whose
+   * `AGENTS.md` is their own must find that file byte-for-byte untouched. The
+   * header is the one fact that tells the two apart, so it is the one thing
+   * asked.
+   *
+   * The pointer is bounded by three conditions, all of them the customer's to
+   * control: the admin keeps the setting on, the file exists (one is NEVER
+   * created for this), and the guide's name appears nowhere in the text. That
+   * last one is a plain content search on purpose — a mention in the
+   * customer's own words, a link, a heading, all count, and the platform stays
+   * out of a file it does not own.
+   *
+   * Returns the paths changed, for the note.
+   */
+  private async reconcileLegacyGuide(
+    repoDir: string,
+    branch: KbBranch,
+    opts: { agentsFile: string; announceKept: boolean },
+  ): Promise<string[]> {
+    let current: string;
+    try {
+      current = await fs.readFile(path.join(repoDir, LEGACY_AGENTS_FILE), 'utf8');
+    } catch (err) {
+      // No customer file: nothing to remove, and nothing to point at the guide
+      // — the platform never creates an `AGENTS.md` for this.
+      if (isAbsence(err)) return [];
+      throw err;
+    }
+
+    if (isManagedGuide(current)) {
+      branch.remove(LEGACY_AGENTS_FILE);
+      branch.note(`Remove the platform-written AGENTS.md — the agent guide is now ${opts.agentsFile}`);
+      return [LEGACY_AGENTS_FILE];
+    }
+
+    if (opts.announceKept) {
+      branch.note('Keep AGENTS.md — it is not a platform template, so it is the knowledge base\'s own');
+    }
+    if (!this.agentsFileLink() || current.includes(opts.agentsFile)) return [];
+    branch.write(LEGACY_AGENTS_FILE, withPointerSentence(current, opts.agentsFile));
+    branch.note(`Add a pointer to ${opts.agentsFile} at the end of AGENTS.md`);
+    return [LEGACY_AGENTS_FILE];
   }
 
   /**
@@ -346,6 +483,8 @@ export class TemplateFilesStep implements OnServerStart {
       dropEvery?: string[];
       /** `[from, to]` pairs: a rule an earlier release wrote, and its spelling now. */
       respell?: ReadonlyArray<readonly [string, string]>;
+      /** Take out the platform's own `AGENTS.md` line — the guide is called something else now. */
+      dropAgentsRule?: boolean;
     },
   ): Promise<string[]> {
     let current: string;
@@ -365,10 +504,11 @@ export class TemplateFilesStep implements OnServerStart {
       current,
     );
     const added = rules.add.reduce((text, pattern) => withIgnorePattern(text, pattern), respelled);
-    const merged = (rules.dropEvery ?? []).reduce(
+    const dropped = (rules.dropEvery ?? []).reduce(
       (text, pattern) => withoutIgnoreLine(text, pattern),
       rules.drop.reduce((text, pattern) => withoutPlatformIgnorePattern(text, pattern), added),
     );
+    const merged = rules.dropAgentsRule ? withoutPlatformAgentsRule(dropped) : dropped;
     if (merged === current) return [];
     branch.write(IGNORE_FILENAME, merged);
     return [IGNORE_FILENAME];
@@ -407,8 +547,72 @@ export function withoutIgnoreLine(text: string, pattern: string): string {
   return kept.join('\n');
 }
 
-/** The legacy comment `withIgnorePattern` wrote above AGENTS.md. */
+/** The legacy comment `withIgnorePattern` wrote above the guide's rule. */
 const PLATFORM_RULE_COMMENT = '# Added by the platform: the conventions doc is not node content.';
+
+/** The comment the packaged template carries above the guide's rule. */
+const AGENTS_RULE_COMMENT = "# The platform's agent guide.";
+
+/**
+ * The template line that has ALWAYS sat directly above the guide's rule in the
+ * packaged `.bevelignore` — the last of the repo-hygiene entries.
+ *
+ * It stands in for a comment on knowledge bases seeded before there was one.
+ * The guide's rule shipped in the template body from the first seed, bare,
+ * like the plugins-root rule did — but unlike that one it must not be dropped
+ * wholesale, because an operator who writes `AGENTS.md` into their own ignore
+ * file is saying something the platform has no business overruling. So
+ * provenance is the position the template put it in: a bare rule sitting
+ * anywhere else in the file is the operator's and stays.
+ */
+const TEMPLATE_LINE_ABOVE_AGENTS_RULE = '.gitattributes';
+
+/**
+ * `text` without the `AGENTS.md` line THE PLATFORM WROTE — under its own
+ * comment (either spelling), or in the slot the packaged template has always
+ * put it in — and without that comment.
+ *
+ * Called only when the guide has been renamed, which is what makes the line
+ * wrong: it hides a file the platform no longer owns. A `!AGENTS.md` negation
+ * is not the rule and stays, as everywhere else here.
+ */
+export function withoutPlatformAgentsRule(text: string): string {
+  const lines = text.split('\n');
+  const kept: string[] = [];
+  for (const line of lines) {
+    const above = kept[kept.length - 1];
+    const ours =
+      line.trim() === LEGACY_AGENTS_FILE &&
+      above !== undefined &&
+      (isPlatformRuleComment(above) || above.trim() === TEMPLATE_LINE_ABOVE_AGENTS_RULE);
+    if (!ours) {
+      kept.push(line);
+      continue;
+    }
+    // The template's own line above the rule is content, not a marker: it
+    // hides `.gitattributes` and stays. Only a comment the platform wrote
+    // goes with the rule it introduced.
+    if (!isPlatformRuleComment(above)) continue;
+    kept.pop();
+    // The blank line that opened an appended block goes with it; the template's
+    // own comment sits inline, with content above it, and nothing to tidy.
+    const appended = above.trim() === PLATFORM_RULE_COMMENT || above.trim() === AGENTS_RULE_COMMENT;
+    if (appended && kept.length > 1 && kept[kept.length - 1]?.trim() === '') kept.pop();
+  }
+  return kept.join('\n');
+}
+
+/**
+ * `text` with the platform's pointer sentence appended as its own paragraph.
+ *
+ * One blank line between the customer's last line and ours, whether or not
+ * their file ended in a newline: a sentence glued onto the end of their last
+ * paragraph would read as a continuation of something they wrote.
+ */
+export function withPointerSentence(text: string, agentsFile: string): string {
+  const body = text.replace(/\n+$/, '');
+  return `${body}\n\n${agentsFilePointerSentence(agentsFile)}\n`;
+}
 
 /** The comment written above the preamble rule on an existing knowledge base. */
 const PREAMBLE_RULE_COMMENT =
@@ -446,6 +650,7 @@ function isPlatformRuleComment(line: string): boolean {
   const trimmed = line.trim();
   if (
     trimmed === PLATFORM_RULE_COMMENT ||
+    trimmed === AGENTS_RULE_COMMENT ||
     trimmed === PREAMBLE_RULE_COMMENT ||
     trimmed === LEGACY_PREAMBLE_TEMPLATE_COMMENT
   ) {
@@ -535,6 +740,11 @@ function withIgnorePattern(text: string, pattern: string): string {
     (lines.includes(PREAMBLE_FILE) || lines.includes(`!${PREAMBLE_FILE}`));
   if (lines.includes(pattern) || lines.includes(`!${pattern}`) || operatorPreambleRule) return text;
   const separator = text.endsWith('\n') ? '' : '\n';
-  const comment = pattern === PREAMBLE_IGNORE_PATTERN ? PREAMBLE_RULE_COMMENT : PLATFORM_RULE_COMMENT;
+  const comment =
+    pattern === PREAMBLE_IGNORE_PATTERN
+      ? PREAMBLE_RULE_COMMENT
+      : pattern === AGENTS_FILE
+        ? AGENTS_RULE_COMMENT
+        : PLATFORM_RULE_COMMENT;
   return `${text}${separator}\n${comment}\n${pattern}\n`;
 }

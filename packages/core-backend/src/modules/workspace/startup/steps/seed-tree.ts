@@ -1,6 +1,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
+import {
+  AGENTS_FILE,
+  LEGACY_AGENTS_FILE,
+  renderKbLayoutPlaceholders,
+} from '@bevel-software/platform-shared';
 import type { IFsProbe, ITreeWalker } from '../../../../shared/fs.contract.js';
 import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
 import { reservedRootDirs } from './template-files.step.js';
@@ -139,12 +143,22 @@ class KbSeedTree {
       }
       return;
     }
+    // The agent guide ships under one name and lands under this deployment's.
+    // Done HERE rather than left to the top-up step, which would otherwise
+    // write the guide under its configured name and then delete the
+    // `AGENTS.md` this seed had just laid down — two commits saying opposite
+    // things about a knowledge base nobody had used yet.
+    if (relDir === '' && name === LEGACY_AGENTS_FILE) {
+      await this.copyTemplateFile(name, dest, AGENTS_FILE);
+      return;
+    }
     await this.copyTemplateFile(relDir ? path.join(relDir, name) : name, dest);
   }
 
   /**
    * Copy one template file (by repo-relative path) into `dest`, creating
-   * parents. Text files are RENDERED — the managed guide and the ignore file
+   * parents. `destRel` is the name it lands under when that differs from the
+   * template's — true of the agent guide and nothing else. Text files are RENDERED — the managed guide and the ignore file
    * name the three root folders, which a deployment may have renamed — and a
    * file without placeholders comes out byte-identical to its source.
    *
@@ -153,9 +167,9 @@ class KbSeedTree {
    * anything that does not decode is copied byte for byte. Either way the
    * source's mode survives — a template script keeps its executable bit.
    */
-  private async copyTemplateFile(relPath: string, dest: string): Promise<void> {
+  private async copyTemplateFile(relPath: string, dest: string, destRel: string = relPath): Promise<void> {
     const from = await this.templates.pathOf(relPath);
-    const to = path.join(dest, relPath);
+    const to = path.join(dest, destRel);
     await fs.mkdir(path.dirname(to), { recursive: true });
     // A binary is spotted from its first bytes (a NUL turns up early in any
     // real one) and streamed across without ever being read whole; only what

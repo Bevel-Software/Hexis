@@ -4,8 +4,12 @@ import { authFetch } from '../../../lib/api';
 /** One configurable setting, as the server describes it. */
 export interface SettingStatus {
   key: string;
-  /** The environment variable that still wins if it is set. */
-  envVar: string;
+  /**
+   * The environment variable that still wins if it is set. Absent for a
+   * setting no variable can override — the knowledge-base layout, which is
+   * entered here and nowhere else.
+   */
+  envVar?: string;
   section: 'knowledge-base' | 'sign-in';
   source: 'env' | 'stored' | 'unset';
   /** Absent for secrets — the server never sends a stored secret back. */

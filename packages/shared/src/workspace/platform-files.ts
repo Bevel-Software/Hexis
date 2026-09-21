@@ -1,23 +1,45 @@
-import { reservedRootDirNames } from './kb-layout.js';
+import {
+  DEFAULT_KB_LAYOUT,
+  FIXED_PLATFORM_FILE_NAMES,
+  agentsFileOf,
+  currentKbLayout,
+  reservedRootDirNames,
+  type KbLayout,
+} from './kb-layout.js';
 
 /**
  * The files the platform reads as configuration, not content. `access.md`
  * governs the folder it sits in and `.bevelignore` layers like `.gitignore`,
- * so both count at any depth; `roles.yaml` and `AGENTS.md` are read from the
- * repository root only, so a nested file of that name is ordinary content.
- * Moving one changes what the platform enforces, so moves refuse them.
+ * so both count at any depth; `roles.yaml` and the agent guide are read from
+ * the repository root only, so a nested file of either name is ordinary
+ * content. Moving one changes what the platform enforces, so moves refuse them.
+ *
+ * A FUNCTION, not a constant, and that is the whole of the configurable-guide
+ * change on this side: the guide's name is a deployment setting, so the fourth
+ * platform file is `HEXIS.md` on one deployment and `AGENTS.md` on the next —
+ * and on the first, a root `AGENTS.md` is the CUSTOMER'S own conventions file,
+ * which has to move and delete like any page. Every gate asks this rather than
+ * reading a list captured at module load.
  */
-export const PLATFORM_FILE_NAMES: readonly string[] = Object.freeze([
-  'access.md',
-  'roles.yaml',
-  '.bevelignore',
-  'AGENTS.md',
-]);
+export function platformFileNames(layout: KbLayout = currentKbLayout()): readonly string[] {
+  return [...FIXED_PLATFORM_FILE_NAMES, agentsFileOf(layout)];
+}
+
+/**
+ * The platform file names under the DEFAULT layout — what they were before the
+ * guide could be renamed. Kept for callers that want the default answer rather
+ * than this deployment's; anything judging a real path asks
+ * {@link platformFileNames}, which knows what this deployment called its guide.
+ */
+export const PLATFORM_FILE_NAMES: readonly string[] = Object.freeze(
+  platformFileNames(DEFAULT_KB_LAYOUT),
+);
 
 /** The platform files that are read wherever they sit, not only at the root. */
 const PLATFORM_FILES_AT_ANY_DEPTH = new Set(['access.md', '.bevelignore']);
 
-const PLATFORM_FILES = new Set(PLATFORM_FILE_NAMES);
+/** The names in effect, as a set — rebuilt per call, because the guide's is configurable. */
+const platformFiles = (): ReadonlySet<string> => new Set(platformFileNames());
 
 const normalize = (path: string): string => path.replace(/^\.?\/+/, '').replace(/\/+$/, '');
 
@@ -46,7 +68,7 @@ const hasTraversal = (path: string): boolean =>
 export function isPlatformFile(repoRelativePath: string): boolean {
   const norm = normalize(repoRelativePath);
   const name = baseName(norm);
-  if (!PLATFORM_FILES.has(name)) return false;
+  if (!platformFiles().has(name)) return false;
   return PLATFORM_FILES_AT_ANY_DEPTH.has(name) || norm === name;
 }
 
@@ -97,15 +119,15 @@ export function platformFolderRefusal(repoRelativeDir: string): string {
  * ROOT's copy into a folder is a move out and not a restore.
  */
 export function isRootPlatformFile(repoRelativePath: string): boolean {
-  return PLATFORM_FILES.has(normalize(repoRelativePath));
+  return platformFiles().has(normalize(repoRelativePath));
 }
 
 /**
  * The place a misplaced platform file is allowed to be put back, when
  * `repoRelativeDestination` names one, and null when it does not.
  *
- * `roles.yaml` and `AGENTS.md` are read from the repository root and nowhere
- * else, so their one required location is the root. A nested `.bevelignore` is
+ * `roles.yaml` and the agent guide are read from the repository root and
+ * nowhere else, so their one required location is the root. A nested `.bevelignore` is
  * read too (it layers, see `BevelIgnoreStack`), yet a restore of one lands at
  * the root only — a deliberate narrowing of the exception, not a claim about
  * where the file is read: the root's copy is the one whose absence breaks the
@@ -125,7 +147,7 @@ export function platformRestoreDestination(
   const norm = normalize(repoRelativeDestination);
   if (hasTraversal(norm)) return null;
   const name = baseName(norm);
-  if (!PLATFORM_FILES.has(name)) return null;
+  if (!platformFiles().has(name)) return null;
   if (name === 'access.md') {
     const slash = norm.lastIndexOf('/');
     return { name, kind: 'folder-without-access-md', dir: slash === -1 ? '' : norm.slice(0, slash) };
@@ -142,11 +164,12 @@ export function platformRestoreDestination(
  * Three things make the shape, and all three are about the move rather than
  * about the source's current standing:
  *
- *  - the source is NAMED like a platform file. A nested `roles.yaml` or
- *    `AGENTS.md` is ordinary content where it sits (`isPlatformFile` says so,
- *    and moving it needs no exception), but it is still the copy a restore
- *    carries back to the root — judging the shape on `isPlatformFile` would
- *    skip the exception for exactly the two files the root can lose;
+ *  - the source is NAMED like a platform file. A nested `roles.yaml`, or a
+ *    nested copy of the agent guide, is ordinary content where it sits
+ *    (`isPlatformFile` says so, and moving it needs no exception), but it is
+ *    still the copy a restore carries back to the root — judging the shape on
+ *    `isPlatformFile` would skip the exception for exactly the two files the
+ *    root can lose;
  *  - the source is not the root's own copy, which is the copy a restore puts
  *    back, never the one it takes out;
  *  - the destination is a required location for that same name, so the file
@@ -158,7 +181,7 @@ export function isPlatformRestoreShape(
 ): boolean {
   if (hasTraversal(repoRelativeSource)) return false;
   const name = baseName(repoRelativeSource);
-  if (!PLATFORM_FILES.has(name)) return false;
+  if (!platformFiles().has(name)) return false;
   if (isRootPlatformFile(repoRelativeSource)) return false;
   const target = platformRestoreDestination(repoRelativeDestination);
   return target !== null && target.name === name;

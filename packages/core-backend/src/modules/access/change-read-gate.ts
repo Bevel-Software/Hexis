@@ -80,7 +80,7 @@ export class ChangeReadGate implements IChangeReadGate {
         if (rel === SYNCED_GROUPS_YAML) return { allowed: true, via: 'machine-owned' };
         // The admin rescue, in the same shape the write floor has it: an
         // admin holds write on the repository root's own files (`roles.yaml`,
-        // `access.md`, `groups.yaml`, `AGENTS.md`, …) whatever the root rules
+        // `access.md`, `groups.yaml`, the agent guide, …) whatever the root rules
         // say, so that a tree whose root grants nobody can still be repaired
         // from inside the app. A subfolder's `access.md` is an ordinary path:
         // an admin who cannot read the folder cannot change it either.

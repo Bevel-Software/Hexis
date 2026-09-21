@@ -39,12 +39,15 @@ import { createFileReaderRegistry } from './file-readers/file-reader.registry.js
 import { DocumentReader } from './file-readers/document-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
 import {
+  AGENTS_FILE,
+  LEGACY_AGENTS_FILE,
   folderPlaceholderPath,
   isFolderPlaceholder,
   isPlatformFile,
   isPlatformFolder,
   isProtectedBranch,
   platformFileCreationRefusal,
+  platformFileNames,
   platformFileRefusal,
   platformFolderRefusal,
   entryExistsMessage,
@@ -192,19 +195,45 @@ async function keepFolderOf(
 }
 
 /**
- * Appended (centrally, in `mount`) to EVERY workspace tool description. A KB
- * author can drop an `AGENTS.md` at the workspace root to document conventions
- * for that knowledge base; agents (ours and external) should consult it before
- * touching files. It rides on every entrypoint — reads (grep/list_files/
- * file_stat) included — because any of them can be a session's first touch.
+ * Appended (centrally, in `mount`) to EVERY workspace tool description. The
+ * platform's managed agent guide sits at the workspace root and documents the
+ * conventions of that knowledge base; agents (ours and external) should consult
+ * it before touching files. It rides on every entrypoint — reads (grep/
+ * list_files/file_stat) included — because any of them can be a session's first
+ * touch.
  *
  * `CLAUDE.md` is named as a fallback because knowledge bases seeded before the
  * rename still carry one, and the seeder never deletes a file it did not
  * expect. Naming both means an agent finds the conventions either way, instead
  * of reading none because it looked for the newer name and stopped.
+ *
+ * WHEN THE GUIDE HAS BEEN RENAMED the sentence names two files, ours first. The
+ * second is the organisation's OWN `AGENTS.md`, which on such a deployment is
+ * ordinary content the platform never touches — and which no harness reads for a
+ * remote agent, because a remote agent has no checkout. Telling it to read both
+ * is the only way the conventions the customer actually wrote reach the agent
+ * working in their knowledge base. Under the default name the wording collapses
+ * to the one file it has always named.
+ *
+ * A FUNCTION, called at mount time: the name is a deployment setting applied at
+ * boot, and a module-scope string would snapshot the default.
  */
-const KB_CONVENTIONS_NOTE =
-  ' Before your first read or change in a workspace, read `AGENTS.md` at the KB root — or `CLAUDE.md` on a knowledge base seeded before it was renamed — if either exists: it holds the author\'s conventions for this knowledge base, and you should follow them.';
+function kbConventionsNote(): string {
+  if (AGENTS_FILE === LEGACY_AGENTS_FILE) {
+    return ' Before your first read or change in a workspace, read `AGENTS.md` at the KB root — or `CLAUDE.md` on a knowledge base seeded before it was renamed — if either exists: it holds the author\'s conventions for this knowledge base, and you should follow them.';
+  }
+  return (
+    ` Before your first read or change in a workspace, read \`${AGENTS_FILE}\` at the KB root, then ` +
+    '`AGENTS.md` if it also exists (the organisation\'s own conventions) — or `CLAUDE.md` on a knowledge base seeded before it was renamed: together they hold the conventions for this knowledge base, and you should follow them.'
+  );
+}
+
+/** The platform files as a tool description lists them — the guide under its own name. */
+function platformFileList(): string {
+  return platformFileNames()
+    .map((name) => `\`${name}\``)
+    .join(', ');
+}
 
 const int = (description: string): JsonSchema => ({ type: 'integer', description });
 
@@ -1079,7 +1108,7 @@ export function registerWorkspaceTools(
     const path = `/api/agent/tools/${spec.name}`;
     const def = toolDef({
       name: spec.name,
-      // Every workspace entrypoint carries the AGENTS.md reminder, every file
+      // Every workspace entrypoint carries the agent-guide reminder, every file
       // tool the one content rule, and every tool a permission can refuse the
       // proposal route — appended once here so no tool (especially the
       // read-only ones a session hits first) can miss them.
@@ -1087,7 +1116,7 @@ export function registerWorkspaceTools(
         spec.description +
         (spec.proposable ? PROPOSAL_ROUTE_NOTE : '') +
         (spec.fileTool === false ? '' : CONTENT_RULE) +
-        KB_CONVENTIONS_NOTE,
+        kbConventionsNote(),
       path,
       inputs: spec.inputs,
       outputs: spec.outputs,
@@ -1302,7 +1331,7 @@ export function registerWorkspaceTools(
     description:
       'Get a file/directory\'s metadata (name, type, size, …) without returning content. A file also reports `contentMode`: `text` (read, write and edit it as text), `document` (read returns an extraction; replace it by upload) or `binary` (bytes: copy, move, delete, or replace by upload), plus `kind` (`text` | `document` | `image` | `binary`), `mime`, `mimeSource` and `textEditable` — decided by the same file readers read_file, grep and the write tools use, so an extensionless text file is `text/plain`.' +
       ' Every entry also reports what you may DO with it. ' +
-      '`managed` is true for a platform item — a platform file (`access.md`, `roles.yaml`, `.bevelignore`, `AGENTS.md`) or a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`); managed items are never movable or deletable through these tools. ' +
+      `\`managed\` is true for a platform item — a platform file (${platformFileList()}) or a platform folder (the repository root or a reserved root folder such as \`KnowledgeBase/\`); managed items are never movable or deletable through these tools. ` +
       '`access: { read, write, download, owner }` is your own verdict under the access rules; pass `explainAccess: true` to learn why, and who else holds each verb. `movable` and `deletable` say whether `move_file` / `delete_file` / `delete_folder` would be allowed for you, judged like their dry runs: not managed, no symbolic link, and on a protected branch you hold write on the item AND on every file under a folder (on a draft branch writes are not gated). `movable` judges the source side only; the destination is judged by a `move_file` dry run. ' +
       'For a folder, `descendants` is the number of files under it at any depth; counting stops at 10000 and `descendantsTruncated` says so, and past that point `movable` and `deletable` are false because a folder that large was not judged in full — run the `move_file` or `delete_folder` dry run for the real verdict. ' +
       'Call this before a move or delete to see what it would touch.' +
@@ -1902,7 +1931,7 @@ export function registerWorkspaceTools(
     name: 'delete_file',
     description:
       'Delete ONE workspace file (a symbolic link is refused: links are never followed or removed). Committed + pushed as you. Its folder stays, even when this was its last file. Files only: a folder is refused with a pointer to `delete_folder`. ' +
-      'A platform file (`access.md` or `.bevelignore` in any folder, `roles.yaml` or `AGENTS.md` at the repository root) and git metadata are refused.' +
+      `A platform file (\`access.md\` or \`.bevelignore\` in any folder, \`roles.yaml\` or \`${AGENTS_FILE}\` at the repository root) and git metadata are refused.` +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -2120,7 +2149,7 @@ export function registerWorkspaceTools(
     name: 'move_file',
     description:
       'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Lands as a delete + create, committed + pushed as you. ' +
-      'Rules: the destination must not exist — a move never overwrites a file or merges into a folder; a platform file (`access.md` or `.bevelignore` in any folder, `roles.yaml` or `AGENTS.md` at the repository root) is refused with "<name> is a platform file and stays in its folder." — a folder that moves takes its own platform files along, still in their folder; a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`) and git metadata are refused; a move cannot create a platform file or folder at `dest` either (renaming a note to `access.md` is refused); a path through a symbolic link is refused, since links are never followed; on a protected branch you must be able to write both ends — for a folder, every file under it at its old and its new path. ' +
+      `Rules: the destination must not exist — a move never overwrites a file or merges into a folder; a platform file (\`access.md\` or \`.bevelignore\` in any folder, \`roles.yaml\` or \`${AGENTS_FILE}\` at the repository root) is refused with "<name> is a platform file and stays in its folder." — a folder that moves takes its own platform files along, still in their folder; a platform folder (the repository root or a reserved root folder such as \`KnowledgeBase/\`) and git metadata are refused; a move cannot create a platform file or folder at \`dest\` either (renaming a note to \`access.md\` is refused); a path through a symbolic link is refused, since links are never followed; on a protected branch you must be able to write both ends — for a folder, every file under it at its old and its new path. ` +
       'Access follows the destination folder. Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination. ' +
       'A move whose `accessChanges` is true runs only with `confirm: true`; without it the call moves nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm.' +
       ONTOLOGY_BOUNDARY_NOTE,

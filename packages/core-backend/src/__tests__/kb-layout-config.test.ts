@@ -1,15 +1,20 @@
 import { describe, test, expect, afterEach } from 'vitest';
 import {
+  AGENTS_FILE,
   DEFAULT_KB_LAYOUT,
   KNOWLEDGE_BASE_DIR,
   PLUGINS_DIR,
   SKILLS_DIR,
+  agentsFilePointerSentence,
   configureKbLayout,
   currentKbLayout,
+  isPlatformFile,
   ontologyRoots,
+  platformFileNames,
   pluginOfPath,
   renderKbLayoutPlaceholders,
   reservedRootDirNames,
+  validateAgentsFileName,
   validateKbLayout,
   validateKbRootName,
   normalizeSkillRoot,
@@ -83,7 +88,12 @@ describe('KB layout — configuration', () => {
     expect(KNOWLEDGE_BASE_DIR).toBe('docs');
     expect(SKILLS_DIR).toBe('skills');
     expect(PLUGINS_DIR).toBe('plugins');
-    expect(currentKbLayout()).toEqual({ knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' });
+    expect(currentKbLayout()).toEqual({
+      knowledgeBaseDir: 'docs',
+      skillsDir: 'skills',
+      pluginsDir: 'plugins',
+      agentsFile: 'AGENTS.md',
+    });
   });
 
   test('the derived sets follow the configured names rather than snapshotting the defaults', () => {
@@ -106,5 +116,103 @@ describe('KB layout — configuration', () => {
   test('trims what it applies', () => {
     configureKbLayout({ knowledgeBaseDir: ' docs ', skillsDir: 'skills', pluginsDir: 'plugins' });
     expect(KNOWLEDGE_BASE_DIR).toBe('docs');
+  });
+});
+
+/**
+ * The agent guide's file name — the fourth thing a deployment may name. The
+ * default is what every deployment before this change ran with, so the
+ * default-name tests here are the regression net for all of them.
+ */
+describe('KB layout — the agent guide\'s file name', () => {
+  test('defaults to AGENTS.md, and a layout that names no guide is the default layout', () => {
+    expect(AGENTS_FILE).toBe('AGENTS.md');
+    expect(DEFAULT_KB_LAYOUT.agentsFile).toBe('AGENTS.md');
+    // An older server's /api/config body, and a deployment that saved three
+    // folder names before the setting existed, both look like this.
+    configureKbLayout({ knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' });
+    expect(AGENTS_FILE).toBe('AGENTS.md');
+  });
+
+  test('accepts a plain markdown name and applies it to the live binding', () => {
+    expect(validateAgentsFileName('HEXIS.md')).toBeNull();
+    configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+    expect(AGENTS_FILE).toBe('HEXIS.md');
+    expect(currentKbLayout().agentsFile).toBe('HEXIS.md');
+  });
+
+  test('refuses every shape that is not one markdown file name of its own', () => {
+    // A folder path: the guide is read from the repository root and nowhere else.
+    expect(validateAgentsFileName('guides/HEXIS.md')).toMatch(/single file name/);
+    expect(validateAgentsFileName('guides\\HEXIS.md')).toMatch(/single file name/);
+    // Not markdown: the per-file access rules apply to `.md` alone.
+    expect(validateAgentsFileName('HEXIS.txt')).toMatch(/end in \.md/);
+    // Nothing at all.
+    expect(validateAgentsFileName('')).toMatch(/required/);
+    expect(validateAgentsFileName('   ')).toMatch(/required/);
+    // A dot-file every scanner skips — including the one that draws the tree.
+    expect(validateAgentsFileName('.hidden.md')).toMatch(/start with a dot/);
+    // The guide's own pre-rename name stays legacy content.
+    expect(validateAgentsFileName('CLAUDE.md')).toMatch(/pre-rename name/);
+    expect(validateAgentsFileName('claude.md')).toMatch(/pre-rename name/);
+    // The other platform files: two platform roles on one path.
+    expect(validateAgentsFileName('access.md')).toMatch(/platform file name/);
+    expect(validateAgentsFileName('roles.yaml')).toMatch(/platform file name/);
+    expect(validateAgentsFileName('.bevelignore')).toMatch(/platform file name/);
+    expect(validateAgentsFileName('mcp-description.md')).toMatch(/platform file name/);
+    // The rule every path component passes.
+    expect(validateAgentsFileName('CON.md')).not.toBeNull();
+    expect(validateAgentsFileName('a:b.md')).not.toBeNull();
+  });
+
+  test('refuses the name of a root folder, whichever of the two the save names', () => {
+    expect(validateAgentsFileName('Plugins.md', { ...DEFAULT_KB_LAYOUT, pluginsDir: 'Plugins.md' }))
+      .toMatch(/already the plugins folder/);
+    // Case-insensitively, like the folders are to each other: one entry on a
+    // case-insensitive disk.
+    expect(validateKbLayout({ ...DEFAULT_KB_LAYOUT, skillsDir: 'guide.md', agentsFile: 'GUIDE.md' }))
+      .toMatch(/already the skills folder/);
+    // And the whole-layout check says which field it is about.
+    expect(validateKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.txt' }))
+      .toMatch(/agent guide's file name/);
+  });
+
+  test('renders {{agentsFile}} so the written guide names the file it lives in', () => {
+    expect(
+      renderKbLayoutPlaceholders('see {{agentsFile}}', { ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' }),
+    ).toBe('see HEXIS.md');
+    // A `$`-pattern in the name is a name, not a replacement pattern.
+    expect(
+      renderKbLayoutPlaceholders('{{agentsFile}}', { ...DEFAULT_KB_LAYOUT, agentsFile: 'A$&.md' }),
+    ).toBe('A$&.md');
+    expect(renderKbLayoutPlaceholders('see {{agentsFile}}', DEFAULT_KB_LAYOUT)).toBe('see AGENTS.md');
+  });
+
+  test('the platform-file gate follows the name: ours is managed, theirs is content', () => {
+    expect(platformFileNames(DEFAULT_KB_LAYOUT)).toEqual([
+      'access.md',
+      'roles.yaml',
+      '.bevelignore',
+      'AGENTS.md',
+    ]);
+    expect(isPlatformFile('AGENTS.md')).toBe(true);
+
+    configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+    expect(platformFileNames()).toEqual(['access.md', 'roles.yaml', '.bevelignore', 'HEXIS.md']);
+    // The guide the platform writes is immovable and undeletable…
+    expect(isPlatformFile('HEXIS.md')).toBe(true);
+    // …and the customer's own AGENTS.md is a page like any other.
+    expect(isPlatformFile('AGENTS.md')).toBe(false);
+    // Still root-only, as `roles.yaml` is: a nested copy is content.
+    expect(isPlatformFile('KnowledgeBase/HEXIS.md')).toBe(false);
+  });
+
+  test('the pointer sentence is one sentence, naming the guide twice, from one place', () => {
+    expect(agentsFilePointerSentence('HEXIS.md')).toBe(
+      'Read [HEXIS.md](./HEXIS.md) before working in this knowledge base — ' +
+        "it is the platform's guide to its layout, files and rules.",
+    );
+    configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+    expect(agentsFilePointerSentence()).toContain('HEXIS.md');
   });
 });

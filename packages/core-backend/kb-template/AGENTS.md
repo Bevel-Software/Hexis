@@ -11,9 +11,10 @@ read:
 This is a git-backed knowledge base. You are the primary agent responsible for
 maintaining it.
 
-> **This file is managed by the platform.** Every server restart replaces it
-> with the current template, so edits made here are overwritten. Deployment- or
-> team-specific conventions belong in files of your own — anywhere under
+> **This file is managed by the platform.** It lives at the repository root as
+> `{{agentsFile}}`, and every server restart replaces it with the current
+> template, so edits made here are overwritten. Deployment- or team-specific
+> conventions belong in files of your own — anywhere under
 > `{{knowledgeBaseDir}}/`, linked from wherever they are needed.
 
 **Read `mcp-description.md` at the repository root first.** It says what this
@@ -266,7 +267,7 @@ Access to any path — reading it as much as writing it — is governed by
   `read:` grant so what they put there is visible to them (a loose FILE
   directly at a root has no folder to carry that grant and is not excepted).
   And an Admin — or the deployment owner — may change the files directly in
-  the repository root (`roles.yaml`, `access.md`, `groups.yaml`, `AGENTS.md`,
+  the repository root (`roles.yaml`, `access.md`, `groups.yaml`, `{{agentsFile}}`,
   …) even when the root grants read to nobody: the same rescue the write
   floor gives them, so a tree whose root rules lock everyone out stays
   repairable from inside the app. That rescue stops at the root; a subfolder

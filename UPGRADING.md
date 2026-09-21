@@ -28,6 +28,18 @@ earlier release added for it — the Skills & Tools sidebar shows that root as
 a file tree now); write a `plugin.json` into every plugin folder that predates
 the manifest. Each is idempotent, so a second start writes nothing.
 
+### The knowledge-base layout is no longer read from the environment
+
+`KB_KNOWLEDGE_BASE_DIR`, `KB_SKILLS_DIR` and `KB_PLUGINS_DIR` are retired: the
+three root folder names, and the agent guide's file name beside them, are
+entered on the setup screen and the Deployment settings page.
+
+Nothing changes for you at the upgrade. On the first start, each of the three
+still set in your environment is imported once into its saved setting and the
+log names the variable to delete. If a saved value already differs from the
+variable, the saved value wins and the start warns that the variable is
+ignored. Delete the variables from your `.env` at your convenience.
+
 A plugin is named by its manifest: the `name` in `plugin.json` is what the
 marketplace publishes, what the plugin's page address uses, and what grants
 spell (`plugin/<name>/read`). The manifests the maintenance phase writes name
