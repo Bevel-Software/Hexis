@@ -17,6 +17,7 @@ import {
   type CreateOAuthSecretInput,
   type OAuthProviderConfig,
   type VariableScopeResolver,
+  type ForcedRefreshOutcome,
   InvalidSecretError,
   SecretNotFoundError,
   SecretOAuthError,
@@ -583,6 +584,64 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     if (!expired) return tokens.access_token;
     if (!tokens.refresh_token) return tokens.access_token; // best-effort; may be stale
 
+    const result = await this.refreshRow(row, blob, tokens);
+    // Transient failure (timeout, network, 5xx) — return the stale token so
+    // the caller gets a clear 401 from the provider rather than a silent
+    // missing var, and the next call retries the refresh.
+    if (result.outcome === 'transient') return tokens.access_token;
+    return result.accessToken;
+  }
+
+  async forceRefresh(userId: string, key: string): Promise<ForcedRefreshOutcome> {
+    const [row] = await this.db
+      .select()
+      .from(secrets)
+      .where(and(eq(secrets.userId, userId), eq(secrets.key, key)))
+      .limit(1);
+    if (!row || row.kind !== 'oauth') return 'skipped';
+    let blob: OAuthBlob;
+    try {
+      blob = this.readBlob(row.valueEncrypted);
+    } catch {
+      return 'skipped';
+    }
+    const tokens = blob.tokens;
+    if (!tokens?.access_token) return 'skipped'; // already not connected
+    // The stored expiry is deliberately NOT consulted: the provider just
+    // refused this token, which outranks whatever lifetime it was issued with.
+    const result = await this.refreshRow(row, blob, tokens);
+    return result.outcome;
+  }
+
+  /**
+   * Trade `tokens.refresh_token` for a fresh token set and persist it — the ONE
+   * refresh path, shared by the expiry-driven `resolve` and the rejection-driven
+   * `forceRefresh`. Three outcomes, each already persisted:
+   *
+   *   - `refreshed` — fresh tokens stored (or a concurrent refresh already
+   *     stored some); `accessToken` is the one to use.
+   *   - `rejected` — the grant is dead: the provider refused it (400/401) or
+   *     there is no refresh token to try. The token set is wiped, the client
+   *     secret kept, so `statusFor` reports not-authorized and /connect routes
+   *     the user to re-authorize.
+   *   - `transient` — timeout, network, 5xx: nothing is changed, so a later
+   *     call tries again.
+   */
+  private async refreshRow(
+    row: typeof secrets.$inferSelect,
+    blob: OAuthBlob,
+    tokens: OAuthTokenSet,
+  ): Promise<
+    | { outcome: 'refreshed'; accessToken: string }
+    | { outcome: 'rejected'; accessToken: null }
+    | { outcome: 'transient' }
+  > {
+    if (!tokens.refresh_token) {
+      // Only the rejection-driven path reaches here without one (`resolve`
+      // serves a refresh-less token as is): the provider refused the only
+      // credential there is, and nothing can renew it.
+      return this.wipeTokens(row, blob);
+    }
     const meta = this.readMeta(row.oauthMeta);
     const body = new URLSearchParams({
       grant_type: 'refresh_token',
@@ -606,36 +665,9 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         err instanceof SecretOAuthError &&
         (err.providerStatus === 400 || err.providerStatus === 401)
       ) {
-        const next: OAuthBlob = { clientSecret: blob.clientSecret };
-        // Guarded on the ciphertext we read, so a concurrent refresh that
-        // already persisted ROTATED tokens can't be wiped by our stale
-        // failure. When that guard trips (0 rows), the failure was against a
-        // dead pre-rotation refresh token — re-read and serve the fresh grant
-        // instead of reporting not-authorized.
-        const wiped = await this.db
-          .update(secrets)
-          .set({ valueEncrypted: this.crypto().encrypt(JSON.stringify(next)), updatedAt: new Date() })
-          .where(and(eq(secrets.id, row.id), eq(secrets.valueEncrypted, row.valueEncrypted)))
-          .returning({ id: secrets.id });
-        if (Array.isArray(wiped) && wiped.length === 0) {
-          const [current] = await this.db
-            .select({ valueEncrypted: secrets.valueEncrypted })
-            .from(secrets)
-            .where(eq(secrets.id, row.id))
-            .limit(1);
-          try {
-            const fresh = current ? this.readBlob(current.valueEncrypted) : null;
-            return fresh?.tokens?.access_token ?? null;
-          } catch {
-            return null;
-          }
-        }
-        return null;
+        return this.wipeTokens(row, blob);
       }
-      // Transient failure (timeout, network, 5xx) — return the stale token so
-      // the caller gets a clear 401 from the provider rather than a silent
-      // missing var, and the next call retries the refresh.
-      return tokens.access_token;
+      return { outcome: 'transient' };
     }
     // Some providers omit the refresh_token on refresh — keep the old one.
     if (!refreshed.refresh_token) refreshed.refresh_token = tokens.refresh_token;
@@ -648,15 +680,73 @@ export class DbSecretsVaultService implements ISecretsVaultService {
 
     // Optimistic concurrency: only persist if the stored ciphertext is unchanged,
     // so a concurrent refresh on the same row doesn't clobber (Microsoft pattern).
-    await this.db
+    const stored = await this.db
       .update(secrets)
       .set({ valueEncrypted: this.crypto().encrypt(JSON.stringify(next)), updatedAt: new Date() })
-      .where(and(eq(secrets.id, row.id), eq(secrets.valueEncrypted, row.valueEncrypted)));
+      .where(and(eq(secrets.id, row.id), eq(secrets.valueEncrypted, row.valueEncrypted)))
+      .returning({ id: secrets.id });
+    if (Array.isArray(stored) && stored.length === 0) {
+      // Nothing was written: the row changed under us, so our fresh token is
+      // not what the vault holds and handing it out would be a lie about
+      // stored state. Same resolution as the guarded wipe — re-read and serve
+      // whatever the winner persisted, or report the grant not-connected when
+      // the winner was a wipe.
+      const current = await this.currentAccessToken(row.id);
+      return current
+        ? { outcome: 'refreshed', accessToken: current }
+        : { outcome: 'rejected', accessToken: null };
+    }
     // A successful refresh is a credential repair — notify so dependent caches
     // (the MCP proxy's manual-failure memo) retry immediately. `row.userId` is
     // null for a shared (admin-scope) row, which maps to "affects everyone".
     this.notifyMutation(row.userId);
-    return refreshed.access_token;
+    return { outcome: 'refreshed', accessToken: refreshed.access_token };
+  }
+
+  /**
+   * The access token currently stored on `id`, or undefined if there is none to
+   * read — including when the row is no longer an OAuth row at all: a concurrent
+   * edit can turn a sign-in into a static value, and a static value that happens
+   * to parse as a token blob must not be handed out as a refreshed grant.
+   */
+  private async currentAccessToken(id: string): Promise<string | undefined> {
+    const [current] = await this.db
+      .select({ kind: secrets.kind, valueEncrypted: secrets.valueEncrypted })
+      .from(secrets)
+      .where(eq(secrets.id, id))
+      .limit(1);
+    if (!current || current.kind !== 'oauth') return undefined;
+    try {
+      return this.readBlob(current.valueEncrypted).tokens?.access_token;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Drop a dead grant's token set, keeping the client secret. See {@link refreshRow}. */
+  private async wipeTokens(
+    row: typeof secrets.$inferSelect,
+    blob: OAuthBlob,
+  ): Promise<{ outcome: 'refreshed'; accessToken: string } | { outcome: 'rejected'; accessToken: null }> {
+    const next: OAuthBlob = { clientSecret: blob.clientSecret };
+    // Guarded on the ciphertext we read, so a concurrent refresh that
+    // already persisted ROTATED tokens can't be wiped by our stale
+    // failure. When that guard trips (0 rows), the failure was against a
+    // dead pre-rotation refresh token — re-read and serve the fresh grant
+    // instead of reporting not-authorized.
+    const wiped = await this.db
+      .update(secrets)
+      .set({ valueEncrypted: this.crypto().encrypt(JSON.stringify(next)), updatedAt: new Date() })
+      .where(and(eq(secrets.id, row.id), eq(secrets.valueEncrypted, row.valueEncrypted)))
+      .returning({ id: secrets.id });
+    if (Array.isArray(wiped) && wiped.length === 0) {
+      const fresh = await this.currentAccessToken(row.id);
+      return fresh ? { outcome: 'refreshed', accessToken: fresh } : { outcome: 'rejected', accessToken: null };
+    }
+    // The sign-in just became not-connected — let credential-validity caches
+    // (pooled downstream connections dialed with the dead token) drop it now.
+    this.notifyMutation(row.userId);
+    return { outcome: 'rejected', accessToken: null };
   }
 
   async putSharedOAuthProvider(input: {

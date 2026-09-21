@@ -18,7 +18,13 @@ import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
 import { PLATFORM_HEADER } from '../../agent-instructions/index.js';
 import { startFakeDownstreamMcpServer, type FakeDownstreamMcpServer } from './fake-downstream-mcp-server.js';
+import { registerBevelSecretsVariableLoader } from '../../secrets-vault/secrets-variable-loader.js';
+import type { ForcedRefreshOutcome, ISecretsVaultService } from '../../secrets-vault/secrets-vault.contract.js';
+import type { IToolManualService } from '../../tool-manuals/tool-manuals.contract.js';
+import { setLogger } from '../../../shared/logging.js';
+import type { ILogger } from '../../../shared/logger.contract.js';
 import { formatProbeReport, probeFirstCall } from '../first-call-probe.js';
+import { printable } from '../../../shared/printable.js';
 
 /**
  * True end-to-end test over the REAL Streamable-HTTP MCP transport. Real MCP
@@ -35,9 +41,23 @@ import { formatProbeReport, probeFirstCall } from '../first-call-probe.js';
 
 const KEY_A = 'bevel_key_user_a';
 const KEY_B = 'bevel_key_user_b';
-const USERS: Record<string, { userId: string; tokenId: string }> = {
+const KEY_FORGER = 'bevel_key_user_forger';
+/**
+ * A user id carrying a whole forged log line — and one character from every
+ * class `printable` escapes: a C0 newline, a C1 control (U+009B, the one-byte
+ * CSI that opens an ANSI sequence), and a Unicode line separator (U+2028).
+ * `JSON.stringify` escapes only the first, so the last two are what keep the
+ * escaping test honest about what it pins.
+ */
+const FORGER_ID =
+  'user-C\ninfo: downstream token refresh: manual=notion user=root outcome=refreshed\u009b31m\u2028tail';
+/** An INTERACTIVE caller (OAuth/JWT): no connection-key id, so it gets the full tool listing. */
+const KEY_INTERACTIVE = 'bevel_key_user_interactive';
+const USERS: Record<string, { userId: string; tokenId?: string }> = {
   [KEY_A]: { userId: 'user-A', tokenId: 'tok-A' },
   [KEY_B]: { userId: 'user-B', tokenId: 'tok-B' },
+  [KEY_FORGER]: { userId: FORGER_ID, tokenId: 'tok-C' },
+  [KEY_INTERACTIVE]: { userId: 'user-I' },
 };
 
 const bearerOf = (req: express.Request) => (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
@@ -99,6 +119,9 @@ interface PlatformOptions {
   /** Extra manuals the catalog serves each caller (beyond the KB manual). */
   manualsFor?: (bearer: string) => unknown[];
   poolNow?: () => number;
+  /** The vault + manual catalog behind per-user credentials; absent ⇒ the proxy skips credential handling. */
+  secretsVault?: ConstructorParameters<typeof McpService>[1];
+  toolManuals?: ConstructorParameters<typeof McpService>[2];
   /**
    * Extra KB-manual tools in this platform's catalog. Empty for every suite
    * that asserts on the catalog's exact contents; the first-call reproduction
@@ -162,7 +185,7 @@ async function startPlatform(opts: PlatformOptions = {}): Promise<Platform> {
     publicFrontendUrl: 'http://localhost:5173',
     readAgentPreamble: opts.readAgentPreamble,
     downstreamPool: opts.poolNow ? { now: opts.poolNow } : undefined,
-  });
+  }, opts.secretsVault, opts.toolManuals);
   const stub = {} as never;
   app.use('/api', createMcpRoutes(service, stub, fakeAuth, fakeAuth, stub, stub, stub, ''));
   // The loopback catalog is served per caller, from the bearer it carries.
@@ -591,6 +614,463 @@ describe('proxied third-party MCP servers: the downstream pool', () => {
     const res = await client.callTool({ name, arguments: { text: 'y' } });
     expect(res.isError).toBeFalsy();
     expect(downstream.initializations()).toBe(2);
+  });
+});
+
+describe('proxied third-party MCP servers: a rejected token gets one refresh and a retry', () => {
+  let downstream: FakeDownstreamMcpServer | undefined;
+  let restoreLogger: ILogger | undefined;
+  afterEach(async () => {
+    await downstream?.stop();
+    downstream = undefined;
+    registerBevelSecretsVariableLoader(null as unknown as ISecretsVaultService);
+    if (restoreLogger) setLogger(restoreLogger);
+    restoreLogger = undefined;
+  });
+
+  const KEY = 'notion_ACCESS_TOKEN';
+
+  /**
+   * One user's stored OAuth sign-in for the `notion` manual, as the proxy sees
+   * it through the vault contract: `resolve` hands out the current token, and
+   * `forceRefresh` does what the test scripts — rotate it, wipe it (a dead
+   * grant), or leave it (a provider outage).
+   */
+  function fakeSignIn(initialToken: string, onRefresh: (s: { token: string | null }) => ForcedRefreshOutcome) {
+    const state = { token: initialToken as string | null, refreshes: 0 };
+    const vault = {
+      resolve: async (_userId: string, key: string) => (key === KEY ? state.token : null),
+      statusFor: async (_userId: string, keys: string[]) =>
+        keys.map((key) => ({ key, adminConfigured: false, userConfigured: true, userAuthorized: state.token !== null })),
+      forceRefresh: async (_userId: string, key: string) => {
+        expect(key).toBe(KEY);
+        state.refreshes += 1;
+        return onRefresh(state);
+      },
+    } as unknown as ISecretsVaultService;
+    registerBevelSecretsVariableLoader(vault);
+    const toolManuals = {
+      userScopedKeysForManual: async (manual: string) =>
+        manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion sign-in', oauth: true }] : [],
+    } as unknown as IToolManualService;
+    return { state, vault, toolManuals };
+  }
+
+  const notionManual = (server: FakeDownstreamMcpServer) => () => [
+    {
+      name: 'notion',
+      call_template_type: 'mcp',
+      config: {
+        mcpServers: { srv: { transport: 'http', url: server.url, headers: { Authorization: 'Bearer ${ACCESS_TOKEN}' } } },
+      },
+    },
+  ];
+
+  /** Every log line, flattened to text, so a test can assert what was — and was not — written. */
+  function captureLogs(): string[] {
+    const lines: string[] = [];
+    const capture = (bindings: Record<string, unknown>): ILogger => {
+      const write = (message: string, fields?: Record<string, unknown>) =>
+        lines.push(JSON.stringify({ ...bindings, message, fields }, (_k, v) => (v instanceof Error ? v.message : v)));
+      return { debug: write, info: write, warn: write, error: write, child: (more) => capture({ ...bindings, ...more }) };
+    };
+    restoreLogger = setLogger(capture({}));
+    return lines;
+  }
+  const refreshLines = (lines: string[]) => lines.filter((l) => l.includes('downstream token refresh'));
+
+  /**
+   * Does this text carry anything `printable` escapes? Everything it escapes,
+   * not just the C0 controls: DEL and the C1 block (U+009B is a one-byte CSI —
+   * an ANSI sequence on its own) and the line separators U+2028/U+2029 all
+   * survive `captureLogs`' JSON round trip raw, so a C0-only check would let a
+   * regression that dropped their escaping through while the line still breaks
+   * or colours an operator's terminal.
+   */
+  const unprintable = (text: string) =>
+    [...text].some((c) => {
+      const code = c.codePointAt(0)!;
+      return code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029;
+    });
+
+  const quiet = () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  };
+
+  it('reproduction: a deliberately invalid stored token is refreshed at the handshake and the tool works', async () => {
+    quiet();
+    let valid = 'fresh-token';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { state, vault, toolManuals } = fakeSignIn('deliberately-invalid-token', (s) => {
+      s.token = valid;
+      return 'refreshed';
+    });
+    const logs = captureLogs();
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'hello' } });
+
+    expect(res.isError).toBeFalsy();
+    expect(toolText(res)).toContain('hello');
+    expect(state.refreshes).toBe(1);
+    expect(downstream.rejections()).toBeGreaterThan(0);
+    expect(refreshLines(logs)).toHaveLength(1);
+    expect(refreshLines(logs)[0]).toContain('manual=\\"notion\\" user=\\"user-A\\" outcome=refreshed');
+    valid = 'unused';
+  });
+
+  it('401 → refresh → retry: a token revoked mid-life is refreshed and the call succeeds; the caller sees only that', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = 'token-2';
+      return 'refreshed';
+    });
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+    expect(toolText(await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } }))).toContain('one');
+    expect(downstream.initializations()).toBe(1);
+
+    valid = 'token-2'; // the provider revokes token-1 before its stated expiry
+
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+    expect(res.isError).toBeFalsy();
+    expect(toolText(res)).toContain('two');
+    expect(state.refreshes).toBe(1);
+    expect(downstream.executions()).toBe(2); // the refused attempt ran nothing
+    expect(downstream.initializations()).toBe(2); // the retry dialed with the fresh token
+  });
+
+  it('refresh rejected → token wiped → status not connected → the answer says to re-authorize on /connect', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = null; // the vault wipes a dead grant
+      return 'rejected';
+    });
+    const logs = captureLogs();
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+
+    valid = 'nothing-valid-any-more';
+
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('Your sign-in for "notion" was rejected and has been disconnected');
+    expect(toolText(res)).toContain('Re-authorize it on http://localhost:5173/connect');
+    expect(state.refreshes).toBe(1);
+    expect((await vault.statusFor('user-A', [KEY]))[0]?.userAuthorized).toBe(false);
+    expect(refreshLines(logs)[0]).toContain('manual=\\"notion\\" user=\\"user-A\\" outcome=rejected');
+  });
+
+  it('transient refresh failure: the original error comes back, the token is kept, and a later call tries again', async () => {
+    quiet();
+    let now = 1_000_000;
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    let providerUp = false;
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      if (!providerUp) return 'transient';
+      s.token = 'token-2';
+      return 'refreshed';
+    });
+    const logs = captureLogs();
+    const { baseUrl } = await startPlatform({
+      manualsFor: notionManual(downstream),
+      secretsVault: vault,
+      toolManuals,
+      poolNow: () => now,
+    });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+
+    valid = 'token-2';
+
+    const failed = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+    expect(failed.isError).toBe(true);
+    expect(toolText(failed)).toContain('invalid_token'); // the downstream's own refusal, unchanged
+    expect(toolText(failed)).not.toContain('Re-authorize');
+    expect(state.token).toBe('token-1'); // kept
+    expect(refreshLines(logs)[0]).toContain('outcome=transient');
+
+    providerUp = true;
+    now += 60_000;
+    const later = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'three' } });
+    expect(later.isError).toBeFalsy();
+    expect(state.refreshes).toBe(2);
+  });
+
+  it('once per minute: a grant the downstream keeps refusing cannot loop the provider', async () => {
+    quiet();
+    let now = 1_000_000;
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    // The provider happily refreshes; the downstream refuses whatever comes back.
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = `token-${s.token}-next`;
+      return 'refreshed';
+    });
+    const { baseUrl } = await startPlatform({
+      manualsFor: notionManual(downstream),
+      secretsVault: vault,
+      toolManuals,
+      poolNow: () => now,
+    });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+
+    valid = 'never';
+    for (let i = 0; i < 4; i++) {
+      const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: `x${i}` } });
+      expect(res.isError).toBe(true);
+      now += 10_000;
+    }
+    // Four refused calls inside the minute, one refresh. (The window reopening
+    // is the guard's own test; here the manual-failure memo additionally keeps
+    // a manual that failed to register from being re-dialed for a while.)
+    expect(state.refreshes).toBe(1);
+  });
+
+  it('logs one line per refresh attempt — manual, user, outcome — and never the token', async () => {
+    quiet();
+    let valid = 'secret-token-OLD';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { vault, toolManuals } = fakeSignIn('secret-token-OLD', (s) => {
+      s.token = 'secret-token-NEW';
+      return 'refreshed';
+    });
+    const logs = captureLogs();
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    valid = 'secret-token-NEW';
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+
+    expect(refreshLines(logs)).toEqual([
+      expect.stringContaining('manual=\\"notion\\" user=\\"user-A\\" outcome=refreshed'),
+    ]);
+    for (const line of logs) {
+      expect(line).not.toContain('secret-token-OLD');
+      expect(line).not.toContain('secret-token-NEW');
+    }
+  });
+
+  it('the refresh line cannot be forged: caller-controlled text is escaped, so one attempt is one line', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = 'token-2';
+      return 'refreshed';
+    });
+    const logs = captureLogs();
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    // This caller's user id is a newline plus a plausible-looking refresh line.
+    const { client } = await connectSdkClient(baseUrl, KEY_FORGER);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    valid = 'token-2';
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+
+    // One attempt, one EVENT. The forged text is carried inside the line it
+    // belongs to, escaped, rather than starting a line of its own — here and
+    // in every other line that names the caller.
+    const messages = logs.map((entry) => JSON.parse(entry).message as string);
+    const events = messages.filter((m) => m.startsWith('downstream token refresh:'));
+    expect(events).toEqual([
+      `downstream token refresh: manual="notion" user=${printable(FORGER_ID)} outcome=refreshed`,
+    ]);
+    for (const message of messages) expect(unprintable(message)).toBe(false);
+  });
+
+  it('a transient refresh at the HANDSHAKE is not remembered as a dead manual: the next call tries again', async () => {
+    quiet();
+    let now = 1_000_000;
+    // Rejects the stored token outright, so the very first connection — the
+    // handshake, before any tool call — is what gets the 401.
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === 'token-2' });
+    let providerUp = false;
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      if (!providerUp) return 'transient';
+      s.token = 'token-2';
+      return 'refreshed';
+    });
+    const { baseUrl } = await startPlatform({
+      manualsFor: notionManual(downstream),
+      secretsVault: vault,
+      toolManuals,
+      poolNow: () => now,
+    });
+    const { client } = await connectSdkClient(baseUrl);
+
+    // The provider is down: the manual cannot register, and the catalog says so.
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(false);
+    expect(state.refreshes).toBe(1);
+
+    // The provider comes back inside the manual-failure memo's five minutes.
+    // The refresh policy's window is one minute, and it is the one that governs:
+    // a transient credential failure is never written into that memo.
+    providerUp = true;
+    now += 60_000;
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(true);
+    expect(state.refreshes).toBe(2);
+    expect(toolText(await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'hi' } }))).toContain('hi');
+  });
+
+  it('a manual catalog that fails mid-refresh is reported on one line, escaped, and refreshes nothing', async () => {
+    quiet();
+    // The catalog breaks only BETWEEN the pre-call secrets check and the
+    // refresh: the fake downstream flips it the moment it answers 401, which
+    // is exactly the window `refreshDownstreamToken` reads it in.
+    let broken = false;
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({
+      acceptsToken: (t) => {
+        const ok = t === valid;
+        if (!ok) broken = true;
+        return ok;
+      },
+    });
+    const { state, vault } = fakeSignIn('token-1', () => 'refreshed');
+    const boom = new Error('catalog read failed\u009b31m\nerror: forged by the manual name\u2028tail');
+    const toolManuals = {
+      userScopedKeysForManual: async (manual: string) => {
+        if (broken) throw boom;
+        return manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion sign-in', oauth: true }] : [];
+      },
+    } as unknown as IToolManualService;
+    const logs = captureLogs();
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+
+    valid = 'token-2'; // the provider revokes the stored token
+
+    // The token is now refused, so the refresh path runs — and finds the
+    // catalog broken.
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+
+    expect(res.isError).toBe(true);
+    expect(state.refreshes).toBe(0); // nothing to refresh against: the token stands
+    const messages = logs.map((entry) => JSON.parse(entry).message as string);
+    const warnings = messages.filter((m) => m.startsWith('downstream token refresh: could not read'));
+    expect(warnings).toEqual([
+      `downstream token refresh: could not read the variables of manual=${printable('notion')}: ${printable(boom.message)}`,
+    ]);
+    // The error's own text cannot start a line either — it travels escaped,
+    // not as a raw Error the logger would render verbatim.
+    for (const message of messages) expect(unprintable(message)).toBe(false);
+  });
+
+  /** The connect link every not-signed-in answer carries. */
+  const CONNECT = 'http://localhost:5173/connect';
+
+  it('after the wipe the manual stays on the surface: an interactive caller still lists the tool, and a call answers with the sign-in link', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = null; // the vault wipes the dead grant
+      return 'rejected';
+    });
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl, KEY_INTERACTIVE);
+    expect(toolText(await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } }))).toContain('one');
+
+    valid = 'nothing-valid-any-more';
+    const wiped = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+    expect(toolText(wiped)).toContain('has been disconnected');
+    expect(state.token).toBeNull();
+
+    // The sign-in is gone; the manual is not. Its tools stay listed from what
+    // the downstream last advertised, and calling one says what to do —
+    // rather than the tool vanishing and the call answering "Unknown tool".
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(true);
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'three' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('needs credentials you haven\'t set up yet');
+    expect(toolText(res)).toContain(CONNECT);
+    expect(toolText(res)).not.toContain('Unknown tool');
+    // One refresh in total. The wipe's own attempt is the one; whatever the
+    // listing and the third call ran into afterwards (a token that no longer
+    // substitutes, or a rejection inside the same minute) stayed inside the
+    // once-a-minute window and did not reach the provider again.
+    expect(state.refreshes).toBe(1);
+  });
+
+  it('after the wipe a connection-key caller does not list the tool, but a call to it still gets the sign-in link', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = null;
+      return 'rejected';
+    });
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    valid = 'nothing-valid-any-more';
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+
+    // Autonomous callers are shown only what is ready to run…
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(false);
+    // …but one holding the name from before is told why, and where to go.
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'three' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain(CONNECT);
+    expect(toolText(res)).not.toContain('Unknown tool');
+  });
+
+  it('a manual nobody has connected to since the process started still answers a call with the sign-in link', async () => {
+    quiet();
+    // Fresh process (a deploy restarted it), and this caller's sign-in is
+    // already gone: no connection was ever made, so no tool definitions exist
+    // to put on the surface — the call must still not answer "Unknown tool".
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: () => false });
+    const { state, vault, toolManuals } = fakeSignIn('token-1', () => 'rejected');
+    state.token = null;
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(false);
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('needs credentials you haven\'t set up yet');
+    expect(toolText(res)).toContain(CONNECT);
+    expect(toolText(res)).not.toContain('Unknown tool');
+    // A name that belongs to no manual of the caller's is still unknown.
+    expect(toolText(await client.callTool({ name: 'linear_srv_echo', arguments: {} }))).toContain('Unknown tool');
+  });
+
+  it('a leftover sign-in row does not stand in for a plain key the manual now declares: the call asks for setup', async () => {
+    quiet();
+    // The `.tool` was edited from an OAuth sign-in to a static key; the user's
+    // old OAuth row is still there and its token is even accepted downstream.
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === 'old-oauth-token' });
+    const { vault } = fakeSignIn('old-oauth-token', () => 'refreshed');
+    const withKind = {
+      ...vault,
+      statusFor: async (_userId: string, keys: string[]) =>
+        keys.map((key) => ({ key, adminConfigured: false, userConfigured: true, userAuthorized: true, userKind: 'oauth' })),
+    } as unknown as ISecretsVaultService;
+    registerBevelSecretsVariableLoader(withKind);
+    const toolManuals = {
+      userScopedKeysForManual: async (manual: string) =>
+        manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion key', oauth: false }] : [],
+    } as unknown as IToolManualService;
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: withKind, toolManuals });
+    const { client } = await connectSdkClient(baseUrl, KEY_INTERACTIVE);
+
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('needs credentials you haven\'t set up yet');
+    expect(toolText(res)).toContain(CONNECT);
+    expect(downstream.executions()).toBe(0);
   });
 });
 
