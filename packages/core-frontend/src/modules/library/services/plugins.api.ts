@@ -88,10 +88,21 @@ export interface PluginSummary {
    * as attention on its row. Absent from an older server.
    */
   warnings?: string[];
-  /** The caller has an OPEN join change request for this plugin. */
+  /**
+   * The caller has asked to join this plugin — true from the moment the
+   * server records the ask, which is before the change request that carries
+   * it exists. That is what keeps the "Requested" card on the page through a
+   * reload while the server is still doing the git work.
+   */
   hasRequested: boolean;
-  /** That CR's number when `hasRequested` (deep-links the review UI). */
+  /** The join CR's number once it exists (deep-links the review UI); null before that. */
   requestNumber: number | null;
+  /**
+   * Why the recorded request could not be sent, in the server's words — set
+   * only when `hasRequested` is false because it failed. Absent from an older
+   * server, and absent whenever there is nothing to say.
+   */
+  requestFailure?: string | null;
 }
 
 export async function listPlugins(): Promise<PluginSummary[]> {
@@ -248,8 +259,21 @@ export class AlreadyReadableError extends Error {
   }
 }
 
-/** Open (or return the existing) join change request. Idempotent server-side. */
-export async function requestPluginAccess(name: string): Promise<{ number: number }> {
+/**
+ * Ask to join a plugin. The server RECORDS the ask and answers — the branch,
+ * the clone, the grant commit, the push and the change request happen after,
+ * so this resolves in a round-trip rather than in however long a first clone
+ * takes. `state` says which: `pending` while the git work is still to come,
+ * `opened` when the change request already exists (a second click, a retry
+ * the server had already finished), in which case `number` is that request's.
+ *
+ * Idempotent server-side, and by the recorded request rather than by the
+ * branch: two tabs or two clicks record one request and open one change
+ * request, and a click after a failure continues the recorded one.
+ */
+export async function requestPluginAccess(
+  name: string,
+): Promise<{ state: 'pending' | 'opened'; number: number | null }> {
   const res = await authFetch(`/api/plugins/${encodeURIComponent(name)}/join-request`, {
     method: 'POST',
   });
@@ -262,7 +286,7 @@ export async function requestPluginAccess(name: string): Promise<{ number: numbe
       .catch(() => ({}))) as { kind?: string };
     if (body.kind === 'already-readable') throw new AlreadyReadableError();
   }
-  return handleApiResponse<{ ok: true; number: number }>(res);
+  return handleApiResponse<{ ok: true; state: 'pending' | 'opened'; number: number | null }>(res);
 }
 
 /**

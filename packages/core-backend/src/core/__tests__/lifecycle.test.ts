@@ -228,6 +228,11 @@ describe('createShutdown', () => {
             order.push('commitWorker.stop');
           },
         },
+        backgroundJobs: {
+          stopSweeping() {
+            order.push('backgroundJobs.stopSweeping');
+          },
+        },
         db: {
           $client: {
             async end() {
@@ -254,6 +259,43 @@ describe('createShutdown', () => {
     expect(d.order).toEqual([
       'server.close',
       'server.closeAllConnections',
+      'backgroundJobs.stopSweeping',
+      'commitWorker.stop',
+      'db.end',
+    ]);
+  });
+
+  it('stops the background sweep before anything it could outlive', async () => {
+    const d = deps();
+    const shutdown = createShutdown(d.deps as never);
+    const done = shutdown('SIGTERM');
+    await settle();
+    d.finishClose();
+    await done;
+
+    // Order is the point, not just presence, in BOTH directions. A tick that
+    // fired after `db.end` would query a client that is gone; a tick during
+    // `commitWorker.stop` — which awaits an in-flight commit and can take
+    // most of the shutdown budget — would start fresh clone/commit/push work
+    // that the process exit immediately after kills mid-git.
+    const stopped = d.order.indexOf('backgroundJobs.stopSweeping');
+    expect(stopped).toBeGreaterThanOrEqual(0);
+    expect(stopped).toBeLessThan(d.order.indexOf('commitWorker.stop'));
+    expect(stopped).toBeLessThan(d.order.indexOf('db.end'));
+  });
+
+  it('shuts down cleanly when no background jobs were built yet', async () => {
+    const d = deps();
+    // A stop that lands mid-boot: the services exist, the jobs do not.
+    delete (d.deps as { backgroundJobs?: unknown }).backgroundJobs;
+    const shutdown = createShutdown(d.deps as never);
+    const done = shutdown('SIGTERM');
+    await settle();
+    d.finishClose();
+    await expect(done).resolves.toBeUndefined();
+    expect(d.order).toEqual([
+      'server.close',
+      'server.closeAllConnections',
       'commitWorker.stop',
       'db.end',
     ]);
@@ -268,6 +310,7 @@ describe('createShutdown', () => {
     expect(d.order).toEqual([
       'server.close',
       'server.closeAllConnections',
+      'backgroundJobs.stopSweeping',
       'commitWorker.stop',
       'db.end',
     ]);

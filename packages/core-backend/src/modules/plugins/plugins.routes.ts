@@ -4,22 +4,22 @@ import { logger } from '../../shared/logging.js';
 const log = logger('plugins');
 import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
 import {
-  DEFAULT_BRANCH,
   joinBranchFor,
   type AuthUser,
   type ChangeRequest,
+  type ChangeRequestState,
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { spliceGrant } from '../access-model/access-splice.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { pluginsWorkspaceId } from './plugins.service.js';
+import { pluginsWorkspaceId, pluginFolderBelowRoot } from './plugins.service.js';
 import { PluginProvisionError, type PluginProvisionService } from './plugin-provision.service.js';
 import { PluginLinkError, type PluginLinksService } from './plugin-links.service.js';
 import { PluginRenameError, type PluginRenameService } from './plugin-rename.service.js';
 import type { JoinRequestsService } from './join-requests.service.js';
+import type { PluginJoinRequestJobs } from './join-request-jobs.service.js';
+import type { JoinRequestRecord } from './join-request-records.store.js';
 import type {
   PluginCatalogEntry,
   PluginSummary,
@@ -31,7 +31,7 @@ import type {
  *
  *   GET    /api/plugins                            → { plugins: PluginSummary[] }
  *   DELETE /api/plugins/:name                      → { ok }          (owners)
- *   POST   /api/plugins/:name/join-request         → { ok, number }  (opens a CR)
+ *   POST   /api/plugins/:name/join-request         → { ok, state, number }  (records it)
  *   GET    /api/plugins/:name/join-requests        → { requests }    (managers)
  *   POST   /api/plugins/:name/join-requests/:n/reconcile → { closed }
  *
@@ -45,8 +45,12 @@ import type {
  *
  * All three false ⇒ the plugin is absent from the response entirely.
  *
- * A join request is a plain change request whose branch edits the plugin's
- * `access.md`. Managers do NOT merge it: they read its individual proposals
+ * A join request is a recorded row plus the change request the row's
+ * background job opens — a branch that edits the plugin's `access.md`. The
+ * row exists so the click can be answered before any git runs; what managers
+ * see is the change request, unchanged.
+ *
+ * Managers do NOT merge it: they read its individual proposals
  * (see `join-proposals.ts`), grant the ones they accept through the ordinary
  * access path, and the request retires itself once its rules are a subset of
  * the default branch's — reconciled here, lazily on listing and eagerly right
@@ -144,10 +148,16 @@ export function createPluginsRoutes(
   pluginIndex: IPluginIndexService,
   accessControl: IAccessControl,
   workflow: IWorkflowService,
-  workspaceService: WorkspaceService,
   joinRequests: JoinRequestsService,
+  /**
+   * Where a join request is RECORDED, and what finishes it afterwards. The
+   * subscribe endpoint writes the row and answers; the git work runs against
+   * it after the answer (see `PluginJoinRequestJobs`) — which is why this
+   * router no longer takes a workspace service or the KB directory name at
+   * all, having no file of its own left to write.
+   */
+  joinRequestJobs: PluginJoinRequestJobs,
   provision: PluginProvisionService,
-  kbDirName: string,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
   /** Optional: a host without the link machinery simply has no link routes. */
   links?: PluginLinksService,
@@ -253,8 +263,8 @@ export function createPluginsRoutes(
   const memberProbe = (folder: string) => folder;
   /** The FILE probe for discovery/management — the folder's access.md. */
   const accessMdOf = (folder: string) => `${folder}/access.md`;
-  /** A plugin folder's path BELOW the plugins root: `GTM`, or `teams/deep`. */
-  const folderBelowRoot = (folder: string) => folder.slice(folder.indexOf('/') + 1);
+  /** A plugin folder's path BELOW the plugins root — see `pluginFolderBelowRoot`. */
+  const folderBelowRoot = pluginFolderBelowRoot;
   /**
    * What a join request is keyed by: the plugin's primary FOLDER path below
    * the root, not its identity. The request writes into that folder's rules;
@@ -272,6 +282,7 @@ export function createPluginsRoutes(
   /** The caller's open join CR for `plugin`, or null. */
   const openJoinCr = (mine: ChangeRequest[], email: string, plugin: string): ChangeRequest | null =>
     mine.find((cr) => cr.state === 'open' && cr.branch === joinBranchFor(email, plugin)) ?? null;
+
 
   router.get('/plugins', async (req, res) => {
     const email = req.userEmail;
@@ -305,6 +316,38 @@ export function createPluginsRoutes(
       } catch (err) {
         log.warn(`join-request lookup failed: ${err instanceof Error ? err.message : String(err)}`);
       }
+      // What the caller has RECORDED — true the moment the subscribe call is
+      // answered, which is the whole point: a reload while the git work is
+      // still running must still show the Requested card, and the change
+      // request the line above looks for may not exist yet. Degrades the same
+      // way, to what the change requests alone can say.
+      let recorded = new Map<string, JoinRequestRecord>();
+      try {
+        recorded = new Map(
+          (await joinRequestJobs.recordsFor(email)).map((r) => [r.pluginKey, r]),
+        );
+      } catch (err) {
+        log.warn(`recorded join requests unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      // Whether the change request each `opened` record names still stands —
+      // from the request's own row, because the listing above is open-only
+      // and cached, so a declined request is merely absent from it. Null when
+      // the rows could not be read: an `opened` record then keeps the benefit
+      // of the doubt, since the alternative is a button over a request that
+      // may well still be standing.
+      let standing: Map<number, ChangeRequestState> | null = null;
+      try {
+        standing = await joinRequestJobs.changeRequestStates(
+          [...recorded.values()].flatMap((r) =>
+            r.status === 'opened' && r.changeRequestNumber !== null ? [r.changeRequestNumber] : [],
+          ),
+        );
+      } catch (err) {
+        log.warn(`join request states unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const stillOpen = (record: JoinRequestRecord): boolean =>
+        standing === null ||
+        (record.changeRequestNumber !== null && standing.get(record.changeRequestNumber) === 'open');
 
       const plugins: PluginSummary[] = [];
       for (const g of catalog) {
@@ -317,6 +360,20 @@ export function createPluginsRoutes(
         const discoverable = member || any(readable, g, accessMdOf);
         if (!member && !manager && !discoverable) continue; // absent — fail closed
         const joinCr = member ? null : openJoinCr(mine, email, joinKeyOf(g));
+        const record = member ? undefined : recorded.get(joinKeyOf(g));
+        // A record that FAILED is not a request: the git work refused, so the
+        // page owes the person the button back and the reason. A `pending`
+        // one is, whether or not its change request has appeared yet. An
+        // `opened` one is a request only for as long as the change request it
+        // names is still open — once a manager declines it, or it is settled
+        // and the access later taken back, the ask is over and the person may
+        // make it again, exactly as they could when the change request was
+        // the only record. The request's own row decides that (see
+        // `standing`), never the open-only listing.
+        const requested =
+          record?.status === 'pending' ||
+          (record?.status === 'opened' && stillOpen(record)) ||
+          joinCr !== null;
         plugins.push({
           name: g.name,
           displayName: g.displayName,
@@ -334,8 +391,11 @@ export function createPluginsRoutes(
           readers: g.readers,
           isPrivate: g.isPrivate,
           warnings: g.warnings,
-          hasRequested: joinCr !== null,
-          requestNumber: joinCr?.number ?? null,
+          hasRequested: requested,
+          requestNumber: requested ? (record?.changeRequestNumber ?? joinCr?.number ?? null) : null,
+          requestFailure: requested
+            ? null
+            : (record?.status === 'failed' ? (record.failureReason ?? 'it could not be completed') : null),
         });
       }
       res.json({ plugins });
@@ -346,13 +406,21 @@ export function createPluginsRoutes(
   });
 
   /**
-   * Open (or return the existing) join change request for the caller.
+   * RECORD the caller's ask, and answer.
    *
-   * Idempotent via the deterministic branch name: a second click finds the
-   * open CR and returns it. Every step is an existing primitive — branch,
-   * splice, commit-and-push, open CR — so the security story is exactly the
-   * workflow's: draft branches are ungated, and the merge gate requires an
-   * approver who can write the touched access.md.
+   * What it does not do is any git, which is the change: the endpoint used to
+   * create the branch, clone the plugins repository for it, splice the grant,
+   * commit, push and open the change request before replying, and the first
+   * ask from a person is a full clone — many seconds during which the button
+   * only greyed out. So the gates below stay exactly as they were (discovery
+   * fail-closed, membership 409) and what follows them is one row and a
+   * reply; `PluginJoinRequestJobs` finishes the request afterwards and the
+   * plugin listing reports it as requested from the row in the meantime.
+   *
+   * Still idempotent, and now by the ROW rather than by the branch name: the
+   * record is unique per (caller, plugin), so two tabs and two clicks record
+   * one request and open one change request. A record that failed is revived
+   * by the next ask, so a retry continues it instead of starting a second one.
    */
   // `POST /plugins` and `POST /plugins/personal` — the creation doors — live
   // in `createPluginCreationRoutes` below, mounted behind a gate that admits
@@ -449,49 +517,21 @@ export function createPluginsRoutes(
         res.status(409).json({ error: 'You can already read this plugin', kind: 'already-readable' });
         return;
       }
-      // The grant is written to the plugin's primary folder — the one the
-      // summary's `folders[0]` names and the banner's touched-path check
-      // expects.
-      const folder = plugin.folders[0];
-
-      const branch = joinBranchFor(email, joinKeyOf(plugin));
-      const existing = openJoinCr(await workflow.listChangeRequestsAuthoredBy(email), email, joinKeyOf(plugin));
-      if (existing) {
-        res.json({ ok: true, number: existing.number });
-        return;
-      }
-
-      // A leftover branch from a rejected/withdrawn request is reused — the
-      // grant commit is already on it and the splice below no-ops.
-      try {
-        await workflow.createBranch(pluginsWorkspaceId(), branch, DEFAULT_BRANCH);
-      } catch {
-        // exists (or raced) — proceed against it
-      }
-      const ws = await workspaceService.getOrCreateForBranch(branch);
-      const accessPath = `${kbDirName}/${accessMdOf(folder)}`;
-      const current = await workspaceService.readFile(ws.id, accessPath).catch(() => '');
-      const spliced = spliceGrant(
-        current,
-        'read',
-        { kind: 'user', email: user.email, displayName: user.name },
-        { target: 'folder' },
+      // A record whose change request has since been declined or settled is
+      // an ask that was answered; this click is a new one, and the row goes
+      // back to `pending` for it. Costs one read of that request's row, on
+      // that path only — a first ask, and a retry after a failure, are still
+      // one statement.
+      const record = await joinRequestJobs.reviveIfAnswered(
+        await joinRequestJobs.record(user, joinKeyOf(plugin)),
       );
-      if (spliced.changed) {
-        await workspaceService.writeFile(ws.id, accessPath, spliced.text);
-        await workflow.commitChanges(ws.id, user, `Request access to ${plugin.displayName}`);
-      }
-      const detail = await workflow.openChangeRequest(ws.id, user, {
-        sourceBranch: branch,
-        targetBranch: DEFAULT_BRANCH,
-        // People read these: the display name, not the identifier.
-        title: `Join request: ${plugin.displayName}`,
-        description:
-          `${user.name} asked to join ${plugin.displayName}. A manager of the plugin accepts by ` +
-          `granting the access this branch proposes; the request closes itself once ` +
-          `every proposal has landed.`,
-      });
-      res.json({ ok: true, number: detail.number });
+      // `number` stays in the answer for a caller that already had a change
+      // request; it is null while the git work has yet to open one, and the
+      // `state` is what says which.
+      res.json({ ok: true, state: record.status, number: record.changeRequestNumber });
+      // AFTER the answer, deliberately, and not awaited: the response is
+      // already on the wire, and the job records its own outcome on the row.
+      void joinRequestJobs.start(record);
     } catch (err) {
       if (err instanceof WorkflowDomainError) {
         res.status(err.status).json(domainErrorBody(err));

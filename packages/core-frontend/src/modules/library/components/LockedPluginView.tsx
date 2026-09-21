@@ -23,6 +23,16 @@ import { PluginBreadcrumb } from './plugin-page-parts';
  * It is the SAME frame as the member view — breadcrumb, h1, run-by lede — so
  * the two never read as different products. Only the middle changes.
  *
+ * ASKING HAS THREE STATES, and the button carries two of them. It reads
+ * "Requesting…" and refuses further clicks from the moment it is pressed
+ * until the server answers; the "Requested" card replaces it on that answer,
+ * which the server gives as soon as it has RECORDED the request rather than
+ * once the change request exists. If the git work that follows the answer
+ * fails, the next load has `requestFailure` set and no request standing, so
+ * the button is back with a sentence above it naming what went wrong —
+ * pressing it again continues the recorded request rather than opening a
+ * second one.
+ *
  * `Manage access` is the escape hatch for a locked-out platform Admin. Admin
  * rescue applies to WRITING `access.md`, not to reading the folder, so an Admin
  * can genuinely be locked out of a plugin they are nevertheless the right person
@@ -51,6 +61,10 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
   const adminsText = ownersTextOf(plugin);
   const primaryFolder = primaryFolderOf(plugin);
   const pending = plugin.hasRequested || requested;
+  // The server could not finish the last request. It says so only while there
+  // is no request standing — `hasRequested` and this are never both true —
+  // so the sentence always sits above a button the person can press again.
+  const failure = pending ? null : (plugin.requestFailure ?? null);
 
   async function request() {
     setRequesting(true);
@@ -106,6 +120,22 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
           for access; a name would tell you what is inside. */}
       <p className="mt-1 text-ui text-ink-muted">{countsLine(plugin)}</p>
 
+      {/* The in-flight word for assistive tech, matching `LinkSkillPanel`.
+          The button says "Requesting…" too, but pressing it disables it and a
+          disabled button drops focus, so that label change is never read out.
+          The acknowledgement is the whole point of this ticket, and it has to
+          reach somebody who cannot see the label.
+
+          `pending`, not `requesting`, is what ends it. The success path never
+          clears `requesting` — deliberately, so the button cannot flicker back
+          to life between the answer and the swap to the Requested card — which
+          left this region presenting "Requesting access to …" for as long as
+          the page stayed up. A screen-reader user arriving at the region after
+          the card had rendered was told the request was still going. */}
+      <span role="status" aria-live="polite" aria-label="Request progress" className="sr-only">
+        {requesting && !pending ? `Requesting access to ${plugin.displayName || plugin.name}…` : ''}
+      </span>
+
       <div className="mt-5">
         {pending ? (
           <Surface tone="sunken" radius="lg" elevation="none" padded className="max-w-lg">
@@ -114,9 +144,21 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
             </p>
           </Surface>
         ) : (
-          <Button variant="primary" disabled={requesting} onClick={() => void request()}>
-            Subscribe to this plugin
-          </Button>
+          <>
+            {failure && (
+              <p className="mb-2.5 max-w-lg text-body text-ink-muted">
+                {`Your request to join ${plugin.displayName || plugin.name} could not be sent: ${failure}. Try again.`}
+              </p>
+            )}
+            {/* The label is the acknowledgement. Nothing else on the page can
+                say "we heard you" in the render that follows the click — the
+                server's answer is a round-trip away, and the whole reason the
+                click used to look like a freeze is that this button greyed out
+                and kept its word. */}
+            <Button variant="primary" disabled={requesting} onClick={() => void request()}>
+              {requesting ? 'Requesting…' : 'Subscribe to this plugin'}
+            </Button>
+          </>
         )}
       </div>
 

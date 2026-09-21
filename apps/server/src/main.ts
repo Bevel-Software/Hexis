@@ -69,6 +69,7 @@ async function main(): Promise<void> {
     const shutdown = createShutdown({
       server: server ?? notListening,
       commitWorker: core?.commitWorker ?? { stop: async () => undefined },
+      backgroundJobs: core?.pluginJoinRequestJobs,
       db: core?.db ?? noPool,
     });
     shutdown(reason)

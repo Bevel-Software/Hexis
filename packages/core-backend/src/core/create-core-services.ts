@@ -63,8 +63,12 @@ import { ToolManualService } from '../modules/tool-manuals/index.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
 import {
   PluginIndexService,
+  pluginFolderBelowRoot,
   PluginProvisionService,
   JoinRequestsService,
+  PluginJoinRequestJobs,
+  JoinRequestNotReadyError,
+  DbJoinRequestStore,
   PluginLinkIndex,
   PluginLinksService,
   PluginRenameService,
@@ -198,6 +202,13 @@ export interface CoreServices {
   pluginIndexService: PluginIndexService;
   pluginProvisionService: PluginProvisionService;
   joinRequestsService: JoinRequestsService;
+  /**
+   * Records a join request and finishes it in the background. Its `sweep()`
+   * runs once at boot — see `createCoreServer`, after the knowledge-base
+   * startup phase — so a request recorded before a restart is completed or
+   * marked failed after it rather than lost.
+   */
+  pluginJoinRequestJobs: PluginJoinRequestJobs;
   /** Which plugins hold which skills (inline or linked) — see `PluginLinkIndex`. */
   pluginLinkIndex: PluginLinkIndex;
   /** Link / unlink / repair shared skills into plugins. */
@@ -586,6 +597,38 @@ export async function createCoreServices(
   // only needs to read files at refs and to close a request whose proposals
   // have all landed.
   const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
+  // The OTHER half of a join request: the row the subscribe endpoint writes
+  // before it answers, and the branch/clone/commit/push/change-request work
+  // that runs against it afterwards. The row is what lets the click be
+  // answered in a database round-trip instead of a clone, and what survives a
+  // restart with the request still owed.
+  const pluginJoinRequestJobs = new PluginJoinRequestJobs(new DbJoinRequestStore(db), {
+    workflow: workflowService,
+    workspaceService,
+    kbDirName,
+    // A record keys on the plugin's primary FOLDER below the root, which the
+    // catalog is the only thing that can turn back into a path and a name
+    // people read. Null once nothing answers to the key — a deleted plugin,
+    // a moved folder — which the job records as a failure the requester sees.
+    //
+    // An EMPTY catalog is not that. Discovery degrades to empty whenever it
+    // cannot read the knowledge base — a boot that has not finished cloning,
+    // a remote that blipped — and answering "null" then would tell everyone
+    // with a request outstanding that their plugin is gone, permanently, for
+    // a fault that healed in seconds. A request is only refused when the
+    // catalog has something to say and this key is absent from it; when it
+    // has nothing to say at all, the failure is raised as a transient one, so
+    // the row stays `pending` for the next sweep to retry.
+    target: async (pluginKey) => {
+      const catalog = await pluginIndexService.catalog();
+      if (catalog.length === 0) {
+        throw new JoinRequestNotReadyError('the plugin catalog is not available yet');
+      }
+      const entry = catalog.find((g) => pluginFolderBelowRoot(g.folders[0]) === pluginKey);
+      return entry ? { folder: entry.folders[0], displayName: entry.displayName } : null;
+    },
+    requester: (email) => authService.getUserByEmail(email),
+  });
   // Links land as ordinary default-branch commits and change what the plugin
   // index counts, so a link drops that cache too.
   const pluginLinksService = new PluginLinksService(
@@ -1054,6 +1097,7 @@ export async function createCoreServices(
     pluginIndexService,
     pluginProvisionService,
     joinRequestsService,
+    pluginJoinRequestJobs,
     pluginLinkIndex,
     pluginLinksService,
     pluginRenameService,
