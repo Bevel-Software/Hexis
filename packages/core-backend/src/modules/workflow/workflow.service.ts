@@ -3087,11 +3087,32 @@ export class WorkflowService implements IWorkflowService {
           // it — so the rules read are the ones the merge is about to change.
           //
           // `changedPaths` is the authorizing set: roles.yaml kept (unlike a
-          // change request's merge, nothing strips it here) and both sides of
-          // a rename, since the old name is a file this merge deletes.
+          // change request's merge, nothing strips it here — so its presence
+          // is what the hook refuses on) and both sides of a rename, since the
+          // old name is a file this merge deletes.
           authorize: isProtectedBranch(targetBranch)
             ? async ({ sha, changedPaths }) => {
                 if (changedPaths.length === 0) return;
+                // roles.yaml never changes through a merge. A change request's
+                // merge restores the target's copy on the source first
+                // (`preserveBaseRolesYaml`): a draft is a free-for-all, and the
+                // merge is what lands its content on a protected branch. This
+                // path lands draft content the same way, so it refuses rather
+                // than authorizing — even an admin, who could write the file
+                // directly, gets the app's roles surface for that, where the
+                // file is validated (parsable, groups that exist); the agent's
+                // own write tools refuse it under the same guard. A merged
+                // roles.yaml would bypass both, on the one file the access
+                // model cannot survive being wrong.
+                if (changedPaths.includes('roles.yaml')) {
+                  throw new WorkflowDomainError(
+                    `"${targetBranch}" is protected and this merge would change its roles.yaml. ` +
+                      `Roles never change through a merge: restore roles.yaml on "${sourceBranch}" to the version on ` +
+                      `"${targetBranch}" and merge again, and ask the user to change roles in the app.`,
+                    403,
+                    { kind: 'protected-merge-changes-roles', targetBranch, sourceBranch },
+                  );
+                }
                 const allowed = await this.accessControl.canWriteBatchAtRef(
                   targetWorkspaceId,
                   sha,

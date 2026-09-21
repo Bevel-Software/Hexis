@@ -611,6 +611,11 @@ export interface IWorkflowService {
    *     and `user` could not commit every file the merge changes directly to
    *     it. Decided against the target commit the merge is built on, not a
    *     workspace `HEAD` that may be behind it.
+   *   - refused (`WorkflowDomainError`, `kind: 'protected-merge-changes-roles'`,
+   *     status 403) when `targetBranch` is protected and the merge would
+   *     change its `roles.yaml` — whoever the caller is. Roles never change
+   *     through a merge; a change request's merge restores the target's copy
+   *     first, and this path refuses instead. Roles are changed in the app.
    *   - refused (`WorkflowDomainError`, `kind: 'merge-target-busy'`, status
    *     409) when `targetBranch`'s workspace still holds unshared edits: the
    *     merge resets it to the published tip, which would discard them.

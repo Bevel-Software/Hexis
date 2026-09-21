@@ -977,6 +977,27 @@ describe('WorkflowService.mergeBranch — an agent merges branches, never an ope
     // through `pullMergeTarget`, which no refusal path gets to anyway.
   });
 
+  it('refuses a protected target whose merge would change roles.yaml, whoever the caller is', async () => {
+    // Every path writable — an admin. The refusal is about the FILE, not the
+    // caller: a change request's merge never lets roles.yaml across either
+    // (`preserveBaseRolesYaml`), and this is the one other path that lands a
+    // draft's content on a protected branch. Roles are changed in the app,
+    // where the file is validated; a merge would land it unvalidated.
+    const { svc, git, access, merge } = harness({
+      canWrite: new Map([['Team/Process.md', true], ['roles.yaml', true]]),
+    });
+    (git.changedPathsForPr as ReturnType<typeof vi.fn>).mockResolvedValue(['Team/Process.md', 'roles.yaml']);
+    const err = await svc.mergeBranch(makeUser(), 'alice/other', PROTECTED).catch((e: unknown) => e);
+    expect(err).toMatchObject({
+      status: 403,
+      payload: { kind: 'protected-merge-changes-roles', targetBranch: PROTECTED, sourceBranch: 'alice/other' },
+    });
+    // Decided on the path set alone, inside the merge's hook: the write check
+    // is never asked, because no answer of its could allow this.
+    expect(merge).toHaveBeenCalledTimes(1);
+    expect(access.canWriteBatchAtRef).not.toHaveBeenCalled();
+  });
+
   it('merges into a protected target when the caller could commit every changed file directly', async () => {
     const { svc, merge } = harness({ canWrite: new Map([['Team/Process.md', true]]) });
     expect(await svc.mergeBranch(makeUser(), 'alice/other', PROTECTED)).toEqual({ kind: 'merged', sha: 'merge-sha' });

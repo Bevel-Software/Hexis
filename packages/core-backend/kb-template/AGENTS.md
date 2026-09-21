@@ -406,7 +406,8 @@ File-level write access decides how a change lands on the default branch:
 - `merge_branch` refuses to merge a draft into the branch its open change
   request targets — it names the request; ask the user to review it in the
   app. Into a protected branch it merges only what you could commit there
-  directly, under the rule above.
+  directly, under the rule above — and never a change to `roles.yaml`, whoever
+  you are: roles are changed in the app, not merged in from a draft.
 
 ## Skills (`{{skillsDir}}/<scope>/…/<skill>/SKILL.md`, or `{{pluginsDir}}/<Plugin>/skills/<skill>/SKILL.md`)
 
