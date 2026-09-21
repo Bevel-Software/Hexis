@@ -214,6 +214,20 @@ afterEach(() => {
 const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * How long the idle cases watch an untouched connection before concluding it
+ * asked for nothing.
+ *
+ * Long on purpose, and worth the seconds. A short window only rules out a
+ * mechanism faster than itself: at 400ms every timer this code has ever
+ * carried — the 2s heartbeat, the 3s poll before it, the 5s throttle — would
+ * have gone unnoticed, and the criterion these two cases exist for has been
+ * broken twice in ways a suite this fast reported as green. Eight seconds
+ * clears all three with room to spare, and is what the live runs against a
+ * real deployment used for the same claim.
+ */
+const IDLE_OBSERVATION_MS = 8_000;
+
+/**
  * A connected client, its notification log, and the teardown for both.
  *
  * Every check in these tests is one the connection's own activity asked for:
@@ -419,7 +433,7 @@ describe('a manual added on the deployment reaches an already-connected client',
       expect(atStartup).toBe(1);
 
       commit(['ping', 'serper_search']);
-      await settle(400);
+      await settle(IDLE_OBSERVATION_MS);
 
       expect(revisionReads.length).toBe(atStartup);
       expect(s.notifications).toEqual([]);
@@ -448,20 +462,32 @@ describe('a manual added on the deployment reaches an already-connected client',
    * is the assertion that would have caught it.
    */
   it('holds nothing open while idle, and asks nothing on any path', { timeout: 60_000 }, async () => {
-    /** Everything the deployment is still holding that is not the MCP session itself. */
-    const heldBeyondTheSession = (): string[] =>
-      [...openRequests.values()].filter((path) => path !== '/api/mcp');
-
     commit(['ping']);
     const s = await start();
     try {
-      // Discovery is over: whatever it opened beyond the session, it has
-      // finished with.
-      expect(heldBeyondTheSession()).toEqual([]);
+      /**
+       * The exact responses discovery left open — the MCP session the remote
+       * manual's registration created, which is what `tools/list` is built
+       * from, and which exists whether anyone uses the connection or not.
+       *
+       * Two conditions, because either alone has a hole. Exempting the PATH
+       * `/api/mcp` wholesale would let a second request on that path — a
+       * subscription opened against the MCP endpoint, exactly the shape of
+       * the mechanism this case forbids — pass as "the session". Exempting
+       * these RESPONSES alone would let a stream opened during discovery in,
+       * since it would be held by the time this baseline is taken. So a held
+       * request is allowed only if it is on the session's path AND is one of
+       * the responses discovery left behind.
+       */
+      const sessionAtStartup = new Set(openRequests.keys());
+      const heldBeyondTheSession = (): string[] =>
+        [...openRequests.entries()]
+          .filter(([res, path]) => path !== '/api/mcp' || !sessionAtStartup.has(res))
+          .map(([, path]) => path);
       const atStartup = requests.length;
 
       commit(['ping', 'serper_search']);
-      await settle(400);
+      await settle(IDLE_OBSERVATION_MS);
 
       // Not "no catalog reads" — NO REQUESTS AT ALL, on any path, by any
       // name, and nothing new left hanging.
@@ -470,9 +496,17 @@ describe('a manual added on the deployment reaches an already-connected client',
       expect(s.notifications).toEqual([]);
 
       // The change is not lost, only unasked-for: the next use collects it.
+      const heldWhileIdle = [...openRequests.values()];
       expect(await listed(s.client)).toContain('serper_search');
-      // …and that listing leaves nothing held open either.
-      expect(heldBeyondTheSession()).toEqual([]);
+
+      // …and the refresh that listing ran REPLACED the session rather than
+      // adding to it. Counted rather than identity-checked here, because the
+      // re-registration necessarily dials a new one: what must not grow is
+      // how many the deployment is holding, and every one of them must still
+      // be the MCP session itself.
+      const heldAfterUse = [...openRequests.values()];
+      expect(heldAfterUse.length).toBe(heldWhileIdle.length);
+      expect(heldAfterUse.filter((path) => path !== '/api/mcp')).toEqual([]);
     } finally {
       await s.shutdown();
     }
