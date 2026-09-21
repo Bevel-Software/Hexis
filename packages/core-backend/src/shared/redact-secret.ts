@@ -27,7 +27,21 @@ export function redactSecret(text: string, secrets: readonly (string | null | un
     .filter((t): t is string => !!t);
   let scrubbed = text;
   for (const token of [...new Set(tokens)].sort((a, b) => b.length - a.length)) {
-    scrubbed = scrubbed.replaceAll(token, '***');
+    // The whole value when it is there; otherwise its longest echoed PREFIX.
+    // Git and the providers elide the middle of a token they quote back
+    // (`ghp_abcdef…`), and an exact match would leave that head on screen —
+    // enough of a secret to be one. Down to a floor, so a short common head
+    // (`ghp_`) does not garble every other token in the log.
+    if (scrubbed.includes(token)) {
+      scrubbed = scrubbed.replaceAll(token, '***');
+      continue;
+    }
+    for (let len = token.length - 1; len >= MIN_ECHOED_PREFIX_LENGTH; len--) {
+      const prefix = token.slice(0, len);
+      if (!scrubbed.includes(prefix)) continue;
+      scrubbed = scrubbed.replaceAll(prefix, '***');
+      break;
+    }
   }
   return (
     scrubbed
@@ -44,6 +58,13 @@ export function redactSecret(text: string, secrets: readonly (string | null | un
 
 /** Shorter than this, a query value is not a credential (`X-Amz-Expires=3600`). */
 const MIN_SECRET_LENGTH = 8;
+
+/**
+ * The shortest head of a token that is still scrubbed when only a prefix of
+ * it was echoed — the same floor the connection probe's redactor uses. Below
+ * it a head is a vendor's common prefix, not a secret.
+ */
+const MIN_ECHOED_PREFIX_LENGTH = 8;
 
 /**
  * A remote's query, named as literal secrets for {@link redactSecret}: the

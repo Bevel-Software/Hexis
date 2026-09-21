@@ -1,6 +1,54 @@
 import { describe, it, expect } from 'vitest';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
-import { omitPathFromTree, pathExistsInTree, suggestedPages, treeHasVisibleEntries } from '../fileTree';
+import { omitPathFromTree, pathExistsInTree, subtreeHasVisibleEntries, suggestedPages, treeHasVisibleEntries } from '../fileTree';
+
+/**
+ * A Library tree is one root of the listing, empty on its own terms: a
+ * knowledge base full of notes still has an empty Skills tree.
+ */
+describe('subtreeHasVisibleEntries', () => {
+  const kb: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: 'knowledge-base',
+        relativePath: 'knowledge-base',
+        type: 'directory',
+        children: [
+          {
+            name: 'KnowledgeBase',
+            relativePath: 'knowledge-base/KnowledgeBase',
+            type: 'directory',
+            children: [{ name: 'note.md', relativePath: 'knowledge-base/KnowledgeBase/note.md', type: 'file' }],
+          },
+          { name: 'Skills', relativePath: 'knowledge-base/Skills', type: 'directory', children: [] },
+          {
+            name: 'Plugins',
+            relativePath: 'knowledge-base/Plugins',
+            type: 'directory',
+            children: [{ name: 'team', relativePath: 'knowledge-base/Plugins/team', type: 'directory', children: [] }],
+          },
+        ],
+      },
+    ],
+  };
+
+  it('is empty for a root with nothing under it, however full the rest of the tree is', () => {
+    expect(treeHasVisibleEntries(kb, 'knowledge-base')).toBe(true);
+    expect(subtreeHasVisibleEntries(kb, 'knowledge-base/Skills')).toBe(false);
+  });
+
+  it('counts a folder under the root as an entry', () => {
+    expect(subtreeHasVisibleEntries(kb, 'knowledge-base/Plugins')).toBe(true);
+  });
+
+  it('is empty for a root the listing does not have', () => {
+    expect(subtreeHasVisibleEntries(kb, 'knowledge-base/Agents')).toBe(false);
+    expect(subtreeHasVisibleEntries(null, 'knowledge-base/Skills')).toBe(false);
+  });
+});
 
 /**
  * The empty state's opening offer walks the tree the server already filtered

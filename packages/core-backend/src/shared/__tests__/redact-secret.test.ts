@@ -39,6 +39,22 @@ describe('redactSecret', () => {
     expect(redactSecret('https://alice:pw@example.com/kb.git?sig=zz')).toBe('https://***@example.com/kb.git?***');
   });
 
+  /**
+   * A host that quotes a token back elides its middle (`ghp_abcdef…`). The
+   * head it prints is enough of the secret to be one, so the longest echoed
+   * prefix is scrubbed when the whole value is not there — down to a floor,
+   * so a vendor's common prefix does not garble every other token.
+   */
+  it('scrubs the longest echoed prefix of a token the host elided', () => {
+    expect(redactSecret("remote: token 'ghp_abcdefghijklmnop…' was rejected", ['ghp_abcdefghijklmnopqrstuv'])).toBe(
+      "remote: token '***…' was rejected",
+    );
+    // Whole value present: scrubbed whole, once.
+    expect(redactSecret('x ghp_abcdefghijklmnopqrstuv y', ['ghp_abcdefghijklmnopqrstuv'])).toBe('x *** y');
+    // Only the vendor prefix in common: below the floor, untouched.
+    expect(redactSecret('a ghp_other b', ['ghp_abcdefghijklmnopqrstuv'])).toBe('a ghp_other b');
+  });
+
   it('scrubs every token in effect: env aliases and tokens the caller names', () => {
     const saved = {
       GITHUB_TOKEN: process.env.GITHUB_TOKEN,

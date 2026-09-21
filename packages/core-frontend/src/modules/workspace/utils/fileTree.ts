@@ -59,6 +59,29 @@ export function treeHasVisibleEntries(tree: FileTreeEntry | null, kbDirName: str
   });
 }
 
+/**
+ * Whether ONE root of the tree — the folder at `rootPath` — shows anything.
+ * The Library renders `Skills/` and `Plugins/` as trees of their own, and each
+ * is empty on its own terms: a knowledge base full of notes still has an
+ * empty Skills tree, and the notice that says so belongs to that tree. A root
+ * that is not in the listing at all shows nothing.
+ */
+export function subtreeHasVisibleEntries(tree: FileTreeEntry | null, rootPath: string): boolean {
+  const root = tree ? findByPath(tree, rootPath) : null;
+  return (root?.children ?? []).some((c) => c.type !== 'file' || c.name !== '.bevelignore');
+}
+
+function findByPath(node: FileTreeEntry, relativePath: string): FileTreeEntry | null {
+  if (node.relativePath === relativePath) return node;
+  for (const child of node.children ?? []) {
+    if (child.type !== 'directory') continue;
+    if (relativePath === child.relativePath || relativePath.startsWith(`${child.relativePath}/`)) {
+      return findByPath(child, relativePath);
+    }
+  }
+  return null;
+}
+
 /** Documents, as opposed to the data, config and archives beside them. */
 const READABLE_PAGE = /\.(md|markdown)$/i;
 

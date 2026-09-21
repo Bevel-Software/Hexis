@@ -107,7 +107,16 @@ export class CreatorAccessService implements ICreatorAccess {
     const root = segments[0];
     if (root === undefined || segments.length < 2 || !creatableRootDirNames().has(root)) return null;
     const top = `${root}/${segments[1]}`;
-    if (await this.exists(path.join(repoDir, top))) return null;
+    try {
+      if (await this.exists(path.join(repoDir, top))) return null;
+    } catch (err) {
+      // A probe that failed (a permission error, an I/O error) is not "not
+      // there": planning on that would seed a grant into a folder that may
+      // exist. Best-effort, as above — no plan, and the write's own gate
+      // decides what the creation may do.
+      warnSkipped(rel, err);
+      return null;
+    }
 
     const principal = this.principalFor(creator);
     try {

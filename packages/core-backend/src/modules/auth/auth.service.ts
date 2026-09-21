@@ -70,6 +70,14 @@ export interface AuthConfig {
   adminEmail: string;
   adminPassword: string;
   allowedEmailDomains: string[];
+  /**
+   * Whether password sign-in is offered at all (`LOGIN_PASSWORD`, default
+   * true). With it off, `ADMIN_PASSWORD` is a credential nothing accepts, so
+   * the deployment admin is not reported as one whose password lives in the
+   * environment — the Account page would otherwise send them to a login
+   * method the deployment has switched off.
+   */
+  loginPasswordEnabled?: boolean;
 }
 
 export class AuthService {
@@ -245,6 +253,7 @@ export class AuthService {
    */
   private isEnvAdminEmail(email: string): boolean {
     return (
+      (this.config.loginPasswordEnabled ?? true) &&
       this.config.adminEmail.length > 0 &&
       this.config.adminPassword.length > 0 &&
       email === this.config.adminEmail

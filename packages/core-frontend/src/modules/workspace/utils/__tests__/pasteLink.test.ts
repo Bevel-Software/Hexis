@@ -38,6 +38,23 @@ describe('markdownLinkForPaste', () => {
     expect(markdownLinkForPaste('https://example.com/x', KB, 'the [spec]')).toBe('[the \\[spec\\]](https://example.com/x)');
   });
 
+  it('escapes a backslash in the label before the brackets, so an escaped bracket stays escaped', () => {
+    // `a\]` naively escaped becomes `a\\]`: Markdown reads `\\` as one
+    // backslash and the `]` then closes the link.
+    expect(markdownLinkForPaste('https://example.com/x', KB, 'a\\]b')).toBe('[a\\\\\\]b](https://example.com/x)');
+  });
+
+  it('pastes a workspace path with an unsound segment as text, never as a link elsewhere', () => {
+    for (const text of [
+      '/knowledge-base/KnowledgeBase/../Secrets/x.md',
+      '/knowledge-base/KnowledgeBase//x.md',
+      '/knowledge-base/KnowledgeBase/./x.md',
+      '/knowledge-base/KnowledgeBase\\x.md',
+    ]) {
+      expect(markdownLinkForPaste(text, KB), text).toBeNull();
+    }
+  });
+
   it('leaves everything else alone', () => {
     for (const text of [
       'hello world',

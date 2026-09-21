@@ -44,7 +44,7 @@ import {
   type UploadTarget,
 } from '../state/workspace.context';
 import { rootAnchoredPath } from '../utils/pasteLink';
-import { findKbRoot, KB_ROOT_DIRS, pathExistsInTree, treeHasVisibleEntries } from '../utils/fileTree';
+import { findKbRoot, KB_ROOT_DIRS, pathExistsInTree, subtreeHasVisibleEntries, treeHasVisibleEntries } from '../utils/fileTree';
 import { uploadErrorNextStep } from '../utils/uploadError';
 import { useMergedWorkspaceTree } from '../hooks/useMergedWorkspaceTree';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
@@ -439,6 +439,10 @@ function ContextMenu({
   const { isPinned, togglePin, available: pinning } = usePinned();
   const openManageAccess = useManageAccess();
   const confirm = useTreeConfirm();
+  // Whether this listing had entries withheld by the caller's read rules: a
+  // folder delete then takes files the tree cannot count, and the question
+  // says so instead of naming a number that is too small.
+  const { withheld } = useMergedWorkspaceTree();
   const pinned = isPinned(entry.relativePath);
   const [unzipping, setUnzipping] = useState(false);
   // Asked only where a Download is on offer — a proposed row or an absent
@@ -511,6 +515,7 @@ function ContextMenu({
       // The folder it was in — the row itself is gone once the delete lands.
       focusAfterRun: () => rowForPath(entry.relativePath.split('/').slice(0, -1).join('/')),
       isProposed: (path) => suggestions.crFor(path) !== null,
+      partial: withheld > 0,
       run: async () => {
         await deleteOnBranch();
       },
@@ -2003,12 +2008,21 @@ export const KB_EMPTY_MESSAGE = 'This knowledge base is empty.';
  *
  * Renders nothing while the tree loads and once a single entry is visible.
  * The Knowledge explorer and the Library's trees both render it, from the
- * same merged listing, so they give the same answer.
+ * same merged listing, so they give the same answer — each for what IT shows.
+ * Knowledge shows the knowledge base (`scope: 'tree'`, the default: the
+ * reserved roots aside, an entry anywhere counts, because a stray top-level
+ * folder is folded into Knowledge). A Library tree shows one root
+ * (`scope: 'root'`): it is empty when that root is, whatever the notes
+ * beside it hold.
  */
-export function EmptyTreeNotice({ rootPath }: { rootPath: string | null }) {
+export function EmptyTreeNotice({ rootPath, scope = 'tree' }: { rootPath: string | null; scope?: 'tree' | 'root' }) {
   const { kbDirName } = useWorkspace();
   const { tree, withheld } = useMergedWorkspaceTree();
-  const empty = tree !== null && !treeHasVisibleEntries(tree, kbDirName);
+  const empty =
+    tree !== null &&
+    (scope === 'root' && rootPath !== null
+      ? !subtreeHasVisibleEntries(tree, rootPath)
+      : !treeHasVisibleEntries(tree, kbDirName));
   // Asked only when the message would carry the hint: a withheld tree never does.
   const canWrite = useCanWriteFolder(empty && withheld === 0 ? rootPath : null);
   if (!empty) return null;

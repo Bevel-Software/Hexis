@@ -150,6 +150,21 @@ describe('AuthService.loginWithPassword — env bootstrap admin', () => {
     expect(result.user.isEnvAdmin).toBe(false);
   });
 
+  /**
+   * With password sign-in switched off, `ADMIN_PASSWORD` is a credential
+   * nothing accepts: reporting the account as the environment's admin would
+   * send its owner to a login method the deployment does not offer.
+   */
+  it('is not reported as the env admin when password login is disabled', async () => {
+    const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
+    const svc = new AuthService(
+      db,
+      makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret', loginPasswordEnabled: false }),
+    );
+    const accounts = await svc.listAccounts();
+    expect(accounts.find((a) => a.email === 'root@example.com')?.isEnvAdmin).toBe(false);
+  });
+
   it('is disabled entirely when either env var is empty', async () => {
     for (const cfg of [
       makeConfig({ adminEmail: 'root@example.com', adminPassword: '' }),

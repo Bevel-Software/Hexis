@@ -488,6 +488,7 @@ export async function createCoreServices(
     adminEmail: config.adminEmail,
     adminPassword: config.adminPassword,
     allowedEmailDomains: parseDomainList(settings.resolve('allowedEmailDomains')),
+    loginPasswordEnabled: config.loginPasswordEnabled,
   });
   const authMiddleware = createAuthMiddleware(authService);
 

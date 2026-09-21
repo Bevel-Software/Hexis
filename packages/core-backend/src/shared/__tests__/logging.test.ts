@@ -54,7 +54,37 @@ describe('createConsoleLogger', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const err = new Error('boom');
     createConsoleLogger({ module: 'mcp' }).error('session failed', { err });
-    expect(error).toHaveBeenCalledWith('[mcp] session failed', err);
+    // Bare — the second argument IS an error, not an object holding one —
+    // though a terminal-safe copy of it (see the escaping case below).
+    expect(error).toHaveBeenCalledTimes(1);
+    const [message, logged] = error.mock.calls[0] as [string, unknown];
+    expect(message).toBe('[mcp] session failed');
+    expect(logged).toBeInstanceOf(Error);
+    expect((logged as Error).message).toBe('boom');
+    expect((logged as Error).stack).toBe(err.stack);
+  });
+
+  /**
+   * An error's MESSAGE is very often not the process's own text — git's
+   * stderr, a path, a branch name — so it is made one line like any string
+   * field; the frames are ours and keep their lines. The original is not
+   * touched: it is often rethrown after it was logged.
+   */
+  it('escapes the text an error carries, keeps its frames, and never mutates the original', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const err = new Error('git said: fatal\n[forged] admin signed in31m');
+    (err as Error & { code?: string }).code = 'E\nFORGED';
+    createConsoleLogger({ module: 'sync' }).error('pull failed', { err });
+    const logged = error.mock.calls[0]?.[1] as Error & { code?: string };
+    expect(logged).toBeInstanceOf(Error);
+    expect(logged).not.toBe(err);
+    expect(logged.message).toBe('git said: fatal\\n[forged] admin signed in\\u009b31m');
+    expect(logged.code).toBe('E\\nFORGED');
+    // The header of the stack is the message and is escaped with it; the
+    // frames below it are still lines of their own.
+    expect(logged.stack?.startsWith('Error: git said: fatal\\n[forged] admin signed in\\u009b31m\n    at ')).toBe(true);
+    expect(err.message).toBe('git said: fatal\n[forged] admin signed in31m');
+    expect(err.stack?.includes('\n[forged]')).toBe(true);
   });
 
   it('passes several fields as one inspectable object, other bindings included', () => {

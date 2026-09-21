@@ -44,6 +44,12 @@ export type TreeConfirmRequest =
       runWithProposals?(): void | Promise<void>;
       /** Rows that are only proposed — not on this branch, so not counted. */
       isProposed?(path: string): boolean;
+      /**
+       * The listing this entry came from had entries withheld by the caller's
+       * read rules: the delete takes files the count cannot see, and the
+       * sentence says so rather than naming a number that is too small.
+       */
+      partial?: boolean;
       /** The row to hand focus back to once the dialog is cancelled. */
       returnFocusTo(): HTMLElement | null;
       /**
@@ -207,7 +213,7 @@ export function TreeActionConfirmDialog({
           </div>
         }
       >
-        <p className="text-detail text-ink">{deleteSentence(request.entry, request.isProposed)}</p>
+        <p className="text-detail text-ink">{deleteSentence(request.entry, request.isProposed, request.partial)}</p>
         <p className="mt-2 text-detail text-ink">
           {requests.length === 1 ? 'An open change request proposes' : 'Open change requests propose'} files in it:
         </p>
@@ -263,7 +269,7 @@ export function TreeActionConfirmDialog({
     >
       <p className="text-detail text-ink">
         {request.kind === 'delete'
-          ? deleteSentence(request.entry, request.isProposed)
+          ? deleteSentence(request.entry, request.isProposed, request.partial)
           : request.kind === 'withdraw'
             ? withdrawSentence(request.files)
             : moveHeadline(name, request.destinationLabel, accessChange)}
