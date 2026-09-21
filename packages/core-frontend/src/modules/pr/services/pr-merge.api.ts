@@ -9,7 +9,8 @@ export interface MergeAccepted {
 
 /**
  * Trigger the server-side merge. `bypass: true` tells the gate to proceed
- * despite soft warnings (unapproved md-with-owner files); the bypassed list
+ * despite missing approvals (unapproved files of any type that have an
+ * eligible approver); the bypassed list
  * is inlined in the merge commit body for audit. Hard blocks (PR closed,
  * no files) are refused regardless.
  *
