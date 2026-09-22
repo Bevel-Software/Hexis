@@ -1994,7 +1994,18 @@ export function ManageAccessDialog({
                           disabled={disabled}
                           active={checked}
                           aria-pressed={checked}
-                          onClick={() => setNewVerbs((v) => ({ ...v, [k]: !v[k] }))}
+                          onClick={() =>
+                            setNewVerbs((v) => {
+                              const on = !v[k];
+                              // Turning a tier OFF is "less than this", and less
+                              // than edit is read, not nothing: the Read the tier
+                              // implied stays selected in its own right. Read's
+                              // own item is the one that takes read away.
+                              return on || k === 'read'
+                                ? { ...v, [k]: on }
+                                : { ...v, [k]: false, read: true };
+                            })
+                          }
                           trailing={checked ? <Check size={14} className="text-accent" /> : undefined}
                         >
                           {role}
@@ -2006,7 +2017,13 @@ export function ManageAccessDialog({
                       disabled={effectiveNewVerbs.owner}
                       active={effectiveNewVerbs.download}
                       aria-pressed={effectiveNewVerbs.download}
-                      onClick={() => setNewVerbs((v) => ({ ...v, download: !v.download }))}
+                      // Same rule as the tiers: unticking download keeps the
+                      // read it implied.
+                      onClick={() =>
+                        setNewVerbs((v) =>
+                          v.download ? { ...v, download: false, read: true } : { ...v, download: true },
+                        )
+                      }
                       trailing={
                         effectiveNewVerbs.download ? (
                           <Check size={14} className="text-accent" />
