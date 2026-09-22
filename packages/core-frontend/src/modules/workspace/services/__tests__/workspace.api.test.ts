@@ -147,10 +147,18 @@ describe('moveEntry carries the destination-taken refusal through unchanged', ()
 
   it('rejects with the sentence itself, not with the HTTP status', async () => {
     mockedFetch.mockResolvedValueOnce(
-      // Exactly what `EntryExistsError` puts on the wire (see the backend's
-      // `domainErrorBody`): the sentence under `error`, beside the
-      // discriminator a client may switch on instead of reading prose.
-      notOk(409, { error: SENTENCE, kind: 'entry-exists', entryKind: 'file' }),
+      // The WHOLE body `EntryExistsError` puts on the wire, not a convenient
+      // slice of it: the backend's `domainErrorBody` spreads the payload
+      // (`kind`, `entryKind`, `destination`) and then writes `error` last, so
+      // these four keys are what a client actually receives. The client here
+      // reads only `error`; the rest are present so this fixture cannot drift
+      // into testing a body the server never sends.
+      notOk(409, {
+        kind: 'entry-exists',
+        entryKind: 'file',
+        destination: 'kb/Sales/Notes.md',
+        error: SENTENCE,
+      }),
     );
 
     const err = await moveEntry('ws-1', 'kb/Sales/Report.docx', 'kb/Sales/Notes.md').catch((e) => e);
@@ -162,7 +170,14 @@ describe('moveEntry carries the destination-taken refusal through unchanged', ()
 
   it('says so for a folder in the way too, and sends the move as a PATCH of both paths', async () => {
     const folder = 'A folder named Q4 already exists in Sales.';
-    mockedFetch.mockResolvedValueOnce(notOk(409, { error: folder, kind: 'entry-exists', entryKind: 'folder' }));
+    mockedFetch.mockResolvedValueOnce(
+      notOk(409, {
+        kind: 'entry-exists',
+        entryKind: 'folder',
+        destination: 'kb/Sales/Q4',
+        error: folder,
+      }),
+    );
 
     await expect(moveEntry('ws-1', 'kb/Archive/Q4', 'kb/Sales/Q4')).rejects.toMatchObject({
       status: 409,
