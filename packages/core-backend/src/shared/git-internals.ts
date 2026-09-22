@@ -131,7 +131,11 @@ export async function assertNotGitInternals(rootDir: string, inputPath: string, 
     // `EACCES` instead of the path rule's typed refusal for a spelling that
     // was never a workspace path. A path a layer already resolved is the one
     // place it is, so it is probed as given.
-    if (!resolved && (relative === '' || relative.startsWith('..') || path.isAbsolute(relative))) continue;
+    // `..` and `../…` are the climbs; `..link` is an ordinary name that merely
+    // starts with those characters, and a link by that name can point into the
+    // folder — so it is probed like any other entry under the root.
+    const climbsOut = relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+    if (!resolved && (relative === '' || climbsOut)) continue;
     const realTarget = await resolvedRealPath(target);
     if (realTarget !== null && hasGitInternalsSegment(path.relative(realRoot, realTarget))) throw new GitInternalsError();
   }

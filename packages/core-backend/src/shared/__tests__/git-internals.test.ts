@@ -120,6 +120,21 @@ describe('assertNotGitInternals — the resolved form', () => {
     },
   );
 
+  it.each(['..link', '..link/config', './..link/config', '..dir/deeper'])(
+    'probes a name that merely BEGINS with dots, and refuses it when it lands in the folder: %s',
+    async (p) => {
+      // Judged from the folder these sit DIRECTLY in, which is where the
+      // outside-the-root test can mistake them: relative to that root, the
+      // whole path is `..link/…`. `..link` is not a climb — it is a file name
+      // — so it is probed like any other entry, or a link by that name reaches
+      // the folder unchecked.
+      const kb = path.join(root, 'knowledge-base');
+      await fs.symlink('.git', path.join(kb, '..link'));
+      await fs.symlink('.git', path.join(kb, '..dir'));
+      await expect(assertNotGitInternals(kb, p)).rejects.toBeInstanceOf(GitInternalsError);
+    },
+  );
+
   it('still refuses a climb into another checkout’s git folder, which is judged without the disk', async () => {
     await expect(assertNotGitInternals(root, '../other-checkout/.git/config')).rejects.toBeInstanceOf(GitInternalsError);
   });

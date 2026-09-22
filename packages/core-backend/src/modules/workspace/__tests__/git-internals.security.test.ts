@@ -88,6 +88,7 @@ function fileForms(name: string): Record<string, string> {
     'symlinked, climb-out': `../${KB}/gitlink/${name}`,
     'symlinked, absolute': `{{WORKSPACE_DIR}}/${KB}/gitlink/${name}`,
     'symlinked, chained link': `${KB}/Notes/../chained/${name}`,
+    'symlinked, dotted name': `${KB}/..link/${name}`,
   };
 }
 
@@ -111,6 +112,7 @@ const DIR_FORMS: Record<string, string> = {
   'symlinked, backslashed': `${KB}\\gitlink`,
   'symlinked, climb-out': `../${KB}/gitlink`,
   'symlinked, absolute': `{{WORKSPACE_DIR}}/${KB}/gitlink`,
+  'symlinked, dotted name': `${KB}/..link`,
   // The folder ITSELF in the same five families the file forms carry, so every
   // directory-taking operation — list, mkdir, delete, folder download, unzip
   // destination — has a regression case for each of them too.
@@ -149,6 +151,9 @@ beforeEach(async () => {
   await symlink('.git', join(kb, 'gitlink'));
   await symlink('.git/config', join(kb, 'cfglink'));
   await symlink('gitlink', join(kb, 'chained'));
+  // An ordinary name that merely BEGINS with dots — not a climb, and a link by
+  // that name reaches the folder like any other.
+  await symlink('.git', join(kb, '..link'));
   const zip = new AdmZip();
   zip.addFile('extracted.md', Buffer.from('# extracted\n'));
   zip.writeZip(join(kb, 'archive.zip'));
