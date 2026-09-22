@@ -72,7 +72,10 @@ function lateBound(bindings: LogFields): ILogger {
  * logs `{ err }` is covered here, so none of them has to remember it.
  */
 export function createConsoleLogger(bindings: LogFields = {}): ILogger {
-  const prefix = typeof bindings.module === 'string' ? `[${bindings.module}] ` : '';
+  // The tag is a binding like any other and goes through the same rule: a
+  // module name is the code's own today, but the contract lets a caller bind
+  // one, and a tag is written at the head of every line it tags.
+  const prefix = typeof bindings.module === 'string' ? `[${oneLine(bindings.module)}] ` : '';
   const rest = Object.fromEntries(Object.entries(bindings).filter(([k]) => k !== 'module'));
   const safe = (v: unknown): unknown => (typeof v === 'string' ? oneLine(v) : v instanceof Error ? oneLineError(v) : v);
   const extra = (fields: LogFields | undefined): unknown[] => {

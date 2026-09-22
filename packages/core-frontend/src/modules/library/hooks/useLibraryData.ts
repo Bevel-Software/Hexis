@@ -42,7 +42,17 @@ import {
  * only the skills+tools pair failing surfaces as a load error.
  */
 export interface LibraryData {
+  /**
+   * True until the FIRST load answers. A reload keeps what is on screen and
+   * swaps it when the new answer lands: the library is re-read after every
+   * access edit, credential save and change-request event, and a load is
+   * many round trips (one per skill for its frontmatter), so dropping the
+   * page to "Loading…" each time meant a long blank after closing a dialog
+   * that changed nothing.
+   */
   loading: boolean;
+  /** A load is in flight behind what is on screen. Absent means no. */
+  refreshing?: boolean;
   error: string | null;
   skills: LibrarySkillSummary[];
   /**
@@ -81,6 +91,7 @@ export interface LibraryData {
 export function useLibraryData(): LibraryData {
   const [state, setState] = useState<Omit<LibraryData, 'reload'>>({
     loading: true,
+    refreshing: false,
     error: null,
     skills: [],
     pendingSkills: [],
@@ -97,7 +108,6 @@ export function useLibraryData(): LibraryData {
 
   useEffect(() => {
     let cancelled = false;
-    setState((s) => ({ ...s, loading: true, error: null }));
 
     (async () => {
       const [skills, tools] = await Promise.all([listSkills(), listToolSecrets()]);
@@ -148,6 +158,7 @@ export function useLibraryData(): LibraryData {
         new Set(skills.filter((s) => results[`${s.path}/SKILL.md`] === true).map((s) => s.name));
       setState({
         loading: false,
+        refreshing: false,
         error: null,
         skills,
         pendingSkills: pending,
@@ -165,6 +176,7 @@ export function useLibraryData(): LibraryData {
       setState((s) => ({
         ...s,
         loading: false,
+        refreshing: false,
         error: err instanceof Error ? err.message : "Couldn't load the library.",
       }));
     });
@@ -174,7 +186,15 @@ export function useLibraryData(): LibraryData {
     };
   }, [revision]);
 
-  const reload = useCallback(() => setRevision((r) => r + 1), []);
+  // The flags are flipped HERE, from the event that asks for the load, not
+  // in the effect (a synchronous setState there costs a cascading render on
+  // every revision). The first load is loud — `useState(true)` above — and a
+  // reload is quiet: `refreshing` behind what is on screen, the error
+  // cleared for the new attempt.
+  const reload = useCallback(() => {
+    setState((s) => (s.loading ? s : { ...s, refreshing: true, error: null }));
+    setRevision((r) => r + 1);
+  }, []);
 
   return { ...state, reload };
 }

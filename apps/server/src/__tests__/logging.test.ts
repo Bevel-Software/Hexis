@@ -44,6 +44,19 @@ describe('createPinoLogger — the err field', () => {
     expect(err.code).toBe('E\\nX');
   });
 
+  it('keeps the failures of an AggregateError from another realm, escaped', () => {
+    const { lines, logger } = capture();
+    const foreign = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(foreign, 'name', { value: 'AggregateError', enumerable: false });
+    Object.defineProperty(foreign, 'message', { value: 'several', enumerable: false });
+    Object.defineProperty(foreign, 'errors', { value: [new Error('one\nA'), 'two\nB'], enumerable: false });
+    logger.error('failed', { err: foreign });
+    const err = lines()[0]?.err as { message: string; errors: unknown[] };
+    expect(err.message).toBe('several');
+    expect((err.errors[0] as { message: string }).message).toBe('one\\nA');
+    expect(err.errors[1]).toBe('two\\nB');
+  });
+
   it('escapes a plain string reason', () => {
     const { lines, logger } = capture();
     logger.error('failed', { err: 'just text\n[forged]' });

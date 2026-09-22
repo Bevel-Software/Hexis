@@ -102,6 +102,13 @@ export interface ServerExtensions {
    * overlay's own router installs a larger parser for them (body-parser
    * ignores a second parse once the first has run — see the comment at the
    * parser below).
+   *
+   * An exempt path under `/api/workspace/:id` has its body parsed AFTER the
+   * git-internals route guard has looked at it, so a path-bearing field in
+   * that body is not refused ahead of the route the way every other
+   * workspace body is. The services refuse the git folder on their own, so
+   * nothing reaches it; but such a router should run `gitGuardedInputs` on
+   * the parsed body itself if it wants the same early, sanitized 403.
    */
   jsonParserExemptPaths?: string[];
   /**

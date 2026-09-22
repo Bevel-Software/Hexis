@@ -8,6 +8,6 @@ You can only change what you can read. Nothing is created, changed, moved into o
 
 There are two exceptions. The first is a new folder directly under the knowledge, skills or plugins root. Anyone may start one, whatever the root's rules grant them, and the new folder's `access.md` is seeded with the creator's own read grant so what they put there is visible to them — the same way a new plugin is provisioned. A loose file directly at a root has no folder to carry that grant and is not excepted.
 
-The second is the admin rescue: an Admin can always change the repository root's own files (`roles.yaml`, `access.md`, `groups.yaml`, `AGENTS.md`), whatever the root's rules say, so a tree that grants nobody stays repairable from inside the app. That floor covers only the root's own files — an admin excluded from reading a subfolder cannot change it either. (An explicit `deny read` naming a person, placed under a folder that grants them write higher up, is now read as it looks: no read, so no changes there either.)
+The second is the admin rescue: an Admin can always change the repository root's own files (`roles.yaml`, `access.md`, `groups.yaml`, and the agent guide — `AGENTS.md` unless the deployment named it otherwise), whatever the root's rules say, so a tree that grants nobody stays repairable from inside the app. That floor covers only the root's own files — an admin excluded from reading a subfolder cannot change it either. (An explicit `deny read` naming a person, placed under a folder that grants them write higher up, is now read as it looks: no read, so no changes there either.)
 
-The agent guide (`AGENTS.md`) states the rule and both exceptions.
+The agent guide (`AGENTS.md`, or the name the deployment gave it) states the rule and both exceptions.

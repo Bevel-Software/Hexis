@@ -26,8 +26,8 @@ describe('sanitizedPath', () => {
     expect(sanitizedPath('a\r\nb.md')).toBe('a\\r\\nb.md');
   });
 
-  it('escapes the other mandatory breaks — vertical tab, form feed, NEL — the same way', () => {
-    expect(sanitizedPath('a\vb\fc\u0085d.md')).toBe('a\\vb\\fc\\u0085d.md');
+  it('escapes the other mandatory breaks — vertical tab, form feed, NEL — as `printable` spells them', () => {
+    expect(sanitizedPath('a\vb\fc\u0085d.md')).toBe('a\\u000bb\\u000cc\\u0085d.md');
   });
 
   it('escapes every other C0/C1 control too, so a name cannot steer a terminal', () => {

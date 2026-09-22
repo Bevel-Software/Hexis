@@ -62,6 +62,12 @@ function asSafeError(err: unknown): Error {
         Object.defineProperty(like, key, { value: source[key], enumerable: false, writable: true, configurable: true });
       }
     }
+    // An AggregateError from another realm keeps its failures under a
+    // non-enumerable `errors` too; carried by name, and escaped one by one
+    // by the same rule (`oneLineError` walks `errors`).
+    if (Array.isArray(source.errors)) {
+      Object.defineProperty(like, 'errors', { value: source.errors, enumerable: false, writable: true, configurable: true });
+    }
     return oneLineError(like);
   }
   return err as Error;

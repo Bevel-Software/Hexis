@@ -33,12 +33,12 @@ export { printable } from '@bevel-software/platform-mcp-core';
  * function, and the missing-path refusals use it too, so a path reads the same
  * however it is refused.
  */
+// The three names JSON and `printable` both use; every other control is
+// `\uXXXX` in both, so a path reads the same in a refusal and in a log.
 const NAMED_ESCAPES: ReadonlyMap<string, string> = new Map([
   ['\r', '\\r'],
   ['\n', '\\n'],
   ['\t', '\\t'],
-  ['\v', '\\v'],
-  ['\f', '\\f'],
 ]);
 // Built rather than written: the lint rule against control characters in a
 // regex literal guards against accidental ones, and these are the point.
