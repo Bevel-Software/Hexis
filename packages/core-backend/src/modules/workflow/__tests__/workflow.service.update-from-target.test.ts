@@ -17,14 +17,23 @@ import {
 } from '../../../shared/domain-errors.js';
 
 /**
- * The request dialog's Update: merge the target into the proposal branch on
- * the server and push it. Only the author or someone who may apply the
- * request may run it, and a conflicting merge must leave nothing behind —
+ * Bringing a change request up to date: merge the target into the proposal
+ * branch on the server and push it. Only the author or someone who may apply
+ * the request may run it, and a conflicting merge must leave nothing behind —
  * no commit, no push — and report the conflict so the dialog can hand the
  * author's agent the prompt.
+ *
+ * The dialog now runs this by ITSELF on open, which makes the approval
+ * bookkeeping load-bearing: a merge nobody asked for must not void approvals
+ * over files it never touched. That holds for every caller of the route — the
+ * dialog, an agent, an older client — because it lives here and not in any
+ * of them.
  */
 
 const USER: AuthUser = { id: 'u1', email: 'alice@example.com', name: 'Alice' };
+/** The proposal's head before the update, and the merge commit after it. */
+const HEAD = 'a'.repeat(40);
+const MERGED_HEAD = 'd'.repeat(40);
 const WS = encodeURIComponent('alice/deal');
 
 function detail(overrides: Partial<PullRequestDetail> = {}): PullRequestDetail {
@@ -36,6 +45,7 @@ function detail(overrides: Partial<PullRequestDetail> = {}): PullRequestDetail {
     base: 'current-company-state',
     behind: true,
     viewerCanUpdate: true,
+    headSha: HEAD,
     mergeBaseSha: 'c'.repeat(40),
     ...overrides,
   } as PullRequestDetail;
@@ -45,6 +55,13 @@ function harness(opts: {
   first?: PullRequestDetail | null;
   merge?: { kind: 'clean'; alreadyUpToDate: boolean } | { kind: 'conflicts'; paths: string[] };
   pullError?: Error;
+  /** What the merge commit moved, as git would report it between the heads. */
+  changedPaths?: string[];
+  changedPathsError?: Error;
+  /** How many approval rows the carry-forward wrote. */
+  carried?: number;
+  /** The detail the extra read after a carry-forward answers with. */
+  withApprovals?: PullRequestDetail;
 }) {
   const git = {
     pull: opts.pullError
@@ -52,19 +69,26 @@ function harness(opts: {
       : vi.fn().mockResolvedValue({ treeChanged: false }),
     mergeFromOrigin: vi.fn().mockResolvedValue(opts.merge ?? { kind: 'clean', alreadyUpToDate: false }),
     push: vi.fn().mockResolvedValue(undefined),
+    pathsChangedBetween: opts.changedPathsError
+      ? vi.fn().mockRejectedValue(opts.changedPathsError)
+      : vi.fn().mockResolvedValue(opts.changedPaths ?? []),
   };
-  const refreshed = detail({ behind: false });
+  const refreshed = detail({ behind: false, headSha: MERGED_HEAD });
   const getPrDetail = vi
     .fn()
     .mockResolvedValueOnce(opts.first === undefined ? detail() : opts.first)
-    .mockResolvedValue(refreshed);
+    .mockResolvedValueOnce(refreshed)
+    .mockResolvedValue(opts.withApprovals ?? refreshed);
   const prs = { getPrDetail, invalidateDetailCache: vi.fn() };
   const pendingCommits = { enqueueIfAbsent: vi.fn().mockResolvedValue(true) };
+  const reviewWorkflow = {
+    carryApprovalsForward: vi.fn().mockResolvedValue(opts.carried ?? 0),
+  };
   const svc = new WorkflowService(
     {} as unknown as Database,
     git as unknown as GitService,
     prs as unknown as PullRequestService,
-    {} as unknown as IReviewWorkflowService,
+    reviewWorkflow as unknown as IReviewWorkflowService,
     {} as unknown as WorkspaceService,
     {} as unknown as IAccessControl,
     {} as unknown as FileLockService,
@@ -72,7 +96,7 @@ function harness(opts: {
     'knowledge-base',
     openChangeGate(),
   );
-  return { svc, git, prs, pendingCommits, refreshed };
+  return { svc, git, prs, pendingCommits, reviewWorkflow, refreshed };
 }
 
 describe('WorkflowService.updateFromTarget', () => {
@@ -145,5 +169,60 @@ describe('WorkflowService.updateFromTarget', () => {
     await expect(h.svc.updateFromTarget(WS, USER, 7)).rejects.toThrow(/fetch failed/);
     expect(h.git.mergeFromOrigin).not.toHaveBeenCalled();
     expect(h.git.push).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorkflowService.updateFromTarget: the approvals the merge did not touch', () => {
+  it('carries them onto the new head, and re-reads the detail so the gate sees them', async () => {
+    const withApprovals = detail({ behind: false, headSha: MERGED_HEAD, mergeableInBevel: true });
+    const h = harness({
+      changedPaths: ['Sales/Deal.md'],
+      carried: 2,
+      withApprovals,
+    });
+
+    await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toBe(withApprovals);
+
+    // What moved is git's answer between the two heads — never a guess, and
+    // never the request's own three-dot diff against the target.
+    expect(h.git.pathsChangedBetween).toHaveBeenCalledWith(WS, HEAD, MERGED_HEAD);
+    expect(h.reviewWorkflow.carryApprovalsForward).toHaveBeenCalledWith(
+      7,
+      HEAD,
+      MERGED_HEAD,
+      ['Sales/Deal.md'],
+    );
+    // The first refreshed detail was assembled before the rows existed, so it
+    // is not the one that goes back.
+    expect(h.prs.getPrDetail).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not re-read the detail when nothing carried', async () => {
+    const h = harness({ changedPaths: ['Sales/Deal.md'], carried: 0 });
+    await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toBe(h.refreshed);
+    expect(h.reviewWorkflow.carryApprovalsForward).toHaveBeenCalledTimes(1);
+    expect(h.prs.getPrDetail).toHaveBeenCalledTimes(2);
+  });
+
+  it('touches nothing when the merge had nothing to do', async () => {
+    const h = harness({ merge: { kind: 'clean', alreadyUpToDate: true } });
+    await h.svc.updateFromTarget(WS, USER, 7);
+    expect(h.git.pathsChangedBetween).not.toHaveBeenCalled();
+    expect(h.reviewWorkflow.carryApprovalsForward).not.toHaveBeenCalled();
+  });
+
+  it('touches nothing when the merge conflicted — the rows describe a head that still stands', async () => {
+    const h = harness({ merge: { kind: 'conflicts', paths: ['Sales/Deal.md'] } });
+    await h.svc.updateFromTarget(WS, USER, 7).catch(() => undefined);
+    expect(h.git.pathsChangedBetween).not.toHaveBeenCalled();
+    expect(h.reviewWorkflow.carryApprovalsForward).not.toHaveBeenCalled();
+  });
+
+  it('still returns the up-to-date request when the bookkeeping itself fails', async () => {
+    // A request that IS up to date is worth more than the carry-forward: the
+    // approvals simply go stale, exactly as they did before this existed.
+    const h = harness({ changedPathsError: new Error('git exploded') });
+    await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toBe(h.refreshed);
+    expect(h.reviewWorkflow.carryApprovalsForward).not.toHaveBeenCalled();
   });
 });

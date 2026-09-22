@@ -786,6 +786,63 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     };
   }
 
+  /**
+   * Carry the per-file approvals across a commit that the APPROVERS did not
+   * make — the merge an update-from-target lands on the proposal's branch.
+   *
+   * An approval is pinned to a head sha (that is what makes an author's own
+   * later edit reset it), so a merge commit voided every approval on the
+   * request, including the many files it never touched. Reviewers then had to
+   * re-approve text nobody had changed, which is how automatic updates would
+   * have turned every stale request into a second round of review.
+   *
+   * What survives is decided by CONTENT, not by trust: `changedPaths` is
+   * every path whose bytes differ between the two heads, and only a path
+   * absent from it keeps its approval. The original `approvedAt` travels with
+   * the row, because the reviewer approved then, not now. Idempotent under
+   * the unique index, so a retried or concurrent update inserts nothing twice.
+   *
+   * Returns how many rows were written — the caller re-reads the detail only
+   * when that is non-zero.
+   */
+  async carryApprovalsForward(
+    prNumber: number,
+    fromHeadSha: string,
+    toHeadSha: string,
+    changedPaths: string[],
+  ): Promise<number> {
+    assertValidPrNumber(prNumber);
+    if (!fromHeadSha || !toHeadSha) {
+      throw new WorkflowValidationError('both head shas are required');
+    }
+    if (fromHeadSha === toHeadSha) return 0;
+
+    const rows = await this.db
+      .select()
+      .from(prFileApprovals)
+      .where(
+        and(eq(prFileApprovals.prNumber, prNumber), eq(prFileApprovals.headSha, fromHeadSha)),
+      );
+    const touched = new Set(changedPaths);
+    const carried = rows
+      .filter((r) => !touched.has(r.path))
+      .map((r) => ({
+        prNumber,
+        path: r.path,
+        approverEmail: r.approverEmail,
+        approverName: r.approverName,
+        headSha: toHeadSha,
+        approvedAt: r.approvedAt,
+      }));
+    if (carried.length === 0) return 0;
+
+    await this.db.insert(prFileApprovals).values(carried).onConflictDoNothing();
+    log.info(
+      `carried ${carried.length} approval(s) forward on PR #${prNumber} from ${fromHeadSha} to ${toHeadSha}`,
+    );
+    return carried.length;
+  }
+
   async unapproveFile(
     prNumber: number,
     path: string,

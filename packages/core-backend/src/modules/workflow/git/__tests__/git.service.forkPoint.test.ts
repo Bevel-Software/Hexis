@@ -158,6 +158,45 @@ describe('GitService — fork point, behind, and Update', () => {
     expect(files[0].patch).not.toContain('status');
   });
 
+  it('names exactly the files the update moved — the approvals on the rest survive it', async () => {
+    // Alice proposes two files. Bob then edits one of them on the target and
+    // adds one of his own. After the merge, only Bob's two paths differ
+    // between the proposal's old head and its new one; the file Alice
+    // proposed and nobody else touched does not — which is what lets its
+    // approval carry forward (see `carryApprovalsForward`).
+    const TERMS = 'Sales/Terms.md';
+    const OTHER = 'Sales/Other.md';
+    await fs.writeFile(path.join(repo, DEAL), ORIGINAL.replace('price: 100', 'price: 120'));
+    await fs.writeFile(path.join(repo, TERMS), 'term: 24 months\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'propose']);
+    await runGit(repo, ['push', '-u', 'origin', SOURCE]);
+
+    await editTargetDirectly(['status: draft', 'status: signed']);
+    await fs.writeFile(path.join(other, OTHER), 'note: mine\n');
+    await runGit(other, ['add', '-A']);
+    await runGit(other, ['commit', '-m', 'and another file']);
+    await runGit(other, ['push', 'origin', TARGET]);
+
+    const headBefore = await gitOut(repo, ['rev-parse', 'HEAD']);
+    expect(await git.mergeFromOrigin(WS, SOURCE, TARGET, USER)).toEqual({
+      kind: 'clean',
+      alreadyUpToDate: false,
+    });
+    const headAfter = await gitOut(repo, ['rev-parse', 'HEAD']);
+
+    const moved = await git.pathsChangedBetween(WS, headBefore, headAfter);
+    expect([...moved].sort()).toEqual([DEAL, OTHER]);
+    expect(moved).not.toContain(TERMS);
+
+    // Nothing moved between a commit and itself.
+    await expect(git.pathsChangedBetween(WS, headAfter, headAfter)).resolves.toEqual([]);
+    // Only real commits are readable — never a ref, never a fragment.
+    await expect(git.pathsChangedBetween(WS, 'HEAD', headAfter)).rejects.toThrow(
+      /invalid commit sha/,
+    );
+  });
+
   it('a conflicting Update leaves the proposal branch untouched and reports the files', async () => {
     await propose(['price: 100', 'price: 120']);
     await editTargetDirectly(['price: 100', 'price: 90']);

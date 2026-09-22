@@ -125,6 +125,26 @@ export interface IReviewWorkflowService {
   ): Promise<FileApprovalState[]>;
 
   /**
+   * Re-pin the per-file approvals a commit did not disturb onto a new head.
+   *
+   * For the merge an update-from-target lands on a proposal's branch: the
+   * approvers did not make that commit, so voiding their approvals over files
+   * whose bytes it never touched would make every automatic update a second
+   * round of review. `changedPaths` is the content verdict — every path that
+   * differs between the two heads — and only a path absent from it keeps its
+   * approval. The approval RULE is unchanged: a row still counts only against
+   * the current head, and the author's own later commit still resets it.
+   *
+   * Idempotent; returns the number of rows written.
+   */
+  carryApprovalsForward(
+    prNumber: number,
+    fromHeadSha: string,
+    toHeadSha: string,
+    changedPaths: string[],
+  ): Promise<number>;
+
+  /**
    * Revoke the caller's own approval on one file. Non-author users cannot
    * revoke someone else's approval (403). Idempotent when no matching
    * approval exists.

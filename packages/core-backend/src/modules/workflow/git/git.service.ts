@@ -2756,6 +2756,41 @@ export class GitService implements IGitService {
   }
 
   /**
+   * Every repo-relative path whose content differs between two commits on a
+   * change request's own branch — what an update from the target actually
+   * CHANGED about the proposal.
+   *
+   * Two-dot, because that is the question: not "what does this request
+   * propose" (three-dot, against the target) but "what did the merge move
+   * under the reviewers who already approved". Renames are NOT followed
+   * (`-M` is deliberately absent): a rename reports as the old path removed
+   * and the new one added, so an approval on either side is correctly read
+   * as touched. The list is the conservative one — a path that appears here
+   * loses its approval, and only a path that does not appear keeps it.
+   */
+  async pathsChangedBetween(
+    workspaceId: string,
+    fromSha: string,
+    toSha: string,
+  ): Promise<string[]> {
+    for (const sha of [fromSha, toSha]) {
+      if (!/^[0-9a-f]{40,64}$/.test(sha)) {
+        throw new WorkflowValidationError(`invalid commit sha: ${sha}`);
+      }
+    }
+    const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () => {
+      const { stdout } = await this.git(cwd, [
+        'diff', '-z', '--name-only', fromSha, toSha,
+      ]);
+      // `-z` terminates each name with NUL, so the trailing field is empty —
+      // and a tracked name may legally carry leading or trailing spaces, so
+      // nothing is trimmed here.
+      return [...new Set(stdout.split('\0').filter((name) => name !== ''))];
+    });
+  }
+
+  /**
    * One file as it stood at a change request's fork point — the "before" side
    * of the request dialog's diff. `sha` must be a commit on the target
    * branch's published history (`origin/<baseBranch>`); anything else is

@@ -1932,10 +1932,14 @@ export class WorkflowService implements IWorkflowService {
    * as `ChangeRequestConflictsError`; the caller (UI or agent) is expected
    * to route into the resolution flow exactly as on open.
    *
-   * Approvals on files touched by the merge resolution invalidate
-   * automatically — they're pinned to the head SHA, and any new commit on
-   * source drops the per-file approval gate (handled by the existing
-   * approval staleness check). No special bookkeeping needed here.
+   * Approvals are carried across the merge BY CONTENT: every approval on a
+   * file whose bytes the merge left alone is re-pinned to the new head, and
+   * only a file the merge actually changed loses its approval (staleness is
+   * still `row.headSha !== headSha`, unchanged). Without this, a merge
+   * nobody asked for would void every approval on the request — including
+   * the files it never touched — and since the dialog now runs this update
+   * by itself, every stale request would cost a second round of review.
+   * This holds for EVERY caller of the route, agent or UI.
    *
    * Authority: the request's author, or anyone who may apply it — the
    * detail's `viewerCanUpdate`, computed for THIS caller, so the button and
@@ -2010,6 +2014,44 @@ export class WorkflowService implements IWorkflowService {
       throw new WorkflowValidationError(
         `Refreshed change request #${number} but could not re-fetch its detail.`,
       );
+    }
+    // The merge is a commit the APPROVERS did not make. Re-pin their
+    // approvals onto the new head for every file whose bytes it left alone —
+    // git's own two-dot diff between the two heads is the verdict on which
+    // those are. Best effort: a request that IS up to date is worth far more
+    // than the bookkeeping, so a failure here is logged and the fresh detail
+    // still goes back.
+    if (!outcome.alreadyUpToDate && detail.headSha && refreshed.headSha !== detail.headSha) {
+      try {
+        const changedPaths = await this.git.pathsChangedBetween(
+          workspaceId,
+          detail.headSha,
+          refreshed.headSha,
+        );
+        const carried = await this.reviewWorkflow.carryApprovalsForward(
+          number,
+          detail.headSha,
+          refreshed.headSha,
+          changedPaths,
+        );
+        // The detail above was assembled before those rows existed, so its
+        // `approvals` (and the merge gate derived from them) still describe
+        // the pre-merge head. Only re-read when something actually carried.
+        if (carried > 0) {
+          this.prs.invalidateDetailCache(number);
+          const withApprovals = await this.prs.getPrDetail(number, {
+            fresh: true,
+            workspaceId,
+            viewerEmail: user.email,
+          });
+          if (withApprovals) return withApprovals;
+        }
+      } catch (err) {
+        log.warn(
+          `could not carry approvals forward on change request #${number} after updating from target`,
+          { err },
+        );
+      }
     }
     return refreshed;
   }
