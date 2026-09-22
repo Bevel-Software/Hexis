@@ -371,6 +371,10 @@ describe('workspace file primitives', () => {
     await refused('mkdir', { path: reserved });
     await refused('copy_file', { src: `${KB_DIR}/a.md`, dest: `${reserved}/a.md` });
     await refused('move_file', { src: `${KB_DIR}/a.md`, dest: `${reserved}/a.md` });
+    await refused('edit_file', { path: `${reserved}/x.md`, old_string: 'a', new_string: 'b' });
+    // `unzip` names its target under `destination`, the one key that is not
+    // `path`, `dest` or `files` — refused before any archive is looked at.
+    await refused('unzip', { path: `${KB_DIR}/archive.zip`, destination: reserved });
     // Nothing landed — the batch's valid entry included, since the batch was
     // refused as a whole before any write.
     await expect(stat(join(tempDir, reserved))).rejects.toThrow();
@@ -396,6 +400,10 @@ describe('workspace file primitives', () => {
     await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/n.md`, content: 'needle in the repository\n' });
     const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle' })).json()) as { matches: { path: string }[] };
     expect(res.matches.map((m) => m.path)).toEqual([`${KB_DIR}/n.md`]);
+    // An explicit empty path is the same absence, not a spelling of the
+    // workspace directory.
+    const empty = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: '' })).json()) as { matches: { path: string }[] };
+    expect(empty.matches.map((m) => m.path)).toEqual([`${KB_DIR}/n.md`]);
   });
 
   it('execute_command runs in the workspace dir', async () => {

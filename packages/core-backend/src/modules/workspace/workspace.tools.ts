@@ -1625,7 +1625,10 @@ export function registerWorkspaceTools(
       // any caller the contents of every stray, including documents that were
       // uploaded to a restricted folder and landed beside it instead. The
       // boot note names those for an operator; no tool reads them.
-      const searchRoot = typeof a.path === 'string' ? a.path : kbDirName;
+      // An EMPTY string is the same absence: the normaliser leaves it alone
+      // (an empty path is the handler's to explain), and here it would
+      // otherwise name the workspace directory by another spelling.
+      const searchRoot = typeof a.path === 'string' && a.path.length > 0 ? a.path : kbDirName;
       // The search root itself is checked here (fail-closed for an agent grep on
       // a named subtree with no sessionId); each file the walk actually opens is
       // recorded per-file below, so a root-level grep that reaches into multiple
