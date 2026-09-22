@@ -116,9 +116,39 @@ async function resolvedRealPath(absolutePath: string): Promise<string | null> {
  */
 export async function assertNotGitInternals(rootDir: string, inputPath: string, absolutePath?: string): Promise<void> {
   assertNoGitInternalsSegment(inputPath);
-  const target = absolutePath ?? path.resolve(rootDir, inputPath.replace(/^[\\/]+/, ''));
-  if (hasGitInternalsSegment(path.relative(path.resolve(rootDir), target))) throw new GitInternalsError();
-  const [realTarget, realRoot] = await Promise.all([resolvedRealPath(target), resolvedRealPath(path.resolve(rootDir))]);
-  if (realTarget === null || realRoot === null) return;
-  if (hasGitInternalsSegment(path.relative(realRoot, realTarget))) throw new GitInternalsError();
+  const root = path.resolve(rootDir);
+  const realRoot = await resolvedRealPath(root);
+  for (const target of absolutePath !== undefined ? [absolutePath] : candidateTargets(root, inputPath)) {
+    if (hasGitInternalsSegment(path.relative(root, target))) throw new GitInternalsError();
+    if (realRoot === null) continue;
+    const realTarget = await resolvedRealPath(target);
+    if (realTarget !== null && hasGitInternalsSegment(path.relative(realRoot, realTarget))) throw new GitInternalsError();
+  }
+}
+
+/**
+ * Every place one raw spelling could LAND, because a spelling is not yet a
+ * path until something decides how to read it.
+ *
+ * A backslash separates segments on Windows and is an ordinary character in a
+ * filename here, so `kb\\Notes\\..\\link` is read BOTH ways; an absolute path
+ * is both the path it names and — as every workspace caller reads it — that
+ * path with its leading slashes dropped, under the workspace; and a leading
+ * climb (`../kb/link`) is both the climb it spells and the path left when the
+ * climb is dropped, which is how a lenient reader takes it. The spelling is
+ * refused when ANY reading lands in the git folder: which reading a later
+ * layer picks is not something this rule should have to predict.
+ *
+ * This is what a CALLER's own spelling needs. A path some layer has already
+ * resolved arrives as `absolutePath` and is judged as the one place it is.
+ */
+function candidateTargets(root: string, inputPath: string): string[] {
+  const targets = new Set<string>();
+  for (const spelling of new Set([inputPath, inputPath.replace(/\\/g, '/')])) {
+    const anchored = spelling.replace(/^[\\/]+/, '');
+    targets.add(path.resolve(root, anchored));
+    targets.add(path.resolve(root, anchored.replace(/^(\.\.?[\\/])+/, '')));
+    if (/^[\\/]/.test(spelling)) targets.add(path.resolve(spelling));
+  }
+  return [...targets];
 }

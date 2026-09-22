@@ -995,12 +995,13 @@ export class WorkspaceService implements IWorkspaceService {
    * is the path the operation will use, and a spelling that normalises inside
    * and resolves outside is exactly the miss this check exists to catch.
    *
-   * The git rule reads the caller's RAW spelling before either step. Those
-   * two refuse `.`/`..`, backslashes and absolute paths with a message that
-   * quotes the path back and names a corrected one, and a git path spelled any
-   * of those ways was answered by THAT rather than by the one sanitized
-   * refusal — measured in production across five families of spelling. Which
-   * rule speaks is not the caller's to choose.
+   * The git rule reads the caller's RAW spelling before either step — the
+   * whole rule, links resolved, not just the spelling. Those two refuse
+   * `.`/`..`, backslashes and absolute paths with a message that quotes the
+   * path back and names a corrected one, and a git path spelled any of those
+   * ways was answered by THAT rather than by the one sanitized refusal
+   * (measured in production), as was a LINK into the folder spelled the same
+   * ways. Which rule speaks is not the caller's to choose.
    *
    * Callers use the returned `relativePath` for everything downstream — the
    * git-internals check, the diff baseline, the lock-free path turns, their own
@@ -1012,8 +1013,8 @@ export class WorkspaceService implements IWorkspaceService {
     workspaceId: string,
     wsPath: string,
   ): Promise<{ workspaceDir: string; relativePath: string; absolutePath: string }> {
-    assertNoGitInternalsSegment(wsPath); // The RAW spelling, first — see above.
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    await assertNotGitInternals(workspaceDir, wsPath); // The RAW spelling, first — see above.
     const relativePath = normalizeWorkspacePath(wsPath, this.kbDirName);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     assertWithinDirectory(absolutePath, this.repoRoot(workspaceDir));

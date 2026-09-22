@@ -23,7 +23,7 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import { assertInsideRepo, assertRepoRootNameFreeArgs, normalizePathArgs } from '../kb-fs/repo-path.js';
 import { GitGuardedFilesystem } from '../kb-fs/git-guarded-filesystem.js';
-import { assertNoGitInternalsSegment, hasGitInternalsSegment } from '../../shared/git-internals.js';
+import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence } from '../../shared/fs.contract.js';
@@ -797,39 +797,48 @@ export function registerWorkspaceTools(
   };
 
   /**
-   * The lexical half of the rule, over the caller's RAW arguments — before
-   * `normalizePathArgs`.
-   *
-   * That normaliser refuses a `..` segment, a `.` segment, a backslash and an
-   * absolute path as PATHS: a 400 that quotes the spelling back and names a
-   * corrected one. For `knowledge-base/Notes/../.git/config` that answer
-   * arrived FIRST and the git rule never saw the path, so five families of
-   * spelling — parent-climb, dot-segment, backslash, climb-out, absolute —
-   * were answered by a message that says which path was meant instead of the
-   * one sanitized refusal. Nothing under the folder was ever served either
-   * way; the sentence was simply the wrong one. So the git rule reads the
-   * caller's spelling before anything may rewrite or refuse it: a path that
-   * names the folder is a git refusal first, whatever else is also wrong with
-   * how it is written.
+   * The branch's workspace root, to judge a spelling against what is on disk
+   * — or null when there is nothing to judge it against yet. Only a branch
+   * ALREADY cloned is used: bootstrapping one here would clone before the
+   * handler's access and ontology gates have had their say.
    */
-  const assertRawToolPathsNotGitInternals = (args: Record<string, unknown>): void => {
-    for (const p of toolPathArgs(args)) assertNoGitInternalsSegment(p);
+  const gitCheckRootFor = async (args: Record<string, unknown>, ctx: ToolContext): Promise<string | null> => {
+    if (typeof args.branch !== 'string' || args.branch === '') return null;
+    try {
+      if (!(await ctx.workspaceService.hasBootstrappedWorkspace(workspaceIdForBranch(args.branch)))) return null;
+      const fs = await ctx.getFilesystem(args.branch);
+      return fs instanceof GitGuardedFilesystem ? fs.basePath : null;
+    } catch {
+      return null;
+    }
   };
 
+  /**
+   * The WHOLE rule — the spelling and where it lands, links resolved — over
+   * the caller's own arguments, before any gate, lock or read.
+   *
+   * Run before `normalizePathArgs`, which refuses a `..` segment, a `.`
+   * segment, a backslash and an absolute path as PATHS: a 400 that quotes the
+   * spelling back and names a corrected one. That answer used to arrive first
+   * for five families of spelling, so `knowledge-base/Notes/../.git/config`
+   * was told which path it meant instead of being refused. Running only the
+   * LEXICAL half here fixed those and left the same hole one step along: a
+   * link into the folder (`Notes/../gitlink/config`) has no `.git` to read in
+   * its spelling, so it took the path rule's answer too. Both halves therefore
+   * read the caller's spelling before anything may rewrite or refuse it.
+   *
+   * Nothing under the folder was reachable through any of it — the filesystem
+   * refuses again underneath — but which rule answers is not the caller's to
+   * choose by how they spell the path.
+   */
   const assertToolPathsNotGitInternals = async (args: Record<string, unknown>, ctx: ToolContext): Promise<void> => {
     const paths = toolPathArgs(args);
     for (const p of paths) assertNoGitInternalsSegment(p);
     const onDisk = paths.filter((p) => !spillStore.isSpillRef(p));
-    if (onDisk.length === 0 || typeof args.branch !== 'string' || args.branch === '') return;
-    let fs: LocalFilesystem;
-    try {
-      if (!(await ctx.workspaceService.hasBootstrappedWorkspace(workspaceIdForBranch(args.branch)))) return;
-      fs = await ctx.getFilesystem(args.branch);
-    } catch {
-      return;
-    }
-    if (!(fs instanceof GitGuardedFilesystem)) return;
-    for (const p of onDisk) await fs.assertNotGitInternals(p);
+    if (onDisk.length === 0) return;
+    const root = await gitCheckRootFor(args, ctx);
+    if (root === null) return;
+    for (const p of onDisk) await assertNotGitInternals(root, p);
   };
 
   // ── preflight for moves and deletes ─────────────────────────────────────
@@ -1213,8 +1222,8 @@ export function registerWorkspaceTools(
       // never reached the repository — the whole bug, spelled with a prefix.
       toolHandler(
         async (args, ctx) => {
-          // BEFORE the normaliser: see `assertRawToolPathsNotGitInternals`.
-          if (spec.fileTool !== false) assertRawToolPathsNotGitInternals(args);
+          // BEFORE the normaliser: see `assertToolPathsNotGitInternals`.
+          if (spec.fileTool !== false) await assertToolPathsNotGitInternals(args, ctx);
           const normalized = normalizePathArgs(
             args,
             kbDirName,

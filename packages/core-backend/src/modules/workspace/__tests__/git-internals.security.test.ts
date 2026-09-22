@@ -71,8 +71,26 @@ function fileForms(name: string): Record<string, string> {
     'mixed-case': `${KB}/.Git/${name}`,
     backslashed: `${KB}\\.git\\${name}`,
     symlinked: `${KB}/gitlink/${name}`,
+    // A LINK into the folder, reached through each of those same five
+    // spellings. Nothing in these names is `.git`, so only the resolved half
+    // of the rule sees them — and while that half ran after the normaliser,
+    // every one of them was answered by the path rule instead. This is the
+    // shape that has now broken twice; it is spelled out per family so a
+    // failure names the one that regressed.
+    'symlinked, parent-climb': `${KB}/Notes/../gitlink/${name}`,
+    'symlinked, dot segments': `./${KB}/./gitlink/${name}`,
+    'symlinked, backslashed': `${KB}\\gitlink\\${name}`,
+    'symlinked, climb-out': `../${KB}/gitlink/${name}`,
+    'symlinked, absolute': `{{WORKSPACE_DIR}}/${KB}/gitlink/${name}`,
+    'symlinked, chained link': `${KB}/Notes/../chained/${name}`,
   };
 }
+
+/**
+ * The absolute forms name the workspace on disk, which only exists once the
+ * temp root does — so they carry a placeholder until the test runs.
+ */
+const resolved = (form: string): string => form.replace('{{WORKSPACE_DIR}}', workspaceDir);
 
 /** Every spelling of the git folder ITSELF, for the operations that take a directory. */
 const DIR_FORMS: Record<string, string> = {
@@ -83,6 +101,10 @@ const DIR_FORMS: Record<string, string> = {
   'upper-case': `${KB}/.GIT`,
   symlinked: `${KB}/gitlink`,
   'symlinked, chained': `${KB}/chained`,
+  'symlinked, parent-climb': `${KB}/Notes/../gitlink`,
+  'symlinked, dot segments': `./${KB}/./gitlink`,
+  'symlinked, backslashed': `${KB}\\gitlink`,
+  'symlinked, climb-out': `../${KB}/gitlink`,
 };
 
 const FILE_FORMS = { ...fileForms('config'), 'symlinked file': `${KB}/cfglink` };
@@ -276,14 +298,15 @@ describe('workspace tools refuse the git folder', () => {
   for (const [op, args] of fileOps) {
     const tool = op.split(' ')[0];
     describe(op, () => {
-      it.each(Object.entries(FILE_FORMS))('%s form', async (form, p) => {
+      it.each(Object.entries(FILE_FORMS))('%s form', async (form, raw) => {
+        const p = resolved(raw);
         await expectRefused(await call(tool, args(p)), form);
       });
 
       it('answers a missing path exactly as an existing one', async () => {
         for (const form of Object.keys(MISSING_FORMS)) {
-          const existing = await call(tool, args(fileForms('config')[form]));
-          const missing = await call(tool, args(MISSING_FORMS[form]));
+          const existing = await call(tool, args(resolved(fileForms('config')[form])));
+          const missing = await call(tool, args(resolved(MISSING_FORMS[form])));
           expect(missing.status, form).toBe(existing.status);
           // Compared with the file name put back. A spelling the PATH rule
           // refuses is answered on the spelling alone, and that answer QUOTES
@@ -301,7 +324,8 @@ describe('workspace tools refuse the git folder', () => {
 
   for (const [op, args] of dirOps) {
     const tool = op.split(' ')[0];
-    it.each(Object.entries(DIR_FORMS))(`${op} — %s form`, async (form, p) => {
+    it.each(Object.entries(DIR_FORMS))(`${op} — %s form`, async (form, raw) => {
+      const p = resolved(raw);
       await expectRefused(await call(tool, args(p)), form);
     });
   }
@@ -444,14 +468,15 @@ describe('workspace routes refuse the git folder', () => {
       // No form passed: on this surface the git guard is mounted ahead of every
       // handler on the `/workspace/:id` prefix, so it answers before the
       // normaliser is ever asked — the one 403, in every spelling, as before.
-      it.each(Object.entries(FILE_FORMS))('%s form', async (_form, p) => {
+      it.each(Object.entries(FILE_FORMS))('%s form', async (_form, raw) => {
+        const p = resolved(raw);
         await expectRefused(await send(p));
       });
 
       it('answers a missing path exactly as an existing one', async () => {
         for (const form of Object.keys(MISSING_FORMS)) {
-          const existing = await send(fileForms('config')[form]);
-          const missing = await send(MISSING_FORMS[form]);
+          const existing = await send(resolved(fileForms('config')[form]));
+          const missing = await send(resolved(MISSING_FORMS[form]));
           expect(missing.status).toBe(existing.status);
           expect(await missing.json()).toEqual(await existing.json());
         }
@@ -460,7 +485,8 @@ describe('workspace routes refuse the git folder', () => {
   }
 
   for (const [name, send] of dirRoutes) {
-    it.each(Object.entries(DIR_FORMS))(`${name} — %s form`, async (_form, p) => {
+    it.each(Object.entries(DIR_FORMS))(`${name} — %s form`, async (_form, raw) => {
+      const p = resolved(raw);
       await expectRefused(await send(p));
     });
   }
@@ -533,10 +559,18 @@ describe('WorkspaceService refuses the git folder on its own', () => {
   ];
 
   for (const [name, run] of ops) {
-    it.each(Object.entries(fileForms('config')).filter(([form]) => !(name === 'readFileAtRef' && form === 'symlinked')))(
+    // `readFileAtRef` reads a path out of a git REF, never off the working
+    // tree, so no link on disk is followed and the link spellings do not
+    // apply to it — a ref read of a link's path yields the link's own blob
+    // (the target's NAME), never anything from inside the folder.
+    it.each(
+      Object.entries(fileForms('config')).filter(
+        ([form]) => !(name === 'readFileAtRef' && form.startsWith('symlinked')),
+      ),
+    )(
       `${name} — %s form`,
-      async (form, p) => {
-        const err = await run(p).catch((e: unknown) => e);
+      async (form, raw) => {
+        const err = await run(resolved(raw)).catch((e: unknown) => e);
         expect(err, form).toBeInstanceOf(GitInternalsError);
       },
     );
@@ -633,7 +667,7 @@ describe('the route guard on its own', () => {
 
   it('refuses every spelling before the route runs, even unauthenticated', async () => {
     userId = undefined;
-    const spellings = Object.values(FILE_FORMS);
+    const spellings = Object.values(FILE_FORMS).map(resolved);
     for (const p of spellings) {
       const res = await fetch(`${baseUrl}/api/workspace/${WS}/anything?path=${encodeURIComponent(p)}`);
       // Every spelling that NAMES the folder is refused with no disk touched.
@@ -694,7 +728,8 @@ describe('DiffService refuses the git folder on its own', () => {
   ];
 
   for (const [name, run] of ops) {
-    it.each(Object.entries(FILE_FORMS))(`${name} — %s form`, async (_form, p) => {
+    it.each(Object.entries(FILE_FORMS))(`${name} — %s form`, async (_form, raw) => {
+      const p = resolved(raw);
       await expect(run(p)).rejects.toBeInstanceOf(GitInternalsError);
     });
   }
@@ -732,7 +767,7 @@ describe('agent filesystems refuse the git folder on their own', () => {
       { basePath: workspaceDir, contained: true },
       { workflow: workflow as unknown as IWorkflowService, workspaceId: WS, branch: BRANCH, user: USER, kbDirName: KB },
     );
-    for (const p of Object.values(FILE_FORMS)) {
+    for (const p of Object.values(FILE_FORMS).map(resolved)) {
       await expect(lockingFs.readFile(p)).rejects.toBeInstanceOf(GitInternalsError);
       await expect(lockingFs.stat(p)).rejects.toBeInstanceOf(GitInternalsError);
       await expect(lockingFs.writeFile(p, 'x')).rejects.toBeInstanceOf(GitInternalsError);
@@ -742,7 +777,7 @@ describe('agent filesystems refuse the git folder on their own', () => {
       await expect(lockingFs.moveFile(p, `${KB}/Notes/b.md`)).rejects.toBeInstanceOf(GitInternalsError);
       await expect(lockingFs.writeFiles([{ path: p, content: 'x' }], 'batch')).rejects.toBeInstanceOf(GitInternalsError);
     }
-    for (const p of Object.values(DIR_FORMS)) {
+    for (const p of Object.values(DIR_FORMS).map(resolved)) {
       await expect(lockingFs.readdir(p)).rejects.toBeInstanceOf(GitInternalsError);
       await expect(lockingFs.mkdir(`${p}/new`)).rejects.toBeInstanceOf(GitInternalsError);
     }
@@ -752,7 +787,7 @@ describe('agent filesystems refuse the git folder on their own', () => {
 
   it('ReadOnlyFilesystem answers a git path with the git refusal, not the read-only one', async () => {
     const readOnly = new ReadOnlyFilesystem({ basePath: workspaceDir, contained: true });
-    for (const p of Object.values(FILE_FORMS)) {
+    for (const p of Object.values(FILE_FORMS).map(resolved)) {
       await expect(readOnly.readFile(p)).rejects.toBeInstanceOf(GitInternalsError);
       await expect(readOnly.exists(p)).rejects.toBeInstanceOf(GitInternalsError);
       await expect(readOnly.writeFile(p, 'x')).rejects.toBeInstanceOf(GitInternalsError);
