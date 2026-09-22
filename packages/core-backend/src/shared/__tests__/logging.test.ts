@@ -50,6 +50,12 @@ describe('createConsoleLogger', () => {
     expect(warn).toHaveBeenCalledWith('[sync] branch is behind');
   });
 
+  it('keeps the tag on the line too: a module name is escaped like any binding', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    createConsoleLogger({ module: 'sync\n[forged] admin signed in' }).warn('behind');
+    expect(warn).toHaveBeenCalledWith('[sync\\n[forged] admin signed in] behind');
+  });
+
   it('passes a lone error bare, so the console prints its stack', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const err = new Error('boom');

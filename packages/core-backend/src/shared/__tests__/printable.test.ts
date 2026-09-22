@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { printable, sanitizedPath } from '../printable.js';
+import { printable, sanitizedPath, terminalSafeJson } from '../printable.js';
 
 /**
  * The two renderings of caller-supplied text, and the one promise they share:
@@ -26,8 +26,16 @@ describe('sanitizedPath', () => {
     expect(sanitizedPath('a\r\nb.md')).toBe('a\\r\\nb.md');
   });
 
-  it('escapes the other mandatory breaks — vertical tab, form feed, NEL — the same way', () => {
-    expect(sanitizedPath('a\vb\fc\u0085d.md')).toBe('a\\vb\\fc\\u0085d.md');
+  it('escapes the other mandatory breaks — vertical tab, form feed, NEL — as `printable` spells them', () => {
+    expect(sanitizedPath('a\vb\fc\u0085d.md')).toBe('a\\u000bb\\fc\\u0085d.md');
+    // The same characters through `printable` (JSON underneath), minus its quotes.
+    expect(printable('a\vb\fc\u0085d\be.md')).toBe(`"${sanitizedPath('a\vb\fc\u0085d\be.md')}"`);
+  });
+
+  it('terminalSafeJson escapes only what JSON.stringify left raw, keeping the document\'s own lines', () => {
+    const json = JSON.stringify({ detail: 'said\n\u009b31mred ' }, null, 2);
+    expect(terminalSafeJson(json)).toBe('{\n  "detail": "said\\n\\u009b31mred\\u2028"\n}');
+    expect(JSON.parse(terminalSafeJson(json))).toEqual(JSON.parse(json));
   });
 
   it('escapes every other C0/C1 control too, so a name cannot steer a terminal', () => {

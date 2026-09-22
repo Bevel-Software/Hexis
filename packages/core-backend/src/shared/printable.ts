@@ -33,20 +33,36 @@ export { printable } from '@bevel-software/platform-mcp-core';
  * function, and the missing-path refusals use it too, so a path reads the same
  * however it is refused.
  */
+// The names JSON gives its escapes — and so what `printable`, which is
+// `JSON.stringify` underneath, writes for the same characters; every other
+// control is `\uXXXX` in both, so a path reads the same in a refusal and
+// in a log. (JSON has no name for vertical tab, so neither does this.)
 const NAMED_ESCAPES: ReadonlyMap<string, string> = new Map([
-  ['\r', '\\r'],
-  ['\n', '\\n'],
+  ['\b', '\\b'],
   ['\t', '\\t'],
-  ['\v', '\\v'],
+  ['\n', '\\n'],
   ['\f', '\\f'],
+  ['\r', '\\r'],
 ]);
 // Built rather than written: the lint rule against control characters in a
 // regex literal guards against accidental ones, and these are the point.
 const CONTROL_OR_SEPARATOR = new RegExp(`[\\x00-\\x1F\\x7F-\\x9F${String.fromCharCode(0x2028, 0x2029)}]`, 'g');
+/** The characters `JSON.stringify` leaves raw: the C1 range and the two line separators. */
+const RAW_AFTER_JSON = new RegExp(`[\\x7F-\\x9F${String.fromCharCode(0x2028, 0x2029)}]`, 'g');
+
+const uEscape = (c: string): string => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`;
 
 export function sanitizedPath(text: string): string {
-  return text.replace(
-    CONTROL_OR_SEPARATOR,
-    (c) => NAMED_ESCAPES.get(c) ?? `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
-  );
+  return text.replace(CONTROL_OR_SEPARATOR, (c) => NAMED_ESCAPES.get(c) ?? uEscape(c));
+}
+
+/**
+ * JSON text as a terminal can show it: `JSON.stringify` escapes the C0
+ * controls inside strings and leaves the C1 range and the line separators
+ * raw, so those are escaped here — still the same JSON to any reader of it,
+ * since they can only occur inside a string. For a document, not a path:
+ * the JSON's own line breaks (pretty-printing) are left alone.
+ */
+export function terminalSafeJson(json: string): string {
+  return json.replace(RAW_AFTER_JSON, uEscape);
 }

@@ -19,6 +19,7 @@
  */
 import { probeFirstCall, formatProbeReport, ProbeOptionsError } from './first-call-probe.js';
 import { ConfigError, parseCliRequest, USAGE } from './first-call-probe.cli-args.js';
+import { terminalSafeJson } from '../../shared/printable.js';
 
 async function main(): Promise<void> {
   const request = parseCliRequest(process.argv.slice(2));
@@ -34,7 +35,9 @@ async function main(): Promise<void> {
   const report = await probeFirstCall(request.options).catch((err: unknown) => {
     throw err instanceof ProbeOptionsError ? new ConfigError(err.message) : err;
   });
-  console.log(request.json ? JSON.stringify(report, null, 2) : formatProbeReport(report));
+  // The report quotes what the remote said, so the JSON is made terminal-safe
+  // the way every other operator-facing text is (see `terminalSafeJson`).
+  console.log(request.json ? terminalSafeJson(JSON.stringify(report, null, 2)) : formatProbeReport(report));
   if (report.failed > 0) process.exitCode = 1;
 }
 

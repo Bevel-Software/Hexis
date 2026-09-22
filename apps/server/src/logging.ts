@@ -45,7 +45,7 @@ export function createPinoLogger(opts: { level?: string; destination?: pino.Dest
  * whether the text is made safe — and `message`/`stack`, which such objects
  * carry non-enumerably, are kept by name rather than lost with the rest.
  */
-function asSafeError(err: unknown): Error {
+function asSafeError(err: unknown, seen: Set<object> = new Set()): Error {
   if (err instanceof Error) return oneLineError(err);
   if (typeof err === 'string') return new Error(oneLine(err));
   if (err && typeof err === 'object') {
@@ -62,6 +62,22 @@ function asSafeError(err: unknown): Error {
         Object.defineProperty(like, key, { value: source[key], enumerable: false, writable: true, configurable: true });
       }
     }
+    // An AggregateError from another realm keeps its failures under a
+    // non-enumerable `errors` too; carried by name, each failure first put
+    // through this same re-rooting (a foreign Error inside is as foreign as
+    // its parent), so `oneLineError` and pino then treat every one as an
+    // error of this realm.
+    if (Array.isArray(source.errors)) {
+      // `seen` is the path down: a list that reaches itself, directly or
+      // through a failure of its own, is cut where it loops — the same
+      // answer `oneLineError` gives a cyclic cause.
+      seen.add(source);
+      const errors = source.errors.map((e) =>
+        e && typeof e === 'object' ? (seen.has(e) ? '[circular]' : asSafeError(e, seen)) : e,
+      );
+      seen.delete(source);
+      Object.defineProperty(like, 'errors', { value: errors, enumerable: false, writable: true, configurable: true });
+    }
     return oneLineError(like);
   }
   return err as Error;
@@ -74,12 +90,20 @@ function asSafeError(err: unknown): Error {
  * vanish from the log. Each is serialized the same way, nested.
  */
 function serializeError(err: unknown): pino.SerializedError {
-  const safe = asSafeError(err);
+  return toRecord(asSafeError(err));
+}
+
+/**
+ * One error as a pino record, its `errors` — at any depth — as records too.
+ * The tree it walks is the escaped copy, which `asSafeError` and
+ * `oneLineError` have already cut at every loop, so it ends.
+ */
+function toRecord(safe: Error): pino.SerializedError {
   const record = pino.stdSerializers.err(safe);
   const errors = (safe as { errors?: unknown }).errors;
   if (Array.isArray(errors)) {
     (record as pino.SerializedError & { errors?: unknown[] }).errors = errors.map((e) =>
-      e instanceof Error ? pino.stdSerializers.err(e) : e,
+      e instanceof Error ? toRecord(e) : e,
     );
   }
   return record;
