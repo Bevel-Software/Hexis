@@ -4,6 +4,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('account-erasure');
 import { and, eq, notExists } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
+import { takeEveryApprovalLock } from '../workflow/review-workflow/approval-lock.js';
 import {
   changeRequests,
   externalApiKeys,
@@ -176,6 +177,16 @@ export class AccountErasureService implements IAccountErasureService {
         .where(eq(pluginJoinRequests.requesterEmail, target.email));
 
       // Audit rows: anonymize in place (no user FK on these; they key by email).
+      //
+      // The approvals are taken under the lock their own writers hold, because
+      // one of those writers COPIES rows: a change request that brings itself
+      // up to date re-pins the approvals its merge did not disturb onto the new
+      // head. A copy that read this person's row a moment before the statement
+      // below would insert their real address back afterwards — a row created
+      // after the last trace of them was supposed to be gone. Exclusive here,
+      // shared there: this waits for the copies in flight and holds the rest
+      // off until the erasure commits, so the rewrite below is the last word.
+      await takeEveryApprovalLock(tx);
       await tx
         .update(prFileApprovals)
         .set({ approverEmail: target.erasedEmail, approverName: target.erasedName })

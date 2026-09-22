@@ -113,8 +113,9 @@ function makeService(stored: ApprovalRow[], opts: { lockError?: unknown } = {}) 
         order.push('timeout');
         return { rows: [] };
       }
-      order.push('lock');
-      // The lock's two keys, dug out of the tagged template's chunks: drizzle
+      // `_shared` first: the exclusive function's name is a prefix of it.
+      order.push(text.includes('_shared') ? 'gate' : 'lock');
+      // Each lock's two keys, dug out of the tagged template's chunks: drizzle
       // keeps the literal text in `StringChunk` objects and the interpolated
       // numbers as bare primitives between them.
       locked.push((statement.queryChunks ?? []).filter((c) => typeof c === 'number'));
@@ -260,10 +261,14 @@ describe('ReviewWorkflowService.carryApprovalsForward', () => {
     // already seen the pre-revoke row.
     const h = makeService([row('Sales/Deal.md')]);
     await h.svc.carryApprovalsForward(PR, OLD_HEAD, NEW_HEAD, []);
-    expect(h.order).toEqual(['begin', 'timeout', 'lock', 'select', 'insert']);
-    // Keyed by this request, under this file's lock class — never a bare PR
-    // number that another subsystem's advisory lock could collide with.
-    expect(h.locked).toEqual([[4207, PR]]);
+    expect(h.order).toEqual(['begin', 'timeout', 'gate', 'lock', 'select', 'insert']);
+    // Keyed under one lock class, never a bare PR number another subsystem's
+    // advisory lock could collide with: shared on the every-request key (0),
+    // which account erasure takes exclusively, then exclusive on this one.
+    expect(h.locked).toEqual([
+      [4207, 0],
+      [4207, PR],
+    ]);
   });
 
   it('does nothing at all when the head did not move', async () => {
@@ -288,7 +293,7 @@ describe('ReviewWorkflowService.carryApprovalsForward', () => {
     });
     // Nothing was read and nothing written: the lock is taken first for
     // exactly this reason.
-    expect(h.order).toEqual(['begin', 'timeout', 'lock']);
+    expect(h.order).toEqual(['begin', 'timeout', 'gate']);
     expect(h.inserted).toHaveLength(0);
     expect(h.stored.filter((r) => r.headSha === NEW_HEAD)).toHaveLength(0);
   });
@@ -358,8 +363,11 @@ describe('ReviewWorkflowService.approveFile: written under the same lock', () =>
     // The write is inside the lock; the read that answers the UI is after it,
     // through the pool — holding a lock across it would serialize every
     // approval behind an access-control read.
-    expect(h.order).toEqual(['begin', 'timeout', 'lock', 'insert', 'db.select']);
-    expect(h.locked).toEqual([[4207, PR]]);
+    expect(h.order).toEqual(['begin', 'timeout', 'gate', 'lock', 'insert', 'db.select']);
+    expect(h.locked).toEqual([
+      [4207, 0],
+      [4207, PR],
+    ]);
     expect(h.stored).toMatchObject([
       { prNumber: PR, path: 'Sales/Deal.md', approverEmail: 'bob@bevel.software', headSha: NEW_HEAD },
     ]);

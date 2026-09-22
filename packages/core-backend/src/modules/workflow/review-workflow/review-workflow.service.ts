@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { logger } from '../../../shared/logging.js';
 
 const log = logger('review-workflow');
@@ -30,44 +30,18 @@ import type {
   MergeGateInput,
   MergeGateResult,
 } from './review-workflow.interface.js';
+import {
+  APPROVAL_LOCK_TIMEOUT_MS,
+  isApprovalLockTimeout,
+  takeApprovalLock,
+  type ApprovalTx,
+} from './approval-lock.js';
 
 // Merge commit (not squash): change requests can carry many meaningful commits
 // (e.g. a bulk node upload split across files) and the KB's history is the audit
 // trail — squashing would collapse them into one. A merge commit preserves every
 // commit on the branch.
 const MERGE_METHOD = 'merge' as const;
-/**
- * Lock class for the per-change-request approval lock (`withApprovalLock`).
- * Postgres advisory locks share one namespace across the whole database, so
- * the two-key form keys every lock this file takes by (this class, PR number)
- * — a PR number can never collide with some other subsystem's key.
- */
-const APPROVAL_LOCK_CLASS = 4207;
-/**
- * How long an approval write waits for that lock before giving up.
- *
- * Every body it guards is one statement or two against rows already in cache,
- * so anything near this is a stuck holder rather than a busy one — and waiting
- * out a stuck holder would pin a pooled connection for as long as it lasts,
- * which is how one wedged transaction becomes a backend with no connections
- * left. Five seconds is far past honest contention and far short of that.
- */
-const APPROVAL_LOCK_TIMEOUT_MS = 5_000;
-/** `lock_timeout` fired — Postgres `lock_not_available`. */
-const LOCK_NOT_AVAILABLE = '55P03';
-/**
- * Whether a rejection is that timeout. The driver surfaces the SQLSTATE on the
- * error itself today; `cause` is checked too so a driver that starts wrapping
- * its errors does not turn a retryable refusal back into a bare 500.
- */
-function isLockTimeout(err: unknown): boolean {
-  for (let e: unknown = err, depth = 0; e && depth < 3; e = (e as { cause?: unknown }).cause, depth++) {
-    if ((e as { code?: unknown }).code === LOCK_NOT_AVAILABLE) return true;
-  }
-  return false;
-}
-/** The handle `db.transaction` hands its callback — a `Database` minus the pool. */
-type ApprovalTx = Parameters<Parameters<Database['transaction']>[0]>[0];
 const EVERYONE_CANONICAL = 'everyone';
 
 function redactTokens(msg: string): string {
@@ -913,30 +887,21 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
   }
 
   /**
-   * Run one change request's approval write under a lock every other approval
-   * write on that request also takes — `pg_advisory_xact_lock`, held for the
-   * transaction the callback runs in and released when it commits or rolls
-   * back. In the DATABASE rather than in this process, because two app
-   * instances share the rows but not a mutex.
-   *
-   * Taken before any row is read, so the reads inside it are already
-   * serialized: Postgres gives each statement in a READ COMMITTED transaction a
-   * fresh snapshot, so a select made after the lock sees everything the
-   * previous holder committed.
+   * Run one change request's approval write under the lock every writer of
+   * these rows takes (see `approval-lock.ts` for what it orders and why),
+   * inside one transaction that holds it until it commits or rolls back.
    *
    * Every approval write this service makes goes through here — carry forward,
    * approve, revoke — because a write that skipped it would be exactly the one
-   * that interleaves with the others. (Account erasure rewrites the same table
-   * from outside this file; it renames an approver rather than deciding whether
-   * an approval stands, so it is not part of this race.)
+   * that interleaves with the others. Account erasure, in another module,
+   * takes the same lock's exclusive form.
    *
    * Keep the body SHORT — no git, no network, no access-control read. This
    * holds a lock and a pooled connection; `approveFile` and `unapproveFile`
    * deliberately leave their access checks and their detail re-read outside.
    *
-   * `lock_timeout` first, so waiting is bounded: a holder that wedges would
-   * otherwise keep this transaction — and its connection — parked forever.
-   * Hitting it is reported as the retryable refusal it is; nothing was written.
+   * The wait is bounded, and hitting that bound is reported as the retryable
+   * refusal it is: nothing was written.
    */
   private async withApprovalLock<T>(
     prNumber: number,
@@ -944,14 +909,11 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
   ): Promise<T> {
     try {
       return await this.db.transaction(async (tx) => {
-        // SET takes no bind parameters, so the interval is rendered from a
-        // module constant — never from anything a caller supplies.
-        await tx.execute(sql.raw(`set local lock_timeout = ${APPROVAL_LOCK_TIMEOUT_MS}`));
-        await tx.execute(sql`select pg_advisory_xact_lock(${APPROVAL_LOCK_CLASS}, ${prNumber})`);
+        await takeApprovalLock(tx, prNumber);
         return fn(tx);
       });
     } catch (err) {
-      if (isLockTimeout(err)) {
+      if (isApprovalLockTimeout(err)) {
         log.warn(
           `gave up waiting for the approval lock on PR #${prNumber} after ${APPROVAL_LOCK_TIMEOUT_MS}ms`,
         );
