@@ -14,6 +14,8 @@
  * into the cached value would surface the wrong path on the second read.
  */
 
+import { sanitizedPath } from '../../../shared/printable.js';
+
 /** A successful extraction: the marker-summary line + the extracted text. */
 export interface ExtractedDoc {
   /**
@@ -47,12 +49,14 @@ export type ExtractFn = (bytes: Buffer) => ExtractResult | Promise<ExtractResult
  *
  * One line is a promise the rest of the read path keeps: grep counts on the
  * marker occupying exactly one, so read_file and grep agree on line numbers.
- * A path may legally carry a CR or LF, which would forge extra lines and shift
- * every number after it, so those are shown as escapes rather than obeyed.
+ * A path may legally carry a line break — CR, LF, or one of the Unicode
+ * separators — which would forge extra lines and shift every number after
+ * it, so those are shown as escapes rather than obeyed: the one rule every
+ * one-line notice uses (`sanitizedPath`), so a path reads the same in the
+ * marker as in a refusal.
  */
 export function extractionMarker(path: string, summary: string): string {
-  const oneLine = path.replace(/[\r\n]/g, (c) => (c === '\r' ? '\\r' : '\\n'));
-  return `[extracted text of ${oneLine} — ${summary}]`;
+  return `[extracted text of ${sanitizedPath(path)} — ${summary}]`;
 }
 
 /** Lowercased extension of `path` including the dot, or '' when there is none. */

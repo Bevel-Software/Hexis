@@ -233,6 +233,10 @@ export class KbStartupRunner {
         // this loop slept. The deployment is open then, sessions may hold
         // clones, and one more run here would be maintenance over live work.
         if (stopped || this.failure === null) return;
+        // Or it may have FAILED the phase with a rejected token while this
+        // loop slept: the standing failure is then one a retry cannot change,
+        // and dialing it again is what gets the token rate-limited.
+        if (!worthRetrying()) return stopOnStanding();
         try {
           await this.runAll();
           log('the remote is reachable again and the knowledge base is maintained — the deployment is open.');

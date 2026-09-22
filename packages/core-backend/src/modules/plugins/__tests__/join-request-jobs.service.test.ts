@@ -162,6 +162,21 @@ describe('PluginJoinRequestJobs', () => {
     ]);
   });
 
+  it('opens nothing for an account erased while the branch was being pushed', async () => {
+    // The account answers when the job starts and is gone by the time the
+    // change request would open — the erasure landed during the git work.
+    let asked = 0;
+    const h = harness({
+      requester: async (mail) => (asked++ === 0 ? { ...ALI_USER, email: mail } : null),
+    });
+    await h.jobs.start(pendingRow(h.store));
+    expect(h.workflow.commitChanges).toHaveBeenCalled();
+    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.store.all()).toMatchObject([
+      { status: 'failed', failureReason: 'the account that asked no longer exists' },
+    ]);
+  });
+
   it('sweeps only the pending rows, and leaves the settled ones alone', async () => {
     const h = harness();
     pendingRow(h.store);

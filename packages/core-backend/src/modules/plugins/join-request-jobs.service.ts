@@ -580,6 +580,15 @@ export class PluginJoinRequestJobs {
     // than enough for a stalled process to have lost its claim, and for an
     // administrator to have erased the account in the meantime.
     await stillOurs();
+    // And the account itself, once more, as late as it can be asked: an
+    // erasure deletes this row in the same transaction as the account, but
+    // a claim confirmed a moment before that commit is still confirmed, and
+    // the request would open in an erased person's name. The erasure runs
+    // its anonymization once more after committing, for a request that
+    // landed in that gap; this read keeps the gap to the open itself.
+    if (!(await this.deps.requester(record.requesterEmail))) {
+      throw new Error('the account that asked no longer exists');
+    }
     const detail = await workflow.openChangeRequest(ws.id, user, {
       sourceBranch: branch,
       targetBranch: DEFAULT_BRANCH,

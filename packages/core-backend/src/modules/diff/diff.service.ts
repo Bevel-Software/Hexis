@@ -8,6 +8,7 @@ import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/
 import { isDiffable } from './diff.config.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
+import { GitInternalsError } from '../../shared/domain-errors.js';
 import { countLineChanges } from './line-diff.js';
 
 /**
@@ -41,6 +42,11 @@ export class DiffService implements IDiffService {
 
   async fileDiff(workspaceId: string, relativePath: string): Promise<FileDiffPayload> {
     return this.mutex.run(workspaceId, async () => {
+      // A path that names the git folder is refused before anything is done
+      // for it: the seed below copies the whole tree, which a refused request
+      // should not set in motion, and a seed that failed would otherwise
+      // mask the refusal. `resolvePair` judges the resolved form after.
+      if (hasGitInternalsSegment(relativePath)) throw new GitInternalsError();
       // Seed the backup ledger if this is the first call on a fresh workspace
       // — otherwise every untouched file would surface as `kind: 'added'`
       // because the backup side is empty.

@@ -329,12 +329,14 @@ export function ExternalAgentAccessPage() {
                   <span className="font-mono">npx</span> was not found, it was launched from the
                   Dock or a desktop icon and cannot see your shell's PATH: run{' '}
                   <span className="font-mono">which npx</span> in a terminal (
-                  <span className="font-mono">where npx</span> in PowerShell) and use the full
+                  <span className="font-mono">where.exe npx</span> in PowerShell) and use the full
                   path it prints as the <span className="font-mono">"command"</span> above. If it
                   then reports{' '}
                   <span className="font-mono">env: node: No such file or directory</span>, that
                   same folder holds <span className="font-mono">node</span>: add it to the
-                  config's <span className="font-mono">"env"</span> PATH.
+                  config's <span className="font-mono">"env"</span> PATH, in front of the usual
+                  system folders rather than instead of them — the sign-in opens your browser
+                  through those.
                 </p>
               </div>
             </details>

@@ -321,9 +321,15 @@ describe('TemplateFilesStep', () => {
     expect(prose).toContain('The nearest `access.md` that says anything about the person decides');
     expect(prose).toContain('in the SAME `access.md` as the denial keeps that access');
     expect(prose).toContain('A group under `Admin` makes every member a full admin');
-    expect(prose).toContain('change request');
-    for (const tool of ['create_branch', 'edit_file', 'commit_change', 'open_change_request']) {
-      expect(prose).toContain(`\`${tool}\``);
+    // A change request cannot carry a roles.yaml edit — the merge restores the
+    // base file — so the guide says who changes roles and where, and never
+    // walks an agent through drafting one.
+    expect(prose).toContain('Only an Admin changes `roles.yaml`');
+    expect(prose).toContain('A change request cannot carry the edit');
+    expect(prose).toContain('Do not propose one');
+    expect(prose).toContain('`edit_file`');
+    for (const tool of ['create_branch', 'commit_change', 'open_change_request']) {
+      expect(prose).not.toContain(`\`${tool}\``);
     }
 
     // The example parses as a roles.yaml whose group entry names a real group.
@@ -346,9 +352,9 @@ describe('TemplateFilesStep', () => {
     expect(written).toContain(example);
   });
 
-  it('rejects .git — any case — as a reserved root name', async () => {
-    for (const bad of ['.git', '.GIT', '.Git']) {
-      expect(() => new TemplateFilesStep(new NodeFs(), [bad]), bad).toThrow(/must not be "\.git"/);
+  it('rejects the git folder — in any spelling — as a reserved root name', async () => {
+    for (const bad of ['.git', '.GIT', '.Git', '.git.', '%2egit']) {
+      expect(() => new TemplateFilesStep(new NodeFs(), [bad]), bad).toThrow(/must not name the git folder/);
     }
   });
 

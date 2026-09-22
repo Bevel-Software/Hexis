@@ -218,6 +218,20 @@ export class AccountErasureService implements IAccountErasureService {
     // captured inside the transaction).
     for (const cb of postCommit) await cb();
 
+    // Once more, after the commit, for the one writer that can still be
+    // holding the person's name: a join-request job that confirmed its claim
+    // just before the delete above landed and opened its change request just
+    // after. The delete is what stops it — the next confirmation finds no
+    // row — but the open it was already inside lands in the real name. The
+    // update is idempotent, so a second pass costs one statement and closes
+    // that window for a request that landed by now; the job's own re-check
+    // of the requester right before it opens (see `PluginJoinRequestJobs`)
+    // narrows what can land after.
+    await this.db
+      .update(changeRequests)
+      .set({ authorEmail: target.erasedEmail, authorName: target.erasedName })
+      .where(eq(changeRequests.authorEmail, target.email));
+
     log.info(`erased user id=${userId}`);
     return true;
   }

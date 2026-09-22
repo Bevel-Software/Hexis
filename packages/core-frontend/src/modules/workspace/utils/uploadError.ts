@@ -20,7 +20,10 @@
  * without rendering a tree.
  */
 export function uploadErrorNextStep(status: number | undefined): string {
-  if (status === 401 || status === 403) return 'Try another folder or ask its owner.';
+  // A lapsed session is not a refused folder: another folder fails the same
+  // way and its owner refused nothing. Signing in again is the step.
+  if (status === 401) return 'Sign in again, then try once more.';
+  if (status === 403) return 'Try another folder or ask its owner.';
   if (status === 413) return 'That file is over the upload size limit — try a smaller one.';
   return 'Try again, or pick another folder.';
 }

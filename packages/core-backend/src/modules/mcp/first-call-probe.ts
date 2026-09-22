@@ -323,10 +323,17 @@ async function toolAttempt(index: number, ctx: AttemptContext): Promise<FirstCal
  * the caller asked for, reported as though it were the burst. A number that
  * cannot be honoured is answered, not reinterpreted.
  */
+/**
+ * An option the probe cannot run with — a malformed base URL, a count that is
+ * not a count. Its own class so a front end can tell the operator's typo
+ * (usage, exit 2) from a probe that crashed (exit 1) without reading prose.
+ */
+export class ProbeOptionsError extends Error {}
+
 function positiveInt(name: string, value: number | undefined, fallback: number): number {
   if (value === undefined) return fallback;
   if (!Number.isInteger(value) || value < 1) {
-    throw new Error(`${name} must be a positive integer, got ${value}`);
+    throw new ProbeOptionsError(`${name} must be a positive integer, got ${value}`);
   }
   return value;
 }
@@ -351,10 +358,10 @@ function normalizeBaseUrl(baseUrl: string): string {
   try {
     parsed = new URL(trimmed);
   } catch {
-    throw new Error(`baseUrl must be an absolute URL, got ${printable(baseUrl)}`);
+    throw new ProbeOptionsError(`baseUrl must be an absolute URL, got ${printable(baseUrl)}`);
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(`baseUrl must be http or https, got ${printable(baseUrl)}`);
+    throw new ProbeOptionsError(`baseUrl must be http or https, got ${printable(baseUrl)}`);
   }
   return trimmed;
 }

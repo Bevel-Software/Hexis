@@ -232,6 +232,9 @@ describe('createShutdown', () => {
           stopSweeping() {
             order.push('backgroundJobs.stopSweeping');
           },
+          async drain() {
+            order.push('backgroundJobs.drain');
+          },
         },
         db: {
           $client: {
@@ -260,9 +263,31 @@ describe('createShutdown', () => {
       'server.close',
       'server.closeAllConnections',
       'backgroundJobs.stopSweeping',
+      'backgroundJobs.drain',
       'commitWorker.stop',
       'db.end',
     ]);
+  });
+
+  it('waits for the jobs a tick already started before the pool goes, within the budget', async () => {
+    const d = deps();
+    let release: () => void = () => undefined;
+    d.deps.backgroundJobs!.drain = () => {
+      d.order.push('backgroundJobs.drain');
+      return new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    };
+    const shutdown = createShutdown(d.deps as never);
+    const done = shutdown('SIGTERM');
+    await settle();
+    d.finishClose();
+    await settle();
+    // The jobs are still running: nothing after them has run.
+    expect(d.order).toEqual(['server.close', 'server.closeAllConnections', 'backgroundJobs.stopSweeping', 'backgroundJobs.drain']);
+    release();
+    await done;
+    expect(d.order.slice(-2)).toEqual(['commitWorker.stop', 'db.end']);
   });
 
   it('stops the background sweep before anything it could outlive', async () => {
@@ -311,6 +336,7 @@ describe('createShutdown', () => {
       'server.close',
       'server.closeAllConnections',
       'backgroundJobs.stopSweeping',
+      'backgroundJobs.drain',
       'commitWorker.stop',
       'db.end',
     ]);

@@ -107,6 +107,12 @@ export interface AccessRemovalOutcome {
  * the account is deleted even when that commit fails, and the outcome says
  * which files still name the user. Resolves to that outcome, or null when
  * removal was not requested.
+ *
+ * A removal that WAS requested and came back with no outcome (a 204: the
+ * deployment has no access-removal service wired) is not the same as none
+ * requested — the account is gone and its address still stands in the files
+ * — so it resolves to a failed outcome that says so, with `stillNamedIn`
+ * unknown, rather than to the silence the page would read as success.
  */
 export async function deleteAccount(
   userId: string,
@@ -117,7 +123,14 @@ export async function deleteAccount(
     method: 'DELETE',
   });
   if (!res.ok) throw new Error(await readError(res, 'Could not delete this account'));
-  if (!opts.removeFromAccess || res.status === 204) return null;
+  if (!opts.removeFromAccess) return null;
+  const notDone: AccessRemovalOutcome = {
+    ok: false,
+    error: 'this deployment cannot remove addresses from access files',
+    removedFrom: [],
+    stillNamedIn: null,
+  };
+  if (res.status === 204) return notDone;
   const body = (await res.json().catch(() => ({}))) as { accessRemoval?: AccessRemovalOutcome };
-  return body.accessRemoval ?? null;
+  return body.accessRemoval ?? notDone;
 }

@@ -372,29 +372,26 @@ roles:
   name in a folder further up does not survive a role denial closer to the
   file.
 
-**Editing `roles.yaml` goes through a change request** unless your user is an
-Admin: only admins may write the file on the default branch. Draft the edit
-on a branch and open a change request for an admin to approve:
+**Only an Admin changes `roles.yaml`, and only on the default branch.** A
+change request cannot carry the edit: when a request is merged, `roles.yaml`
+is restored to what the default branch has, so a role edit drafted on a
+branch is dropped at the merge without a word. Do not propose one. If your
+user is an Admin, `edit_file` the file on the default branch directly — for
+example, to give the Reviewer role to a group, add the entry under the
+existing role:
 
-1. `create_branch` with `name: dana/platform-team-reviewer` and `branch` set
-   to the default branch.
-2. On that draft, `edit_file` `roles.yaml`, adding the entry under the
-   existing role:
+```yaml
+roles:
+  Admin:
+    - dana@example.com
+  Reviewer:
+    - lee@example.com
+    - group:Platform Team   # added
+```
 
-   ```yaml
-   roles:
-     Admin:
-       - dana@example.com
-     Reviewer:
-       - lee@example.com
-       - group:Platform Team   # added
-   ```
-
-3. `commit_change` with `summary: "Give the Reviewer role to the Platform Team group"`.
-4. `open_change_request` with `sourceBranch: dana/platform-team-reviewer`,
-   the default branch as `targetBranch`, and a title such as `Give Reviewer
-   to the Platform Team group`. Tell your user an admin must approve it
-   before the role takes effect.
+If your user is not an Admin, tell them who is (the `Admin` entries in
+`roles.yaml`) and that the change is made in the app's Roles page or by an
+admin editing the file; do not open a change request for it.
 
 ### Direct writes vs change requests
 
