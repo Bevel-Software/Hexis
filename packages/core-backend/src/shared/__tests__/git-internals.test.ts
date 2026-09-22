@@ -98,6 +98,47 @@ describe('assertNotGitInternals — the resolved form', () => {
     await expect(assertNotGitInternals(root, 'knowledge-base/dangling')).rejects.toMatchObject({ code: 'EACCES' });
   });
 
+  it.each(['/etc/shadow', '../../../../etc/shadow', '/proc/1/root/secret'])(
+    'never probes a spelling that lands outside the workspace on disk: %s',
+    async (outside) => {
+      // A raw spelling fans out into candidates, and one can name somewhere
+      // the server may not read. Probing it would answer with that place's own
+      // EACCES instead of the path rule's typed refusal for a spelling that
+      // was never a workspace path — so the disk is only asked about
+      // candidates that land under the root. The lexical reading still judges
+      // the rest, which is what catches a climb into another checkout's .git.
+      const realpath = fs.realpath.bind(fs);
+      const asked: string[] = [];
+      vi.spyOn(fs, 'realpath').mockImplementation((async (p: string) => {
+        asked.push(p);
+        if (!p.startsWith(root)) throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+        return realpath(p);
+      }) as typeof fs.realpath);
+
+      await expect(assertNotGitInternals(root, outside)).resolves.toBeUndefined();
+      expect(asked.filter((p) => !p.startsWith(root))).toEqual([]);
+    },
+  );
+
+  it.each(['..link', '..link/config', './..link/config', '..dir/deeper'])(
+    'probes a name that merely BEGINS with dots, and refuses it when it lands in the folder: %s',
+    async (p) => {
+      // Judged from the folder these sit DIRECTLY in, which is where the
+      // outside-the-root test can mistake them: relative to that root, the
+      // whole path is `..link/…`. `..link` is not a climb — it is a file name
+      // — so it is probed like any other entry, or a link by that name reaches
+      // the folder unchecked.
+      const kb = path.join(root, 'knowledge-base');
+      await fs.symlink('.git', path.join(kb, '..link'));
+      await fs.symlink('.git', path.join(kb, '..dir'));
+      await expect(assertNotGitInternals(kb, p)).rejects.toBeInstanceOf(GitInternalsError);
+    },
+  );
+
+  it('still refuses a climb into another checkout’s git folder, which is judged without the disk', async () => {
+    await expect(assertNotGitInternals(root, '../other-checkout/.git/config')).rejects.toBeInstanceOf(GitInternalsError);
+  });
+
   it('a link loop is no refusal of its own, and does not hang', async () => {
     await expect(assertNotGitInternals(root, 'knowledge-base/loop-a')).resolves.toBeUndefined();
   });

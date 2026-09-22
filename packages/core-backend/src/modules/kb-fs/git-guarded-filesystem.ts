@@ -24,10 +24,19 @@ import { assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-
  * the floor under them, for whatever reaches the filesystem another way.
  */
 export class GitGuardedFilesystem extends LocalFilesystem {
-  /** Refuse `inputPath` when it names the git folder or resolves into it. */
+  /**
+   * Refuse `inputPath` when it names the git folder or resolves into it.
+   *
+   * The caller's SPELLING is judged first, every way it could land: this
+   * filesystem's own resolver reads a backslash as an ordinary character and
+   * carries a leading climb out of the workspace, so a link reached either way
+   * used to resolve to nothing and pass. Where this filesystem would actually
+   * put the path is then judged too, when that is somewhere else again.
+   */
   async assertNotGitInternals(inputPath: string): Promise<void> {
-    const absolutePath = this.resolveAbsolutePath(inputPath) ?? path.resolve(this.basePath, inputPath.replace(/^[\\/]+/, ''));
-    await assertNotGitInternals(this.basePath, inputPath, absolutePath);
+    await assertNotGitInternals(this.basePath, inputPath);
+    const resolvedPath = this.resolveAbsolutePath(inputPath);
+    if (resolvedPath !== undefined) await assertNotGitInternals(this.basePath, inputPath, resolvedPath);
   }
 
   override async readFile(inputPath: string, options?: ReadOptions): Promise<string | Buffer> {
