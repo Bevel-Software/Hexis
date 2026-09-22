@@ -118,9 +118,20 @@ export async function assertNotGitInternals(rootDir: string, inputPath: string, 
   assertNoGitInternalsSegment(inputPath);
   const root = path.resolve(rootDir);
   const realRoot = await resolvedRealPath(root);
-  for (const target of absolutePath !== undefined ? [absolutePath] : candidateTargets(root, inputPath)) {
-    if (hasGitInternalsSegment(path.relative(root, target))) throw new GitInternalsError();
+  const resolved = absolutePath !== undefined;
+  for (const target of resolved ? [absolutePath] : candidateTargets(root, inputPath)) {
+    const relative = path.relative(root, target);
+    if (hasGitInternalsSegment(relative)) throw new GitInternalsError();
     if (realRoot === null) continue;
+    // A raw spelling fans out into candidates, and one of them can name a
+    // place outside the workspace entirely — `/etc/…`, a deep climb. Such a
+    // candidate is judged by the lexical reading above (a link into another
+    // checkout's `.git` is named there) but NOT probed on disk: probing it
+    // would let an unreadable external directory answer with its own
+    // `EACCES` instead of the path rule's typed refusal for a spelling that
+    // was never a workspace path. A path a layer already resolved is the one
+    // place it is, so it is probed as given.
+    if (!resolved && (relative === '' || relative.startsWith('..') || path.isAbsolute(relative))) continue;
     const realTarget = await resolvedRealPath(target);
     if (realTarget !== null && hasGitInternalsSegment(path.relative(realRoot, realTarget))) throw new GitInternalsError();
   }

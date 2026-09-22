@@ -64,7 +64,12 @@ function fileForms(name: string): Record<string, string> {
     // climb-out, absolute). `dotted`, `dot segments` and `backslashed` above
     // are three of them; these are the two the set was missing.
     'climb-out': `../${KB}/.git/${name}`,
+    // Production's own spelling, kept verbatim: it names a directory that
+    // exists on no test machine, so it is the LEXICAL half this covers.
     absolute: `/app/apps/server/workspaces/main/${KB}/.git/${name}`,
+    // The same family pointed at this run's workspace, so the resolved half
+    // is exercised too — the folder it names is really there.
+    'absolute, in workspace': `{{WORKSPACE_DIR}}/${KB}/.git/${name}`,
     encoded: `${KB}/%2egit/${name}`,
     'double-encoded': `${KB}/%252Egit/${name}`,
     'upper-case': `${KB}/.GIT/${name}`,
@@ -105,6 +110,15 @@ const DIR_FORMS: Record<string, string> = {
   'symlinked, dot segments': `./${KB}/./gitlink`,
   'symlinked, backslashed': `${KB}\\gitlink`,
   'symlinked, climb-out': `../${KB}/gitlink`,
+  'symlinked, absolute': `{{WORKSPACE_DIR}}/${KB}/gitlink`,
+  // The folder ITSELF in the same five families the file forms carry, so every
+  // directory-taking operation — list, mkdir, delete, folder download, unzip
+  // destination — has a regression case for each of them too.
+  'parent-climb': `${KB}/Notes/../.git`,
+  'dot segments': `./${KB}/./.git`,
+  backslashed: `${KB}\\.git`,
+  'climb-out': `../${KB}/.git`,
+  absolute: `{{WORKSPACE_DIR}}/${KB}/.git`,
 };
 
 const FILE_FORMS = { ...fileForms('config'), 'symlinked file': `${KB}/cfglink` };
@@ -193,10 +207,15 @@ async function listen(app: express.Express): Promise<{ server: Server; baseUrl: 
  */
 async function expectRefused(res: Response, form?: string): Promise<unknown> {
   const body = (await res.json()) as Record<string, unknown>;
-  expect({ status: res.status, error: body.error }, form).toEqual({ status: 403, error: GIT_INTERNALS_MESSAGE });
-  // The sanitized message stands alone: no spelling of the caller's path, and
-  // no "use this instead" correction, rides along beside it.
-  expect(JSON.stringify(body), form).not.toMatch(/\.git|corrected|outside the knowledge base/i);
+  expect(res.status, form).toBe(403);
+  // The WHOLE body, not a search through it: the sanitized message stands
+  // alone, and no field beside it can carry a spelling of the caller's path or
+  // a "use this instead" correction. Two shapes exist — the tool surface
+  // answers `{ error }`, the routes add the error's `kind` — so the one the
+  // answer claims is the one it is held to, exactly.
+  expect(body, form).toEqual(
+    'kind' in body ? { kind: 'git-internals', error: GIT_INTERNALS_MESSAGE } : { error: GIT_INTERNALS_MESSAGE },
+  );
   return body;
 }
 
@@ -575,6 +594,41 @@ describe('WorkspaceService refuses the git folder on its own', () => {
       },
     );
   }
+
+  it('a ref read of a link path reads the REF, not the folder the link points into', async () => {
+    // The exception the matrix above excludes, asserted rather than assumed:
+    // `readFileAtRef` runs `git show <ref>:<path>`, which reads out of the
+    // object database and never follows a link on disk. A ref read of a link's
+    // path yields the link's own blob — the target's NAME — so there is
+    // nothing from inside the folder to refuse, and refusing it would take a
+    // legitimate read away. The git rule still refuses every LITERAL spelling.
+    const gitRunner = {
+      defaultTimeoutMs: 1000,
+      run: vi.fn(async (_cwd: string, args: string[]) => {
+        // What `git show` really answers for a link's path: its target name.
+        expect(args[0]).toBe('show');
+        return { stdout: '.git\n', stderr: '', code: 0 };
+      }),
+    };
+    const refService = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs(), 'x-access-token', gitRunner as never);
+
+    for (const [form, raw] of Object.entries(fileForms('config'))) {
+      if (!form.startsWith('symlinked')) continue;
+      // The service takes a repo-relative path here, as its callers pass it.
+      const repoPath = resolved(raw).replace(`${KB}/`, '');
+      const result = await refService.readFileAtRef(WS, 'main', repoPath).catch((e: unknown) => e);
+      expect(result, form).not.toBeInstanceOf(GitInternalsError);
+    }
+    expect(gitRunner.run).toHaveBeenCalled();
+
+    // …while a literal git path at a ref is still refused, whatever its form.
+    for (const [form, raw] of Object.entries(fileForms('config'))) {
+      if (form.startsWith('symlinked')) continue;
+      const repoPath = resolved(raw).replace(`${KB}/`, '');
+      const err = await refService.readFileAtRef(WS, 'main', repoPath).catch((e: unknown) => e);
+      expect(err, form).toBeInstanceOf(Error);
+    }
+  });
 
   it('a folder download leaves out a git folder spelled in another case', async () => {
     const upper = join(workspaceDir, KB, 'Notes', '.GIT');
