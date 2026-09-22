@@ -59,6 +59,11 @@ describe('redactSecret', () => {
     ).toBe("fetch https://***@host/r: token '***…' rejected");
     // Only the vendor prefix in common: below the floor, untouched.
     expect(redactSecret('a ghp_other b', ['ghp_abcdefghijklmnopqrstuv'])).toBe('a ghp_other b');
+    // Two tokens sharing a head longer than the floor: the echo of the second
+    // goes whole, not just the head the first one also has.
+    expect(
+      redactSecret("token 'ghp_abcdefghY123…' rejected", ['ghp_abcdefghXXXXXXXXXX', 'ghp_abcdefghY123456789']),
+    ).toBe("token '***…' rejected");
   });
 
   it('scrubs every token in effect: env aliases and tokens the caller names', () => {

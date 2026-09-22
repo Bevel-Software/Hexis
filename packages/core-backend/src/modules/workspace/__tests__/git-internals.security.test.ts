@@ -1,6 +1,6 @@
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import AdmZip from 'adm-zip';
@@ -586,6 +586,20 @@ describe('the route guard on its own', () => {
     expect(reached).toBe(0);
   });
 
+  it('refuses the git folder in the prospective-access query fields, and only there for `from`', async () => {
+    const git = encodeURIComponent(`${KB}/.git/config`);
+    const note = encodeURIComponent(`${KB}/Notes/a.md`);
+    await expectRefused(await fetch(`${baseUrl}/api/workspace/${WS}/access/prospective?from=${git}&toDir=${note}`));
+    await expectRefused(await fetch(`${baseUrl}/api/workspace/${WS}/access/prospective?from=${note}&toDir=${git}`));
+    // `toDir` is a path wherever it appears; `from` is a BRANCH on the
+    // workflow comparison and is left to the branch-name rule there.
+    await expectRefused(await fetch(`${baseUrl}/api/workspace/${WS}/anything?toDir=${git}`));
+    expect(reached).toBe(0);
+    const compare = await fetch(`${baseUrl}/api/workspace/${WS}/workflow/compare?from=${git}`);
+    expect(compare.status).toBe(200);
+    expect(reached).toBe(1);
+  });
+
   it('refuses every spelling before the route runs, even unauthenticated', async () => {
     userId = undefined;
     const spellings = Object.values(FILE_FORMS);
@@ -653,6 +667,14 @@ describe('DiffService refuses the git folder on its own', () => {
       await expect(run(p)).rejects.toBeInstanceOf(GitInternalsError);
     });
   }
+
+  it('a refused fileDiff on a fresh workspace seeds nothing — the refusal comes before the ledger', async () => {
+    await expect(diffService.fileDiff(WS, `${KB}/.git/config`)).rejects.toMatchObject({ status: 403 });
+    // Through a link as well: the resolved form is judged before the seed too.
+    await symlink('.git', join(workspaceDir, KB, 'gitlink-diff'));
+    await expect(diffService.fileDiff(WS, `${KB}/gitlink-diff/config`)).rejects.toMatchObject({ status: 403 });
+    await expect(stat(join(root, 'backups'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 
   it('a legacy git entry in the backup ledger is not listed, and its content never comes back', async () => {
     // A ledger seeded before the rule existed: the backup side holds the git

@@ -1,7 +1,7 @@
 ---
-'@bevel-software/platform-core-backend': patch
-'@bevel-software/platform-core-frontend': patch
-'@bevel-software/platform-shared': patch
+'@bevel-software/platform-core-backend': minor
+'@bevel-software/platform-core-frontend': minor
+'@bevel-software/platform-shared': minor
 ---
 
 A rename or a move onto a name that is already taken is refused instead of replacing what is there. Renaming an entry was a plain `fs.rename` with no look at the destination, and `rename` replaces an existing file on every platform: a tester renamed a `.docx` to the exact name of an existing `.md`, the markdown file silently became Word bytes, and the page broke.

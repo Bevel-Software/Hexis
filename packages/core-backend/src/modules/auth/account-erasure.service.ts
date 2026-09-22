@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('account-erasure');
-import { eq } from 'drizzle-orm';
+import { and, eq, notExists } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import {
   changeRequests,
@@ -217,6 +217,27 @@ export class AccountErasureService implements IAccountErasureService {
     // Post-commit callbacks (e.g. Mastra memory cleanup for chat threads
     // captured inside the transaction).
     for (const cb of postCommit) await cb();
+
+    // Once more, after the commit, for the one writer that can still be
+    // holding the person's name: a join-request job that confirmed its claim
+    // just before the delete above landed and opened its change request just
+    // after. The delete is what stops it — the next confirmation finds no
+    // row — but the open it was already inside lands in the real name. The
+    // update is idempotent, so a second pass costs one statement and closes
+    // that window for a request that landed by now; the job's own re-check
+    // of the requester right before it opens (see `PluginJoinRequestJobs`)
+    // narrows what can land after. Only while NO account answers to the
+    // address: one made again with the same email since the commit is a new
+    // person, and their requests are their own.
+    await this.db
+      .update(changeRequests)
+      .set({ authorEmail: target.erasedEmail, authorName: target.erasedName })
+      .where(
+        and(
+          eq(changeRequests.authorEmail, target.email),
+          notExists(this.db.select({ id: users.id }).from(users).where(eq(users.email, target.email))),
+        ),
+      );
 
     log.info(`erased user id=${userId}`);
     return true;

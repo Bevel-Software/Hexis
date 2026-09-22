@@ -199,12 +199,14 @@ export interface ShutdownDeps {
   /** The lease loop from {@link holdCommitWorkerLease}: its stop finishes the in-flight commit and releases the lease. */
   commitWorker: Pick<LeaseLoopHandle, 'stop'>;
   /**
-   * Background timers to cancel before the pool goes — the join-request
-   * sweep, today. Stopped after the server so nothing new is scheduled, and
-   * before the pool so a tick cannot fire a query into a closed client.
-   * Optional: a caller that has not built them yet passes nothing.
+   * Background work to wind down before the pool goes — the join-request
+   * sweep and its jobs, today. The timer is stopped after the server so
+   * nothing new is scheduled, then the jobs already running are awaited
+   * (within the budget) so the pool is not ended under a clone or a push
+   * that is still writing to it. Optional: a caller that has not built them
+   * yet passes nothing.
    */
-  backgroundJobs?: { stopSweeping(): void };
+  backgroundJobs?: { stopSweeping(): void; drain(): Promise<void> };
   /** The database — its pool is ended last, once nothing above can still need it. */
   db: Pick<Database, '$client'>;
   log?: (message: string) => void;
@@ -291,6 +293,15 @@ export function createShutdown(
       // earliest point the interval is dead weight. Synchronous and unfailing
       // — it just clears an interval — so it needs no budget of its own.
       deps.backgroundJobs?.stopSweeping();
+      // Clearing the interval stops future ticks; it does nothing to a job a
+      // tick already started, which holds a claim it heartbeats through the
+      // pool and is mid-clone or mid-push. Awaited here, in the budget: a job
+      // that finishes releases or marks its row; one that cannot in time is
+      // killed with the process and its claim goes stale for the next sweep
+      // — which is the recovery every crash already gets.
+      if (deps.backgroundJobs) {
+        await bounded(deps.backgroundJobs.drain(), remaining(), 'finishing the background jobs', log);
+      }
       await bounded(deps.commitWorker.stop(), remaining(), 'stopping the commit worker', log);
       await bounded(deps.db.$client.end(), remaining(), 'ending the database pool', log);
 

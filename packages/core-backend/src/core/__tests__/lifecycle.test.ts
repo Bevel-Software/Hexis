@@ -232,6 +232,9 @@ describe('createShutdown', () => {
           stopSweeping() {
             order.push('backgroundJobs.stopSweeping');
           },
+          async drain() {
+            order.push('backgroundJobs.drain');
+          },
         },
         db: {
           $client: {
@@ -260,9 +263,31 @@ describe('createShutdown', () => {
       'server.close',
       'server.closeAllConnections',
       'backgroundJobs.stopSweeping',
+      'backgroundJobs.drain',
       'commitWorker.stop',
       'db.end',
     ]);
+  });
+
+  it('waits for the jobs a tick already started before the pool goes, within the budget', async () => {
+    const d = deps();
+    let release: () => void = () => undefined;
+    d.deps.backgroundJobs!.drain = () => {
+      d.order.push('backgroundJobs.drain');
+      return new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    };
+    const shutdown = createShutdown(d.deps as never);
+    const done = shutdown('SIGTERM');
+    await settle();
+    d.finishClose();
+    await settle();
+    // The jobs are still running: nothing after them has run.
+    expect(d.order).toEqual(['server.close', 'server.closeAllConnections', 'backgroundJobs.stopSweeping', 'backgroundJobs.drain']);
+    release();
+    await done;
+    expect(d.order.slice(-2)).toEqual(['commitWorker.stop', 'db.end']);
   });
 
   it('stops the background sweep before anything it could outlive', async () => {
@@ -301,6 +326,20 @@ describe('createShutdown', () => {
     ]);
   });
 
+  it('does not wait past the budget for jobs that never finish, and still ends the pool', async () => {
+    const d = deps();
+    d.deps.backgroundJobs!.drain = () => {
+      d.order.push('backgroundJobs.drain');
+      return new Promise<void>(() => undefined); // a clone that never returns
+    };
+    const shutdown = createShutdown(d.deps as never, { deadlineMs: 60 });
+    const done = shutdown('SIGTERM');
+    await settle();
+    d.finishClose();
+    await done;
+    expect(d.order.slice(-3)).toEqual(['backgroundJobs.drain', 'commitWorker.stop', 'db.end']);
+  });
+
   it('does not hang on a step that never finishes, and still runs the rest', async () => {
     const d = deps();
     // A server whose close callback never comes — a connection that will not drain.
@@ -311,6 +350,7 @@ describe('createShutdown', () => {
       'server.close',
       'server.closeAllConnections',
       'backgroundJobs.stopSweeping',
+      'backgroundJobs.drain',
       'commitWorker.stop',
       'db.end',
     ]);

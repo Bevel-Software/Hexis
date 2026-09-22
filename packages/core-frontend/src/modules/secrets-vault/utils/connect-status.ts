@@ -70,10 +70,14 @@ export function signInNeedsSetup(o: ConnectToolOAuth): boolean {
  *
  * Standalone sign-ins are deliberately NOT in this number. They are registered
  * on the Secrets page rather than declared by a `.tool`, so no plugin banner has
- * ever counted one, and this number exists to equal a banner's. Adding them
- * would reintroduce the disagreement from the other side: a reader with one
+ * ever counted one, and this number is counted the way a banner counts. Adding
+ * them would reintroduce the disagreement from the other side: a reader with one
  * unauthorized personal secret would see a page claiming five where the plugin
  * said four. They are still work, and still listed — see `standaloneOutstanding`.
+ *
+ * Counted the same WAY, not always the same NUMBER: this page lists every
+ * plugin the reader can reach, so with several plugins it is the sum of their
+ * banners, and equals one banner only when that plugin is the only one.
  */
 export function outstandingCount(pending: ConnectPending): number {
   const slugs = new Set<string>();

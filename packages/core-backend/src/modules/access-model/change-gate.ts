@@ -44,7 +44,12 @@ export type ChangeReadVerdict =
         | 'machine-owned'
         /** An admin on a file directly in the repository root — the rescue path. */
         | 'admin-rescue'
-        /** No usable access config on this tree: nothing to decide against. */
+        /**
+         * No `roles.yaml` on this tree at all — a repository before its first
+         * one: nothing to decide against. A `roles.yaml` that is THERE but
+         * unusable is not this: a broken rule set is an error, never an open
+         * door.
+         */
         | 'no-rules';
     }
   | {

@@ -30,8 +30,12 @@ export function isBlockedHost(hostname: string): boolean {
     // and unspecified (`::1`, `::`, `::2`…), link-local fe80::/10, unique-local
     // fc00::/7 and multicast ff00::/8.
     if (hextets[0] < 0x2000 || hextets[0] > 0x3fff) return true;
-    // Documentation 2001:db8::/32 is never a real host.
-    if (hextets[0] === 0x2001 && hextets[1] === 0x0db8) return true;
+    // Inside global unicast, the special-purpose blocks: 2001::/23 (Teredo,
+    // ORCHID, the benchmarking range 2001:2::/48, …), documentation
+    // 2001:db8::/32, and the newer documentation block 3fff::/20. None is a
+    // real host to fetch from.
+    if (hextets[0] === 0x2001 && (hextets[1] < 0x0200 || hextets[1] === 0x0db8)) return true;
+    if (hextets[0] === 0x3fff && hextets[1] < 0x1000) return true;
     return false;
   }
   return isBlockedV4(host);

@@ -83,10 +83,13 @@ export function createToolHandlerFactory(resolve: ResolveToolContext) {
         }
         if (hasHttpStatus(err)) {
           // Structured details ride beside `error`, never over it. A domain
-          // refusal brings its own payload (`kind`, and whatever that kind
-          // carries) exactly as it does on the HTTP routes — a tool caller
-          // switching on `branch-not-found` vs `remote-branch-gone` should
-          // not have to read the prose to tell them apart.
+          // refusal brings its own payload exactly as it does on the HTTP
+          // routes — most subclasses carry a `kind` and whatever that kind
+          // brings with it, others carry their own keys (`AccessConfigError`
+          // carries an `accessConfigErrors` list; see each subclass for its
+          // payload) — so a tool caller
+          // switching on `branch-not-found` vs `remote-branch-gone` does not
+          // have to read the prose to tell them apart.
           if (err instanceof WorkflowDomainError) {
             res.status(err.status).json(domainErrorBody(err));
             return;

@@ -145,6 +145,9 @@ describe('CoreConfig — PUBLIC_BACKEND_URL never carries credentials', () => {
   it.each([
     ['https://user@host.example.com', 'https://host.example.com'],
     ['http://u:p%40ss@localhost:3001', 'http://localhost:3001'],
+    // An unencoded `@` inside the password: the whole userinfo goes, not the head of it.
+    ['https://u:p@ss@host.example.com/cb', 'https://host.example.com/cb'],
+    ['https://u:p@ss@host.example.com?next=a@b', 'https://host.example.com?next=a@b'],
     ['https://host.example.com/path@not-userinfo', 'https://host.example.com/path@not-userinfo'],
     ['https://host.example.com?next=a@b', 'https://host.example.com?next=a@b'],
     ['https://host.example.com', 'https://host.example.com'],

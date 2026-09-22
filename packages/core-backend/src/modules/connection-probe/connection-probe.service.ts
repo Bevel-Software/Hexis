@@ -230,7 +230,10 @@ class SecretRedactor {
  * characters or more never come here at all.
  */
 function standingAlone(value: string): RegExp {
-  return new RegExp(`(?<![A-Za-z0-9])${escapeRegExp(value)}(?![A-Za-z0-9])`, 'g');
+  // Letters and digits of ANY script are word characters here: a value that
+  // happens to be the tail of a provider's non-ASCII word (`clé`, `código`)
+  // must not be cut out of it.
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(value)}(?![\\p{L}\\p{N}])`, 'gu');
 }
 
 function escapeRegExp(value: string): string {

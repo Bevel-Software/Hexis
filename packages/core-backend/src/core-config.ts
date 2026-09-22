@@ -48,9 +48,13 @@ export function resolveDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string
  * `new URL(...).toString()` round-trip: that drops a default port, lowercases
  * the host and re-encodes, and a provider comparing redirect URIs as exact
  * strings (Entra, Okta) would refuse the one an admin registered.
+ *
+ * Through the LAST `@` before the path, query or fragment: a password can
+ * carry an unencoded `@` of its own (`https://u:p@ss@host`), and stopping at
+ * the first would leave `ss@` — most of the credential — in what is kept.
  */
 export function withoutUserinfo(url: string): string {
-  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/?#]*@/i, '$1');
+  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i, '$1');
 }
 
 /**

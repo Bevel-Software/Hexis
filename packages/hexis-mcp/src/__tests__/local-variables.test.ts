@@ -340,3 +340,39 @@ describe('HexisLocalVariableLoader', () => {
     expect(await loader.get('git_A')).toBe('recovered');
   });
 });
+
+/**
+ * A catalog refresh drops the cache while a fetch for the OLD definition may
+ * still be in flight. That fetch answers its askers, and stores nothing:
+ * the next ask fetches again, against the new definition.
+ */
+describe('dropLocalVariableCache with a fetch in flight', () => {
+  it('does not let a fetch started before the drop repopulate the cache it cleared', async () => {
+    let answer: (body: unknown) => void = () => undefined;
+    let calls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        calls += 1;
+        if (calls === 1) {
+          return new Promise<Response>((resolve) => {
+            answer = (body) => resolve(new Response(JSON.stringify(body), { status: 200 }));
+          });
+        }
+        return new Response(JSON.stringify({ name: 'git', missing: [], variables: { GITHUB_TOKEN: 'new' } }), { status: 200 });
+      }),
+    );
+    const loader = new HexisLocalVariableLoader(
+      bindLocalVariableResolver(config, local({ git: { slug: 'git', path: 'p' } })),
+    );
+    const first = loader.get('git_GITHUB_TOKEN');
+    await new Promise((resolve) => setTimeout(resolve, 0)); // the fetch is under way
+    dropLocalVariableCache(loader.binding_id);
+    answer({ name: 'git', missing: [], variables: { GITHUB_TOKEN: 'old' } });
+    // The asker gets what it asked for…
+    expect(await first).toBe('old');
+    // …and nothing of it stays: the next ask fetches the new definition.
+    expect(await loader.get('git_GITHUB_TOKEN')).toBe('new');
+    expect(calls).toBe(2);
+  });
+});

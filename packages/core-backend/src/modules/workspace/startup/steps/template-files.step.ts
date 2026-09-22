@@ -126,11 +126,12 @@ function assertRootSegment(dir: string): void {
   if (!dir || dir === '.' || dir === '..' || dir.includes('/') || dir.includes('\\') || path.isAbsolute(dir)) {
     throw new Error(`Reserved KB root must be a single path segment (no separators, no ".."); got "${dir}"`);
   }
-  // `.git` can never be a KB root: writing `<dir>/.gitkeep` under it would
-  // corrupt the clone's own metadata. Any case — Windows filesystems treat
-  // `.GIT` as the same directory.
+  // The git folder can never be a KB root: writing `<dir>/.gitkeep` under it
+  // would corrupt the clone's own metadata. In ANY spelling that names it —
+  // any case, a trailing dot or space Windows collapses, a percent-encoded
+  // form — the one rule every path check uses (`shared/git-internals.ts`).
   if (hasGitInternalsSegment(dir)) {
-    throw new Error(`Reserved KB root must not be ".git" (any case); got "${dir}"`);
+    throw new Error(`Reserved KB root must not name the git folder (".git" in any spelling); got "${dir}"`);
   }
 }
 
