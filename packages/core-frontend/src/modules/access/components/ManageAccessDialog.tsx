@@ -540,6 +540,13 @@ const MENU_MARGIN = 8;
  * trigger by the difference.
  */
 const MENU_MIN_WIDTH = 200;
+/**
+ * The most a content-sized menu grows to before its items start truncating.
+ * Wide enough for "Can download · from the whole workspace ✓" on one line;
+ * narrow enough that a folder with a very long name cannot turn the menu
+ * into a banner.
+ */
+const MENU_MAX_WIDTH = 360;
 
 /**
  * A dropdown panel that escapes the dialog's scroll container.
@@ -592,8 +599,11 @@ function AnchoredMenu({
    */
   triggerRef,
   /**
-   * Panel width in px, or `'anchor'` to match the trigger (the combobox case).
-   * Clamped up to {@link MENU_MIN_WIDTH} either way.
+   * Panel width in px, `'anchor'` to match the trigger (the combobox case), or
+   * `'content'` to fit the widest item (a menu whose items carry notes — "from
+   * the whole workspace" — that a trigger-sized panel would truncate the LABEL
+   * to make room for). Clamped up to {@link MENU_MIN_WIDTH} either way, and
+   * `'content'` is clamped down to {@link MENU_MAX_WIDTH} and the viewport.
    */
   width = MENU_MIN_WIDTH,
   /** Which edge lines up with the anchor's. */
@@ -603,7 +613,7 @@ function AnchoredMenu({
 }: {
   onDismiss?: () => void;
   triggerRef?: RefObject<HTMLElement | null>;
-  width?: number | 'anchor';
+  width?: number | 'anchor' | 'content';
   align?: 'left' | 'right';
   className?: string;
   children: ReactNode;
@@ -628,7 +638,21 @@ function AnchoredMenu({
       const el = panelRef.current;
       const anchor = el?.parentElement?.getBoundingClientRect();
       if (!anchor || !el) return;
-      const w = Math.max(width === 'anchor' ? anchor.width : width, MENU_MIN_WIDTH);
+      let w: number;
+      if (width === 'content') {
+        // Let the panel take its natural width for one measurement, then pin
+        // it: what the widest item needs, within the caps. The observer on
+        // the panel sees only the pinned size, which is unchanged whenever the
+        // content is, so this does not feed it.
+        el.style.width = 'max-content';
+        const natural = el.offsetWidth;
+        w = Math.max(
+          MENU_MIN_WIDTH,
+          Math.min(natural, MENU_MAX_WIDTH, window.innerWidth - 2 * MENU_MARGIN),
+        );
+      } else {
+        w = Math.max(width === 'anchor' ? anchor.width : width, MENU_MIN_WIDTH);
+      }
       // Width BEFORE height: the panel wraps and grows taller when narrower, so
       // measuring at the wrong width picks the wrong side to open on.
       el.style.width = `${w}px`;
@@ -1695,7 +1719,15 @@ export function ManageAccessDialog({
                 {rowSummary(p)}
               </Button>
               {openRowKey === p.key && (
-                <AnchoredMenu onDismiss={() => setOpenRowKey(null)} triggerRef={openRowTriggerRef}>
+                <AnchoredMenu
+                  onDismiss={() => setOpenRowKey(null)}
+                  triggerRef={openRowTriggerRef}
+                  // Sized to the items, not the trigger: a row that reads
+                  // "Can read" opens a narrow panel, and its items carry
+                  // notes ("from the whole workspace") that would otherwise
+                  // squeeze the label itself down to "C…".
+                  width="content"
+                >
                   {/* Everyone is public READ only (the grant route refuses the
                       rest), so its row offers exactly the verb it can hold —
                       plus Deny, which takes even that away. */}
@@ -1729,7 +1761,14 @@ export function ManageAccessDialog({
                             trailing={
                               <span className="flex items-center gap-1.5">
                                 {note && (
-                                  <span aria-hidden className="text-meta text-ink-faint">
+                                  // The note is what gives way when the panel
+                                  // is at its cap, never the label: bounded and
+                                  // truncated, with the full text on hover.
+                                  <span
+                                    aria-hidden
+                                    title={note}
+                                    className="max-w-44 truncate text-meta text-ink-faint"
+                                  >
                                     {note}
                                   </span>
                                 )}
