@@ -24,6 +24,7 @@ import {
 import type { IGitRunner } from '../../shared/git.contract.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
+import { assertRepoRootNameFree, normalizeWorkspacePath } from '../kb-fs/repo-path.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import {
   GitInternalsError,
@@ -977,22 +978,52 @@ export class WorkspaceService implements IWorkspaceService {
     return this.buildFileTree(workspaceDir, workspaceDir, readFilter);
   }
 
-  async readFile(workspaceId: string, relativePath: string): Promise<string> {
-    assertNoGitInternalsSegment(relativePath);
+  /** The repository inside a workspace directory: `<workspaceDir>/<kbDirName>`. */
+  private repoRoot(workspaceDir: string): string {
+    return path.join(workspaceDir, this.kbDirName);
+  }
+
+  /**
+   * THE resolution — the only place in this service that turns a workspace
+   * path into a location on disk.
+   *
+   * Two steps, and neither is optional. `normalizeWorkspacePath` places the
+   * path inside the repository (`KnowledgeBase/Report.md` is the page of that
+   * name in the checkout, not a stray beside it) and refuses `.`/`..`,
+   * backslashes and absolute paths outright. Then the RESOLVED path is checked
+   * against `<workspaceDir>/<kbDirName>` — after normalisation, because that
+   * is the path the operation will use, and a spelling that normalises inside
+   * and resolves outside is exactly the miss this check exists to catch.
+   *
+   * Callers use the returned `relativePath` for everything downstream — the
+   * git-internals check, the diff baseline, the lock-free path turns, their own
+   * error messages — so what is checked is what is written. Nine inline
+   * `path.resolve(workspaceDir, …)` calls used to do this, none of them
+   * checking the repository root; a drift-guard test now fails if one returns.
+   */
+  private async resolveInsideRepo(
+    workspaceId: string,
+    wsPath: string,
+  ): Promise<{ workspaceDir: string; relativePath: string; absolutePath: string }> {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    const relativePath = normalizeWorkspacePath(wsPath, this.kbDirName);
     const absolutePath = path.resolve(workspaceDir, relativePath);
+    assertWithinDirectory(absolutePath, this.repoRoot(workspaceDir));
+    return { workspaceDir, relativePath, absolutePath };
+  }
+
+  async readFile(workspaceId: string, wsPath: string): Promise<string> {
+    const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
+    assertNoGitInternalsSegment(relativePath);
     await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
-    this.assertWithinWorkspace(absolutePath, workspaceDir);
     await this.assertNotThroughLink(absolutePath, workspaceDir);
     return fs.readFile(absolutePath, 'utf-8');
   }
 
-  async readFileBinary(workspaceId: string, relativePath: string): Promise<Buffer> {
+  async readFileBinary(workspaceId: string, wsPath: string): Promise<Buffer> {
+    const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
     assertNoGitInternalsSegment(relativePath);
-    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    const absolutePath = path.resolve(workspaceDir, relativePath);
     await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
-    this.assertWithinWorkspace(absolutePath, workspaceDir);
     await this.assertNotThroughLink(absolutePath, workspaceDir);
     return fs.readFile(absolutePath);
   }
@@ -1000,8 +1031,8 @@ export class WorkspaceService implements IWorkspaceService {
   /**
    * Refuse a path that reaches its file through a symbolic link — as the
    * final component, or as any directory between the workspace root and it.
-   * `assertWithinWorkspace` is lexical: `knowledge-base/notes.md` passes it
-   * however the name resolves, so a link the repository carries (they only
+   * `resolveInsideRepo`'s containment is lexical: `knowledge-base/notes.md`
+   * passes it however the name resolves, so a link the repository carries (they only
    * arrive by direct git push; the app's own writes never create one) would
    * let a read hand out bytes from anywhere the server process can read, and
    * a write replace whatever the link points at. The rule is the plugin
@@ -1094,12 +1125,10 @@ export class WorkspaceService implements IWorkspaceService {
    * size crosses `ZIP_DOWNLOAD_MAX_BYTES`. Buffered in memory (adm-zip has
    * no streaming API); the cap therefore doubles as a peak-heap bound.
    */
-  async createFolderZip(workspaceId: string, relativePath: string): Promise<Buffer> {
+  async createFolderZip(workspaceId: string, wsPath: string): Promise<Buffer> {
+    const { workspaceDir, relativePath, absolutePath: absoluteRoot } = await this.resolveInsideRepo(workspaceId, wsPath);
     assertNoGitInternalsSegment(relativePath);
-    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    const absoluteRoot = path.resolve(workspaceDir, relativePath);
     await assertNotGitInternals(workspaceDir, relativePath, absoluteRoot);
-    this.assertWithinWorkspace(absoluteRoot, workspaceDir);
     const stat = await fs.stat(absoluteRoot);
     if (!stat.isDirectory()) {
       throw new Error('Not a directory');
@@ -1245,11 +1274,9 @@ export class WorkspaceService implements IWorkspaceService {
     }
   }
 
-  async deleteFile(workspaceId: string, relativePath: string): Promise<void> {
+  async deleteFile(workspaceId: string, wsPath: string): Promise<void> {
+    const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
     assertNoGitInternalsSegment(relativePath);
-    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    const absolutePath = path.resolve(workspaceDir, relativePath);
-    this.assertWithinWorkspace(absolutePath, workspaceDir);
     // Under the path's turn like every other single-file mutation: a delete
     // landing between a conditional write's compare and its write would let
     // that write recreate the file the delete had just removed. The diff
@@ -1292,17 +1319,19 @@ export class WorkspaceService implements IWorkspaceService {
    * outside that guarantee; the workflow lock on the moved path is what
    * serializes it against the app's own editors.
    */
-  async moveEntry(workspaceId: string, oldRelativePath: string, newRelativePath: string): Promise<void> {
+  async moveEntry(workspaceId: string, oldWsPath: string, newWsPath: string): Promise<void> {
+    const { workspaceDir, relativePath: oldRelativePath, absolutePath: oldAbsolute } =
+      await this.resolveInsideRepo(workspaceId, oldWsPath);
+    const { relativePath: newRelativePath, absolutePath: newAbsolute } =
+      await this.resolveInsideRepo(workspaceId, newWsPath);
+    // A move and a rename are the same call, so this is where the checkout's
+    // own name is reserved at the repository root for both.
+    assertRepoRootNameFree(newRelativePath, this.kbDirName);
     assertNoGitInternalsSegment(oldRelativePath);
     assertNoGitInternalsSegment(newRelativePath);
     assertValidPath(newRelativePath);
-    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    const oldAbsolute = path.resolve(workspaceDir, oldRelativePath);
-    const newAbsolute = path.resolve(workspaceDir, newRelativePath);
     await assertNotGitInternals(workspaceDir, oldRelativePath, oldAbsolute);
     await assertNotGitInternals(workspaceDir, newRelativePath, newAbsolute);
-    this.assertWithinWorkspace(oldAbsolute, workspaceDir);
-    this.assertWithinWorkspace(newAbsolute, workspaceDir);
     // Both ends: a link on the way to either end would carry the rename
     // outside. A link used AS the source is refused too — a committed link
     // is not something the app moves around, any more than reads it.
@@ -1364,15 +1393,13 @@ export class WorkspaceService implements IWorkspaceService {
    */
   async assertContentMatches(
     workspaceId: string,
-    relativePath: string,
+    wsPath: string,
     expectedContent: string,
   ): Promise<void> {
+    const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
     assertNoGitInternalsSegment(relativePath);
     assertValidPath(relativePath);
-    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    const absolutePath = path.resolve(workspaceDir, relativePath);
     await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
-    this.assertWithinWorkspace(absolutePath, workspaceDir);
     await assertConditionalWriteMatches(absolutePath, relativePath,expectedContent);
   }
 
@@ -1401,12 +1428,10 @@ export class WorkspaceService implements IWorkspaceService {
    * Linux deployment target `Foo.md` and `foo.md` are two files, and treating
    * them as one would be a worse bug than the race it would close.
    */
-  async withPathTurn<T>(workspaceId: string, relativePath: string, op: () => Promise<T>): Promise<T> {
+  async withPathTurn<T>(workspaceId: string, wsPath: string, op: () => Promise<T>): Promise<T> {
+    const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
     assertNoGitInternalsSegment(relativePath);
     assertValidPath(relativePath);
-    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    const absolutePath = path.resolve(workspaceDir, relativePath);
-    this.assertWithinWorkspace(absolutePath, workspaceDir);
     // The resolved check reads the disk, and how long that takes depends on
     // the spelling. Run before the queue, it let a later call overtake an
     // earlier one for the same file; inside the turn, callers keep their order
@@ -1432,11 +1457,9 @@ export class WorkspaceService implements IWorkspaceService {
    * folder delete takes each file's — and each clone's changes meet in git,
    * as any write into a folder another instance deletes already does.
    */
-  async withFolderTurn<T>(workspaceId: string, relativeDir: string, op: () => Promise<T>): Promise<T> {
+  async withFolderTurn<T>(workspaceId: string, wsDir: string, op: () => Promise<T>): Promise<T> {
+    const { relativePath: relativeDir, absolutePath: absoluteDir } = await this.resolveInsideRepo(workspaceId, wsDir);
     assertValidPath(relativeDir);
-    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    const absoluteDir = path.resolve(workspaceDir, relativeDir);
-    this.assertWithinWorkspace(absoluteDir, workspaceDir);
     const overlaps = (held: string) =>
       held === absoluteDir ||
       held.startsWith(absoluteDir + path.sep) ||
@@ -1521,15 +1544,17 @@ export class WorkspaceService implements IWorkspaceService {
    */
   async writeFile(
     workspaceId: string,
-    relativePath: string,
+    wsPath: string,
     content: string,
     options?: { failIfExists?: boolean; expectedContent?: string },
   ): Promise<void> {
+    const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
+    // A write creates the folders on the way to it, so the reserved root name
+    // is refused here too — otherwise `knowledge-base/knowledge-base/x.md`
+    // would bring the unreachable folder into existence around the file.
+    assertRepoRootNameFree(relativePath, this.kbDirName);
     assertNoGitInternalsSegment(relativePath);
     assertValidPath(relativePath);
-    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    const absolutePath = path.resolve(workspaceDir, relativePath);
-    this.assertWithinWorkspace(absolutePath, workspaceDir);
     await this.withResolvedPathTurn(absolutePath, async () => {
       // Inside the turn, beside the link check (see `withPathTurn`).
       await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
@@ -1567,13 +1592,12 @@ export class WorkspaceService implements IWorkspaceService {
     });
   }
 
-  async createDirectory(workspaceId: string, relativePath: string): Promise<void> {
+  async createDirectory(workspaceId: string, wsPath: string): Promise<void> {
+    const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
+    assertRepoRootNameFree(relativePath, this.kbDirName);
     assertNoGitInternalsSegment(relativePath);
     assertValidPath(relativePath);
-    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    const absolutePath = path.resolve(workspaceDir, relativePath);
     await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
-    this.assertWithinWorkspace(absolutePath, workspaceDir);
     await this.assertNotThroughLink(absolutePath, workspaceDir);
     await fs.mkdir(absolutePath, { recursive: true });
     const entries = await fs.readdir(absolutePath);
@@ -1590,11 +1614,10 @@ export class WorkspaceService implements IWorkspaceService {
    * refused like any write through one, so the placeholder cannot land
    * outside the workspace.
    */
-  async writeFolderPlaceholder(workspaceId: string, relativeDir: string): Promise<boolean> {
+  async writeFolderPlaceholder(workspaceId: string, wsDir: string): Promise<boolean> {
+    const { workspaceDir, relativePath: relativeDir, absolutePath: absoluteDir } =
+      await this.resolveInsideRepo(workspaceId, wsDir);
     assertValidPath(relativeDir);
-    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    const absoluteDir = path.resolve(workspaceDir, relativeDir);
-    this.assertWithinWorkspace(absoluteDir, workspaceDir);
     const placeholder = path.join(absoluteDir, FOLDER_PLACEHOLDER);
     await this.assertNotThroughLink(placeholder, workspaceDir);
     let entries: string[];
@@ -1609,12 +1632,11 @@ export class WorkspaceService implements IWorkspaceService {
     return true;
   }
 
-  async writeFileBinary(workspaceId: string, relativePath: string, data: Uint8Array): Promise<void> {
+  async writeFileBinary(workspaceId: string, wsPath: string, data: Uint8Array): Promise<void> {
+    const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
+    assertRepoRootNameFree(relativePath, this.kbDirName);
     assertNoGitInternalsSegment(relativePath);
     assertValidPath(relativePath);
-    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    const absolutePath = path.resolve(workspaceDir, relativePath);
-    this.assertWithinWorkspace(absolutePath, workspaceDir);
     // An upload over a path is a mutation of that path, so it takes the same
     // turn as a text write: see {@link withPathTurn}. The whole of it — the
     // parent chain too, so a folder delete serialized before this turn
@@ -1636,8 +1658,8 @@ export class WorkspaceService implements IWorkspaceService {
    */
   async unzipFile(
     workspaceId: string,
-    zipRelativePath: string,
-    destDirRelativePath?: string,
+    zipWsPath: string,
+    destDirWsPath?: string,
     /**
      * Per-extracted-path write guard (ontology-session boundary). Called with
      * each entry's workspace-relative target before it is written; if it throws,
@@ -1646,29 +1668,27 @@ export class WorkspaceService implements IWorkspaceService {
      */
     guardWrite?: (wsRelativePath: string) => Promise<void>,
   ): Promise<UnzipResult> {
+    const { workspaceDir, relativePath: zipRelativePath, absolutePath: zipAbsolute } =
+      await this.resolveInsideRepo(workspaceId, zipWsPath);
     assertNoGitInternalsSegment(zipRelativePath);
-    if (destDirRelativePath !== undefined) assertNoGitInternalsSegment(destDirRelativePath);
-    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    const zipAbsolute = path.resolve(workspaceDir, zipRelativePath);
     await assertNotGitInternals(workspaceDir, zipRelativePath, zipAbsolute);
-    this.assertWithinWorkspace(zipAbsolute, workspaceDir);
     if (!zipRelativePath.toLowerCase().endsWith('.zip')) {
       throw new WorkflowValidationError('Only .zip files can be extracted');
     }
 
-    const inferredDest = (() => {
-      const d = path.posix.dirname(zipRelativePath.replace(/\\/g, '/'));
-      return d === '.' ? '' : d;
-    })();
-    const destRel = destDirRelativePath ?? inferredDest;
-    if (destRel) assertValidPath(destRel);
-    const destAbsolute = destRel ? path.resolve(workspaceDir, destRel) : workspaceDir;
+    // Inferred from the NORMALISED archive path, so an archive named without
+    // the prefix extracts beside itself inside the repository rather than at
+    // the workspace root.
+    const inferredDest = path.posix.dirname(zipRelativePath);
+    const { relativePath: destRel, absolutePath: destAbsolute } =
+      await this.resolveInsideRepo(workspaceId, destDirWsPath ?? inferredDest);
+    assertValidPath(destRel);
+    assertNoGitInternalsSegment(destRel);
     await assertNotGitInternals(workspaceDir, destRel, destAbsolute);
-    this.assertWithinWorkspace(destAbsolute, workspaceDir);
     // Neither the archive nor the destination may sit behind a link; each
     // entry's own target is checked again below, once it is known.
     await this.assertNotThroughLink(zipAbsolute, workspaceDir);
-    if (destAbsolute !== workspaceDir) await this.assertNotThroughLink(destAbsolute, workspaceDir);
+    if (destAbsolute !== this.repoRoot(workspaceDir)) await this.assertNotThroughLink(destAbsolute, workspaceDir);
 
     // The archive is READ ONCE, here, and the reader is handed those bytes —
     // it is never given the path to open for itself. Two reasons, and the
@@ -1783,6 +1803,24 @@ export class WorkspaceService implements IWorkspaceService {
       // The symbolic-link rule, per entry: a link already on disk under the
       // destination must not redirect this entry's bytes. Reported like the
       // other per-entry refusals, so one such entry does not fail the rest.
+      // The checkout's own name is reserved at the repository root here too: an
+      // archive carrying it would otherwise create the one folder no workspace
+      // path can name. Reported like the other per-entry refusals — one such
+      // entry does not fail the rest — and asked on its own rather than inside
+      // the catch below, which stays the closed list of types it was.
+      const reservedName = (() => {
+        try {
+          assertRepoRootNameFree(relForReport, this.kbDirName);
+          return null;
+        } catch (err) {
+          return err instanceof Error ? err.message : String(err);
+        }
+      })();
+      if (reservedName !== null) {
+        skipped.push({ path: rawName, reason: reservedName });
+        continue;
+      }
+
       try {
         await assertNotGitInternals(workspaceDir, trimmed, targetAbsolute);
         await this.assertNotThroughLink(targetAbsolute, workspaceDir);
@@ -2091,11 +2129,6 @@ export class WorkspaceService implements IWorkspaceService {
       const reason = err instanceof Error ? err.message : String(err);
       throw new Error(`Invalid workspace ID "${workspaceId}": ${reason}`);
     }
-  }
-
-  /** The shared lexical containment check (see `shared/path-containment.ts`). */
-  private assertWithinWorkspace(absolutePath: string, workspaceDir: string): void {
-    assertWithinDirectory(absolutePath, workspaceDir);
   }
 
   private async buildFileTree(root: string, workspaceRoot: string, readFilter?: ReadTreeFilter): Promise<FileTreeEntry> {

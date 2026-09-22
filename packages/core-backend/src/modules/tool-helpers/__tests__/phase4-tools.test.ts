@@ -95,11 +95,13 @@ afterEach(async () => {
 });
 
 describe('Phase 4 tools (core subset)', () => {
-  it('unzip calls workspaceService.unzipFile with the context workspace', async () => {
+  it('unzip calls workspaceService.unzipFile with the context workspace, on the repository path', async () => {
     const base = await start();
     const res = await post(`${base}/api/agent/tools/unzip`, { path: 'a.zip', branch: WS });
     expect(res.status).toBe(200);
-    expect(recorded).toContainEqual(['unzip', WS, 'a.zip', undefined]);
+    // The archive is named without the clone-folder prefix; the normaliser
+    // places it inside the checkout, and THAT is the path the service is given.
+    expect(recorded).toContainEqual(['unzip', WS, 'knowledge-base/a.zip', undefined]);
   });
 
   it('unzip never extracts a roles.yaml — extraction bypasses the filesystem gate that checks it', async () => {

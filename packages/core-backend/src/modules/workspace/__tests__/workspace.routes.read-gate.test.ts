@@ -136,13 +136,28 @@ describe('read-permission gates on human read routes', () => {
     expect(h.canRead).toHaveBeenCalledWith(WS, USER.email, 'Knowledge/Secret/x.md');
   });
 
-  it('GET /file: a non-KB path (reserved workspace file) is not read-gated', async () => {
+  it('GET /file: an unprefixed path is placed in the repository and gated THERE', async () => {
     h = await makeHarness();
-    // Outside `kbDirName` → carries no read rules → served without a canRead
-    // check (matches the agent tools and diff routes). Previously this 403'd
-    // because the full path was passed to default-deny canRead.
+    // No route path can be outside `kbDirName` any more: the normaliser places
+    // `reserved-config.json` at the repository root, and the read gate is asked
+    // about exactly the repo-relative path the read will use. Before this it was
+    // taken as a workspace file, carried no read rules, and was served ungated
+    // — the same reading that let a write land beside the checkout.
     const res = await get(`/file?path=${encodeURIComponent('reserved-config.json')}`);
     expect(res.status).toBe(200);
+    expect(h.canRead).toHaveBeenCalledWith(WS, USER.email, 'reserved-config.json');
+    // …and a denied one is refused on that same repo-relative name.
+    const denied = await get(`/file?path=${encodeURIComponent('Secret-config.json')}`);
+    expect(denied.status).toBe(403);
+    expect(h.canRead).toHaveBeenCalledWith(WS, USER.email, 'Secret-config.json');
+  });
+
+  it('GET /file: the clone folder itself carries no read rules', async () => {
+    h = await makeHarness();
+    // `toKbRelative` gives nothing for the folder itself, so there is no
+    // repo-relative path to resolve rules against — unchanged.
+    const res = await get(`/file?path=${encodeURIComponent(KB)}`);
+    expect(res.status).not.toBe(403);
     expect(h.canRead).not.toHaveBeenCalled();
   });
 

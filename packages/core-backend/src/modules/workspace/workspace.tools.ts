@@ -21,7 +21,7 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a workflow service, so this stays inside the module boundary.
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
-import { assertInsideRepo, normalizePathArgs } from '../kb-fs/repo-path.js';
+import { assertInsideRepo, assertRepoRootNameFreeArgs, normalizePathArgs } from '../kb-fs/repo-path.js';
 import { GitGuardedFilesystem } from '../kb-fs/git-guarded-filesystem.js';
 import { assertNoGitInternalsSegment, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
@@ -250,20 +250,43 @@ const IMAGE_CONVENTION_NOTE =
   ' Images: keep them in an `assets/` folder next to the page that uses them and link them with a relative path, e.g. `![Approval screen](./assets/approval-screen.png)`; the page renders them inline.';
 
 /**
- * A path input that names the clone folder. The tools are rooted at the
- * WORKSPACE dir, one level above the git clone, so a path only reaches git
- * when it starts with that folder; an agent that reads `KnowledgeBase/Foo.md`
- * in a URL or a doc and passes it verbatim would otherwise write beside the
- * repository. Saying so in the input itself, not only in prose, is what the
- * agent actually sees when it fills the argument. `refused` is false for the
- * inputs that may legitimately name a stray (a source to rescue, a file to
- * remove).
+ * A path input that names the clone folder, and says what happens when it does
+ * not. The tools are rooted at the WORKSPACE dir, one level above the git clone,
+ * so a path reaches git only when it starts with that folder — and a path that
+ * does not name it is PLACED under it now rather than refused, by the one
+ * normaliser every route and tool goes through. An agent that reads
+ * `KnowledgeBase/Foo.md` in a URL or a doc and passes it verbatim gets the page
+ * of that name in the repository, which is what it meant; it no longer gets a
+ * refusal, and it never again gets a file written beside the repository where
+ * nothing commits it. Saying so in the input itself, not only in prose, is what
+ * the agent actually sees when it fills the argument.
+ *
+ * ONE sentence for every input, where there used to be a shorter second form for
+ * the ones that could legitimately name a stray (a source to rescue, a file to
+ * remove). Nothing can name a stray any more. Traversal (`.`/`..`), backslashes
+ * and absolute paths are still refused, everywhere.
  */
-const wsPath = (kbDirName: string, what: string, refused = true): JsonSchema =>
+const wsPath = (kbDirName: string, what: string): JsonSchema =>
   str(
-    `${what}: starts with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash (\`/${kbDirName}/…\` is the same path).` +
-      (refused ? ' A path without that prefix is outside the repository and is refused.' : ''),
+    `${what}: under \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash (\`/${kbDirName}/…\` is the same path). ` +
+      `A path without that prefix is placed under \`${kbDirName}/\`, so \`KnowledgeBase/Foo.md\` means \`${kbDirName}/KnowledgeBase/Foo.md\`; \`.\` or \`..\` segments, backslashes and absolute paths are refused.`,
   );
+
+/**
+ * The inputs each tool CREATES at, for the reserved-root-name rule (see
+ * `assertRepoRootNameFreeArgs`). Destinations only: `src` of a copy or a move,
+ * and the path of a delete, are left out on purpose, so an existing reserved
+ * folder can be moved out of or removed. A tool absent here creates nothing.
+ */
+const RESERVED_ROOT_NAME_TARGETS: Readonly<Record<string, readonly string[]>> = {
+  write_file: ['path'],
+  write_files: ['files'],
+  edit_file: ['path'],
+  mkdir: ['path'],
+  copy_file: ['dest'],
+  move_file: ['dest'],
+  unzip: ['destination'],
+};
 
 function asText(content: string | Buffer): string {
   return typeof content === 'string' ? content : content.toString('utf8');
@@ -1152,11 +1175,32 @@ export function registerWorkspaceTools(
       path.slice('/api'.length),
       toolAuth,
       ...(spec.internalOnly ? [requireInternalSource] : []),
-      // A leading slash is the root-anchored form Copy path gives and names
-      // the same workspace path — normalised once here, for every path input.
+      // EVERY path input becomes a repository path here, once, before any
+      // handler runs: the root-anchored `/<kbDirName>/…` form Copy path gives
+      // names the same workspace path, and a path with no prefix at all is
+      // placed under `<kbDirName>/` instead of being refused.
+      //
+      // The one exception is `read_file`'s `__tool_chain_spill__/…` ref, which
+      // belongs to no workspace and is left exactly as it came — and it is
+      // `read_file`'s ALONE. `read_file` is the only tool that consumes a
+      // spill ref; for any other, `__tool_chain_spill__/x` is an ordinary
+      // path, and exempting it there would be a workspace-relative path that
+      // never reached the repository — the whole bug, spelled with a prefix.
       toolHandler(
         async (args, ctx) => {
-          const normalized = normalizePathArgs(args);
+          const normalized = normalizePathArgs(
+            args,
+            kbDirName,
+            spec.name === 'read_file' ? (v) => spillStore.isSpillRef(v) : undefined,
+          );
+          // The checkout's own name is reserved at the repository root on this
+          // surface too. The routes meet that rule inside `WorkspaceService`;
+          // these tools write through the locking filesystem, which never
+          // enters it, so the rule is applied here — on the inputs a tool
+          // CREATES at, never on a source, so an existing reserved folder can
+          // still be moved out of or deleted.
+          const creates = RESERVED_ROOT_NAME_TARGETS[spec.name];
+          if (creates) assertRepoRootNameFreeArgs(normalized, kbDirName, creates);
           // The git folder is refused before the handler — and so before the
           // write-denial wrapper below, which would otherwise offer to propose
           // a change to it.
@@ -1248,7 +1292,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str(`Path to read, starting with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash, or a \`__tool_chain_spill__/…\` ref from a truncated \`call_tool_chain\`.`),
+        path: str(`Path to read, under \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash — a path without that prefix is placed under \`${kbDirName}/\` — or a \`__tool_chain_spill__/…\` ref from a truncated \`call_tool_chain\`.`),
         offset: int('Start character index (default 0).'),
         limit: int('Max characters to return from `offset`.'),
         sessionId: SESSION_ID_INPUT,
@@ -1308,13 +1352,13 @@ export function registerWorkspaceTools(
   mount({
     name: 'list_files',
     description:
-      `List a directory. Returns \`{ path, entries: [{ name, type, size? }] }\`. Omit \`path\` for the workspace root, which holds the repository as the \`${kbDirName}/\` folder: every content path starts with it (e.g. \`${kbDirName}/KnowledgeBase\`).` +
+      `List a directory. Returns \`{ path, entries: [{ name, type, size? }] }\`. Omit \`path\` for the workspace root, which holds the repository as the \`${kbDirName}/\` folder: every content path is under it (e.g. \`${kbDirName}/KnowledgeBase\`), and a path given without that prefix is placed under it.` +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str(`Directory to list, starting with \`${kbDirName}/\`, with or without a leading slash (default: the workspace root, where the repository is the \`${kbDirName}/\` folder).`),
+        path: str(`Directory to list, under \`${kbDirName}/\`, with or without a leading slash — a path without that prefix is placed under \`${kbDirName}/\` (default: the workspace root, where the repository is the \`${kbDirName}/\` folder).`),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch'],
@@ -1541,7 +1585,7 @@ export function registerWorkspaceTools(
       properties: {
         branch: BRANCH_INPUT,
         pattern: str('JavaScript regular expression.'),
-        path: str('Subtree to search, or a single file to search on its own, with or without a leading slash (default: whole workspace).'),
+        path: str(`Subtree to search, or a single file to search on its own, with or without a leading slash — a path without the \`${kbDirName}/\` prefix is placed under \`${kbDirName}/\` (default: the whole repository, \`${kbDirName}/\`).`),
         ignore_case: { type: 'boolean', description: 'Case-insensitive match.' },
         max_results: { type: 'integer', minimum: 1, maximum: 1000, description: 'Cap on matches (default 200).' },
         sessionId: SESSION_ID_INPUT,
@@ -1574,7 +1618,17 @@ export function registerWorkspaceTools(
       } catch (err) {
         throw new ToolError(`Invalid regex: ${(err as Error).message}`, 400);
       }
-      const searchRoot = typeof a.path === 'string' ? a.path : '';
+      // No path means the whole REPOSITORY, not the workspace directory above
+      // it. The workspace root also holds whatever an older build left beside
+      // the checkout, and the read gate has no rules for a path outside the
+      // repository — it answers "readable" — so a walk from there would hand
+      // any caller the contents of every stray, including documents that were
+      // uploaded to a restricted folder and landed beside it instead. The
+      // boot note names those for an operator; no tool reads them.
+      // An EMPTY string is the same absence: the normaliser leaves it alone
+      // (an empty path is the handler's to explain), and here it would
+      // otherwise name the workspace directory by another spelling.
+      const searchRoot = typeof a.path === 'string' && a.path.length > 0 ? a.path : kbDirName;
       // The search root itself is checked here (fail-closed for an agent grep on
       // a named subtree with no sessionId); each file the walk actually opens is
       // recorded per-file below, so a root-level grep that reaches into multiple
@@ -1958,7 +2012,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: wsPath(kbDirName, 'Path to the file', false),
+        path: wsPath(kbDirName, 'Path to the file'),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'path'],
@@ -2044,6 +2098,8 @@ export function registerWorkspaceTools(
     handler: async (a, ctx: ToolContext) => {
       const path = (a.path as string).replace(/\/+$/, '');
       const branch = a.branch as string;
+      // The normaliser has already placed the path inside the repository; this
+      // is the check that it really is in there before a folder is walked.
       assertInsideRepo(path, kbDirName);
       await recordOntologyRead(sessionOntologyGate, ctx, path);
       const fs = await ctx.getFilesystem(branch);
@@ -2178,7 +2234,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        src: wsPath(kbDirName, 'Source path (file or folder)', false),
+        src: wsPath(kbDirName, 'Source path (file or folder)'),
         dest: wsPath(kbDirName, 'Destination path — the full new path; must not exist yet'),
         dryRun: { type: 'boolean', description: 'Answer with the impact and change nothing.' },
         confirm: { type: 'boolean', description: 'Required when the move changes your access. Set it only after a dry run.' },
@@ -2336,7 +2392,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        src: wsPath(kbDirName, 'Source path', false),
+        src: wsPath(kbDirName, 'Source path'),
         dest: wsPath(kbDirName, 'Destination path — must not exist yet'),
         sessionId: SESSION_ID_INPUT,
       },
@@ -2427,7 +2483,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: wsPath(kbDirName, 'Path to the .zip archive', false),
+        path: wsPath(kbDirName, 'Path to the .zip archive'),
         destination: wsPath(kbDirName, "Directory to extract into (default: the zip's parent)"),
         sessionId: SESSION_ID_INPUT,
       },
