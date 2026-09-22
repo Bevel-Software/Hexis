@@ -78,9 +78,11 @@ describe('ManageAccessDialog: Download carries Read', () => {
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
 
     const menu = await openNewGrantMenu(user);
-    // Start from Edit (the default) turned off, so nothing but Download can
-    // be what checks Read.
+    // Start from nothing selected, so nothing but Download can be what checks
+    // Read: Edit (the default) off leaves Read selected in its own right, so
+    // Read is turned off too.
     await user.click(within(menu).getByRole('button', { name: /^can edit$/i }));
+    await user.click(within(menu).getByRole('button', { name: /^can read$/i }));
     expect(within(menu).getByRole('button', { name: /^can read$/i })).toHaveAttribute(
       'aria-pressed',
       'false',
@@ -95,6 +97,52 @@ describe('ManageAccessDialog: Download carries Read', () => {
     expect(
       await screen.findByRole('button', { name: /^can read, can download$/i }),
     ).toBeInTheDocument();
+  });
+
+  it('on a NEW grant: unticking Can edit leaves Can read selected, and Share grants read', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const menu = await openNewGrantMenu(user);
+    // Read was checked only because Edit implied it; turning Edit off used to
+    // clear both and dim Share. Less than edit is read, not nothing.
+    await user.click(within(menu).getByRole('button', { name: /^can edit$/i }));
+    const readItem = within(menu).getByRole('button', { name: /^can read$/i });
+    expect(readItem).toHaveAttribute('aria-pressed', 'true');
+    expect(readItem).not.toBeDisabled();
+    expect(within(menu).getByRole('button', { name: /^can edit$/i })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+    await user.keyboard('{Escape}');
+    expect(await screen.findByRole('button', { name: /^can read$/i })).toBeInTheDocument();
+
+    await user.type(
+      await screen.findByPlaceholderText('Add people, groups, roles or plugins…'),
+      'gtm',
+    );
+    await user.click(await screen.findByRole('button', { name: /GTM Team/ }));
+    await user.click(screen.getByRole('button', { name: /^Share$/ }));
+
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalledTimes(1));
+    expect(api.grantAccess).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({ verb: 'read', principal: { kind: 'group', group: 'GTM Team' } }),
+    );
+  });
+
+  it('on a NEW grant: unticking Can download likewise keeps Can read', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const menu = await openNewGrantMenu(user);
+    await user.click(within(menu).getByRole('button', { name: /^can edit$/i }));
+    await user.click(within(menu).getByRole('button', { name: /^can read$/i }));
+    await user.click(within(menu).getByRole('button', { name: /^can download$/i }));
+    await user.click(within(menu).getByRole('button', { name: /^can download$/i }));
+    const readItem = within(menu).getByRole('button', { name: /^can read$/i });
+    expect(readItem).toHaveAttribute('aria-pressed', 'true');
+    expect(readItem).not.toBeDisabled();
   });
 
   it('grants Download alone — no redundant second read grant, since download carries it', async () => {

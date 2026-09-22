@@ -540,6 +540,13 @@ const MENU_MARGIN = 8;
  * trigger by the difference.
  */
 const MENU_MIN_WIDTH = 200;
+/**
+ * The most a content-sized menu grows to before its items start truncating.
+ * Wide enough for "Can download · from the whole workspace ✓" on one line;
+ * narrow enough that a folder with a very long name cannot turn the menu
+ * into a banner.
+ */
+const MENU_MAX_WIDTH = 360;
 
 /**
  * A dropdown panel that escapes the dialog's scroll container.
@@ -592,8 +599,11 @@ function AnchoredMenu({
    */
   triggerRef,
   /**
-   * Panel width in px, or `'anchor'` to match the trigger (the combobox case).
-   * Clamped up to {@link MENU_MIN_WIDTH} either way.
+   * Panel width in px, `'anchor'` to match the trigger (the combobox case), or
+   * `'content'` to fit the widest item (a menu whose items carry notes — "from
+   * the whole workspace" — that a trigger-sized panel would truncate the LABEL
+   * to make room for). Clamped up to {@link MENU_MIN_WIDTH} either way, and
+   * `'content'` is clamped down to {@link MENU_MAX_WIDTH} and the viewport.
    */
   width = MENU_MIN_WIDTH,
   /** Which edge lines up with the anchor's. */
@@ -603,7 +613,7 @@ function AnchoredMenu({
 }: {
   onDismiss?: () => void;
   triggerRef?: RefObject<HTMLElement | null>;
-  width?: number | 'anchor';
+  width?: number | 'anchor' | 'content';
   align?: 'left' | 'right';
   className?: string;
   children: ReactNode;
@@ -628,7 +638,21 @@ function AnchoredMenu({
       const el = panelRef.current;
       const anchor = el?.parentElement?.getBoundingClientRect();
       if (!anchor || !el) return;
-      const w = Math.max(width === 'anchor' ? anchor.width : width, MENU_MIN_WIDTH);
+      let w: number;
+      if (width === 'content') {
+        // Let the panel take its natural width for one measurement, then pin
+        // it: what the widest item needs, within the caps. The observer on
+        // the panel sees only the pinned size, which is unchanged whenever the
+        // content is, so this does not feed it.
+        el.style.width = 'max-content';
+        const natural = el.offsetWidth;
+        w = Math.max(
+          MENU_MIN_WIDTH,
+          Math.min(natural, MENU_MAX_WIDTH, window.innerWidth - 2 * MENU_MARGIN),
+        );
+      } else {
+        w = Math.max(width === 'anchor' ? anchor.width : width, MENU_MIN_WIDTH);
+      }
       // Width BEFORE height: the panel wraps and grows taller when narrower, so
       // measuring at the wrong width picks the wrong side to open on.
       el.style.width = `${w}px`;
@@ -667,12 +691,21 @@ function AnchoredMenu({
     const observer = new ResizeObserver(place);
     if (anchorEl) observer.observe(anchorEl);
     if (panel) observer.observe(panel);
+    // A content-sized panel is PINNED to a width, so the resize observer above
+    // cannot see its items change under it — and they do while a row menu
+    // stays open across writes: notes ("from Sales") and check marks come and
+    // go with each fresh view. Re-measure on any change to what the panel
+    // holds. Children and text only, not attributes: `place` writes the
+    // panel's own style, which must not re-trigger it.
+    const contents = new MutationObserver(place);
+    if (panel) contents.observe(panel, { childList: true, subtree: true, characterData: true });
     window.addEventListener('resize', place);
     // Capture phase: the dialog body is what scrolls, and scroll events don't
     // bubble to `window`.
     window.addEventListener('scroll', place, true);
     return () => {
       observer.disconnect();
+      contents.disconnect();
       window.removeEventListener('resize', place);
       window.removeEventListener('scroll', place, true);
     };
@@ -905,6 +938,8 @@ export function ManageAccessDialog({
   // time), so it always names the button whose menu is on screen.
   const openRowTriggerRef = useRef<HTMLButtonElement>(null);
   const verbTriggerRef = useRef<HTMLButtonElement>(null);
+  /** The add row's text field — where the caret goes back to after a pick. */
+  const queryInputRef = useRef<HTMLInputElement>(null);
   // The "What can I share with?" explainer beside the add field.
   const [kindHelpOpen, setKindHelpOpen] = useState(false);
   const kindHelpTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1201,7 +1236,35 @@ export function ManageAccessDialog({
     );
     setQuery('');
     setSuggest(null);
+    // A pick from the list moved focus onto the list's button, which is about
+    // to unmount; the next name is typed into the field, so put the caret
+    // back there rather than making the person click into the white space.
+    queryInputRef.current?.focus();
   }, []);
+
+  // What the list OFFERS: the server's suggestions minus what is already a
+  // chip. A group picked once has nothing to add a second time, and seeing it
+  // offered again reads as "did that not take?".
+  const offered = useMemo(() => {
+    if (!suggest) return null;
+    const picked = new Set(pickedChips.map(principalKey));
+    return {
+      groups: (suggest.groups ?? []).filter((g) => !picked.has(principalKey({ kind: 'group', group: g }))),
+      roles: (suggest.roles ?? []).filter((r) => !picked.has(principalKey({ kind: 'role', role: r }))),
+      plugins: (suggest.pluginPrincipals ?? [])
+        .flatMap((name) => PLUGIN_PRINCIPAL_VERBS.map((verb) => ({ name, verb })))
+        .filter(({ name, verb }) => !picked.has(principalKey({ kind: 'plugin', plugin: name, verb }))),
+      people: (suggest.people ?? []).filter(
+        (p) => !picked.has(principalKey({ kind: 'user', email: p.email, displayName: p.name })),
+      ),
+    };
+  }, [suggest, pickedChips]);
+  const offersAnything =
+    !!offered &&
+    (offered.groups.length > 0 ||
+      offered.roles.length > 0 ||
+      offered.plugins.length > 0 ||
+      offered.people.length > 0);
 
   const removeChip = useCallback((p: Principal) => {
     setPickedChips((chips) => chips.filter((c) => principalKey(c) !== principalKey(p)));
@@ -1665,7 +1728,15 @@ export function ManageAccessDialog({
                 {rowSummary(p)}
               </Button>
               {openRowKey === p.key && (
-                <AnchoredMenu onDismiss={() => setOpenRowKey(null)} triggerRef={openRowTriggerRef}>
+                <AnchoredMenu
+                  onDismiss={() => setOpenRowKey(null)}
+                  triggerRef={openRowTriggerRef}
+                  // Sized to the items, not the trigger: a row that reads
+                  // "Can read" opens a narrow panel, and its items carry
+                  // notes ("from the whole workspace") that would otherwise
+                  // squeeze the label itself down to "C…".
+                  width="content"
+                >
                   {/* Everyone is public READ only (the grant route refuses the
                       rest), so its row offers exactly the verb it can hold —
                       plus Deny, which takes even that away. */}
@@ -1699,7 +1770,14 @@ export function ManageAccessDialog({
                             trailing={
                               <span className="flex items-center gap-1.5">
                                 {note && (
-                                  <span aria-hidden className="text-meta text-ink-faint">
+                                  // The note is what gives way when the panel
+                                  // is at its cap, never the label: bounded and
+                                  // truncated, with the full text on hover.
+                                  <span
+                                    aria-hidden
+                                    title={note}
+                                    className="max-w-44 truncate text-meta text-ink-faint"
+                                  >
                                     {note}
                                   </span>
                                 )}
@@ -1829,6 +1907,7 @@ export function ManageAccessDialog({
                     );
                   })}
                   <input
+                    ref={queryInputRef}
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     onKeyDown={(e) => {
@@ -1845,9 +1924,9 @@ export function ManageAccessDialog({
                     `roles` or `groups` (version skew) must degrade to an empty
                     section, never a crash. Groups lead — they are the audience
                     concept grants are meant for; roles remain grantable below. */}
-                {query.trim() && suggest && ((suggest.groups?.length ?? 0) > 0 || (suggest.roles?.length ?? 0) > 0 || (suggest.pluginPrincipals?.length ?? 0) > 0 || (suggest.people?.length ?? 0) > 0) && (
+                {query.trim() && offered && offersAnything && (
                   <AnchoredMenu width="anchor" align="left" className="max-h-56 overflow-auto">
-                    {(suggest.groups ?? []).map((g) => (
+                    {offered.groups.map((g) => (
                       <MenuItem
                         key={`grp:${g}`}
                         onClick={() => addChip({ kind: 'group', group: g })}
@@ -1867,7 +1946,7 @@ export function ManageAccessDialog({
                         <span className="min-w-0 flex-1 truncate">{g}</span>
                       </MenuItem>
                     ))}
-                    {(suggest.roles ?? []).map((g) => (
+                    {offered.roles.map((g) => (
                       <MenuItem
                         key={`g:${g}`}
                         onClick={() => addChip({ kind: 'role', role: g })}
@@ -1889,8 +1968,7 @@ export function ManageAccessDialog({
                     ))}
                     {/* A plugin is three grantees — its readers, its writers, its
                         owners — each following the plugin's own roster live. */}
-                    {(suggest.pluginPrincipals ?? []).flatMap((name) =>
-                      PLUGIN_PRINCIPAL_VERBS.map((verb) => (
+                    {offered.plugins.map(({ name, verb }) => (
                         <MenuItem
                           key={`pl:${name}/${verb}`}
                           onClick={() => addChip({ kind: 'plugin', plugin: name, verb })}
@@ -1909,9 +1987,8 @@ export function ManageAccessDialog({
                           </span>
                           <span className="min-w-0 flex-1 truncate">{pluginPrincipalLabel(name, verb)}</span>
                         </MenuItem>
-                      )),
-                    )}
-                    {(suggest.people ?? []).map((p) => {
+                    ))}
+                    {offered.people.map((p) => {
                       const tone = avatarTone(p.name || p.email);
                       return (
                         <MenuItem
@@ -1994,7 +2071,18 @@ export function ManageAccessDialog({
                           disabled={disabled}
                           active={checked}
                           aria-pressed={checked}
-                          onClick={() => setNewVerbs((v) => ({ ...v, [k]: !v[k] }))}
+                          onClick={() =>
+                            setNewVerbs((v) => {
+                              const on = !v[k];
+                              // Turning a tier OFF is "less than this", and less
+                              // than edit is read, not nothing: the Read the tier
+                              // implied stays selected in its own right. Read's
+                              // own item is the one that takes read away.
+                              return on || k === 'read'
+                                ? { ...v, [k]: on }
+                                : { ...v, [k]: false, read: true };
+                            })
+                          }
                           trailing={checked ? <Check size={14} className="text-accent" /> : undefined}
                         >
                           {role}
@@ -2006,7 +2094,13 @@ export function ManageAccessDialog({
                       disabled={effectiveNewVerbs.owner}
                       active={effectiveNewVerbs.download}
                       aria-pressed={effectiveNewVerbs.download}
-                      onClick={() => setNewVerbs((v) => ({ ...v, download: !v.download }))}
+                      // Same rule as the tiers: unticking download keeps the
+                      // read it implied.
+                      onClick={() =>
+                        setNewVerbs((v) =>
+                          v.download ? { ...v, download: false, read: true } : { ...v, download: true },
+                        )
+                      }
                       trailing={
                         effectiveNewVerbs.download ? (
                           <Check size={14} className="text-accent" />
