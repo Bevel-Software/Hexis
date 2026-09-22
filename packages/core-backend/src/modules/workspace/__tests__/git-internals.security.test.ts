@@ -152,8 +152,28 @@ async function listen(app: express.Express): Promise<{ server: Server; baseUrl: 
   return { server, baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
 }
 
-async function expectRefused(res: Response): Promise<unknown> {
+/**
+ * The spellings the PATH rule refuses before the git rule is ever consulted:
+ * a `..` segment, a `.` segment below a leading `./`, a backslash. One
+ * normaliser reads every accepted workspace path now, and it refuses these as
+ * paths rather than as git paths — earlier, and with the 400 that says the path
+ * could not be placed inside the repository. The git folder is unreachable
+ * either way, which is what this file is about; only the sentence differs.
+ */
+const UNSPELLABLE = new Set(['dotted', 'dot segments', 'backslashed']);
+
+/**
+ * The refusal, whichever rule got there first. Pass the form's name and a
+ * spelling the normaliser refuses is checked against ITS answer; leave it out
+ * and only the git refusal will do.
+ */
+async function expectRefused(res: Response, form?: string): Promise<unknown> {
   const body = (await res.json()) as Record<string, unknown>;
+  if (form !== undefined && UNSPELLABLE.has(form)) {
+    expect({ status: res.status, outside: /is outside the knowledge base repository/.test(String(body.error)) }, form)
+      .toEqual({ status: 400, outside: true });
+    return body;
+  }
   expect({ status: res.status, error: body.error }).toEqual({ status: 403, error: GIT_INTERNALS_MESSAGE });
   return body;
 }
@@ -256,12 +276,16 @@ describe('workspace tools refuse the git folder', () => {
   for (const [op, args] of fileOps) {
     const tool = op.split(' ')[0];
     describe(op, () => {
-      it.each(Object.entries(FILE_FORMS))('%s form', async (_form, p) => {
-        await expectRefused(await call(tool, args(p)));
+      it.each(Object.entries(FILE_FORMS))('%s form', async (form, p) => {
+        await expectRefused(await call(tool, args(p)), form);
       });
 
       it('answers a missing path exactly as an existing one', async () => {
         for (const form of Object.keys(MISSING_FORMS)) {
+          // A spelling the path rule refuses is answered on the spelling alone,
+          // and its answer quotes the path the caller sent: nothing about the
+          // disk is in it, so there is nothing for it to give away.
+          if (UNSPELLABLE.has(form)) continue;
           const existing = await call(tool, args(fileForms('config')[form]));
           const missing = await call(tool, args(MISSING_FORMS[form]));
           expect(missing.status).toBe(existing.status);
@@ -273,8 +297,8 @@ describe('workspace tools refuse the git folder', () => {
 
   for (const [op, args] of dirOps) {
     const tool = op.split(' ')[0];
-    it.each(Object.entries(DIR_FORMS))(`${op} — %s form`, async (_form, p) => {
-      await expectRefused(await call(tool, args(p)));
+    it.each(Object.entries(DIR_FORMS))(`${op} — %s form`, async (form, p) => {
+      await expectRefused(await call(tool, args(p)), form);
     });
   }
 
@@ -413,6 +437,9 @@ describe('workspace routes refuse the git folder', () => {
 
   for (const [name, send] of fileRoutes) {
     describe(name, () => {
+      // No form passed: on this surface the git guard is mounted ahead of every
+      // handler on the `/workspace/:id` prefix, so it answers before the
+      // normaliser is ever asked — the one 403, in every spelling, as before.
       it.each(Object.entries(FILE_FORMS))('%s form', async (_form, p) => {
         await expectRefused(await send(p));
       });
@@ -504,8 +531,16 @@ describe('WorkspaceService refuses the git folder on its own', () => {
   for (const [name, run] of ops) {
     it.each(Object.entries(fileForms('config')).filter(([form]) => !(name === 'readFileAtRef' && form === 'symlinked')))(
       `${name} — %s form`,
-      async (_form, p) => {
+      async (form, p) => {
         const err = await run(p).catch((e: unknown) => e);
+        // `readFileAtRef` takes a REPO-relative path (it strips the prefix
+        // above), so it is not a workspace path and does not meet the
+        // normaliser; every other op does, and for the spellings the path rule
+        // refuses that refusal is the one that answers.
+        if (UNSPELLABLE.has(form) && name !== 'readFileAtRef') {
+          expect((err as Error).message, form).toMatch(/is outside the knowledge base repository/);
+          return;
+        }
         expect(err).toBeInstanceOf(GitInternalsError);
       },
     );

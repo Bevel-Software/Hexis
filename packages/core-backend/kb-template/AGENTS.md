@@ -47,9 +47,11 @@ effect each time it is written.)
 
 Tool paths are workspace-relative, and the workspace root holds this
 repository as the `knowledge-base/` folder: a file in it is
-`knowledge-base/{{knowledgeBaseDir}}/Foo.md`, never `{{knowledgeBaseDir}}/Foo.md`. A path
-without that prefix is refused, because it would land beside the repository
-where git never sees it.
+`knowledge-base/{{knowledgeBaseDir}}/Foo.md`. Write the prefix where you can —
+it is the path every tool reports back — but a path without it is PLACED under
+`knowledge-base/` rather than refused, so `{{knowledgeBaseDir}}/Foo.md` names that
+same file. Nothing you send can land beside the repository, where git would
+never see it. `.` or `..` segments, backslashes and absolute paths are refused.
 
 Only those three folders are structural. `{{skillsDir}}/` holds shared skills at any
 depth — the folder that holds a `SKILL.md` is the skill, and everything above

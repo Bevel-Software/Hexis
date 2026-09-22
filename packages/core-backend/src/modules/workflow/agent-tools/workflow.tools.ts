@@ -165,9 +165,11 @@ export function registerWorkflowTools(
       path.slice('/api'.length),
       toolAuth,
       ...(spec.internalOnly ? [requireInternalSource] : []),
-      // A leading slash is the root-anchored form Copy path gives and names
-      // the same workspace path — normalised once here, for every path input.
-      toolHandler((args, ctx) => spec.handler(normalizePathArgs(args), ctx), { write: spec.write }),
+      // Every path input becomes a repository path here, once, through the one
+      // normaliser: the root-anchored `/<kbDirName>/…` form names the same
+      // workspace path, and a path with no prefix is placed under
+      // `<kbDirName>/` rather than refused.
+      toolHandler((args, ctx) => spec.handler(normalizePathArgs(args, kbDirName), ctx), { write: spec.write }),
     );
   };
 
@@ -262,9 +264,9 @@ export function registerWorkflowTools(
       const path = args.path as string;
       const branch = args.branch as string;
       // This tool commits whatever is on disk at `path` through the lock
-      // protocol, bypassing the locking filesystem's own guard. A path without
-      // the clone-folder prefix names a file git can never see: refuse it
-      // before a lock is taken, with the same corrected-path message.
+      // protocol, bypassing the locking filesystem's own guard. The normaliser
+      // above has already placed the path inside the clone; this is the check
+      // that what came out is really in there, before a lock is taken.
       if (typeof path !== 'string' || path.length === 0) {
         throw new ToolError('`path` is required and must be a non-empty string.', 400);
       }

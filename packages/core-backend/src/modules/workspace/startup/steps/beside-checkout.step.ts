@@ -1,0 +1,85 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { logger } from '../../../../shared/logging.js';
+import { isAbsence } from '../../../../shared/fs.contract.js';
+import { printable } from '../../../../shared/printable.js';
+import type { OnServerStart, StepResult } from '../on-server-start.js';
+
+const log = logger('kb-startup');
+
+/** The opening of the boot note, so a test and an operator's grep agree on it. */
+export const BESIDE_CHECKOUT_NOTE = 'Beside the checkout, not in the repository:';
+
+/**
+ * Name whatever is sitting in a workspace directory other than the checkout —
+ * and touch none of it.
+ *
+ * A workspace directory holds the repository as one folder (`<kbDirName>/`).
+ * Anything else in there is in a location git never sees: never committed,
+ * never pushed, never shared, and invisible in the app once the explorer reads
+ * its roots from the checkout. Nothing the platform accepts can write there any
+ * more — every path goes through the normaliser now — but deployments that ran
+ * the older code already have such files, and the only way anyone learns of
+ * them is if the platform says so. So it says so, once per start, per workspace.
+ *
+ * DELETES NOTHING, MOVES NOTHING, on purpose. The platform cannot prove it
+ * wrote any of it: a stray may be an operator's own scratch file beside a
+ * clone, and a boot that quietly removed it would be a data loss nobody asked
+ * for. The operator cleans up, and the note stops on the next start.
+ *
+ * EVERYTHING other than the checkout folder is named, the platform's own
+ * transient `tmp/` scratch included on the rare start that finds one (a run
+ * clears it when it finishes). That is deliberate: the note's claim is about
+ * what is not in the repository, and a note that quietly kept exceptions would
+ * be a note an operator could not trust.
+ *
+ * Reads the workspaces root directly rather than through a branch handle: it
+ * needs the directories that are ALREADY on disk, not the branches this build
+ * would clone, and a read-only scan must not be the thing that clones a branch.
+ */
+export class BesideCheckoutStep implements OnServerStart {
+  readonly name = 'beside-checkout';
+
+  constructor(
+    private readonly workspacesRoot: string,
+    private readonly kbDirName: string,
+    /** Where the note goes. Injected so a test can read it without a log sink. */
+    private readonly note: (line: string) => void = (line) => log.warn(line),
+  ) {}
+
+  async run(): Promise<StepResult> {
+    const workspaces = await this.entries(this.workspacesRoot);
+    for (const workspace of workspaces) {
+      if (!workspace.isDirectory()) continue;
+      const strays = (await this.entries(path.join(this.workspacesRoot, workspace.name)))
+        .filter((e) => e.name !== this.kbDirName)
+        // A trailing slash marks the folders, so one line says which is which
+        // without the operator having to go and look. Then `printable`, because
+        // every name here is disk-controlled text on its way into an operator's
+        // log: one carrying a control character must not steer the terminal or
+        // forge a second line of the note, and the quotes it adds keep a name
+        // with a space or a comma in it readable in the list.
+        .map((e) => printable(e.isDirectory() ? `${e.name}/` : e.name))
+        .sort();
+      if (strays.length === 0) continue;
+      this.note(
+        `${BESIDE_CHECKOUT_NOTE} ${strays.join(', ')} — in the workspace for ${printable(workspace.name)}, ` +
+          'outside the git clone, so never committed or pushed. Nothing was deleted or moved; remove them by hand when you have looked.',
+      );
+    }
+    // Always `ok`: the step's whole job is to NAME what it found, and it did
+    // that. Strays are the deployment's state to fix, not this step's failure —
+    // and `partial` would caption other steps' commit with a finding of its own.
+    return { outcome: 'ok' };
+  }
+
+  /** A directory's entries, or none when it is not there yet (a cold start). */
+  private async entries(dir: string): Promise<{ name: string; isDirectory(): boolean }[]> {
+    try {
+      return await fs.readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      if (isAbsence(err)) return [];
+      throw err;
+    }
+  }
+}

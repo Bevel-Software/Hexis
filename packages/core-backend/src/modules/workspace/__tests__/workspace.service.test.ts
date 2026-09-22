@@ -145,12 +145,15 @@ describe('WorkspaceService.createDirectory', () => {
   let root: string;
   let svc: WorkspaceService;
   let workspaceDir: string;
+  /** Where a created folder goes: inside the checkout, whatever the caller spelled. */
+  let repoDir: string;
   let workspaceId: string;
 
   beforeEach(async () => {
     root = await mkTmpRoot();
     const seeded = await seedBranchWorkspace(root, 'target-company-state');
     workspaceDir = seeded.workspaceDir;
+    repoDir = path.join(workspaceDir, 'knowledge-base');
     workspaceId = seeded.workspaceId;
     svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
     // Hydrate the in-memory map so subsequent ops resolve fast.
@@ -161,9 +164,11 @@ describe('WorkspaceService.createDirectory', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it('creates a .gitkeep inside a fresh empty folder', async () => {
+  it('creates a .gitkeep inside a fresh empty folder — in the repository, from an unprefixed path', async () => {
     await svc.createDirectory(workspaceId, 'a');
-    const absDir = path.join(workspaceDir, 'a');
+    const absDir = path.join(repoDir, 'a');
+    // …and nothing beside the checkout, which is the whole point of the ticket.
+    await expect(fs.stat(path.join(workspaceDir, 'a'))).rejects.toMatchObject({ code: 'ENOENT' });
     const dirStat = await fs.stat(absDir);
     expect(dirStat.isDirectory()).toBe(true);
     const gitkeep = await fs.readFile(path.join(absDir, '.gitkeep'), 'utf-8');
@@ -171,7 +176,7 @@ describe('WorkspaceService.createDirectory', () => {
   });
 
   it('does not add a .gitkeep when the folder already has content', async () => {
-    const absDir = path.join(workspaceDir, 'has-content');
+    const absDir = path.join(repoDir, 'has-content');
     await fs.mkdir(absDir, { recursive: true });
     await fs.writeFile(path.join(absDir, 'real.md'), 'hello', 'utf-8');
 
@@ -182,7 +187,7 @@ describe('WorkspaceService.createDirectory', () => {
   });
 
   it('does not duplicate a .gitkeep when one already exists', async () => {
-    const absDir = path.join(workspaceDir, 'kept');
+    const absDir = path.join(repoDir, 'kept');
     await fs.mkdir(absDir, { recursive: true });
     await fs.writeFile(path.join(absDir, '.gitkeep'), '', 'utf-8');
 
@@ -195,9 +200,9 @@ describe('WorkspaceService.createDirectory', () => {
   it('only writes a .gitkeep in the leaf for nested paths', async () => {
     await svc.createDirectory(workspaceId, 'a/b/c');
 
-    const aEntries = await fs.readdir(path.join(workspaceDir, 'a'));
-    const bEntries = await fs.readdir(path.join(workspaceDir, 'a', 'b'));
-    const cEntries = await fs.readdir(path.join(workspaceDir, 'a', 'b', 'c'));
+    const aEntries = await fs.readdir(path.join(repoDir, 'a'));
+    const bEntries = await fs.readdir(path.join(repoDir, 'a', 'b'));
+    const cEntries = await fs.readdir(path.join(repoDir, 'a', 'b', 'c'));
 
     expect(aEntries).toEqual(['b']);
     expect(bEntries).toEqual(['c']);
@@ -206,8 +211,8 @@ describe('WorkspaceService.createDirectory', () => {
 
   it('hides .gitkeep entries from listFiles', async () => {
     await svc.createDirectory(workspaceId, 'visible-empty');
-    await fs.writeFile(path.join(workspaceDir, 'visible-empty', '.gitkeep'), '', 'utf-8');
-    const mixed = path.join(workspaceDir, 'mixed');
+    await fs.writeFile(path.join(repoDir, 'visible-empty', '.gitkeep'), '', 'utf-8');
+    const mixed = path.join(repoDir, 'mixed');
     await fs.mkdir(mixed, { recursive: true });
     await fs.writeFile(path.join(mixed, '.gitkeep'), '', 'utf-8');
     await fs.writeFile(path.join(mixed, 'real.md'), 'hi', 'utf-8');
@@ -335,18 +340,14 @@ describe('WorkspaceService.writeFile — expectedContent', () => {
     // refuses it. A canonicaliser that dropped the empty leading segment would
     // turn this into an ordinary write at `<workspace>/etc/passwd`.
     //
-    // The boundary check IS what answers here, and the message says so. Two
-    // exported functions in this repo are called `assertValidRelativePath`:
-    // `writeFile` calls the one in `@bevel-software/platform-shared`, which
-    // splits on `/` and drops empty segments, so `/etc/passwd` validates as
-    // `['etc','passwd']` and passes. The stricter one in
-    // `modules/kb-fs/branch-name.ts` would refuse it with 'path must be
-    // relative', but only `git.service.ts` uses that one, to guard a git
-    // pathspec. Reviewers have read this the other way round twice; renaming
-    // the strict one is recorded as a follow-up.
+    // THE NORMALISER is what answers here, and its message names the path and
+    // a correction. It refuses the absolute path outright rather than placing
+    // it under the repository folder: an unprefixed `etc/passwd` is an ordinary
+    // page name, `/etc/passwd` is an attempt to leave, and the two must not be
+    // read as the same request.
     await expect(
       svc.writeFile(workspaceId, '/etc/passwd', 'pwned', { expectedContent: '' }),
-    ).rejects.toThrow('Path traversal detected');
+    ).rejects.toThrow('is outside the knowledge base repository');
   });
 
   it('is not applied at all when the option is absent', async () => {
@@ -647,11 +648,14 @@ describe('WorkspaceService.createFolderZip', () => {
   let svc: WorkspaceService;
   let workspaceDir: string;
   let workspaceId: string;
+  /** The folder a zip request names resolves inside the checkout. */
+  let repoDir: string;
 
   beforeEach(async () => {
     root = await mkTmpRoot();
     const seeded = await seedBranchWorkspace(root, 'target-company-state');
     workspaceDir = seeded.workspaceDir;
+    repoDir = path.join(workspaceDir, 'knowledge-base');
     workspaceId = seeded.workspaceId;
     svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
     await svc.getWorkspacePath(workspaceId);
@@ -671,7 +675,7 @@ describe('WorkspaceService.createFolderZip', () => {
   }
 
   it('zips a folder prefixing entries with the folder name', async () => {
-    const dir = path.join(workspaceDir, 'docs');
+    const dir = path.join(repoDir, 'docs');
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, 'a.md'), 'alpha');
     await fs.writeFile(path.join(dir, 'b.md'), 'beta');
@@ -685,7 +689,7 @@ describe('WorkspaceService.createFolderZip', () => {
   });
 
   it('preserves nested directory structure', async () => {
-    const dir = path.join(workspaceDir, 'tree');
+    const dir = path.join(repoDir, 'tree');
     await fs.mkdir(path.join(dir, 'nested', 'deep'), { recursive: true });
     await fs.writeFile(path.join(dir, 'top.md'), 'top');
     await fs.writeFile(path.join(dir, 'nested', 'mid.md'), 'mid');
@@ -701,7 +705,7 @@ describe('WorkspaceService.createFolderZip', () => {
   });
 
   it('omits .git directories and .gitkeep files', async () => {
-    const dir = path.join(workspaceDir, 'mixed');
+    const dir = path.join(repoDir, 'mixed');
     await fs.mkdir(path.join(dir, '.git', 'objects'), { recursive: true });
     await fs.writeFile(path.join(dir, '.git', 'config'), 'should-not-ship');
     await fs.writeFile(path.join(dir, '.git', 'objects', 'pack'), 'binary');
@@ -714,7 +718,7 @@ describe('WorkspaceService.createFolderZip', () => {
   });
 
   it('honors .bevelignore rules from inside the folder', async () => {
-    const dir = path.join(workspaceDir, 'with-ignore');
+    const dir = path.join(repoDir, 'with-ignore');
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, '.bevelignore'), 'secret.md\n');
     await fs.writeFile(path.join(dir, 'public.md'), 'pub');
@@ -727,12 +731,19 @@ describe('WorkspaceService.createFolderZip', () => {
   });
 
   it('refuses to zip a file (not a directory)', async () => {
-    await fs.writeFile(path.join(workspaceDir, 'lone.md'), 'one');
+    await fs.writeFile(path.join(repoDir, 'lone.md'), 'one');
     await expect(svc.createFolderZip(workspaceId, 'lone.md')).rejects.toThrow('Not a directory');
   });
 
-  it('rejects path traversal outside the workspace', async () => {
-    await expect(svc.createFolderZip(workspaceId, '../escape')).rejects.toThrow('Path traversal');
+  it('refuses a traversing path, and reads an unprefixed one as the repository folder', async () => {
+    await expect(svc.createFolderZip(workspaceId, '../escape')).rejects.toThrow(
+      'is outside the knowledge base repository',
+    );
+    // The unprefixed spelling is the repository's own folder, so it zips.
+    await fs.mkdir(path.join(repoDir, 'unprefixed'), { recursive: true });
+    await fs.writeFile(path.join(repoDir, 'unprefixed', 'a.md'), 'a');
+    const buf = await svc.createFolderZip(workspaceId, 'unprefixed');
+    expect((await unzipEntries(buf)).map((e) => e.name)).toEqual(['unprefixed/a.md']);
   });
 
   it('throws FolderTooLargeError when contents exceed the size cap', async () => {
@@ -745,7 +756,7 @@ describe('WorkspaceService.createFolderZip', () => {
     // in diff.service.seed-atomicity.test.ts. A re-imported namespace via
     // `await import('node:fs/promises')` is sealed and `vi.spyOn` can't
     // redefine its properties.
-    const dir = path.join(workspaceDir, 'too-big');
+    const dir = path.join(repoDir, 'too-big');
     await fs.mkdir(dir, { recursive: true });
     const filePath = path.join(dir, 'huge.bin');
     await fs.writeFile(filePath, 'x'); // 1 byte real; stat will lie below.
@@ -1091,12 +1102,15 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
   let root: string;
   let svc: WorkspaceService;
   let workspaceDir: string;
+  /** Archive and destination alike resolve inside the checkout. */
+  let repoDir: string;
   let workspaceId: string;
 
   beforeEach(async () => {
     root = await mkTmpRoot();
     const seeded = await seedBranchWorkspace(root, 'target-company-state');
     workspaceDir = seeded.workspaceDir;
+    repoDir = path.join(workspaceDir, 'knowledge-base');
     workspaceId = seeded.workspaceId;
     svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
     await svc.getWorkspacePath(workspaceId);
@@ -1110,7 +1124,7 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
     const { default: AdmZip } = await import('adm-zip');
     const zip = new AdmZip();
     for (const [name, content] of Object.entries(files)) zip.addFile(name, Buffer.from(content));
-    await fs.writeFile(path.join(workspaceDir, rel), zip.toBuffer());
+    await fs.writeFile(path.join(repoDir, rel), zip.toBuffer());
   }
 
   it('skips entries the write guard rejects and never writes them to disk', async () => {
@@ -1118,10 +1132,13 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
     const res = await svc.unzipFile(workspaceId, 'a.zip', 'out', async (wsPath) => {
       if (wsPath.endsWith('blocked.md')) throw new Error('Blocked by the ontology-session boundary');
     });
-    expect(res.extracted).toEqual(['out/keep.md']);
+    // An unprefixed destination is the repository's own `out/`, and the
+    // extracted paths are reported workspace-relative, so prefixed.
+    expect(res.extracted).toEqual(['knowledge-base/out/keep.md']);
     expect(res.skipped).toContainEqual({ path: 'blocked.md', reason: 'Blocked by the ontology-session boundary' });
-    expect((await fs.readFile(path.join(workspaceDir, 'out', 'keep.md'))).toString()).toBe('ok');
-    await expect(fs.readFile(path.join(workspaceDir, 'out', 'blocked.md'))).rejects.toThrow();
+    expect((await fs.readFile(path.join(repoDir, 'out', 'keep.md'))).toString()).toBe('ok');
+    await expect(fs.readFile(path.join(repoDir, 'out', 'blocked.md'))).rejects.toThrow();
+    await expect(fs.stat(path.join(workspaceDir, 'out'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('skips a guard-rejected directory entry without creating it on disk', async () => {
@@ -1129,15 +1146,15 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
     const zip = new AdmZip();
     zip.addFile('blocked-dir/', Buffer.alloc(0)); // bare directory entry
     zip.addFile('keep.md', Buffer.from('ok'));
-    await fs.writeFile(path.join(workspaceDir, 'c.zip'), zip.toBuffer());
+    await fs.writeFile(path.join(repoDir, 'c.zip'), zip.toBuffer());
 
     const res = await svc.unzipFile(workspaceId, 'c.zip', 'out', async (wsPath) => {
       if (wsPath.includes('blocked-dir')) throw new Error('Blocked by the ontology-session boundary');
     });
 
-    expect(res.extracted).toEqual(['out/keep.md']);
+    expect(res.extracted).toEqual(['knowledge-base/out/keep.md']);
     expect(res.skipped).toContainEqual({ path: 'blocked-dir/', reason: 'Blocked by the ontology-session boundary' });
-    await expect(fs.stat(path.join(workspaceDir, 'out', 'blocked-dir'))).rejects.toThrow();
+    await expect(fs.stat(path.join(repoDir, 'out', 'blocked-dir'))).rejects.toThrow();
   });
 
   it('does not create the destination directory when every entry is blocked', async () => {
@@ -1147,7 +1164,7 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
     });
     expect(res.extracted).toEqual([]);
     expect(res.skipped).toHaveLength(2);
-    await expect(fs.stat(path.join(workspaceDir, 'out'))).rejects.toThrow();
+    await expect(fs.stat(path.join(repoDir, 'out'))).rejects.toThrow();
   });
 
   // The zip reader cannot tell a missing file from a corrupt one: it answers
@@ -1158,7 +1175,7 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
     await expect(svc.unzipFile(workspaceId, 'nope.zip')).rejects.toMatchObject({
       name: 'PathNotFoundError',
       status: 404,
-      payload: { kind: 'not_found', path: 'nope.zip' },
+      payload: { kind: 'not_found', path: 'knowledge-base/nope.zip' },
     });
   });
 
@@ -1168,14 +1185,15 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
   // missing from the HTTP 404 that the tools' 404 is supposed to match.
   it('the missing-archive 404 carries the next step and a one-line path, on any surface', async () => {
     await expect(svc.unzipFile(workspaceId, 'nope.zip')).rejects.toMatchObject({
-      message: 'There is no file or directory at "nope.zip" in this workspace. Check the path with list_files.',
+      message:
+        'There is no file or directory at "knowledge-base/nope.zip" in this workspace. Check the path with list_files.',
     });
     // A name carrying a line break cannot forge a second line of the answer,
     // in the message or in the `path` a JSON consumer reads.
     const forged = 'a\nb\u2028c.zip';
     await expect(svc.unzipFile(workspaceId, forged)).rejects.toMatchObject({
       status: 404,
-      payload: { kind: 'not_found', path: 'a\\nb\\u2028c.zip' },
+      payload: { kind: 'not_found', path: 'knowledge-base/a\\nb\\u2028c.zip' },
     });
   });
 
@@ -1191,7 +1209,7 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
       await expect(svc.unzipFile(workspaceId, 'racy.zip')).rejects.toMatchObject({
         name: 'PathNotFoundError',
         status: 404,
-        payload: { kind: 'not_found', path: 'racy.zip' },
+        payload: { kind: 'not_found', path: 'knowledge-base/racy.zip' },
       });
     } finally {
       readSpy.mockRestore();
@@ -1201,7 +1219,7 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
   // The other half of that single read: bytes that ARE there but are not a zip
   // are still the archive's problem, not the path's.
   it('a file that is not a zip is still the 422, read from its bytes', async () => {
-    await fs.writeFile(path.join(workspaceDir, 'junk.zip'), 'not really a zip');
+    await fs.writeFile(path.join(repoDir, 'junk.zip'), 'not really a zip');
     await expect(svc.unzipFile(workspaceId, 'junk.zip')).rejects.toMatchObject({
       status: 422,
       payload: { kind: 'unreadable-archive' },
@@ -1211,7 +1229,127 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
   it('extracts everything when no guard is supplied (human / non-agent path)', async () => {
     await writeZip('b.zip', { 'x.md': '1', 'y.md': '2' });
     const res = await svc.unzipFile(workspaceId, 'b.zip', 'out');
-    expect(res.extracted.sort()).toEqual(['out/x.md', 'out/y.md']);
+    expect(res.extracted.sort()).toEqual(['knowledge-base/out/x.md', 'knowledge-base/out/y.md']);
     expect(res.skipped).toEqual([]);
+  });
+});
+
+/**
+ * The service resolves a workspace path in ONE place, and that place does two
+ * things: it places the path inside the repository, and it checks the RESOLVED
+ * location against `<workspaceDir>/<kbDirName>`. Nine inline
+ * `path.resolve(workspaceDir, …)` calls used to do the first half only — which
+ * is how an unprefixed path written by a staging test ended up beside the
+ * checkout, never committed and never pushed.
+ */
+describe('WorkspaceService — every operation resolves inside the repository', () => {
+  let root: string;
+  let svc: WorkspaceService;
+  let workspaceDir: string;
+  let repoDir: string;
+  let workspaceId: string;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const seeded = await seedBranchWorkspace(root, 'target-company-state');
+    workspaceDir = seeded.workspaceDir;
+    repoDir = path.join(workspaceDir, 'knowledge-base');
+    workspaceId = seeded.workspaceId;
+    svc = new WorkspaceService(root, 'https://example.invalid/kb.git', 'knowledge-base', new NodeFs());
+    await svc.getWorkspacePath(workspaceId);
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  /** Whatever sits in the workspace directory other than the checkout. */
+  const besideCheckout = async () => (await fs.readdir(workspaceDir)).filter((n) => n !== 'knowledge-base').sort();
+
+  it('puts every write an unprefixed path names inside the checkout', async () => {
+    await svc.writeFile(workspaceId, 'KnowledgeBase/Report.md', 'body');
+    await svc.writeFileBinary(workspaceId, 'Uploads/TestDocx.docx', Buffer.from('bytes'));
+    await svc.createDirectory(workspaceId, 'Plugins/GTM');
+
+    expect(await fs.readFile(path.join(repoDir, 'KnowledgeBase', 'Report.md'), 'utf-8')).toBe('body');
+    expect(await fs.readFile(path.join(repoDir, 'Uploads', 'TestDocx.docx'), 'utf-8')).toBe('bytes');
+    expect((await fs.stat(path.join(repoDir, 'Plugins', 'GTM'))).isDirectory()).toBe(true);
+    expect(await besideCheckout()).toEqual([]);
+  });
+
+  it('reads, moves and deletes the repository file an unprefixed path names', async () => {
+    await svc.writeFile(workspaceId, 'a.md', 'one');
+
+    expect(await svc.readFile(workspaceId, 'a.md')).toBe('one');
+    expect((await svc.readFileBinary(workspaceId, 'a.md')).toString()).toBe('one');
+    // Both spellings are the same file.
+    expect(await svc.readFile(workspaceId, 'knowledge-base/a.md')).toBe('one');
+
+    await svc.moveEntry(workspaceId, 'a.md', 'Moved/a.md');
+    expect(await fs.readFile(path.join(repoDir, 'Moved', 'a.md'), 'utf-8')).toBe('one');
+
+    await svc.deleteFile(workspaceId, 'Moved/a.md');
+    await expect(fs.stat(path.join(repoDir, 'Moved', 'a.md'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await besideCheckout()).toEqual([]);
+  });
+
+  it('takes its path and folder turns on the repository path, so two spellings are one queue', async () => {
+    const order: string[] = [];
+    const slow = svc.withPathTurn(workspaceId, 'contended.md', async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      order.push('first');
+    });
+    const fast = svc.withPathTurn(workspaceId, 'knowledge-base/contended.md', async () => {
+      order.push('second');
+    });
+    await Promise.all([slow, fast]);
+    expect(order).toEqual(['first', 'second']);
+
+    await svc.withFolderTurn(workspaceId, 'Folder', async () => undefined);
+  });
+
+  it('refuses a path that resolves outside the checkout after normalisation', async () => {
+    // The spelling is contained and normalises into the repository; only
+    // resolving it finds the way out. This is the post-normalisation root check.
+    const outside = path.join(workspaceDir, 'outside');
+    await fs.mkdir(outside, { recursive: true });
+    await fs.symlink(outside, path.join(repoDir, 'Escape'));
+
+    await expect(svc.writeFile(workspaceId, 'Escape/x.md', 'x')).rejects.toThrow('Path traversal detected');
+    await expect(svc.readFile(workspaceId, 'Escape/x.md')).rejects.toThrow('Path traversal detected');
+    expect(await fs.readdir(outside)).toEqual([]);
+  });
+
+  it('cannot be asked for the workspace directory itself, or anything beside the checkout', async () => {
+    await fs.writeFile(path.join(workspaceDir, 'stray.md'), 'already there', 'utf-8');
+    // `stray.md` names the REPOSITORY's `stray.md` now — the one beside the
+    // checkout has no path that reaches it, which is the point.
+    await expect(svc.readFile(workspaceId, 'stray.md')).rejects.toMatchObject({ code: 'ENOENT' });
+    await svc.writeFile(workspaceId, 'stray.md', 'in the repository');
+    expect(await fs.readFile(path.join(workspaceDir, 'stray.md'), 'utf-8')).toBe('already there');
+    expect(await fs.readFile(path.join(repoDir, 'stray.md'), 'utf-8')).toBe('in the repository');
+  });
+
+  it('reserves the checkout folder name at the repository root on create, move and write', async () => {
+    const reserved = /"knowledge-base" is reserved/;
+    await expect(svc.createDirectory(workspaceId, 'knowledge-base/knowledge-base')).rejects.toThrow(reserved);
+    await expect(svc.writeFile(workspaceId, 'knowledge-base/knowledge-base/x.md', 'x')).rejects.toThrow(reserved);
+    await expect(
+      svc.writeFileBinary(workspaceId, 'knowledge-base/knowledge-base/x.bin', Buffer.from('x')),
+    ).rejects.toThrow(reserved);
+
+    await svc.writeFile(workspaceId, 'movable.md', 'm');
+    await expect(svc.moveEntry(workspaceId, 'movable.md', 'knowledge-base/knowledge-base/movable.md')).rejects.toThrow(
+      reserved,
+    );
+    await expect(fs.stat(path.join(repoDir, 'knowledge-base'))).rejects.toMatchObject({ code: 'ENOENT' });
+
+    // The refusal says why, so nobody has to guess.
+    await expect(svc.createDirectory(workspaceId, 'knowledge-base/knowledge-base')).rejects.toThrow(
+      /it is the checkout folder's name/,
+    );
+    // A namesake deeper in the tree is ordinary content.
+    await svc.createDirectory(workspaceId, 'KnowledgeBase/knowledge-base');
+    expect((await fs.stat(path.join(repoDir, 'KnowledgeBase', 'knowledge-base'))).isDirectory()).toBe(true);
   });
 });

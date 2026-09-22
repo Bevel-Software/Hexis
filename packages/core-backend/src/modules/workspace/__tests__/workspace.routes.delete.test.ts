@@ -35,11 +35,14 @@ const stubCreatorAccess: ICreatorAccess = {
 const USER_ID = 'user-1';
 const USER = { id: USER_ID, email: 'alice@example.com', name: 'Alice' };
 const WORKSPACE_ID = 'feature-branch';
+const KB = 'knowledge-base';
 
 interface Harness {
   server: Server;
   baseUrl: string;
   workspaceDir: string;
+  /** The checkout inside it — where every path the route accepts resolves. */
+  repoDir: string;
   /** Exposed so a test can assert the PATH the route handed the service. */
   deleteFileMock: ReturnType<typeof vi.fn>;
 }
@@ -100,7 +103,7 @@ async function makeHarness(): Promise<Harness> {
     workflowService,
     eventBus,
     accessControl,
-    'knowledge-base',
+    KB,
     stubCreatorAccess,
     // Not exercised here — only `.bevelignore`'s tree visibility consults it.
     { isAdmin: async () => false } as unknown as IAdminAccessService,
@@ -119,6 +122,7 @@ async function makeHarness(): Promise<Harness> {
     server,
     baseUrl: `http://127.0.0.1:${port}`,
     workspaceDir,
+    repoDir: path.join(workspaceDir, KB),
     deleteFileMock: workspaceServiceMock.deleteFile as unknown as ReturnType<typeof vi.fn>,
   };
 }
@@ -154,11 +158,11 @@ describe('DELETE /workspace/:id/file — recursive folder delete (BEVA-132)', ()
     //   sub/a.md
     //   sub/deep/b.md
     //   other/c.md
-    await fs.mkdir(path.join(h.workspaceDir, 'parent/sub/deep'), { recursive: true });
-    await fs.mkdir(path.join(h.workspaceDir, 'parent/other'), { recursive: true });
-    await fs.writeFile(path.join(h.workspaceDir, 'parent/sub/a.md'), 'a');
-    await fs.writeFile(path.join(h.workspaceDir, 'parent/sub/deep/b.md'), 'b');
-    await fs.writeFile(path.join(h.workspaceDir, 'parent/other/c.md'), 'c');
+    await fs.mkdir(path.join(h.repoDir, 'parent/sub/deep'), { recursive: true });
+    await fs.mkdir(path.join(h.repoDir, 'parent/other'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'parent/sub/a.md'), 'a');
+    await fs.writeFile(path.join(h.repoDir, 'parent/sub/deep/b.md'), 'b');
+    await fs.writeFile(path.join(h.repoDir, 'parent/other/c.md'), 'c');
 
     const res = await fetch(
       `${h.baseUrl}/api/workspace/${WORKSPACE_ID}/file?path=${encodeURIComponent('parent')}`,
@@ -169,13 +173,13 @@ describe('DELETE /workspace/:id/file — recursive folder delete (BEVA-132)', ()
     expect(body.status).toBe('deleted');
     expect(body.count).toBe(3);
     // The whole subtree — including the empty sub-folder shells — is gone.
-    expect(await exists(path.join(h.workspaceDir, 'parent'))).toBe(false);
+    expect(await exists(path.join(h.repoDir, 'parent'))).toBe(false);
   });
 
   it('removes a folder that contains only empty sub-folders (no tracked files)', async () => {
     h = await makeHarness();
-    await fs.mkdir(path.join(h.workspaceDir, 'parent/emptyA/nested'), { recursive: true });
-    await fs.mkdir(path.join(h.workspaceDir, 'parent/emptyB'), { recursive: true });
+    await fs.mkdir(path.join(h.repoDir, 'parent/emptyA/nested'), { recursive: true });
+    await fs.mkdir(path.join(h.repoDir, 'parent/emptyB'), { recursive: true });
 
     const res = await fetch(
       `${h.baseUrl}/api/workspace/${WORKSPACE_ID}/file?path=${encodeURIComponent('parent')}`,
@@ -184,7 +188,7 @@ describe('DELETE /workspace/:id/file — recursive folder delete (BEVA-132)', ()
     expect(res.status).toBe(200);
     const body = (await res.json()) as { status: string; count: number };
     expect(body.count).toBe(0);
-    expect(await exists(path.join(h.workspaceDir, 'parent'))).toBe(false);
+    expect(await exists(path.join(h.repoDir, 'parent'))).toBe(false);
   });
 });
 
@@ -194,7 +198,8 @@ describe('DELETE /workspace/:id/file — one file identity', () => {
     // `.//note.md` must not coordinate separately from a save on `note.md`.
     const h = await makeHarness();
     try {
-      await fs.writeFile(path.join(h.workspaceDir, 'note.md'), 'bye', 'utf-8');
+      await fs.mkdir(h.repoDir, { recursive: true });
+      await fs.writeFile(path.join(h.repoDir, 'note.md'), 'bye', 'utf-8');
 
       const res = await fetch(
         `${h.baseUrl}/api/workspace/${WORKSPACE_ID}/file?path=${encodeURIComponent('.//note.md')}`,
@@ -202,7 +207,10 @@ describe('DELETE /workspace/:id/file — one file identity', () => {
       );
 
       expect(res.status).toBe(200);
-      expect(h.deleteFileMock).toHaveBeenCalledWith(WORKSPACE_ID, 'note.md');
+      // One identity, and it is the REPOSITORY path: the spelling is collapsed
+      // and the checkout folder added, so the lock row a delete takes is the one
+      // a save on the same file takes.
+      expect(h.deleteFileMock).toHaveBeenCalledWith(WORKSPACE_ID, `${KB}/note.md`);
     } finally {
       await closeServer(h.server);
       await fs.rm(h.workspaceDir, { recursive: true, force: true });
