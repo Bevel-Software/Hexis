@@ -58,6 +58,32 @@ let mcpUnavailable = false;
 let revision = 'rev-1';
 /** Every catalog-revision read's bearer, so the check's credential is checkable. */
 const revisionReads: (string | undefined)[] = [];
+/**
+ * EVERY request this process makes, by path, and how many of them are still
+ * open.
+ *
+ * `revisionReads` alone cannot answer "does an idle connection cost the
+ * deployment anything?", because it only sees one route. A mechanism that
+ * asked on some OTHER path — or, worse, opened one request and held it for the
+ * life of the connection — would leave that counter at rest and the suite
+ * green while every idle laptop in the estate pinned a socket on the
+ * deployment. That is not hypothetical: it is what shipped, and it took a
+ * proxy's access log outside the suite to see it. So the accounting is here
+ * now, and it is path-blind on purpose.
+ */
+const requests: string[] = [];
+/**
+ * The requests the stub has not answered yet, by path — a held socket is one
+ * that never leaves.
+ *
+ * `/api/mcp` is expected to be among them and is excluded where it matters:
+ * that is the MCP session the remote manual's registration created, which is
+ * what `tools/list` is BUILT from. It exists because the connection serves
+ * tools at all, is one per process rather than one per refresh, and is
+ * identical whether anyone is using the connection or not. Every OTHER held
+ * request is a mechanism that chose to hold it.
+ */
+const openRequests = new Map<http.ServerResponse, string>();
 
 /** Change what the deployment serves, exactly as a default-branch commit would. */
 function commit(tools: string[], local: string[] = deploymentLocal): void {
@@ -69,6 +95,12 @@ function commit(tools: string[], local: string[] = deploymentLocal): void {
 beforeAll(async () => {
   httpServer = http.createServer((req, res) => {
     let body = '';
+    // Recorded on ARRIVAL and cleared when the response finishes, so a request
+    // the deployment never answers — the shape a long-lived stream takes —
+    // stays visible in `openRequests` for as long as it is held.
+    requests.push((req.url ?? '/').split('?')[0]!);
+    openRequests.set(res, (req.url ?? '/').split('?')[0]!);
+    res.on('close', () => openRequests.delete(res));
     req.on('data', (chunk: Buffer) => (body += chunk.toString('utf8')));
     req.on('end', () => {
       void (async () => {
@@ -172,12 +204,28 @@ afterAll(async () => {
 afterEach(() => {
   vi.restoreAllMocks();
   revisionReads.length = 0;
+  requests.length = 0;
+  openRequests.clear();
   advertisesCatalogRevision = true;
   mcpUnavailable = false;
   deploymentLocal = [];
 });
 
 const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * How long the idle cases watch an untouched connection before concluding it
+ * asked for nothing.
+ *
+ * Long on purpose, and worth the seconds. A short window only rules out a
+ * mechanism faster than itself: at 400ms every timer this code has ever
+ * carried — the 2s heartbeat, the 3s poll before it, the 5s throttle — would
+ * have gone unnoticed, and the criterion these two cases exist for has been
+ * broken twice in ways a suite this fast reported as green. Eight seconds
+ * clears all three with room to spare, and is what the live runs against a
+ * real deployment used for the same claim.
+ */
+const IDLE_OBSERVATION_MS = 8_000;
 
 /**
  * A connected client, its notification log, and the teardown for both.
@@ -385,7 +433,7 @@ describe('a manual added on the deployment reaches an already-connected client',
       expect(atStartup).toBe(1);
 
       commit(['ping', 'serper_search']);
-      await settle(400);
+      await settle(IDLE_OBSERVATION_MS);
 
       expect(revisionReads.length).toBe(atStartup);
       expect(s.notifications).toEqual([]);
@@ -393,6 +441,72 @@ describe('a manual added on the deployment reaches an already-connected client',
       // The next use is a listing, which runs its own check and waits for it.
       expect(await listed(s.client)).toContain('serper_search');
       expect(revisionReads.length).toBe(atStartup + 1);
+    } finally {
+      await s.shutdown();
+    }
+  });
+
+  /**
+   * AND IT HOLDS NOTHING OPEN. The test above counts one route; this one
+   * counts every request on every path, and how many of them the deployment
+   * is still holding.
+   *
+   * The distinction is not academic. "An idle connection costs the deployment
+   * nothing" has two ways to fail, and only one of them moves a poll counter.
+   * A subscription — one request, opened once, held for the life of the
+   * connection — polls nothing and asks nothing on a timer, so every
+   * assertion the suite had stayed green while each idle laptop in the estate
+   * pinned a socket on the deployment for hours. That version shipped, and it
+   * took a proxy's access log outside the suite to notice. The criterion is
+   * explicit about it now ("no timer and no held socket per laptop"), so this
+   * is the assertion that would have caught it.
+   */
+  it('holds nothing open while idle, and asks nothing on any path', { timeout: 60_000 }, async () => {
+    commit(['ping']);
+    const s = await start();
+    try {
+      /**
+       * The exact responses discovery left open — the MCP session the remote
+       * manual's registration created, which is what `tools/list` is built
+       * from, and which exists whether anyone uses the connection or not.
+       *
+       * Two conditions, because either alone has a hole. Exempting the PATH
+       * `/api/mcp` wholesale would let a second request on that path — a
+       * subscription opened against the MCP endpoint, exactly the shape of
+       * the mechanism this case forbids — pass as "the session". Exempting
+       * these RESPONSES alone would let a stream opened during discovery in,
+       * since it would be held by the time this baseline is taken. So a held
+       * request is allowed only if it is on the session's path AND is one of
+       * the responses discovery left behind.
+       */
+      const sessionAtStartup = new Set(openRequests.keys());
+      const heldBeyondTheSession = (): string[] =>
+        [...openRequests.entries()]
+          .filter(([res, path]) => path !== '/api/mcp' || !sessionAtStartup.has(res))
+          .map(([, path]) => path);
+      const atStartup = requests.length;
+
+      commit(['ping', 'serper_search']);
+      await settle(IDLE_OBSERVATION_MS);
+
+      // Not "no catalog reads" — NO REQUESTS AT ALL, on any path, by any
+      // name, and nothing new left hanging.
+      expect(requests.slice(atStartup)).toEqual([]);
+      expect(heldBeyondTheSession()).toEqual([]);
+      expect(s.notifications).toEqual([]);
+
+      // The change is not lost, only unasked-for: the next use collects it.
+      const heldWhileIdle = [...openRequests.values()];
+      expect(await listed(s.client)).toContain('serper_search');
+
+      // …and the refresh that listing ran REPLACED the session rather than
+      // adding to it. Counted rather than identity-checked here, because the
+      // re-registration necessarily dials a new one: what must not grow is
+      // how many the deployment is holding, and every one of them must still
+      // be the MCP session itself.
+      const heldAfterUse = [...openRequests.values()];
+      expect(heldAfterUse.length).toBe(heldWhileIdle.length);
+      expect(heldAfterUse.filter((path) => path !== '/api/mcp')).toEqual([]);
     } finally {
       await s.shutdown();
     }
