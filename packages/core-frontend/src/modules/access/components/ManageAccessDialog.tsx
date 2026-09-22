@@ -96,23 +96,58 @@ interface VerbSet {
   download: boolean;
 }
 
+/** The three tiers a row can sit at, broadest first; download is not one of them. */
+type Tier = 'Owner' | 'Can edit' | 'Can read';
+const TIERS: Tier[] = ['Owner', 'Can edit', 'Can read'];
+
+/** The tier a set sits at — its highest held one — or null when it holds nothing (a denied row). */
+function tierOf(v: VerbSet): Tier | null {
+  return v.owner ? 'Owner' : v.write ? 'Can edit' : v.read ? 'Can read' : null;
+}
+
 /**
- * What each item of a row's verb menu MEANS as a whole set — the effective
- * verbs the principal ends up with here after picking it. This is the model
- * the row menu works in: a pick is not a toggle of one box but a statement of
- * the whole set, and the dialog writes whatever difference that implies
- * (denials for what the set drops, grants for what it adds).
+ * The set a row ends up with after a click on one item of its menu, or null
+ * when the item has nothing to do from where the row is (the item renders
+ * disabled). The dialog then writes the DIFFERENCE between that set and what
+ * the principal effectively has here (denials for what the set drops, grants
+ * for what it adds — see `doApplyVerbSet`).
  *
- * The folds are the resolver's own, so a set reads the way the file resolves:
- * Owner confers edit, download and read; Can edit confers read; Can download
- * confers read (a person trusted with a copy may open it).
+ * The menu is TWO AXES, which is what its separator has always drawn, and a
+ * click moves one axis and leaves the other where it is:
+ *
+ *   - Owner / Can edit / Can read are one exclusive tier. An unchecked tier is
+ *     where the row goes; the held tier steps DOWN one (Owner → Can edit → Can
+ *     read), which is what "unticking" the top of a nested set can mean. Can
+ *     read at the top has nothing below it — taking read away is what Remove
+ *     and Deny are for — so it is disabled there.
+ *   - Can download toggles on its own. Under Owner it is conferred, not chosen,
+ *     so it is disabled there; and leaving Owner leaves it behind too, since
+ *     the demoted person never held it independently. Turning it on carries
+ *     read, the resolver's own fold (a person trusted with a copy may open it).
+ *
+ * Each item used to apply a fixed whole set instead — Can edit meant "edit and
+ * no download", Can download meant "download and no edit" — so raising one axis
+ * silently wrote a revoke or a denial on the other. That is the bug this
+ * function replaces.
  */
-const ROLE_SET: Record<Role, VerbSet> = {
-  Owner: { owner: true, write: true, read: true, download: true },
-  'Can edit': { owner: false, write: true, read: true, download: false },
-  'Can read': { owner: false, write: false, read: true, download: false },
-  'Can download': { owner: false, write: false, read: true, download: true },
-};
+function nextVerbSet(current: VerbSet, role: Role): VerbSet | null {
+  if (role === 'Can download') {
+    if (current.owner) return null;
+    return { ...current, download: !current.download, read: true };
+  }
+  const held = tierOf(current);
+  const target: Tier | null =
+    role === held ? (TIERS[TIERS.indexOf(role) + 1] ?? null) : role;
+  if (target === null) return null;
+  return {
+    owner: target === 'Owner',
+    write: target !== 'Can read',
+    read: true,
+    // Owner confers download; below it the axis keeps what the row chose, and
+    // a row coming DOWN from Owner chose nothing.
+    download: target === 'Owner' ? true : current.owner ? false : current.download,
+  };
+}
 
 /**
  * The verbs in the order a set has to be APPLIED: broadest first.
@@ -381,7 +416,7 @@ function lookupDenials(
 }
 
 /** The checklist order; download is independent and rendered separately. */
-const TIER_ROLES: Role[] = ['Owner', 'Can edit', 'Can read'];
+const TIER_ROLES: Role[] = TIERS;
 
 /**
  * A row's verb menu, top to bottom — the tiers, then download, then (added by
@@ -1625,6 +1660,9 @@ export function ManageAccessDialog({
                     (role, i) => {
                       const checked = p.verbs[ROLE_TO_KEY[role]];
                       const note = verbNote(p, ROLE_TO_VERB[role]);
+                      // Where a click on this item takes the row; null means
+                      // nowhere from here, and the item says so by being off.
+                      const next = nextVerbSet(p.verbs, role);
                       return (
                         // A Fragment, not a wrapper div: the items must stay
                         // DIRECT children of the panel, which is the box the
@@ -1636,14 +1674,14 @@ export function ManageAccessDialog({
                             <div className="my-1 border-t border-line" />
                           )}
                           <MenuItem
-                            disabled={busy}
+                            disabled={busy || next === null}
                             active={checked}
                             // The note is the row's own explanation, not part of
                             // what the item DOES: keep it out of the name ("Can
                             // read"), and give it to assistive tech as the
                             // description it is.
                             aria-description={note}
-                            onClick={() => doApplyVerbSet(p, ROLE_SET[role])}
+                            onClick={() => next && doApplyVerbSet(p, next)}
                             trailing={
                               <span className="flex items-center gap-1.5">
                                 {note && (
