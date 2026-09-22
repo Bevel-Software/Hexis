@@ -95,6 +95,42 @@ describe('runShell', () => {
     expect(p.exit).toHaveBeenCalledWith(0);
   });
 
+  it('a crash — an unhandled rejection or an uncaught exception — runs the sequence and exits 1', async () => {
+    for (const event of ['unhandledRejection', 'uncaughtException'] as const) {
+      const core = fakeCore();
+      const p = fakeProcess();
+      await runShell({ services: async () => core, listen: async () => fakeServer(core.order), process: p.process });
+      p.signal(event, new Error('a bug'));
+      await exited(p.exit);
+      expect(core.order.at(-1)).toBe('db.end');
+      expect(p.exit).toHaveBeenCalledWith(1);
+    }
+  });
+
+  it('a signal that lands while the services are still being built lets go of nothing and exits 0', async () => {
+    const p = fakeProcess();
+    const listen = vi.fn();
+    let finishServices!: (core: ShellCore) => void;
+    const booting = runShell({
+      services: () =>
+        new Promise<ShellCore>((resolve) => {
+          finishServices = resolve;
+        }),
+      listen,
+      process: p.process,
+    });
+    p.signal('SIGTERM');
+    await exited(p.exit);
+    expect(p.exit).toHaveBeenCalledWith(0);
+    expect(listen).not.toHaveBeenCalled();
+    // The services arriving afterwards start nothing: the process has
+    // already been told to exit, and nothing begins listening on its way out.
+    finishServices(fakeCore());
+    await booting;
+    expect(listen).not.toHaveBeenCalled();
+    expect(p.exit).toHaveBeenCalledTimes(1);
+  });
+
   it('a second way of ending joins the sequence already under way', async () => {
     const core = fakeCore();
     const p = fakeProcess();

@@ -89,6 +89,10 @@ export async function runShell<Core extends ShellCore>(io: ShellIo<Core>): Promi
 
   try {
     core = await io.services();
+    // A stop that landed while the services were being built has already
+    // let go of what there was and asked the process to exit: nothing
+    // starts listening on its way out.
+    if (exiting) return;
     server = await io.listen(core);
   } catch (err) {
     log.error('fatal boot error', { err });
