@@ -111,14 +111,24 @@ function escapedCopy(err: Error, seen: Set<Error>): Error {
   if (cause !== undefined) {
     Object.defineProperty(copy, 'cause', { value: nested(cause), enumerable: false, writable: true, configurable: true });
   }
-  // An `AggregateError`'s failures — non-enumerable, and the whole point of it.
+  // An `AggregateError`'s failures — non-enumerable there, and the whole
+  // point of it; kept as enumerable as the source had it, so an ordinary
+  // error that carries an `errors` list of its own still shows it.
   const errors = (err as { errors?: unknown }).errors;
   if (Array.isArray(errors)) {
-    Object.defineProperty(copy, 'errors', { value: errors.map(nested), enumerable: false, writable: true, configurable: true });
+    Object.defineProperty(copy, 'errors', {
+      value: errors.map(nested),
+      enumerable: Object.prototype.propertyIsEnumerable.call(err, 'errors'),
+      writable: true,
+      configurable: true,
+    });
   }
   // Own enumerable fields (a `code`, a `status`) travel with the error.
   for (const [key, value] of Object.entries(err)) {
     if (!(key in copy)) (copy as unknown as Record<string, unknown>)[key] = typeof value === 'string' ? oneLine(value) : value;
   }
+  // `seen` is the path down, not everything met: one failure listed twice
+  // under an AggregateError is copied twice, and only a true loop is cut.
+  seen.delete(err);
   return copy;
 }

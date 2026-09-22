@@ -118,6 +118,17 @@ describe('createConsoleLogger', () => {
     expect(second).toBeInstanceOf(AggregateError);
     expect((second.errors[0] as Error).message).toBe('one\\nA');
     expect(second.errors[1]).toBe('two\\nB');
+    // One failure listed twice is not a loop: both copies keep their text.
+    const shared = new Error('same\nS');
+    createConsoleLogger({ module: 'sync' }).error('failed', { err: new AggregateError([shared, shared], 'twice') });
+    const third = error.mock.calls[2]?.[1] as AggregateError;
+    expect(third.errors.map((e) => (e as Error).message)).toEqual(['same\\nS', 'same\\nS']);
+    // An ordinary error's own enumerable `errors` field stays visible.
+    const plain = Object.assign(new Error('plain'), { errors: ['x\ny'] });
+    createConsoleLogger({ module: 'sync' }).error('failed', { err: plain });
+    const fourth = error.mock.calls[3]?.[1] as Error & { errors: string[] };
+    expect(Object.keys(fourth)).toContain('errors');
+    expect(fourth.errors).toEqual(['x\\ny']);
   });
 
   it('cuts a cause chain that loops back on itself', () => {
