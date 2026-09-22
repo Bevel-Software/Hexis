@@ -37,6 +37,8 @@ function harness() {
   /** Everything the erasure did, in order, as `<verb>:<table>` / lock labels. */
   const order: string[] = [];
   const locked: unknown[][] = [];
+  /** The lock statements as written, so the FUNCTION is pinned, not just its keys. */
+  const lockSql: string[] = [];
   const done = Promise.resolve([]);
   const tx = {
     execute: async (statement: { queryChunks?: unknown[] }) => {
@@ -46,6 +48,7 @@ function harness() {
         return { rows: [] };
       }
       order.push(text.includes('_shared') ? 'gate:shared' : 'gate:exclusive');
+      lockSql.push(text);
       locked.push((statement.queryChunks ?? []).filter((c) => typeof c === 'number'));
       return { rows: [] };
     },
@@ -75,7 +78,7 @@ function harness() {
     update: () => ({ set: () => ({ where: async () => undefined }) }),
     transaction: async <T,>(fn: (t: typeof tx) => Promise<T>) => fn(tx),
   } as unknown as Database;
-  return { svc: new AccountErasureService(db), order, locked };
+  return { svc: new AccountErasureService(db), order, locked, lockSql };
 }
 
 describe('AccountErasureService: approvals are rewritten under the approval lock', () => {
@@ -97,6 +100,13 @@ describe('AccountErasureService: approvals are rewritten under the approval lock
     // the shared form is the per-request writers', not this.
     expect(h.locked).toEqual([[4207, 0]]);
     expect(h.order).not.toContain('gate:shared');
+    // And TRANSACTION-scoped. The session-scoped `pg_advisory_lock` would
+    // satisfy every assertion above and then keep an exclusive lock on a
+    // pooled connection after this transaction ends — held by whatever request
+    // borrows that connection next, released by nobody.
+    expect(h.lockSql).toHaveLength(1);
+    expect(h.lockSql[0]).toContain('pg_advisory_xact_lock');
+    expect(h.lockSql[0]).not.toMatch(/pg_advisory_lock\b/);
     // Still inside the same transaction as the user row's deletion, which is
     // what keeps the lock held for the whole rewrite.
     expect(h.order.indexOf('delete:users')).toBeGreaterThan(gate);

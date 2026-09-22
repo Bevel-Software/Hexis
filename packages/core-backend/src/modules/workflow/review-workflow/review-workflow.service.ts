@@ -14,7 +14,7 @@ import type {
   PullRequestState,
 } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
-import { changeRequests, prComments, prFileApprovals, prMergeLog } from '../../database/schema.js';
+import { changeRequests, prComments, prFileApprovals, prMergeLog, users } from '../../database/schema.js';
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { GitService } from '../git/git.service.js';
@@ -102,6 +102,24 @@ class ApprovalAuthError extends WorkflowDomainError {
     }[reason];
     super(msg, status);
     this.name = 'ApprovalAuthError';
+  }
+}
+
+/**
+ * The account this approval would be recorded in the name of is gone — erased
+ * between the request being authenticated and its write reaching the table.
+ *
+ * 401 and not 403: the same answer `requireUser` gives a token whose account
+ * no longer exists, which is what the NEXT request from this caller will get.
+ * Signing in again makes a fresh account at the same address, and approvals
+ * made then are that new person's.
+ */
+class ApprovalAccountGoneError extends WorkflowDomainError {
+  constructor() {
+    super('This account no longer exists — sign in again to approve.', 401, {
+      kind: 'approval-account-erased',
+    });
+    this.name = 'ApprovalAccountGoneError';
   }
 }
 
@@ -553,6 +571,25 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     // carried with the rest, or follows it and is honestly an approval of a
     // head that has already moved — which the dialog then shows as stale.
     await this.withApprovalLock(prNumber, async (tx) => {
+      // Is there still an account to record this in the name of?
+      //
+      // The route proved there was before the access read above, and that read
+      // fetches remotes — seconds, on a cold clone. An erasure that commits in
+      // that window has already rewritten every row this person's address was
+      // on, so an insert landing after it would put the address back, on a row
+      // created after the last trace of them was supposed to be gone. The lock
+      // makes the two orderings the only two: erased first and this finds
+      // nothing and refuses; approved first and the erasure's own rewrite —
+      // which waits for this transaction — takes the new row with the rest.
+      //
+      // By id, not by address: a NEW account signed in at the same address
+      // since is a different person, and this caller is not them.
+      const [account] = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, user.id))
+        .limit(1);
+      if (!account) throw new ApprovalAccountGoneError();
       await tx
         .insert(prFileApprovals)
         .values({

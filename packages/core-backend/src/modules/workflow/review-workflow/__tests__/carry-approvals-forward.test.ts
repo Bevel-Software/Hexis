@@ -70,6 +70,16 @@ function conditions(clause: unknown): Record<string, unknown> {
   return found;
 }
 
+/** The table a statement names, as far as this stub needs to know. */
+function tableOf(target: unknown): string {
+  const t = target as Record<symbol | string, unknown>;
+  for (const sym of Object.getOwnPropertySymbols(t)) {
+    const name = String(t[sym]);
+    if (name && name !== 'undefined' && !name.startsWith('[object')) return name;
+  }
+  return 'unknown';
+}
+
 /** The SQL text of a drizzle statement, literal chunks only. */
 function statementText(statement: { queryChunks?: unknown[] }): string {
   return (statement.queryChunks ?? [])
@@ -78,7 +88,10 @@ function statementText(statement: { queryChunks?: unknown[] }): string {
     .join(' ');
 }
 
-function makeService(stored: ApprovalRow[], opts: { lockError?: unknown } = {}) {
+function makeService(
+  stored: ApprovalRow[],
+  opts: { lockError?: unknown; accountGone?: boolean } = {},
+) {
   const selected: Record<string, unknown>[] = [];
   const inserted: ApprovalRow[][] = [];
   /**
@@ -89,22 +102,39 @@ function makeService(stored: ApprovalRow[], opts: { lockError?: unknown } = {}) 
    */
   const order: string[] = [];
   const locked: unknown[][] = [];
+  /** The lock statements as written, so the FUNCTION is pinned, not just its keys. */
+  const lockSql: string[] = [];
   /** `select`, wired to record under whichever handle it was reached through. */
   const selectVia = (label: string) => () => ({
-    from: () => ({
-      where: (clause: unknown) => {
-        const where = conditions(clause);
-        order.push(label);
-        selected.push(where);
-        return Promise.resolve(
-          stored.filter(
-            (r) =>
-              (where.pr_number === undefined || r.prNumber === where.pr_number) &&
-              (where.head_sha === undefined || r.headSha === where.head_sha),
-          ),
-        );
-      },
-    }),
+    from: (table: unknown) => {
+      // `approveFile` re-reads the caller's account under the lock, so an
+      // approval whose account was erased while the request was in flight is
+      // refused rather than putting the erased address back on a fresh row.
+      if (tableOf(table) === 'users') {
+        return {
+          where: () => ({
+            limit: async () => {
+              order.push('select:users');
+              return opts.accountGone ? [] : [{ id: 'u1' }];
+            },
+          }),
+        };
+      }
+      return {
+        where: (clause: unknown) => {
+          const where = conditions(clause);
+          order.push(label);
+          selected.push(where);
+          return Promise.resolve(
+            stored.filter(
+              (r) =>
+                (where.pr_number === undefined || r.prNumber === where.pr_number) &&
+                (where.head_sha === undefined || r.headSha === where.head_sha),
+            ),
+          );
+        },
+      };
+    },
   });
   const tx = {
     execute: async (statement: { queryChunks?: unknown[] }) => {
@@ -115,6 +145,7 @@ function makeService(stored: ApprovalRow[], opts: { lockError?: unknown } = {}) 
       }
       // `_shared` first: the exclusive function's name is a prefix of it.
       order.push(text.includes('_shared') ? 'gate' : 'lock');
+      lockSql.push(text);
       // Each lock's two keys, dug out of the tagged template's chunks: drizzle
       // keeps the literal text in `StringChunk` objects and the interpolated
       // numbers as bare primitives between them.
@@ -195,7 +226,7 @@ function makeService(stored: ApprovalRow[], opts: { lockError?: unknown } = {}) 
     {} as unknown as WorkspaceService,
     {} as unknown as GitService,
   );
-  return { svc, db, stored, selected, inserted, order, locked };
+  return { svc, db, stored, selected, inserted, order, locked, lockSql };
 }
 
 describe('ReviewWorkflowService.carryApprovalsForward', () => {
@@ -269,6 +300,15 @@ describe('ReviewWorkflowService.carryApprovalsForward', () => {
       [4207, 0],
       [4207, PR],
     ]);
+    // Both TRANSACTION-scoped. The session-scoped `pg_advisory_lock` would
+    // satisfy every assertion above and then leave the lock held on a pooled
+    // connection after this transaction ends — taken by one request, released
+    // by nobody, and blocking whichever request borrows that connection next.
+    expect(h.lockSql).toEqual([
+      expect.stringContaining('pg_advisory_xact_lock_shared'),
+      expect.stringContaining('pg_advisory_xact_lock'),
+    ]);
+    expect(h.lockSql.some((statement) => /pg_advisory_lock\b/.test(statement))).toBe(false);
   });
 
   it('does nothing at all when the head did not move', async () => {
@@ -325,9 +365,8 @@ describe('ReviewWorkflowService.approveFile: written under the same lock', () =>
     },
   ];
 
-  it('inserts inside the transaction, and only re-reads the states after it', async () => {
-    const h = makeService([]);
-    const svc = new ReviewWorkflowService(
+  const approver = (h: ReturnType<typeof makeService>) =>
+    new ReviewWorkflowService(
       h.db,
       {
         canWriteAtRef: async () => true,
@@ -349,7 +388,9 @@ describe('ReviewWorkflowService.approveFile: written under the same lock', () =>
       {} as unknown as GitService,
     );
 
-    const states = await svc.approveFile(
+  it('inserts inside the transaction, and only re-reads the states after it', async () => {
+    const h = makeService([]);
+    const states = await approver(h).approveFile(
       PR,
       'Sales/Deal.md',
       USER,
@@ -363,7 +404,15 @@ describe('ReviewWorkflowService.approveFile: written under the same lock', () =>
     // The write is inside the lock; the read that answers the UI is after it,
     // through the pool — holding a lock across it would serialize every
     // approval behind an access-control read.
-    expect(h.order).toEqual(['begin', 'timeout', 'gate', 'lock', 'insert', 'db.select']);
+    expect(h.order).toEqual([
+      'begin',
+      'timeout',
+      'gate',
+      'lock',
+      'select:users',
+      'insert',
+      'db.select',
+    ]);
     expect(h.locked).toEqual([
       [4207, 0],
       [4207, PR],
@@ -372,6 +421,34 @@ describe('ReviewWorkflowService.approveFile: written under the same lock', () =>
       { prNumber: PR, path: 'Sales/Deal.md', approverEmail: 'bob@bevel.software', headSha: NEW_HEAD },
     ]);
     expect(states.find((st) => st.path === 'Sales/Deal.md')?.isApproved).toBe(true);
+  });
+
+  it('refuses when the approver was erased while the request was in flight', async () => {
+    // The route proved this account existed; then the access read below it
+    // fetched remotes, which on a cold clone is seconds, and an erasure
+    // committed inside that window. It has already rewritten every row this
+    // address was on, so inserting now would put it back on a row made after
+    // the last trace of them was supposed to be gone.
+    const h = makeService([], { accountGone: true });
+
+    await expect(
+      approver(h).approveFile(
+        PR,
+        'Sales/Deal.md',
+        USER,
+        FILES,
+        NEW_HEAD,
+        'current-company-state',
+        null,
+        'ws-1',
+      ),
+    ).rejects.toMatchObject({ status: 401, payload: { kind: 'approval-account-erased' } });
+
+    // Checked under the lock and before the insert, so the erasure's own
+    // rewrite cannot have run between the two — and nothing was written.
+    expect(h.order).toEqual(['begin', 'timeout', 'gate', 'lock', 'select:users']);
+    expect(h.inserted).toHaveLength(0);
+    expect(h.stored).toHaveLength(0);
   });
 });
 
