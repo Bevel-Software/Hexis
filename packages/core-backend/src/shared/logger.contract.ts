@@ -84,16 +84,41 @@ function escapedCopy(err: Error, seen: Set<Error>): Error {
     // like a frame would otherwise move the boundary up and pass the rest of
     // itself through raw. A stack that does not open with the header is not
     // one this code knows the shape of, and is escaped whole.
+    // The frames keep their lines; each is still escaped within its line, for
+    // a stack that is not Node's own (a foreign runtime's, a hand-built one)
+    // and carries a control character after a frame-shaped line.
     const head = Error.prototype.toString.call(err);
     const frames = err.stack.startsWith(head) ? err.stack.indexOf('\n    at ', head.length) : -1;
-    const stack = frames === -1 ? oneLine(err.stack) : `${oneLine(err.stack.slice(0, frames))}${err.stack.slice(frames)}`;
+    const stack =
+      frames === -1
+        ? oneLine(err.stack)
+        : `${oneLine(err.stack.slice(0, frames))}\n${err.stack
+            .slice(frames + 1)
+            .split('\n')
+            .map(oneLine)
+            .join('\n')}`;
     Object.defineProperty(copy, 'stack', { value: stack, enumerable: false, writable: true, configurable: true });
   }
+  const nested = (value: unknown): unknown =>
+    value instanceof Error
+      ? seen.has(value)
+        ? '[circular]'
+        : escapedCopy(value, seen)
+      : typeof value === 'string'
+        ? oneLine(value)
+        : value;
   const cause = (err as { cause?: unknown }).cause;
   if (cause !== undefined) {
-    Object.defineProperty(copy, 'cause', {
-      value: cause instanceof Error ? (seen.has(cause) ? '[circular]' : escapedCopy(cause, seen)) : cause,
-      enumerable: false,
+    Object.defineProperty(copy, 'cause', { value: nested(cause), enumerable: false, writable: true, configurable: true });
+  }
+  // An `AggregateError`'s failures — non-enumerable there, and the whole
+  // point of it; kept as enumerable as the source had it, so an ordinary
+  // error that carries an `errors` list of its own still shows it.
+  const errors = (err as { errors?: unknown }).errors;
+  if (Array.isArray(errors)) {
+    Object.defineProperty(copy, 'errors', {
+      value: errors.map(nested),
+      enumerable: Object.prototype.propertyIsEnumerable.call(err, 'errors'),
       writable: true,
       configurable: true,
     });
@@ -102,5 +127,8 @@ function escapedCopy(err: Error, seen: Set<Error>): Error {
   for (const [key, value] of Object.entries(err)) {
     if (!(key in copy)) (copy as unknown as Record<string, unknown>)[key] = typeof value === 'string' ? oneLine(value) : value;
   }
+  // `seen` is the path down, not everything met: one failure listed twice
+  // under an AggregateError is copied twice, and only a true loop is cut.
+  seen.delete(err);
   return copy;
 }

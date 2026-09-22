@@ -11,10 +11,15 @@
  */
 export const FOLDER_PLACEHOLDER = '.gitkeep';
 
-/** True when `nameOrPath` (a bare name or any `/`-separated path) is the placeholder. */
+/**
+ * True when `nameOrPath` (a bare name or any `/`-separated path, trailing
+ * slashes allowed as the other basename helpers here allow them) is the
+ * placeholder.
+ */
 export function isFolderPlaceholder(nameOrPath: string): boolean {
-  const slash = nameOrPath.lastIndexOf('/');
-  return (slash === -1 ? nameOrPath : nameOrPath.slice(slash + 1)) === FOLDER_PLACEHOLDER;
+  const trimmed = nameOrPath.replace(/\/+$/, '');
+  const slash = trimmed.lastIndexOf('/');
+  return (slash === -1 ? trimmed : trimmed.slice(slash + 1)) === FOLDER_PLACEHOLDER;
 }
 
 /** The placeholder's path inside `dir` (`''` for a root-level placeholder). */

@@ -72,7 +72,7 @@ describe('createConsoleLogger', () => {
    */
   it('escapes the text an error carries, keeps its frames, and never mutates the original', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const err = new Error('git said: fatal\n[forged] admin signed in31m');
+    const err = new Error('git said: fatal\n[forged] admin signed in\u009b31m');
     (err as Error & { code?: string }).code = 'E\nFORGED';
     createConsoleLogger({ module: 'sync' }).error('pull failed', { err });
     const logged = error.mock.calls[0]?.[1] as Error & { code?: string };
@@ -83,7 +83,7 @@ describe('createConsoleLogger', () => {
     // The header of the stack is the message and is escaped with it; the
     // frames below it are still lines of their own.
     expect(logged.stack?.startsWith('Error: git said: fatal\\n[forged] admin signed in\\u009b31m\n    at ')).toBe(true);
-    expect(err.message).toBe('git said: fatal\n[forged] admin signed in31m');
+    expect(err.message).toBe('git said: fatal\n[forged] admin signed in\u009b31m');
     expect(err.stack?.includes('\n[forged]')).toBe(true);
   });
 
@@ -104,6 +104,31 @@ describe('createConsoleLogger', () => {
     // The frames that follow are the real ones; the forged one never became a line.
     expect(logged.stack?.slice(header!.length).startsWith('\n    at ')).toBe(true);
     expect(logged.stack?.includes('\n    at fake')).toBe(false);
+  });
+
+  it('escapes a string cause and the failures of an AggregateError, which the copy would otherwise drop', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const withStringCause = new Error('outer', { cause: 'git said\n[forged]' });
+    const aggregate = new AggregateError([new Error('one\nA'), 'two\nB'], 'several');
+    createConsoleLogger({ module: 'sync' }).error('failed', { err: withStringCause });
+    createConsoleLogger({ module: 'sync' }).error('failed', { err: aggregate });
+    const first = error.mock.calls[0]?.[1] as Error & { cause?: unknown };
+    const second = error.mock.calls[1]?.[1] as AggregateError;
+    expect(first.cause).toBe('git said\\n[forged]');
+    expect(second).toBeInstanceOf(AggregateError);
+    expect((second.errors[0] as Error).message).toBe('one\\nA');
+    expect(second.errors[1]).toBe('two\\nB');
+    // One failure listed twice is not a loop: both copies keep their text.
+    const shared = new Error('same\nS');
+    createConsoleLogger({ module: 'sync' }).error('failed', { err: new AggregateError([shared, shared], 'twice') });
+    const third = error.mock.calls[2]?.[1] as AggregateError;
+    expect(third.errors.map((e) => (e as Error).message)).toEqual(['same\\nS', 'same\\nS']);
+    // An ordinary error's own enumerable `errors` field stays visible.
+    const plain = Object.assign(new Error('plain'), { errors: ['x\ny'] });
+    createConsoleLogger({ module: 'sync' }).error('failed', { err: plain });
+    const fourth = error.mock.calls[3]?.[1] as Error & { errors: string[] };
+    expect(Object.keys(fourth)).toContain('errors');
+    expect(fourth.errors).toEqual(['x\\ny']);
   });
 
   it('cuts a cause chain that loops back on itself', () => {
@@ -132,7 +157,7 @@ describe('createConsoleLogger', () => {
    */
   it('keeps every event on one line, whatever the text carried', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    createConsoleLogger({ module: 'sync' }).warn('branch "x\n[forged] admin signed in31m" is behind', {
+    createConsoleLogger({ module: 'sync' }).warn('branch "x\n[forged] admin signed in\u009b31m" is behind', {
       detail: 'line one\r\nline two',
       rows: 2,
     });

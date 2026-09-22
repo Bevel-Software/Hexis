@@ -1,7 +1,7 @@
 ---
-'@bevel-software/platform-core-backend': patch
-'@bevel-software/platform-core-frontend': patch
-'@bevel-software/platform-shared': patch
+'@bevel-software/platform-core-backend': minor
+'@bevel-software/platform-core-frontend': minor
+'@bevel-software/platform-shared': minor
 ---
 
 Every account except the deployment admin changes its own password from the Account page, and the deployment admin is told theirs is set in the environment.

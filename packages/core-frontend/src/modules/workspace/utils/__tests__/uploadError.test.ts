@@ -11,8 +11,10 @@ import { uploadErrorNextStep } from '../uploadError';
 describe('uploadErrorNextStep', () => {
   it('sends a refused writer to another folder, or to the owner', () => {
     expect(uploadErrorNextStep(403)).toBe('Try another folder or ask its owner.');
-    // An expired session on the upload route refuses the same way.
-    expect(uploadErrorNextStep(401)).toBe('Try another folder or ask its owner.');
+  });
+
+  it('sends a lapsed session back to sign in — another folder would refuse the same way', () => {
+    expect(uploadErrorNextStep(401)).toBe('Sign in again, then try once more.');
   });
 
   it('asks for a smaller file when the upload was too big', () => {

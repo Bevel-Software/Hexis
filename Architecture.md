@@ -28,7 +28,7 @@ A domain module **never** reaches into another module's internals. All cross-mod
 All business logic is defined as **interfaces** before any implementation is written.
 
 ```ts
-// Define the contract (modules/workspace/file-readers/file-reader.ts) —
+// Define the contract (packages/core-backend/src/modules/workspace/file-readers/file-reader.ts) —
 // an EXCERPT: the real interface also names the file kind, whether the
 // text is editable, and the edit and stat hooks. Read the file before
 // implementing it; `implements FileReader` on this excerpt does not compile.
@@ -75,7 +75,7 @@ class FixedWindowRateLimiter {
 All dependencies are **injected**, never instantiated inline.
 
 ```ts
-// Good — dependencies are injected (modules/access/access-control.service.ts).
+// Good — dependencies are injected (packages/core-backend/src/modules/access/access-control.service.ts).
 // Type them as the CONTRACT: `IWorkspaceService`, not the class. (The real
 // service still says `WorkspaceService` here — see the note under §1 — and
 // that is the exception to migrate, not the shape to copy.)

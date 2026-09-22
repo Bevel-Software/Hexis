@@ -173,12 +173,16 @@ describe('AuthService.loginWithPassword — env bootstrap admin', () => {
     await expect(
       new AuthService(forCreate, cfg).createAccount('root@example.com', 'Root', 'a-long-enough-password'),
     ).rejects.toThrow('set in the deployment environment');
-    const { db: forChange } = makeFakeDb([[{ ...ROW, email: 'root@example.com', passwordHash: null }]]);
+    const { db: forChange, captured: capturedByChange } = makeFakeDb([
+      [{ ...ROW, email: 'root@example.com', passwordHash: null }],
+    ]);
     await expect(
       new AuthService(forChange, cfg).changePassword(ROW.id, undefined, 'a-long-enough-password'),
     ).rejects.toThrow('set in the deployment environment');
-    expect(captured.set).toHaveLength(0);
-    expect(captured.values).toHaveLength(0);
+    for (const writes of [captured, capturedByChange]) {
+      expect(writes.set).toHaveLength(0);
+      expect(writes.values).toHaveLength(0);
+    }
   });
 
   it('is disabled entirely when either env var is empty', async () => {

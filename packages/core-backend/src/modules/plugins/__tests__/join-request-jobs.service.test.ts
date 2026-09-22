@@ -162,6 +162,39 @@ describe('PluginJoinRequestJobs', () => {
     ]);
   });
 
+  it('opens nothing for an account erased and made again under the same address', async () => {
+    let asked = 0;
+    const h = harness({
+      requester: async (mail) => ({ ...ALI_USER, id: asked++ === 0 ? 'u-1' : 'u-2', email: mail }),
+    });
+    await h.jobs.start(pendingRow(h.store));
+    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.store.all()).toMatchObject([{ status: 'failed' }]);
+  });
+
+  it('starts nothing once the sweep is stopped — the row waits for the next boot', async () => {
+    const h = harness();
+    h.jobs.stopSweeping();
+    await h.jobs.start(pendingRow(h.store));
+    expect(h.workflow.createBranch).not.toHaveBeenCalled();
+    expect(h.store.all()).toMatchObject([{ status: 'pending' }]);
+  });
+
+  it('opens nothing for an account erased while the branch was being pushed', async () => {
+    // The account answers when the job starts and is gone by the time the
+    // change request would open — the erasure landed during the git work.
+    let asked = 0;
+    const h = harness({
+      requester: async (mail) => (asked++ === 0 ? { ...ALI_USER, email: mail } : null),
+    });
+    await h.jobs.start(pendingRow(h.store));
+    expect(h.workflow.commitChanges).toHaveBeenCalled();
+    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.store.all()).toMatchObject([
+      { status: 'failed', failureReason: 'the account that asked no longer exists' },
+    ]);
+  });
+
   it('sweeps only the pending rows, and leaves the settled ones alone', async () => {
     const h = harness();
     pendingRow(h.store);

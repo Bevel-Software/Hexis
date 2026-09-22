@@ -354,7 +354,8 @@ describe('SkillsTree: an empty tree says why', () => {
   };
 
   it('says nothing is shared when entries were withheld from the Skills folder', () => {
-    renderTree('/skills-and-tools', { fileTree: EMPTY_KB({ listing: 4, skills: 4 }) });
+    // The folder's own count alone decides; the listing total is not consulted.
+    renderTree('/skills-and-tools', { fileTree: EMPTY_KB({ skills: 4 }) });
     expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(
       'Nothing here is shared with you yet. Ask an admin to grant you access.',
     );

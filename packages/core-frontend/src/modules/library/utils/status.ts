@@ -294,9 +294,13 @@ export interface LibraryFilterable {
   plugins?: { name: string }[];
 }
 
-/** "Yours alone": in no plugin folder AND not a shared skill. */
-export function isUngrouped(item: Pick<LibraryFilterable, 'plugin' | 'shared'>): boolean {
-  return item.plugin === null && !item.shared;
+/**
+ * "Yours alone": in no plugin folder, not a shared skill, and in no plugin
+ * by link either — a tool under a root a plugin links arrives on that
+ * plugin's page with the skills beside it, so it is not alone.
+ */
+export function isUngrouped(item: Pick<LibraryFilterable, 'plugin' | 'shared' | 'plugins'>): boolean {
+  return item.plugin === null && !item.shared && !(item.plugins?.length ?? 0);
 }
 
 /** Whether an item belongs to `plugin` — by folder, or by a link from the plugin's manifest. */

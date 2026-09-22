@@ -28,6 +28,7 @@
 import path from 'node:path';
 import { creatableRootDirNames } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
+import { printable } from '../../shared/printable.js';
 
 const log = logger('creator-access');
 
@@ -182,6 +183,10 @@ export class CreatorAccessService implements ICreatorAccess {
   }
 }
 
+/**
+ * `rel` is the caller's own text and is quoted as one token; the error goes
+ * as an error, which every sink of the logger port escapes on its own.
+ */
 function warnSkipped(rel: string, err: unknown): void {
-  log.warn(`skipped creator read grant for "${rel}":`, { err });
+  log.warn(`skipped creator read grant for ${printable(rel)}:`, { err });
 }

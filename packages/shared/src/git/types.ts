@@ -254,7 +254,9 @@ export interface IGitService {
    * that has just refreshed the whole clone's remote-tracking refs in one
    * round trip, which is what a LIST does rather than paying one fetch per
    * request. Pass it only when that is true; otherwise the diff can describe
-   * a stale head.
+   * a stale head. It is a skip, not a promise: a branch the clone does not
+   * have yet is fetched anyway, since there is nothing to diff without it —
+   * so a list's first sight of a new request still costs one round trip.
    */
   changedPathsForPr(
     workspaceId: string,

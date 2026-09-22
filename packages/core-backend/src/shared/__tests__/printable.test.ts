@@ -26,6 +26,10 @@ describe('sanitizedPath', () => {
     expect(sanitizedPath('a\r\nb.md')).toBe('a\\r\\nb.md');
   });
 
+  it('escapes the other mandatory breaks — vertical tab, form feed, NEL — the same way', () => {
+    expect(sanitizedPath('a\vb\fc\u0085d.md')).toBe('a\\vb\\fc\\u0085d.md');
+  });
+
   // U+2028/U+2029 render as line breaks in editors, terminals and JSON
   // consumers, and `JSON.stringify` passes them through raw — so a path
   // carrying one survives being carried, in the `path` field of a not-found

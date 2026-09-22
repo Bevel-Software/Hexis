@@ -1,4 +1,5 @@
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { sanitizedPath } from '../../shared/printable.js';
 
 export interface AccessDeniedDetails {
   /** repo-relative POSIX path the caller tried to write */
@@ -26,9 +27,13 @@ export interface AccessDeniedDetails {
   targetKind?: 'file' | 'dir';
 }
 
-/** How the read-before-write refusal names the unreadable place. */
+/**
+ * How the read-before-write refusal names the unreadable place. The path is
+ * the caller's own text and goes into a one-line sentence, so a line break
+ * in it is shown, not obeyed.
+ */
 export function unreadablePlaceLabel(repoRelative: string): string {
-  return repoRelative === '' ? 'the top level' : `"${repoRelative}"`;
+  return repoRelative === '' ? 'the top level' : `"${sanitizedPath(repoRelative)}"`;
 }
 
 /**

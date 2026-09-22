@@ -1,5 +1,5 @@
 ---
-'@bevel-software/platform-core-frontend': minor
+'@bevel-software/platform-core-frontend': patch
 ---
 
 Every skill card and plugin row now carries its own "…" menu — on Everything, on Owned by me, on a group's page, on a plugin's own page and on your own space — so sharing is offered on the thing you are looking at rather than only on the page you have to open first. The button appears on hover and on focus and is a real tab stop after the card; a right-click anywhere on the card or row opens the same menu at the pointer. Opening it moves focus to the first item, the arrow keys (and Home/End) walk the list, and Escape closes it and hands focus back to the button — as do picking an item and tabbing out of the menu, so focus is never left on the item that just went away. Clicking the card or row body still opens the item, exactly as before.

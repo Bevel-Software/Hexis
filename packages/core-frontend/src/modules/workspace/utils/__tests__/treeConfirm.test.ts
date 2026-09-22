@@ -35,7 +35,7 @@ describe('deleteSentence', () => {
 
   it('says "everything in it" when the folder had entries withheld', () => {
     expect(deleteSentence(folder, undefined, true)).toBe(
-      'Delete Sales and everything in it? (2 files you can see; it holds more you can\'t.)',
+      'Delete Sales and everything in it? (2 files on this branch you can see; it holds more you can\'t.)',
     );
   });
 });

@@ -17,7 +17,7 @@
  * `first-call-probe.cli-args.ts`, where it can be tested. All that is left
  * here is the part that cannot be: reading argv, printing, and the exit code.
  */
-import { probeFirstCall, formatProbeReport } from './first-call-probe.js';
+import { probeFirstCall, formatProbeReport, ProbeOptionsError } from './first-call-probe.js';
 import { ConfigError, parseCliRequest, USAGE } from './first-call-probe.cli-args.js';
 
 async function main(): Promise<void> {
@@ -28,9 +28,11 @@ async function main(): Promise<void> {
   }
   // `probeFirstCall` checks the arguments it cannot probe with — a malformed
   // `--base-url` above all — and does it before opening anything, so its
-  // refusal is the operator's typo too and leaves by the same door as the rest.
+  // refusal is the operator's typo too and leaves by the same door as the
+  // rest. ONLY that refusal: anything else it throws is the probe crashing,
+  // which must not come out dressed as a mistyped command.
   const report = await probeFirstCall(request.options).catch((err: unknown) => {
-    throw new ConfigError(err instanceof Error ? err.message : String(err));
+    throw err instanceof ProbeOptionsError ? new ConfigError(err.message) : err;
   });
   console.log(request.json ? JSON.stringify(report, null, 2) : formatProbeReport(report));
   if (report.failed > 0) process.exitCode = 1;

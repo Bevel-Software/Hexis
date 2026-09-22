@@ -52,6 +52,12 @@ export function retiredToolMessage(name: string): string | undefined {
  * ("KNOWLEDGE_BASE.merge_change_request is not a function"), so the tool that
  * actually failed is right there in the message.
  *
+ * Matched in the shape the runtime reports a missing callee — `<expr>.<name>
+ * is not a function`, `<name> is not defined` — and not anywhere in the text:
+ * a failure that merely QUOTES the name (a missing file whose path carries
+ * it, a server's error echoing the request) died of something else, and the
+ * migration notice would hide that.
+ *
  * A chain that reaches the retired name through a computed property
  * (`KNOWLEDGE_BASE['merge_' + 'change_request']()`) is not recognised: the
  * runtime prints the expression, not the resolved name. It still fails — the
@@ -60,7 +66,10 @@ export function retiredToolMessage(name: string): string | undefined {
  */
 export function retiredToolInFailure(failure: string): string | undefined {
   for (const [retired, message] of Object.entries(RETIRED_TOOL_MESSAGES)) {
-    if (new RegExp(`\\b${retired}\\b`).test(failure)) return message;
+    // The name as an identifier or a member (`X.name`), not as quoted text:
+    // a server that echoes the sentence back inside quotes is a different
+    // failure, and the quote mark before the name is what tells them apart.
+    if (new RegExp(`(?:^|[\\s.])${retired} is not (?:a function|defined)\\b`).test(failure)) return message;
   }
   return undefined;
 }

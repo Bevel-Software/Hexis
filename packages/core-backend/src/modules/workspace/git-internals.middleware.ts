@@ -5,11 +5,18 @@ import { assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 /** The query and body fields through which a workspace route names a path. */
-const GIT_GUARDED_QUERY_KEYS = ['path'] as const;
+const GIT_GUARDED_QUERY_KEYS = ['path', 'toDir'] as const;
 // `paths` is the access batch's list; `ancestor` is the folder a
 // remove-from-parent cascades up to. Both name workspace paths, so both are
 // judged — a field that names a path and is not here is a way around this.
 const GIT_GUARDED_BODY_KEYS = ['path', 'oldPath', 'newPath', 'destination', 'paths', 'ancestor'] as const;
+/**
+ * `from` names a PATH on the prospective-access route (`?from=<file>&toDir=…`)
+ * and a BRANCH on the workflow comparison (`?from=<branch>`), so it is judged
+ * only where it is a path — a branch called after the git folder is refused
+ * by the branch-name rule, not by this one.
+ */
+const PATH_FROM_ROUTE = /\/access\/prospective\/?$/;
 
 /** Every workspace path a request names, array-shaped queries included. */
 export function gitGuardedInputs(req: express.Request): string[] {
@@ -19,6 +26,7 @@ export function gitGuardedInputs(req: express.Request): string[] {
   };
   const query = req.query as Record<string, unknown>;
   for (const key of GIT_GUARDED_QUERY_KEYS) add(query[key]);
+  if (PATH_FROM_ROUTE.test(req.path)) add(query.from);
   const body = req.body as unknown;
   if (body && typeof body === 'object' && !Buffer.isBuffer(body)) {
     for (const key of GIT_GUARDED_BODY_KEYS) add((body as Record<string, unknown>)[key]);

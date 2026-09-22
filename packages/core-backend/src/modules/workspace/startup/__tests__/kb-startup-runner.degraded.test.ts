@@ -309,3 +309,53 @@ describe('KbStartupRunner retry after a boot that survived a rejected token', ()
     expect(logged.join('\n')).toMatch(/saving the setup form retries/);
   });
 });
+
+describe('KbStartupRunner retry when the token is rejected while it sleeps', () => {
+  it('stops instead of re-dialing: the setup save that failed with the rejected token owns the retry', async () => {
+    // The boot fails as unreachable, so the loop starts. While it sleeps, a
+    // setup save runs the phase with a token the host refuses: the standing
+    // failure is now one a retry cannot change, and the loop must read that
+    // AFTER the sleep, not only when it started.
+    let dials = 0;
+    const rejecting: IGitRunner = {
+      defaultTimeoutMs: 1000,
+      run: (async () => {
+        dials += 1;
+        const said = "fatal: Authentication failed for 'https://example.com/acme/kb.git/'";
+        throw new GitRunError(`git ls-remote failed: Command failed: git ls-remote\n${said}`, {
+          exitCode: 128,
+          stderr: said,
+        });
+      }) as IGitRunner['run'],
+    };
+    let current: IGitRunner = new NodeGitRunner();
+    const switching: IGitRunner = {
+      defaultTimeoutMs: 1000,
+      run: ((...args: Parameters<IGitRunner['run']>) => current.run(...args)) as IGitRunner['run'],
+    };
+    let url = path.join(root, 'nowhere.git');
+    const runner = makeRunner([], () => url, switching);
+    await runner.runAll().catch(() => undefined);
+    expect(runner.lastFailureKind()?.kind).not.toBe('credentials-rejected');
+
+    const waits: number[] = [];
+    const logged: string[] = [];
+    runner.retryUntilMaintained({
+      initialDelayMs: 5,
+      log: (m) => logged.push(m),
+      sleep: async (ms) => {
+        waits.push(ms);
+        // The setup save, landing while the loop sleeps, with a rotated token.
+        current = rejecting;
+        url = 'https://example.com/acme/kb.git';
+        await runner.runAll().catch(() => undefined);
+      },
+    });
+    await waitFor(() => logged.some((m) => m.includes('asking again cannot change')));
+    expect(runner.lastFailureKind()?.kind).toBe('credentials-rejected');
+    // One dial: the save's. The loop did not add one of its own.
+    expect(dials).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(waits).toHaveLength(1);
+  });
+});

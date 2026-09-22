@@ -321,20 +321,25 @@ export function ExternalAgentAccessPage() {
                     substitute in the copy that is not. Both halves of the gap,
                     because an absolute `npx` is a script whose
                     `#!/usr/bin/env node` line looks `node` up on that same
-                    PATH; and `where npx`, because this paragraph sits under
-                    "on Windows, prefer the JSON config" and `which` is not a
-                    command there. */}
+                    PATH; and `where.exe npx`, because this paragraph sits under
+                    "on Windows, prefer the JSON config", `which` is not a
+                    command there, and a bare `where` is PowerShell's alias for
+                    Where-Object. The path it prints holds backslashes, which
+                    JSON needs doubled — said here, since the field is JSON. */}
                 <p className="text-meta text-ink-muted leading-snug">
                   Needs Node 22.13+ or 24 on the machine. If the client reports that{' '}
                   <span className="font-mono">npx</span> was not found, it was launched from the
                   Dock or a desktop icon and cannot see your shell's PATH: run{' '}
                   <span className="font-mono">which npx</span> in a terminal (
-                  <span className="font-mono">where npx</span> in PowerShell) and use the full
-                  path it prints as the <span className="font-mono">"command"</span> above. If it
-                  then reports{' '}
+                  <span className="font-mono">where.exe npx</span> in PowerShell) and use the full
+                  path it prints as the <span className="font-mono">"command"</span> above — on
+                  Windows with each backslash doubled, or with forward slashes, since the field is
+                  JSON. If it then reports{' '}
                   <span className="font-mono">env: node: No such file or directory</span>, that
                   same folder holds <span className="font-mono">node</span>: add it to the
-                  config's <span className="font-mono">"env"</span> PATH.
+                  config's <span className="font-mono">"env"</span> PATH, in front of the usual
+                  system folders rather than instead of them — the sign-in opens your browser
+                  through those.
                 </p>
               </div>
             </details>

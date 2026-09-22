@@ -1046,14 +1046,19 @@ export function createWorkspaceRoutes(
             // removes dirs that are *actually empty* at the moment it visits them,
             // so a concurrent writer's new file (and its parent chain) is
             // preserved — the same safety property the old non-recursive check had.
+            // A folder that vanished or filled up under a concurrent writer
+            // is passed over inside the sweep; what reaches here is a real
+            // failure (permissions, I/O) that left the folder on disk, and
+            // the request fails — as the agent's delete does — rather than
+            // the response reporting gone a folder the tree still shows. The
+            // per-file deletes have landed either way, and the next delete
+            // of the now-empty folder either sweeps it or says why not. The
+            // cause is logged; the answer carries no path of the host's.
             try {
               await removeEmptyDirs(absolute);
             } catch (rmErr) {
-              // Directory already gone (raced delete), or a concurrent writer
-              // repopulated it. Either way, skip removal — the per-file deletes
-              // are what's load-bearing.
-              const reason = rmErr instanceof Error ? rmErr.message : String(rmErr);
-              log.warn(`dir cleanup skipped for ${printable(filePath)}: ${printable(reason)}`);
+              log.warn(`dir cleanup failed for ${printable(filePath)}`, { err: rmErr });
+              throw new Error('The files were deleted, but the empty folder could not be removed. Delete it again.');
             }
             return files;
           });

@@ -39,7 +39,10 @@ export function canCarryFrontmatter(
   extensions: readonly string[] = FRONTMATTER_CARRIER_EXTENSIONS,
 ): boolean {
   const name = path.slice(path.lastIndexOf('/') + 1);
-  return extensions.some((ext) => name.length > ext.length && name.endsWith(ext));
+  // The resolver's own rule is a plain suffix match, so a file named exactly
+  // `.md` is read for its frontmatter there — and must be a carrier here too,
+  // or a rule the resolver honours could not be managed.
+  return extensions.some((ext) => name.endsWith(ext));
 }
 
 /** The `kind` a refused file-level access mutation answers with. */

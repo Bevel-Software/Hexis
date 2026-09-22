@@ -76,6 +76,20 @@ describe('retired tools', () => {
     expect(retiredToolChainFailure(unrelated)).toBeUndefined();
     expect(retiredToolInFailure('Request failed with status code 500')).toBeUndefined();
   });
+
+  it('keeps a failure that merely quotes the retired name', () => {
+    // A missing file whose path carries the name, or a server echoing the
+    // request: the chain died of that, not of calling a retired tool.
+    for (const failure of [
+      '[ERROR] Code execution failed: Error: No such file: Skills/merge_change_request/SKILL.md',
+      'Request failed: the server said "merge_change_request" in its reply',
+      'Request failed with status 500: "merge_change_request is not a function"',
+    ]) {
+      expect(retiredToolInFailure(failure), failure).toBeUndefined();
+    }
+    // The runtime's two spellings of a missing callee are still recognised.
+    expect(retiredToolInFailure('ReferenceError: merge_change_request is not defined')).toMatch(PERSON_MERGES);
+  });
 });
 
 describe('call_tool_chain and a retired tool', () => {

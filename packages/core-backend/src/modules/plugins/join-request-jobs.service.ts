@@ -255,6 +255,13 @@ export interface JoinRequestJobsDeps {
 export class PluginJoinRequestJobs {
   private readonly inFlight = new Map<string, Promise<void>>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Set by `stopSweeping`: the process is shutting down. A start that arrives
+   * after it — a request handler still finishing while the pool is being
+   * drained — runs nothing; the row stays `pending` and the next boot's sweep
+   * does the work, exactly as for a row written just before a crash.
+   */
+  private stopping = false;
 
   constructor(
     private readonly store: JoinRequestStore,
@@ -310,7 +317,7 @@ export class PluginJoinRequestJobs {
    * on the row, which is where the requester reads it.
    */
   start(record: JoinRequestRecord): Promise<void> {
-    if (record.status === 'opened') return Promise.resolve();
+    if (record.status === 'opened' || this.stopping) return Promise.resolve();
     const existing = this.inFlight.get(record.id);
     if (existing) return existing;
     const flight = this.run(record).finally(() => {
@@ -364,8 +371,13 @@ export class PluginJoinRequestJobs {
     this.sweepTimer.unref?.();
   }
 
-  /** Stop the periodic sweep. Part of shutting down cleanly. */
+  /**
+   * Stop the periodic sweep, and refuse to start any further job. Part of
+   * shutting down cleanly: what is in flight is awaited by `drain`; nothing
+   * new begins against a pool that is about to end.
+   */
   stopSweeping(): void {
+    this.stopping = true;
     if (!this.sweepTimer) return;
     clearInterval(this.sweepTimer);
     this.sweepTimer = null;
@@ -580,6 +592,19 @@ export class PluginJoinRequestJobs {
     // than enough for a stalled process to have lost its claim, and for an
     // administrator to have erased the account in the meantime.
     await stillOurs();
+    // And the account itself, once more, as late as it can be asked: an
+    // erasure deletes this row in the same transaction as the account, but
+    // a claim confirmed a moment before that commit is still confirmed, and
+    // the request would open in an erased person's name. The erasure runs
+    // its anonymization once more after committing, for a request that
+    // landed in that gap; this read keeps the gap to the open itself.
+    // By IDENTITY, not by address: an account erased and made again with the
+    // same email is a different person's row, and the request must not open
+    // in the old one's name either.
+    const still = await this.deps.requester(record.requesterEmail);
+    if (!still || still.id !== user.id) {
+      throw new Error('the account that asked no longer exists');
+    }
     const detail = await workflow.openChangeRequest(ws.id, user, {
       sourceBranch: branch,
       targetBranch: DEFAULT_BRANCH,

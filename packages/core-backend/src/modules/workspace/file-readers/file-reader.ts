@@ -25,9 +25,9 @@ export type ReadResult =
   | { kind: 'refusal'; message: string };
 
 /**
- * `path` as interpolated into a ONE-LINE notice or refusal: CR/LF are shown
- * as escapes rather than obeyed (the same rule as `extractionMarker`), so a
- * filename cannot forge extra output lines. The rule itself lives in
+ * `path` as interpolated into a ONE-LINE notice or refusal: line breaks are
+ * shown as escapes rather than obeyed (the rule `extractionMarker` uses too),
+ * so a filename cannot forge extra output lines. The rule itself lives in
  * `shared/printable`, because the missing-path refusals (`not-found.ts`) need
  * the same one and the shared layer is the only one both can reach.
  */

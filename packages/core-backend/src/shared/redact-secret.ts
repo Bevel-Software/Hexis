@@ -37,13 +37,16 @@ export function redactSecret(text: string, secrets: readonly (string | null | un
   // Down to a floor, so a short common head (`ghp_`) does not garble every
   // other token in the log.
   for (const token of ordered) scrubbed = scrubbed.replaceAll(token, '***');
-  for (const token of ordered) {
-    for (let len = token.length - 1; len >= MIN_ECHOED_PREFIX_LENGTH; len--) {
-      const prefix = token.slice(0, len);
-      if (!scrubbed.includes(prefix)) continue;
-      scrubbed = scrubbed.replaceAll(prefix, '***');
-      break;
-    }
+  // Every echoed prefix of every token, LONGEST FIRST ACROSS TOKENS — not
+  // token by token: two tokens can share a head longer than the floor
+  // (`ghp_abcdefgh…`), and one token's shorter prefix, taken first, would
+  // scrub that head out of the other's echo and leave the rest of it on
+  // screen (`***Y123…`). Longest first, the longer echo goes whole.
+  const prefixes = ordered.flatMap((token) =>
+    Array.from({ length: Math.max(0, token.length - MIN_ECHOED_PREFIX_LENGTH) }, (_, i) => token.slice(0, token.length - 1 - i)),
+  );
+  for (const prefix of [...new Set(prefixes)].sort((a, b) => b.length - a.length)) {
+    if (scrubbed.includes(prefix)) scrubbed = scrubbed.replaceAll(prefix, '***');
   }
   return (
     scrubbed
