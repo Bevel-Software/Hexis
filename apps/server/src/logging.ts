@@ -45,7 +45,7 @@ export function createPinoLogger(opts: { level?: string; destination?: pino.Dest
  * whether the text is made safe — and `message`/`stack`, which such objects
  * carry non-enumerably, are kept by name rather than lost with the rest.
  */
-function asSafeError(err: unknown): Error {
+function asSafeError(err: unknown, seen: Set<object> = new Set()): Error {
   if (err instanceof Error) return oneLineError(err);
   if (typeof err === 'string') return new Error(oneLine(err));
   if (err && typeof err === 'object') {
@@ -68,7 +68,14 @@ function asSafeError(err: unknown): Error {
     // its parent), so `oneLineError` and pino then treat every one as an
     // error of this realm.
     if (Array.isArray(source.errors)) {
-      const errors = source.errors.map((e) => (e && typeof e === 'object' ? asSafeError(e) : e));
+      // `seen` is the path down: a list that reaches itself, directly or
+      // through a failure of its own, is cut where it loops — the same
+      // answer `oneLineError` gives a cyclic cause.
+      seen.add(source);
+      const errors = source.errors.map((e) =>
+        e && typeof e === 'object' ? (seen.has(e) ? '[circular]' : asSafeError(e, seen)) : e,
+      );
+      seen.delete(source);
       Object.defineProperty(like, 'errors', { value: errors, enumerable: false, writable: true, configurable: true });
     }
     return oneLineError(like);

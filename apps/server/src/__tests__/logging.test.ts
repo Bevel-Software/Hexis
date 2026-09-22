@@ -68,6 +68,23 @@ describe('createPinoLogger — the err field', () => {
     expect((err.errors[2] as { message: string; stack: string }).stack).toBe('Error: three\\nC\n    at z (w:1:1)');
   });
 
+  it('cuts a foreign failure list that reaches itself, instead of recursing forever', () => {
+    const { lines, logger } = capture();
+    const foreign = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(foreign, 'message', { value: 'loops', enumerable: false });
+    const inner = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(inner, 'message', { value: 'inner', enumerable: false });
+    Object.defineProperty(inner, 'errors', { value: [foreign], enumerable: false });
+    Object.defineProperty(foreign, 'errors', { value: [foreign, inner], enumerable: false });
+    logger.error('failed', { err: foreign });
+    const err = lines()[0]?.err as { message: string; errors: unknown[] };
+    expect(err.message).toBe('loops');
+    expect(err.errors[0]).toBe('[circular]');
+    const nested = err.errors[1] as { message: string; errors: unknown[] };
+    expect(nested.message).toBe('inner');
+    expect(nested.errors[0]).toBe('[circular]');
+  });
+
   it('escapes a plain string reason', () => {
     const { lines, logger } = capture();
     logger.error('failed', { err: 'just text\n[forged]' });
