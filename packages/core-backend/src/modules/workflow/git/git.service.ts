@@ -3198,6 +3198,39 @@ export class GitService implements IGitService {
   }
 
   /**
+   * The commits on `ref` that touched `repoRelativePath`, newest first, at
+   * most `limit` of them. What a skill's `version` is looked up through: each
+   * commit is a copy of the file that may have declared a version. Renames are
+   * not followed — a moved skill's earlier history is the old path's.
+   */
+  async pathHistory(
+    workspaceId: string,
+    ref: string,
+    repoRelativePath: string,
+    limit: number,
+  ): Promise<string[]> {
+    const cwd = await this.repoDir(workspaceId);
+    const { stdout } = await this.git(cwd, [
+      'rev-list',
+      `--max-count=${Math.max(1, Math.trunc(limit))}`,
+      ref,
+      '--',
+      repoRelativePath,
+    ]);
+    return stdout.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+  }
+
+  /**
+   * Every file under `folder` at `ref`, repo-root-relative and in tree order.
+   * A folder that does not exist at that ref lists nothing.
+   */
+  async listFilesAtRef(workspaceId: string, ref: string, folder: string): Promise<string[]> {
+    const cwd = await this.repoDir(workspaceId);
+    const { stdout } = await this.git(cwd, ['ls-tree', '-r', '--name-only', ref, '--', folder]);
+    return stdout.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+  }
+
+  /**
    * A clean `git status` for a path has two honest readings (already
    * committed; a queued re-apply of something that landed) and one dishonest
    * one: the bytes exist, but BESIDE the repository, because a caller wrote a

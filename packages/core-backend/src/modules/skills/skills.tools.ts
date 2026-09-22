@@ -43,8 +43,9 @@ export function registerSkillsTools(
     toolHandler(async (args, ctx: ToolContext) => {
       const name = typeof args.name === 'string' ? args.name : '';
       const file = typeof args.file === 'string' ? args.file : undefined;
+      const version = typeof args.version === 'string' ? args.version : undefined;
       if (!name) return { error: 'missing_name' };
-      const result = await skillService.getSkill(ctx.user.email, name, file);
+      const result = await skillService.getSkill(ctx.user.email, name, file, { version });
       if (!allowedTools || !result.ok || result.kind !== 'skill') return result;
       return { ...result, warnings: await allowedTools.check(ctx.user.email, result.skill.allowedTools) };
     }),
@@ -62,7 +63,8 @@ async function buildListSkillsDef(skillService: ISkillService, userEmail?: strin
   return toolDef({
     name: 'list_skills',
     description:
-      'List the available skills (reusable specialist instructions) with their names and descriptions. ' +
+      'List the available skills (reusable specialist instructions) with their names, descriptions and, ' +
+      'for a skill that declares one, its current `version` (the `metadata.version` of its SKILL.md). ' +
       'Discover what skills exist before specialist work, then `get_skill` to load one. ' +
       (await availableSkillsLine(skillService, userEmail)),
     path: '/api/agent/tools/list_skills',
@@ -78,7 +80,10 @@ async function buildListSkillsDef(skillService: ISkillService, userEmail?: strin
             properties: {
               name: { type: 'string' },
               description: { type: 'string' },
-              version: { type: 'string' },
+              version: {
+                type: 'string',
+                description: 'The version the skill currently declares (`metadata.version` in its SKILL.md); absent when it declares none.',
+              },
               path: { type: 'string' },
             },
           },
@@ -95,7 +100,8 @@ async function buildGetSkillDef(skillService: ISkillService, userEmail?: string)
     description:
       'Load a skill by name: returns its full instructions (SKILL.md body) to follow, plus the skill ' +
       'folder path and the list of bundled files. Pass `file` to fetch a bundled file’s content ' +
-      '(e.g. a script) instead of the body. ' +
+      '(e.g. a script) instead of the body. Loads the latest copy unless `version` names an earlier ' +
+      'one the skill declared. ' +
       (await availableSkillsLine(skillService, userEmail)),
     path: '/api/agent/tools/get_skill',
     inputs: {
@@ -107,6 +113,14 @@ async function buildGetSkillDef(skillService: ISkillService, userEmail?: string)
           description:
             'Optional bundled file path relative to the skill folder (e.g. `scripts/build_xlsx.py`) — ' +
             'fetch its content instead of the body.',
+        },
+        version: {
+          type: 'string',
+          description:
+            'Optional: the `metadata.version` to load (e.g. `1.4.0`). Omitted, the skill is loaded as it ' +
+            'is now, which is the latest. Given, the skill — or the `file` — is served as it was at the most ' +
+            'recent commit that declared that version; a version the skill never declared answers ' +
+            '`version_not_found` with the versions it did declare.',
         },
       },
       required: ['name'],
@@ -125,7 +139,15 @@ async function buildGetSkillDef(skillService: ISkillService, userEmail?: string)
             'each `{ entry, message, suggestion? }`. Do not rely on such a tool.',
           items: { type: 'object' },
         },
-        error: { type: 'string', description: 'Error code: `not_found`, `forbidden`, `invalid_file`, `missing_name`.' },
+        error: {
+          type: 'string',
+          description: 'Error code: `not_found`, `forbidden`, `invalid_file`, `missing_name`, `version_not_found`.',
+        },
+        versions: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'With `version_not_found`: every version the skill has declared, newest first.',
+        },
       },
     },
     tags: ['skills'],

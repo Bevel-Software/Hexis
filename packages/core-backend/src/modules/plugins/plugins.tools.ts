@@ -46,7 +46,8 @@ export const MY_PLUGIN: UtcpTool = toolDef({
   description:
     "The caller's own private plugin — their personal space in the knowledge base, created on first use. " +
     'Returns its folder and where skills go inside it (`skillsDir`); write a skill there as ' +
-    '`<skillsDir>/<skill-name>/SKILL.md` with the file tools. Readable only by its owner — not even admins — and ' +
+    '`<skillsDir>/<skill-name>/SKILL.md` with the file tools, opening with the Agent Skills frontmatter ' +
+    '(`name`, `description`, and `metadata.version` such as `"1.0.0"`). Readable only by its owner — not even admins — and ' +
     'never listed as a shared plugin. Idempotent: calling it again returns the same folder.',
   path: '/api/plugins/personal',
   inputs: { type: 'object', properties: {}, additionalProperties: false },

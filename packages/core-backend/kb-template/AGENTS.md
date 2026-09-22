@@ -452,9 +452,11 @@ metadata:
 
 The body is the instructions, in plain markdown. `allowed-tools` entries are
 tool names from the `.tool` manuals and MCP servers of the plugins that hold
-the skill. `metadata.version` is semver. Any other `metadata` keys are the
-author's own notes — the catalog carries the file as it is and acts on none
-of them.
+the skill. `metadata.version` is semver; `list_skills` reports it, and
+`get_skill` with a `version` loads the skill as it was when it last declared
+that version (omit `version` for the latest). Any other `metadata` keys are
+the author's own notes — the catalog carries the file as it is and acts on
+none of them.
 
 A `SKILL.md` committed on the default branch is listed and loadable from the
 very next `list_skills` or `get_skill`, on the connection you already have:
