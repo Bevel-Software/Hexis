@@ -4,6 +4,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('account-erasure');
 import { and, eq, notExists } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
+import type { IReviewWorkflowService } from '../workflow/review-workflow/review-workflow.interface.js';
 import {
   changeRequests,
   externalApiKeys,
@@ -112,6 +113,12 @@ export interface IAccountErasureService {
 export class AccountErasureService implements IAccountErasureService {
   constructor(
     private readonly db: Database,
+    /**
+     * The review workflow owns the approvals and the lock their writers take,
+     * so it does the rewrite (see `IReviewWorkflowService.eraseApprover`);
+     * this module only decides WHEN, inside its own transaction.
+     */
+    private readonly reviewWorkflow: Pick<IReviewWorkflowService, 'eraseApprover'>,
     private readonly participants: IErasureParticipant[] = [],
   ) {}
 
@@ -176,10 +183,18 @@ export class AccountErasureService implements IAccountErasureService {
         .where(eq(pluginJoinRequests.requesterEmail, target.email));
 
       // Audit rows: anonymize in place (no user FK on these; they key by email).
-      await tx
-        .update(prFileApprovals)
-        .set({ approverEmail: target.erasedEmail, approverName: target.erasedName })
-        .where(eq(prFileApprovals.approverEmail, target.email));
+      //
+      // The approvals belong to the review workflow, and so does the lock
+      // their writers take — one of those writers COPIES rows (a change request
+      // bringing itself up to date re-pins the approvals its merge did not
+      // disturb onto the new head), and a copy that read this person's row a
+      // moment before the rewrite would insert their real address back
+      // afterwards. The workflow takes that lock exclusively and rewrites the
+      // rows, in THIS transaction, so it stays held until the erasure commits.
+      await this.reviewWorkflow.eraseApprover(tx, target.email, {
+        email: target.erasedEmail,
+        name: target.erasedName,
+      });
       await tx
         .update(prMergeLog)
         .set({ triggeredByEmail: target.erasedEmail, triggeredByName: target.erasedName })
@@ -214,9 +229,35 @@ export class AccountErasureService implements IAccountErasureService {
       await tx.delete(users).where(eq(users.id, userId));
     });
 
-    // Post-commit callbacks (e.g. Mastra memory cleanup for chat threads
-    // captured inside the transaction).
-    for (const cb of postCommit) await cb();
+    // The two second passes below run BEFORE the callbacks, not after them: a
+    // callback talks to an external store and can reject, and the erasure it
+    // would abandon is already committed — `eraseUser` cannot be retried into
+    // it, so a pass sequenced behind a failing callback is a pass that may
+    // never run at all. Nothing here depends on a callback having succeeded.
+
+    // The second pass for the approvals, for the same kind of reason as the one
+    // the change requests already had.
+    //
+    // The lock above orders this erasure against every writer that takes it,
+    // and `approveFile` re-reads the account under that lock before it writes
+    // — so an approval in flight when this commits is refused rather than
+    // landing in the erased name. This is the belt to that pair of braces: it
+    // costs one statement, it is idempotent, and it means the guarantee does
+    // not rest on every future writer of this table remembering the lock. A
+    // row that got in anyway is rewritten here.
+    //
+    // Only while NO account answers to the address, exactly as below: someone
+    // who signs in again at it since the commit is a new person, and the
+    // approvals they make are their own.
+    await this.db
+      .update(prFileApprovals)
+      .set({ approverEmail: target.erasedEmail, approverName: target.erasedName })
+      .where(
+        and(
+          eq(prFileApprovals.approverEmail, target.email),
+          notExists(this.db.select({ id: users.id }).from(users).where(eq(users.email, target.email))),
+        ),
+      );
 
     // Once more, after the commit, for the one writer that can still be
     // holding the person's name: a join-request job that confirmed its claim
@@ -238,6 +279,10 @@ export class AccountErasureService implements IAccountErasureService {
           notExists(this.db.select({ id: users.id }).from(users).where(eq(users.email, target.email))),
         ),
       );
+
+    // Post-commit callbacks (e.g. Mastra memory cleanup for chat threads
+    // captured inside the transaction).
+    for (const cb of postCommit) await cb();
 
     log.info(`erased user id=${userId}`);
     return true;

@@ -99,7 +99,33 @@ export function ChangeRequestDialog({
    * a problem with the platform.
    */
   const [branchFailure, setBranchFailure] = useState<Map<string, ReadFailure>>(new Map());
-  const [blocked, setBlocked] = useState(false);
+  /**
+   * Git refused, so there is nothing left to click — and WHICH refusal, because
+   * the two read completely differently to the reader. `apply` is the merge
+   * onto the shared version failing; `update` is bringing the request up to
+   * date failing. Both end at the same place (the author's agent has to redo
+   * the proposal against the text as it stands), so both carry `ConflictHelp`,
+   * but telling someone their request "can't be applied" when nobody tried to
+   * apply it sends them looking for a decision that was never made.
+   */
+  const [blockedBy, setBlockedBy] = useState<null | 'apply' | 'update'>(null);
+  const blocked = blockedBy !== null;
+  /**
+   * The automatic bring-up-to-date this open owes has finished.
+   *
+   * A request whose target has moved on is brought up to date by OPENING it —
+   * no button, no confirmation: a business user should not have to know that
+   * a proposal can fall behind, let alone operate the machinery that fixes it.
+   * False from the moment the dialog mounts until that update settles.
+   *
+   * One-way, and per MOUNT, which is what "at most once per open" means: a
+   * conflict (or any other refusal) is not retried under the same reader, who
+   * would only watch it fail again. Opening the dialog afresh is a new
+   * attempt — by then someone may have resolved it.
+   */
+  const [autoUpdateSettled, setAutoUpdateSettled] = useState(false);
+  /** A bring-up-to-date that landed — the one neutral line, after the fact. */
+  const [broughtUpToDate, setBroughtUpToDate] = useState(false);
   /**
    * Bumped when the request's branch has moved under the dialog (an Update
    * merged into it), so the open file's branch copy is read again. Clearing
@@ -114,6 +140,25 @@ export function ChangeRequestDialog({
    * whichever of the two copies was the one that failed and cannot know which.
    */
   const [baseRevision, setBaseRevision] = useState(0);
+
+  /**
+   * The request has fallen behind AND this reader is one of the people who
+   * may bring it up to date (its author, an admin, or anyone who may apply
+   * it). The server re-checks the same predicate; this only decides whether
+   * the dialog reaches for the update at all.
+   */
+  const behindAndUpdatable =
+    detail !== null && detail.state === 'open' && detail.behind && detail.viewerCanUpdate;
+  /**
+   * Mid-update: the dialog shows one status line and NO file content.
+   *
+   * Derived rather than stored, so it is already true on the very render the
+   * detail arrives on — a frame of pre-update files, immediately replaced,
+   * would be the dialog showing a version of the change that is about to stop
+   * being true. It also holds the file reads back (see the read effect), so
+   * nothing is fetched against a head the server is in the middle of moving.
+   */
+  const bringingUpToDate = !autoUpdateSettled && behindAndUpdatable && !blocked;
 
   const isTop = useModalLayer(true);
   useEffect(() => {
@@ -263,8 +308,25 @@ export function ChangeRequestDialog({
   const asked = useRef<Map<string, object>>(new Map());
   useEffect(() => {
     // `selected` is '' until the detail names any file in an unscoped dialog —
-    // nothing to read yet. Binary files are never read at all (above).
-    if (selected && !selectedIsBinary && !asked.current.has(selected)) {
+    // nothing to read yet. Binary files are never read at all (above). A read
+    // held back while the request is being brought up to date is not skipped:
+    // `bringingUpToDate` is a dependency, so it fires the moment the update
+    // settles — against the head the merge left, never the one it replaced.
+    //
+    // Nothing is read before the DETAIL either, even though a dialog opened
+    // about a file has a selection from the first render (`initialPath`): until
+    // the detail says whether this request is behind and whether this reader
+    // may update it, there is no way to know that the branch is not about to
+    // move. Reading first would spend a request on content the update then
+    // throws away, and the pane cannot draw a diff before the detail names its
+    // fork point regardless.
+    if (
+      detail !== null &&
+      !bringingUpToDate &&
+      selected &&
+      !selectedIsBinary &&
+      !asked.current.has(selected)
+    ) {
       const token = {};
       asked.current.set(selected, token);
       const current = () => asked.current.get(selected) === token;
@@ -285,7 +347,7 @@ export function ChangeRequestDialog({
           }),
         );
     }
-  }, [selected, selectedIsBinary, cr.branch, branchRevision]);
+  }, [selected, selectedIsBinary, cr.branch, branchRevision, bringingUpToDate, detail]);
 
   /**
    * Read the selected file again, both sides — the Retry link the retryable
@@ -353,8 +415,11 @@ export function ChangeRequestDialog({
   // Raw-vs-raw: the skills API hands back SKILL.md's PARSED body (frontmatter
   // stripped), and diffing that against a raw branch read renders the
   // frontmatter as a deletion and the whole file as changed.
+  // Nothing is read while the request is being brought up to date, on this
+  // side either: the fork point is exactly what the merge moves, so a read
+  // started now would answer about a fork point that no longer exists.
   const beforePath =
-    isAdded || renameWithoutOldPath || !selected || selectedIsBinary
+    isAdded || renameWithoutOldPath || !selected || selectedIsBinary || bringingUpToDate
       ? null
       : (movedFrom ?? selected);
   /**
@@ -765,19 +830,25 @@ export function ChangeRequestDialog({
       // other refusal (an approval the gate is still waiting on, a transient
       // git error) can change under the reader, so it is reported with the
       // button intact.
-      if (refusal.conflicts) setBlocked(true);
+      if (refusal.conflicts) setBlockedBy('apply');
       else setError(refusal.reason);
     },
   });
   const applyBusy = applying.activeCr === cr.number;
 
   /**
-   * Update: merge the target into this request's branch on the server, so the
-   * proposal sits on the text as it stands now. Success re-reads everything —
-   * the head, the fork point, and every file cached from before — and the
-   * "has changed" notice clears with the fresh detail. A conflict is the same
-   * answer an apply conflict is (git refused; nothing was merged), and gets
-   * the same help: the prompt for the author's agent.
+   * Bring the request up to date: merge the target into its branch on the
+   * server, so the proposal sits on the text as it stands now. Success
+   * re-reads everything — the head, the fork point, and every file cached
+   * from before — and the dialog shows the updated files with one neutral
+   * line. A conflict is the same answer an apply conflict is (git refused;
+   * nothing was merged), and gets the same help: the prompt for the author's
+   * agent.
+   *
+   * Nobody asks for this: it runs by itself when the dialog opens, from the
+   * effect below. There is no button, so the only guards left are the ones
+   * that matter — one run per open, and never on top of an apply or of
+   * itself.
    */
   const [updating, setUpdating] = useState(false);
   async function updateFromTarget() {
@@ -807,17 +878,61 @@ export function ChangeRequestDialog({
       } finally {
         setBranchRevision((r) => r + 1);
       }
+      setBroughtUpToDate(true);
     } catch (err) {
       const conflicts =
         err instanceof GitApiError &&
         err.status === 409 &&
         (err.body as { kind?: unknown } | undefined)?.kind === 'change-request-conflicts';
-      if (conflicts) setBlocked(true);
+      if (conflicts) setBlockedBy('update');
       else setError(err instanceof Error ? err.message : "Couldn't update this change request.");
     } finally {
       setUpdating(false);
+      // Settled either way, and settled for good on this open: a refusal that
+      // re-armed itself would merge-and-fail on every render the detail
+      // changes, and a success has nothing left to do.
+      setAutoUpdateSettled(true);
     }
   }
+
+  /**
+   * The open IS the request to bring it up to date.
+   *
+   * Runs at most once per mount, never against a request that is not open
+   * or a reader who may not update it (`behindAndUpdatable`), never on top of
+   * a conflict already reported, and never while an apply is running — an
+   * apply is a merge on the same branches, and two of them at once is how a
+   * request ends up half-landed. An apply that fails without conflicting lets
+   * this through afterwards, which is right: the request is still open and
+   * still behind.
+   */
+  const autoUpdateStarted = useRef(false);
+  useEffect(() => {
+    if (autoUpdateStarted.current || autoUpdateSettled) return;
+    // A viewer who may not update it, a request that is not open or not
+    // behind, and a conflict already on screen are all ruled out here rather
+    // than recorded: none of them can turn back into an update this open owes.
+    if (detail === null || !behindAndUpdatable || blocked) return;
+    // An apply is a merge on the same two branches; two at once is how a
+    // request ends up half-landed. Not settled — just held, so an apply that
+    // fails without conflicting still lets this through afterwards.
+    if (applyBusy) return;
+    // The ref, not the state, is what makes this once-and-only-once: React
+    // re-runs an effect twice on mount under StrictMode, and both runs read
+    // the same state.
+    autoUpdateStarted.current = true;
+    // The synchronous setState this reaches is the in-flight marker every
+    // effect that starts async work has to raise — the render it costs is the
+    // one that swaps the files for "Bringing this up to date…", which is the
+    // whole point. Deferring it would show the pre-update files for a frame.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void updateFromTarget();
+    // `updateFromTarget` is re-created every render and is deliberately not a
+    // dependency: the guards above are what make this run once, not the dep
+    // list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoUpdateSettled, detail, behindAndUpdatable, blocked, applyBusy]);
+
   // Name the step: recording approvals and merging are separately slow, and one
   // label over both makes the longer half look stalled.
   const applyLabel = applying.phase === 'approving' ? 'Approving…' : 'Applying…';
@@ -945,50 +1060,82 @@ export function ChangeRequestDialog({
           </Banner>
         )}
 
-        {blocked && (
+        {/* Git refused. Both refusals end in the same place — the proposal has
+            to be redone against the text as it stands — so both hand the
+            author's agent the prompt. What differs is what was attempted:
+            saying "can't apply" about an update nobody asked for sends the
+            reader looking for a decision that was never made. Neither
+            sentence names a branch. */}
+        {blockedBy !== null && (
           <Banner tone="wait" role="alert" className="mx-8 mt-4">
-            <b className="font-semibold">Can't apply</b>: files changed after {firstName} wrote
-            this, so there is no honest before and after to apply. It has to be redone against
-            the current text.
+            {blockedBy === 'update' ? (
+              <>
+                <b className="font-semibold">Can't bring this up to date</b>: what everyone sees
+                has changed since this was proposed, and the two can't be combined
+                automatically. This request needs a hand.
+              </>
+            ) : (
+              <>
+                <b className="font-semibold">Can't apply</b>: files changed after {firstName}{' '}
+                wrote this, so there is no honest before and after to apply. It has to be redone
+                against the current text.
+              </>
+            )}
             <div className="mt-2.5">
               <ConflictHelp prompt={conflictResolutionPrompt(cr)} />
             </div>
           </Banner>
         )}
 
-        {/* The target moved on after this was proposed. The diff below does not
-            show that (it is read from the fork point), so it is said here —
-            with Update for the author and anyone who may apply it. Nothing at
-            all when the request is up to date. The button goes once an Update
-            has conflicted: the conflict help above is the way forward, and a
-            second click would only fail the same way. */}
-        {detail !== null && detail.behind && (
-          <Banner tone="neutral" role="status" className="mx-8 mt-4">
-            <span className="flex flex-wrap items-center gap-3">
-              <span className="min-w-0 flex-1">
-                <span className="font-mono">{detail.base || targetBranch}</span> has changed since
-                this was proposed
-              </span>
-              {detail.viewerCanUpdate && !blocked && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={updating || applyBusy}
-                  onClick={() => void updateFromTarget()}
-                >
-                  {updating ? 'Updating…' : 'Update'}
-                </Button>
-              )}
-            </span>
-          </Banner>
+        {/* The target moved on after this was proposed, and this reader is not
+            one of the people who can do anything about it. Everyone who can
+            never sees this: the dialog has already brought the request up to
+            date by the time it would render, or is saying so above.
+            "What everyone sees" is the phrase the Deployment page uses for
+            the same thing — a business user does not know what a branch is,
+            and this dialog never tells them. */}
+        {detail !== null &&
+          detail.behind &&
+          detail.state === 'open' &&
+          !detail.viewerCanUpdate &&
+          !blocked && (
+            <Banner tone="neutral" role="status" className="mx-8 mt-4">
+              What everyone sees has changed since this was proposed. Its author, or someone who
+              can apply it, brings it up to date by opening it.
+            </Banner>
+          )}
+
+        {/* It happened, and that is all: one neutral line, no banner, no
+            button. The reader did not ask for the update and has nothing to
+            decide about it — they only need to know the files below are the
+            proposal against the current text, not against the text it was
+            written on. */}
+        {broughtUpToDate && !bringingUpToDate && (
+          <p role="status" className="mt-3 px-8 text-detail text-ink-faint">
+            Brought up to date with what everyone sees.
+          </p>
         )}
 
-        {/* A request that no longer changes anything — everything it proposed
+        {/* The update the open is running, in place of the files. NOT beside
+            them: the file content that exists right now is the proposal
+            against text that has already moved, and showing it for the second
+            or two the merge takes would be the dialog answering the reader's
+            question wrongly and then correcting itself. */}
+        {bringingUpToDate ? (
+          <div className="mt-4 min-h-0 flex-1 px-8">
+            <p
+              role="status"
+              className="mx-auto max-w-[52ch] py-10 text-center text-detail text-ink-faint"
+            >
+              Bringing this up to date with what everyone sees…
+            </p>
+          </div>
+        ) : /* A request that no longer changes anything — everything it proposed
             has since landed on (or been removed from) the target, or its only
             change was one the merge never takes (roles.yaml). The file grid
             below would render a blank pill over an eternal "Loading…", which
-            reads as a hang; the truth is simpler and gets said instead. */}
-        {detail !== null && allFiles.length === 0 ? (
+            reads as a hang; the truth is simpler and gets said instead. */
+        detail !== null && allFiles.length === 0 ? (
           <div className="mt-4 min-h-0 flex-1 px-8">
             <p className="mx-auto max-w-[52ch] py-10 text-center text-detail text-ink-faint">
               This request doesn't change anything anymore. What it proposed is already part of
@@ -1057,8 +1204,8 @@ export function ChangeRequestDialog({
             )}
             {isRemoved && selectedPreview !== null && (
               <p className="pb-1 text-meta text-ink-faint">
-                This request DELETES this file. Below is the version on{' '}
-                <span className="font-mono">{targetBranch}</span> that would go.
+                This request DELETES this file. Below is the version everyone sees today, which
+                would go.
               </p>
             )}
             {oldPathUnreadable && (
@@ -1162,7 +1309,14 @@ export function ChangeRequestDialog({
         <div className="mt-4 border-t border-line bg-sunken px-8 py-4">
           {/* What is the viewer's to approve, above the verdict: a count and
               one button for all of them, or who everyone is waiting on. */}
-          {!blocked && detail !== null && allFiles.length > 0 && (mine.length > 0 || !canApply) && (
+          {/* Nothing to approve or wait on while the files are hidden: the
+              verdict belongs to the request as it will stand after the
+              update, which is a second away. */}
+          {!blocked &&
+            !bringingUpToDate &&
+            detail !== null &&
+            allFiles.length > 0 &&
+            (mine.length > 0 || !canApply) && (
             <div className="mb-3 flex flex-wrap items-center gap-3">
               <p className="text-meta font-medium text-ink">
                 {mine.length > 0
@@ -1188,7 +1342,9 @@ export function ChangeRequestDialog({
           <p className="mr-auto max-w-[52ch] text-meta text-ink-muted">
             {blocked
               ? `Nothing changes for anyone until ${firstName} proposes it again against the current text.`
-              : detail === null
+              : bringingUpToDate
+                ? ''
+                : detail === null
                 ? ''
                 : allFiles.length === 0
                   ? 'Applying would change nothing, so the button stays away.'
@@ -1230,7 +1386,7 @@ export function ChangeRequestDialog({
               but every one of them approvable BY THIS VIEWER (write access) →
               the same click, named for what it is: their authority covers the
               missing approvals. Anyone else gets the waiting line above. */}
-          {!blocked && canApply && (
+          {!blocked && !bringingUpToDate && canApply && (
             <Button
               variant="primary"
               size="sm"

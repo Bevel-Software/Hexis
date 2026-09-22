@@ -14,7 +14,7 @@ import type {
   PullRequestState,
 } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
-import { changeRequests, prComments, prFileApprovals, prMergeLog } from '../../database/schema.js';
+import { changeRequests, prComments, prFileApprovals, prMergeLog, users } from '../../database/schema.js';
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { GitService } from '../git/git.service.js';
@@ -30,6 +30,13 @@ import type {
   MergeGateInput,
   MergeGateResult,
 } from './review-workflow.interface.js';
+import {
+  APPROVAL_LOCK_TIMEOUT_MS,
+  isApprovalLockTimeout,
+  takeApprovalLock,
+  takeEveryApprovalLock,
+  type ApprovalTx,
+} from './approval-lock.js';
 
 // Merge commit (not squash): change requests can carry many meaningful commits
 // (e.g. a bulk node upload split across files) and the KB's history is the audit
@@ -52,6 +59,22 @@ class CommentAuthError extends WorkflowDomainError {
       reason === 'not-found' ? 404 : 403,
     );
     this.name = 'CommentAuthError';
+  }
+}
+
+/**
+ * Another approval write on this same request is holding the lock and did not
+ * let go. Retryable BY THE CALLER, and said in words a business user can act
+ * on: nothing was written, and trying again is the whole fix.
+ */
+class ApprovalBusyError extends WorkflowDomainError {
+  constructor() {
+    super(
+      'This change request is being updated right now — try that again in a moment.',
+      503,
+      { kind: 'approval-write-busy', retryable: true },
+    );
+    this.name = 'ApprovalBusyError';
   }
 }
 
@@ -80,6 +103,24 @@ class ApprovalAuthError extends WorkflowDomainError {
     }[reason];
     super(msg, status);
     this.name = 'ApprovalAuthError';
+  }
+}
+
+/**
+ * The account this approval would be recorded in the name of is gone — erased
+ * between the request being authenticated and its write reaching the table.
+ *
+ * 401 and not 403: the same answer `requireUser` gives a token whose account
+ * no longer exists, which is what the NEXT request from this caller will get.
+ * Signing in again makes a fresh account at the same address, and approvals
+ * made then are that new person's.
+ */
+class ApprovalAccountGoneError extends WorkflowDomainError {
+  constructor() {
+    super('This account no longer exists — sign in again to approve.', 401, {
+      kind: 'approval-account-erased',
+    });
+    this.name = 'ApprovalAccountGoneError';
   }
 }
 
@@ -523,22 +564,68 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
 
     // Unique index on (prNumber, path, approverEmail, headSha) makes this
     // idempotent — `onConflictDoNothing` turns a double-click into a no-op.
-    await this.db
-      .insert(prFileApprovals)
-      .values({
-        prNumber,
-        path,
-        approverEmail: callerEmail,
-        approverName: user.name,
-        headSha,
-      })
-      .onConflictDoNothing();
+    //
+    // Under the same per-request lock the carry-forward takes: an approval
+    // that landed between that copy's select and its insert would be pinned to
+    // the head the update was replacing and silently dropped from the request
+    // it was made on. Serialized, the approval either precedes the copy and is
+    // carried with the rest, or follows it and is honestly an approval of a
+    // head that has already moved — which the dialog then shows as stale.
+    await this.withApprovalLock(prNumber, async (tx) => {
+      // Is there still an account to record this in the name of?
+      //
+      // The route proved there was before the access read above, and that read
+      // fetches remotes — seconds, on a cold clone. An erasure that commits in
+      // that window has already rewritten every row this person's address was
+      // on, so an insert landing after it would put the address back, on a row
+      // created after the last trace of them was supposed to be gone. The lock
+      // makes the two orderings the only two: erased first and this finds
+      // nothing and refuses; approved first and the erasure's own rewrite —
+      // which waits for this transaction — takes the new row with the rest.
+      //
+      // By id, not by address: a NEW account signed in at the same address
+      // since is a different person, and this caller is not them.
+      const [account] = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, user.id))
+        .limit(1);
+      if (!account) throw new ApprovalAccountGoneError();
+      await tx
+        .insert(prFileApprovals)
+        .values({
+          prNumber,
+          path,
+          approverEmail: callerEmail,
+          approverName: user.name,
+          headSha,
+        })
+        .onConflictDoNothing();
+    });
 
     // WITH the caller as viewer: these approvals go straight back to the UI
     // that just clicked, and omitting the viewer computed every
     // `viewerCanApprove` as false — one approval made the apply button and
     // every remaining approve control vanish until a fresh detail fetch.
     return this.getApprovalStates(prNumber, files, headSha, baseBranch, prAuthorIdHash, workspaceId, user.email);
+  }
+
+  /**
+   * See the interface. The lock is taken right before the statement it has to
+   * cover, not at the top of the caller's transaction: what it orders is this
+   * rewrite and everything after it, and every millisecond earlier is that
+   * much longer for approvals to queue behind an erasure.
+   */
+  async eraseApprover(
+    tx: ApprovalTx,
+    email: string,
+    erased: { email: string; name: string },
+  ): Promise<void> {
+    await takeEveryApprovalLock(tx);
+    await tx
+      .update(prFileApprovals)
+      .set({ approverEmail: erased.email, approverName: erased.name })
+      .where(eq(prFileApprovals.approverEmail, email));
   }
 
   /**
@@ -786,6 +873,112 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     };
   }
 
+  /**
+   * Carry the per-file approvals across a commit that the APPROVERS did not
+   * make — the merge an update-from-target lands on the proposal's branch.
+   *
+   * An approval is pinned to a head sha (that is what makes an author's own
+   * later edit reset it), so a merge commit voided every approval on the
+   * request, including the many files it never touched. Reviewers then had to
+   * re-approve text nobody had changed, which is how automatic updates would
+   * have turned every stale request into a second round of review.
+   *
+   * What survives is decided by CONTENT, not by trust: `changedPaths` is
+   * every path whose bytes differ between the two heads, and only a path
+   * absent from it keeps its approval. The original `approvedAt` travels with
+   * the row, because the reviewer approved then, not now. Idempotent under
+   * the unique index, so a retried or concurrent update inserts nothing twice.
+   *
+   * Read and write sit inside one `withApprovalLock` transaction because a
+   * REVOKE landing between them would otherwise be undone: `unapproveFile`
+   * deletes the approver's rows at every head, and a copy taken before that
+   * delete would re-insert the row it just removed, silently restoring an
+   * approval its owner withdrew. Under the lock the two orderings are the only
+   * two possible ones — revoke first, and the select finds nothing to carry;
+   * carry first, and the revoke's delete sees both rows and takes both.
+   *
+   * Returns how many rows were actually WRITTEN (`returning()`, not the size
+   * of the candidate list): on a retry where every row already exists nothing
+   * is written, and the caller re-reads the detail only when that is non-zero.
+   */
+  async carryApprovalsForward(
+    prNumber: number,
+    fromHeadSha: string,
+    toHeadSha: string,
+    changedPaths: string[],
+  ): Promise<number> {
+    assertValidPrNumber(prNumber);
+    if (!fromHeadSha || !toHeadSha) {
+      throw new WorkflowValidationError('both head shas are required');
+    }
+    if (fromHeadSha === toHeadSha) return 0;
+
+    const written = await this.withApprovalLock(prNumber, async (tx) => {
+      const rows = await tx
+        .select()
+        .from(prFileApprovals)
+        .where(
+          and(eq(prFileApprovals.prNumber, prNumber), eq(prFileApprovals.headSha, fromHeadSha)),
+        );
+      const touched = new Set(changedPaths);
+      const carried = rows
+        .filter((r) => !touched.has(r.path))
+        .map((r) => ({
+          prNumber,
+          path: r.path,
+          approverEmail: r.approverEmail,
+          approverName: r.approverName,
+          headSha: toHeadSha,
+          approvedAt: r.approvedAt,
+        }));
+      if (carried.length === 0) return [];
+      return tx.insert(prFileApprovals).values(carried).onConflictDoNothing().returning();
+    });
+    if (written.length === 0) return 0;
+
+    log.info(
+      `carried ${written.length} approval(s) forward on PR #${prNumber} from ${fromHeadSha} to ${toHeadSha}`,
+    );
+    return written.length;
+  }
+
+  /**
+   * Run one change request's approval write under the lock every writer of
+   * these rows takes (see `approval-lock.ts` for what it orders and why),
+   * inside one transaction that holds it until it commits or rolls back.
+   *
+   * Every approval write this service makes goes through here — carry forward,
+   * approve, revoke — because a write that skipped it would be exactly the one
+   * that interleaves with the others. Account erasure, in another module,
+   * takes the same lock's exclusive form.
+   *
+   * Keep the body SHORT — no git, no network, no access-control read. This
+   * holds a lock and a pooled connection; `approveFile` and `unapproveFile`
+   * deliberately leave their access checks and their detail re-read outside.
+   *
+   * The wait is bounded, and hitting that bound is reported as the retryable
+   * refusal it is: nothing was written.
+   */
+  private async withApprovalLock<T>(
+    prNumber: number,
+    fn: (tx: ApprovalTx) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await this.db.transaction(async (tx) => {
+        await takeApprovalLock(tx, prNumber);
+        return fn(tx);
+      });
+    } catch (err) {
+      if (isApprovalLockTimeout(err)) {
+        log.warn(
+          `gave up waiting for the approval lock on PR #${prNumber} after ${APPROVAL_LOCK_TIMEOUT_MS}ms`,
+        );
+        throw new ApprovalBusyError();
+      }
+      throw err;
+    }
+  }
+
   async unapproveFile(
     prNumber: number,
     path: string,
@@ -805,15 +998,22 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     // Only revoke the caller's OWN approval — never someone else's. Filter on
     // (PR, path, approverEmail) without pinning the SHA so a user revoking
     // after a force-push can drop their stale row in one click.
-    await this.db
-      .delete(prFileApprovals)
-      .where(
-        and(
-          eq(prFileApprovals.prNumber, prNumber),
-          eq(prFileApprovals.path, path),
-          eq(prFileApprovals.approverEmail, callerEmail),
-        ),
-      );
+    //
+    // Under the same per-request lock `carryApprovalsForward` takes: an
+    // automatic update copies the approvals of the head it is replacing onto
+    // the new one, and a delete that interleaved with that copy would be
+    // undone by it — the revoked approval would come back at the new head.
+    await this.withApprovalLock(prNumber, async (tx) => {
+      await tx
+        .delete(prFileApprovals)
+        .where(
+          and(
+            eq(prFileApprovals.prNumber, prNumber),
+            eq(prFileApprovals.path, path),
+            eq(prFileApprovals.approverEmail, callerEmail),
+          ),
+        );
+    });
 
     // WITH the caller as viewer: these approvals go straight back to the UI
     // that just clicked, and omitting the viewer computed every

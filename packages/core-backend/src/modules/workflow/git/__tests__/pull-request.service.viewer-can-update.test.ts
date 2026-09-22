@@ -4,9 +4,11 @@ import { computeViewerCanUpdate } from '../pull-request.service.js';
 import { hashEmail } from '../../../../shared/email-identity.js';
 
 /**
- * Update (merge the target into a request's branch) belongs to the request's
- * author and to anyone who may apply it. Everyone else sees the "has changed"
- * notice without the button — and the route refuses them the same way.
+ * Bringing a request up to date (merging its target into its branch) belongs
+ * to the request's author and to anyone who may apply it — these three are
+ * the viewers whose OPEN of the dialog runs the update by itself. Everyone
+ * else is told in plain words who can do it, and the route refuses them the
+ * same way.
  */
 
 const EMAIL = 'juan@bevel.software';

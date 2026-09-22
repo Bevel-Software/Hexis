@@ -869,7 +869,11 @@ export async function createCoreServices(
 
   // GDPR erasure path: admin-driven user deletion. The core service erases the
   // rows it owns; each module contributes its slice as a participant.
-  const accountErasureService = new AccountErasureService(db, ports.erasureParticipants ?? []);
+  const accountErasureService = new AccountErasureService(
+    db,
+    reviewWorkflowService,
+    ports.erasureParticipants ?? [],
+  );
 
   // MCP (remote agent access). ExternalApiKeyService handles connection-key
   // lifecycle. McpService is a GENERIC, STATELESS proxy: per request it
