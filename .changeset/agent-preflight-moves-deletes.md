@@ -1,7 +1,0 @@
----
-'@bevel-software/platform-core-backend': minor
-'@bevel-software/platform-shared': minor
-'@bevel-software/platform-mcp-core': patch
----
-
-An agent can see what a move or delete would do before it does it. `file_stat` now says whether an item is `managed` (a platform file such as `access.md`, or a platform folder such as `KnowledgeBase/`), whether it is `movable` and `deletable` for the caller, the caller's `access: { read, write, download, owner }`, and for a folder how many files are under it (`descendants`). `move_file` takes `dryRun` and `confirm`: a dry run answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` and changes nothing, and a move that changes the caller's access runs only with `confirm: true`. A move never overwrites an existing destination, and a platform file is refused with "<name> is a platform file and stays in its folder.". The new `delete_folder` deletes a folder and every file under it, with the same dry run, and needs `confirm: true` when the folder is not empty; platform folders and folders holding files the caller cannot write are refused with the reason. `delete_file` on a folder now points to `delete_folder`. A move or delete refused for permissions is a `write-denied` answer saying whether the caller may propose the change instead, and the steps. `@bevel-software/platform-shared` exports `isPlatformFile`, `isPlatformFolder` and their refusal sentences; the MCP layer keeps a structured refusal's fields instead of reducing it to its sentence.

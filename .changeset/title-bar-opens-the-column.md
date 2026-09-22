@@ -1,9 +1,0 @@
----
-'@bevel-software/platform-core-frontend': patch
----
-
-The file page's title bar now opens its column, so it lines up with the sidebar header row like every other page's does. The band was already the right height there — 48px, from the shared token, same as the sidebar's — but `FileViewer` rendered the tab strip above it inside the same column, and a 36px strip plus its 18px gap put the title bar 54px lower than the row it is supposed to hold a line with. At every width, unchanged by collapsing or resizing the sidebar. The tab strip reads below the title now: the document names itself first, and the switcher between open documents is chrome.
-
-Which row opens a document column is `KbDocumentShell`'s to decide rather than its caller's, the same way the row on the other side of the seam belongs to `SidebarFrame`. The shell takes the title bar as a `header` slot and renders it as the column's first row in all three of its variants, on the one shared offset. Full-bleed gets that offset for the first time — a PDF, an image or a spreadsheet page used to open straight onto its renderer, so its title bar sat 12px *above* the sidebar's row rather than below it.
-
-The suite could not see any of this, which is why staging found it. `HeaderAlignment.test.tsx` rendered `KbPageHeader` on its own: a header with no column above it cannot be anything but the first row, so the tab strip that was pushing it down did not exist in the test. It renders through the real shell now, with something else in the column beside the band, and asserts what a headless DOM can actually answer about a top edge — nothing is drawn above either band, and both columns open on the same constant — across prose, full-bleed and rail. `FileViewer.test.tsx` asserts the part only the real page can say: that the file page hands its title bar to the slot, with its tab strip genuinely rendered below it.
