@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   assertInsideRepo,
+  assertKbDirNameFree,
   assertRepoRootNameFree,
+  assertRepoRootNameFreeArgs,
   isInsideRepo,
   normalizePathArgs,
   normalizeWorkspacePath,
@@ -276,5 +278,38 @@ describe('normalizePathArgs', () => {
 
   it('refuses a traversing tool argument', () => {
     expect(() => normalizePathArgs({ path: '../escape.md' }, KB)).toThrow(/outside the knowledge base repository/);
+  });
+});
+
+describe('assertRepoRootNameFreeArgs', () => {
+  const reserved = `${KB}/${KB}/x.md`;
+
+  it('refuses the reserved name on the inputs a tool creates at, batch entries included', () => {
+    expect(() => assertRepoRootNameFreeArgs({ path: reserved }, KB, ['path'])).toThrow(/is reserved/);
+    expect(() => assertRepoRootNameFreeArgs({ dest: `${KB}/${KB}` }, KB, ['dest'])).toThrow(/is reserved/);
+    expect(() => assertRepoRootNameFreeArgs({ files: [{ path: `${KB}/ok.md` }, { path: reserved }] }, KB, ['files'])).toThrow(
+      /is reserved/,
+    );
+  });
+
+  it('looks only at the keys it is given, so a source or a delete of an existing one is left possible', () => {
+    // A move OUT of the reserved folder: `src` is not a creation.
+    expect(() => assertRepoRootNameFreeArgs({ src: reserved, dest: `${KB}/elsewhere/x.md` }, KB, ['dest'])).not.toThrow();
+    expect(() => assertRepoRootNameFreeArgs({ path: reserved }, KB, [])).not.toThrow();
+    expect(() => assertRepoRootNameFreeArgs({ path: undefined, files: 'not-a-list' }, KB, ['path', 'files'])).not.toThrow();
+  });
+});
+
+describe('assertKbDirNameFree', () => {
+  const layout = { knowledgeBaseDir: 'KnowledgeBase', skillsDir: 'Skills', pluginsDir: 'Plugins', agentsFile: 'AGENTS.md' };
+
+  it('accepts a checkout folder name none of the repository roots use', () => {
+    expect(() => assertKbDirNameFree('knowledge-base', layout)).not.toThrow();
+  });
+
+  it('refuses a checkout folder named like a repository root, in any case, naming both', () => {
+    expect(() => assertKbDirNameFree('KnowledgeBase', layout)).toThrow(/knowledgeBaseDir \("KnowledgeBase"\)/);
+    expect(() => assertKbDirNameFree('skills', layout)).toThrow(/skillsDir \("Skills"\)/);
+    expect(() => assertKbDirNameFree('agents.md', layout)).toThrow(/agentsFile \("AGENTS.md"\)/);
   });
 });

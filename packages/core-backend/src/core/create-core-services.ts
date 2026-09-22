@@ -26,6 +26,7 @@ import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
 import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
 import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
 import { NodeFs } from '../modules/kb-fs/node-fs.js';
+import { assertKbDirNameFree } from '../modules/kb-fs/repo-path.js';
 import type { IFsProbe, ITreeWalker } from '../shared/fs.contract.js';
 import type { IGitRunner } from '../shared/git.contract.js';
 import { AdvisoryLease, AdvisoryLock } from '../modules/database/advisory-lock.js';
@@ -361,6 +362,11 @@ export async function createCoreServices(
   // The remote URL and username are read per-operation instead, so an admin
   // finishing setup can clone immediately without bouncing the process.
   const kbDirName = settings.resolve('kbDirName') || 'knowledge-base';
+  // A checkout folder named like one of the repository's own roots would make
+  // every path under that root read as the checkout itself, and the root
+  // unnameable. Both are operator settings, so the collision is refused here,
+  // by name, before any service captures either.
+  assertKbDirNameFree(kbDirName, settings.resolveKbLayout());
   // The disk: one walk, one probe, for every reader below.
   const disk = new NodeFs();
   // How git is run, for every module that runs it: one environment, one buffer

@@ -21,7 +21,7 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a workflow service, so this stays inside the module boundary.
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
-import { assertInsideRepo, normalizePathArgs } from '../kb-fs/repo-path.js';
+import { assertInsideRepo, assertRepoRootNameFreeArgs, normalizePathArgs } from '../kb-fs/repo-path.js';
 import { GitGuardedFilesystem } from '../kb-fs/git-guarded-filesystem.js';
 import { assertNoGitInternalsSegment, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
@@ -271,6 +271,22 @@ const wsPath = (kbDirName: string, what: string): JsonSchema =>
     `${what}: under \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash (\`/${kbDirName}/…\` is the same path). ` +
       `A path without that prefix is placed under \`${kbDirName}/\`, so \`KnowledgeBase/Foo.md\` means \`${kbDirName}/KnowledgeBase/Foo.md\`; \`.\` or \`..\` segments, backslashes and absolute paths are refused.`,
   );
+
+/**
+ * The inputs each tool CREATES at, for the reserved-root-name rule (see
+ * `assertRepoRootNameFreeArgs`). Destinations only: `src` of a copy or a move,
+ * and the path of a delete, are left out on purpose, so an existing reserved
+ * folder can be moved out of or removed. A tool absent here creates nothing.
+ */
+const RESERVED_ROOT_NAME_TARGETS: Readonly<Record<string, readonly string[]>> = {
+  write_file: ['path'],
+  write_files: ['files'],
+  edit_file: ['path'],
+  mkdir: ['path'],
+  copy_file: ['dest'],
+  move_file: ['dest'],
+  unzip: ['destination'],
+};
 
 function asText(content: string | Buffer): string {
   return typeof content === 'string' ? content : content.toString('utf8');
@@ -1177,6 +1193,14 @@ export function registerWorkspaceTools(
             kbDirName,
             spec.name === 'read_file' ? (v) => spillStore.isSpillRef(v) : undefined,
           );
+          // The checkout's own name is reserved at the repository root on this
+          // surface too. The routes meet that rule inside `WorkspaceService`;
+          // these tools write through the locking filesystem, which never
+          // enters it, so the rule is applied here — on the inputs a tool
+          // CREATES at, never on a source, so an existing reserved folder can
+          // still be moved out of or deleted.
+          const creates = RESERVED_ROOT_NAME_TARGETS[spec.name];
+          if (creates) assertRepoRootNameFreeArgs(normalized, kbDirName, creates);
           // The git folder is refused before the handler — and so before the
           // write-denial wrapper below, which would otherwise offer to propose
           // a change to it.
@@ -1561,7 +1585,7 @@ export function registerWorkspaceTools(
       properties: {
         branch: BRANCH_INPUT,
         pattern: str('JavaScript regular expression.'),
-        path: str(`Subtree to search, or a single file to search on its own, with or without a leading slash — a path without the \`${kbDirName}/\` prefix is placed under \`${kbDirName}/\` (default: whole workspace).`),
+        path: str(`Subtree to search, or a single file to search on its own, with or without a leading slash — a path without the \`${kbDirName}/\` prefix is placed under \`${kbDirName}/\` (default: the whole repository, \`${kbDirName}/\`).`),
         ignore_case: { type: 'boolean', description: 'Case-insensitive match.' },
         max_results: { type: 'integer', minimum: 1, maximum: 1000, description: 'Cap on matches (default 200).' },
         sessionId: SESSION_ID_INPUT,
@@ -1594,7 +1618,14 @@ export function registerWorkspaceTools(
       } catch (err) {
         throw new ToolError(`Invalid regex: ${(err as Error).message}`, 400);
       }
-      const searchRoot = typeof a.path === 'string' ? a.path : '';
+      // No path means the whole REPOSITORY, not the workspace directory above
+      // it. The workspace root also holds whatever an older build left beside
+      // the checkout, and the read gate has no rules for a path outside the
+      // repository — it answers "readable" — so a walk from there would hand
+      // any caller the contents of every stray, including documents that were
+      // uploaded to a restricted folder and landed beside it instead. The
+      // boot note names those for an operator; no tool reads them.
+      const searchRoot = typeof a.path === 'string' ? a.path : kbDirName;
       // The search root itself is checked here (fail-closed for an agent grep on
       // a named subtree with no sessionId); each file the walk actually opens is
       // recorded per-file below, so a root-level grep that reaches into multiple

@@ -354,6 +354,50 @@ describe('workspace file primitives', () => {
     expect(batchBody.properties.files.items.properties.path.description).toContain('with or without a leading slash');
   });
 
+  // The routes meet this rule inside WorkspaceService; the tools write through
+  // the locking filesystem, which never enters it — so the rule has to hold on
+  // this surface on its own, or `write_file` could create the one folder no
+  // single-prefix path can name.
+  it('the checkout folder name is reserved at the repository root on the tool surface too', async () => {
+    const base = await start();
+    const reserved = `${KB_DIR}/${KB_DIR}`;
+    const refused = async (tool: string, body: Record<string, unknown>) => {
+      const res = await post(`${base}/api/agent/tools/${tool}`, body);
+      expect(res.status, tool).toBe(400);
+      expect(JSON.stringify(await res.json()), tool).toContain('is reserved');
+    };
+    await refused('write_file', { path: `${reserved}/x.md`, content: 'x' });
+    await refused('write_files', { files: [{ path: `${KB_DIR}/ok.md`, content: 'ok' }, { path: `${reserved}/y.md`, content: 'y' }] });
+    await refused('mkdir', { path: reserved });
+    await refused('copy_file', { src: `${KB_DIR}/a.md`, dest: `${reserved}/a.md` });
+    await refused('move_file', { src: `${KB_DIR}/a.md`, dest: `${reserved}/a.md` });
+    // Nothing landed — the batch's valid entry included, since the batch was
+    // refused as a whole before any write.
+    await expect(stat(join(tempDir, reserved))).rejects.toThrow();
+    await expect(stat(join(tempDir, KB_DIR, 'ok.md'))).rejects.toThrow();
+
+    // An existing reserved folder (an older build could have made one) can
+    // still be emptied and moved out of: the rule is about creating, not about
+    // trapping what is there.
+    await mkdir(join(tempDir, reserved), { recursive: true });
+    await writeFile(join(tempDir, reserved, 'old.md'), 'old');
+    await writeFile(join(tempDir, reserved, 'keep.md'), 'keep');
+    expect((await post(`${base}/api/agent/tools/move_file`, { src: `${reserved}/keep.md`, dest: `${KB_DIR}/keep.md` })).status).toBe(200);
+    expect((await post(`${base}/api/agent/tools/delete_file`, { path: `${reserved}/old.md` })).status).toBe(200);
+    expect(await readFile(join(tempDir, KB_DIR, 'keep.md'), 'utf8')).toBe('keep');
+  });
+
+  it('grep with no path searches the repository, never what sits beside the checkout', async () => {
+    const base = await start();
+    // A stray an older build left beside the checkout. The read gate has no
+    // rules for a path outside the repository and would call it readable, so
+    // the only safe root for a walk is the repository itself.
+    await writeFile(join(tempDir, 'stray.md'), 'needle in a stray\n');
+    await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/n.md`, content: 'needle in the repository\n' });
+    const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle' })).json()) as { matches: { path: string }[] };
+    expect(res.matches.map((m) => m.path)).toEqual([`${KB_DIR}/n.md`]);
+  });
+
   it('execute_command runs in the workspace dir', async () => {
     const base = await start();
     const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: 'echo hello-exec' })).json()) as { stdout: string; exitCode: number };

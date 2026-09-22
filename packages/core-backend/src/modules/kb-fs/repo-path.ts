@@ -135,9 +135,11 @@ export function normalizeWorkspacePath(wsPath: string, kbDirName: string): strin
  *
  * Consequence of normalising rather than refusing: `knowledge-base/x` has to
  * mean ONE thing, and it means the repository's own `x`. A repository folder
- * called `knowledge-base` would therefore be unreachable — every path naming
- * it is read as the checkout itself — so the name is reserved at the root
- * rather than left ambiguous. Existing ones are named at boot, never deleted.
+ * called `knowledge-base` would therefore be ambiguous — `knowledge-base/x`
+ * is read as the checkout's `x`, and the folder is reachable only by spelling
+ * the prefix twice — so the name is reserved at the root rather than left
+ * ambiguous. An existing one is left alone: nothing here deletes it, and a
+ * delete or a move OUT of it stays possible so an operator can clean it up.
  *
  * Case-INSENSITIVELY, whatever this host's filesystem does. On macOS or
  * Windows `Knowledge-Base/` and `knowledge-base/` are one folder, so a
@@ -156,6 +158,72 @@ export function assertRepoRootNameFree(wsPath: string, kbDirName: string): void 
       // refusal stays one sentence about one name.
       (segments[1] === kbDirName ? '' : ` A different case is the same folder wherever the repository is cloned onto a case-insensitive filesystem, so "${kbDirName}" is refused in every spelling.`),
     { kind: 'reserved-root-name', path: wsPath, kbDirName },
+  );
+}
+
+/**
+ * {@link assertRepoRootNameFree} over the arguments of a tool call that CREATES
+ * something — `keys` names the inputs that are destinations (`path` of a
+ * write or a mkdir, `dest` of a copy or a move, `destination` of an unzip, and
+ * `files` for each `files[].path` of a batch write). Never a source: a move or
+ * a delete OUT of an existing reserved folder is how it gets cleaned up.
+ *
+ * The routes enforce the reservation inside `WorkspaceService`; the MCP tools
+ * write through the locking filesystem, which never enters that service, so
+ * this is where the same rule meets them — after {@link normalizePathArgs},
+ * on the normalised path.
+ */
+export function assertRepoRootNameFreeArgs(
+  args: Record<string, unknown>,
+  kbDirName: string,
+  keys: readonly string[],
+): void {
+  for (const key of keys) {
+    if (key === 'files') {
+      if (!Array.isArray(args.files)) continue;
+      for (const f of args.files) {
+        const p = f && typeof f === 'object' ? (f as Record<string, unknown>).path : undefined;
+        if (typeof p === 'string') assertRepoRootNameFree(p, kbDirName);
+      }
+      continue;
+    }
+    const value = args[key];
+    if (typeof value === 'string' && value.length > 0) assertRepoRootNameFree(value, kbDirName);
+  }
+}
+
+/**
+ * Refuse a checkout folder name that is also one of the repository's own root
+ * names (the knowledge, skills or plugins root, or the agent guide's file).
+ *
+ * The normaliser reads a path whose first segment is `<kbDirName>` as already
+ * inside the checkout. Were the checkout folder called `KnowledgeBase` — the
+ * default name of the knowledge root — `KnowledgeBase/Report.md` would mean
+ * the checkout's OWN `Report.md`, never the page under the knowledge root, and
+ * {@link assertRepoRootNameFree} would refuse the knowledge root itself as a
+ * reserved name. Both settings are the operator's to choose, so the collision
+ * is refused at boot, by name, rather than discovered one misplaced write at a
+ * time. Case-insensitive, for the same reason the reservation is.
+ */
+export function assertKbDirNameFree(
+  kbDirName: string,
+  layout: { knowledgeBaseDir: string; skillsDir: string; pluginsDir: string; agentsFile: string },
+): void {
+  const taken = kbDirName.toLowerCase();
+  const collision = (
+    [
+      ['knowledgeBaseDir', layout.knowledgeBaseDir],
+      ['skillsDir', layout.skillsDir],
+      ['pluginsDir', layout.pluginsDir],
+      ['agentsFile', layout.agentsFile],
+    ] as const
+  ).find(([, name]) => name.toLowerCase() === taken);
+  if (!collision) return;
+  throw new Error(
+    `The checkout folder name (kbDirName / KB_DIR_NAME) is "${kbDirName}", which is also the repository's ` +
+      `${collision[0]} ("${collision[1]}"). Every workspace path starting with that name is read as the checkout itself, ` +
+      `so the repository's own "${collision[1]}" could never be named. Give the checkout folder a name none of the ` +
+      `repository's root folders or files use.`,
   );
 }
 
