@@ -75,7 +75,14 @@ function harness() {
         }),
       }),
     }),
-    update: () => ({ set: () => ({ where: async () => undefined }) }),
+    // Outside the transaction: the second passes, after the commit.
+    update: (table: unknown) => ({
+      set: () => ({
+        where: async () => {
+          order.push(`after-commit:${tableOf(table)}`);
+        },
+      }),
+    }),
     transaction: async <T,>(fn: (t: typeof tx) => Promise<T>) => fn(tx),
   } as unknown as Database;
   return { svc: new AccountErasureService(db), order, locked, lockSql };
@@ -110,5 +117,20 @@ describe('AccountErasureService: approvals are rewritten under the approval lock
     // Still inside the same transaction as the user row's deletion, which is
     // what keeps the lock held for the whole rewrite.
     expect(h.order.indexOf('delete:users')).toBeGreaterThan(gate);
+  });
+
+  it('sweeps the approvals once more after the commit, for anything the lock did not order', async () => {
+    // The lock covers every writer that takes it, and `approveFile` re-reads
+    // the account under it before writing. This is the belt to those braces:
+    // one idempotent statement so the guarantee does not rest on every future
+    // writer of this table remembering the lock.
+    const h = harness();
+    await h.svc.eraseUser('u1');
+
+    const committed = h.order.indexOf('delete:users');
+    const sweep = h.order.indexOf('after-commit:pr_file_approvals');
+    expect(sweep).toBeGreaterThan(committed);
+    // The change requests get the same treatment, and did before this.
+    expect(h.order).toContain('after-commit:change_requests');
   });
 });

@@ -229,6 +229,29 @@ export class AccountErasureService implements IAccountErasureService {
     // captured inside the transaction).
     for (const cb of postCommit) await cb();
 
+    // The same second pass for the approvals, and for the same kind of reason.
+    //
+    // The lock above orders this erasure against every writer that takes it,
+    // and `approveFile` re-reads the account under that lock before it writes
+    // — so an approval in flight when this commits is refused rather than
+    // landing in the erased name. This is the belt to that pair of braces: it
+    // costs one statement, it is idempotent, and it means the guarantee does
+    // not rest on every future writer of this table remembering the lock. A
+    // row that got in anyway is rewritten here.
+    //
+    // Only while NO account answers to the address, exactly as below: someone
+    // who signs in again at it since the commit is a new person, and the
+    // approvals they make are their own.
+    await this.db
+      .update(prFileApprovals)
+      .set({ approverEmail: target.erasedEmail, approverName: target.erasedName })
+      .where(
+        and(
+          eq(prFileApprovals.approverEmail, target.email),
+          notExists(this.db.select({ id: users.id }).from(users).where(eq(users.email, target.email))),
+        ),
+      );
+
     // Once more, after the commit, for the one writer that can still be
     // holding the person's name: a join-request job that confirmed its claim
     // just before the delete above landed and opened its change request just
