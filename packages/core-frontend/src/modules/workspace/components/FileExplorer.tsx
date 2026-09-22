@@ -2327,20 +2327,29 @@ export function FileExplorer() {
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
+      // Nothing to drop INTO: the tree below renders no row and says the
+      // checkout is missing, and this drop used to be sent with an empty
+      // target — the workspace root, beside the missing folder, where
+      // nothing this sidebar shows can ever live. Refused before
+      // `preventDefault`, so the browser's own cursor says "not here".
+      if (!checkout) return;
       e.preventDefault();
       setDragOver(false);
       // Only handle external file/folder drops at the root level.
       if (e.dataTransfer.getData(DRAG_MIME)) return;
+      // The background of the tree is the tree's ROOT — the checkout — not
+      // the workspace directory that happens to contain it.
+      const target = checkout.relativePath;
       const entries = e.dataTransfer.items ? snapshotEntries(e.dataTransfer.items) : [];
       if (entries.length > 0) {
         // Outside the `TreeChrome` below, so this one names the tree itself.
-        dispatchUpload({ kind: 'items', entries }, '', KNOWLEDGE_UPLOAD_TARGET);
+        dispatchUpload({ kind: 'items', entries }, target, KNOWLEDGE_UPLOAD_TARGET);
         return;
       }
       const files = Array.from(e.dataTransfer.files);
-      if (files.length > 0) dispatchUpload({ kind: 'files', files }, '', KNOWLEDGE_UPLOAD_TARGET);
+      if (files.length > 0) dispatchUpload({ kind: 'files', files }, target, KNOWLEDGE_UPLOAD_TARGET);
     },
-    [dispatchUpload],
+    [checkout, dispatchUpload],
   );
 
   return (
@@ -2360,6 +2369,9 @@ export function FileExplorer() {
       }`}
       onDrop={handleDrop}
       onDragOver={(e) => {
+        // Same refusal as the drop: no checkout, no drop target, so no
+        // highlight promising one.
+        if (!checkout) return;
         e.preventDefault();
         setDragOver(true);
       }}

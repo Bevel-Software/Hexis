@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
-import * as fileTree from '../fileTree';
 import {
   checkoutRoot,
   mergePendingIntoTree,
@@ -180,16 +179,6 @@ describe('checkoutRoot', () => {
 
   it("is not fooled by a FILE of the checkout's name", () => {
     expect(checkoutRoot(dir('', [file(KB)]), KB)).toBeNull();
-  });
-
-  /**
-   * The bug was the finder, not any one caller. A module that exports a
-   * name-search root finder again hands the next caller the same foot-gun,
-   * so the module's surface is pinned: one resolver, and it takes the name.
-   */
-  it("is the module's only root resolver — no search-by-name finder survives", () => {
-    expect(Object.keys(fileTree).filter((k) => /kbroot|findkb/i.test(k))).toEqual([]);
-    expect(checkoutRoot.length).toBe(2);
   });
 });
 

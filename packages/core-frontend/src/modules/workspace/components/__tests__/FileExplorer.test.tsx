@@ -79,6 +79,19 @@ const EMPTY_TREE: FileTreeEntry = {
 const KB_DIR = 'knowledge-base';
 
 /**
+ * The fixtures that write their own workspace paths (`knowledge-base/...`)
+ * rather than short ones. Membership is stated by the fixture, never read off
+ * its shape — see `inCheckout`.
+ */
+const CHECKOUT_ROOTED = new WeakSet<FileTreeEntry>();
+
+/** Declare a fixture already rooted at the checkout. Returns it unchanged. */
+function rootedAtCheckout(tree: FileTreeEntry): FileTreeEntry {
+  CHECKOUT_ROOTED.add(tree);
+  return tree;
+}
+
+/**
  * Put a fixture's contents INSIDE the checkout, which is where the explorer
  * takes its root from: the tree it is handed roots at the workspace and
  * carries `<kbDirName>/` as a child, and NOTHING above that child is read.
@@ -86,11 +99,16 @@ const KB_DIR = 'knowledge-base';
  * overlays that merge pending uploads and proposed files into the tree walk
  * it by path, and a short path would land them beside the checkout.
  *
- * Applied only to a fixture that does not already name the checkout, so the
- * trees written out in full below (which do) pass through untouched.
+ * Skipped only for a fixture that SAYS it already writes workspace paths, via
+ * `rootedAtCheckout`. It used to guess that from a child named
+ * `knowledge-base`, which is not something the shape can tell: a short-path
+ * fixture whose own top-level folder is called `knowledge-base` is the same
+ * data as a checkout-rooted one, so it would have been passed through,
+ * `atPath` would have stayed the identity, and every path the harness names
+ * would have been short with nothing to say so.
  */
 function inCheckout(tree: FileTreeEntry): FileTreeEntry {
-  if (tree.children?.some((c) => c.name === KB_DIR)) return tree;
+  if (CHECKOUT_ROOTED.has(tree)) return tree;
   const under = (e: FileTreeEntry): FileTreeEntry => ({
     ...e,
     relativePath: kbPath(e.relativePath),
@@ -543,7 +561,10 @@ describe('FileExplorer toolbar', () => {
     const [uploadInput, dir] = dispatchUpload.mock.calls[0];
     expect(uploadInput.kind).toBe('files');
     expect(uploadInput.files[0].name).toBe('dropped.md');
-    expect(dir).toBe('');
+    // The tree's background is the tree's ROOT. It used to send an empty
+    // target, which is the workspace directory — the file landed BESIDE the
+    // checkout, where this sidebar can never show it again.
+    expect(dir).toBe(KB_DIR);
   });
 
   it('renders the loading placeholder when fileTree is null', async () => {
@@ -1924,7 +1945,7 @@ describe('FileExplorer: delete and move ask first', () => {
   const DRAG_MIME = 'application/x-workspace-path';
   const DRAG_KIND_MIME = 'application/x-workspace-kind';
   const KB = 'knowledge-base';
-  const TREE: FileTreeEntry = {
+  const TREE: FileTreeEntry = rootedAtCheckout({
     name: '.',
     relativePath: '.',
     type: 'directory',
@@ -1963,7 +1984,7 @@ describe('FileExplorer: delete and move ask first', () => {
         ],
       },
     ],
-  };
+  });
   const CONTRACT = `${KB}/KnowledgeBase/Legal/contract.pdf`;
 
   /** One side of the prospective-access answer. */
@@ -2561,7 +2582,7 @@ describe('FileExplorer: deleting a folder with proposed files', () => {
   const REPORTS = `${KB}/Data/Reports`;
   const PROPOSED = `${REPORTS}/proposed.md`;
   /** One committed file on the branch; `proposed.md` exists only in request #12. */
-  const TREE: FileTreeEntry = {
+  const TREE: FileTreeEntry = rootedAtCheckout({
     name: '.',
     relativePath: '.',
     type: 'directory',
@@ -2587,14 +2608,16 @@ describe('FileExplorer: deleting a folder with proposed files', () => {
         ],
       },
     ],
-  };
+  });
   /** The branch after "Delete folder only": the folder is gone, the proposal is not. */
-  const TREE_WITHOUT_REPORTS: FileTreeEntry = {
+  // Derived from a checkout-rooted fixture, so it says so itself: the
+  // declaration is per-object, and a spread is a new object.
+  const TREE_WITHOUT_REPORTS: FileTreeEntry = rootedAtCheckout({
     ...TREE,
     children: [
       { name: KB, relativePath: KB, type: 'directory', children: [{ name: 'Data', relativePath: `${KB}/Data`, type: 'directory', children: [] }] },
     ],
-  };
+  });
 
   const request = (over: Record<string, unknown> = {}) => ({
     number: 12,
@@ -2874,7 +2897,7 @@ describe('FileExplorer: an empty tree says why', () => {
   });
   const fileAt = (rel: string): FileTreeEntry => ({ name: rel.split('/').pop()!, relativePath: rel, type: 'file' });
   /** A seeded knowledge base: the reserved roots, forced visible, with `kb` under KnowledgeBase. */
-  const seeded = (kb: FileTreeEntry[], extra: Partial<FileTreeEntry> = {}, loose: FileTreeEntry[] = []): FileTreeEntry => ({
+  const seeded = (kb: FileTreeEntry[], extra: Partial<FileTreeEntry> = {}, loose: FileTreeEntry[] = []): FileTreeEntry => rootedAtCheckout({
     ...dirAt('.', [
       dirAt(KBD, [
         dirAt(`${KBD}/KnowledgeBase`, kb),
@@ -2933,7 +2956,7 @@ describe('FileExplorer: an empty tree says why', () => {
 
   it('asks about the KB clone folder, not the workspace root, for a tree that predates the split', async () => {
     mockAuthFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ canWrite: false }) });
-    renderExplorer({ fileTree: dirAt('.', [dirAt(KBD)]), workspaceId: 'target-company-state' });
+    renderExplorer({ fileTree: rootedAtCheckout(dirAt('.', [dirAt(KBD)])), workspaceId: 'target-company-state' });
     await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
     expect(mockAuthFetch.mock.calls[0][0] as string).toContain(`/access?path=${KBD}&kind=folder`);
     expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
@@ -2975,7 +2998,7 @@ describe('FileExplorer: platform files stay put', () => {
     type: 'file',
   });
 
-  const TREE: FileTreeEntry = {
+  const TREE: FileTreeEntry = rootedAtCheckout({
     name: '.',
     relativePath: '.',
     type: 'directory',
@@ -2997,7 +3020,7 @@ describe('FileExplorer: platform files stay put', () => {
         ],
       },
     ],
-  };
+  });
 
   const PLATFORM = ['access.md', 'roles.yaml', '.bevelignore', 'AGENTS.md'];
 
@@ -3078,7 +3101,7 @@ describe('FileExplorer: platform files stay put', () => {
   // never moves, and nobody but an admin moves any of them — and lets the
   // server answer the rest, which is the only place the answer lives.
   describe('an admin may drag a misplaced one back', () => {
-    const MISPLACED: FileTreeEntry = {
+    const MISPLACED: FileTreeEntry = rootedAtCheckout({
       name: '.',
       relativePath: '.',
       type: 'directory',
@@ -3094,7 +3117,7 @@ describe('FileExplorer: platform files stay put', () => {
           ],
         },
       ],
-    };
+    });
 
     function misplacedRow(): HTMLElement {
       return screen.getAllByText('.bevelignore')[0].closest('button')!;
@@ -3179,7 +3202,7 @@ describe('FileExplorer: platform files stay put', () => {
   it('a FOLDER named like a platform file refuses the rename too, not just the drag', () => {
     // The server reads the path, not the kind. Offering Rename here opened an
     // editor that could only fail on the round trip.
-    const WITH_FOLDER: FileTreeEntry = {
+    const WITH_FOLDER: FileTreeEntry = rootedAtCheckout({
       name: '.',
       relativePath: '.',
       type: 'directory',
@@ -3193,7 +3216,7 @@ describe('FileExplorer: platform files stay put', () => {
           ],
         },
       ],
-    };
+    });
     renderExplorer({ fileTree: WITH_FOLDER });
     // The folder row's draggable sits on the wrapper around the name button.
     expect(screen.getByText('access.md').closest('[draggable]')).toHaveAttribute('draggable', 'false');
@@ -3373,6 +3396,35 @@ describe('FileExplorer: the root is the checkout', () => {
     expect(screen.queryByText('Knowledge')).toBeNull();
     expect(screen.queryByText('Planted.md')).toBeNull();
     expect(screen.queryByText('Stray.docx')).toBeNull();
+  });
+
+  /**
+   * The drop the sidebar accepts goes where the sidebar reads from. With no
+   * checkout there is no such place: the notice says the repository is
+   * missing, and a drop taken anyway would be written beside the missing
+   * folder and never appear.
+   */
+  it('drops onto the background into the checkout, and refuses them when there is none', async () => {
+    const drop = async () => {
+      const file = new File(['drop'], 'dropped.md');
+      await act(async () => {
+        fireEvent.drop(screen.getByTestId('file-explorer-root'), {
+          dataTransfer: { files: [file], getData: () => '' },
+        });
+      });
+    };
+
+    const dispatchUpload = vi.fn().mockResolvedValue(undefined);
+    renderExplorer({ fileTree: workspace(...STRAYS, CHECKOUT), verbatimTree: true, dispatchUpload });
+    await drop();
+    expect(dispatchUpload).toHaveBeenCalledTimes(1);
+    expect(dispatchUpload.mock.calls[0][1]).toBe(KB_DIR);
+    cleanup();
+
+    const refused = vi.fn().mockResolvedValue(undefined);
+    renderExplorer({ fileTree: workspace(...STRAYS), verbatimTree: true, dispatchUpload: refused });
+    await drop();
+    expect(refused).not.toHaveBeenCalled();
   });
 
   /** A checkout that is merely EMPTY is a different answer, and keeps its own. */
