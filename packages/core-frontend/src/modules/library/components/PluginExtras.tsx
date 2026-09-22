@@ -6,7 +6,7 @@ import { cn } from '../../../lib/utils';
 import { Button } from '../../../shared/components';
 import { listFiles, readFile } from '../../workspace/services/workspace.api';
 import { useWorkspace } from '../../workspace/state/workspace.context';
-import { findKbRoot } from '../../workspace/utils/fileTree';
+import { checkoutRoot } from '../../workspace/utils/fileTree';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 
 /**
@@ -216,13 +216,13 @@ export function ClientExtensionsSection({
     setListings([]);
     if (!kbDirName) return;
     if (reusableTree) {
-      setListings(namespaceListings(reusableTree, folder));
+      setListings(namespaceListings(reusableTree, kbDirName, folder));
       return;
     }
     let live = true;
     listFiles(workspaceId)
       .then((tree) => {
-        if (live) setListings(namespaceListings(tree, folder));
+        if (live) setListings(namespaceListings(tree, kbDirName, folder));
       })
       .catch(() => {
         /* the section renders nothing — a tree fetch failure is not this page's story */
@@ -277,13 +277,17 @@ export function ClientExtensionsSection({
 
 /**
  * Walk the (already-loaded, ACL-filtered) tree down to this plugin's namespace
- * dirs. Through `findKbRoot`, not `[kbDirName, …]` from the literal root: the
- * fileTree can carry workspace/KB-clone wrapper levels above the kb dir, and
- * that helper is how the rest of the codebase reaches the well-known root
- * dirs regardless.
+ * dirs. Through `checkoutRoot`, the one way anything here reaches into the
+ * repository: the fileTree roots at the workspace and carries the checkout as
+ * its `<kbDirName>/` child, and a `Plugins/` anywhere else in the workspace
+ * is not this deployment's.
  */
-function namespaceListings(tree: FileTreeEntry, folder: string): NamespaceListing[] {
-  const kbRoot = findKbRoot(tree);
+function namespaceListings(
+  tree: FileTreeEntry,
+  kbDirName: string,
+  folder: string,
+): NamespaceListing[] {
+  const kbRoot = checkoutRoot(tree, kbDirName);
   // `folder` is the path below the plugins root — one segment for a top-level
   // plugin, several for a nested one — and the tree is walked a segment at a time.
   const pluginDir = kbRoot ? descend(kbRoot, [PLUGINS_DIR, ...folder.split('/')]) : null;

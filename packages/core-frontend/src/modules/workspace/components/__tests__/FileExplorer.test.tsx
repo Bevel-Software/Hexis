@@ -72,6 +72,67 @@ const EMPTY_TREE: FileTreeEntry = {
   children: [],
 };
 
+/**
+ * The name the deployment gives the repository checkout — `makeWorkspaceFixture`'s
+ * `kbDirName`, and the only child of the workspace root the explorer reads.
+ */
+const KB_DIR = 'knowledge-base';
+
+/**
+ * The fixtures that write their own workspace paths (`knowledge-base/...`)
+ * rather than short ones. Membership is stated by the fixture, never read off
+ * its shape — see `inCheckout`.
+ */
+const CHECKOUT_ROOTED = new WeakSet<FileTreeEntry>();
+
+/** Declare a fixture already rooted at the checkout. Returns it unchanged. */
+function rootedAtCheckout(tree: FileTreeEntry): FileTreeEntry {
+  CHECKOUT_ROOTED.add(tree);
+  return tree;
+}
+
+/**
+ * Put a fixture's contents INSIDE the checkout, which is where the explorer
+ * takes its root from: the tree it is handed roots at the workspace and
+ * carries `<kbDirName>/` as a child, and NOTHING above that child is read.
+ * Every path is rewritten too, because a path is where a row lives — the
+ * overlays that merge pending uploads and proposed files into the tree walk
+ * it by path, and a short path would land them beside the checkout.
+ *
+ * Skipped only for a fixture that SAYS it already writes workspace paths, via
+ * `rootedAtCheckout`. It used to guess that from a child named
+ * `knowledge-base`, which is not something the shape can tell: a short-path
+ * fixture whose own top-level folder is called `knowledge-base` is the same
+ * data as a checkout-rooted one, so it would have been passed through,
+ * `atPath` would have stayed the identity, and every path the harness names
+ * would have been short with nothing to say so.
+ */
+function inCheckout(tree: FileTreeEntry): FileTreeEntry {
+  if (CHECKOUT_ROOTED.has(tree)) return tree;
+  const under = (e: FileTreeEntry): FileTreeEntry => ({
+    ...e,
+    relativePath: kbPath(e.relativePath),
+    children: e.children?.map(under),
+  });
+  return {
+    ...tree,
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: KB_DIR,
+        relativePath: KB_DIR,
+        type: 'directory',
+        children: (tree.children ?? []).map(under),
+      },
+    ],
+  };
+}
+
+/** A fixture's short path (`docs/a.md`) as the workspace holds it. */
+const kbPath = (p: string): string => `${KB_DIR}/${p}`;
+
 function makeAuth(): AuthContextValue {
   return {
     user: null,
@@ -104,7 +165,6 @@ function makeGit(): GitContextValue {
     fetchFileComparison: async () => '',
   };
 }
-
 
 interface RenderOptions {
   dispatchUpload?: ReturnType<typeof vi.fn>;
@@ -148,6 +208,12 @@ interface RenderOptions {
   crFiles?: string[];
   /** The URL the tree mounts at — a reload lands on whatever the query says. */
   initialEntries?: string[];
+  /**
+   * The fixture is the workspace tree EXACTLY as the API returns it — do not
+   * put it inside the checkout. For the trees whose point is what sits beside
+   * the checkout, or that there is no checkout at all.
+   */
+  verbatimTree?: boolean;
 }
 
 /** The router's current query, so a test can read what a click put there. */
@@ -163,7 +229,14 @@ function renderExplorer(opts: RenderOptions = {}) {
   const deleteEntry = opts.deleteEntry ?? vi.fn().mockResolvedValue(undefined);
   const moveEntry = opts.moveEntry ?? vi.fn().mockResolvedValue(undefined);
   // Distinguish "caller wants null tree" from "caller didn't pass anything".
-  const fileTree = 'fileTree' in opts ? opts.fileTree ?? null : EMPTY_TREE;
+  const given = 'fileTree' in opts ? opts.fileTree ?? null : EMPTY_TREE;
+  const fileTree = given && !opts.verbatimTree ? inCheckout(given) : given;
+  // A fixture that was wrapped had its paths rewritten with it; the options
+  // that NAME paths — the open file, the caller's proposals — are in the same
+  // space and move with them. A fixture already rooted at the checkout writes
+  // its own full paths and is left alone.
+  const wrapped = fileTree !== null && fileTree !== given;
+  const atPath = (path: string) => (wrapped ? kbPath(path) : path);
   const bannerTarget = opts.uploadTarget ?? KNOWLEDGE_UPLOAD_TARGET;
   const workspace: WorkspaceContextValue = makeWorkspaceFixture({
     fileTree,
@@ -171,7 +244,7 @@ function renderExplorer(opts: RenderOptions = {}) {
     uploadNotices: opts.uploadNotice ? new Map([[bannerTarget, opts.uploadNotice]]) : new Map(),
     clearUploadNotice: opts.clearUploadNotice ?? (() => {}),
     isUploading: opts.isUploading ?? false,
-    openFilePath: opts.openFilePath ?? null,
+    openFilePath: opts.openFilePath ? atPath(opts.openFilePath) : null,
     refreshFileTree: async () => fileTree,
     dispatchUpload,
     clearUploadError,
@@ -188,7 +261,7 @@ function renderExplorer(opts: RenderOptions = {}) {
             <GitContext.Provider value={makeGit()}>
                 <OpenChangeRequestsContext.Provider
                   value={{
-                    paths: new Set(opts.openChangeRequestPaths ?? []),
+                    paths: new Set((opts.openChangeRequestPaths ?? []).map(atPath)),
                     // A suggestion row resolves its request through forPath —
                     // synthesize a summary for every minePaths entry so the
                     // shared dialog has something to open.
@@ -204,7 +277,7 @@ function renderExplorer(opts: RenderOptions = {}) {
                               base: 'main',
                               state: 'open',
                               createdAt: '2026-08-01T00:00:00.000Z',
-                              touchedNodePaths: opts.crFiles ?? [p],
+                              touchedNodePaths: opts.crFiles?.map(atPath) ?? [p],
                               author: { login: 'user-x' },
                               review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
                               url: '',
@@ -224,7 +297,7 @@ function renderExplorer(opts: RenderOptions = {}) {
         </AuthContext.Provider>
       </MemoryRouter>
   );
-  const minePaths = opts.minePaths ?? new Map<string, number>();
+  const minePaths = new Map([...(opts.minePaths ?? new Map<string, number>())].map(([k, n]) => [atPath(k), n]));
   const result = render(ui(workspace, minePaths));
   return {
     moveEntry,
@@ -306,7 +379,9 @@ describe('FileExplorer toolbar', () => {
     expect(uploadInput.kind).toBe('files');
     expect(uploadInput.files).toHaveLength(1);
     expect(uploadInput.files[0].name).toBe('note.md');
-    expect(dir).toBe('');
+    // The root row IS the checkout folder, and a write into it is addressed
+    // like any other folder's — not as a bare '' at the workspace root.
+    expect(dir).toBe(KB_DIR);
   });
 
   it('passes every file when multiple are selected at once', async () => {
@@ -486,7 +561,10 @@ describe('FileExplorer toolbar', () => {
     const [uploadInput, dir] = dispatchUpload.mock.calls[0];
     expect(uploadInput.kind).toBe('files');
     expect(uploadInput.files[0].name).toBe('dropped.md');
-    expect(dir).toBe('');
+    // The tree's background is the tree's ROOT. It used to send an empty
+    // target, which is the workspace directory — the file landed BESIDE the
+    // checkout, where this sidebar can never show it again.
+    expect(dir).toBe(KB_DIR);
   });
 
   it('renders the loading placeholder when fileTree is null', async () => {
@@ -590,7 +668,7 @@ describe('FileExplorer right-click: Download menu (per-path access)', () => {
     await openMenuOn('brief.md');
 
     expect(accessCalls()).toHaveLength(1);
-    expect(accessCalls()[0]).toContain('/api/workspace/ws-1/access?path=brief.md');
+    expect(accessCalls()[0]).toContain(`/api/workspace/ws-1/access?path=${encodeURIComponent(kbPath('brief.md'))}`);
     expect(accessCalls()[0]).toContain('kind=file');
     const item = screen.getByRole('menuitem', { name: 'Download' });
     expect(item).not.toHaveAttribute('aria-disabled');
@@ -617,7 +695,7 @@ describe('FileExplorer right-click: Download menu (per-path access)', () => {
     await openMenuOn('reports');
 
     expect(accessCalls()).toHaveLength(1);
-    expect(accessCalls()[0]).toContain('path=reports');
+    expect(accessCalls()[0]).toContain(`path=${encodeURIComponent(kbPath('reports'))}`);
     expect(accessCalls()[0]).toContain('kind=folder');
     const item = screen.getByRole('menuitem', { name: 'Download as zip' });
     expect(item).toHaveAttribute('aria-disabled', 'true');
@@ -804,7 +882,7 @@ describe('FileExplorer right-click: Download menu (per-path access)', () => {
     expect(downloadCalls()).toHaveLength(1);
     const url = downloadCalls()[0];
     expect(url).toContain('/api/workspace/ws-1/file/raw');
-    expect(url).toContain('path=brief.md');
+    expect(url).toContain(`path=${encodeURIComponent(kbPath('brief.md'))}`);
     expect(url).toContain('download=1');
     expect(createObjectURL).toHaveBeenCalled();
     // The revoke is DEFERRED a tick (setTimeout 0) so the click's download
@@ -847,7 +925,7 @@ describe('FileExplorer right-click: Download menu (per-path access)', () => {
       expect(downloadCalls()).toHaveLength(1);
       const url = downloadCalls()[0];
       expect(url).toContain('/api/workspace/ws-1/folder/zip');
-      expect(url).toContain('path=reports');
+      expect(url).toContain(`path=${encodeURIComponent(kbPath('reports'))}`);
       expect(url).toContain('download=1');
       expect(anchorDownloadValues).toContain('reports.zip');
     } finally {
@@ -892,7 +970,10 @@ describe('FileExplorer chevron collapse: userIntent vs autoExpanded', () => {
     openFilePath: string | null;
     fileTree: FileTreeEntry;
   }) {
-    const workspace = makeWorkspaceFixture({ fileTree, openFilePath });
+    const workspace = makeWorkspaceFixture({
+      fileTree: inCheckout(fileTree),
+      openFilePath: openFilePath && kbPath(openFilePath),
+    });
     return (
       <MemoryRouter>
         <AuthContext.Provider value={makeAuth()}>
@@ -1282,7 +1363,7 @@ describe('FileExplorer rows: the prototype tree', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: /Copy path/i }));
     });
-    expect(writeText).toHaveBeenCalledWith('/brief.md');
+    expect(writeText).toHaveBeenCalledWith(`/${kbPath('brief.md')}`);
   });
 
   it('copies a nested entry as its full root-anchored path', async () => {
@@ -1297,15 +1378,17 @@ describe('FileExplorer rows: the prototype tree', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: /Copy path/i }));
     });
-    expect(writeText).toHaveBeenCalledWith('/docs/a.md');
+    expect(writeText).toHaveBeenCalledWith(`/${kbPath('docs/a.md')}`);
   });
 
-  it('does not offer Copy path on the workspace root, which would copy "/."', () => {
+  // The root row is the CHECKOUT folder — copying its path hands over the
+  // repository, which is not a destination anything links to.
+  it('does not offer Copy path on the tree\'s root row', () => {
     renderExplorer({ fileTree: TREE });
     fireEvent.contextMenu(screen.getByText('reports'));
     expect(screen.getByRole('menuitem', { name: /Copy path/i })).toBeInTheDocument();
     fireEvent.keyDown(document, { key: 'Escape' });
-    fireEvent.contextMenu(screen.getAllByText('.')[0]);
+    fireEvent.contextMenu(screen.getAllByText(KB_DIR)[0]);
     expect(screen.queryByRole('menuitem', { name: /Copy path/i })).not.toBeInTheDocument();
   });
 
@@ -1352,7 +1435,7 @@ describe('FileExplorer rows: the prototype tree', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     });
-    expect(deleteEntry).toHaveBeenCalledWith('brief.md');
+    expect(deleteEntry).toHaveBeenCalledWith(kbPath('brief.md'));
   });
 
   // WP6: the tree consumes the SHARED, workspace-relative set. The two path
@@ -1451,7 +1534,7 @@ describe('FileExplorer rows: the prototype tree', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: /Manage access/i }));
 
     const dialog = screen.getByTestId('manage-access-dialog');
-    expect(dialog.dataset.path).toBe('docs/new-idea.md');
+    expect(dialog.dataset.path).toBe(kbPath('docs/new-idea.md'));
     expect(JSON.parse(dialog.dataset.proposal!)).toEqual({
       number: 12,
       branch: 'suggestions/me/knowledge',
@@ -1468,7 +1551,7 @@ describe('FileExplorer rows: the prototype tree', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: /Manage access/i }));
 
     const dialog = screen.getByTestId('manage-access-dialog');
-    expect(dialog.dataset.path).toBe('brief.md');
+    expect(dialog.dataset.path).toBe(kbPath('brief.md'));
     // No proposal, no pinned workspace: the ambient branch, exactly as before.
     expect(JSON.parse(dialog.dataset.proposal!)).toBeNull();
     expect(dialog.dataset.workspace).toBe('');
@@ -1526,7 +1609,7 @@ describe('FileExplorer rows: the prototype tree', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: /Manage access/i }));
 
     const dialog = screen.getByTestId('manage-access-dialog');
-    expect(dialog.dataset.path).toBe('brief.md');
+    expect(dialog.dataset.path).toBe(kbPath('brief.md'));
     expect(JSON.parse(dialog.dataset.proposal!)).toBeNull();
   });
 });
@@ -1862,7 +1945,7 @@ describe('FileExplorer: delete and move ask first', () => {
   const DRAG_MIME = 'application/x-workspace-path';
   const DRAG_KIND_MIME = 'application/x-workspace-kind';
   const KB = 'knowledge-base';
-  const TREE: FileTreeEntry = {
+  const TREE: FileTreeEntry = rootedAtCheckout({
     name: '.',
     relativePath: '.',
     type: 'directory',
@@ -1901,7 +1984,7 @@ describe('FileExplorer: delete and move ask first', () => {
         ],
       },
     ],
-  };
+  });
   const CONTRACT = `${KB}/KnowledgeBase/Legal/contract.pdf`;
 
   /** One side of the prospective-access answer. */
@@ -2499,7 +2582,7 @@ describe('FileExplorer: deleting a folder with proposed files', () => {
   const REPORTS = `${KB}/Data/Reports`;
   const PROPOSED = `${REPORTS}/proposed.md`;
   /** One committed file on the branch; `proposed.md` exists only in request #12. */
-  const TREE: FileTreeEntry = {
+  const TREE: FileTreeEntry = rootedAtCheckout({
     name: '.',
     relativePath: '.',
     type: 'directory',
@@ -2525,14 +2608,16 @@ describe('FileExplorer: deleting a folder with proposed files', () => {
         ],
       },
     ],
-  };
+  });
   /** The branch after "Delete folder only": the folder is gone, the proposal is not. */
-  const TREE_WITHOUT_REPORTS: FileTreeEntry = {
+  // Derived from a checkout-rooted fixture, so it says so itself: the
+  // declaration is per-object, and a spread is a new object.
+  const TREE_WITHOUT_REPORTS: FileTreeEntry = rootedAtCheckout({
     ...TREE,
     children: [
       { name: KB, relativePath: KB, type: 'directory', children: [{ name: 'Data', relativePath: `${KB}/Data`, type: 'directory', children: [] }] },
     ],
-  };
+  });
 
   const request = (over: Record<string, unknown> = {}) => ({
     number: 12,
@@ -2812,7 +2897,7 @@ describe('FileExplorer: an empty tree says why', () => {
   });
   const fileAt = (rel: string): FileTreeEntry => ({ name: rel.split('/').pop()!, relativePath: rel, type: 'file' });
   /** A seeded knowledge base: the reserved roots, forced visible, with `kb` under KnowledgeBase. */
-  const seeded = (kb: FileTreeEntry[], extra: Partial<FileTreeEntry> = {}, loose: FileTreeEntry[] = []): FileTreeEntry => ({
+  const seeded = (kb: FileTreeEntry[], extra: Partial<FileTreeEntry> = {}, loose: FileTreeEntry[] = []): FileTreeEntry => rootedAtCheckout({
     ...dirAt('.', [
       dirAt(KBD, [
         dirAt(`${KBD}/KnowledgeBase`, kb),
@@ -2871,7 +2956,7 @@ describe('FileExplorer: an empty tree says why', () => {
 
   it('asks about the KB clone folder, not the workspace root, for a tree that predates the split', async () => {
     mockAuthFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ canWrite: false }) });
-    renderExplorer({ fileTree: dirAt('.', [dirAt(KBD)]), workspaceId: 'target-company-state' });
+    renderExplorer({ fileTree: rootedAtCheckout(dirAt('.', [dirAt(KBD)])), workspaceId: 'target-company-state' });
     await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
     expect(mockAuthFetch.mock.calls[0][0] as string).toContain(`/access?path=${KBD}&kind=folder`);
     expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
@@ -2913,7 +2998,7 @@ describe('FileExplorer: platform files stay put', () => {
     type: 'file',
   });
 
-  const TREE: FileTreeEntry = {
+  const TREE: FileTreeEntry = rootedAtCheckout({
     name: '.',
     relativePath: '.',
     type: 'directory',
@@ -2935,7 +3020,7 @@ describe('FileExplorer: platform files stay put', () => {
         ],
       },
     ],
-  };
+  });
 
   const PLATFORM = ['access.md', 'roles.yaml', '.bevelignore', 'AGENTS.md'];
 
@@ -3016,7 +3101,7 @@ describe('FileExplorer: platform files stay put', () => {
   // never moves, and nobody but an admin moves any of them — and lets the
   // server answer the rest, which is the only place the answer lives.
   describe('an admin may drag a misplaced one back', () => {
-    const MISPLACED: FileTreeEntry = {
+    const MISPLACED: FileTreeEntry = rootedAtCheckout({
       name: '.',
       relativePath: '.',
       type: 'directory',
@@ -3032,7 +3117,7 @@ describe('FileExplorer: platform files stay put', () => {
           ],
         },
       ],
-    };
+    });
 
     function misplacedRow(): HTMLElement {
       return screen.getAllByText('.bevelignore')[0].closest('button')!;
@@ -3070,7 +3155,7 @@ describe('FileExplorer: platform files stay put', () => {
       // root is reached from the API and the agent's tool, not by dragging.)
       const { moveEntry } = renderExplorer({ fileTree: MISPLACED, isAdmin: true });
       await act(async () => {
-        fireEvent.drop(screen.getByRole('button', { name: '.' }), {
+        fireEvent.drop(screen.getByRole('button', { name: KB }), {
           dataTransfer: {
             getData: (t: string) => (t === DRAG_MIME ? `${KB}/Misplaced/.bevelignore` : ''),
             files: [],
@@ -3117,7 +3202,7 @@ describe('FileExplorer: platform files stay put', () => {
   it('a FOLDER named like a platform file refuses the rename too, not just the drag', () => {
     // The server reads the path, not the kind. Offering Rename here opened an
     // editor that could only fail on the round trip.
-    const WITH_FOLDER: FileTreeEntry = {
+    const WITH_FOLDER: FileTreeEntry = rootedAtCheckout({
       name: '.',
       relativePath: '.',
       type: 'directory',
@@ -3131,7 +3216,7 @@ describe('FileExplorer: platform files stay put', () => {
           ],
         },
       ],
-    };
+    });
     renderExplorer({ fileTree: WITH_FOLDER });
     // The folder row's draggable sits on the wrapper around the name button.
     expect(screen.getByText('access.md').closest('[draggable]')).toHaveAttribute('draggable', 'false');
@@ -3184,14 +3269,14 @@ describe('FileExplorer: a proposed row opens its request at that file', () => {
     expect(
       await screen.findByRole('dialog', { name: /Change request: Suggested change/ }),
     ).toBeInTheDocument();
-    expect(search()).toBe('?cr=12&file=docs%2Fnew-idea.md');
+    expect(search()).toBe(`?cr=12&file=${encodeURIComponent(kbPath('docs/new-idea.md'))}`);
   });
 
   it('opens straight from the URL, so a reload lands on the same file', async () => {
     renderExplorer({
       fileTree: TREE_WITH_DOCS,
       minePaths: new Map([['docs/new-idea.md', 12]]),
-      initialEntries: ['/workspace/main?cr=12&file=docs%2Fnew-idea.md'],
+      initialEntries: [`/workspace/main?cr=12&file=${encodeURIComponent(kbPath('docs/new-idea.md'))}`],
     });
     // No click: the query alone opened it.
     expect(
@@ -3203,7 +3288,7 @@ describe('FileExplorer: a proposed row opens its request at that file', () => {
     renderExplorer({
       fileTree: TREE_WITH_DOCS,
       minePaths: new Map([['docs/new-idea.md', 12]]),
-      initialEntries: ['/workspace/main?cr=12&file=docs%2Fnew-idea.md'],
+      initialEntries: [`/workspace/main?cr=12&file=${encodeURIComponent(kbPath('docs/new-idea.md'))}`],
     });
     const dialog = await screen.findByRole('dialog', { name: /Change request: Suggested change/ });
     fireEvent.click(within(dialog).getByRole('button', { name: /close/i }));
@@ -3214,9 +3299,137 @@ describe('FileExplorer: a proposed row opens its request at that file', () => {
     renderExplorer({
       fileTree: TREE_WITH_DOCS,
       minePaths: new Map([['docs/new-idea.md', 12]]),
-      initialEntries: ['/workspace/main?cr=999&file=docs%2Fnew-idea.md'],
+      initialEntries: [`/workspace/main?cr=999&file=${encodeURIComponent(kbPath('docs/new-idea.md'))}`],
     });
     await waitFor(() => expect(screen.getByTestId('location-search')).toBeInTheDocument());
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * WHERE the explorer takes its root from. The repository is the `<kbDirName>/`
+ * child of the workspace tree, by name, and the sections are that folder's
+ * children — never a folder found by searching the tree for a well-known
+ * name, which on core-staging found a stray `KnowledgeBase/` beside the
+ * checkout and rendered it as the whole knowledge base.
+ */
+describe('FileExplorer: the root is the checkout', () => {
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+  });
+
+  const d = (rel: string, children: FileTreeEntry[] = []): FileTreeEntry => ({
+    name: rel.split('/').pop()!,
+    relativePath: rel,
+    type: 'directory',
+    children,
+  });
+  const f = (rel: string): FileTreeEntry => ({ name: rel.split('/').pop()!, relativePath: rel, type: 'file' });
+
+  /** The checkout as a seeded knowledge base: the split, a stray content folder, a loose file. */
+  const CHECKOUT = d(KB_DIR, [
+    d(`${KB_DIR}/KnowledgeBase`, [f(`${KB_DIR}/KnowledgeBase/Handbook.md`)]),
+    d(`${KB_DIR}/Data`, [f(`${KB_DIR}/Data/rows.csv`)]),
+    d(`${KB_DIR}/Plugins`, [d(`${KB_DIR}/Plugins/GTM`)]),
+    d(`${KB_DIR}/Skills`, [d(`${KB_DIR}/Skills/Sales`)]),
+    d(`${KB_DIR}/Legal`, [f(`${KB_DIR}/Legal/Terms.md`)]),
+    f(`${KB_DIR}/roles.yaml`),
+  ]);
+
+  /** Exactly what sat beside the checkout on core-staging on 2026-09-22. */
+  const STRAYS: FileTreeEntry[] = [
+    d('KnowledgeBase', [f('KnowledgeBase/Planted.md')]),
+    d('Plugins', [d('Plugins/zz-stray', [f('Plugins/zz-stray/plugin.json')])]),
+    d('Skills', [d('Skills/stray-scope', [f('Skills/stray-scope/SKILL.md')])]),
+    f('Stray.docx'),
+  ];
+
+  const workspace = (...children: FileTreeEntry[]): FileTreeEntry => d('.', children);
+
+  /** Every row on screen, in order — the tree as the reader sees it. */
+  const rendered = () =>
+    Array.from(document.querySelectorAll('[data-tree-path]')).map(
+      (el) => `${(el as HTMLElement).dataset.treePath}:${el.textContent}`,
+    );
+
+  it('splits the checkout into its sections, and renders the same tree with strays beside it', () => {
+    renderExplorer({ fileTree: workspace(CHECKOUT), verbatimTree: true });
+    const clean = rendered();
+    expect(clean.length).toBeGreaterThan(0);
+    cleanup();
+
+    renderExplorer({ fileTree: workspace(...STRAYS, CHECKOUT), verbatimTree: true });
+    expect(rendered()).toEqual(clean);
+  });
+
+  it('renders no entry from outside the checkout — not one path, not one name', () => {
+    renderExplorer({ fileTree: workspace(...STRAYS, CHECKOUT), verbatimTree: true });
+    for (const path of rendered().map((r) => r.split(':')[0])) {
+      expect(path === KB_DIR || path.startsWith(`${KB_DIR}/`)).toBe(true);
+    }
+    expect(screen.queryByText('Planted.md')).toBeNull();
+    expect(screen.queryByText('zz-stray')).toBeNull();
+    expect(screen.queryByText('stray-scope')).toBeNull();
+    expect(screen.queryByText('Stray.docx')).toBeNull();
+  });
+
+  /**
+   * How the bug showed itself: with the root one level too high, the real
+   * checkout was just another content folder and folded into Knowledge.
+   */
+  it('never folds the checkout folder itself into Knowledge', () => {
+    renderExplorer({ fileTree: workspace(...STRAYS, CHECKOUT), verbatimTree: true });
+    // Knowledge is drawn at the checkout's `KnowledgeBase/`, and the stray
+    // content folder inside the checkout is the only thing folded in.
+    expect(screen.getByText('Knowledge')).toBeInTheDocument();
+    expect(screen.getByText('Legal')).toBeInTheDocument();
+    expect(screen.queryByText(KB_DIR)).toBeNull();
+  });
+
+  it('shows the empty state naming the missing checkout, and nothing else, when it is absent', () => {
+    renderExplorer({ fileTree: workspace(...STRAYS), verbatimTree: true });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(
+      'Nothing to show here: the repository checkout is missing.',
+    );
+    expect(rendered()).toEqual([]);
+    expect(screen.queryByText('Knowledge')).toBeNull();
+    expect(screen.queryByText('Planted.md')).toBeNull();
+    expect(screen.queryByText('Stray.docx')).toBeNull();
+  });
+
+  /**
+   * The drop the sidebar accepts goes where the sidebar reads from. With no
+   * checkout there is no such place: the notice says the repository is
+   * missing, and a drop taken anyway would be written beside the missing
+   * folder and never appear.
+   */
+  it('drops onto the background into the checkout, and refuses them when there is none', async () => {
+    const drop = async () => {
+      const file = new File(['drop'], 'dropped.md');
+      await act(async () => {
+        fireEvent.drop(screen.getByTestId('file-explorer-root'), {
+          dataTransfer: { files: [file], getData: () => '' },
+        });
+      });
+    };
+
+    const dispatchUpload = vi.fn().mockResolvedValue(undefined);
+    renderExplorer({ fileTree: workspace(...STRAYS, CHECKOUT), verbatimTree: true, dispatchUpload });
+    await drop();
+    expect(dispatchUpload).toHaveBeenCalledTimes(1);
+    expect(dispatchUpload.mock.calls[0][1]).toBe(KB_DIR);
+    cleanup();
+
+    const refused = vi.fn().mockResolvedValue(undefined);
+    renderExplorer({ fileTree: workspace(...STRAYS), verbatimTree: true, dispatchUpload: refused });
+    await drop();
+    expect(refused).not.toHaveBeenCalled();
+  });
+
+  /** A checkout that is merely EMPTY is a different answer, and keeps its own. */
+  it('says the knowledge base is empty, not missing, when the checkout is there but bare', () => {
+    renderExplorer({ fileTree: workspace(d(KB_DIR, [d(`${KB_DIR}/KnowledgeBase`)])), verbatimTree: true });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(/^This knowledge base is empty\./);
   });
 });

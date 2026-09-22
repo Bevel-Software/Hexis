@@ -45,7 +45,7 @@ import {
 } from '../state/workspace.context';
 import { rootAnchoredPath } from '../utils/pasteLink';
 import {
-  findKbRoot,
+  checkoutRoot,
   KB_ROOT_DIRS,
   pathExistsInTree,
   subtreeHasVisibleEntries,
@@ -901,6 +901,7 @@ export function FileTreeNode({
   collapseChildren,
   reserved = false,
   absent = false,
+  root,
 }: {
   entry: FileTreeEntry;
   depth: number;
@@ -926,6 +927,16 @@ export function FileTreeNode({
    * is withheld: no Download, which would ask the server for a zip of nothing.
    */
   absent?: boolean;
+  /**
+   * This row IS the tree — the folder everything below it hangs off. It gets
+   * the root's affordances (the Add files / Add folder pickers) and none of
+   * the ones that would move the tree out from under itself (drag, rename,
+   * delete, Copy path). Defaults to the `.` workspace-root node, which is
+   * what a tree rooted at the literal root hands down; the Knowledge
+   * explorer sets it on the CHECKOUT folder, which is its root even though
+   * the workspace directory above it is not.
+   */
+  root?: boolean;
 }) {
   const { createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, kbDirName, pendingUploads } = useWorkspace();
   const nav = useTreeNav();
@@ -1046,9 +1057,13 @@ export function FileTreeNode({
     [dispatchUpload, uploadTarget],
   );
 
+  // Where this row's own writes go. Keyed to the PATH, not to `isRoot`: the
+  // checkout folder is a root row with a real path of its own, and a write
+  // into it is addressed like any other folder's. Only the literal `.`
+  // workspace root has no path to give, and `''` is how the server hears it.
+  const pickTarget = entry.relativePath === '.' ? '' : entry.relativePath;
   // Resetting `value` after dispatch lets users re-select the same file and
   // still get an `onChange` event the second time around.
-  const pickTarget = entry.relativePath === '.' ? '' : entry.relativePath;
   const handleRootFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     e.target.value = '';
@@ -1075,7 +1090,7 @@ export function FileTreeNode({
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   const paddingLeft = indentFor(depth);
-  const isRoot = entry.relativePath === '.';
+  const isRoot = root ?? entry.relativePath === '.';
   const isPending = pendingUploads.has(entry.relativePath);
   // A folder with nothing in it still gets its caret — without one it reads
   // as a file — and opening it says so with a muted "Empty" row.
@@ -1183,13 +1198,13 @@ export function FileTreeNode({
           : '';
         // "The top level" is the top of the tree the dragged row lives in —
         // the KB clone's own root — not the workspace folder the clone sits
-        // in. The explorer draws the clone's roots (Knowledge, Data, …) and
-        // its loose files, never a row for the clone itself, so a drop that
-        // resolves to no folder is how the clone's root is reached at all:
-        // it is where an admin drops a misplaced `roles.yaml` to put it back.
-        // Left bare, that move would send the file to `roles.yaml` BESIDE the
-        // clone — out of the repository, where nothing reads it and git never
-        // sees it again.
+        // in. In the split layout the explorer draws the clone's roots
+        // (Knowledge, Data, …) and its loose files but no row for the clone
+        // itself, so a drop that resolves to no folder is how the clone's
+        // root is reached at all: it is where an admin drops a misplaced
+        // `roles.yaml` to put it back. Left bare, that move would send the
+        // file to `roles.yaml` BESIDE the clone — out of the repository,
+        // where nothing reads it and git never sees it again.
         const kbPrefix = kbDirName ? `${kbDirName}/` : null;
         const targetDir =
           droppedOn === '' && kbPrefix !== null && sourcePath.startsWith(kbPrefix)
@@ -1278,7 +1293,7 @@ export function FileTreeNode({
   }, []);
 
   if (entry.type === 'directory') {
-    const dirPath = isRoot ? '' : entry.relativePath;
+    const dirPath = pickTarget;
     const createButtons = (
       <>
         <IconButton
@@ -2004,6 +2019,15 @@ export function TreeChrome({
 export const NOTHING_SHARED_MESSAGE = 'Nothing here is shared with you yet. Ask an admin to grant you access.';
 /** Shown when the knowledge base has nothing in it at all. */
 export const KB_EMPTY_MESSAGE = 'This knowledge base is empty.';
+/**
+ * Shown when `<kbDirName>/` is not in the workspace tree at all. Not the same
+ * emptiness as the one above: the knowledge base is not empty, it is not
+ * THERE, and the next step is an operator's (the clone failed, or the
+ * deployment names a folder that was never checked out) rather than a
+ * writer's. Before this existed the sidebars guessed a root instead, and
+ * rendered whatever directory happened to sit beside the missing one.
+ */
+export const CHECKOUT_MISSING_MESSAGE = 'Nothing to show here: the repository checkout is missing.';
 
 /**
  * Why a tree has nothing in it, when it has nothing in it. Read is
@@ -2037,6 +2061,17 @@ export function EmptyTreeNotice({ rootPath, scope = 'tree' }: { rootPath: string
     return (
       <div data-testid="tree-empty-notice" role="status" className="px-3 py-2 text-xs text-ink-muted">
         {NOTHING_SHARED_MESSAGE}
+      </div>
+    );
+  }
+  // After the withheld check, not before: a reader who may open nothing sees
+  // a tree the filter emptied, and "the checkout is missing" would be a
+  // diagnosis of the wrong thing. Only a tree nothing was kept out of can
+  // say the folder is genuinely not there.
+  if (checkoutRoot(tree, kbDirName) === null) {
+    return (
+      <div data-testid="tree-empty-notice" role="status" className="px-3 py-2 text-xs text-ink-muted">
+        {CHECKOUT_MISSING_MESSAGE}
       </div>
     );
   }
@@ -2156,16 +2191,8 @@ export function UploadNotices() {
   );
 }
 
-/**
- * Walk down to the node that actually holds the KB content. The file tree roots
- * at the per-branch workspace dir and wraps the KB clone a level or two deep
- * (`<branch>/<kbDir>/{KnowledgeBase,Data,Agents,Pipelines,Skills,Tools,…}`), so
- * the split lives below the visible root. Returns the first node whose children
- * include one of those well-known root directories, or null when there's no
- * such split (legacy clones).
- */
-// (`findKbRoot` lives in `../utils/fileTree` — shared with registry-
-// contributed explorer items.)
+// (`checkoutRoot` lives in `../utils/fileTree` — the one lookup every
+// surface that reads the workspace tree goes through.)
 
 export function FileExplorer() {
   const { openFilePath, dispatchUpload, kbDirName } = useWorkspace();
@@ -2177,6 +2204,13 @@ export function FileExplorer() {
   // item with the reason. A 403 that still lands — the permission changed
   // while the menu was open — becomes the row's own inline notice.
   const { tree: mergedTree, suggestionOnlyPaths } = useMergedWorkspaceTree();
+  // THE root, for every row this explorer draws: the repository checkout, by
+  // the name the deployment gave it. Nothing beside it in the workspace — a
+  // stray `KnowledgeBase/`, a loose upload, another clone — is reachable from
+  // anything below, because nothing above the checkout is ever read. Null
+  // when the workspace holds no checkout, which is its own empty state
+  // rather than a cue to go looking for a root that looks about right.
+  const checkout = useMemo(() => checkoutRoot(mergedTree, kbDirName), [mergedTree, kbDirName]);
   // The pane workspace's own navigation: the open tab is the current row, and
   // a click opens the file on the checked-out branch.
   const nav = useMemo<TreeNav>(() => ({ activePath: openFilePath, open: openFile }), [openFilePath, openFile]);
@@ -2202,14 +2236,17 @@ export function FileExplorer() {
   );
   // Resolve pinned paths to live tree entries, dropping any that no longer
   // exist on this branch (a folder pinned elsewhere may be absent here).
+  // Resolved from the CHECKOUT, not the workspace root, for the same reason
+  // the sections are: a pin is a shortcut into the repository, and a path
+  // that lands beside it resolves to nothing rather than to a row.
   const pinnedEntries = useMemo(
     () =>
-      mergedTree
+      checkout
         ? pinnedPaths
-            .map((p) => findEntryByPath(mergedTree, p))
+            .map((p) => findEntryByPath(checkout, p))
             .filter((e): e is FileTreeEntry => e != null)
         : [],
-    [mergedTree, pinnedPaths],
+    [checkout, pinnedPaths],
   );
 
   // Registry-contributed rows for the Pinned section (rendered below the
@@ -2241,9 +2278,7 @@ export function FileExplorer() {
   // created by core (see `CORE_REQUIRED_DIRS`) — a deployment that owns the
   // agentic execution layer seeds them, and this reads whatever is there.
   const sections = useMemo(() => {
-    // Descend past the workspace / KB-clone wrapper levels to the node that
-    // actually holds the well-known root dirs, then split that level.
-    const kids = findKbRoot(mergedTree)?.children;
+    const kids = checkout?.children;
     if (!kids) return null;
     const findDir = (name: string) =>
       kids.find((c) => c.type === 'directory' && c.name === name);
@@ -2288,24 +2323,33 @@ export function FileExplorer() {
       pipelines: pipelinesRoot,
       looseFiles: kids.filter((c) => c.type === 'file'),
     };
-  }, [mergedTree]);
+  }, [checkout]);
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
+      // Nothing to drop INTO: the tree below renders no row and says the
+      // checkout is missing, and this drop used to be sent with an empty
+      // target — the workspace root, beside the missing folder, where
+      // nothing this sidebar shows can ever live. Refused before
+      // `preventDefault`, so the browser's own cursor says "not here".
+      if (!checkout) return;
       e.preventDefault();
       setDragOver(false);
       // Only handle external file/folder drops at the root level.
       if (e.dataTransfer.getData(DRAG_MIME)) return;
+      // The background of the tree is the tree's ROOT — the checkout — not
+      // the workspace directory that happens to contain it.
+      const target = checkout.relativePath;
       const entries = e.dataTransfer.items ? snapshotEntries(e.dataTransfer.items) : [];
       if (entries.length > 0) {
         // Outside the `TreeChrome` below, so this one names the tree itself.
-        dispatchUpload({ kind: 'items', entries }, '', KNOWLEDGE_UPLOAD_TARGET);
+        dispatchUpload({ kind: 'items', entries }, target, KNOWLEDGE_UPLOAD_TARGET);
         return;
       }
       const files = Array.from(e.dataTransfer.files);
-      if (files.length > 0) dispatchUpload({ kind: 'files', files }, '', KNOWLEDGE_UPLOAD_TARGET);
+      if (files.length > 0) dispatchUpload({ kind: 'files', files }, target, KNOWLEDGE_UPLOAD_TARGET);
     },
-    [dispatchUpload],
+    [checkout, dispatchUpload],
   );
 
   return (
@@ -2325,6 +2369,9 @@ export function FileExplorer() {
       }`}
       onDrop={handleDrop}
       onDragOver={(e) => {
+        // Same refusal as the drop: no checkout, no drop target, so no
+        // highlight promising one.
+        if (!checkout) return;
         e.preventDefault();
         setDragOver(true);
       }}
@@ -2352,6 +2399,10 @@ export function FileExplorer() {
         <div className="mx-3 my-2 border-t border-line" />
         {!mergedTree ? (
           <div className="px-3 py-4 text-xs text-ink-muted">Loading...</div>
+        ) : !checkout ? (
+          // No checkout in the workspace: no tree, and no guessing at one
+          // from whatever else is there. `EmptyTreeNotice` below says why.
+          null
         ) : sections ? (
           <>
             {sections.knowledge && (
@@ -2376,19 +2427,21 @@ export function FileExplorer() {
             )}
           </>
         ) : (
-          <FileTreeNode entry={mergedTree} depth={0} />
+          // A clone that predates the split: no named roots to section by, so
+          // the checkout folder itself is the tree. Still the checkout — the
+          // fallback is a different SHAPE, never a different directory — and
+          // it is the ROOT row, not a folder inside one: the workspace
+          // directory above it is not something this explorer shows.
+          <FileTreeNode entry={checkout} depth={0} root />
         )}
         {/* Under the (empty) roots, so the hint's "folder above" is on
             screen: Knowledge's own folder is where a first page goes. A tree
-            that predates the split starts at the KB clone's folder when it
-            wraps one, as `treeHasVisibleEntries` reads it. */}
+            that predates the split has no Knowledge section, so the checkout
+            folder itself is where a first page goes — and when there is no
+            checkout at all the notice says THAT instead, and there is no
+            folder to offer. */}
         <EmptyTreeNotice
-          rootPath={
-            sections
-              ? sections.knowledge?.relativePath ?? null
-              : (mergedTree?.children?.find((c) => c.type === 'directory' && c.name === kbDirName) ?? mergedTree)
-                  ?.relativePath ?? null
-          }
+          rootPath={sections ? sections.knowledge?.relativePath ?? null : checkout?.relativePath ?? null}
         />
       </div>
     </div>
