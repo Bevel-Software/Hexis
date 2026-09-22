@@ -64,7 +64,8 @@ async function buildListSkillsDef(skillService: ISkillService, userEmail?: strin
     name: 'list_skills',
     description:
       'List the available skills (reusable specialist instructions) with their names, descriptions and, ' +
-      'for a skill that declares one, its current `version` (the `metadata.version` of its SKILL.md). ' +
+      'for a skill that declares one, its current `version` (its SKILL.md `metadata.version`, else a ' +
+      'top-level `version`, else `lifecycle.version`). ' +
       'Discover what skills exist before specialist work, then `get_skill` to load one. ' +
       (await availableSkillsLine(skillService, userEmail)),
     path: '/api/agent/tools/list_skills',
@@ -82,7 +83,9 @@ async function buildListSkillsDef(skillService: ISkillService, userEmail?: strin
               description: { type: 'string' },
               version: {
                 type: 'string',
-                description: 'The version the skill currently declares (`metadata.version` in its SKILL.md); absent when it declares none.',
+                description:
+                  'The version the skill currently declares (`metadata.version`, else top-level `version`, ' +
+                  'else `lifecycle.version` in its SKILL.md); absent when it declares none.',
               },
               path: { type: 'string' },
             },
@@ -117,7 +120,8 @@ async function buildGetSkillDef(skillService: ISkillService, userEmail?: string)
         version: {
           type: 'string',
           description:
-            'Optional: the `metadata.version` to load (e.g. `1.4.0`). Omitted, the skill is loaded as it ' +
+            'Optional: the declared version to load (e.g. `1.4.0` — the `version` that `list_skills` ' +
+            'reports: `metadata.version`, else `version`, else `lifecycle.version`). Omitted, the skill is loaded as it ' +
             'is now, which is the latest. Given, the skill — or the `file` — is served as it was at the most ' +
             'recent commit that declared that version; a version the skill never declared answers ' +
             '`version_not_found` with the versions it did declare.',

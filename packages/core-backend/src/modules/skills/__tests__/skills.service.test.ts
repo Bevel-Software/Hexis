@@ -72,7 +72,9 @@ describe('SkillService', () => {
     );
     await writeFile(join(skills, 'Development', 'access.md'), '---\nwrite:\n  - Developer\n---\n');
   });
-  afterEach(() => rm(root, { recursive: true, force: true }));
+  // Retried: the version tests put a real git repository under `root`, and a
+  // git child may still hold a `.git` handle for a moment on Windows.
+  afterEach(() => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   test('lists shared skills under the Skills root alongside plugin skills', async () => {
     const shared = join(root, wsId, KB_DIR, 'Skills', 'Engineering', 'deploy');
@@ -387,6 +389,8 @@ describe('SkillService', () => {
       // 1.0.0 — the body and one script; no build_xlsx.py yet.
       await rm(join(rfi, 'scripts', 'build_xlsx.py'));
       await writeFile(join(rfi, 'scripts', 'draft.py'), 'print("v1")\n');
+      // A non-ASCII name: git would C-quote it on a line-based listing.
+      await writeFile(join(rfi, 'scripts', 'übersicht.md'), 'v1\n');
       await writeFile(join(rfi, 'SKILL.md'), skillMd('1.0.0', '# RFI v1', 'First cut.'));
       await commit('rfi 1.0.0');
       // 1.1.0 — the script changes, draft.py stays.
@@ -398,6 +402,7 @@ describe('SkillService', () => {
       await commit('rfi 1.1.0 typo');
       // 1.4.0 — what is on disk now: the fixture body, build_xlsx.py, draft.py gone.
       await rm(join(rfi, 'scripts', 'draft.py'));
+      await rm(join(rfi, 'scripts', 'übersicht.md'));
       await writeFile(join(rfi, 'scripts', 'build_xlsx.py'), 'print("xlsx")\n');
       await writeFile(join(rfi, 'SKILL.md'), RFI_SKILL);
       await commit('rfi 1.4.0');
@@ -410,8 +415,10 @@ describe('SkillService', () => {
       expect(res.skill.version).toBe('1.0.0');
       expect(res.skill.description).toBe('First cut.');
       expect(res.skill.body).toBe('# RFI v1\n');
-      expect(res.skill.files).toEqual(['Plugins/rfi/scripts/draft.py']);
+      expect(res.skill.files).toEqual(['Plugins/rfi/scripts/draft.py', 'Plugins/rfi/scripts/übersicht.md']);
       expect(res.skill.path).toBe('Plugins/rfi');
+      const file = await versioned().getSkill('user@x.eu', 'rfi', 'scripts/übersicht.md', { version: '1.0.0' });
+      expect(file.ok && file.kind === 'file' && file.file.content).toBe('v1\n');
     });
 
     test('a version declared by several commits answers with its most recent copy', async () => {

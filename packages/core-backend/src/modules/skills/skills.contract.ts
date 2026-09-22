@@ -74,8 +74,9 @@ export type GetSkillResult =
 /** What `getSkill` may be asked beyond a name and a file. */
 export interface GetSkillOptions {
   /**
-   * The `metadata.version` (or `version`) the skill declared in the copy to
-   * load. Omitted, the skill is loaded as it is now — the latest. Given, the
+   * The version the skill declared in the copy to load — its
+   * `metadata.version`, else a top-level `version`, else `lifecycle.version`.
+   * Omitted, the skill is loaded as it is now — the latest. Given, the
    * default branch's history of the skill's `SKILL.md` is searched newest
    * first for the most recent commit that declared exactly this version, and
    * the skill (body, bundled files, or the one `file` asked for) is served as

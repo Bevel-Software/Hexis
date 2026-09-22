@@ -263,7 +263,9 @@ export async function proposeChange(
  * that never declared one has no history to load by.
  */
 export function newSkillMarkdown(name: string): string {
-  return `---\nname: ${name}\ndescription:\nmetadata:\n  version: "1.0.0"\n---\n\n`;
+  // Quoted: a folder name is free text short of `/` and `\`, and a bare
+  // `#draft` or `a: b` would parse as a comment or a nested mapping.
+  return `---\nname: ${JSON.stringify(name)}\ndescription:\nmetadata:\n  version: "1.0.0"\n---\n\n`;
 }
 
 export type CreateSkillInput = {

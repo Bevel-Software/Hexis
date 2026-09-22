@@ -3222,12 +3222,14 @@ export class GitService implements IGitService {
 
   /**
    * Every file under `folder` at `ref`, repo-root-relative and in tree order.
-   * A folder that does not exist at that ref lists nothing.
+   * A folder that does not exist at that ref lists nothing. NUL-delimited, so
+   * a non-ASCII name comes back as itself rather than C-quoted, and one with
+   * a leading or trailing space keeps it.
    */
   async listFilesAtRef(workspaceId: string, ref: string, folder: string): Promise<string[]> {
     const cwd = await this.repoDir(workspaceId);
-    const { stdout } = await this.git(cwd, ['ls-tree', '-r', '--name-only', ref, '--', folder]);
-    return stdout.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+    const { stdout } = await this.git(cwd, ['ls-tree', '-r', '-z', '--name-only', ref, '--', folder]);
+    return stdout.split('\0').filter((line) => line.length > 0);
   }
 
   /**
