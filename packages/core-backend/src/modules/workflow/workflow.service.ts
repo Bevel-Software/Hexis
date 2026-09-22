@@ -2043,6 +2043,13 @@ export class WorkflowService implements IWorkflowService {
     // those are. Best effort: a request that IS up to date is worth far more
     // than the bookkeeping, so a failure here is logged and the fresh detail
     // still goes back.
+    //
+    // `alreadyUpToDate` is the real gate: no merge commit, no head to compare,
+    // nothing moved under anyone. The other two conditions are belt-and-braces
+    // over a sha that is not a sha — a resolve that failed onto a detail with
+    // no head, or two heads that somehow read equal — both of which
+    // `pathsChangedBetween` and `carryApprovalsForward` would refuse anyway.
+    // A merge that authored a commit cannot leave the head where it was.
     if (!outcome.alreadyUpToDate && headBeforeMerge && refreshed.headSha !== headBeforeMerge) {
       try {
         const changedPaths = await this.git.pathsChangedBetween(

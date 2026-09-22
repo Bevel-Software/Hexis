@@ -43,6 +43,29 @@ const MERGE_METHOD = 'merge' as const;
  * — a PR number can never collide with some other subsystem's key.
  */
 const APPROVAL_LOCK_CLASS = 4207;
+/**
+ * How long an approval write waits for that lock before giving up.
+ *
+ * Every body it guards is one statement or two against rows already in cache,
+ * so anything near this is a stuck holder rather than a busy one — and waiting
+ * out a stuck holder would pin a pooled connection for as long as it lasts,
+ * which is how one wedged transaction becomes a backend with no connections
+ * left. Five seconds is far past honest contention and far short of that.
+ */
+const APPROVAL_LOCK_TIMEOUT_MS = 5_000;
+/** `lock_timeout` fired — Postgres `lock_not_available`. */
+const LOCK_NOT_AVAILABLE = '55P03';
+/**
+ * Whether a rejection is that timeout. The driver surfaces the SQLSTATE on the
+ * error itself today; `cause` is checked too so a driver that starts wrapping
+ * its errors does not turn a retryable refusal back into a bare 500.
+ */
+function isLockTimeout(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e && depth < 3; e = (e as { cause?: unknown }).cause, depth++) {
+    if ((e as { code?: unknown }).code === LOCK_NOT_AVAILABLE) return true;
+  }
+  return false;
+}
 /** The handle `db.transaction` hands its callback — a `Database` minus the pool. */
 type ApprovalTx = Parameters<Parameters<Database['transaction']>[0]>[0];
 const EVERYONE_CANONICAL = 'everyone';
@@ -61,6 +84,22 @@ class CommentAuthError extends WorkflowDomainError {
       reason === 'not-found' ? 404 : 403,
     );
     this.name = 'CommentAuthError';
+  }
+}
+
+/**
+ * Another approval write on this same request is holding the lock and did not
+ * let go. Retryable BY THE CALLER, and said in words a business user can act
+ * on: nothing was written, and trying again is the whole fix.
+ */
+class ApprovalBusyError extends WorkflowDomainError {
+  constructor() {
+    super(
+      'This change request is being updated right now — try that again in a moment.',
+      503,
+      { kind: 'approval-write-busy', retryable: true },
+    );
+    this.name = 'ApprovalBusyError';
   }
 }
 
@@ -532,16 +571,25 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
 
     // Unique index on (prNumber, path, approverEmail, headSha) makes this
     // idempotent — `onConflictDoNothing` turns a double-click into a no-op.
-    await this.db
-      .insert(prFileApprovals)
-      .values({
-        prNumber,
-        path,
-        approverEmail: callerEmail,
-        approverName: user.name,
-        headSha,
-      })
-      .onConflictDoNothing();
+    //
+    // Under the same per-request lock the carry-forward takes: an approval
+    // that landed between that copy's select and its insert would be pinned to
+    // the head the update was replacing and silently dropped from the request
+    // it was made on. Serialized, the approval either precedes the copy and is
+    // carried with the rest, or follows it and is honestly an approval of a
+    // head that has already moved — which the dialog then shows as stale.
+    await this.withApprovalLock(prNumber, async (tx) => {
+      await tx
+        .insert(prFileApprovals)
+        .values({
+          prNumber,
+          path,
+          approverEmail: callerEmail,
+          approverName: user.name,
+          headSha,
+        })
+        .onConflictDoNothing();
+    });
 
     // WITH the caller as viewer: these approvals go straight back to the UI
     // that just clicked, and omitting the viewer computed every
@@ -871,20 +919,46 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
    * back. In the DATABASE rather than in this process, because two app
    * instances share the rows but not a mutex.
    *
-   * Taken as the transaction's first statement so the reads inside it are
-   * already serialized: Postgres gives each statement in a READ COMMITTED
-   * transaction a fresh snapshot, so a select made after the lock sees
-   * everything the previous holder committed.
+   * Taken before any row is read, so the reads inside it are already
+   * serialized: Postgres gives each statement in a READ COMMITTED transaction a
+   * fresh snapshot, so a select made after the lock sees everything the
+   * previous holder committed.
+   *
+   * Every approval write this service makes goes through here — carry forward,
+   * approve, revoke — because a write that skipped it would be exactly the one
+   * that interleaves with the others. (Account erasure rewrites the same table
+   * from outside this file; it renames an approver rather than deciding whether
+   * an approval stands, so it is not part of this race.)
    *
    * Keep the body SHORT — no git, no network, no access-control read. This
-   * holds a lock and a pooled connection; `unapproveFile` deliberately leaves
-   * its detail re-read outside.
+   * holds a lock and a pooled connection; `approveFile` and `unapproveFile`
+   * deliberately leave their access checks and their detail re-read outside.
+   *
+   * `lock_timeout` first, so waiting is bounded: a holder that wedges would
+   * otherwise keep this transaction — and its connection — parked forever.
+   * Hitting it is reported as the retryable refusal it is; nothing was written.
    */
-  private withApprovalLock<T>(prNumber: number, fn: (tx: ApprovalTx) => Promise<T>): Promise<T> {
-    return this.db.transaction(async (tx) => {
-      await tx.execute(sql`select pg_advisory_xact_lock(${APPROVAL_LOCK_CLASS}, ${prNumber})`);
-      return fn(tx);
-    });
+  private async withApprovalLock<T>(
+    prNumber: number,
+    fn: (tx: ApprovalTx) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await this.db.transaction(async (tx) => {
+        // SET takes no bind parameters, so the interval is rendered from a
+        // module constant — never from anything a caller supplies.
+        await tx.execute(sql.raw(`set local lock_timeout = ${APPROVAL_LOCK_TIMEOUT_MS}`));
+        await tx.execute(sql`select pg_advisory_xact_lock(${APPROVAL_LOCK_CLASS}, ${prNumber})`);
+        return fn(tx);
+      });
+    } catch (err) {
+      if (isLockTimeout(err)) {
+        log.warn(
+          `gave up waiting for the approval lock on PR #${prNumber} after ${APPROVAL_LOCK_TIMEOUT_MS}ms`,
+        );
+        throw new ApprovalBusyError();
+      }
+      throw err;
+    }
   }
 
   async unapproveFile(

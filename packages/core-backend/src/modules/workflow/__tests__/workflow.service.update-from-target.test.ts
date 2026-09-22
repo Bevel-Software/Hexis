@@ -255,11 +255,18 @@ describe('WorkflowService.updateFromTarget: the approvals the merge did not touc
     expect(h.reviewWorkflow.carryApprovalsForward).toHaveBeenCalledWith(7, HEAD, MERGED_HEAD, []);
   });
 
-  it('carries nothing when the branch was already at the head the merge produced', async () => {
-    // The published head resolved before the merge IS the head afterwards:
-    // there is no pair of heads to compare, so there is nothing to re-pin.
-    const h = harness({ publishedHead: MERGED_HEAD });
-    await h.svc.updateFromTarget(WS, USER, 7);
+  it('carries nothing when there is no head to compare at all', async () => {
+    // The resolve failed AND the detail carries no head either — a degraded
+    // read, not a merge outcome. There is no pair of shas to diff, so the
+    // bookkeeping is skipped rather than attempted with an empty one (which
+    // `carryApprovalsForward` would refuse outright).
+    const h = harness({
+      first: detail({ headSha: '' }),
+      resolveError: new Error('no such ref'),
+      carried: 1,
+    });
+    await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toBe(h.refreshed);
+    expect(h.git.push).toHaveBeenCalledWith(WS, USER);
     expect(h.git.pathsChangedBetween).not.toHaveBeenCalled();
     expect(h.reviewWorkflow.carryApprovalsForward).not.toHaveBeenCalled();
   });
