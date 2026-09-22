@@ -12,8 +12,14 @@ import {
 import { X, Lock, Loader2, ChevronDown, Check, Globe, CircleHelp } from 'lucide-react';
 import {
   canCarryFrontmatter,
+  conferredByOthers,
+  effectiveVerbs,
   folderGovernsAccessMessage,
+  KNOWN_VERBS,
+  minimalGrantVerbs,
+  VERBS_BROADEST_FIRST,
   type FileTreeEntry,
+  type VerbSet,
 } from '@bevel-software/platform-shared';
 import {
   Badge,
@@ -88,13 +94,11 @@ interface Props {
 
 type Role = 'Owner' | 'Can edit' | 'Can read' | 'Can download';
 
-/** Which verbs a principal holds at the target (independent flags). */
-interface VerbSet {
-  owner: boolean;
-  write: boolean;
-  read: boolean;
-  download: boolean;
-}
+// `VerbSet` — which verbs a principal holds at the target — and every fold
+// over it (`effectiveVerbs`, `conferredByOthers`, `minimalGrantVerbs`,
+// `VERBS_BROADEST_FIRST`) come from `platform-shared`: the same table the
+// resolver reads, so this sheet can never disagree with it about what an
+// owner may do or which lines a set needs.
 
 /** The three tiers a row can sit at, broadest first; download is not one of them. */
 type Tier = 'Owner' | 'Can edit' | 'Can read';
@@ -133,23 +137,26 @@ function tierOf(v: VerbSet): Tier | null {
 function nextVerbSet(current: VerbSet, role: Role): VerbPick | null {
   if (role === 'Can download') {
     if (current.owner) return null;
-    return { ...current, download: !current.download, read: true };
+    // The fold supplies whatever the toggled download carries (read).
+    return effectiveVerbs({ ...current, download: !current.download });
   }
   const held = tierOf(current);
   const target: Tier | null =
     role === held ? (TIERS[TIERS.indexOf(role) + 1] ?? null) : role;
   if (target === null) return null;
-  return {
+  // Below Owner the download axis keeps what the row chose. A row coming DOWN
+  // from Owner is left to the file: the download it shows may be the owner
+  // line's fold (gone with that line) or a line of its own (which stays), and
+  // the view cannot tell the two apart — so nothing is revoked or granted for
+  // it, and the fresh view says which it was.
+  const leaveDownloadToFile = current.owner && target !== 'Owner';
+  const next = effectiveVerbs({
     owner: target === 'Owner',
-    write: target !== 'Can read',
-    read: true,
-    // Owner confers download; below it the axis keeps what the row chose. A
-    // row coming DOWN from Owner is left to the file: the download it shows
-    // may be the owner line's fold (gone with that line) or a line of its
-    // own (which stays), and the view cannot tell the two apart — so nothing
-    // is revoked or granted for it, and the fresh view says which it was.
-    download: target === 'Owner' ? true : current.owner ? undefined : current.download,
-  };
+    write: target === 'Can edit',
+    read: target === 'Can read',
+    download: !leaveDownloadToFile && current.download,
+  });
+  return leaveDownloadToFile ? { ...next, download: undefined } : next;
 }
 
 /**
@@ -159,49 +166,6 @@ function nextVerbSet(current: VerbSet, role: Role): VerbPick | null {
  * neither drops nor grants an omitted verb.
  */
 type VerbPick = Omit<VerbSet, 'download'> & { download?: boolean };
-
-/**
- * The verbs in the order a set has to be APPLIED: broadest first.
- *
- * Lowering must start at the top because a grant folds downward inside one
- * scope — denying `write` while a local `owner:` grant still stands would be
- * refused by the server as ineffective, since owner confers write. Stripping
- * owner first removes the thing that was conferring it.
- *
- * Raising reads the same order for the opposite reason: granting `owner` first
- * confers write, download and read in one line, so the later verbs are already
- * satisfied and no redundant second grant is written.
- */
-const VERBS_BROADEST_FIRST: GrantVerb[] = ['owner', 'write', 'download', 'read'];
-
-/** The `VerbSet` key each grant verb reads. */
-const VERB_TO_KEY: Record<GrantVerb, keyof VerbSet> = {
-  owner: 'owner',
-  write: 'write',
-  read: 'read',
-  download: 'download',
-};
-
-/**
- * The fewest grant lines that produce a set — the single highest tier verb
- * (the lower ones fold in server-side) plus download when the set has it
- * without owner. A bare `read` is only worth writing when nothing else already
- * confers read, and download does.
- *
- * The same minimisation the add-row's `grantVerbs` does, as a function of a set
- * so the row menu can reuse it. Deriving it from the SET rather than from what
- * each intermediate response reports also keeps the write list deterministic:
- * a response that has not caught up cannot make the loop write `read:` under an
- * `owner:` it just granted.
- */
-function minimalGrantVerbs(set: VerbPick): GrantVerb[] {
-  const verbs: GrantVerb[] = [];
-  if (set.owner) verbs.push('owner');
-  else if (set.write) verbs.push('write');
-  else if (set.read && !set.download) verbs.push('read');
-  if (set.download && !set.owner) verbs.push('download');
-  return verbs;
-}
 
 interface PrincipalRow {
   key: string;
@@ -270,7 +234,7 @@ interface PrincipalRow {
 }
 
 /** The four grant verbs, for whole-set reasoning. */
-const ALL_VERBS: GrantVerb[] = ['owner', 'write', 'read', 'download'];
+const ALL_VERBS: readonly GrantVerb[] = KNOWN_VERBS;
 
 /** Every source list in a per-verb map, empty entries dropped. */
 function sourceLists(map: GrantSources | DenialSources | undefined): GrantSource[][] {
@@ -512,7 +476,7 @@ function summarizeVerbs(v: VerbSet): string {
  *   - held by an entry here, or simply never granted → nothing to explain.
  */
 function verbNote(row: PrincipalRow, verb: GrantVerb): string | undefined {
-  if (row.verbs[VERB_TO_KEY[verb]]) {
+  if (row.verbs[verb]) {
     const winner = (row.sources?.[verb] ?? [])[0];
     return winner?.kind === 'ancestor' ? `from ${folderLabel(winner.path)}` : undefined;
   }
@@ -857,7 +821,7 @@ function buildRows(data: AccessResponse | null, myEmail: string): PrincipalRow[]
   // `readers` too, so this is belt-and-braces for an older backend — but it is
   // also what makes the row's Read box render checked-and-implied next to a
   // Download it cannot be unticked without.
-  for (const row of rows.values()) if (row.verbs.download) row.verbs.read = true;
+  for (const row of rows.values()) row.verbs = effectiveVerbs(row.verbs);
 
   // Attach each row's per-verb grants and denials, and the manageability they
   // imply (direct / inherited / external), keyed by the same row key (with the
@@ -1270,33 +1234,15 @@ export function ManageAccessDialog({
     setPickedChips((chips) => chips.filter((c) => principalKey(c) !== principalKey(p)));
   }, []);
 
-  // The new-grant checklist stores independent flags, but the nesting folds for
-  // display: Owner implies edit + download + read; Edit implies read; Download
-  // implies read too (a person trusted with a copy may open it).
-  // `effectiveNewVerbs` is what the boxes render as checked.
-  const effectiveNewVerbs = useMemo<VerbSet>(
-    () => ({
-      owner: newVerbs.owner,
-      write: newVerbs.owner || newVerbs.write,
-      read: newVerbs.owner || newVerbs.write || newVerbs.download || newVerbs.read,
-      download: newVerbs.owner || newVerbs.download,
-    }),
-    [newVerbs],
-  );
+  // The new-grant checklist stores independent flags; the grammar's fold turns
+  // them into what the boxes render as checked (Owner implies edit, download
+  // and read; Edit and Download each imply read).
+  const effectiveNewVerbs = useMemo<VerbSet>(() => effectiveVerbs(newVerbs), [newVerbs]);
 
-  // The minimal verb list to send: the single highest tier verb (the lower ones
-  // fold in server-side) plus download when it's chosen independently of owner.
-  // A bare `read` line is only worth writing when nothing else already confers
-  // read — download does, so Download alone (or Read + Download) sends `download`
-  // and no redundant second grant.
-  const grantVerbs = useMemo<GrantVerb[]>(() => {
-    const verbs: GrantVerb[] = [];
-    if (effectiveNewVerbs.owner) verbs.push('owner');
-    else if (effectiveNewVerbs.write) verbs.push('write');
-    else if (effectiveNewVerbs.read && !effectiveNewVerbs.download) verbs.push('read');
-    if (effectiveNewVerbs.download && !effectiveNewVerbs.owner) verbs.push('download');
-    return verbs;
-  }, [effectiveNewVerbs]);
+  // The fewest lines to send for that set — the grammar's own minimisation, so
+  // `owner` is one line and Download alone (or Read + Download) is `download`
+  // with no redundant `read:` beside it.
+  const grantVerbs = useMemo<GrantVerb[]>(() => minimalGrantVerbs(effectiveNewVerbs), [effectiveNewVerbs]);
 
   /** Grant every picked principal the chosen verbs. Resolves `true` only when all of them landed. */
   const doGrant = useCallback(async (): Promise<boolean> => {
@@ -1446,9 +1392,9 @@ export function ManageAccessDialog({
         // Only a verb the pick states as OFF is dropped; one it leaves out is
         // left to the file (see `VerbPick`).
         for (const verb of VERBS_BROADEST_FIRST) {
-          if (picked[VERB_TO_KEY[verb]] !== false) continue;
+          if (picked[verb] !== false) continue;
           const now = current();
-          if (!now?.verbs[VERB_TO_KEY[verb]]) continue; // already gone
+          if (!now?.verbs[verb]) continue; // already gone
           const src = now.sources?.[verb] ?? [];
           // Purely local → a plain revoke is enough and leaves no `deny` line
           // behind to explain later. Anything else (inherited, or conferred with
@@ -1464,14 +1410,14 @@ export function ManageAccessDialog({
           // A local grant that turned out to be doubled by a parent: the revoke
           // landed, the verb survived it. Finish the job with the denial rather
           // than leave a half-applied set behind.
-          if (localOnly && current()?.verbs[VERB_TO_KEY[verb]]) {
+          if (localOnly && current()?.verbs[verb]) {
             await step(() => revokeAccess(workspaceId, { ...base, mode: 'deny-here', verb }));
           }
         }
 
         // ---- raise: lift the restrictions the new set no longer needs ------
         for (const verb of VERBS_BROADEST_FIRST) {
-          if (!picked[VERB_TO_KEY[verb]]) continue;
+          if (!picked[verb]) continue;
           if (!(current()?.denials?.[verb] ?? []).some((s) => s.kind === 'direct')) continue;
           await step(() => revokeAccess(workspaceId, { ...base, verb }));
         }
@@ -1481,7 +1427,7 @@ export function ManageAccessDialog({
         // confer, so this writes at most two lines (a tier, plus download) and
         // never a redundant `read:` under a grant that carries read anyway.
         for (const verb of minimalGrantVerbs(picked)) {
-          if (current()?.verbs[VERB_TO_KEY[verb]]) continue;
+          if (current()?.verbs[verb]) continue;
           await step(() => grantAccess(workspaceId, { ...base, verb }));
         }
       } catch (err) {
@@ -2059,12 +2005,8 @@ export function ManageAccessDialog({
                     {TIER_ROLES.map((role) => {
                       const k = ROLE_TO_KEY[role];
                       const checked = effectiveNewVerbs[k];
-                      const disabled =
-                        (role === 'Can edit' && effectiveNewVerbs.owner) ||
-                        (role === 'Can read' &&
-                          (effectiveNewVerbs.owner ||
-                            effectiveNewVerbs.write ||
-                            effectiveNewVerbs.download));
+                      // Checked because another tick confers it: not a choice here.
+                      const disabled = conferredByOthers(newVerbs, k);
                       return (
                         <MenuItem
                           key={role}
@@ -2091,7 +2033,7 @@ export function ManageAccessDialog({
                     })}
                     <div className="my-1 border-t border-line" />
                     <MenuItem
-                      disabled={effectiveNewVerbs.owner}
+                      disabled={conferredByOthers(newVerbs, 'download')}
                       active={effectiveNewVerbs.download}
                       aria-pressed={effectiveNewVerbs.download}
                       // Same rule as the tiers: unticking download keeps the
