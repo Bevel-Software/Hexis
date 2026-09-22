@@ -142,6 +142,31 @@ describe('noteBesideCheckout', () => {
     await fs.rm(elsewhere, { recursive: true, force: true });
   });
 
+  it.runIf(process.platform !== 'win32')('names a DANGLING link where the checkout should be', async () => {
+    // Absence is an answer: a link to nothing is not a clone, and the operator
+    // needs to know the workspace has no checkout in it.
+    const dir = path.join(root, 'main');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.symlink(path.join(root, 'gone'), path.join(dir, KB), 'dir');
+
+    await scan();
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain(`${BESIDE_CHECKOUT_NOTE} "${KB}"`);
+  });
+
+  it.runIf(process.platform !== 'win32')('refuses to guess about a checkout it cannot read', async () => {
+    // A self-referential link answers ELOOP, not "absent". Swallowing that
+    // would publish "the checkout is a stray" about a path this process could
+    // not read — so the scan throws and the boot's handler names it instead.
+    const dir = path.join(root, 'main');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.symlink(path.join(dir, KB), path.join(dir, KB));
+
+    await expect(scan()).rejects.toMatchObject({ code: 'ELOOP' });
+    expect(notes).toEqual([]);
+  });
+
   it('is quiet on a cold start, with no workspaces root on disk yet', async () => {
     await noteBesideCheckout(path.join(root, 'not-yet'), KB, (line) => notes.push(line));
     expect(notes).toEqual([]);

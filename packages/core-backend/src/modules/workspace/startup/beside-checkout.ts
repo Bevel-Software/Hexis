@@ -82,12 +82,22 @@ export async function noteBesideCheckout(
   }
 }
 
-/** Whether `p` is a directory, links followed. Anything unreadable is not one. */
+/**
+ * Whether `p` is a directory, links followed.
+ *
+ * Absence is an answer — a dangling link where the checkout should be is not a
+ * checkout, and saying so is the note's job. Anything else (a permission
+ * failure, an I/O error, a symlink loop) is NOT an answer: swallowing it would
+ * publish "the checkout is a stray" about a path this process could not read.
+ * It is thrown, the same rule {@link entries} keeps, and the boot's diagnostic
+ * handler names the path instead.
+ */
 async function isDirectory(p: string): Promise<boolean> {
   try {
     return (await fs.stat(p)).isDirectory();
-  } catch {
-    return false;
+  } catch (err) {
+    if (isAbsence(err)) return false;
+    throw err;
   }
 }
 
