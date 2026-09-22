@@ -136,12 +136,17 @@ export class TemplateSource {
    * must read as "same", or the managed-file refresh would commit churn on
    * every boot forever. Rendered, so a renamed root is compared against the
    * guide that names it, not against the placeholders.
+   *
+   * `templateRel` is the template's own name for the file, when the two differ.
+   * They do for exactly one file: the agent guide ships as `AGENTS.md` and is
+   * written under whatever this deployment calls it, so the comparison has to
+   * name both ends.
    */
-  async differsFrom(repoDir: string, relPath: string): Promise<boolean> {
+  async differsFrom(repoDir: string, relPath: string, templateRel: string = relPath): Promise<boolean> {
     const norm = (text: string) => text.replace(/\r\n?/g, '\n');
     const [current, template] = await Promise.all([
       this.disk.readTextFile(path.join(repoDir, relPath)),
-      this.read(relPath),
+      this.read(templateRel),
     ]);
     return norm(current) !== norm(template);
   }

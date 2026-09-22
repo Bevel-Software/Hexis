@@ -46,8 +46,19 @@ const TOKEN_FOR_THAT_REPOSITORY =
 const SECRET_FOR_THAT_PROVIDER =
   'Enter the application secret for that provider — the saved one is only sent to the provider it was saved for.';
 
-/** The three renameable roots, as setting keys. */
-const LAYOUT_KEYS: readonly string[] = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'];
+/**
+ * The knowledge-base layout as setting keys: the three renameable roots, the
+ * guide's file name, and the consent that rides with it — which the KB startup
+ * phase reads through a getter, so the completing save puts it in effect along
+ * with the names.
+ */
+const LAYOUT_KEYS: readonly string[] = [
+  'knowledgeBaseDir',
+  'skillsDir',
+  'pluginsDir',
+  'agentsFile',
+  'agentsFileLink',
+];
 /** The branch model, as setting keys. */
 const BRANCH_KEYS: readonly string[] = ['defaultBranch', 'protectedBranches'];
 

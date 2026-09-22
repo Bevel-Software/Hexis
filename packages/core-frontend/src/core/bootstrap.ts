@@ -70,15 +70,23 @@ export async function loadServerConfig(): Promise<void> {
   // The KB layout has defaults, so an absent or invalid one is not a boot
   // failure either: the module keeps its defaults, which is exactly what an
   // older server that omits the field is running with.
+  //
+  // The guide's file name is read the same way, one field at a time: a server
+  // from before it was configurable serves the three folders and no guide, and
+  // taking the whole layout as unusable over that would put a deployment that
+  // renamed its ROOTS back on the default folder names in the browser alone.
   const layout = config.kbLayout;
   if (
     layout &&
     typeof layout.knowledgeBaseDir === 'string' &&
     typeof layout.skillsDir === 'string' &&
-    typeof layout.pluginsDir === 'string' &&
-    !validateKbLayout(layout)
+    typeof layout.pluginsDir === 'string'
   ) {
-    configureKbLayout(layout);
+    const proposed = {
+      ...layout,
+      agentsFile: typeof layout.agentsFile === 'string' ? layout.agentsFile : undefined,
+    };
+    if (!validateKbLayout(proposed)) configureKbLayout(proposed);
   }
 
   /**

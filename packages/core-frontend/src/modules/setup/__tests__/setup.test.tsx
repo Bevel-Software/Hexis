@@ -27,6 +27,7 @@ const facade = vi.hoisted(() => ({
 }));
 vi.mock('../../settings/services/github-facade.api', () => facade);
 
+import { agentsFilePointerSentence } from '@bevel-software/platform-shared';
 import { SetupGate } from '../components/SetupGate';
 import { SetupScreen } from '../components/SetupScreen';
 import { KbInitFailed, SettingsProblems, type SettingStatus } from '../services/setup.api';
@@ -37,9 +38,12 @@ const SETTINGS: SettingStatus[] = [
   { key: 'gitToken', envVar: 'GIT_TOKEN', section: KB, source: 'unset', configured: false, secret: true, restartToApply: false },
   { key: 'gitUsername', envVar: 'GIT_USERNAME', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: false },
   { key: 'kbDirName', envVar: 'KB_DIR_NAME', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
-  { key: 'knowledgeBaseDir', envVar: 'KB_KNOWLEDGE_BASE_DIR', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
-  { key: 'skillsDir', envVar: 'KB_SKILLS_DIR', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
-  { key: 'pluginsDir', envVar: 'KB_PLUGINS_DIR', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  // The layout settings carry no `envVar`: they are entered here and nowhere else.
+  { key: 'knowledgeBaseDir', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'skillsDir', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'pluginsDir', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'agentsFile', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'agentsFileLink', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'defaultBranch', envVar: 'DEFAULT_BRANCH', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'protectedBranches', envVar: 'PROTECTED_BRANCHES', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'oidcClientSecret', envVar: 'OIDC_CLIENT_SECRET', section: 'sign-in', source: 'unset', configured: false, secret: true, restartToApply: false },
@@ -1274,5 +1278,77 @@ describe('SetupScreen — sync panel when the whole knowledge base is env-set', 
     expect(screen.getByText('https://hexis.example.test/api/sync/<branch>')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'Repository sync' })).toBeTruthy();
+  });
+});
+
+/**
+ * The agent guide's file name, and the one thing that rides with it: the
+ * sentence the platform would add to the customer's own `AGENTS.md`, and the
+ * consent to keep it there.
+ */
+describe('SetupScreen — the agent guide file', () => {
+  async function renderScreen(variant: 'setup' | 'settings' = 'setup') {
+    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS });
+    if (variant === 'settings') {
+      render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} variant="settings" />);
+      return;
+    }
+    render(<SetupGate>{APP}</SetupGate>);
+    await screen.findByRole('heading', { name: /Set up this deployment/ });
+  }
+
+  it('offers the field on first run, beside the three folder names', async () => {
+    await renderScreen();
+    expect(screen.getByLabelText('Agent guide file')).toHaveValue('');
+    // Not tucked under Advanced, for the same reason the folders are not: a
+    // repository that already has an AGENTS.md loses it unless this is
+    // answered before the first boot.
+    expect(screen.getByLabelText('Knowledge folder')).toBeInTheDocument();
+  });
+
+  it('offers it on the Deployment settings page too', async () => {
+    await renderScreen('settings');
+    expect(screen.getByLabelText('Agent guide file')).toBeInTheDocument();
+  });
+
+  it('shows nothing about a pointer while the guide is still AGENTS.md', async () => {
+    await renderScreen('settings');
+    expect(screen.queryByTestId('agents-file-link')).toBeNull();
+    await userEvent.type(screen.getByLabelText('Agent guide file'), 'AGENTS.md');
+    expect(screen.queryByTestId('agents-file-link')).toBeNull();
+  });
+
+  it('shows the exact sentence and a ticked box once the name differs', async () => {
+    await renderScreen('settings');
+    await userEvent.type(screen.getByLabelText('Agent guide file'), 'HEXIS.md');
+    const panel = within(screen.getByTestId('agents-file-link'));
+    // On by default — a renamed guide nothing points at is a guide no coding
+    // agent will find.
+    expect(panel.getByRole('checkbox')).toBeChecked();
+    // The sentence itself, from the same helper the server appends with.
+    expect(panel.getByText(agentsFilePointerSentence('HEXIS.md'))).toBeInTheDocument();
+  });
+
+  it('saves the name and the consent the admin actually gave', async () => {
+    api.saveSettings.mockResolvedValue({ restartRequired: true, complete: false, settings: SETTINGS });
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} variant="settings" />);
+    await userEvent.type(screen.getByLabelText('Agent guide file'), 'HEXIS.md');
+    await userEvent.click(within(screen.getByTestId('agents-file-link')).getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await waitFor(() =>
+      expect(api.saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ agentsFile: 'HEXIS.md', agentsFileLink: 'false' }),
+      ),
+    );
+  });
+
+  it('shows the server\'s rule against a name it refused', async () => {
+    api.saveSettings.mockRejectedValue(
+      new SettingsProblems({ agentsFile: 'The name must end in .md.' }),
+    );
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} variant="settings" />);
+    await userEvent.type(screen.getByLabelText('Agent guide file'), 'HEXIS.txt');
+    await userEvent.click(screen.getByRole('button', { name: /Save/ }));
+    expect(await screen.findByText('The name must end in .md.')).toBeInTheDocument();
   });
 });

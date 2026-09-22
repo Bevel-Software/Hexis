@@ -590,8 +590,9 @@ describe('POST /setup/settings — the folder names on the completing save', () 
     const body = await res.json();
     expect(body.complete).toBe(true);
     expect(body.restartRequired).toBe(false);
-    expect(seenByPhase).toEqual([{ knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins' }]);
-    expect(currentKbLayout()).toEqual({ knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins' });
+    const applied = { knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins', agentsFile: 'AGENTS.md' };
+    expect(seenByPhase).toEqual([applied]);
+    expect(currentKbLayout()).toEqual(applied);
   });
 
   it('applies names stored by an earlier, incomplete save', async () => {

@@ -5,7 +5,10 @@ Every setting Hexis reads, and where it comes from.
 Four values are **required** before first boot. Everything marked *setup
 screen* can be left unset and configured in the app at first sign-in.
 **Anything set in the environment wins over the setup screen**, so a value you
-pin in `.env` cannot be changed out from under you in the UI.
+pin in `.env` cannot be changed out from under you in the UI. The one
+exception is the knowledge-base layout — the three root folders and the agent
+guide's file name — which is entered in the app and nowhere else; see the
+*retired* rows below.
 
 [`.env.example`](../.env.example) documents every variable in full.
 
@@ -32,7 +35,7 @@ pin in `.env` cannot be changed out from under you in the UI.
 | `PORT` | no | Backend port (default 3001) |
 | `KB_DIR_NAME` | no | Directory name of the KB clone inside each workspace |
 | `KB_SYNC_SECRET` | setup screen | Bearer secret a git host's webhook or a pipeline presents to `POST /api/sync` so pushes made outside Hexis show up at once — see [git-sync.md](git-sync.md) |
-| `KB_KNOWLEDGE_BASE_DIR` / `KB_SKILLS_DIR` / `KB_PLUGINS_DIR` | setup screen | The three top-level folders of the repository (defaults `KnowledgeBase`, `Skills`, `Plugins`). Rename them to read a repository laid out by someone else; the three must differ. Restart to apply |
+| `KB_KNOWLEDGE_BASE_DIR` / `KB_SKILLS_DIR` / `KB_PLUGINS_DIR` | retired | The three top-level folders are now entered on the setup screen and the Deployment settings page only. A deployment that still sets one has its value imported into the saved setting on the first start after upgrading (with a log line naming the variable to delete); a saved value that differs wins, and the variable is ignored |
 | `TENANT_ID` | no | Slug branding credential prefixes (default `bevel`) |
 | `KB_TEMPLATE_DIR` | no | Overrides the packaged KB seed template |
 | `INTERNAL_TOKEN_SECRET` | no | Dedicated HMAC key for internal (loopback) tool tokens; unset, one is derived from `JWT_SECRET` |
@@ -71,12 +74,50 @@ at boot, so if you run more than one, restart the others after changing SSO
   **only** signup boundary. Without it, anyone with an account at the issuer
   can sign in.
 
+## The agent guide's file name
+
+The platform writes a managed agent guide to the top of the repository and
+refreshes it on every start. It is called `AGENTS.md` by default — which is
+also the name coding agents look for by convention, so a repository that
+already has one of its own would have it overwritten.
+
+Set **Agent guide file** (setup screen, and Deployment settings afterwards) to
+a name of your own — `HEXIS.md`, say — and:
+
+- the managed guide is written and refreshed under that name instead;
+- your `AGENTS.md` becomes ordinary content: never written, never refreshed,
+  never hidden from the file tree, and movable and deletable like any page;
+- an `AGENTS.md` the platform itself wrote is removed on the next start (only
+  when its content still carries the platform's managed header — an edited or
+  hand-written one is left exactly as it is);
+- every instruction an agent reads names your guide first and tells it to read
+  `AGENTS.md` too, so a remote agent with no checkout still sees your own
+  conventions.
+
+Beside the field is the exact sentence the platform offers to keep at the end
+of your `AGENTS.md`, pointing at the guide, and a checkbox — on by default —
+to keep it there. While it is ticked, each start looks for the guide's name
+anywhere in your file and appends the sentence only when it is missing; a
+mention in your own words counts. No `AGENTS.md` is ever created for this.
+
+The name must be one file name (no folders), end in `.md`, and differ from
+`CLAUDE.md`, from the other platform files and from the three root folders.
+Restart to apply, like the folder names.
+
 ## Configuring by environment instead of the setup screen
 
-Every value the setup screen collects has an env var (`KB_REPO_URL`,
+Most values the setup screen collects have an env var (`KB_REPO_URL`,
 `GIT_TOKEN`, `DEFAULT_BRANCH`, …). Setting them in the environment skips those
 steps at first sign-in and pins them against later change in the UI, which is
 what you want for a deployment managed by config-as-code.
+
+The knowledge-base layout is the exception: `KB_KNOWLEDGE_BASE_DIR`,
+`KB_SKILLS_DIR` and `KB_PLUGINS_DIR` are retired, and the agent guide's file
+name never had a variable. On the first start after upgrading, each of those
+three still present in the environment is imported once into its saved
+setting, with a log line naming the variable to delete; where a saved value
+already differs, the saved value wins and the start warns that the variable is
+ignored.
 
 ## State that survives redeploys
 
