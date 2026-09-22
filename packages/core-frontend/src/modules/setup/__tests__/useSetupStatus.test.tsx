@@ -102,4 +102,29 @@ describe('useSetupStatus', () => {
     expect(api.fetchSetupStatus).not.toHaveBeenCalled();
     expect(result.current.loaded).toBe(false);
   });
+
+  /**
+   * The gate stays mounted for the app's whole life; the Deployment page comes
+   * and goes. A save on the page that leaves the deployment incomplete has to
+   * reach the gate, or it keeps showing the app over a server whose setup
+   * gate is shut.
+   */
+  it('a refresh asked for on one reader re-reads every mounted reader', async () => {
+    api.fetchSetupStatus.mockResolvedValue(status(true));
+    const gate = renderHook(() => useSetupStatus());
+    const page = renderHook(() => useSetupStatus());
+    await waitFor(() => expect(gate.result.current.loaded && page.result.current.loaded).toBe(true));
+    expect(api.fetchSetupStatus).toHaveBeenCalledTimes(2);
+
+    api.fetchSetupStatus.mockResolvedValue(status(false));
+    act(() => page.result.current.refresh());
+    await waitFor(() => expect(gate.result.current.status).toEqual(status(false)));
+    expect(page.result.current.status).toEqual(status(false));
+    expect(api.fetchSetupStatus).toHaveBeenCalledTimes(4);
+
+    // An unmounted reader is no longer asked.
+    page.unmount();
+    act(() => gate.result.current.refresh());
+    await waitFor(() => expect(api.fetchSetupStatus).toHaveBeenCalledTimes(5));
+  });
 });

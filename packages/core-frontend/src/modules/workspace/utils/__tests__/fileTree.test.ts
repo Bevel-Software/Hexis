@@ -1,9 +1,110 @@
 import { describe, it, expect } from 'vitest';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import * as fileTree from '../fileTree';
-import { checkoutRoot, omitPathFromTree, pathExistsInTree, suggestedPages, treeHasVisibleEntries } from '../fileTree';
+import {
+  checkoutRoot,
+  mergePendingIntoTree,
+  omitPathFromTree,
+  pathExistsInTree,
+  subtreeHasVisibleEntries,
+  subtreeWithheld,
+  suggestedPages,
+  treeHasVisibleEntries,
+} from '../fileTree';
 
 const KB = 'knowledge-base';
+
+/**
+ * A Library tree is one root of the listing, empty on its own terms: a
+ * knowledge base full of notes still has an empty Skills tree.
+ */
+describe('subtreeHasVisibleEntries', () => {
+  const kb: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: 'knowledge-base',
+        relativePath: 'knowledge-base',
+        type: 'directory',
+        children: [
+          {
+            name: 'KnowledgeBase',
+            relativePath: 'knowledge-base/KnowledgeBase',
+            type: 'directory',
+            children: [{ name: 'note.md', relativePath: 'knowledge-base/KnowledgeBase/note.md', type: 'file' }],
+          },
+          { name: 'Skills', relativePath: 'knowledge-base/Skills', type: 'directory', children: [] },
+          {
+            name: 'Plugins',
+            relativePath: 'knowledge-base/Plugins',
+            type: 'directory',
+            children: [{ name: 'team', relativePath: 'knowledge-base/Plugins/team', type: 'directory', children: [] }],
+          },
+        ],
+      },
+    ],
+  };
+
+  it('is empty for a root with nothing under it, however full the rest of the tree is', () => {
+    expect(treeHasVisibleEntries(kb, 'knowledge-base')).toBe(true);
+    expect(subtreeHasVisibleEntries(kb, 'knowledge-base/Skills')).toBe(false);
+  });
+
+  it('counts a folder under the root as an entry', () => {
+    expect(subtreeHasVisibleEntries(kb, 'knowledge-base/Plugins')).toBe(true);
+  });
+
+  it('is empty for a root the listing does not have', () => {
+    expect(subtreeHasVisibleEntries(kb, 'knowledge-base/Agents')).toBe(false);
+    expect(subtreeHasVisibleEntries(null, 'knowledge-base/Skills')).toBe(false);
+  });
+});
+
+/**
+ * What was kept out of ONE root is that root's own count, set by the server
+ * per folder: a Skills tree emptied by the read rules says "nothing shared",
+ * a Skills tree that is simply empty beside a withheld Knowledge does not.
+ */
+describe('subtreeWithheld', () => {
+  const kb: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    withheld: 7,
+    children: [
+      {
+        name: 'knowledge-base',
+        relativePath: 'knowledge-base',
+        type: 'directory',
+        withheld: 7,
+        children: [
+          { name: 'KnowledgeBase', relativePath: 'knowledge-base/KnowledgeBase', type: 'directory', withheld: 4, children: [] },
+          { name: 'Skills', relativePath: 'knowledge-base/Skills', type: 'directory', withheld: 3, children: [] },
+          { name: 'Plugins', relativePath: 'knowledge-base/Plugins', type: 'directory', children: [] },
+        ],
+      },
+    ],
+  };
+
+  it("reads one root's own count, not the listing's", () => {
+    expect(subtreeWithheld(kb, 'knowledge-base/Skills')).toBe(3);
+    expect(subtreeWithheld(kb, 'knowledge-base/Plugins')).toBe(0);
+    expect(subtreeWithheld(kb, 'knowledge-base')).toBe(7);
+  });
+
+  it('is 0 for a root the listing does not have', () => {
+    expect(subtreeWithheld(kb, 'knowledge-base/Agents')).toBe(0);
+    expect(subtreeWithheld(null, 'knowledge-base/Skills')).toBe(0);
+  });
+
+  it('survives the pending-upload overlay, which copies the tree', () => {
+    const merged = mergePendingIntoTree(kb, new Map([['knowledge-base/Plugins/new.md', { fullPath: 'knowledge-base/Plugins/new.md', type: 'file' }]]));
+    expect(subtreeWithheld(merged, 'knowledge-base/Skills')).toBe(3);
+    expect(merged.withheld).toBe(7);
+  });
+});
 
 /**
  * The empty state's opening offer walks the tree the server already filtered

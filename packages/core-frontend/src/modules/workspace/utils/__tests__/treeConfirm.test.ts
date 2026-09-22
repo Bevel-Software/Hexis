@@ -1,8 +1,10 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { DEFAULT_KB_LAYOUT, configureKbLayout } from '@bevel-software/platform-shared';
 import type { AccessPrincipalRef, PathPrincipals } from '../../../access/api';
+import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
   accessChangeLines,
+  deleteSentence,
   moveQuestion,
   moveSentence,
   moveWarnings,
@@ -10,6 +12,33 @@ import {
   platformFileMoveRefusal,
   principalLabel,
 } from '../treeConfirm';
+
+/**
+ * The delete question counts what the listing shows. When the caller's read
+ * rules kept entries out of it, the delete still takes them, so the sentence
+ * stops naming a count as the whole and says what the count is.
+ */
+describe('deleteSentence', () => {
+  const folder: FileTreeEntry = {
+    name: 'Sales',
+    relativePath: 'knowledge-base/KnowledgeBase/Sales',
+    type: 'directory',
+    children: [
+      { name: 'a.md', relativePath: 'knowledge-base/KnowledgeBase/Sales/a.md', type: 'file' },
+      { name: 'b.md', relativePath: 'knowledge-base/KnowledgeBase/Sales/b.md', type: 'file' },
+    ],
+  };
+
+  it('counts the files it can see when the listing is whole', () => {
+    expect(deleteSentence(folder)).toBe('Delete Sales and its 2 files?');
+  });
+
+  it('says "everything in it" when the folder had entries withheld', () => {
+    expect(deleteSentence(folder, undefined, true)).toBe(
+      'Delete Sales and everything in it? (2 files you can see; it holds more you can\'t.)',
+    );
+  });
+});
 
 /**
  * What the move confirmation says about access. The tester who failed the

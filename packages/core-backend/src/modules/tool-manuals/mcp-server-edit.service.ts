@@ -131,7 +131,13 @@ export class McpServerEditService {
     private readonly disk: IFsProbe,
   ) {}
 
-  /** The merged view of one server, or null when unknown/unreadable (indistinguishable, fail closed). */
+  /**
+   * The merged view of one server, or null when unknown — including when
+   * `mcp.json` is absent, is not a JSON object, or has no object entry for it
+   * (indistinguishable, fail closed). A missing or malformed manifest only
+   * leaves the extension fields empty. A filesystem failure reading either
+   * file is not "unknown" and propagates.
+   */
   async getServer(userEmail: string, slug: string): Promise<McpServerView | null> {
     const located = await this.locate(userEmail, slug);
     if (!located) return null;

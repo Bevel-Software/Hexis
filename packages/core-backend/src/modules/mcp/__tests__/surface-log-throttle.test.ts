@@ -114,6 +114,37 @@ describe('SurfaceLogThrottle — a wall clock that steps backwards', () => {
   });
 });
 
+describe('SurfaceLogThrottle — a user rebuilding under suppression is not quiet', () => {
+  const shape = { tools: 5, manuals: 2 };
+
+  it('survives another user\'s sweep, so the count its next line owes is not lost', () => {
+    let now = 1_000_000;
+    const throttle = new SurfaceLogThrottle(60_000, () => now);
+
+    throttle.decide('a', shape); // t0: logged
+    now += 30_000;
+    throttle.decide('a', shape); // t0+30s: suppressed (1) — a is active
+    now += 30_000;
+    // t0+60s: another user's request runs the sweep. a's last LOGGED line is
+    // an interval old, but a rebuilt thirty seconds ago; it stays.
+    throttle.decide('b', shape);
+    expect(throttle.size()).toBe(2);
+    // a's next line carries the rebuild that was suppressed, not zero.
+    expect(throttle.decide('a', shape)).toEqual({ log: true, suppressed: 1 });
+  });
+
+  it('is still forgotten once it has not rebuilt at all for an interval', () => {
+    let now = 1_000_000;
+    const throttle = new SurfaceLogThrottle(60_000, () => now);
+    throttle.decide('a', shape);
+    now += 30_000;
+    throttle.decide('a', shape); // suppressed
+    now += 60_000; // a has been quiet a whole interval since that rebuild
+    throttle.decide('b', shape); // sweep
+    expect(throttle.size()).toBe(1);
+  });
+});
+
 describe('SurfaceLogThrottle — a large clock rollback', () => {
   const shape = { tools: 5, manuals: 2 };
 

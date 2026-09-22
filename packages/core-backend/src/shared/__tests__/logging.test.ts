@@ -54,7 +54,68 @@ describe('createConsoleLogger', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const err = new Error('boom');
     createConsoleLogger({ module: 'mcp' }).error('session failed', { err });
-    expect(error).toHaveBeenCalledWith('[mcp] session failed', err);
+    // Bare — the second argument IS an error, not an object holding one —
+    // though a terminal-safe copy of it (see the escaping case below).
+    expect(error).toHaveBeenCalledTimes(1);
+    const [message, logged] = error.mock.calls[0] as [string, unknown];
+    expect(message).toBe('[mcp] session failed');
+    expect(logged).toBeInstanceOf(Error);
+    expect((logged as Error).message).toBe('boom');
+    expect((logged as Error).stack).toBe(err.stack);
+  });
+
+  /**
+   * An error's MESSAGE is very often not the process's own text — git's
+   * stderr, a path, a branch name — so it is made one line like any string
+   * field; the frames are ours and keep their lines. The original is not
+   * touched: it is often rethrown after it was logged.
+   */
+  it('escapes the text an error carries, keeps its frames, and never mutates the original', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const err = new Error('git said: fatal\n[forged] admin signed in31m');
+    (err as Error & { code?: string }).code = 'E\nFORGED';
+    createConsoleLogger({ module: 'sync' }).error('pull failed', { err });
+    const logged = error.mock.calls[0]?.[1] as Error & { code?: string };
+    expect(logged).toBeInstanceOf(Error);
+    expect(logged).not.toBe(err);
+    expect(logged.message).toBe('git said: fatal\\n[forged] admin signed in\\u009b31m');
+    expect(logged.code).toBe('E\\nFORGED');
+    // The header of the stack is the message and is escaped with it; the
+    // frames below it are still lines of their own.
+    expect(logged.stack?.startsWith('Error: git said: fatal\\n[forged] admin signed in\\u009b31m\n    at ')).toBe(true);
+    expect(err.message).toBe('git said: fatal\n[forged] admin signed in31m');
+    expect(err.stack?.includes('\n[forged]')).toBe(true);
+  });
+
+  /**
+   * The frames are looked for after the stack's header — the error's own
+   * `toString()` — not from the top: a message that carries a line shaped
+   * like a frame must not move the boundary up and pass the rest of itself
+   * through raw.
+   */
+  it('escapes a message that mimics a stack frame, whole', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const err = new Error('first\n    at fake (forged.js:1:1)\n[forged] admin signed in');
+    createConsoleLogger({ module: 'sync' }).error('failed', { err });
+    const logged = error.mock.calls[0]?.[1] as Error;
+    expect(logged.message).toBe('first\\n    at fake (forged.js:1:1)\\n[forged] admin signed in');
+    const header = logged.stack?.slice(0, logged.stack.indexOf('\n'));
+    expect(header).toBe('Error: first\\n    at fake (forged.js:1:1)\\n[forged] admin signed in');
+    // The frames that follow are the real ones; the forged one never became a line.
+    expect(logged.stack?.slice(header!.length).startsWith('\n    at ')).toBe(true);
+    expect(logged.stack?.includes('\n    at fake')).toBe(false);
+  });
+
+  it('cuts a cause chain that loops back on itself', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const a = new Error('a\nA');
+    const b = new Error('b\nB', { cause: a });
+    (a as Error & { cause?: unknown }).cause = b;
+    createConsoleLogger({ module: 'sync' }).error('failed', { err: a });
+    const logged = error.mock.calls[0]?.[1] as Error & { cause?: Error & { cause?: unknown } };
+    expect(logged.message).toBe('a\\nA');
+    expect(logged.cause?.message).toBe('b\\nB');
+    expect(logged.cause?.cause).toBe('[circular]');
   });
 
   it('passes several fields as one inspectable object, other bindings included', () => {

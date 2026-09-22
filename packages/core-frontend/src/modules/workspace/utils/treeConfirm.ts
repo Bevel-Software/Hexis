@@ -98,10 +98,22 @@ export function rootOf(path: string, kbDirName: string | null): string | null {
 
 const possessive = (name: string) => (/s$/i.test(name) ? `${name}'` : `${name}'s`);
 
-export function deleteSentence(entry: FileTreeEntry, isProposed?: (path: string) => boolean): string {
+/**
+ * The delete question. A folder's count is of the files this listing SHOWS:
+ * when the caller's read rules kept entries out of THIS folder (`partial`),
+ * the delete still takes every file under it, seen or not, so the sentence
+ * says "everything in it" and gives the visible count as what it is.
+ */
+export function deleteSentence(
+  entry: FileTreeEntry,
+  isProposed?: (path: string) => boolean,
+  partial = false,
+): string {
   if (entry.type === 'file') return `Delete ${entry.name}?`;
   const n = countFiles(entry, isProposed);
-  return `Delete ${entry.name} and its ${n} ${n === 1 ? 'file' : 'files'}?`;
+  const files = `${n} ${n === 1 ? 'file' : 'files'}`;
+  if (partial) return `Delete ${entry.name} and everything in it? (${files} you can see; it holds more you can't.)`;
+  return `Delete ${entry.name} and its ${files}?`;
 }
 
 /** `#12 "Title" by Ana (2 files)` — one open change request as a folder delete names it. */
