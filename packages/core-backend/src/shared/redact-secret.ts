@@ -56,8 +56,19 @@ export function redactSecret(text: string, secrets: readonly (string | null | un
       .replace(/:\/\/[^/\s]*@/g, '://***@')
       // A presigned remote carries its credential in the query instead
       // (`?X-Amz-Signature=…`, `?access_token=…`). A git remote has no query
-      // worth keeping in a log, so the whole of it goes.
-      .replace(/(\bhttps?:\/\/[^\s?#'"]+)\?[^\s#'"]*/gi, '$1?***')
+      // worth keeping in a log, so the whole of it goes — up to whitespace or
+      // a fragment, not to the first quote: a credential can carry a quote
+      // of its own, and stopping there would leave the rest of it in the log.
+      // When git quoted the URL, the LAST quote of that kind before the next
+      // space is the one closing it, and what follows it (`': 403`) is kept.
+      .replace(
+        /(\bhttps?:\/\/[^\s?#'"]+)\?([^\s#]*)/gi,
+        (_m, url: string, query: string, offset: number, whole: string) => {
+          const opener = whole[offset - 1];
+          const closing = opener === "'" || opener === '"' ? query.lastIndexOf(opener) : -1;
+          return `${url}?***${closing === -1 ? '' : query.slice(closing)}`;
+        },
+      )
   );
 }
 

@@ -32,8 +32,10 @@ export type TreeConfirmRequest =
       entry: FileTreeEntry;
       /**
        * Today's delete, unchanged: this branch's copy of the entry. For a
-       * folder with proposed files it is "Delete folder only" — the change
-       * requests proposing them stay open.
+       * folder with proposed files it is "Delete current content only" — what
+       * the branch holds goes, and the change requests proposing files into
+       * the folder stay open. (Not "delete folder only": the folder is what
+       * the proposals still fill, so it does not leave the tree.)
        */
       run(): void | Promise<void>;
       /**
@@ -199,7 +201,7 @@ export function TreeActionConfirmDialog({
               Cancel
             </Button>
             <Button ref={confirmRef} size="sm" onClick={() => onConfirm('folder-only')}>
-              Delete folder only
+              Delete current content only
             </Button>
             <Button
               size="sm"
@@ -225,9 +227,10 @@ export function TreeActionConfirmDialog({
           ))}
         </ul>
         <p className="mt-2 text-detail text-ink-muted">
-          Delete folder only keeps {requests.length === 1 ? 'that request' : 'those requests'} open, and
-          their proposed files stay listed. Deleting the proposed changes too takes those files out of
-          each request; a request left with nothing in it is withdrawn.
+          Deleting the current content only removes what is on this branch and keeps{' '}
+          {requests.length === 1 ? 'that request' : 'those requests'} open, so their proposed files
+          stay listed. Deleting the proposed changes too takes those files out of each request; a
+          request left with nothing in it is withdrawn.
         </p>
         {refused.length > 0 && (
           <ul id="delete-proposals-refused" className="mt-2 space-y-1">

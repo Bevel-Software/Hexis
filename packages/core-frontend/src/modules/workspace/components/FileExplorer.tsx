@@ -1883,7 +1883,7 @@ export function TreeChrome({
   // folder. It asks for EVERY knowledge-base folder: the shared list may still
   // be loading, or have failed, and its silence is not "no proposals". A
   // folder the list shows no proposals under opens the plain dialog at once
-  // (its Delete is "Delete folder only") and switches to the three-way one
+  // (its Delete is "Delete current content only") and switches to the three-way one
   // if the answer names requests. Keyed by the request it answers.
   const [proposalsAnswer, setProposalsAnswer] = useState<
     { request: TreeConfirmRequest; proposals: FolderProposals } | null

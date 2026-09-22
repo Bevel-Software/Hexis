@@ -21,6 +21,19 @@ const isGone = (err: unknown): boolean => codeOf(err) === 'ENOENT' || codeOf(err
  * thrown, so a caller never reports a folder gone that is still there.
  */
 export async function removeEmptyDirs(absoluteDir: string): Promise<void> {
+  // The root itself is judged as it is on disk, a link as a link: `readdir`
+  // would follow a directory link and the sweep would then empty folders
+  // wherever it points — outside the workspace, for a link committed to the
+  // repository. A link is never swept; the children below are `Dirent`s,
+  // for which `isDirectory()` is already false on a link.
+  let root: import('node:fs').Stats;
+  try {
+    root = await fs.lstat(absoluteDir);
+  } catch (err) {
+    if (isGone(err)) return;
+    throw err;
+  }
+  if (!root.isDirectory()) return;
   let entries: import('node:fs').Dirent[];
   try {
     entries = await fs.readdir(absoluteDir, { withFileTypes: true });

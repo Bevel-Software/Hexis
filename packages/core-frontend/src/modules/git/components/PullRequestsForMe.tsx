@@ -8,7 +8,7 @@ import { listPullRequestsForMe } from '../services/pr.api';
 import { friendlyGitError } from '../services/error-messages';
 import { useGit } from '../state/git.context';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
-import { PR_STALE_EVENT, PR_STALE_FALLBACK_MS } from '../../../core/events';
+import { PR_STALE_EVENT, PR_STALE_FALLBACK_MS, subscribePrStale } from '../../../core/events';
 
 const POLL_INTERVAL_MS = PR_STALE_FALLBACK_MS;
 
@@ -134,12 +134,12 @@ export function PullRequestsForMe() {
         console.error('[PullRequestsForMe] initial load failed', e);
       });
     document.addEventListener('visibilitychange', handleVisibility);
-    window.addEventListener(PR_STALE_EVENT, handlePrStale);
+    const offStale = subscribePrStale(handlePrStale);
 
     return () => {
       cancelled = true;
       document.removeEventListener('visibilitychange', handleVisibility);
-      window.removeEventListener(PR_STALE_EVENT, handlePrStale);
+      offStale();
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, [available, deleteBranch, refreshBranches]);

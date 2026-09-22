@@ -36,7 +36,9 @@ entered on the setup screen and the Deployment settings page.
 
 Nothing changes for most deployments: on the first start, each of the three
 still set in your environment is imported once into its saved setting and the
-log names the variable to delete. Delete the variables from your `.env` at your
+log names the variable to delete. A value that is not a usable folder name is
+not imported — the start warns and falls back to the default name for that
+root, so check the log once after upgrading. Delete the variables from your `.env` at your
 convenience.
 
 One deployment shape does change at the upgrade. Where a value is ALREADY saved

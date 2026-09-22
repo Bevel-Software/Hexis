@@ -15,6 +15,38 @@
 export const PR_STALE_EVENT = 'bevel:pr-stale';
 
 /**
+ * How long a listener waits after a {@link PR_STALE_EVENT} before it acts, so
+ * that a burst of them is one refetch. One user action can raise several: the
+ * tab that applied a request announces it locally AND receives the server's
+ * broadcast of the same merge through the bus binder a moment later, and a
+ * folder delete announces once per proposal it retracted. Each of those used
+ * to start its own fresh list request.
+ */
+export const PR_STALE_COALESCE_MS = 100;
+
+/**
+ * Subscribe `handler` to {@link PR_STALE_EVENT}, coalesced: events inside one
+ * {@link PR_STALE_COALESCE_MS} window run the handler once, after the window.
+ * Returns the unsubscribe, which also drops a run still pending — a listener
+ * that unmounted must not refetch into nothing.
+ */
+export function subscribePrStale(handler: () => void): () => void {
+  let pending: ReturnType<typeof setTimeout> | null = null;
+  const onStale = () => {
+    if (pending !== null) return;
+    pending = setTimeout(() => {
+      pending = null;
+      handler();
+    }, PR_STALE_COALESCE_MS);
+  };
+  window.addEventListener(PR_STALE_EVENT, onStale);
+  return () => {
+    window.removeEventListener(PR_STALE_EVENT, onStale);
+    if (pending !== null) clearTimeout(pending);
+  };
+}
+
+/**
  * The fallback window for a {@link PR_STALE_EVENT} that never came — the bus
  * dropped the merge or rejection that would have triggered it. Change-request
  * lists re-read the server on this cadence while the tab is visible, so a lost

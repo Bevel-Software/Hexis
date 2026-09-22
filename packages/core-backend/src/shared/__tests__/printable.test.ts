@@ -30,6 +30,13 @@ describe('sanitizedPath', () => {
     expect(sanitizedPath('a\vb\fc\u0085d.md')).toBe('a\\vb\\fc\\u0085d.md');
   });
 
+  it('escapes every other C0/C1 control too, so a name cannot steer a terminal', () => {
+    // U+009B is the one-byte CSI: on its own it starts an ANSI sequence.
+    expect(sanitizedPath('a\u009b31mb.md')).toBe('a\\u009b31mb.md');
+    expect(sanitizedPath('a\u0000b\u001bc\u007fd.md')).toBe('a\\u0000b\\u001bc\\u007fd.md');
+    expect(sanitizedPath('tab\there.md')).toBe('tab\\there.md');
+  });
+
   // U+2028/U+2029 render as line breaks in editors, terminals and JSON
   // consumers, and `JSON.stringify` passes them through raw — so a path
   // carrying one survives being carried, in the `path` field of a not-found

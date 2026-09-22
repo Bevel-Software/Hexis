@@ -87,23 +87,35 @@ async function main(): Promise<void> {
     exitAfter('uncaught exception', 1);
   });
 
-  const config = new CoreConfig();
-  core = await createCoreServices(config, {});
+  // A boot that fails partway — a fatal validation in `createCoreServer`, a
+  // migration that could not take its lock — leaves what was built so far:
+  // the commit-worker lease loop, the pool. It ends through the same sequence
+  // a signal does, so the lease is let go of and the pool closed before the
+  // process exits, with the code saying it was not a clean stop.
+  try {
+    const config = new CoreConfig();
+    core = await createCoreServices(config, {});
 
-  const staticDir =
-    process.env.STATIC_DIR ||
-    (config.nodeEnv === 'production'
-      ? path.resolve(__dirname, '..', '..', 'web', 'dist')
-      : undefined);
+    const staticDir =
+      process.env.STATIC_DIR ||
+      (config.nodeEnv === 'production'
+        ? path.resolve(__dirname, '..', '..', 'web', 'dist')
+        : undefined);
 
-  const app = await createCoreServer(core, {}, { staticDir });
+    const app = await createCoreServer(core, {}, { staticDir });
 
-  server = app.listen(config.port, () => {
-    log.info(`Bevel core server listening on http://localhost:${config.port}`, { port: config.port });
-  });
+    server = app.listen(config.port, () => {
+      log.info(`Bevel core server listening on http://localhost:${config.port}`, { port: config.port });
+    });
+  } catch (err) {
+    log.error('fatal boot error', { err });
+    exitAfter('fatal boot error', 1);
+  }
 }
 
+// Nothing above reaches here: `main` ends itself on every failure. This is
+// the last resort for a bug in the shutdown wiring itself.
 main().catch((err) => {
-  log.error('fatal boot error', { err });
+  log.error('fatal boot error, and the shutdown sequence could not run', { err });
   process.exit(1);
 });

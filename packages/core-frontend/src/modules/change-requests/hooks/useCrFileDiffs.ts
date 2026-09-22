@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { readFileAtForkPoint, readFileOnBranch, type ForkPointFile } from '../services/change-requests.api';
-import { PR_STALE_EVENT } from '../../../core/events';
+import { subscribePrStale } from '../../../core/events';
 import { isBinaryFile } from '../../workspace/components/renderers';
 import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 import { diffLines, hasChanges, type DiffLine } from '../utils/diff';
@@ -71,16 +71,16 @@ export function useCrFileDiffs(
    * new fork point, and half a re-read is a diff between two moments.
    */
   const [staleEpoch, setStaleEpoch] = useState(0);
-  useEffect(() => {
-    const onStale = () => {
-      asked.current.clear();
-      forkAsked.current.clear();
-      targetAsked.current.clear();
-      setStaleEpoch((e) => e + 1);
-    };
-    window.addEventListener(PR_STALE_EVENT, onStale);
-    return () => window.removeEventListener(PR_STALE_EVENT, onStale);
-  }, []);
+  useEffect(
+    () =>
+      subscribePrStale(() => {
+        asked.current.clear();
+        forkAsked.current.clear();
+        targetAsked.current.clear();
+        setStaleEpoch((e) => e + 1);
+      }),
+    [],
+  );
 
   // Only the change requests that actually touch this file have anything to show.
   const relevant = useMemo(

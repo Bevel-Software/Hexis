@@ -98,6 +98,20 @@ function isLockTimeout(err: unknown): boolean {
   );
 }
 
+/** `work`, or an error naming `what` once `ms` have passed without an answer. */
+async function bounded<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timed out after ${ms}ms ${what} — the database did not answer.`)), ms);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** The name of a lock, for an error message a human has to act on. */
 function lockName(lock: AdvisoryLockId): string {
   const entry = Object.entries(AdvisoryLock).find(([, value]) => value === lock);
@@ -121,12 +135,22 @@ export async function withAdvisoryLock<T>(
   const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
   const client = await db.$client.connect();
   try {
-    await client.query('begin');
+    // `lock_timeout` bounds the wait for the lock, once it is set. The two
+    // statements before it run on a connection that may be half-dead — the
+    // socket open, the server gone — and would otherwise wait forever, with
+    // the boot behind them. So they carry a deadline of their own, and a
+    // connection that cannot answer them fails the boot as loudly as one that
+    // cannot take the lock.
+    await bounded(client.query('begin'), waitMs, 'beginning the lock transaction');
     try {
       // `set_config` rather than `SET LOCAL`, which cannot take a bind
       // parameter. `true` makes the setting transaction-local, so the
       // `rollback` below reverts it.
-      await client.query("select set_config('lock_timeout', $1, true)", [String(waitMs)]);
+      await bounded(
+        client.query("select set_config('lock_timeout', $1, true)", [String(waitMs)]),
+        waitMs,
+        'setting lock_timeout',
+      );
       await client.query('select pg_advisory_xact_lock($1, $2)', [LOCK_NAMESPACE, lock]);
     } catch (err) {
       if (isLockTimeout(err)) {
