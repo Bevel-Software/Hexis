@@ -75,14 +75,17 @@ describe('createPinoLogger — the err field', () => {
     const inner = Object.create(null) as Record<string, unknown>;
     Object.defineProperty(inner, 'message', { value: 'inner', enumerable: false });
     Object.defineProperty(inner, 'errors', { value: [foreign], enumerable: false });
-    Object.defineProperty(foreign, 'errors', { value: [foreign, inner], enumerable: false });
+    // `inner` is listed twice: a repeat on the same level is not a loop, and
+    // keeps its text both times — only the path back up is cut.
+    Object.defineProperty(foreign, 'errors', { value: [foreign, inner, inner], enumerable: false });
     logger.error('failed', { err: foreign });
     const err = lines()[0]?.err as { message: string; errors: unknown[] };
     expect(err.message).toBe('loops');
     expect(err.errors[0]).toBe('[circular]');
-    const nested = err.errors[1] as { message: string; errors: unknown[] };
-    expect(nested.message).toBe('inner');
-    expect(nested.errors[0]).toBe('[circular]');
+    for (const nested of [err.errors[1], err.errors[2]] as { message: string; errors: unknown[] }[]) {
+      expect(nested.message).toBe('inner');
+      expect(nested.errors[0]).toBe('[circular]');
+    }
   });
 
   it('escapes a plain string reason', () => {
