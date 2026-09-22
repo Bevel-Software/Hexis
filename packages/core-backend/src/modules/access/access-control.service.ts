@@ -49,6 +49,7 @@ import {
   parseAccessFile,
   parseOwnAccessEntries,
   parseRolesYaml,
+  requiredVerbsFor,
   sourceVerbsFor,
   type AccessFile,
   type OwnEntries,
@@ -252,6 +253,15 @@ interface AccessScope {
   byEmail: Map<string, GrantState>;
   everyone: GrantState | undefined;
   source: ScopeSource;
+  /**
+   * The keys whose `'denied'` in `byRole` / `byEmail` is IMPLIED — a denial
+   * of a verb the target presupposes (`deny write` when resolving `owner`),
+   * with no `deny <target>` line of their own here. The verdict is as real as
+   * any (the effective walk, the eligible lists and the collapsed view treat
+   * it as denied), but it is not a LINE in this file: `denialSources`, which
+   * reports the entries a person can lift, leaves it out.
+   */
+  implied: { byRole: Set<string>; byEmail: Set<string> };
 }
 
 /**
@@ -331,13 +341,21 @@ function resolveScopes(
   fileOwn?: OwnEntries | null,
 ): AccessScope[] {
   const target = verb;
+  // Both lists come from the grammar's one dependency graph (`VERB_REQUIRES`):
+  // the verbs whose grant confers the target, and the verbs the target
+  // presupposes, whose denial strips it.
   const supersets = sourceVerbsFor(verb).filter((v) => v !== verb);
+  const prerequisites = requiredVerbsFor(verb).filter((v) => v !== verb);
 
   // Build one scope's effective verdicts. The target verb contributes both
-  // grants and denials; superset verbs contribute grants only (a `deny write`
-  // never strips `read`). Within the scope a grant always wins over a deny of
-  // the same principal, so a same-file superset grant overrides a target deny
-  // (e.g. `owner:` beats `deny write`, `write:` beats `deny read`).
+  // grants and denials. Superset verbs contribute grants only (a `deny write`
+  // never strips `read`); prerequisite verbs contribute DENIALS only (a `deny
+  // write` strips `owner`, a `deny read` strips all three — nobody owns what
+  // they may not edit, or edits what they may not open), and a `read` grant
+  // confers no `write`. Within the scope a grant always wins over a deny of
+  // the same principal, so a same-file grant of the target or of a superset
+  // overrides a deny of the target or of a prerequisite (`owner:` beats `deny
+  // write`, `write:` beats `deny read`).
   const buildScope = (
     entries: Record<Verb, ParsedEntry[]>,
     filterRoles: boolean,
@@ -345,21 +363,37 @@ function resolveScopes(
   ): AccessScope => {
     const byRole = new Map<string, GrantState>();
     const byEmail = new Map<string, GrantState>();
+    const implied = { byRole: new Set<string>(), byEmail: new Set<string>() };
     const set = (entry: ParsedEntry, state: GrantState) => {
       const map = entry.kind === 'role' ? byRole : byEmail;
       const key = entry.kind === 'role' ? entry.role : entry.email;
       if (map.get(key) === 'grant') return; // a grant in this scope sticks
       map.set(key, state);
     };
+    const skip = (entry: ParsedEntry) =>
+      filterRoles && entry.kind === 'role' && !roleKnown(model.roles, entry.role);
     for (const entry of entries[target]) {
-      if (filterRoles && entry.kind === 'role' && !roleKnown(model.roles, entry.role)) continue;
+      if (skip(entry)) continue;
       set(entry, entry.deny ? 'denied' : 'grant');
     }
     for (const src of supersets) {
       for (const entry of entries[src]) {
         if (entry.deny) continue; // grant-only fold
-        if (filterRoles && entry.kind === 'role' && !roleKnown(model.roles, entry.role)) continue;
+        if (skip(entry)) continue;
         set(entry, 'grant');
+      }
+    }
+    // Last, so a target or superset GRANT already in the map stands, and a
+    // target's own `deny` line is never re-labelled as implied.
+    for (const src of prerequisites) {
+      for (const entry of entries[src]) {
+        if (!entry.deny) continue; // deny-only fold
+        if (skip(entry)) continue;
+        const map = entry.kind === 'role' ? byRole : byEmail;
+        const key = entry.kind === 'role' ? entry.role : entry.email;
+        if (map.has(key)) continue; // an own verdict (grant or deny) is already the answer
+        map.set(key, 'denied');
+        (entry.kind === 'role' ? implied.byRole : implied.byEmail).add(key);
       }
     }
     // The anonymous caller's verdict at this scope — what someone who holds
@@ -384,7 +418,7 @@ function resolveScopes(
       : publicDeny
         ? 'denied'
         : byRole.get(EVERYONE_CANONICAL);
-    return { byRole, byEmail, everyone, source };
+    return { byRole, byEmail, everyone, source, implied };
   };
 
   const scopes: AccessScope[] = [];
@@ -889,7 +923,14 @@ function resolveDenialSourcesForVerb(
       // grant stick over a deny of the same principal), so it ends the walk
       // whether or not the other spelling denies here.
       if (states.includes('grant')) break;
-      if (states.includes('denied')) out.push(scopeToGrantSource(scope, kind, relativePath));
+      // Only a `deny <verb>` LINE is a source; a denial the scope implies from
+      // a prerequisite verb's line (`deny write` when asking about owner) is
+      // real but is not this verb's entry — the prerequisite's own report is
+      // where it can be lifted.
+      const written = tokens.some(
+        (t) => scope.byRole.get(t) === 'denied' && !scope.implied.byRole.has(t),
+      );
+      if (written) out.push(scopeToGrantSource(scope, kind, relativePath));
     }
     return out;
   }
@@ -898,7 +939,9 @@ function resolveDenialSourcesForVerb(
   for (const scope of scopes) {
     const own = scope.byEmail.get(email);
     if (own === 'grant') break;
-    if (own === 'denied') out.push(scopeToGrantSource(scope, kind, relativePath));
+    if (own === 'denied' && !scope.implied.byEmail.has(email)) {
+      out.push(scopeToGrantSource(scope, kind, relativePath));
+    }
   }
   return out;
 }

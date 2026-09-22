@@ -39,8 +39,10 @@ export const ADMIN_CANONICAL = 'admin';
  * lower verbs, and a `write` or `download` grant additionally confers `read`;
  * `owner` also marks the principal as a contact point for the node (surfaced in
  * the UI so users know who to ask). `write` and `download` stay independent of
- * each other — neither confers the other.
- * See `sourceVerbsFor` for how these implications fold into resolution.
+ * each other — neither confers the other. Denials run the other way: a verb
+ * denied at a scope takes every verb that presupposes it down with it there.
+ * See `VERB_REQUIRES` — the one place this graph is written — and the two
+ * lists derived from it, `sourceVerbsFor` and `requiredVerbsFor`.
  */
 export const KNOWN_VERBS = ['read', 'write', 'download', 'owner'] as const;
 export type Verb = (typeof KNOWN_VERBS)[number];
@@ -50,38 +52,78 @@ export const EVERYONE_CANONICAL = 'everyone';
 export const EVERYONE_DISPLAY = 'Everyone';
 
 /**
- * Verbs whose entries contribute to resolving `verb`, target verb first.
- * `owner` implies `read`, `write`, and `download`; `write` and `download` each
- * additionally imply `read`. So resolving `read` folds in `write`, `download`
- * and `owner`, resolving `write`/`download` folds in `owner`, and resolving
- * `owner` uses only `owner`.
+ * THE DEPENDENCY GRAPH OF THE VERBS — what holding each one presupposes,
+ * declared once, here, beside the verbs themselves. `owner` presupposes `write`
+ * and `download`; `write` and `download` each presuppose `read`; `read`
+ * presupposes nothing. Everything about how verbs fold into one another is
+ * DERIVED from this table, in both directions:
  *
- * `download` folds into `read` because the pair is otherwise a DEAD combination:
- * the raw-file route read-gates before it download-gates, so a download-only
- * grant let its holder neither open the file nor save it. Someone trusted with a
- * copy on their own disk is trusted to look at it in the app.
+ *   - a GRANT confers, downwards, every verb the granted one presupposes
+ *     (`sourceVerbsFor`: resolving `read` folds in `write`, `download` and
+ *     `owner` grants; resolving `write` or `download` folds in `owner`;
+ *     resolving `owner` uses only `owner`);
+ *   - a DENIAL strips, upwards, every verb that presupposes the denied one
+ *     (`requiredVerbsFor`: resolving `owner` honours `deny write`, `deny
+ *     download` and `deny read`; resolving `write` or `download` honours
+ *     `deny read`; `read` honours only `deny read`). Nobody owns what they may
+ *     not edit, and nobody edits or saves what they may not open.
  *
- * The implication is **grant-only** (see `resolveAtPath`): a superset grant
- * confers the lower verb, but a superset *denial* does not — `deny write` and
- * `deny download` say nothing about `read`, so neither ever strips a separate
- * read grant. The target verb itself contributes both its grants and its denials.
+ * Neither converse is implied: a `deny write` says nothing about `read` (a
+ * superset denial leaves a separate lower grant standing), and a `read` grant
+ * confers no `write`. Within ONE scope a grant of the verb, or of one that
+ * confers it, beats a denial of the verb or of one it presupposes — see
+ * `resolveScopes`.
  *
- * THIS TABLE IS THE ONLY COPY. Every place that folds verbs calls it:
- * `resolveAtPath`, the plugin roster synthesis in `plugin-principals.ts` that
- * decides who lands in `plugin/<slug>/read`, and `personal-spaces.step.ts`
- * asking whether a space is already open. A second fold written out by hand
- * somewhere else is how one of them comes to disagree with resolution about
- * the same file — add a verb here, not there.
+ * `download` presupposes `read` because the pair is otherwise a DEAD
+ * combination: the raw-file route read-gates before it download-gates, so a
+ * download-only grant let its holder neither open the file nor save it.
+ * Someone trusted with a copy on their own disk is trusted to look at it in
+ * the app.
+ *
+ * THIS TABLE IS THE ONLY COPY. Add a verb, or change what one presupposes,
+ * here and nowhere else: the resolver (`resolveScopes`), the plugin roster
+ * synthesis in `plugin-principals.ts` that decides who lands in
+ * `plugin/<slug>/read`, and `personal-spaces.step.ts` asking whether a space
+ * is already open all read the two derived lists below rather than restating
+ * them. A fold written out by hand somewhere else is how one of them comes to
+ * disagree with resolution about the same file.
+ */
+export const VERB_REQUIRES: Readonly<Record<Verb, readonly Verb[]>> = {
+  read: [],
+  write: ['read'],
+  download: ['read'],
+  owner: ['write', 'download'],
+};
+
+/** `verb` and everything it presupposes, transitively. */
+function presupposedBy(verb: Verb): ReadonlySet<Verb> {
+  const out = new Set<Verb>();
+  const visit = (v: Verb) => {
+    if (out.has(v)) return;
+    out.add(v);
+    for (const dep of VERB_REQUIRES[v]) visit(dep);
+  };
+  visit(verb);
+  return out;
+}
+
+/**
+ * Verbs whose GRANT confers `verb`, target verb first: `verb` itself, then
+ * every verb that presupposes it, in `KNOWN_VERBS` order. Derived from
+ * `VERB_REQUIRES`.
  */
 export function sourceVerbsFor(verb: Verb): Verb[] {
-  switch (verb) {
-    case 'owner':
-      return ['owner'];
-    case 'read':
-      return ['read', 'write', 'download', 'owner'];
-    default:
-      return [verb, 'owner'];
-  }
+  return [verb, ...KNOWN_VERBS.filter((v) => v !== verb && presupposedBy(v).has(verb))];
+}
+
+/**
+ * Verbs whose DENIAL strips `verb`, target verb first: `verb` itself, then
+ * every verb it presupposes, in `KNOWN_VERBS` order. Derived from
+ * `VERB_REQUIRES`.
+ */
+export function requiredVerbsFor(verb: Verb): Verb[] {
+  const needs = presupposedBy(verb);
+  return [verb, ...KNOWN_VERBS.filter((v) => v !== verb && needs.has(v))];
 }
 export const RESERVED_ROLE_NAMES = new Set(['deny', EVERYONE_CANONICAL]);
 export const DENY_PREFIX = 'deny ';

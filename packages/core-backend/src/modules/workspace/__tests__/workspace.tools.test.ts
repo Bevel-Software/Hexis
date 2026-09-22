@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from 'node:http';
 import { execFile } from 'node:child_process';
-import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readdir as nodeReaddir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -22,6 +22,7 @@ import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
+import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { PROPOSAL_ROUTE_NOTE, proposalTitleFor } from '../write-denial.js';
@@ -72,6 +73,8 @@ let fs: LocalFilesystem;
  * named "undefined" is attempted.
  */
 let workspacePathCalls: string[] = [];
+/** Every `(archive, destination)` pair `unzip` handed the service. */
+let unzipCalls: [string, string | undefined][] = [];
 /** Every folder turn a tool took, as `workspaceId:dir`. */
 let folderTurns: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
@@ -102,6 +105,17 @@ async function start(
   tempDir = await mkdtemp(join(tmpdir(), 'ws-tools-'));
   docCacheDir = await mkdtemp(join(tmpdir(), 'ws-doc-cache-'));
   fs = new LocalFilesystem({ basePath: tempDir, contained: true });
+  // The harness speaks the paths the TOOLS speak. A fixture written here as
+  // `report.docx` must land where a tool asked for `report.docx` will read it:
+  // inside the checkout, through the one normaliser. Before the normaliser
+  // existed, this file's fixtures sat BESIDE the clone — the very bug the
+  // ticket is about — and every test would otherwise have to restate the
+  // prefix. Idempotent, so the tools' own already-prefixed paths pass through.
+  for (const method of ['readFile', 'writeFile', 'appendFile', 'deleteFile', 'mkdir', 'stat'] as const) {
+    const inner = (fs as unknown as Record<string, (...a: unknown[]) => unknown>)[method].bind(fs);
+    (fs as unknown as Record<string, unknown>)[method] = (path: string, ...rest: unknown[]) =>
+      inner(normalizeWorkspacePath(path, KB_DIR), ...rest);
+  }
   // `LockingFilesystem.writeFiles` is what the real `delete_folder` and
   // `write_files` land through — one lock cycle over every path, then one
   // commit. A plain LocalFilesystem has no such method, so stand in for its
@@ -147,6 +161,7 @@ async function start(
   };
   await fs.writeFile('a.md', 'hello\nworld\n');
   workspacePathCalls = [];
+  unzipCalls = [];
   folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
   focusedBranch = undefined;
@@ -179,7 +194,10 @@ async function start(
       // shapes is absence, and the real service raises exactly this error for
       // it (asserted in workspace.service.test.ts). Extraction itself lives
       // there too — none of it is the tool's to decide.
-      unzipFile: async (_id: string, zipRel: string) => {
+      unzipFile: async (_id: string, zipRel: string, destRel?: string) => {
+        // Recorded so a test can assert the PATHS the tool handed over — both
+        // ends normalised into the repository.
+        unzipCalls.push([zipRel, destRel]);
         try {
           await stat(join(tempDir, zipRel));
         } catch {
@@ -255,63 +273,66 @@ async function isDeadOrZombie(pid: number): Promise<boolean> {
 describe('workspace file primitives', () => {
   it('read_file returns the content', async () => {
     const base = await start();
-    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: 'a.md' })).json()).toEqual({ path: 'a.md', content: 'hello\nworld\n' });
+    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` })).json()).toEqual({ path: `${KB_DIR}/a.md`, content: 'hello\nworld\n' });
   });
 
   it('write_file then read_file round-trips', async () => {
     const base = await start();
-    await post(`${base}/api/agent/tools/write_file`, { path: 'b.md', content: 'fresh' });
-    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: 'b.md' })).json()).toMatchObject({ content: 'fresh' });
+    await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/b.md`, content: 'fresh' });
+    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/b.md` })).json()).toMatchObject({ content: 'fresh' });
   });
 
   it('edit_file replaces an exact unique string', async () => {
     const base = await start();
-    const res = await post(`${base}/api/agent/tools/edit_file`, { path: 'a.md', old_string: 'world', new_string: 'earth' });
-    expect(await res.json()).toMatchObject({ path: 'a.md', replaced: 1 });
-    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: 'a.md' })).json()).toMatchObject({ content: 'hello\nearth\n' });
+    const res = await post(`${base}/api/agent/tools/edit_file`, { path: `${KB_DIR}/a.md`, old_string: 'world', new_string: 'earth' });
+    expect(await res.json()).toMatchObject({ path: `${KB_DIR}/a.md`, replaced: 1 });
+    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` })).json()).toMatchObject({ content: 'hello\nearth\n' });
   });
 
   it('edit_file 400s when old_string is missing', async () => {
     const base = await start();
-    expect((await post(`${base}/api/agent/tools/edit_file`, { path: 'a.md', old_string: 'nope', new_string: 'x' })).status).toBe(400);
+    expect((await post(`${base}/api/agent/tools/edit_file`, { path: `${KB_DIR}/a.md`, old_string: 'nope', new_string: 'x' })).status).toBe(400);
   });
 
   it('list_files + file_stat', async () => {
     const base = await start();
-    const list = (await (await post(`${base}/api/agent/tools/list_files`, {})).json()) as { entries: { name: string }[] };
+    const root = (await (await post(`${base}/api/agent/tools/list_files`, {})).json()) as { entries: { name: string }[] };
+    // The workspace root holds the checkout and nothing else now.
+    expect(root.entries.map((e) => e.name)).toEqual([KB_DIR]);
+    const list = (await (await post(`${base}/api/agent/tools/list_files`, { path: KB_DIR })).json()) as { entries: { name: string }[] };
     expect(list.entries.map((e) => e.name)).toContain('a.md');
-    expect(await (await post(`${base}/api/agent/tools/file_stat`, { path: 'a.md' })).json()).toMatchObject({ type: 'file' });
+    expect(await (await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/a.md` })).json()).toMatchObject({ type: 'file' });
   });
 
   it('grep finds a match with line number', async () => {
     const base = await start();
     const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'wor' })).json()) as { matches: { path: string; line: number }[] };
-    expect(res.matches).toContainEqual(expect.objectContaining({ path: 'a.md', line: 2 }));
+    expect(res.matches).toContainEqual(expect.objectContaining({ path: `${KB_DIR}/a.md`, line: 2 }));
   });
 
   // Copy path gives the root-anchored `/<kbDirName>/…`, and people paste
   // that same text into an agent: a leading slash names the same path.
   it('every path input accepts a leading slash as the same workspace path', async () => {
     const base = await start();
-    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: '/a.md' })).json()).toEqual({ path: 'a.md', content: 'hello\nworld\n' });
-    expect(await (await post(`${base}/api/agent/tools/file_stat`, { path: '/a.md' })).json()).toMatchObject({ type: 'file' });
-    await post(`${base}/api/agent/tools/write_file`, { path: '/b.md', content: 'fresh' });
-    await post(`${base}/api/agent/tools/write_file`, { path: '/c.md', content: 'batch' });
-    await post(`${base}/api/agent/tools/edit_file`, { path: '/a.md', old_string: 'world', new_string: 'earth' });
-    await post(`${base}/api/agent/tools/mkdir`, { path: '/dir' });
-    await post(`${base}/api/agent/tools/copy_file`, { src: '/b.md', dest: '/dir/b-copy.md' });
-    await post(`${base}/api/agent/tools/move_file`, { src: '/c.md', dest: '/dir/c.md' });
-    expect(await readFile(join(tempDir, 'a.md'), 'utf8')).toBe('hello\nearth\n');
-    expect(await readFile(join(tempDir, 'b.md'), 'utf8')).toBe('fresh');
-    expect(await readFile(join(tempDir, 'dir', 'b-copy.md'), 'utf8')).toBe('fresh');
-    expect(await readFile(join(tempDir, 'dir', 'c.md'), 'utf8')).toBe('batch');
-    const list = (await (await post(`${base}/api/agent/tools/list_files`, { path: '/dir' })).json()) as { path: string; entries: { name: string }[] };
-    expect(list.path).toBe('dir');
+    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `/${KB_DIR}/a.md` })).json()).toEqual({ path: `${KB_DIR}/a.md`, content: 'hello\nworld\n' });
+    expect(await (await post(`${base}/api/agent/tools/file_stat`, { path: `/${KB_DIR}/a.md` })).json()).toMatchObject({ type: 'file' });
+    await post(`${base}/api/agent/tools/write_file`, { path: `/${KB_DIR}/b.md`, content: 'fresh' });
+    await post(`${base}/api/agent/tools/write_file`, { path: `/${KB_DIR}/c.md`, content: 'batch' });
+    await post(`${base}/api/agent/tools/edit_file`, { path: `/${KB_DIR}/a.md`, old_string: 'world', new_string: 'earth' });
+    await post(`${base}/api/agent/tools/mkdir`, { path: `/${KB_DIR}/dir` });
+    await post(`${base}/api/agent/tools/copy_file`, { src: `/${KB_DIR}/b.md`, dest: `/${KB_DIR}/dir/b-copy.md` });
+    await post(`${base}/api/agent/tools/move_file`, { src: `/${KB_DIR}/c.md`, dest: `/${KB_DIR}/dir/c.md` });
+    expect(await readFile(join(tempDir, `${KB_DIR}/a.md`), 'utf8')).toBe('hello\nearth\n');
+    expect(await readFile(join(tempDir, `${KB_DIR}/b.md`), 'utf8')).toBe('fresh');
+    expect(await readFile(join(tempDir, KB_DIR, 'dir', 'b-copy.md'), 'utf8')).toBe('fresh');
+    expect(await readFile(join(tempDir, KB_DIR, 'dir', 'c.md'), 'utf8')).toBe('batch');
+    const list = (await (await post(`${base}/api/agent/tools/list_files`, { path: `/${KB_DIR}/dir` })).json()) as { path: string; entries: { name: string }[] };
+    expect(list.path).toBe(`${KB_DIR}/dir`);
     expect(list.entries.map((e) => e.name).sort()).toEqual(['b-copy.md', 'c.md']);
-    const grep = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'earth', path: '/a.md' })).json()) as { matches: { path: string }[] };
-    expect(grep.matches).toContainEqual(expect.objectContaining({ path: 'a.md' }));
-    await post(`${base}/api/agent/tools/delete_file`, { path: '/b.md' });
-    await expect(readFile(join(tempDir, 'b.md'), 'utf8')).rejects.toThrow();
+    const grep = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'earth', path: `/${KB_DIR}/a.md` })).json()) as { matches: { path: string }[] };
+    expect(grep.matches).toContainEqual(expect.objectContaining({ path: `${KB_DIR}/a.md` }));
+    await post(`${base}/api/agent/tools/delete_file`, { path: `/${KB_DIR}/b.md` });
+    await expect(readFile(join(tempDir, `${KB_DIR}/b.md`), 'utf8')).rejects.toThrow();
   });
 
   it('says so on the path inputs', async () => {
@@ -331,6 +352,58 @@ describe('workspace file primitives', () => {
     const batch = tools.find((t) => t.name === 'write_files')!;
     const batchBody = (batch.inputs as { properties: { body: { properties: { files: { items: { properties: Record<string, { description?: string }> } } } } } }).properties.body;
     expect(batchBody.properties.files.items.properties.path.description).toContain('with or without a leading slash');
+  });
+
+  // The routes meet this rule inside WorkspaceService; the tools write through
+  // the locking filesystem, which never enters it — so the rule has to hold on
+  // this surface on its own, or `write_file` could create the one folder no
+  // single-prefix path can name.
+  it('the checkout folder name is reserved at the repository root on the tool surface too', async () => {
+    const base = await start();
+    const reserved = `${KB_DIR}/${KB_DIR}`;
+    const refused = async (tool: string, body: Record<string, unknown>) => {
+      const res = await post(`${base}/api/agent/tools/${tool}`, body);
+      expect(res.status, tool).toBe(400);
+      expect(JSON.stringify(await res.json()), tool).toContain('is reserved');
+    };
+    await refused('write_file', { path: `${reserved}/x.md`, content: 'x' });
+    await refused('write_files', { files: [{ path: `${KB_DIR}/ok.md`, content: 'ok' }, { path: `${reserved}/y.md`, content: 'y' }] });
+    await refused('mkdir', { path: reserved });
+    await refused('copy_file', { src: `${KB_DIR}/a.md`, dest: `${reserved}/a.md` });
+    await refused('move_file', { src: `${KB_DIR}/a.md`, dest: `${reserved}/a.md` });
+    await refused('edit_file', { path: `${reserved}/x.md`, old_string: 'a', new_string: 'b' });
+    // `unzip` names its target under `destination`, the one key that is not
+    // `path`, `dest` or `files` — refused before any archive is looked at.
+    await refused('unzip', { path: `${KB_DIR}/archive.zip`, destination: reserved });
+    // Nothing landed — the batch's valid entry included, since the batch was
+    // refused as a whole before any write.
+    await expect(stat(join(tempDir, reserved))).rejects.toThrow();
+    await expect(stat(join(tempDir, KB_DIR, 'ok.md'))).rejects.toThrow();
+
+    // An existing reserved folder (an older build could have made one) can
+    // still be emptied and moved out of: the rule is about creating, not about
+    // trapping what is there.
+    await mkdir(join(tempDir, reserved), { recursive: true });
+    await writeFile(join(tempDir, reserved, 'old.md'), 'old');
+    await writeFile(join(tempDir, reserved, 'keep.md'), 'keep');
+    expect((await post(`${base}/api/agent/tools/move_file`, { src: `${reserved}/keep.md`, dest: `${KB_DIR}/keep.md` })).status).toBe(200);
+    expect((await post(`${base}/api/agent/tools/delete_file`, { path: `${reserved}/old.md` })).status).toBe(200);
+    expect(await readFile(join(tempDir, KB_DIR, 'keep.md'), 'utf8')).toBe('keep');
+  });
+
+  it('grep with no path searches the repository, never what sits beside the checkout', async () => {
+    const base = await start();
+    // A stray an older build left beside the checkout. The read gate has no
+    // rules for a path outside the repository and would call it readable, so
+    // the only safe root for a walk is the repository itself.
+    await writeFile(join(tempDir, 'stray.md'), 'needle in a stray\n');
+    await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/n.md`, content: 'needle in the repository\n' });
+    const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle' })).json()) as { matches: { path: string }[] };
+    expect(res.matches.map((m) => m.path)).toEqual([`${KB_DIR}/n.md`]);
+    // An explicit empty path is the same absence, not a spelling of the
+    // workspace directory.
+    const empty = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: '' })).json()) as { matches: { path: string }[] };
+    expect(empty.matches.map((m) => m.path)).toEqual([`${KB_DIR}/n.md`]);
   });
 
   it('execute_command runs in the workspace dir', async () => {
@@ -564,8 +637,8 @@ describe('workspace file primitives', () => {
 
   it('read scope refuses write tools (403) but allows reads', async () => {
     const base = await start('read');
-    expect((await post(`${base}/api/agent/tools/write_file`, { path: 'c.md', content: 'x' })).status).toBe(403);
-    expect((await post(`${base}/api/agent/tools/read_file`, { path: 'a.md' })).status).toBe(200);
+    expect((await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/c.md`, content: 'x' })).status).toBe(403);
+    expect((await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` })).status).toBe(200);
   });
 });
 
@@ -585,104 +658,104 @@ describe('write modes and per-path outcomes', () => {
 
   it('write_file with no mode creates a new file and says `created`', async () => {
     const base = await start();
-    const res = await writeFile(base, { path: 'fresh.md', content: 'new page' });
+    const res = await writeFile(base, { path: `${KB_DIR}/fresh.md`, content: 'new page' });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ path: 'fresh.md', bytes: 8, outcome: 'created' });
-    expect(await onDisk('fresh.md')).toBe('new page');
+    expect(await res.json()).toMatchObject({ path: `${KB_DIR}/fresh.md`, bytes: 8, outcome: 'created' });
+    expect(await onDisk(`${KB_DIR}/fresh.md`)).toBe('new page');
   });
 
   it('write_file with no mode refuses a path that exists, names it, says how to replace it, and leaves it alone', async () => {
     const base = await start();
-    const res = await writeFile(base, { path: 'a.md', content: 'clobbered' });
+    const res = await writeFile(base, { path: `${KB_DIR}/a.md`, content: 'clobbered' });
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string; code: string; path: string };
     expect(body.code).toBe('exists');
-    expect(body.path).toBe('a.md');
-    expect(body.error).toContain('a.md');
+    expect(body.path).toBe(`${KB_DIR}/a.md`);
+    expect(body.error).toContain(`${KB_DIR}/a.md`);
     expect(body.error).toContain('pass mode: overwrite to replace it');
-    expect(await onDisk('a.md')).toBe('hello\nworld\n');
+    expect(await onDisk(`${KB_DIR}/a.md`)).toBe('hello\nworld\n');
   });
 
   it('write_file mode overwrite replaces and says `replaced`, and creates what is not there yet', async () => {
     const base = await start();
-    const replaced = await writeFile(base, { path: 'a.md', content: 'replacement' });
+    const replaced = await writeFile(base, { path: `${KB_DIR}/a.md`, content: 'replacement' });
     expect(replaced.status).toBe(409); // …without the mode.
-    const res = await writeFile(base, { path: 'a.md', content: 'replacement', mode: 'overwrite' });
+    const res = await writeFile(base, { path: `${KB_DIR}/a.md`, content: 'replacement', mode: 'overwrite' });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ path: 'a.md', outcome: 'replaced' });
-    expect(await onDisk('a.md')).toBe('replacement');
+    expect(await res.json()).toMatchObject({ path: `${KB_DIR}/a.md`, outcome: 'replaced' });
+    expect(await onDisk(`${KB_DIR}/a.md`)).toBe('replacement');
     // `overwrite` on a path with nothing at it is still a create, and says so.
-    const created = await writeFile(base, { path: 'not-there.md', content: 'x', mode: 'overwrite' });
+    const created = await writeFile(base, { path: `${KB_DIR}/not-there.md`, content: 'x', mode: 'overwrite' });
     expect(await created.json()).toMatchObject({ outcome: 'created' });
   });
 
   it('write_file mode update rewrites an existing file and refuses a missing one with `missing`', async () => {
     const base = await start();
-    const updated = await writeFile(base, { path: 'a.md', content: 'second draft', mode: 'update' });
+    const updated = await writeFile(base, { path: `${KB_DIR}/a.md`, content: 'second draft', mode: 'update' });
     expect(updated.status).toBe(200);
-    expect(await updated.json()).toMatchObject({ path: 'a.md', outcome: 'updated' });
-    expect(await onDisk('a.md')).toBe('second draft');
+    expect(await updated.json()).toMatchObject({ path: `${KB_DIR}/a.md`, outcome: 'updated' });
+    expect(await onDisk(`${KB_DIR}/a.md`)).toBe('second draft');
 
-    const missing = await writeFile(base, { path: 'nowhere.md', content: 'x', mode: 'update' });
+    const missing = await writeFile(base, { path: `${KB_DIR}/nowhere.md`, content: 'x', mode: 'update' });
     expect(missing.status).toBe(404);
     const body = (await missing.json()) as { error: string; code: string; path: string };
     expect(body.code).toBe('missing');
-    expect(body.path).toBe('nowhere.md');
-    expect(body.error).toContain('nowhere.md');
-    await expect(onDisk('nowhere.md')).rejects.toThrow();
+    expect(body.path).toBe(`${KB_DIR}/nowhere.md`);
+    expect(body.error).toContain(`${KB_DIR}/nowhere.md`);
+    await expect(onDisk(`${KB_DIR}/nowhere.md`)).rejects.toThrow();
   });
 
   it('write_files answers for every requested path in input order, writes the rest, and counts only what landed', async () => {
     const base = await start();
     const res = await writeFiles(base, {
       files: [
-        { path: 'one.md', content: 'first' },
-        { path: 'a.md', content: 'clobbered' }, // already there
-        { path: 'two.md', content: 'second' },
+        { path: `${KB_DIR}/one.md`, content: 'first' },
+        { path: `${KB_DIR}/a.md`, content: 'clobbered' }, // already there
+        { path: `${KB_DIR}/two.md`, content: 'second' },
       ],
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as BatchAnswer;
     expect(body.count).toBe(2);
-    expect(body.files.map((f) => f.path)).toEqual(['one.md', 'a.md', 'two.md']);
+    expect(body.files.map((f) => f.path)).toEqual([`${KB_DIR}/one.md`, `${KB_DIR}/a.md`, `${KB_DIR}/two.md`]);
     expect(body.files.map((f) => f.outcome)).toEqual(['created', 'refused', 'created']);
     expect(body.files[1].error).toBe('exists');
     expect(body.files[1].message).toContain('pass mode: overwrite to replace it');
     // The two it could write landed; the one it refused is untouched.
-    expect(await onDisk('one.md')).toBe('first');
-    expect(await onDisk('two.md')).toBe('second');
-    expect(await onDisk('a.md')).toBe('hello\nworld\n');
+    expect(await onDisk(`${KB_DIR}/one.md`)).toBe('first');
+    expect(await onDisk(`${KB_DIR}/two.md`)).toBe('second');
+    expect(await onDisk(`${KB_DIR}/a.md`)).toBe('hello\nworld\n');
   });
 
   it('write_files takes the same three modes', async () => {
     const base = await start();
     const overwritten = (await (await writeFiles(base, {
       mode: 'overwrite',
-      files: [{ path: 'a.md', content: 'replaced text' }, { path: 'brand-new.md', content: 'new' }],
+      files: [{ path: `${KB_DIR}/a.md`, content: 'replaced text' }, { path: `${KB_DIR}/brand-new.md`, content: 'new' }],
     })).json()) as BatchAnswer;
     expect(overwritten.count).toBe(2);
     expect(overwritten.files.map((f) => f.outcome)).toEqual(['replaced', 'created']);
-    expect(await onDisk('a.md')).toBe('replaced text');
+    expect(await onDisk(`${KB_DIR}/a.md`)).toBe('replaced text');
 
     const updated = (await (await writeFiles(base, {
       mode: 'update',
-      files: [{ path: 'a.md', content: 'again' }, { path: 'never-written.md', content: 'x' }],
+      files: [{ path: `${KB_DIR}/a.md`, content: 'again' }, { path: `${KB_DIR}/never-written.md`, content: 'x' }],
     })).json()) as BatchAnswer;
     expect(updated.count).toBe(1);
     expect(updated.files.map((f) => f.outcome)).toEqual(['updated', 'refused']);
     expect(updated.files[1].error).toBe('missing');
-    await expect(onDisk('never-written.md')).rejects.toThrow();
+    await expect(onDisk(`${KB_DIR}/never-written.md`)).rejects.toThrow();
   });
 
   it('write_files refuses a second create for a path an earlier entry in the SAME batch already claims', async () => {
     const base = await start();
     const body = (await (await writeFiles(base, {
-      files: [{ path: 'dup.md', content: 'first' }, { path: 'dup.md', content: 'second' }],
+      files: [{ path: `${KB_DIR}/dup.md`, content: 'first' }, { path: `${KB_DIR}/dup.md`, content: 'second' }],
     })).json()) as BatchAnswer;
     expect(body.count).toBe(1);
     expect(body.files.map((f) => f.outcome)).toEqual(['created', 'refused']);
     expect(body.files[1].error).toBe('exists');
-    expect(await onDisk('dup.md')).toBe('first');
+    expect(await onDisk(`${KB_DIR}/dup.md`)).toBe('first');
   });
 
   it('an empty batch is still an answer with both fields', async () => {
@@ -693,15 +766,15 @@ describe('write modes and per-path outcomes', () => {
   it('a mode that is not one of the three is refused, not read as the nearest one', async () => {
     const base = await start();
     for (const res of [
-      await writeFile(base, { path: 'a.md', content: 'x', mode: 'replace' }),
-      await writeFiles(base, { files: [{ path: 'a.md', content: 'x' }], mode: 'replace' }),
+      await writeFile(base, { path: `${KB_DIR}/a.md`, content: 'x', mode: 'replace' }),
+      await writeFiles(base, { files: [{ path: `${KB_DIR}/a.md`, content: 'x' }], mode: 'replace' }),
     ]) {
       expect(res.status).toBe(400);
       const body = (await res.json()) as { error: string; code: string };
       expect(body.code).toBe('bad_mode');
       expect(body.error).toContain('`create`, `overwrite`, `update`');
     }
-    expect(await onDisk('a.md')).toBe('hello\nworld\n');
+    expect(await onDisk(`${KB_DIR}/a.md`)).toBe('hello\nworld\n');
   });
 
   /**
@@ -714,53 +787,53 @@ describe('write modes and per-path outcomes', () => {
   describe('the mode is judged over the state the write actually lands on', () => {
     it('write_file create refuses a path another writer created after the preflight, and keeps their file', async () => {
       const base = await start();
-      raceHook = async () => { await fs.writeFile('contested.md', 'theirs\n'); };
-      const res = await writeFile(base, { path: 'contested.md', content: 'mine' });
+      raceHook = async () => { await fs.writeFile(`${KB_DIR}/contested.md`, 'theirs\n'); };
+      const res = await writeFile(base, { path: `${KB_DIR}/contested.md`, content: 'mine' });
       expect(res.status).toBe(409);
       const body = (await res.json()) as { code: string; path: string; error: string };
       expect(body.code).toBe('exists');
-      expect(body.path).toBe('contested.md');
+      expect(body.path).toBe(`${KB_DIR}/contested.md`);
       expect(body.error).toContain('pass mode: overwrite to replace it');
       // The point of the whole feature: their bytes are still there.
-      expect(await onDisk('contested.md')).toBe('theirs\n');
+      expect(await onDisk(`${KB_DIR}/contested.md`)).toBe('theirs\n');
     });
 
     it('write_file update refuses a path another writer deleted after the preflight, and does not recreate it', async () => {
       const base = await start();
-      raceHook = async () => { await fs.deleteFile('a.md'); };
-      const res = await writeFile(base, { path: 'a.md', content: 'second draft', mode: 'update' });
+      raceHook = async () => { await fs.deleteFile(`${KB_DIR}/a.md`); };
+      const res = await writeFile(base, { path: `${KB_DIR}/a.md`, content: 'second draft', mode: 'update' });
       expect(res.status).toBe(404);
-      expect(await res.json()).toMatchObject({ code: 'missing', path: 'a.md' });
-      await expect(onDisk('a.md')).rejects.toThrow();
+      expect(await res.json()).toMatchObject({ code: 'missing', path: `${KB_DIR}/a.md` });
+      await expect(onDisk(`${KB_DIR}/a.md`)).rejects.toThrow();
     });
 
     it('write_file overwrite reports `replaced`, not `created`, when the file appeared after the preflight', async () => {
       const base = await start();
-      raceHook = async () => { await fs.writeFile('late.md', 'theirs\n'); };
-      const res = await writeFile(base, { path: 'late.md', content: 'mine', mode: 'overwrite' });
+      raceHook = async () => { await fs.writeFile(`${KB_DIR}/late.md`, 'theirs\n'); };
+      const res = await writeFile(base, { path: `${KB_DIR}/late.md`, content: 'mine', mode: 'overwrite' });
       expect(res.status).toBe(200);
       // The preflight saw nothing there and would have answered `created`.
-      expect(await res.json()).toMatchObject({ path: 'late.md', outcome: 'replaced' });
-      expect(await onDisk('late.md')).toBe('mine');
+      expect(await res.json()).toMatchObject({ path: `${KB_DIR}/late.md`, outcome: 'replaced' });
+      expect(await onDisk(`${KB_DIR}/late.md`)).toBe('mine');
     });
 
     it('write_files drops only the path another writer took, lands the rest, and counts what landed', async () => {
       const base = await start();
-      raceHook = async () => { await fs.writeFile('two.md', 'theirs\n'); };
+      raceHook = async () => { await fs.writeFile(`${KB_DIR}/two.md`, 'theirs\n'); };
       const body = (await (await writeFiles(base, {
         files: [
-          { path: 'one.md', content: 'first' },
-          { path: 'two.md', content: 'second' },
-          { path: 'three.md', content: 'third' },
+          { path: `${KB_DIR}/one.md`, content: 'first' },
+          { path: `${KB_DIR}/two.md`, content: 'second' },
+          { path: `${KB_DIR}/three.md`, content: 'third' },
         ],
       })).json()) as BatchAnswer;
       expect(body.count).toBe(2);
-      expect(body.files.map((f) => f.path)).toEqual(['one.md', 'two.md', 'three.md']);
+      expect(body.files.map((f) => f.path)).toEqual([`${KB_DIR}/one.md`, `${KB_DIR}/two.md`, `${KB_DIR}/three.md`]);
       expect(body.files.map((f) => f.outcome)).toEqual(['created', 'refused', 'created']);
       expect(body.files[1].error).toBe('exists');
-      expect(await onDisk('one.md')).toBe('first');
-      expect(await onDisk('three.md')).toBe('third');
-      expect(await onDisk('two.md')).toBe('theirs\n');
+      expect(await onDisk(`${KB_DIR}/one.md`)).toBe('first');
+      expect(await onDisk(`${KB_DIR}/three.md`)).toBe('third');
+      expect(await onDisk(`${KB_DIR}/two.md`)).toBe('theirs\n');
     });
   });
 
@@ -856,10 +929,20 @@ describe('read-permission gating', () => {
     expect(paths).not.toContain(`${KB_DIR}/Knowledge/Secret.md`);
   });
 
-  it('non-KB workspace files are never gated', async () => {
-    // `a.md` lives at the workspace root, outside the KB dir → always readable.
-    const base = await start('read', denyReads(new Set(['a.md'])));
-    expect((await post(`${base}/api/agent/tools/read_file`, { path: 'a.md' })).status).toBe(200);
+  it('gates on the repository path, not on the spelling the caller sent', async () => {
+    // `a.md` is seeded through the normaliser like every path in this file, so
+    // it sits INSIDE the checkout, at `<tempDir>/knowledge-base/a.md`. Nothing
+    // is outside the KB dir any more. The gate keys on the repo-relative path,
+    // so a rule written on the workspace-relative spelling names no file…
+    const base = await start('read', denyReads(new Set([`${KB_DIR}/a.md`])));
+    expect((await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` })).status).toBe(200);
+    // …and the same read, with the rule on the key the gate actually uses, is
+    // denied: what is checked is the path the read resolves, whichever of its
+    // spellings the caller sent.
+    const gated = await start('read', denyReads(new Set(['a.md'])));
+    for (const path of ['a.md', `${KB_DIR}/a.md`, `/${KB_DIR}/a.md`]) {
+      expect((await post(`${gated}/api/agent/tools/read_file`, { path })).status, path).toBe(403);
+    }
   });
 });
 
@@ -881,18 +964,18 @@ describe('grep with a path that names a file', () => {
 
   it('searches exactly that file — the match carries that path and a 1-based line number', async () => {
     const base = await start();
-    await fs.writeFile('notes/deep.md', 'alpha\nbeta needle\ngamma\n');
+    await fs.writeFile(`${KB_DIR}/notes/deep.md`, 'alpha\nbeta needle\ngamma\n');
     // A sibling holding the same term: a file grep must not reach it.
-    await fs.writeFile('notes/other.md', 'needle elsewhere\n');
-    const res = await grep(base, { pattern: 'needle', path: 'notes/deep.md' });
-    expect(res.matches).toEqual([{ path: 'notes/deep.md', line: 2, text: 'beta needle' }]);
+    await fs.writeFile(`${KB_DIR}/notes/other.md`, 'needle elsewhere\n');
+    const res = await grep(base, { pattern: 'needle', path: `${KB_DIR}/notes/deep.md` });
+    expect(res.matches).toEqual([{ path: `${KB_DIR}/notes/deep.md`, line: 2, text: 'beta needle' }]);
     expect(res.truncated).toBe(false);
     expect(res.note).toBeUndefined();
   });
 
   it('a file the pattern is simply not in is an empty SUCCESS — no note, no error', async () => {
     const base = await start();
-    const res = await grep(base, { pattern: 'absent-term', path: 'a.md' });
+    const res = await grep(base, { pattern: 'absent-term', path: `${KB_DIR}/a.md` });
     expect(res.matches).toEqual([]);
     expect(res.truncated).toBe(false);
     expect(res.note).toBeUndefined();
@@ -900,8 +983,8 @@ describe('grep with a path that names a file', () => {
 
   it('caps a file grep at max_results and reports truncated, exactly as a directory grep does', async () => {
     const base = await start();
-    await fs.writeFile('many.md', 'needle\n'.repeat(5));
-    const res = await grep(base, { pattern: 'needle', path: 'many.md', max_results: 2 });
+    await fs.writeFile(`${KB_DIR}/many.md`, 'needle\n'.repeat(5));
+    const res = await grep(base, { pattern: 'needle', path: `${KB_DIR}/many.md`, max_results: 2 });
     expect(res.matches.map((m) => m.line)).toEqual([1, 2]);
     expect(res.truncated).toBe(true);
   });
@@ -910,12 +993,12 @@ describe('grep with a path that names a file', () => {
     const base = await start();
     // "needle" followed by a NUL byte: binary content, so nothing to search —
     // the byte pattern is present but the file is not text.
-    await fs.writeFile('data.bin', Buffer.from('needle\0tail', 'latin1'));
+    await fs.writeFile(`${KB_DIR}/data.bin`, Buffer.from('needle\0tail', 'latin1'));
     await fs.writeFile(
-      'logo.png',
+      `${KB_DIR}/logo.png`,
       Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'),
     );
-    for (const path of ['data.bin', 'logo.png']) {
+    for (const path of [`${KB_DIR}/data.bin`, `${KB_DIR}/logo.png`]) {
       const res = await grep(base, { pattern: 'needle', path });
       expect(res.matches, path).toEqual([]);
       expect(res.note, path).toContain('no searchable text');
@@ -925,10 +1008,10 @@ describe('grep with a path that names a file', () => {
 
   it('a path with nothing at it fails with an error naming the path — never an empty success', async () => {
     const base = await start();
-    const res = await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: 'notes/ghost.md' });
+    const res = await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: `${KB_DIR}/notes/ghost.md` });
     expect(res.status).toBe(404);
     const { error } = (await res.json()) as { error: string };
-    expect(error).toContain('notes/ghost.md');
+    expect(error).toContain(`${KB_DIR}/notes/ghost.md`);
   });
 
   it('a FILE the caller may not read answers exactly as read_file does — same status, same body', async () => {
@@ -951,17 +1034,17 @@ describe('grep with a path that names a file', () => {
 
   it('a path UNDER an existing file is nothing-there too — the same 404, not a raw failure', async () => {
     const base = await start();
-    await fs.writeFile('notes/deep.md', 'alpha\n');
+    await fs.writeFile(`${KB_DIR}/notes/deep.md`, 'alpha\n');
     // `notes/deep.md` is a FILE, so the filesystem answers ENOTDIR rather than
     // ENOENT. Nothing can live at this path either, so it earns the same
     // honest 404 as a plainly absent one.
     const res = await post(`${base}/api/agent/tools/grep`, {
       pattern: 'needle',
-      path: 'notes/deep.md/deeper.md',
+      path: `${KB_DIR}/notes/deep.md/deeper.md`,
     });
     expect(res.status).toBe(404);
     const { error } = (await res.json()) as { error: string };
-    expect(error).toContain('notes/deep.md/deeper.md');
+    expect(error).toContain(`${KB_DIR}/notes/deep.md/deeper.md`);
   });
 
   it("a denied path the filesystem cannot even stat still answers with read_file's 403", async () => {
@@ -999,11 +1082,11 @@ describe('grep with a path that names a file', () => {
 
   it('a DIRECTORY path still walks the whole subtree (unchanged)', async () => {
     const base = await start();
-    await fs.writeFile('notes/one.md', 'needle here\n');
-    await fs.writeFile('notes/sub/two.md', 'and needle there\n');
-    await fs.writeFile('outside.md', 'needle outside the subtree\n');
+    await fs.writeFile(`${KB_DIR}/notes/one.md`, 'needle here\n');
+    await fs.writeFile(`${KB_DIR}/notes/sub/two.md`, 'and needle there\n');
+    await fs.writeFile(`${KB_DIR}/outside.md`, 'needle outside the subtree\n');
     const res = await grep(base, { pattern: 'needle', path: 'notes' });
-    expect(res.matches.map((m) => m.path).sort()).toEqual(['notes/one.md', 'notes/sub/two.md']);
+    expect(res.matches.map((m) => m.path).sort()).toEqual([`${KB_DIR}/notes/one.md`, `${KB_DIR}/notes/sub/two.md`]);
     expect(res.note).toBeUndefined();
   });
 });
@@ -1113,77 +1196,77 @@ describe('office documents and PDFs', () => {
 
   it('read_file returns marker + extracted text for a docx', async () => {
     const base = await start();
-    await fs.writeFile('report.docx', docx('Hello from Word', 'Second paragraph'));
-    const content = await readContent(base, 'report.docx');
+    await fs.writeFile(`${KB_DIR}/report.docx`, docx('Hello from Word', 'Second paragraph'));
+    const content = await readContent(base, `${KB_DIR}/report.docx`);
     const lines = content.split('\n');
-    expect(lines[0]).toMatch(/^\[extracted text of report\.docx — 2 paragraphs;/);
+    expect(lines[0]).toMatch(new RegExp(`^\\[extracted text of ${KB_DIR}/report\\.docx — 2 paragraphs;`));
     expect(lines[0]).toContain('layout, images and formatting omitted');
     expect(lines.slice(1)).toEqual(['Hello from Word', 'Second paragraph']);
   });
 
   it('read_file slices offset/limit AFTER assembling marker + text (unchanged semantics)', async () => {
     const base = await start();
-    await fs.writeFile('report.docx', docx('Sliceable content here'));
-    const full = await readContent(base, 'report.docx');
-    const sliced = await readContent(base, 'report.docx', { offset: 5, limit: 12 });
+    await fs.writeFile(`${KB_DIR}/report.docx`, docx('Sliceable content here'));
+    const full = await readContent(base, `${KB_DIR}/report.docx`);
+    const sliced = await readContent(base, `${KB_DIR}/report.docx`, { offset: 5, limit: 12 });
     expect(sliced).toBe(full.slice(5, 17));
   });
 
   it('read_file returns [page N] text for a PDF', async () => {
     const base = await start();
-    await fs.writeFile('paper.pdf', pdf('Findings inside a PDF'));
-    const content = await readContent(base, 'paper.pdf');
-    expect(content).toMatch(/^\[extracted text of paper\.pdf — 1 page;/);
+    await fs.writeFile(`${KB_DIR}/paper.pdf`, pdf('Findings inside a PDF'));
+    const content = await readContent(base, `${KB_DIR}/paper.pdf`);
+    expect(content).toMatch(new RegExp(`^\\[extracted text of ${KB_DIR}/paper\\.pdf — 1 page;`));
     expect(content).toContain('[page 1]\nFindings inside a PDF');
   });
 
   it('grep finds a term inside a pptx, with the [slide N] marker line locating it', async () => {
     const base = await start();
-    await fs.writeFile('deck.pptx', pptx([['Intro'], ['Roadmap 2026', 'Ship documents']]));
+    await fs.writeFile(`${KB_DIR}/deck.pptx`, pptx([['Intro'], ['Roadmap 2026', 'Ship documents']]));
     const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'Roadmap' })).json()) as {
       matches: { path: string; line: number; text: string }[];
       note?: string;
     };
-    expect(res.matches).toContainEqual(expect.objectContaining({ path: 'deck.pptx', text: 'Roadmap 2026' }));
+    expect(res.matches).toContainEqual(expect.objectContaining({ path: `${KB_DIR}/deck.pptx`, text: 'Roadmap 2026' }));
     // The extraction reads: marker line 1, [slide 1] line 2, Intro line 3,
     // [slide 2] line 4, Roadmap line 5 — grep reports the extraction's numbers.
     expect(res.matches.find((m) => m.text === 'Roadmap 2026')?.line).toBe(5);
     // The structure markers themselves are searchable.
     const markers = (await (await post(`${base}/api/agent/tools/grep`, { pattern: '\\[slide 2\\]' })).json()) as { matches: { path: string }[] };
-    expect(markers.matches).toContainEqual(expect.objectContaining({ path: 'deck.pptx' }));
+    expect(markers.matches).toContainEqual(expect.objectContaining({ path: `${KB_DIR}/deck.pptx` }));
     expect(res.note).toBeUndefined();
   });
 
   it('grep on a path naming a DOCUMENT searches its extraction the way the walk does — markers included', async () => {
     const base = await start();
-    await fs.writeFile('deck.pptx', pptx([['Intro'], ['Roadmap 2026']]));
+    await fs.writeFile(`${KB_DIR}/deck.pptx`, pptx([['Intro'], ['Roadmap 2026']]));
     // A second deck carrying the same term: a file grep must not reach it.
-    await fs.writeFile('decoy.pptx', pptx([['Roadmap 2026 decoy deck']]));
-    const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'Roadmap', path: 'deck.pptx' })).json()) as {
+    await fs.writeFile(`${KB_DIR}/decoy.pptx`, pptx([['Roadmap 2026 decoy deck']]));
+    const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'Roadmap', path: `${KB_DIR}/deck.pptx` })).json()) as {
       matches: { path: string; line: number; text: string }[];
       note?: string;
     };
     // Same line arithmetic as the directory grep: marker 1, [slide 1] 2,
     // Intro 3, [slide 2] 4, Roadmap 5.
-    expect(res.matches).toEqual([{ path: 'deck.pptx', line: 5, text: 'Roadmap 2026' }]);
+    expect(res.matches).toEqual([{ path: `${KB_DIR}/deck.pptx`, line: 5, text: 'Roadmap 2026' }]);
     expect(res.note).toBeUndefined();
     // The structure markers are searchable on the single-file path too.
-    const markers = (await (await post(`${base}/api/agent/tools/grep`, { pattern: '\\[slide 2\\]', path: 'deck.pptx' })).json()) as {
+    const markers = (await (await post(`${base}/api/agent/tools/grep`, { pattern: '\\[slide 2\\]', path: `${KB_DIR}/deck.pptx` })).json()) as {
       matches: { path: string; line: number }[];
     };
-    expect(markers.matches).toEqual([expect.objectContaining({ path: 'deck.pptx', line: 4 })]);
+    expect(markers.matches).toEqual([expect.objectContaining({ path: `${KB_DIR}/deck.pptx`, line: 4 })]);
   });
 
   it('grep on a path naming a CORRUPT document notes it has no searchable text', async () => {
     const base = await start();
-    await fs.writeFile('broken.docx', Buffer.from('not really a zip'));
-    const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'zip', path: 'broken.docx' })).json()) as {
+    await fs.writeFile(`${KB_DIR}/broken.docx`, Buffer.from('not really a zip'));
+    const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'zip', path: `${KB_DIR}/broken.docx` })).json()) as {
       matches: unknown[];
       note?: string;
     };
     expect(res.matches).toEqual([]);
     expect(res.note).toContain('no searchable text');
-    expect(res.note).toContain('broken.docx');
+    expect(res.note).toContain(`${KB_DIR}/broken.docx`);
   });
 
   it('grep extracts at most 20 uncached documents per call and notes the skipped rest; a re-run covers them', async () => {
@@ -1210,41 +1293,41 @@ describe('office documents and PDFs', () => {
 
   it('read_file returns marker + extracted text for the three OpenDocument formats', async () => {
     const base = await start();
-    await fs.writeFile('memo.odt', odt('Hello from Writer', 'Second paragraph'));
-    const odtContent = await readContent(base, 'memo.odt');
+    await fs.writeFile(`${KB_DIR}/memo.odt`, odt('Hello from Writer', 'Second paragraph'));
+    const odtContent = await readContent(base, `${KB_DIR}/memo.odt`);
     expect(odtContent.split('\n')).toEqual([
-      '[extracted text of memo.odt — 2 paragraphs; layout, images and formatting omitted]',
+      `[extracted text of ${KB_DIR}/memo.odt — 2 paragraphs; layout, images and formatting omitted]`,
       'Hello from Writer',
       'Second paragraph',
     ]);
 
-    await fs.writeFile('deck.odp', odp([['Impress intro'], ['Second page']]));
-    const odpContent = await readContent(base, 'deck.odp');
-    expect(odpContent).toMatch(/^\[extracted text of deck\.odp — 2 slides;/);
+    await fs.writeFile(`${KB_DIR}/deck.odp`, odp([['Impress intro'], ['Second page']]));
+    const odpContent = await readContent(base, `${KB_DIR}/deck.odp`);
+    expect(odpContent).toMatch(new RegExp(`^\\[extracted text of ${KB_DIR}/deck\\.odp — 2 slides;`));
     expect(odpContent).toContain('[slide 1]\nImpress intro\n[slide 2]\nSecond page');
 
-    await fs.writeFile('numbers.ods', ods('Inventory', [['Name', 'Qty'], ['Widget', '3']]));
-    const odsContent = await readContent(base, 'numbers.ods');
-    expect(odsContent).toMatch(/^\[extracted text of numbers\.ods — 1 sheet, rows as tab-separated values;/);
+    await fs.writeFile(`${KB_DIR}/numbers.ods`, ods('Inventory', [['Name', 'Qty'], ['Widget', '3']]));
+    const odsContent = await readContent(base, `${KB_DIR}/numbers.ods`);
+    expect(odsContent).toMatch(new RegExp(`^\\[extracted text of ${KB_DIR}/numbers\\.ods — 1 sheet, rows as tab-separated values;`));
     expect(odsContent).toContain('[sheet: Inventory]\nName\tQty\nWidget\t3');
   });
 
   it('grep finds a term inside an odp, with the [slide N] marker line locating it', async () => {
     const base = await start();
-    await fs.writeFile('deck.odp', odp([['Intro'], ['Roadmap 2027', 'Ship OpenDocument']]));
+    await fs.writeFile(`${KB_DIR}/deck.odp`, odp([['Intro'], ['Roadmap 2027', 'Ship OpenDocument']]));
     const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'Roadmap' })).json()) as {
       matches: { path: string; line: number; text: string }[];
     };
     // Extraction: marker line 1, [slide 1] 2, Intro 3, [slide 2] 4, Roadmap 5.
-    expect(res.matches).toContainEqual(expect.objectContaining({ path: 'deck.odp', text: 'Roadmap 2027', line: 5 }));
+    expect(res.matches).toContainEqual(expect.objectContaining({ path: `${KB_DIR}/deck.odp`, text: 'Roadmap 2027', line: 5 }));
     const markers = (await (await post(`${base}/api/agent/tools/grep`, { pattern: '\\[slide 2\\]' })).json()) as { matches: { path: string }[] };
-    expect(markers.matches).toContainEqual(expect.objectContaining({ path: 'deck.odp' }));
+    expect(markers.matches).toContainEqual(expect.objectContaining({ path: `${KB_DIR}/deck.odp` }));
   });
 
   it('read_file answers a corrupt odt zip with an honest could-not-parse message (no 500)', async () => {
     const base = await start();
-    await fs.writeFile('broken.odt', Buffer.from('not really a zip'));
-    const res = await post(`${base}/api/agent/tools/read_file`, { path: 'broken.odt' });
+    await fs.writeFile(`${KB_DIR}/broken.odt`, Buffer.from('not really a zip'));
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/broken.odt` });
     expect(res.status).toBe(200);
     const { content } = (await res.json()) as { content: string };
     expect(content).toContain('could not be parsed as a .odt');
@@ -1267,10 +1350,10 @@ describe('office documents and PDFs', () => {
 
   it('read_file returns marker + [from]/[subject] header block + body for a .eml email', async () => {
     const base = await start();
-    await fs.writeFile('Inbox/offer.eml', eml('Quarterly numbers', 'Please see the summary.'));
-    const content = await readContent(base, 'Inbox/offer.eml');
+    await fs.writeFile(`${KB_DIR}/Inbox/offer.eml`, eml('Quarterly numbers', 'Please see the summary.'));
+    const content = await readContent(base, `${KB_DIR}/Inbox/offer.eml`);
     expect(content.split('\n')).toEqual([
-      '[extracted text of Inbox/offer.eml — email message; formatting and full headers omitted]',
+      `[extracted text of ${KB_DIR}/Inbox/offer.eml — email message; formatting and full headers omitted]`,
       '[from] Ada Lovelace <ada@example.com>',
       '[to] bob@example.com',
       '[subject] Quarterly numbers',
@@ -1282,27 +1365,27 @@ describe('office documents and PDFs', () => {
 
   it('grep finds a term inside a .eml, with the [subject] header line itself searchable', async () => {
     const base = await start();
-    await fs.writeFile('Inbox/offer.eml', eml('Quarterly numbers', 'The needle-2026 is in the body.'));
+    await fs.writeFile(`${KB_DIR}/Inbox/offer.eml`, eml('Quarterly numbers', 'The needle-2026 is in the body.'));
     const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle-2026' })).json()) as {
       matches: { path: string; line: number; text: string }[];
     };
     // Extraction: marker 1, [from] 2, [to] 3, [subject] 4, [date] 5, blank 6, body 7.
     expect(res.matches).toContainEqual(
-      expect.objectContaining({ path: 'Inbox/offer.eml', text: 'The needle-2026 is in the body.', line: 7 }),
+      expect.objectContaining({ path: `${KB_DIR}/Inbox/offer.eml`, text: 'The needle-2026 is in the body.', line: 7 }),
     );
     const header = (await (await post(`${base}/api/agent/tools/grep`, { pattern: '\\[subject\\] Quarterly' })).json()) as {
       matches: { path: string; line: number }[];
     };
-    expect(header.matches).toContainEqual(expect.objectContaining({ path: 'Inbox/offer.eml', line: 4 }));
+    expect(header.matches).toContainEqual(expect.objectContaining({ path: `${KB_DIR}/Inbox/offer.eml`, line: 4 }));
   });
 
   it('write_file / edit_file refuse email files with the snapshot explanation', async () => {
     const base = await start();
-    await fs.writeFile('Inbox/offer.eml', eml('original', 'original body'));
+    await fs.writeFile(`${KB_DIR}/Inbox/offer.eml`, eml('original', 'original body'));
     for (const [tool, body] of [
-      ['write_file', { path: 'Inbox/offer.eml', content: 'rewritten' }],
-      ['write_file', { path: 'Inbox/new-thread.msg', content: 'plain text' }],
-      ['edit_file', { path: 'Inbox/offer.eml', old_string: 'original', new_string: 'changed' }],
+      ['write_file', { path: `${KB_DIR}/Inbox/offer.eml`, content: 'rewritten' }],
+      ['write_file', { path: `${KB_DIR}/Inbox/new-thread.msg`, content: 'plain text' }],
+      ['edit_file', { path: `${KB_DIR}/Inbox/offer.eml`, old_string: 'original', new_string: 'changed' }],
     ] as const) {
       const res = await post(`${base}/api/agent/tools/${tool}`, body);
       expect(res.status, tool).toBe(415);
@@ -1312,13 +1395,13 @@ describe('office documents and PDFs', () => {
       expect(error, tool).toContain('uploading a new version');
     }
     // The email is untouched: reading it still extracts the original text.
-    expect(await readContent(base, 'Inbox/offer.eml')).toContain('original body');
+    expect(await readContent(base, `${KB_DIR}/Inbox/offer.eml`)).toContain('original body');
   });
 
   it('read_file answers a corrupt .msg with an honest could-not-parse message (no 500)', async () => {
     const base = await start();
-    await fs.writeFile('Inbox/broken.msg', Buffer.from('not a CFB container'));
-    const res = await post(`${base}/api/agent/tools/read_file`, { path: 'Inbox/broken.msg' });
+    await fs.writeFile(`${KB_DIR}/Inbox/broken.msg`, Buffer.from('not a CFB container'));
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/Inbox/broken.msg` });
     expect(res.status).toBe(200);
     const { content } = (await res.json()) as { content: string };
     expect(content).toContain('could not be parsed as a .msg');
@@ -1327,8 +1410,8 @@ describe('office documents and PDFs', () => {
 
   it('read_file answers a corrupt docx with an honest could-not-parse message (no 500)', async () => {
     const base = await start();
-    await fs.writeFile('broken.docx', Buffer.from('not really a zip'));
-    const res = await post(`${base}/api/agent/tools/read_file`, { path: 'broken.docx' });
+    await fs.writeFile(`${KB_DIR}/broken.docx`, Buffer.from('not really a zip'));
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/broken.docx` });
     expect(res.status).toBe(200);
     const { content } = (await res.json()) as { content: string };
     expect(content).toContain('could not be parsed as a .docx');
@@ -1337,18 +1420,18 @@ describe('office documents and PDFs', () => {
 
   it('read_file answers a legacy .doc with the convert-to-modern hint', async () => {
     const base = await start();
-    await fs.writeFile('old.doc', Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0x00, 0x01, 0x02]));
-    const content = await readContent(base, 'old.doc');
+    await fs.writeFile(`${KB_DIR}/old.doc`, Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0x00, 0x01, 0x02]));
+    const content = await readContent(base, `${KB_DIR}/old.doc`);
     expect(content).toContain('legacy office format');
     expect(content).toContain('.docx');
   });
 
   it('edit_file / write_file refuse a legacy .doc with the convert-or-replace message — a binary the reader cannot extract must never be text-overwritten', async () => {
     const base = await start();
-    await fs.writeFile('old.doc', Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0x00, 0x01, 0x02]));
+    await fs.writeFile(`${KB_DIR}/old.doc`, Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0x00, 0x01, 0x02]));
     for (const [tool, body] of [
-      ['edit_file', { path: 'old.doc', old_string: 'a', new_string: 'b' }],
-      ['write_file', { path: 'old.doc', content: 'plain text' }],
+      ['edit_file', { path: `${KB_DIR}/old.doc`, old_string: 'a', new_string: 'b' }],
+      ['write_file', { path: `${KB_DIR}/old.doc`, content: 'plain text' }],
     ] as const) {
       const res = await post(`${base}/api/agent/tools/${tool}`, body);
       expect(res.status, tool).toBe(415);
@@ -1364,10 +1447,10 @@ describe('office documents and PDFs', () => {
     // A write gate that only asked about the EXTENSION let an agent overwrite
     // exactly those bytes — destroying a file it was never allowed to see.
     const base = await start();
-    await fs.writeFile('blob.dat', Buffer.from([0x00, 0x01, 0x02, 0x03, 0xff]));
+    await fs.writeFile(`${KB_DIR}/blob.dat`, Buffer.from([0x00, 0x01, 0x02, 0x03, 0xff]));
     for (const [tool, body] of [
-      ['write_file', { path: 'blob.dat', content: 'plain text' }],
-      ['edit_file', { path: 'blob.dat', old_string: 'a', new_string: 'b' }],
+      ['write_file', { path: `${KB_DIR}/blob.dat`, content: 'plain text' }],
+      ['edit_file', { path: `${KB_DIR}/blob.dat`, old_string: 'a', new_string: 'b' }],
     ] as const) {
       const res = await post(`${base}/api/agent/tools/${tool}`, body);
       expect(res.status, tool).toBe(415);
@@ -1376,31 +1459,31 @@ describe('office documents and PDFs', () => {
       expect(error, tool).toContain('uploading a new version');
     }
     // …and a TEXT file under the same fallback reader still writes normally.
-    const ok = await post(`${base}/api/agent/tools/write_file`, { path: 'notes.dat', content: 'hello' });
+    const ok = await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/notes.dat`, content: 'hello' });
     expect(ok.status).toBe(200);
   });
 
   it('read_file answers other binary files with a one-line notice (zip names the unzip tool)', async () => {
     const base = await start();
     // .mp3, not an image: images return native MCP image content (see below).
-    await fs.writeFile('song.mp3', Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]));
-    const mp3 = await readContent(base, 'song.mp3');
-    expect(mp3).toBe('[song.mp3 is a binary file (audio/mpeg, 9 bytes) — not readable as text.]');
-    await fs.writeFile('bundle.zip', Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00]));
-    const zip = await readContent(base, 'bundle.zip');
+    await fs.writeFile(`${KB_DIR}/song.mp3`, Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]));
+    const mp3 = await readContent(base, `${KB_DIR}/song.mp3`);
+    expect(mp3).toBe(`[${KB_DIR}/song.mp3 is a binary file (audio/mpeg, 9 bytes) — not readable as text.]`);
+    await fs.writeFile(`${KB_DIR}/bundle.zip`, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00]));
+    const zip = await readContent(base, `${KB_DIR}/bundle.zip`);
     expect(zip).toContain('application/zip');
     expect(zip).toContain('unzip tool');
   });
 
   it('write_file / edit_file / write_files refuse document extensions with the round-trip explanation', async () => {
     const base = await start();
-    await fs.writeFile('deck.pptx', pptx([['Original']]));
+    await fs.writeFile(`${KB_DIR}/deck.pptx`, pptx([['Original']]));
     for (const [tool, body] of [
-      ['write_file', { path: 'new.docx', content: 'plain text' }],
-      ['write_file', { path: 'new.odt', content: 'plain text' }],
-      ['write_file', { path: 'slides.odp', content: 'plain text' }],
-      ['edit_file', { path: 'deck.pptx', old_string: 'Original', new_string: 'Changed' }],
-      ['edit_file', { path: 'numbers.ods', old_string: 'a', new_string: 'b' }],
+      ['write_file', { path: `${KB_DIR}/new.docx`, content: 'plain text' }],
+      ['write_file', { path: `${KB_DIR}/new.odt`, content: 'plain text' }],
+      ['write_file', { path: `${KB_DIR}/slides.odp`, content: 'plain text' }],
+      ['edit_file', { path: `${KB_DIR}/deck.pptx`, old_string: 'Original', new_string: 'Changed' }],
+      ['edit_file', { path: `${KB_DIR}/numbers.ods`, old_string: 'a', new_string: 'b' }],
     ] as const) {
       const res = await post(`${base}/api/agent/tools/${tool}`, body);
       expect(res.status, tool).toBe(415);
@@ -1410,23 +1493,23 @@ describe('office documents and PDFs', () => {
     }
     // In a BATCH the same refusal is per path: the document is refused with the
     // same explanation, and the innocent .md beside it is still written.
-    for (const doc of ['sheet.xlsx', 'sheet.ods']) {
+    for (const doc of [`${KB_DIR}/sheet.xlsx`, `${KB_DIR}/sheet.ods`]) {
       const res = await post(`${base}/api/agent/tools/write_files`, {
-        files: [{ path: `ok-${doc}.md`, content: 'fine' }, { path: doc, content: 'nope' }],
+        files: [{ path: `${doc}.ok.md`, content: 'fine' }, { path: doc, content: 'nope' }],
       });
       expect(res.status, doc).toBe(200);
       const body = (await res.json()) as { count: number; files: { path: string; outcome: string; error?: string; message?: string }[] };
       expect(body.count, doc).toBe(1);
-      expect(body.files.map((f) => f.path), doc).toEqual([`ok-${doc}.md`, doc]);
+      expect(body.files.map((f) => f.path), doc).toEqual([`${doc}.ok.md`, doc]);
       expect(body.files[0], doc).toMatchObject({ outcome: 'created' });
       expect(body.files[1], doc).toMatchObject({ outcome: 'refused', error: 'binary_not_writable' });
       expect(body.files[1].message, doc).toContain('EXTRACTED text');
       expect(body.files[1].message, doc).toContain('uploading a new version');
-      expect(await readContent(base, `ok-${doc}.md`)).toBe('fine');
+      expect(await readContent(base, `${doc}.ok.md`)).toBe('fine');
       expect((await post(`${base}/api/agent/tools/file_stat`, { path: doc })).status, doc).not.toBe(200);
     }
     // And the pptx is untouched: reading it still extracts the original text.
-    expect(await readContent(base, 'deck.pptx')).toContain('Original');
+    expect(await readContent(base, `${KB_DIR}/deck.pptx`)).toContain('Original');
   });
 
   it('every file tool states the SAME content rule — refused families, the byte tools and the upload path — so agents learn before the call', async () => {
@@ -1460,21 +1543,24 @@ describe('office documents and PDFs', () => {
     );
     const zipBytes = (): Buffer => {
       const z = new AdmZip();
-      z.addFile('inner.md', Buffer.from('# inner\n'));
+      z.addFile(`${KB_DIR}/inner.md`, Buffer.from('# inner\n'));
       return z.toBuffer();
     };
     /** Seed the four kinds; returns each path with its exact bytes and expected answers. */
     const seed = async () => {
       const files = [
-        { path: 'notes.md', bytes: Buffer.from('hello text\n'), mode: 'text', kind: null },
-        { path: 'deck.pptx', bytes: pptx([['Original']]), mode: 'document', kind: 'document' },
-        { path: 'logo.png', bytes: PNG, mode: 'binary', kind: 'image' },
-        { path: 'bundle.zip', bytes: zipBytes(), mode: 'binary', kind: 'archive' },
+        { path: `${KB_DIR}/notes.md`, bytes: Buffer.from('hello text\n'), mode: 'text', kind: null },
+        { path: `${KB_DIR}/deck.pptx`, bytes: pptx([['Original']]), mode: 'document', kind: 'document' },
+        { path: `${KB_DIR}/logo.png`, bytes: PNG, mode: 'binary', kind: 'image' },
+        { path: `${KB_DIR}/bundle.zip`, bytes: zipBytes(), mode: 'binary', kind: 'archive' },
       ] as const;
       for (const f of files) await fs.writeFile(f.path, f.bytes);
       return files;
     };
+    /** `path` is a repository path, which is workspace-relative already. */
     const onDisk = async (path: string) => Buffer.from(await readFile(join(tempDir, path)));
+    /** A sibling of `path` under `dir`, inside the repository. */
+    const under = (dir: string, path: string) => `${KB_DIR}/${dir}/${path.slice(KB_DIR.length + 1)}`;
     interface Refusal { error: string; kind: string; fileKind: string; useInstead: string[] }
     const expectRefusal = async (res: Response, fileKind: string, label: string) => {
       expect(res.status, label).toBe(415);
@@ -1505,12 +1591,12 @@ describe('office documents and PDFs', () => {
         expect(stat.contentMode, f.path).toBe(f.mode);
       }
       // Binary content under a text name is binary: write_file would refuse it.
-      await fs.writeFile('blob.dat', Buffer.from([0x00, 0xff]));
-      const blob = (await (await post(`${base}/api/agent/tools/file_stat`, { path: 'blob.dat' })).json()) as Record<string, unknown>;
+      await fs.writeFile(`${KB_DIR}/blob.dat`, Buffer.from([0x00, 0xff]));
+      const blob = (await (await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/blob.dat` })).json()) as Record<string, unknown>;
       expect(blob.contentMode).toBe('binary');
       // A directory has no content mode.
-      await fs.mkdir('dir', { recursive: true });
-      const dir = (await (await post(`${base}/api/agent/tools/file_stat`, { path: 'dir' })).json()) as Record<string, unknown>;
+      await fs.mkdir(`${KB_DIR}/dir`, { recursive: true });
+      const dir = (await (await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/dir` })).json()) as Record<string, unknown>;
       expect(dir.contentMode).toBeUndefined();
       expect(dir.kind).toBeUndefined();
     });
@@ -1527,17 +1613,17 @@ describe('office documents and PDFs', () => {
       // The filesystem's own mimeType (a second extension table: octet-stream
       // here) is not passed through, so nothing in the answer contradicts `mime`.
       expect((await fs.stat('Sample file')).mimeType).toBeDefined();
-      await fs.writeFile('notes.md', Buffer.from('# notes\n'));
+      await fs.writeFile(`${KB_DIR}/notes.md`, Buffer.from('# notes\n'));
       await fs.mkdir('folder', { recursive: true });
-      for (const p of ['Sample file', 'notes.md', 'folder']) {
+      for (const p of ['Sample file', `${KB_DIR}/notes.md`, 'folder']) {
         expect(await stat(p), p).not.toHaveProperty('mimeType');
       }
-      expect(await stat('notes.md')).toMatchObject({ kind: 'text', mime: 'text/plain' });
-      await fs.writeFile('plata.pdf', Buffer.from('%PDF-1.4\n'));
-      expect(await stat('plata.pdf')).toMatchObject({ kind: 'document', mime: 'application/pdf', textEditable: false });
+      expect(await stat(`${KB_DIR}/notes.md`)).toMatchObject({ kind: 'text', mime: 'text/plain' });
+      await fs.writeFile(`${KB_DIR}/plata.pdf`, Buffer.from('%PDF-1.4\n'));
+      expect(await stat(`${KB_DIR}/plata.pdf`)).toMatchObject({ kind: 'document', mime: 'application/pdf', textEditable: false });
       await seed();
-      expect(await stat('deck.pptx')).toMatchObject({ kind: 'document', mimeSource: 'extension', textEditable: false });
-      expect(await stat('logo.png')).toMatchObject({ kind: 'image', mime: 'image/png', textEditable: false });
+      expect(await stat(`${KB_DIR}/deck.pptx`)).toMatchObject({ kind: 'document', mimeSource: 'extension', textEditable: false });
+      expect(await stat(`${KB_DIR}/logo.png`)).toMatchObject({ kind: 'image', mime: 'image/png', textEditable: false });
       // Real binary bytes without a known extension: the octet-stream fallback, and a note saying so.
       await fs.writeFile('Sample blob', Buffer.from([0x00, 0x01, 0xff]));
       const blob = await stat('Sample blob');
@@ -1572,24 +1658,24 @@ describe('office documents and PDFs', () => {
         expect((await onDisk(f.path)).equals(f.bytes), f.path).toBe(true);
       }
       // Creating a NEW image or zip by text is refused the same way — nothing lands.
-      await expectRefusal(await post(`${base}/api/agent/tools/write_file`, { path: 'new.png', content: 'x' }), 'image', 'new.png');
-      await expectRefusal(await post(`${base}/api/agent/tools/write_file`, { path: 'new.zip', content: 'x' }), 'archive', 'new.zip');
-      expect((await post(`${base}/api/agent/tools/file_stat`, { path: 'new.png' })).status).not.toBe(200);
+      await expectRefusal(await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/new.png`, content: 'x' }), 'image', `${KB_DIR}/new.png`);
+      await expectRefusal(await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/new.zip`, content: 'x' }), 'archive', `${KB_DIR}/new.zip`);
+      expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/new.png` })).status).not.toBe(200);
     });
 
     it('copy_file and move_file carry every kind byte-for-byte', async () => {
       const base = await start();
       for (const f of await seed()) {
-        const copied = await post(`${base}/api/agent/tools/copy_file`, { src: f.path, dest: `copies/${f.path}` });
+        const copied = await post(`${base}/api/agent/tools/copy_file`, { src: f.path, dest: under('copies', f.path) });
         expect(copied.status, f.path).toBe(200);
-        expect((await onDisk(`copies/${f.path}`)).equals(f.bytes), `copy ${f.path}`).toBe(true);
-        const moved = await post(`${base}/api/agent/tools/move_file`, { src: f.path, dest: `moved/${f.path}` });
+        expect((await onDisk(under('copies', f.path))).equals(f.bytes), `copy ${f.path}`).toBe(true);
+        const moved = await post(`${base}/api/agent/tools/move_file`, { src: f.path, dest: under('moved', f.path) });
         expect(moved.status, f.path).toBe(200);
-        expect((await onDisk(`moved/${f.path}`)).equals(f.bytes), `move ${f.path}`).toBe(true);
+        expect((await onDisk(under('moved', f.path))).equals(f.bytes), `move ${f.path}`).toBe(true);
       }
       // The moved zip is still a real archive: unzip reads it as bytes.
-      const z = new AdmZip(await onDisk('moved/bundle.zip'));
-      expect(z.getEntry('inner.md')?.getData().toString('utf8')).toBe('# inner\n');
+      const z = new AdmZip(await onDisk(`${KB_DIR}/moved/bundle.zip`));
+      expect(z.getEntry(`${KB_DIR}/inner.md`)?.getData().toString('utf8')).toBe('# inner\n');
     });
   });
 
@@ -1629,14 +1715,14 @@ describe('images', () => {
 
   it('read_file on a png returns the image sentinel with base64, mimeType and a note naming path + dimensions + size', async () => {
     const base = await start();
-    await fs.writeFile('logo.png', PNG_1X1);
-    const res = await post(`${base}/api/agent/tools/read_file`, { path: 'logo.png' });
+    await fs.writeFile(`${KB_DIR}/logo.png`, PNG_1X1);
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/logo.png` });
     expect(res.status).toBe(200);
     const body = (await res.json()) as ImageSentinel;
     expect(body.kind).toBe('bevel/mcp-image@v1');
     expect(body.mimeType).toBe('image/png');
     expect(body.data).toBe(PNG_1X1.toString('base64'));
-    expect(body.note).toContain('logo.png');
+    expect(body.note).toContain(`${KB_DIR}/logo.png`);
     expect(body.note).toContain('image/png');
     expect(body.note).toContain(`${PNG_1X1.length} bytes`);
     expect(body.note).toContain('1×1 px');
@@ -1644,8 +1730,8 @@ describe('images', () => {
 
   it('read_file passes a gif through whole under the same cap (first frame is the client’s concern)', async () => {
     const base = await start();
-    await fs.writeFile('anim.gif', GIF_1X1);
-    const body = (await (await post(`${base}/api/agent/tools/read_file`, { path: 'anim.gif' })).json()) as ImageSentinel;
+    await fs.writeFile(`${KB_DIR}/anim.gif`, GIF_1X1);
+    const body = (await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/anim.gif` })).json()) as ImageSentinel;
     expect(body.kind).toBe('bevel/mcp-image@v1');
     expect(body.mimeType).toBe('image/gif');
     expect(body.data).toBe(GIF_1X1.toString('base64'));
@@ -1655,11 +1741,11 @@ describe('images', () => {
   it('read_file maps .jpg/.jpeg to image/jpeg (dimensions omitted when the header has none to give)', async () => {
     const base = await start();
     const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]); // SOI + EOI, no frame header
-    await fs.writeFile('photo.jpg', bytes);
-    const body = (await (await post(`${base}/api/agent/tools/read_file`, { path: 'photo.jpg' })).json()) as ImageSentinel;
+    await fs.writeFile(`${KB_DIR}/photo.jpg`, bytes);
+    const body = (await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/photo.jpg` })).json()) as ImageSentinel;
     expect(body.mimeType).toBe('image/jpeg');
     expect(body.data).toBe(bytes.toString('base64'));
-    expect(body.note).toBe(`[image: photo.jpg — image/jpeg, ${bytes.length} bytes]`);
+    expect(body.note).toBe(`[image: ${KB_DIR}/photo.jpg — image/jpeg, ${bytes.length} bytes]`);
   });
 
   it('read_file refuses an image over 3.5 MiB raw with the downscale message, not a sentinel', async () => {
@@ -1667,11 +1753,11 @@ describe('images', () => {
     // 3,670,016 is the cap; one byte over must refuse. PNG magic + zero fill.
     const big = Buffer.alloc(3_670_017);
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(big);
-    await fs.writeFile('huge.png', big);
-    const res = await post(`${base}/api/agent/tools/read_file`, { path: 'huge.png' });
+    await fs.writeFile(`${KB_DIR}/huge.png`, big);
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/huge.png` });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { path: string; content: string };
-    expect(body.path).toBe('huge.png');
+    expect(body.path).toBe(`${KB_DIR}/huge.png`);
     expect(body.content).toContain('too large to return over MCP');
     expect(body.content).toContain('3670016 bytes');
     expect(body.content).toContain('Downscale');
@@ -1681,9 +1767,9 @@ describe('images', () => {
   it('read_file keeps .svg on the TEXT path — it is markup, not an image block', async () => {
     const base = await start();
     const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8"/></svg>';
-    await fs.writeFile('icon.svg', svg);
-    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: 'icon.svg' })).json()).toEqual({
-      path: 'icon.svg',
+    await fs.writeFile(`${KB_DIR}/icon.svg`, svg);
+    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/icon.svg` })).json()).toEqual({
+      path: `${KB_DIR}/icon.svg`,
       content: svg,
     });
   });
@@ -1992,6 +2078,30 @@ describe('path inputs tell the agent about the repository folder', () => {
     }
   });
 
+  it('say the prefix is OPTIONAL, and what an unprefixed path means', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    const byName = (name: string) => tools.find((t) => t.name === name);
+    const said = (name: string, ...keys: string[]) => inputDescription(byName(name), ...keys);
+    // Every path input, the ones that used to carry the shorter "may name a
+    // stray" wording included: a path without the prefix is PLACED under it,
+    // and the description says which path that is.
+    for (const name of ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'edit_file', 'delete_file', 'mkdir', 'unzip', 'delete_folder']) {
+      expect(said(name, 'path'), name).toContain(`placed under \`${KB_DIR}/\``);
+    }
+    for (const name of ['move_file', 'copy_file']) {
+      for (const key of ['src', 'dest']) {
+        expect(said(name, key), `${name}.${key}`).toContain(`placed under \`${KB_DIR}/\``);
+      }
+    }
+    expect(said('unzip', 'destination')).toContain(`placed under \`${KB_DIR}/\``);
+    expect(inputDescription(byName('write_files'), 'files', 'path')).toContain(`placed under \`${KB_DIR}/\``);
+    // And no input still claims a missing prefix is refused.
+    for (const name of ['read_file', 'write_file', 'delete_file', 'move_file', 'copy_file', 'unzip']) {
+      expect(said(name, 'path') + said(name, 'src') + said(name, 'dest'), name).not.toContain('is refused');
+    }
+  });
+
   it('the root listing names the clone folder, so an agent that lists first learns the prefix', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
@@ -1999,6 +2109,149 @@ describe('path inputs tell the agent about the repository folder', () => {
     expect(list).toBeDefined();
     expect(list!.description).toContain(`\`${KB_DIR}/\``);
     expect(inputDescription(list, 'path')).toContain(`\`${KB_DIR}/\``);
+  });
+});
+
+/**
+ * The MCP tools ACCEPT an unprefixed path now, by placing it inside the
+ * checkout, where they used to refuse it with a message naming the corrected
+ * spelling. One normaliser does it for all of them, at the tool boundary, so a
+ * tool cannot drift from a route again — and the answer names the repository
+ * path, so a caller always learns where its bytes went.
+ */
+describe('the tools place an unprefixed path inside the repository', () => {
+  const tool = (base: string, name: string, body: Record<string, unknown>) =>
+    post(`${base}/api/agent/tools/${name}`, { branch: 'main', ...body });
+  const onDisk = (repoRel: string) => readFile(join(tempDir, KB_DIR, repoRel), 'utf8');
+  /** Nothing beside the checkout, ever. */
+  const besideCheckout = async () => (await nodeReaddir(tempDir)).filter((n) => n !== KB_DIR).sort();
+
+  it('write_file writes into the repository and reports the repository path', async () => {
+    const base = await start();
+    const res = await tool(base, 'write_file', { path: 'KnowledgeBase/Report.md', content: 'body' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ path: `${KB_DIR}/KnowledgeBase/Report.md`, outcome: 'created' });
+    expect(await onDisk('KnowledgeBase/Report.md')).toBe('body');
+    expect(await besideCheckout()).toEqual([]);
+  });
+
+  it('write_files places every entry of a batch', async () => {
+    const base = await start();
+    const res = await tool(base, 'write_files', {
+      files: [{ path: 'one.md', content: '1' }, { path: 'Nested/two.md', content: '2' }],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { files: { path: string }[] };
+    expect(body.files.map((f) => f.path)).toEqual([`${KB_DIR}/one.md`, `${KB_DIR}/Nested/two.md`]);
+    expect(await onDisk('Nested/two.md')).toBe('2');
+    expect(await besideCheckout()).toEqual([]);
+  });
+
+  it('read_file, file_stat and edit_file all read the same repository file', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/Notes.md`, 'hello\nworld\n');
+
+    expect(await (await tool(base, 'read_file', { path: 'Notes.md' })).json()).toEqual({
+      path: `${KB_DIR}/Notes.md`,
+      content: 'hello\nworld\n',
+    });
+    expect(await (await tool(base, 'file_stat', { path: 'Notes.md' })).json()).toMatchObject({ type: 'file' });
+    const edited = await tool(base, 'edit_file', { path: 'Notes.md', old_string: 'world', new_string: 'earth' });
+    expect(await edited.json()).toMatchObject({ path: `${KB_DIR}/Notes.md`, replaced: 1 });
+    expect(await onDisk('Notes.md')).toBe('hello\nearth\n');
+  });
+
+  it('mkdir creates the folder in the repository', async () => {
+    const base = await start();
+    expect((await tool(base, 'mkdir', { path: 'KnowledgeBase/Reports' })).status).toBe(200);
+    expect(await fs.exists(`${KB_DIR}/KnowledgeBase/Reports`)).toBe(true);
+    expect(await besideCheckout()).toEqual([]);
+  });
+
+  it('move_file and copy_file place both ends', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/Src/a.md`, 'a');
+
+    expect((await tool(base, 'copy_file', { src: 'Src/a.md', dest: 'Copies/a.md' })).status).toBe(200);
+    expect(await onDisk('Copies/a.md')).toBe('a');
+    expect((await tool(base, 'move_file', { src: 'Src/a.md', dest: 'Moved/a.md' })).status).toBe(200);
+    expect(await onDisk('Moved/a.md')).toBe('a');
+    expect(await besideCheckout()).toEqual([]);
+  });
+
+  it('delete_file and delete_folder act inside the repository', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/Doomed/x.md`, 'x');
+    expect((await tool(base, 'delete_file', { path: 'Doomed/x.md' })).status).toBe(200);
+    expect(await fs.exists(`${KB_DIR}/Doomed/x.md`)).toBe(false);
+
+    await fs.writeFile(`${KB_DIR}/Gone/y.md`, 'y');
+    expect((await tool(base, 'delete_folder', { path: 'Gone', confirm: true })).status).toBe(200);
+    expect(await fs.exists(`${KB_DIR}/Gone/y.md`)).toBe(false);
+  });
+
+  it('unzip hands the service the repository path for archive and destination alike', async () => {
+    const base = await start();
+    const zip = new AdmZip();
+    zip.addFile('in.md', Buffer.from('z'));
+    await fs.writeFile(`${KB_DIR}/drop.zip`, zip.toBuffer());
+
+    expect((await tool(base, 'unzip', { path: 'drop.zip', destination: 'Out' })).status).toBe(200);
+    expect(unzipCalls).toContainEqual([`${KB_DIR}/drop.zip`, `${KB_DIR}/Out`]);
+  });
+
+  it('still refuses the spellings no prefix can rescue, on every tool', async () => {
+    const base = await start();
+    for (const p of ['../etc/hostname', 'KnowledgeBase\\x', '/tmp/x', 'KnowledgeBase/../../escape.md']) {
+      for (const [name, body] of [
+        ['read_file', { path: p }],
+        ['file_stat', { path: p }],
+        ['write_file', { path: p, content: 'x' }],
+        ['edit_file', { path: p, old_string: 'a', new_string: 'b' }],
+        ['mkdir', { path: p }],
+        ['delete_file', { path: p }],
+        ['move_file', { src: p, dest: `${KB_DIR}/x.md` }],
+        ['copy_file', { src: `${KB_DIR}/a.md`, dest: p }],
+        ['unzip', { path: p }],
+      ] as [string, Record<string, unknown>][]) {
+        const res = await tool(base, name, body);
+        expect(res.status, `${name} ${p}`).toBe(400);
+        expect((await res.json()).error, `${name} ${p}`).toContain('outside the knowledge base repository');
+      }
+    }
+    expect(await besideCheckout()).toEqual([]);
+  });
+
+  it('leaves a spill ref alone — it belongs to no workspace', async () => {
+    const base = await start();
+    const res = await tool(base, 'read_file', { path: '__tool_chain_spill__/nope.json' });
+    // Absent, not refused as a path: the ref reached the spill store as written.
+    expect(res.status).not.toBe(400);
+  });
+
+  it('gives that exception to read_file alone — for every other tool the ref is a path', async () => {
+    // `read_file` is the only tool that consumes a spill ref. Anywhere else,
+    // `__tool_chain_spill__/…` is an ordinary string, and leaving it unnormalised
+    // would be a workspace-relative path that never reached the repository —
+    // beside the checkout, which is the whole bug. So it is placed under the
+    // checkout like any other prefix-less path, and names a file that is not there.
+    const base = await start();
+    const ref = '__tool_chain_spill__/nope.json';
+    for (const [name, body] of [
+      ['file_stat', { path: ref }],
+      ['delete_file', { path: ref }],
+      ['copy_file', { src: ref, dest: `${KB_DIR}/copied.md` }],
+      ['list_files', { path: ref }],
+    ] as [string, Record<string, unknown>][]) {
+      const res = await tool(base, name, body);
+      const answer = JSON.stringify(await res.json());
+      // The answer names the path the tool actually looked at, and it is the
+      // one under the checkout — the ref was normalised, not exempted.
+      expect(answer, name).toContain(`${KB_DIR}/__tool_chain_spill__`);
+      expect(res.status, `${name}: ${answer}`).not.toBe(200);
+    }
+    // And nothing was written beside the checkout on the way.
+    expect(await besideCheckout()).toEqual([]);
   });
 });
 
@@ -2115,7 +2368,9 @@ describe('folders never vanish', () => {
     await gitIn(repo, ['add', '-A']);
     await gitIn(repo, ['commit', '-qm', 'delete']);
     await gitIn(tempDir, ['clone', '-q', repo, 'fresh-clone']);
-    expect((await fs.stat('fresh-clone/nested/level-two')).type).toBe('directory');
+    // Beside the checkout on purpose — a clone OF it, not content in it — so it
+    // is read from disk rather than through a workspace path.
+    expect((await stat(join(tempDir, 'fresh-clone', 'nested', 'level-two'))).isDirectory()).toBe(true);
   });
 
   it('delete_file with siblings left, or at the clone folder itself, writes no placeholder', async () => {
@@ -2170,7 +2425,7 @@ describe('folders never vanish', () => {
 
     expect((await tool(base, 'move_file', { src: KB('from/a.md'), dest: KB('to/a.md') })).status).toBe(200);
 
-    expect((await names(base, KB(''))).sort()).toEqual(['from:directory', 'to:directory']);
+    expect((await names(base, KB(''))).sort()).toEqual(['a.md:file', 'from:directory', 'to:directory']);
     expect(await names(base, KB('from'))).toEqual([]);
     await expect(fs.exists(KB('from/.gitkeep'))).resolves.toBe(true);
   });
@@ -2180,11 +2435,11 @@ describe('folders never vanish', () => {
     await tool(base, 'mkdir', { path: KB('Made') });
     await tool(base, 'write_file', { path: KB('Written/n.md'), content: 'n' });
 
-    expect((await names(base, KB(''))).sort()).toEqual(['Made:directory', 'Written:directory']);
+    expect((await names(base, KB(''))).sort()).toEqual(['Made:directory', 'Written:directory', 'a.md:file']);
     expect(await names(base, KB('Made'))).toEqual([]);
 
     await tool(base, 'delete_file', { path: KB('Written/n.md') });
-    expect((await names(base, KB(''))).sort()).toEqual(['Made:directory', 'Written:directory']);
+    expect((await names(base, KB(''))).sort()).toEqual(['Made:directory', 'Written:directory', 'a.md:file']);
     expect(await names(base, KB('Written'))).toEqual(await names(base, KB('Made')));
     expect((await tool(base, 'file_stat', { path: KB('Written') })).body).toMatchObject({ type: 'directory' });
   });
@@ -2731,7 +2986,13 @@ describe('preflight for moves and deletes', () => {
       expect((await call(base, 'move_file', { src: sneaky, dest: KB('Sales/rules.md'), dryRun: true })).status).toBe(400);
       expect((await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/../Locked/deal.md') })).status).toBe(400);
       expect((await call(base, 'delete_folder', { path: KB('Sales/../Locked'), confirm: true })).status).toBe(400);
-      expect((await call(base, 'file_stat', { path: KB('Sales/./deal.md') })).body).toMatchObject({ movable: false, deletable: false });
+      // `file_stat` used to answer with a body saying the path was neither
+      // movable nor deletable. The normaliser refuses the spelling before the
+      // tool runs at all now, which is the stronger answer: nothing is judged
+      // under a path that names one folder and opens another.
+      const stat = await call(base, 'file_stat', { path: KB('Sales/./deal.md') });
+      expect(stat.status).toBe(400);
+      expect(stat.body.error).toContain('"." or ".." segments');
       expect(await exists(KB('Locked/rules.md'))).toBe(true);
       expect(await exists(KB('Sales/deal.md'))).toBe(true);
     });
@@ -3334,21 +3595,20 @@ describe('a path with nothing at it answers 404 not_found on every file tool', (
     expect(json.error).not.toContain('ENOTDIR');
   });
 
-  // A backslash is a filename character on this disk, never a separator, so
-  // the read tools meet plain absence. move_file and delete_file judge the
-  // path as WRITTEN and keep refusing it up front — an answer that predates
-  // this mapping and is not absence at all.
-  it('a malformed path: backslashes read as absence, and still refused by the tools that judge spelling', async () => {
+  // A backslash is a filename character on THIS disk and a separator on
+  // Windows, so it is a path nobody can read the same way twice. The read tools
+  // used to meet it as plain absence; the one normaliser refuses it up front
+  // now, on every tool alike — the refusal the move and delete tools always
+  // gave, extended to the rest by the fact that they all go through it.
+  it('a malformed path: backslashes are refused up front, on every tool', async () => {
     const base = await start();
     const odd = `${KB_DIR}\\Knowledge\\NoSuchFile.md`;
-    for (const tool of ['read_file', 'file_stat', 'grep', 'edit_file', 'copy_file'] as const) {
-      const body = callsFor(odd).find(([name]) => name === tool)![1];
-      await expectNotFound(base, tool, body, odd);
-    }
-    for (const [tool, body] of [
+    const tools: [string, Record<string, unknown>][] = [
+      ...callsFor(odd).filter(([name]) => ['read_file', 'file_stat', 'grep', 'edit_file', 'copy_file'].includes(name)),
       ['delete_file', { path: odd }],
       ['move_file', { src: odd, dest: `${FOLDER}/Moved.md` }],
-    ] as [string, Record<string, unknown>][]) {
+    ];
+    for (const [tool, body] of tools) {
       const res = await post(`${base}/api/agent/tools/${tool}`, { branch: 'main', ...body });
       expect(res.status, tool).toBe(400);
       expect((await res.json()).error, tool).toContain('backslashes');

@@ -9,6 +9,8 @@ import type { Router, RequestHandler } from 'express';
 import { createAuthRoutes } from '../modules/auth/auth.routes.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
 import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals.middleware.js';
+import { noteBesideCheckout } from '../modules/workspace/startup/beside-checkout.js';
+import { printable } from '../shared/printable.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
 import { createWorkflowRoutes } from '../modules/workflow/workflow.routes.js';
 import { createEventsRoutes } from '../modules/workflow/events.routes.js';
@@ -102,6 +104,13 @@ export interface ServerExtensions {
    * overlay's own router installs a larger parser for them (body-parser
    * ignores a second parse once the first has run — see the comment at the
    * parser below).
+   *
+   * An exempt path under `/api/workspace/:id` has its body parsed AFTER the
+   * git-internals route guard has looked at it, so a path-bearing field in
+   * that body is not refused ahead of the route the way every other
+   * workspace body is. The services refuse the git folder on their own, so
+   * nothing reaches it; but such a router should run `gitGuardedInputs` on
+   * the parsed body itself if it wants the same early, sanitized 403.
    */
   jsonParserExemptPaths?: string[];
   /**
@@ -300,6 +309,23 @@ export async function createCoreServer(
 
   // Overlay boot-time side effects (startup reconciles, periodic sweeps).
   await ext.onBoot?.(core);
+
+  // What is already sitting beside a checkout, named once per boot and touched
+  // by nothing. Outside the KB startup phase below on purpose: that phase is
+  // gated on the branch model and the repository URL, and a deployment whose
+  // setup never finished — or whose remote is down — is exactly one whose
+  // strays would otherwise go unmentioned. A diagnostic never stops a boot, so
+  // an unreadable workspaces root is logged and the boot carries on.
+  try {
+    await noteBesideCheckout(core.config.workspacesRoot, core.kbDirName);
+  } catch (err) {
+    // `printable`, because the message quotes a path off the disk (an ENOENT
+    // or EACCES names the file it failed on) and a name carrying a control
+    // character would forge a second line of the operator's log.
+    startupLog.warn('could not look for content beside the checkouts:', {
+      detail: printable(err instanceof Error ? err.message : String(err)),
+    });
+  }
 
   // The KB startup phase — AFTER the distribution's onBoot, because a FATAL
   // template finding raised there must stop the boot before anything seeds
