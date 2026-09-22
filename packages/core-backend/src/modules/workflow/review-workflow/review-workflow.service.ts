@@ -34,6 +34,7 @@ import {
   APPROVAL_LOCK_TIMEOUT_MS,
   isApprovalLockTimeout,
   takeApprovalLock,
+  takeEveryApprovalLock,
   type ApprovalTx,
 } from './approval-lock.js';
 
@@ -607,6 +608,24 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     // `viewerCanApprove` as false — one approval made the apply button and
     // every remaining approve control vanish until a fresh detail fetch.
     return this.getApprovalStates(prNumber, files, headSha, baseBranch, prAuthorIdHash, workspaceId, user.email);
+  }
+
+  /**
+   * See the interface. The lock is taken right before the statement it has to
+   * cover, not at the top of the caller's transaction: what it orders is this
+   * rewrite and everything after it, and every millisecond earlier is that
+   * much longer for approvals to queue behind an erasure.
+   */
+  async eraseApprover(
+    tx: ApprovalTx,
+    email: string,
+    erased: { email: string; name: string },
+  ): Promise<void> {
+    await takeEveryApprovalLock(tx);
+    await tx
+      .update(prFileApprovals)
+      .set({ approverEmail: erased.email, approverName: erased.name })
+      .where(eq(prFileApprovals.approverEmail, email));
   }
 
   /**

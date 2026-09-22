@@ -4,7 +4,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('account-erasure');
 import { and, eq, notExists } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
-import { takeEveryApprovalLock } from '../workflow/review-workflow/approval-lock.js';
+import type { IReviewWorkflowService } from '../workflow/review-workflow/review-workflow.interface.js';
 import {
   changeRequests,
   externalApiKeys,
@@ -113,6 +113,12 @@ export interface IAccountErasureService {
 export class AccountErasureService implements IAccountErasureService {
   constructor(
     private readonly db: Database,
+    /**
+     * The review workflow owns the approvals and the lock their writers take,
+     * so it does the rewrite (see `IReviewWorkflowService.eraseApprover`);
+     * this module only decides WHEN, inside its own transaction.
+     */
+    private readonly reviewWorkflow: Pick<IReviewWorkflowService, 'eraseApprover'>,
     private readonly participants: IErasureParticipant[] = [],
   ) {}
 
@@ -178,19 +184,17 @@ export class AccountErasureService implements IAccountErasureService {
 
       // Audit rows: anonymize in place (no user FK on these; they key by email).
       //
-      // The approvals are taken under the lock their own writers hold, because
-      // one of those writers COPIES rows: a change request that brings itself
-      // up to date re-pins the approvals its merge did not disturb onto the new
-      // head. A copy that read this person's row a moment before the statement
-      // below would insert their real address back afterwards — a row created
-      // after the last trace of them was supposed to be gone. Exclusive here,
-      // shared there: this waits for the copies in flight and holds the rest
-      // off until the erasure commits, so the rewrite below is the last word.
-      await takeEveryApprovalLock(tx);
-      await tx
-        .update(prFileApprovals)
-        .set({ approverEmail: target.erasedEmail, approverName: target.erasedName })
-        .where(eq(prFileApprovals.approverEmail, target.email));
+      // The approvals belong to the review workflow, and so does the lock
+      // their writers take — one of those writers COPIES rows (a change request
+      // bringing itself up to date re-pins the approvals its merge did not
+      // disturb onto the new head), and a copy that read this person's row a
+      // moment before the rewrite would insert their real address back
+      // afterwards. The workflow takes that lock exclusively and rewrites the
+      // rows, in THIS transaction, so it stays held until the erasure commits.
+      await this.reviewWorkflow.eraseApprover(tx, target.email, {
+        email: target.erasedEmail,
+        name: target.erasedName,
+      });
       await tx
         .update(prMergeLog)
         .set({ triggeredByEmail: target.erasedEmail, triggeredByName: target.erasedName })

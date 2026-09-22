@@ -4,6 +4,7 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { AccountErasureService, type IErasureParticipant } from '../account-erasure.service.js';
 import type { Database } from '../../database/connection.js';
+import { ReviewWorkflowService } from '../../workflow/review-workflow/review-workflow.service.js';
 
 /**
  * Erasing an account rewrites the person's name and address out of every
@@ -118,7 +119,15 @@ function harness(opts: { participants?: IErasureParticipant[] } = {}) {
     transaction: async <T,>(fn: (t: typeof tx) => Promise<T>) => fn(tx),
   } as unknown as Database;
   return {
-    svc: new AccountErasureService(db, opts.participants ?? []),
+    // The REAL review workflow, so what is pinned below is the contract as
+    // wired: erasure asks it to rewrite the approvals inside the erasure's
+    // transaction, and it is the workflow that takes the lock. Its other
+    // collaborators are never reached by `eraseApprover`.
+    svc: new AccountErasureService(
+      db,
+      new ReviewWorkflowService(db, {} as never, {} as never, {} as never),
+      opts.participants ?? [],
+    ),
     order,
     locked,
     lockSql,

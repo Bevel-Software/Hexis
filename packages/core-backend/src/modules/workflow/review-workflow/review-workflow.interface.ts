@@ -8,6 +8,14 @@ import type {
   PullRequestFile,
   PullRequestState,
 } from '@bevel-software/platform-shared';
+import type { ApprovalTx } from './approval-lock.js';
+
+/**
+ * The transaction handle a caller outside this module hands `eraseApprover`.
+ * Re-exported so the caller depends on this contract alone, never on the lock
+ * file behind it.
+ */
+export type { ApprovalTx };
 
 export interface MergeGateInput {
   prNumber: number;
@@ -166,6 +174,25 @@ export interface IReviewWorkflowService {
    * merge route re-validate via the same code path.
    */
   evaluateMergeGate(input: MergeGateInput): MergeGateResult;
+
+  /**
+   * Rewrite one person out of every approval they ever made, as `erased`.
+   *
+   * Account erasure calls this INSIDE its own transaction (`tx`) rather than
+   * touching the rows itself, because this module owns them and the writers
+   * that race the rewrite are this module's: a reviewer approving or revoking
+   * one file, and a change request copying the approvals its update did not
+   * disturb onto its new head. Both take the approval lock; this takes it
+   * exclusively on every request at once, BEFORE the rewrite, and the caller's
+   * transaction keeps it held until the erasure commits — so a copy that read
+   * the row a moment earlier cannot re-insert the real address onto a new head
+   * after what was supposed to be the last trace of it.
+   *
+   * Bounded (`ERASURE_LOCK_TIMEOUT_MS`): a wedged holder fails the erasure
+   * loudly instead of hanging it, and since the caller's transaction is atomic
+   * a refusal erases nothing — the operator runs it again.
+   */
+  eraseApprover(tx: ApprovalTx, email: string, erased: { email: string; name: string }): Promise<void>;
 
   /**
    * Execute the merge via a local `git merge --no-ff` on the base branch's
