@@ -10,9 +10,26 @@ export function rootAnchoredPath(relativePath: string): string {
   return relativePath.startsWith('/') ? relativePath : `/${relativePath}`;
 }
 
-/** `[` and `]` in a label would close the link early. */
+/**
+ * `[` and `]` in a label would close the link early. Backslashes go first: a
+ * label already holding `\]` would otherwise become `\\]`, where Markdown
+ * reads the doubled backslash as one literal and the bracket as the close.
+ */
 function escapeLabel(label: string): string {
-  return label.replace(/[[\]]/g, '\\$&');
+  return label.replace(/\\/g, '\\\\').replace(/[[\]]/g, '\\$&');
+}
+
+/**
+ * Whether a root-anchored path names a file the way the explorer would: every
+ * segment a real name. A `..` would resolve to a different place than the
+ * text says, an empty segment doubles a slash, and a backslash is never part
+ * of a workspace path — such a clipboard is pasted as text, not turned into a
+ * link to somewhere else. One trailing slash is how a folder's path is
+ * copied and is allowed; a second one is an empty segment like any other.
+ */
+function isPlainWorkspacePath(text: string): boolean {
+  const segments = text.replace(/\/$/, '').split('/').slice(1);
+  return segments.every((s) => s !== '' && s !== '.' && s !== '..' && !s.includes('\\'));
 }
 
 /**
@@ -49,7 +66,8 @@ export function markdownLinkForPaste(
   if (!text || /[\r\n]/.test(text)) return null;
 
   if (kbDirName && text.startsWith(`/${kbDirName}/`)) {
-    const name = text.replace(/\/+$/, '').split('/').pop() ?? '';
+    if (!isPlainWorkspacePath(text)) return null;
+    const name = text.replace(/\/$/, '').split('/').pop() ?? '';
     if (!name || name === kbDirName) return null;
     // The link resolver splits at the first `#` and percent-decodes the rest,
     // so a literal `#` or `%` in a file name is encoded to survive both.

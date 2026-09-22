@@ -159,6 +159,30 @@ describe('CreatorAccessService.planForCreate', () => {
     expect(await svc.planForCreate(WS, ALICE, 'reserved-config.json', 'file')).toBeNull();
   });
 
+  it('plans nothing when the probe for the new top-level folder fails — a failed probe is not "not there"', async () => {
+    // A disk that cannot say whether `KnowledgeBase/Projects` exists: planning
+    // on "not there" would seed a grant into a folder that may well exist.
+    const real = new NodeFs();
+    const failing = new Proxy(real, {
+      get(target, prop, receiver) {
+        if (prop !== 'lstatOrNull') return Reflect.get(target, prop, receiver) as unknown;
+        return async (abs: string) => {
+          if (abs.endsWith(path.join('KnowledgeBase', 'Projects'))) {
+            throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+          }
+          return real.lstatOrNull(abs);
+        };
+      },
+    });
+    const ws = stubWorkspaceService(path.join(root, WS));
+    const withFailingDisk = new CreatorAccessService(ws, new AccessControlService(ws, KB, real), KB, failing);
+    expect(await withFailingDisk.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Projects`, 'dir')).toBeNull();
+    expect(await withFailingDisk.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Projects/a.md`, 'file')).toBeNull();
+    // The same creation on a disk that answers is planned, so it was the
+    // probe's failure and not the path that made the difference.
+    expect(await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Projects`, 'dir')).not.toBeNull();
+  });
+
   it('returns null (never throws) when the access config is unusable', async () => {
     await fs.rm(path.join(repo, 'roles.yaml'));
     const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Projects`, 'dir');

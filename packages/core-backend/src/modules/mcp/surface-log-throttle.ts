@@ -38,7 +38,15 @@ export interface SurfaceLogDecision {
 }
 
 interface LastLogged {
+  /** When this user's line was last LOGGED — the interval counts from here. */
   at: number;
+  /**
+   * When this user last rebuilt at all, logged or suppressed — what pruning
+   * counts from. A user rebuilding every second inside the interval is
+   * active, and forgetting them on a sweep would discard the suppressed count
+   * their next logged line owes.
+   */
+  seenAt: number;
   shape: string;
   suppressed: number;
 }
@@ -76,10 +84,11 @@ export class SurfaceLogThrottle {
     const prev = this.last.get(userId);
     if (prev && prev.shape === key && now - prev.at < this.intervalMs) {
       prev.suppressed += 1;
+      prev.seenAt = now;
       return { log: false, suppressed: prev.suppressed };
     }
     const suppressed = prev?.suppressed ?? 0;
-    this.last.set(userId, { at: now, shape: key, suppressed: 0 });
+    this.last.set(userId, { at: now, seenAt: now, shape: key, suppressed: 0 });
     return { log: true, suppressed };
   }
 
@@ -90,15 +99,22 @@ export class SurfaceLogThrottle {
 
   /**
    * Entries for users quiet for the interval or longer carry no information;
-   * drop them. An entry stamped LATER than now was written before the clock
-   * stepped backwards: its age is unknowable across the step, so it is
-   * restamped as seen now and ages from here — otherwise a large step would
-   * keep every pre-step user for as long as the step, past the stated bound.
+   * drop them. Quiet means no rebuild at all, logged or suppressed (`seenAt`):
+   * a user whose every rebuild in the interval was suppressed is not quiet,
+   * and dropping them would lose the count their next line reports. An entry
+   * stamped LATER than now was written before the clock stepped backwards:
+   * its age is unknowable across the step, so it is restamped as seen now and
+   * ages from here — otherwise a large step would keep every pre-step user
+   * for as long as the step, past the stated bound.
    */
   private prune(now: number, except: string): void {
     for (const [userId, entry] of this.last) {
-      if (entry.at > now) entry.at = now;
-      else if (userId !== except && now - entry.at >= this.intervalMs) this.last.delete(userId);
+      if (entry.seenAt > now) {
+        entry.seenAt = now;
+        if (entry.at > now) entry.at = now;
+      } else if (userId !== except && now - entry.seenAt >= this.intervalMs) {
+        this.last.delete(userId);
+      }
     }
   }
 }
