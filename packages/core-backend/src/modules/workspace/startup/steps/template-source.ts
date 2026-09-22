@@ -130,9 +130,12 @@ export class TemplateSource {
     // In the ignore file the guide's name is a PATTERN, and a name gitignore
     // reads as syntax (`#Guide.md`, `!Guide.md`, brackets) would hide nothing
     // written bare. Escaped there, and only there: everywhere else the
-    // placeholder is prose.
+    // placeholder is prose. ONE render, with the escaped name as the layout's
+    // — a second pass over the rendered text would read a name that happens
+    // to contain a placeholder as one.
     if (relPath === IGNORE_FILENAME) {
-      raw = raw.replaceAll('{{agentsFile}}', () => gitignoreLiteral(agentsFileOf(currentKbLayout())));
+      const layout = currentKbLayout();
+      return renderKbLayoutPlaceholders(raw, { ...layout, agentsFile: gitignoreLiteral(agentsFileOf(layout)) });
     }
     return renderKbLayoutPlaceholders(raw);
   }

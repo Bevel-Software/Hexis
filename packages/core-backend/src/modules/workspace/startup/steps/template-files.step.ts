@@ -803,10 +803,12 @@ function withIgnorePattern(text: string, pattern: string): string {
     (lines.includes(PREAMBLE_FILE) || lines.includes(`!${PREAMBLE_FILE}`));
   if (lines.includes(pattern) || lines.includes(`!${pattern}`) || operatorPreambleRule) return text;
   const separator = text.endsWith('\n') ? '' : '\n';
+  // The guide's rule arrives as a gitignore literal (escaped where the name
+  // needs it), so it is recognised in that spelling.
   const comment =
     pattern === PREAMBLE_IGNORE_PATTERN
       ? PREAMBLE_RULE_COMMENT
-      : pattern === AGENTS_FILE
+      : pattern === gitignoreLiteral(AGENTS_FILE)
         ? AGENTS_RULE_COMMENT
         : PLATFORM_RULE_COMMENT;
   return `${text}${separator}\n${comment}\n${pattern}\n`;

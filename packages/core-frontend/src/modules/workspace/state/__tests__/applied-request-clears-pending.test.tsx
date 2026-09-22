@@ -237,7 +237,7 @@ describe('an applied change request stops showing as pending — for every viewe
     );
     act(() => bus.emit({ kind: 'change-request-rejected', number: 99 }));
     // Past the coalescing window, so that read has actually left before…
-    await act(() => new Promise<void>((resolve) => setTimeout(resolve, PR_STALE_COALESCE_MS + 20)));
+    await act(() => new Promise<void>((resolve) => setTimeout(resolve, PR_STALE_COALESCE_MS * 3)));
     // …the merge lands and the refresh reads the truth.
     serverHasOpenRequest(false, { submitter: true });
     act(() => bus.emit({ kind: 'change-request-merged', number: 7 }));

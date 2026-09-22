@@ -18,8 +18,10 @@
  * the bindings of the logger it came from — at least `module`, the tag every
  * call used to spell by hand in square brackets. Bindings and fields are one
  * flat set on the line: a `child`'s bindings override its parent's under the
- * same key, and a call's fields override the bindings — so `module` is the
- * one key to leave to the tag; a call that sets it relabels its own line.
+ * same key, and a call's fields override the bindings — except `module`,
+ * which is the tag: the default sink fixes the `[tag]` from the logger's own
+ * bindings when it is made, and a call-time `module` is printed as an
+ * ordinary field beside it. Leave that key to the tag.
  * An error goes under `err`, by that name: it is the key both the default
  * sink and pino recognise as an error, and render with its stack. Put an
  * `Error` there, not a string: the type cannot insist, and a string under

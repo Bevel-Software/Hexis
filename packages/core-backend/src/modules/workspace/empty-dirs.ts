@@ -41,6 +41,17 @@ export async function removeEmptyDirs(absoluteDir: string): Promise<void> {
     if (isGone(err)) return;
     throw err;
   }
+  // The same folder still, after the listing: a link swapped in between the
+  // `lstat` above and the `readdir` would have had the listing follow it.
+  // Node has no way to list without following on every platform this runs
+  // on, so the identity is checked on both sides of the read instead, and a
+  // folder that changed underneath is left alone — the sweep is hygiene, and
+  // a folder it does not sweep is only a folder that stays listed.
+  const after = await fs.lstat(absoluteDir).catch((err: unknown) => {
+    if (isGone(err)) return null;
+    throw err;
+  });
+  if (!after || !after.isDirectory() || after.ino !== root.ino || after.dev !== root.dev) return;
   for (const entry of entries) {
     if (hasGitInternalsSegment(entry.name)) continue;
     if (entry.isDirectory()) {

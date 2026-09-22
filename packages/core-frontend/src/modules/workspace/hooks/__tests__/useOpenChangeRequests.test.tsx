@@ -219,7 +219,7 @@ describe('useOpenChangeRequests', () => {
     // Past the coalescing window, so the stale fetch has actually left.
     await act(async () => {
       window.dispatchEvent(new Event('bevel:pr-stale'));
-      await new Promise<void>((resolve) => setTimeout(resolve, PR_STALE_COALESCE_MS + 20));
+      await new Promise<void>((resolve) => setTimeout(resolve, PR_STALE_COALESCE_MS * 3));
     });
     await waitFor(() =>
       expect(api.listMyChangeRequests).toHaveBeenCalledWith({ fresh: true }),
@@ -323,7 +323,7 @@ describe('useOpenChangeRequests', () => {
     // Past the coalescing window, so the stale fetch has actually left.
     await act(async () => {
       window.dispatchEvent(new Event('bevel:pr-stale'));
-      await new Promise<void>((resolve) => setTimeout(resolve, PR_STALE_COALESCE_MS + 20));
+      await new Promise<void>((resolve) => setTimeout(resolve, PR_STALE_COALESCE_MS * 3));
     });
     // The retraction's own refetch never answers in this test.
     api.listOpenChangeRequests.mockReturnValue(new Promise(() => {}));
@@ -356,7 +356,7 @@ describe('useOpenChangeRequests', () => {
     // Past the coalescing window, so the stale fetch has actually left.
     await act(async () => {
       window.dispatchEvent(new Event('bevel:pr-stale'));
-      await new Promise<void>((resolve) => setTimeout(resolve, PR_STALE_COALESCE_MS + 20));
+      await new Promise<void>((resolve) => setTimeout(resolve, PR_STALE_COALESCE_MS * 3));
     });
     // The retraction's refetch answers first: the files are gone.
     api.listOpenChangeRequests.mockResolvedValue([]);

@@ -17,8 +17,8 @@ vi.mock('../services/teams.api', () => ({ listTeams: vi.fn().mockResolvedValue([
 import { LibraryProvider, useLibrary } from '../state/library-data';
 import { PR_STALE_COALESCE_MS, PR_STALE_EVENT, TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 
-/** Past the window in which stale events are coalesced into one reload. */
-const settled = () => new Promise<void>((resolve) => setTimeout(resolve, PR_STALE_COALESCE_MS + 20));
+/** Well past the window in which stale events are coalesced into one reload — for asserting that nothing more happens. */
+const settled = () => new Promise<void>((resolve) => setTimeout(resolve, PR_STALE_COALESCE_MS * 3));
 
 /** The catalog, empty — each test fills in only the part it is about. */
 function emptyData(reload: () => void): LibraryData {
@@ -52,15 +52,14 @@ describe('LibraryProvider', () => {
     expect(listPlugins).toHaveBeenCalledTimes(1);
     // Two events in one burst — the local announcement and the bus binder's
     // — are one reload, once the coalescing window has passed.
-    await act(async () => {
+    act(() => {
       window.dispatchEvent(new Event(PR_STALE_EVENT));
       window.dispatchEvent(new Event(PR_STALE_EVENT));
-      await settled();
     });
-    expect(reload).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
     // A merged change can move plugin links and access: the summaries
     // refresh with the catalog, not only on a page's own reload.
-    expect(listPlugins).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(listPlugins).toHaveBeenCalledTimes(2));
     view.unmount();
     await act(async () => {
       window.dispatchEvent(new Event(PR_STALE_EVENT));
