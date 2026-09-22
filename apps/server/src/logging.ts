@@ -90,12 +90,20 @@ function asSafeError(err: unknown, seen: Set<object> = new Set()): Error {
  * vanish from the log. Each is serialized the same way, nested.
  */
 function serializeError(err: unknown): pino.SerializedError {
-  const safe = asSafeError(err);
+  return toRecord(asSafeError(err));
+}
+
+/**
+ * One error as a pino record, its `errors` — at any depth — as records too.
+ * The tree it walks is the escaped copy, which `asSafeError` and
+ * `oneLineError` have already cut at every loop, so it ends.
+ */
+function toRecord(safe: Error): pino.SerializedError {
   const record = pino.stdSerializers.err(safe);
   const errors = (safe as { errors?: unknown }).errors;
   if (Array.isArray(errors)) {
     (record as pino.SerializedError & { errors?: unknown[] }).errors = errors.map((e) =>
-      e instanceof Error ? pino.stdSerializers.err(e) : e,
+      e instanceof Error ? toRecord(e) : e,
     );
   }
   return record;
