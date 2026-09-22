@@ -23,6 +23,10 @@ export function isNamedGroup(
   name: string | null,
 ): boolean {
   if (!name) return false;
-  const wanted = name.trim().toLowerCase();
-  return entry.displayName.toLowerCase() === wanted || entry.canonical.toLowerCase() === wanted;
+  // As the backend canonicalises a group name: case and inner whitespace
+  // are not identity, so a link typed or shared with two spaces still lands
+  // on the card.
+  const fold = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+  const wanted = fold(name);
+  return fold(entry.displayName) === wanted || fold(entry.canonical) === wanted;
 }

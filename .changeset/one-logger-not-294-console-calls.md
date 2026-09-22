@@ -1,5 +1,5 @@
 ---
-'@bevel-software/platform-core-backend': patch
+'@bevel-software/platform-core-backend': minor
 ---
 
 The backend logs through one port. Every one of its 294 bare `console.*` calls is gone; each module asks for a tagged logger and writes a message with optional structured fields, and the process decides once where lines go and what shape they take.

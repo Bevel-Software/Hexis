@@ -1,4 +1,4 @@
-import { PR_STALE_EVENT, TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
+import { subscribePrStale, TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode,  } from 'react';
 import { LibraryContext } from './library-context';
 import { SKILLS_DIR } from '@bevel-software/platform-shared';
@@ -342,11 +342,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   // event; so does the whole Library, or the two would disagree after a
   // proposal lands or is resolved — and a merged change can move plugin
   // links and access, so the summaries refresh with the catalog here too.
-  useEffect(() => {
-    const onStale = () => reloadAll();
-    window.addEventListener(PR_STALE_EVENT, onStale);
-    return () => window.removeEventListener(PR_STALE_EVENT, onStale);
-  }, [reloadAll]);
+  useEffect(() => subscribePrStale(reloadAll), [reloadAll]);
 
   // A credential landing anywhere in the app is a catalog change here: every
   // "needs setup" in the Library — the cards, the plugin page's banner, the

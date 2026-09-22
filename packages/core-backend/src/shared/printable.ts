@@ -17,12 +17,15 @@ export { printable } from '@bevel-software/platform-mcp-core';
  * line break is escaped, so a refusal naming the path stays one line and
  * cannot forge a second.
  *
- * That is CR and LF, the other mandatory breaks — vertical tab, form feed
- * and NEL (U+0085) — and the Unicode line separators U+2028/U+2029 with them:
- * `JSON.stringify` leaves the last three raw, so a path that carries one
- * survives being carried — in the `path` field of a not-found body, in a log
- * line — and breaks the line wherever it is finally rendered. {@link printable}
- * escapes them for exactly that reason.
+ * That is every C0 and C1 control character — CR and LF, the other mandatory
+ * breaks (vertical tab, form feed, NEL), and the one-byte escapes a terminal
+ * obeys (U+009B starts an ANSI sequence on its own) — and the Unicode line
+ * separators U+2028/U+2029 with them: `JSON.stringify` leaves the C1 range
+ * and the separators raw, so a path that carries one survives being carried
+ * — in the `path` field of a not-found body, in a log line — and breaks or
+ * steers the line wherever it is finally rendered. {@link printable} escapes
+ * the same set for exactly that reason; the spelling is the same too (`\n`,
+ * `\t`, else `\uXXXX`), so a path reads alike in a refusal and in a log.
  *
  * Unquoted, unlike {@link printable}: this text is read by a person or an
  * agent inside a sentence that already quotes it, not by an operator scanning
@@ -30,16 +33,20 @@ export { printable } from '@bevel-software/platform-mcp-core';
  * function, and the missing-path refusals use it too, so a path reads the same
  * however it is refused.
  */
-const LINE_BREAKING: ReadonlyMap<string, string> = new Map([
+const NAMED_ESCAPES: ReadonlyMap<string, string> = new Map([
   ['\r', '\\r'],
   ['\n', '\\n'],
+  ['\t', '\\t'],
   ['\v', '\\v'],
   ['\f', '\\f'],
-  ['\u0085', '\\u0085'],
-  ['\u2028', '\\u2028'],
-  ['\u2029', '\\u2029'],
 ]);
+// Built rather than written: the lint rule against control characters in a
+// regex literal guards against accidental ones, and these are the point.
+const CONTROL_OR_SEPARATOR = new RegExp(`[\\x00-\\x1F\\x7F-\\x9F${String.fromCharCode(0x2028, 0x2029)}]`, 'g');
 
 export function sanitizedPath(text: string): string {
-  return text.replace(/[\r\n\v\f\u0085\u2028\u2029]/g, (c) => LINE_BREAKING.get(c) ?? c);
+  return text.replace(
+    CONTROL_OR_SEPARATOR,
+    (c) => NAMED_ESCAPES.get(c) ?? `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
 }

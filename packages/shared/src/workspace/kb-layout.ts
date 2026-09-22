@@ -185,6 +185,17 @@ export function agentsFileOf(layout: KbLayout): string {
 }
 
 /**
+ * `name` as one literal gitignore pattern. The guide's name is the
+ * operator's, and the name rules admit characters gitignore reads as syntax:
+ * a leading `#` is a comment and a leading `!` a negation (the rule would
+ * silently hide nothing), `[`, `]`, `*` and `?` are globs, and a backslash is
+ * the escape itself. Each is escaped so the pattern names exactly the file.
+ */
+export function gitignoreLiteral(name: string): string {
+  return name.replace(/[[\]*?\\]/g, '\\$&').replace(/^([#!])/, '\\$1');
+}
+
+/**
  * The ONE sentence the platform offers to keep in a customer's own
  * `AGENTS.md`, pointing at the managed guide beside it.
  *

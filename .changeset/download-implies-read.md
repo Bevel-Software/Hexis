@@ -7,6 +7,6 @@ A `download` grant now confers `read`, the way a `write` grant does (`write` is 
 
 The implication is grant-only, exactly like the existing one. A `deny download` says nothing about read: someone who reads a folder through a parent grant and is denied download on a file inside it can still open that file, and still cannot save it. Every shape of grant folds the same way — a direct `Name <email>` entry, a role, a group, a plugin token, a rule inherited from an ancestor folder, or a node's own frontmatter.
 
-The Manage access dialog shows Read as checked and greyed whenever Download is checked, on a new grant and on an existing row, and its verb summary reads "Can read, Can download". Choosing Download alone writes one `download:` line rather than a redundant `read:` beside it, since the one line already carries both.
+The Manage access dialog shows Read as checked whenever Download is checked, and its verb summary reads "Can read, Can download". On a new grant Read is greyed while Download is on; on an existing row whose only grant is Download, Read stays clickable — choosing it takes the download grant back. Choosing Download alone writes one `download:` line rather than a redundant `read:` beside it, since the one line already carries both.
 
 Existing `download:`-only rules become live read grants on upgrade. That is the intent — those rules previously granted nothing at all.

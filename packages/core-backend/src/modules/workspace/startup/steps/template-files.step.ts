@@ -7,6 +7,7 @@ import {
   PLUGINS_DIR,
   SKILLS_DIR,
   agentsFilePointerSentence,
+  gitignoreLiteral,
   mentionsAgentsFile,
   retargetAgentsFilePointer,
   validateKbRootName,
@@ -258,7 +259,7 @@ export class TemplateFilesStep implements OnServerStart {
         content = withPlatformIgnorePatternRespelled(content, PREAMBLE_FILE, PREAMBLE_IGNORE_PATTERN);
         content = withoutIgnoreLine(
           withoutPlatformIgnorePattern(
-            withIgnorePattern(withIgnorePattern(content, agentsFile), PREAMBLE_IGNORE_PATTERN),
+            withIgnorePattern(withIgnorePattern(content, gitignoreLiteral(agentsFile)), PREAMBLE_IGNORE_PATTERN),
             `${SKILLS_DIR}/`,
           ),
           `${PLUGINS_DIR}/`,
@@ -312,7 +313,9 @@ export class TemplateFilesStep implements OnServerStart {
         // that booted the release shipping the unanchored spelling carries the
         // platform's own line, and that line hides a nested namesake too.
         respell: [[PREAMBLE_FILE, PREAMBLE_IGNORE_PATTERN]],
-        add: [agentsFile, PREAMBLE_IGNORE_PATTERN],
+        // As a gitignore PATTERN: a guide name that reads as syntax there is
+        // escaped, or the rule would hide nothing.
+        add: [gitignoreLiteral(agentsFile), PREAMBLE_IGNORE_PATTERN],
         drop: [`${SKILLS_DIR}/`],
         dropEvery: [`${PLUGINS_DIR}/`],
         // The guide's rule FOLLOWS its name. Once the guide is `HEXIS.md`, the
@@ -800,10 +803,12 @@ function withIgnorePattern(text: string, pattern: string): string {
     (lines.includes(PREAMBLE_FILE) || lines.includes(`!${PREAMBLE_FILE}`));
   if (lines.includes(pattern) || lines.includes(`!${pattern}`) || operatorPreambleRule) return text;
   const separator = text.endsWith('\n') ? '' : '\n';
+  // The guide's rule arrives as a gitignore literal (escaped where the name
+  // needs it), so it is recognised in that spelling.
   const comment =
     pattern === PREAMBLE_IGNORE_PATTERN
       ? PREAMBLE_RULE_COMMENT
-      : pattern === AGENTS_FILE
+      : pattern === gitignoreLiteral(AGENTS_FILE)
         ? AGENTS_RULE_COMMENT
         : PLATFORM_RULE_COMMENT;
   return `${text}${separator}\n${comment}\n${pattern}\n`;

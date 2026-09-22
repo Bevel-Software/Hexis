@@ -1,8 +1,8 @@
 import { type VariableLoader, VariableLoaderSerializer, Serializer } from '@utcp/sdk';
 import { logger } from '../../shared/logging.js';
+import type { ISecretsVaultService } from './secrets-vault.contract.js';
 
 const log = logger('secrets-vault');
-import type { ISecretsVaultService } from './secrets-vault.contract.js';
 
 /**
  * The `bevel-secrets` UTCP variable loader — the swappable seam that lets any
