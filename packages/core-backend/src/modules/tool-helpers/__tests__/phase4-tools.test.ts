@@ -15,15 +15,29 @@ import { DocExtractService } from '../../workspace/file-readers/doc-extract.serv
 
 const WS = 'target-company-state';
 let recorded: unknown[][] = [];
+/** Workspace-relative targets the stub archive holds; each is offered to the tool's write guard. */
+let archiveEntries: string[] = [];
 
 const externalApiKeyService = { verifyAndLoadToken: async () => null } as never;
 const authService = { getUserById: async (id: string) => ({ id, email: 'e@x', name: 'N' }) } as never;
 const workspaceService = {
   getOrCreateForUser: async () => ({ id: WS }),
   getWorkspacePath: async () => '/tmp/ws',
-  unzipFile: async (ws: string, p: string, d?: string) => {
+  unzipFile: async (ws: string, p: string, d?: string, guardWrite?: (target: string) => Promise<void>) => {
     recorded.push(['unzip', ws, p, d]);
-    return { extracted: [p], skipped: [] };
+    if (archiveEntries.length === 0) return { extracted: [p], skipped: [] };
+    // Mirrors the real extraction: a guard refusal skips that entry with its message.
+    const extracted: string[] = [];
+    const skipped: { path: string; reason: string }[] = [];
+    for (const target of archiveEntries) {
+      try {
+        await guardWrite?.(target);
+        extracted.push(target);
+      } catch (err) {
+        skipped.push({ path: target, reason: (err as Error).message });
+      }
+    }
+    return { extracted, skipped };
   },
   readFile: async () => {
     throw new Error('no such file');
@@ -73,6 +87,7 @@ const post = (url: string, body: unknown = {}) =>
 
 beforeEach(() => {
   recorded = [];
+  archiveEntries = [];
 });
 afterEach(async () => {
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
@@ -80,11 +95,25 @@ afterEach(async () => {
 });
 
 describe('Phase 4 tools (core subset)', () => {
-  it('unzip calls workspaceService.unzipFile with the context workspace', async () => {
+  it('unzip calls workspaceService.unzipFile with the context workspace, on the repository path', async () => {
     const base = await start();
     const res = await post(`${base}/api/agent/tools/unzip`, { path: 'a.zip', branch: WS });
     expect(res.status).toBe(200);
-    expect(recorded).toContainEqual(['unzip', WS, 'a.zip', undefined]);
+    // The archive is named without the clone-folder prefix; the normaliser
+    // places it inside the checkout, and THAT is the path the service is given.
+    expect(recorded).toContainEqual(['unzip', WS, 'knowledge-base/a.zip', undefined]);
+  });
+
+  it('unzip never extracts a roles.yaml — extraction bypasses the filesystem gate that checks it', async () => {
+    archiveEntries = ['knowledge-base/KnowledgeBase/notes.md', 'knowledge-base/roles.yaml'];
+    const base = await start();
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: 'knowledge-base/a.zip', branch: WS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
+    expect(body.extracted).toEqual(['knowledge-base/KnowledgeBase/notes.md']);
+    expect(body.skipped).toEqual([
+      { path: 'knowledge-base/roles.yaml', reason: expect.stringContaining('roles.yaml is never extracted') },
+    ]);
   });
 
   it('the registered core tool appears in the internal manual', async () => {

@@ -4,9 +4,10 @@ import type { FileDiffPayload, PendingChange, ReviewSession, ChangeKind } from '
 import type { IDiffService } from './diff.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { WorkspaceMutex } from '../kb-fs/mutex.js';
-import { BevelIgnoreStack } from '../workspace/bevel-ignore.js';
+import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
 import { isDiffable } from './diff.config.js';
-import { assertWithinDirectory } from './diff-paths.js';
+import { assertWithinDirectory } from '../../shared/path-containment.js';
+import { assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { countLineChanges } from './line-diff.js';
 
 /**
@@ -21,6 +22,7 @@ export class DiffService implements IDiffService {
     private readonly workspacesRoot: string,
     private readonly backupsRoot: string,
     private readonly kbDirName: string,
+    private readonly disk: ITreeWalker,
   ) {}
 
   // ── public API ──────────────────────────────────────────────────────────
@@ -39,11 +41,15 @@ export class DiffService implements IDiffService {
 
   async fileDiff(workspaceId: string, relativePath: string): Promise<FileDiffPayload> {
     return this.mutex.run(workspaceId, async () => {
+      // Resolved — and so judged, git folder and containment, links followed
+      // — BEFORE the ledger is seeded: the seed copies the whole tree, which
+      // a refused request must not set in motion, and a seed that failed
+      // would otherwise mask the refusal. The pair needs no ledger to resolve.
+      const { fileAbs, backupAbs } = await this.resolvePair(workspaceId, relativePath);
       // Seed the backup ledger if this is the first call on a fresh workspace
       // — otherwise every untouched file would surface as `kind: 'added'`
       // because the backup side is empty.
       await this.ensureSeededUnlocked(workspaceId);
-      const { fileAbs, backupAbs } = await this.resolvePair(workspaceId, relativePath);
       const [diskBuf, backupBuf] = await Promise.all([
         fs.readFile(fileAbs).catch(() => null),
         fs.readFile(backupAbs).catch(() => null),
@@ -149,8 +155,10 @@ export class DiffService implements IDiffService {
       const writes: { path: string; content: Buffer }[] = [];
       const deletes: string[] = [];
       for (const rel of paths) {
-        if (!isDiffable(rel)) continue;
+        // Resolved BEFORE the diffable test, like accept and reject: the git
+        // folder is refused for every path the caller names.
         const { backupAbs } = await this.resolvePair(workspaceId, rel);
+        if (!isDiffable(rel)) continue;
         try {
           // Backup exists → the revert is a write of the pre-agent baseline
           // bytes (Buffer: pending changes can be binary).
@@ -160,8 +168,7 @@ export class DiffService implements IDiffService {
           // discards it". Any other read failure (EACCES, EMFILE, …) must
           // abort the plan — misclassifying it as no-backup would DELETE a
           // file whose baseline we merely failed to read.
-          const code = (err as NodeJS.ErrnoException | null)?.code;
-          if (code !== 'ENOENT') throw err;
+          if (!isAbsence(err)) throw err;
           deletes.push(rel);
         }
       }
@@ -188,8 +195,8 @@ export class DiffService implements IDiffService {
     const workspaceDir = await this.workspaceService.getWorkspacePath(workspaceId);
     const backupDir = await this.getBackupDir(workspaceId);
     const candidates = new Set<string>();
-    await walkDiffable(workspaceDir, workspaceDir, candidates);
-    await walkAll(backupDir, backupDir, candidates);
+    await walkDiffable(this.disk, workspaceDir, candidates);
+    await walkAll(this.disk, backupDir, candidates);
     const pending: PendingChange[] = [];
     for (const rel of candidates) {
       const change = await computePending(workspaceDir, backupDir, rel);
@@ -263,8 +270,7 @@ export class DiffService implements IDiffService {
       try {
         await fs.rename(backupDir, oldBackupTrash);
       } catch (err) {
-        const code = (err as NodeJS.ErrnoException | null)?.code;
-        if (code !== 'ENOENT') throw err; // no existing backup is fine
+        if (!isAbsence(err)) throw err; // no existing backup is fine
       }
       await fs.rename(stagingDir, backupDir);
       await fs.rm(oldBackupTrash, { recursive: true, force: true }).catch(() => undefined);
@@ -283,8 +289,10 @@ export class DiffService implements IDiffService {
   }
 
   private async acceptOneUnlocked(workspaceId: string, relativePath: string): Promise<void> {
-    if (!isDiffable(relativePath)) return;
+    // Resolved BEFORE the diffable test, so the git folder is refused for
+    // every path rather than left to the fact that nothing in it is markdown.
     const { fileAbs, backupAbs } = await this.resolvePair(workspaceId, relativePath);
+    if (!isDiffable(relativePath)) return;
     let diskExists = true;
     try {
       await fs.access(fileAbs);
@@ -301,8 +309,9 @@ export class DiffService implements IDiffService {
   }
 
   private async rejectOneUnlocked(workspaceId: string, relativePath: string): Promise<void> {
-    if (!isDiffable(relativePath)) return;
+    // Resolved first, like `acceptOneUnlocked` — same reason.
     const { fileAbs, backupAbs } = await this.resolvePair(workspaceId, relativePath);
+    if (!isDiffable(relativePath)) return;
     let backupExists = true;
     try {
       await fs.access(backupAbs);
@@ -337,37 +346,29 @@ export class DiffService implements IDiffService {
     const backupDir = await this.getBackupDir(workspaceId);
     const fileAbs = path.resolve(workspaceDir, relativePath);
     const backupAbs = path.resolve(backupDir, relativePath);
+    // Every review operation resolves its pair here — the file diff, accept,
+    // reject, the ledger sync — so the git folder is refused for all of them
+    // in one place, links into it included. FIRST, so a path into the folder
+    // gets the one sanitized refusal rather than a containment error.
+    await assertNotGitInternals(workspaceDir, relativePath, fileAbs);
     assertWithinDirectory(fileAbs, workspaceDir);
     assertWithinDirectory(backupAbs, backupDir);
     return { workspaceDir, backupDir, fileAbs, backupAbs };
   }
 
-  private async copyDiffableTree(
-    workspaceDir: string,
-    backupDir: string,
-    currentDir: string,
-    parentIgnore: BevelIgnoreStack = BevelIgnoreStack.empty(),
-  ): Promise<void> {
-    let entries;
-    try {
-      entries = await fs.readdir(currentDir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    const ignoreStack = await parentIgnore.extendedWith(currentDir);
-    for (const entry of entries) {
-      if (entry.name === '.git' || entry.name === '.workspace.json') continue;
-      const srcPath = path.join(currentDir, entry.name);
-      if (ignoreStack.isIgnored(srcPath, entry.isDirectory())) continue;
-      const rel = path.relative(workspaceDir, srcPath);
-      const dstPath = path.join(backupDir, rel);
-      if (entry.isDirectory()) {
-        await this.copyDiffableTree(workspaceDir, backupDir, srcPath, ignoreStack);
-      } else if (entry.isFile() && isDiffable(entry.name)) {
-        await fs.mkdir(path.dirname(dstPath), { recursive: true });
-        await fs.copyFile(srcPath, dstPath);
-      }
-    }
+  /** Mirror every diffable file under `currentDir` into `backupDir`, at the same path relative to `workspaceDir`. */
+  private async copyDiffableTree(workspaceDir: string, backupDir: string, currentDir: string): Promise<void> {
+    await this.disk.walk(currentDir, diffableWalk(), [
+      {
+        async onFile(dir, name) {
+          if (!isDiffable(name)) return;
+          const srcPath = path.join(currentDir, dir, name);
+          const dstPath = path.join(backupDir, path.relative(workspaceDir, srcPath));
+          await fs.mkdir(path.dirname(dstPath), { recursive: true });
+          await fs.copyFile(srcPath, dstPath);
+        },
+      },
+    ]);
   }
 
   /**
@@ -409,49 +410,44 @@ function looksBinary(buf: Buffer): boolean {
   return sample.indexOf(0) !== -1;
 }
 
-async function walkDiffable(
-  root: string,
-  dir: string,
-  out: Set<string>,
-  parentIgnore: BevelIgnoreStack = BevelIgnoreStack.empty(),
-): Promise<void> {
-  let entries;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  const ignoreStack = await parentIgnore.extendedWith(dir);
-  for (const entry of entries) {
-    if (entry.name === '.git' || entry.name === '.workspace.json') continue;
-    const abs = path.join(dir, entry.name);
-    if (ignoreStack.isIgnored(abs, entry.isDirectory())) continue;
-    if (entry.isDirectory()) {
-      await walkDiffable(root, abs, out, ignoreStack);
-    } else if (entry.isFile() && isDiffable(entry.name)) {
-      out.add(path.relative(root, abs).replace(/\\/g, '/'));
-    }
-  }
+/**
+ * The walk of a workspace the diff ledger mirrors: no git internals, no
+ * workspace marker, `.bevelignore` honoured on the way down, and a folder
+ * that cannot be listed is left out — the ledger shows what it can.
+ */
+function diffableWalk(): TreeWalkOptions {
+  return { skip: (e) => hasGitInternalsSegment(e.name) || e.name === '.workspace.json', ignore: true };
 }
 
-async function walkAll(root: string, dir: string, out: Set<string>): Promise<void> {
-  let entries;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    const abs = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await walkAll(root, abs, out);
-    } else if (entry.isFile()) {
-      // Strip the .tmp suffix from in-flight atomic writes so a crashed write
-      // doesn't surface as a phantom "modified" entry on the next list call.
-      if (entry.name.endsWith('.tmp')) continue;
-      out.add(path.relative(root, abs).replace(/\\/g, '/'));
-    }
-  }
+/** Every diffable file under `root`, as `/`-separated paths relative to it. */
+async function walkDiffable(disk: ITreeWalker, root: string, out: Set<string>): Promise<void> {
+  await disk.walk(root, diffableWalk(), [
+    {
+      onFile(dir, name) {
+        if (isDiffable(name)) out.add(dir ? `${dir}/${name}` : name);
+      },
+    },
+  ]);
+}
+
+/**
+ * Every file under the backup `root`, as `/`-separated paths relative to it.
+ * The git folder is skipped here as well as on the workspace side: a ledger
+ * seeded before this rule existed can still hold `.git`/`.GIT` entries, and
+ * listing one would pair it with the workspace path and read the folder back
+ * out through the review session.
+ */
+async function walkAll(disk: ITreeWalker, root: string, out: Set<string>): Promise<void> {
+  await disk.walk(root, { skip: (e) => hasGitInternalsSegment(e.name) }, [
+    {
+      onFile(dir, name) {
+        // Strip the .tmp suffix from in-flight atomic writes so a crashed write
+        // doesn't surface as a phantom "modified" entry on the next list call.
+        if (name.endsWith('.tmp')) return;
+        out.add(dir ? `${dir}/${name}` : name);
+      },
+    },
+  ]);
 }
 
 async function computePending(

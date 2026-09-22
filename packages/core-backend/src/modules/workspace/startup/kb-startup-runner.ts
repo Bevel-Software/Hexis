@@ -1,9 +1,24 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isBranchModelConfigured } from '@bevel-software/platform-shared';
+import { logger } from '../../../shared/logging.js';
+
+// `startupLog` rather than `log`: `retryUntilMaintained` takes a `log`
+// callback of its own, and a module logger of the same name would be
+// shadowed exactly where it is meant to be the default.
+const startupLog = logger('kb-startup');
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { KbBranch, OnServerStart, ServerStartContext } from './on-server-start.js';
-import { git, lsRemoteHeads, redactSecret, stampIdentity, withTempDir } from './kb-git.js';
+import { git, lsRemoteHeads, stampIdentity, withTempDir } from './kb-git.js';
+import { GitRunError, type IGitRunner } from '../../../shared/git.contract.js';
+import {
+  ClassifiedFailure,
+  classifyGitFailure,
+  failureOf,
+  gitFailure,
+  type GitFailure,
+} from '../../../shared/git-failure.js';
+import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
 
 /**
  * The KB startup phase: run every registered {@link OnServerStart} step, in
@@ -29,8 +44,16 @@ import { git, lsRemoteHeads, redactSecret, stampIdentity, withTempDir } from './
  */
 
 export interface KbStartupRunnerOptions {
+  /** How git is run — see `shared/git.contract.ts`. */
+  gitRunner: IGitRunner;
   kbRepoUrl: () => string;
   gitUsername: () => string;
+  /**
+   * The git token in effect (settings-stored or environment), scrubbed from
+   * every message the phase throws or logs. Optional: `GITHUB_TOKEN` and its
+   * aliases are scrubbed regardless.
+   */
+  gitToken?: () => string;
   workspacesRoot: string;
   kbDirName: string;
   templateDir: string;
@@ -50,16 +73,195 @@ export interface KbStartupRunnerOptions {
   buildSeedTree: (dir: string) => Promise<string[]>;
 }
 
+/**
+ * The remote could not be reached or refused us: a host that is down, a DNS
+ * name that does not resolve, a token that was rotated. Told apart from every
+ * other way the phase can fail because it is the one that says nothing about
+ * the knowledge base — what we would write is not known to be wrong, we
+ * simply cannot get there right now — and so the one a boot may survive:
+ * the deployment comes up gated and unmaintained, and tries again.
+ *
+ * A {@link ClassifiedFailure} that keeps the classification the remote
+ * contact already produced when it has one — `credentials-rejected`,
+ * `not-found` — and is `unreachable` only when nothing more specific is
+ * known. The setup screen shows the remediation for THAT kind, the same one a
+ * setup-time connection test shows for the same token: a rotated token reads
+ * as "the host rejected the credentials", not as a network the server cannot
+ * reach, and the retry loop is not left re-dialing a host that will never
+ * accept it.
+ */
+export class KbRemoteUnreachableError extends ClassifiedFailure {
+  constructor(message: string, opts?: { cause?: unknown }) {
+    super(
+      message,
+      opts?.cause instanceof ClassifiedFailure ? opts.cause.failure : gitFailure('unreachable'),
+      opts,
+    );
+    this.name = 'KbRemoteUnreachableError';
+  }
+}
+
+export interface RetryOptions {
+  /** First wait before trying again. Default 30s. */
+  initialDelayMs?: number;
+  /** The wait doubles up to this. Default 10 minutes. */
+  maxDelayMs?: number;
+  /** Test seam — defaults to `setTimeout` wrapped as a promise, unref'd. */
+  sleep?: (ms: number) => Promise<void>;
+  log?: (message: string) => void;
+}
+
 export class KbStartupRunner {
   constructor(private readonly opts: KbStartupRunnerOptions) {}
+
+  /** The run in progress, so two invokers share one rather than racing clones. */
+  private inFlight: Promise<void> | null = null;
+  /** Why the last run failed, redacted; null after a run that finished. */
+  private failure: string | null = null;
+  /** The same failure classified — what the setup screen shows. */
+  private failureKind: GitFailure | null = null;
+  /** The phase's last attempt to reach the remote — for the readiness answer. */
+  private remoteContact: { at: number; ok: boolean } | null = null;
+
+  /**
+   * {@link redactSecret} plus the token in effect, which may never have reached
+   * the environment. Tokens, URL userinfo and URL query strings go — and the
+   * configured remote's own query values (a presigned remote's credential) are
+   * named as secrets too, so they are scrubbed even where git's text carries
+   * them without the URL around them.
+   */
+  private redact(text: string): string {
+    return redactSecret(text, [this.opts.gitToken?.(), ...urlQuerySecrets(this.opts.kbRepoUrl())]);
+  }
+
+  /**
+   * When this runner last tried the remote and whether it answered. The
+   * phase's `ls-remote` is often the FIRST contact a boot makes, and on a
+   * gated deployment the only one, so a readiness answer that read only the
+   * workspace layer's fetches would call an unreachable remote "ok".
+   */
+  lastRemoteContact(): { at: number; ok: boolean } | null {
+    return this.remoteContact;
+  }
+
+  /**
+   * Why the most recent run failed, or null when the last run finished — the
+   * gate reads this so a boot that survived an unreachable remote keeps the
+   * deployment shut until a later run succeeds, exactly as a failed
+   * setup-time run does.
+   */
+  lastFailure(): string | null {
+    return this.failure;
+  }
+
+  /** The most recent failure in the terms an admin can act on; null when the last run finished. */
+  lastFailureKind(): GitFailure | null {
+    return this.failureKind;
+  }
 
   /**
    * Run the whole phase. Throws to stop the boot; returns normally when the
    * KB is fully maintained (or safe boot abandoned the phase, loudly).
+   *
+   * One run at a time: a second caller — the setup save while a background
+   * retry is under way, or the reverse — joins the run in progress rather
+   * than starting another over the same clones.
    */
-  async runAll(): Promise<void> {
+  runAll(): Promise<void> {
+    this.inFlight ??= this.runAllOnce()
+      .then(() => {
+        this.failure = null;
+        this.failureKind = null;
+      })
+      .catch((err: unknown) => {
+        this.failure = this.redact(err instanceof Error ? err.message : String(err));
+        this.failureKind = failureOf(err);
+        throw err;
+      })
+      .finally(() => {
+        this.inFlight = null;
+      });
+    return this.inFlight;
+  }
+
+  /**
+   * Keep running the phase until it finishes, for a boot that survived an
+   * unreachable remote. Safe to run while the process serves, because the
+   * deployment is GATED for as long as `lastFailure` stands: no session can
+   * be holding a working clone the phase would race. Doubles the wait up to a
+   * ceiling — a host that is down for an hour is asked every ten minutes,
+   * not every thirty seconds — and stops on the first success, or on a
+   * failure that is NOT the remote being unreachable: that one says the
+   * knowledge base itself is wrong, and asking again will not change it.
+   * The timer never holds the process open.
+   */
+  retryUntilMaintained(opts: RetryOptions = {}): { stop(): void } {
+    const initial = opts.initialDelayMs ?? 30_000;
+    const max = opts.maxDelayMs ?? 10 * 60_000;
+    const log = opts.log ?? ((message: string) => startupLog.warn(message));
+    const sleep =
+      opts.sleep ??
+      ((ms: number) =>
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, ms).unref();
+        }));
+    let stopped = false;
+
+    // A rejected token is not worth asking again with: the host answers the
+    // same until the token changes, and the setup save that changes it runs
+    // the phase itself — while re-dialing with a dead token is what gets it
+    // rate-limited or locked. Such a boot still survives (the deployment
+    // comes up gated, showing that failure); it just is not re-dialed on a
+    // timer. Everything else the boot survived IS asked again: a host that
+    // could not be reached comes back, and a repository that was "not found"
+    // appears when it is created or when the token is granted access to it —
+    // neither needs a settings change on this side.
+    const worthRetrying = () => this.failureKind?.kind !== 'credentials-rejected';
+    const stopOnStanding = () => {
+      log(
+        `the retry stopped on a failure that asking again cannot change — ` +
+          `saving the setup form retries once it is fixed: ${this.failure ?? 'unknown failure'}`,
+      );
+    };
+
+    void (async () => {
+      let delay = initial;
+      if (this.failure !== null && !worthRetrying()) return stopOnStanding();
+      while (!stopped) {
+        await sleep(delay);
+        // Another caller — the setup save — may have finished the phase while
+        // this loop slept. The deployment is open then, sessions may hold
+        // clones, and one more run here would be maintenance over live work.
+        if (stopped || this.failure === null) return;
+        // Or it may have FAILED the phase with a rejected token while this
+        // loop slept: the standing failure is then one a retry cannot change,
+        // and dialing it again is what gets the token rate-limited.
+        if (!worthRetrying()) return stopOnStanding();
+        try {
+          await this.runAll();
+          log('the remote is reachable again and the knowledge base is maintained — the deployment is open.');
+          return;
+        } catch (err) {
+          // Stopped by either: a failure that is no longer the remote at all
+          // (the knowledge base itself is wrong — asking again will not change
+          // it), or a remote answer that a retry cannot change (see above).
+          if (!(err instanceof KbRemoteUnreachableError) || !worthRetrying()) return stopOnStanding();
+          delay = Math.min(delay * 2, max);
+          log(`remote still unreachable; trying again in ${Math.round(delay / 1000)}s`);
+        }
+      }
+    })();
+
+    return {
+      stop() {
+        stopped = true;
+      },
+    };
+  }
+
+  private async runAllOnce(): Promise<void> {
     if (!isBranchModelConfigured()) {
-      console.log('[kb-startup] branch model not configured yet — phase skipped until setup completes.');
+      startupLog.info('branch model not configured yet — phase skipped until setup completes.');
       return;
     }
     // A branch model without a repository URL is a PARTIALLY set-up deployment
@@ -69,13 +271,13 @@ export class KbStartupRunner {
     // needs stays unreachable. The setup-completion invocation catches up the
     // moment the URL exists.
     if (this.opts.kbRepoUrl().trim() === '') {
-      console.log('[kb-startup] KB repository URL not configured yet — phase skipped until setup completes.');
+      startupLog.info('KB repository URL not configured yet — phase skipped until setup completes.');
       return;
     }
     const safeBoot = process.env.KB_SAFE_BOOT === '1';
     if (safeBoot) {
-      console.warn(
-        '[kb-startup] KB_SAFE_BOOT=1 — failures will abandon maintenance instead of stopping the boot. ' +
+      startupLog.warn(
+        'KB_SAFE_BOOT=1 — failures will abandon maintenance instead of stopping the boot. ' +
           'Remove the variable once the rescue is done.',
       );
     }
@@ -108,18 +310,20 @@ export class KbStartupRunner {
         const started = Date.now();
         const result = await step.run(ctx).catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err);
-          throw new Error(redactSecret(`KB startup step "${step.name}" failed: ${msg}`));
+          const raw = `KB startup step "${step.name}" failed: ${msg}`;
+          // A git failure inside the step was classified where git's words were
+          // still whole; anything else is read here, before the scrub.
+          const failure = err instanceof ClassifiedFailure ? err.failure : classifyGitFailure(raw);
+          throw new ClassifiedFailure(this.redact(raw), failure, { cause: err });
         });
         const took = `${((Date.now() - started) / 1000).toFixed(1)}s`;
         if (result.outcome === 'stopBoot') {
-          // Redacted like every other exit: the message travels beyond logs
-          // (the setup status endpoint surfaces it to admins).
-          throw new Error(
-            redactSecret(`KB startup step "${step.name}" stopped the boot: ${result.message}`),
-          );
+          // Redacted like every other exit: the message reaches the log.
+          const raw = `KB startup step "${step.name}" stopped the boot: ${result.message}`;
+          throw new ClassifiedFailure(this.redact(raw), classifyGitFailure(raw));
         }
         if (result.outcome === 'skipped') {
-          console.warn(`[kb-startup] ${step.name}: skipped — ${result.reason} (${took})`);
+          startupLog.warn(`${step.name}: skipped — ${result.reason} (${took})`);
           for (const h of handles.values()) h.discardBuffer();
           continue;
         }
@@ -138,11 +342,11 @@ export class KbStartupRunner {
             ? 'no changes'
             : `${changes} change${changes === 1 ? '' : 's'} on ${branches} branch${branches === 1 ? '' : 'es'}`;
         if (result.outcome === 'partial') {
-          console.warn(`[kb-startup] ${step.name}: partial — ${result.reason} (${scope}, ${took})`);
+          startupLog.warn(`${step.name}: partial — ${result.reason} (${scope}, ${took})`);
         } else {
           // One line per step even when nothing happened: a silent phase and a
           // step that never ran look identical from the boot log otherwise.
-          console.log(`[kb-startup] ${step.name}: ok — ${scope} (${took})`);
+          startupLog.info(`${step.name}: ok — ${scope} (${took})`);
         }
         for (const h of handles.values()) await h.applyBuffer();
       }
@@ -151,11 +355,20 @@ export class KbStartupRunner {
         await this.finalize(h);
       }
     } catch (err) {
-      if (!safeBoot) throw err;
-      console.error(
-        '[kb-startup] SAFE BOOT: abandoning the phase after a failure — the KB is UNMAINTAINED this run.',
-        redactSecret(err instanceof Error ? err.message : String(err)),
-      );
+      // Every exit carries a scrubbed message: the port scrubs only what the
+      // environment holds, and a token saved on the setup screen is the one
+      // this runner alone knows about. The classification rides along, read
+      // from text no scrub had touched.
+      const msg = this.redact(err instanceof Error ? err.message : String(err));
+      if (!safeBoot) {
+        // An unreachable remote keeps its own type: it is the one failure a
+        // boot survives, and the callers tell it apart by that type.
+        if (err instanceof KbRemoteUnreachableError) throw err;
+        throw new ClassifiedFailure(msg, failureOf(err), { cause: err });
+      }
+      startupLog.error('SAFE BOOT: abandoning the phase after a failure — the KB is UNMAINTAINED this run.', {
+        detail: msg,
+      });
       // Reset only DIRTY handles — ones an apply at least began on (the mark
       // is set before the first op, so a mid-apply failure is covered). A
       // clone a step merely read must NOT be swept: sweeping it would disturb
@@ -165,7 +378,7 @@ export class KbStartupRunner {
       for (const h of handles.values()) await h.resetUncommitted().catch(() => {});
       return;
     }
-    console.log(`[kb-startup] phase complete (${((Date.now() - phaseStart) / 1000).toFixed(1)}s).`);
+    startupLog.info(`phase complete (${((Date.now() - phaseStart) / 1000).toFixed(1)}s).`);
   }
 
   /**
@@ -177,7 +390,29 @@ export class KbStartupRunner {
   private async ensureRemote(): Promise<Set<string>> {
     const url = this.opts.kbRepoUrl();
     const user = this.opts.gitUsername();
-    const heads = await lsRemoteHeads(url, user);
+    // The first question asked of the remote, and the one that answers
+    // "can we get there at all". Everything after it — seeding, pushing —
+    // fails for reasons of ours; this fails for reasons of the host's.
+    let heads: Set<string>;
+    try {
+      heads = await lsRemoteHeads(this.opts.gitRunner, url, user);
+      this.remoteContact = { at: Date.now(), ok: true };
+    } catch (err) {
+      // Git that never ran — no executable, a spawn refused — is a fact about
+      // this host, not the remote, and retrying the remote would not change
+      // it: that failure stops the boot with its own words. What git itself
+      // reported (an exit) or a deadline is the remote's answer, and survivable.
+      // The port's error is the classified failure's cause (see `kb-git.ts`).
+      const run = err instanceof ClassifiedFailure ? err.cause : err;
+      if (run instanceof GitRunError && run.exitCode === undefined && !run.timedOut) throw err;
+      this.remoteContact = { at: Date.now(), ok: false };
+      throw new KbRemoteUnreachableError(
+        `The knowledge-base remote could not be reached: ${this.redact(
+          err instanceof Error ? err.message : String(err),
+        )}`,
+        { cause: err },
+      );
+    }
     const protectedBranches = this.opts.protectedBranches();
     const defaultBranch = this.opts.defaultBranch();
 
@@ -188,23 +423,23 @@ export class KbStartupRunner {
         );
       }
       const seededByOther = await withTempDir(async (dir) => {
-        await git(dir, user, ['init', '-b', defaultBranch]);
-        await stampIdentity(dir, user);
+        await git(this.opts.gitRunner, dir, user,['init', '-b', defaultBranch]);
+        await stampIdentity(this.opts.gitRunner, dir, user);
         const generated = await this.opts.buildSeedTree(dir);
-        await git(dir, user, ['add', '-A']);
+        await git(this.opts.gitRunner, dir, user,['add', '-A']);
         // The template may ship a `.gitignore` whose rules happen to match a
         // GENERATED seed file (roles.yaml, a reserved root's .gitkeep) —
         // `add -A` would silently drop it from the seed commit. Force-add
         // exactly what the builder generated; `-f` on an already-staged path
         // is a no-op.
-        if (generated.length > 0) await git(dir, user, ['add', '-f', '--', ...generated]);
-        await git(dir, user, ['commit', '-m', 'Seed knowledge base from Bevel template']);
+        if (generated.length > 0) await git(this.opts.gitRunner, dir, user,['add', '-f', '--', ...generated]);
+        await git(this.opts.gitRunner, dir, user,['commit', '-m', 'Seed knowledge base from Bevel template']);
         for (const b of protectedBranches) {
-          if (b !== defaultBranch) await git(dir, user, ['branch', b]);
+          if (b !== defaultBranch) await git(this.opts.gitRunner, dir, user,['branch', b]);
         }
-        await git(dir, user, ['remote', 'add', 'origin', url]);
+        await git(this.opts.gitRunner, dir, user,['remote', 'add', 'origin', url]);
         try {
-          await git(dir, user, ['push', '-u', 'origin', ...protectedBranches]);
+          await git(this.opts.gitRunner, dir, user,['push', '-u', 'origin', ...protectedBranches]);
           return null;
         } catch (err) {
           // Two replicas racing to seed the same empty remote: both saw it
@@ -217,18 +452,18 @@ export class KbStartupRunner {
           // who seeded. A foreign seed is just an "existing remote"
           // discovered late, the same contract as a repo populated before
           // boot.
-          const reread = await lsRemoteHeads(url, user);
+          const reread = await lsRemoteHeads(this.opts.gitRunner, url, user);
           if (protectedBranches.every((b) => reread.has(b))) return reread;
           throw err;
         }
       });
       if (seededByOther) {
-        console.log(
-          '[kb-startup] seed push rejected — another replica seeded the remote first; continuing with its branches.',
+        startupLog.info(
+          'seed push rejected — another replica seeded the remote first; continuing with its branches.',
         );
         return seededByOther;
       }
-      console.log(`[kb-startup] seeded empty KB remote with branches: ${protectedBranches.join(', ')}`);
+      startupLog.info(`seeded empty KB remote with branches: ${protectedBranches.join(', ')}`);
       return new Set(protectedBranches);
     }
 
@@ -238,11 +473,11 @@ export class KbStartupRunner {
     for (const b of protectedBranches) {
       if (heads.has(b)) continue;
       await withTempDir(async (dir) => {
-        await git(dir, user, ['clone', '--depth', '1', '-b', base, url, 'seed']);
-        await git(path.join(dir, 'seed'), user, ['push', 'origin', `HEAD:refs/heads/${b}`]);
+        await git(this.opts.gitRunner, dir, user,['clone', '--depth', '1', '-b', base, url, 'seed']);
+        await git(this.opts.gitRunner, path.join(dir, 'seed'), user,['push', 'origin', `HEAD:refs/heads/${b}`]);
       });
       heads.add(b);
-      console.log(`[kb-startup] created missing protected branch "${b}" from "${base}"`);
+      startupLog.info(`created missing protected branch "${b}" from "${base}"`);
     }
     return heads;
   }
@@ -252,7 +487,12 @@ export class KbStartupRunner {
     const handleFor = (branch: string): BranchHandle => {
       let h = handles.get(branch);
       if (!h) {
-        h = new BranchHandle(branch, protectedSet.has(branch), () => this.ensureClone(branch));
+        h = new BranchHandle(
+          branch,
+          protectedSet.has(branch),
+          () => this.ensureClone(branch),
+          this.opts.gitRunner,
+        );
         handles.set(branch, h);
       }
       return h;
@@ -282,18 +522,18 @@ export class KbStartupRunner {
     if (!hasGit) {
       await fs.mkdir(workspaceDir, { recursive: true });
       await fs.rm(repoDir, { recursive: true, force: true });
-      await git(workspaceDir, user, ['clone', '-b', branch, this.opts.kbRepoUrl(), repoDir]);
-      await git(repoDir, user, ['config', 'core.longpaths', 'true']);
-      await stampIdentity(repoDir, user);
+      await git(this.opts.gitRunner, workspaceDir, user,['clone', '-b', branch, this.opts.kbRepoUrl(), repoDir]);
+      await git(this.opts.gitRunner, repoDir, user,['config', 'core.longpaths', 'true']);
+      await stampIdentity(this.opts.gitRunner, repoDir, user);
       return repoDir;
     }
-    await git(repoDir, user, ['fetch', 'origin', branch]);
-    const local = (await git(repoDir, user, ['rev-parse', 'HEAD'])).trim();
-    const remote = (await git(repoDir, user, ['rev-parse', `origin/${branch}`])).trim();
+    await git(this.opts.gitRunner, repoDir, user,['fetch', 'origin', branch]);
+    const local = (await git(this.opts.gitRunner, repoDir, user,['rev-parse', 'HEAD'])).trim();
+    const remote = (await git(this.opts.gitRunner, repoDir, user,['rev-parse', `origin/${branch}`])).trim();
     if (local !== remote) {
-      const mergeBase = (await git(repoDir, user, ['merge-base', 'HEAD', `origin/${branch}`])).trim();
+      const mergeBase = (await git(this.opts.gitRunner, repoDir, user,['merge-base', 'HEAD', `origin/${branch}`])).trim();
       if (mergeBase === local) {
-        await git(repoDir, user, ['reset', '--hard', `origin/${branch}`]);
+        await git(this.opts.gitRunner, repoDir, user,['reset', '--hard', `origin/${branch}`]);
       }
       // Ahead or diverged: committed-but-unpushed work lives here; not ours to discard.
     }
@@ -305,12 +545,12 @@ export class KbStartupRunner {
     if (!h.dirty) return;
     const repoDir = await h.repoDir();
     const user = this.opts.gitUsername();
-    await stampIdentity(repoDir, user);
+    await stampIdentity(this.opts.gitRunner, repoDir, user);
     // Drop any PRE-EXISTING index state first (a crashed tool may have left
     // edits staged): `git commit` publishes the whole index, and the phase
     // must commit exactly its own staged set. The edits stay in the working
     // tree, unstaged and unpublished — preserved, not adopted.
-    await git(repoDir, user, ['reset', '-q']);
+    await git(this.opts.gitRunner, repoDir, user,['reset', '-q']);
     // Stage ONLY the paths the phase's ops touched — sources and targets both
     // (a move's `from` and a remove's path stage as deletions; `add -A -- <path>`
     // handles a deleted path, `-f` handles one a branch `.gitignore` matches).
@@ -326,7 +566,7 @@ export class KbStartupRunner {
     for (const rel of h.appliedPaths()) {
       const onDisk = await fs.access(path.join(repoDir, rel)).then(() => true, () => false);
       if (!onDisk) {
-        const known = (await git(repoDir, user, ['ls-files', '--', `:(literal)${rel}`])).trim();
+        const known = (await git(this.opts.gitRunner, repoDir, user,['ls-files', '--', `:(literal)${rel}`])).trim();
         if (known === '') continue;
       }
       touched.push(rel);
@@ -334,7 +574,7 @@ export class KbStartupRunner {
     // `:(literal)` — these are file paths, not pathspecs; chunked so a large
     // migration cannot overflow the platform's argv limit.
     for (let i = 0; i < touched.length; i += 100) {
-      await git(repoDir, user, [
+      await git(this.opts.gitRunner, repoDir, user,[
         'add',
         '-A',
         '-f',
@@ -345,7 +585,7 @@ export class KbStartupRunner {
     // Exit 0 = nothing staged: the ops converged to no byte changes. (An
     // errored diff reads as "something staged"; a genuinely broken repo then
     // fails loudly at commit rather than being silently skipped here.)
-    const nothingStaged = await git(repoDir, user, ['diff', '--cached', '--quiet']).then(
+    const nothingStaged = await git(this.opts.gitRunner, repoDir, user,['diff', '--cached', '--quiet']).then(
       () => true,
       () => false,
     );
@@ -354,11 +594,11 @@ export class KbStartupRunner {
     // can undo exactly it — and ONLY it. Resetting to origin/<name> instead
     // would also nuke a pre-existing committed-but-unpushed (AHEAD) commit
     // that ensureClone deliberately preserved.
-    const preCommit = (await git(repoDir, user, ['rev-parse', 'HEAD'])).trim();
-    await git(repoDir, user, ['commit', '-m', h.commitMessage()]);
+    const preCommit = (await git(this.opts.gitRunner, repoDir, user,['rev-parse', 'HEAD'])).trim();
+    await git(this.opts.gitRunner, repoDir, user,['commit', '-m', h.commitMessage()]);
     try {
-      await git(repoDir, user, ['push', 'origin', `HEAD:refs/heads/${h.name}`]);
-      console.log(`[kb-startup] ${h.name}: ${h.commitSubject()}`);
+      await git(this.opts.gitRunner, repoDir, user,['push', 'origin', `HEAD:refs/heads/${h.name}`]);
+      startupLog.info(`${h.name}: ${h.commitSubject()}`);
       // Committed AND pushed: nothing of the phase remains uncommitted here,
       // so a LATER branch's failure under KB_SAFE_BOOT must not rewind this
       // clone to its pre-phase sha — that would leave it behind what origin
@@ -378,11 +618,10 @@ export class KbStartupRunner {
       if (!/non-fast-forward|fetch first/i.test(msg)) {
         throw err;
       }
-      console.warn(
-        `[kb-startup] ${h.name}: push rejected (concurrent replica?) — rolling back local commit.`,
-        redactSecret(msg),
-      );
-      await git(repoDir, user, ['reset', '--hard', preCommit]).catch(() => {});
+      startupLog.warn(`${h.name}: push rejected (concurrent replica?) — rolling back local commit.`, {
+        detail: this.redact(msg),
+      });
+      await git(this.opts.gitRunner, repoDir, user, ['reset', '--hard', preCommit]).catch(() => {});
     }
   }
 }
@@ -405,6 +644,7 @@ class BranchHandle implements KbBranch {
     readonly name: string,
     readonly isProtected: boolean,
     cloneOnce: () => Promise<string>,
+    private readonly gitRunner: IGitRunner,
   ) {
     this.clone = lazyOnce(async () => {
       const dir = await cloneOnce();
@@ -415,7 +655,7 @@ class BranchHandle implements KbBranch {
       // resetUncommitted resets to THIS sha rather than HEAD, so a finalize
       // commit that was created but failed to push rolls back too instead of
       // surviving as a stranded local commit no later boot would ever push.
-      this.prePhaseSha = (await git(dir, 'x-access-token', ['rev-parse', 'HEAD'])).trim();
+      this.prePhaseSha = (await git(this.gitRunner, dir, 'x-access-token',['rev-parse', 'HEAD'])).trim();
       return dir;
     });
   }
@@ -537,12 +777,12 @@ class BranchHandle implements KbBranch {
   async resetUncommitted(): Promise<void> {
     if (!this.dirty) return;
     const repoDir = await this.repoDir();
-    await git(repoDir, 'x-access-token', ['reset', '--hard', this.prePhaseSha ?? 'HEAD']).catch(() => {});
+    await git(this.gitRunner, repoDir, 'x-access-token',['reset', '--hard', this.prePhaseSha ?? 'HEAD']).catch(() => {});
     if (this.applied.size > 0) {
       // `:(literal)` — these are file paths, not pathspecs: a name that
       // happens to contain glob or magic characters must match itself only,
       // never broaden the cleanup.
-      await git(repoDir, 'x-access-token', [
+      await git(this.gitRunner, repoDir, 'x-access-token',[
         'clean',
         '-fdx',
         '--',

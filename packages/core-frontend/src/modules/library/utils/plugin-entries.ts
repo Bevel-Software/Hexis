@@ -24,11 +24,32 @@ export interface PluginEntry {
 }
 
 /**
+ * The "Owned by me" nav row's numbers, from the two slices its page lists —
+ * the owned cards and the owned plugin rows — so the count is the pilled
+ * items and cannot drift into a different meaning of "owned". `attention` is
+ * the owned cards that need a person.
+ */
+export function ownedLensOf(
+  items: readonly LibraryItem[],
+  summaries: readonly PluginSummary[],
+  teams: readonly TeamAccess[],
+  personalLabel: string,
+): { count: number; attention: number } {
+  const filter: LibraryFilter = { kind: 'owned' };
+  const cards = filterLibraryItems(items, filter, '', teams);
+  const plugins = pluginEntriesFor(items, summaries, filter, teams, '', personalLabel);
+  return {
+    count: cards.length + plugins.length,
+    attention: cards.filter((i) => i.status.state !== 'ok').length,
+  };
+}
+
+/**
  * The plugin rows a gallery filter shows.
  *
  *  - Everything: the caller's own space, then every plugin the index lists,
  *    members' and locked alike — locked ones are still places on the map.
- *  - Owned by me: the plugins the caller manages, own space first.
+ *  - Owned by me: the plugins the caller owns (`isOwner`), own space first.
  *  - A team: the plugins the team can read, as the server named them; the
  *    counts on those rows are the TEAM's — how many of the plugin's skills
  *    and tools are in the team's slice — so a row never claims more than
@@ -79,7 +100,8 @@ export function pluginEntriesFor(
     // Membership is READ, never write: an admin rescued into a plugin's
     // rules can manage a folder they cannot open, and that row is locked.
     const member = summary ? summary.canRead || hasItems : hasItems;
-    if (filter.kind === 'owned' && !summary?.canWrite) continue;
+    // Ownership, not management: the same `isOwner` the row's Owner pill shows.
+    if (filter.kind === 'owned' && !summary?.isOwner) continue;
     if (filter.kind === 'team' && !team?.plugins.includes(name)) continue;
     entries.push({
       name,

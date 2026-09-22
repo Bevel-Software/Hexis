@@ -80,9 +80,30 @@ export function registerToolManualsTools(
       'from its frontmatter `write:`/`owner:` verbs and the access.md chain — NOT a platform role), which ' +
       'is exactly what gates setting its shared secrets: the people who manage the file configure the tool. ' +
       'Secret VALUES are never returned and can never be set through a tool — an admin enters them in the ' +
-      'tool editor; users sign in on /connect.',
+      'tool editor; users sign in on /connect. ' +
+      '`invalid` names any `.tool` file the scan REFUSED, with the reason and its location: those files ' +
+      'are the only ones missing — every other tool is listed and callable, and a refused file is listed ' +
+      'again as a normal tool on the next call once it is fixed (or removed), with nothing to restart or ' +
+      'reconnect. ' +
+      'The listing is the RELEASED catalog, built from the default branch only: a server or `.tool` you ' +
+      'declared on a draft is not listed, not callable and not signed-in-able until that draft is merged. ' +
+      'Pass `branch` (the draft you wrote the declaration on) and `onBranchOnly` names every tool declared ' +
+      'there that the default branch does not serve yet — open a change request, then ask the user to ' +
+      'review and merge it in the app to activate it.',
     path: '/api/agent/tools/list_tool_setup',
-    inputs: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    inputs: {
+      type: 'object',
+      properties: {
+        branch: {
+          type: 'string',
+          description:
+            'Optional: the draft branch you are working on. Tools declared there but not yet on the default ' +
+            'branch are reported in `onBranchOnly`. Omit (or pass the default branch) for the catalog alone.',
+        },
+      },
+      required: [],
+      additionalProperties: false,
+    },
     outputs: {
       type: 'object',
       properties: {
@@ -125,8 +146,43 @@ export function registerToolManualsTools(
             required: ['slug', 'name', 'path', 'type', 'canWrite', 'variables'],
           },
         },
+        invalid: {
+          type: 'array',
+          description:
+            '`.tool` files the scan refused — the ONLY tools missing from `tools`. Each names the file and ' +
+            'why it was refused, with the line/column or field where the validation failed. Fix the file (or ' +
+            'delete it) and the next call lists it as a normal tool. Never contains a secret value.',
+          items: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', description: 'KB path of the refused `.tool` file (read it with `read_file`).' },
+              reason: { type: 'string', description: 'The validation message, with its location where there is one.' },
+            },
+            required: ['path', 'reason'],
+          },
+        },
+        onBranchOnly: {
+          type: 'array',
+          description:
+            'Tools declared on `branch` that the default branch does not serve yet — absent from `tools` and ' +
+            'from every tool surface until the branch is merged. Empty without `branch`.',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              path: { type: 'string' },
+              type: { type: 'string' },
+              branch: { type: 'string' },
+            },
+            required: ['name', 'path', 'type', 'branch'],
+          },
+        },
+        note: {
+          type: 'string',
+          description: 'Present when `onBranchOnly` is non-empty: what it takes for those tools to go live.',
+        },
       },
-      required: ['tools'],
+      required: ['tools', 'invalid', 'onBranchOnly'],
     },
     tags: ['tools'],
   });
@@ -135,8 +191,16 @@ export function registerToolManualsTools(
   router.post(
     '/agent/tools/list_tool_setup',
     toolAuth,
-    toolHandler(async (_args, ctx: ToolContext) => {
-      const manuals = await toolManualService.listAccessible(ctx.user.email);
+    toolHandler(async (args, ctx: ToolContext) => {
+      // The in-app agent is focused on its own draft; an external caller names it.
+      const branch = typeof args.branch === 'string' && args.branch ? args.branch : ctx.focusedBranch;
+      // The catalog comes back whole — what parsed AND what was refused — from
+      // ONE scan, so the refused files cost no second walk of the workspace and
+      // the two halves cannot disagree about which files made it.
+      const [{ tools: manuals, invalid }, pending] = await Promise.all([
+        toolManualService.listAccessibleCatalog(ctx.user.email),
+        branch ? toolManualService.listDeclaredOnlyOnBranch(ctx.user.email, branch) : Promise.resolve([]),
+      ]);
       const allKeys = manuals.flatMap((m) => (m.variables ?? []).map((v) => varKey(m.name, v.name)));
       const status = await deps.variableStatus.statusFor(ctx.user.id, allKeys);
       const statusByKey = new Map(status.map((s) => [s.key, s]));
@@ -163,7 +227,18 @@ export function registerToolManualsTools(
           }),
         })),
       );
-      return { tools };
+      const onBranchOnly = pending.map((p) => ({ ...p, branch: branch! }));
+      if (onBranchOnly.length === 0) return { tools, invalid, onBranchOnly };
+      return {
+        tools,
+        invalid,
+        onBranchOnly,
+        note:
+          `${onBranchOnly.map((p) => `\`${p.name}\``).join(', ')} ${onBranchOnly.length === 1 ? 'is' : 'are'} declared on ` +
+          `\`${branch}\` only. Tools are served from \`${DEFAULT_BRANCH}\`, so ${onBranchOnly.length === 1 ? 'it stays' : 'they stay'} ` +
+          'unlisted, uncallable and without a sign-in until that branch is merged: open a change request with ' +
+          `\`open_change_request\` (target \`${DEFAULT_BRANCH}\`), then ask the user to review and merge it in the app.`,
+      };
     }),
   );
 }

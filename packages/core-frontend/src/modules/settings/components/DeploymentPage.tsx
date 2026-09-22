@@ -1,10 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Banner, Button } from '../../../shared/components';
 import { useAdmin } from '../../admin/state/admin.context';
-import { fetchSetupStatus, type SetupStatus } from '../../setup/services/setup.api';
+import { useSetupStatus } from '../../setup/hooks/useSetupStatus';
 import { SetupScreen } from '../../setup/components/SetupScreen';
-import { ClaudeConnectionCard } from './ClaudeConnectionCard';
 
 /**
  * Deployment settings, routed at `/deployment` — the first-run setup screen
@@ -29,25 +27,11 @@ import { ClaudeConnectionCard } from './ClaudeConnectionCard';
  */
 export function DeploymentPage() {
   const { isAdmin } = useAdmin();
-  const [status, setStatus] = useState<SetupStatus | null>(null);
-  const [failed, setFailed] = useState(false);
-  const [loaded, setLoaded] = useState(false);
-
-  const refresh = useCallback(() => {
-    // Non-admins never fetch: the endpoint would answer them safely (status
-    // without settings), but this page has already told them it is not
-    // theirs — a request whose answer nothing renders is noise.
-    if (!isAdmin) return;
-    fetchSetupStatus()
-      .then((s) => {
-        setStatus(s);
-        setFailed(false);
-      })
-      .catch(() => setFailed(true))
-      .finally(() => setLoaded(true));
-  }, [isAdmin]);
-
-  useEffect(refresh, [refresh]);
+  // Read the shared way (`useSetupStatus`: latest read wins, a failed read
+  // keeps the last status). Non-admins never read: the endpoint would answer
+  // them safely (status without settings), but this page has already told them
+  // it is not theirs — a request whose answer nothing renders is noise.
+  const { status, failed, loaded, refresh } = useSetupStatus(isAdmin);
 
   if (!isAdmin) {
     return (
@@ -81,22 +65,18 @@ export function DeploymentPage() {
         </Banner>
       )}
 
+      {/* The Marketplace section (Claude registration) renders inside the
+          screen, below its form — the same place it has on first run. */}
       {loaded && status?.settings && (
         <div className="mt-6">
           <SetupScreen
             settings={status.settings}
             sync={status.sync}
+            oidcVerification={status.oidcVerification}
+            kbInit={status.kbInit}
             onSaved={refresh}
             variant="settings"
           />
-        </div>
-      )}
-
-      {/* Below the settings form, not inside it: these are generated, not
-          typed — a copy source for Claude's admin settings, with one verb. */}
-      {loaded && status?.settings && (
-        <div className="mt-10">
-          <ClaudeConnectionCard />
         </div>
       )}
     </PageShell>

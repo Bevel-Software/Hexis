@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { readFileOnBranch } from '../services/change-requests.api';
+import { describeReadFailure } from '../services/denied-file.api';
+import type { ReadFailure } from '../utils/readFailure';
 
 /**
  * A read that has landed, or the fact that it hasn't.
@@ -17,10 +19,15 @@ export interface BranchFileRead {
   content: string | null;
   /** True once the read SETTLED as an error — a definitive "no", not a wait. */
   failed: boolean;
+  /**
+   * WHY it failed, set whenever `failed` is. A permission denial and a broken
+   * read are answered by different things — a person, or another attempt — so
+   * a caller holding only "failed" can say nothing useful about either.
+   */
+  failure?: ReadFailure;
 }
 
 const PENDING: BranchFileRead = { content: null, failed: false };
-const FAILED: BranchFileRead = { content: null, failed: true };
 
 /**
  * The file's RAW text on the default branch.
@@ -115,13 +122,19 @@ export function useFileOnBranchRead(
         cache.current.set(key, { content, failed: false });
         arrived((n) => n + 1);
       })
-      .catch(() => {
+      .catch((err: unknown) =>
         // NOT `{ content: '' }`: an empty string would diff as "the whole file
         // was deleted". The failure is recorded as a failure so the caller can
-        // say so.
-        cache.current.set(key, FAILED);
-        arrived((n) => n + 1);
-      });
+        // say so — and DESCRIBED first, because a denial and an outage are
+        // different sentences. Describing costs a round trip of its own, and
+        // the key deliberately stays absent (so, pending) until it lands: a
+        // caller that published "couldn't be read" and then rewrote it as
+        // "you don't have access" would change the reason under the reader.
+        describeReadFailure(err, branch, repoRelativePath).then((failure) => {
+          cache.current.set(key, { content: null, failed: true, failure });
+          arrived((n) => n + 1);
+        }),
+      );
   }, [branch, repoRelativePath, key]);
 
   // No path (or no branch) is not a failure — it is "nothing was asked for".

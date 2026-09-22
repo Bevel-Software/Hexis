@@ -1,4 +1,7 @@
 import { and, asc, eq } from 'drizzle-orm';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('review-workflow');
 import type {
   AuthUser,
   CancelPrResult,
@@ -11,10 +14,9 @@ import type {
   PullRequestState,
 } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
-import { changeRequests, prComments, prFileApprovals, prMergeLog } from '../../database/schema.js';
+import { changeRequests, prComments, prFileApprovals, prMergeLog, users } from '../../database/schema.js';
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import { isAccessMdPath } from '../../access-model/access-grammar.js';
 import type { GitService } from '../git/git.service.js';
 import {
   ChangeRequestConflictsError,
@@ -22,12 +24,19 @@ import {
   WorkflowValidationError,
 } from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import { hashEmail } from '../../../shared/hash-email.js';
+import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import type {
   IReviewWorkflowService,
   MergeGateInput,
   MergeGateResult,
 } from './review-workflow.interface.js';
+import {
+  APPROVAL_LOCK_TIMEOUT_MS,
+  isApprovalLockTimeout,
+  takeApprovalLock,
+  takeEveryApprovalLock,
+  type ApprovalTx,
+} from './approval-lock.js';
 
 // Merge commit (not squash): change requests can carry many meaningful commits
 // (e.g. a bulk node upload split across files) and the KB's history is the audit
@@ -35,8 +44,6 @@ import type {
 // commit on the branch.
 const MERGE_METHOD = 'merge' as const;
 const EVERYONE_CANONICAL = 'everyone';
-/** Repo-relative path of the access-config file the resolver gates as Admin-only. */
-const ROLES_YAML = 'roles.yaml';
 
 function redactTokens(msg: string): string {
   const tokens = [process.env.GITHUB_TOKEN, process.env.GH_TOKEN].filter(
@@ -52,6 +59,22 @@ class CommentAuthError extends WorkflowDomainError {
       reason === 'not-found' ? 404 : 403,
     );
     this.name = 'CommentAuthError';
+  }
+}
+
+/**
+ * Another approval write on this same request is holding the lock and did not
+ * let go. Retryable BY THE CALLER, and said in words a business user can act
+ * on: nothing was written, and trying again is the whole fix.
+ */
+class ApprovalBusyError extends WorkflowDomainError {
+  constructor() {
+    super(
+      'This change request is being updated right now — try that again in a moment.',
+      503,
+      { kind: 'approval-write-busy', retryable: true },
+    );
+    this.name = 'ApprovalBusyError';
   }
 }
 
@@ -80,6 +103,24 @@ class ApprovalAuthError extends WorkflowDomainError {
     }[reason];
     super(msg, status);
     this.name = 'ApprovalAuthError';
+  }
+}
+
+/**
+ * The account this approval would be recorded in the name of is gone — erased
+ * between the request being authenticated and its write reaching the table.
+ *
+ * 401 and not 403: the same answer `requireUser` gives a token whose account
+ * no longer exists, which is what the NEXT request from this caller will get.
+ * Signing in again makes a fresh account at the same address, and approvals
+ * made then are that new person's.
+ */
+class ApprovalAccountGoneError extends WorkflowDomainError {
+  constructor() {
+    super('This account no longer exists — sign in again to approve.', 401, {
+      kind: 'approval-account-erased',
+    });
+    this.name = 'ApprovalAccountGoneError';
   }
 }
 
@@ -147,33 +188,19 @@ function assertValidUuid(value: unknown, fieldName: string): asserts value is st
 }
 
 /**
- * The access-config files the resolver treats as Admin-only to write
- * (`roles.yaml` decides admin membership; any `access.md` decides per-path
- * grants). These are NOT `.md` KB nodes but ARE the most security-critical
- * files in the repo, so the approval gate must bind them too — without this a
- * `roles.yaml`-only change request rides into a protected branch with no
- * approval and no admin check, letting its author self-promote to Admin.
- * Mirrors the resolver's own `relativePath === 'roles.yaml' || isAccessMdPath`
- * special-cases (access-control.service.ts). Paths are repo-relative, the same
- * form GitHub reports a PR's changed files in.
+ * Approval enforcement binds every touched file that has someone eligible to
+ * approve it per the access tree — Markdown notes, the access-config files
+ * (`roles.yaml`, `access.md`), extensionless and binary files alike. The
+ * extension plays no part: a `report.pdf` or a `Makefile` in an owned folder
+ * is as much its owners' decision as a note beside it, and an extension check
+ * let a request touching only such files merge with no approval at all. Files
+ * with no eligible approvers are outside the gate — nobody could approve them,
+ * so counting them would deadlock the request. Shared between the gate and
+ * any call-site that needs the "does this participate in approvals" question
+ * answered consistently.
  */
-function isAccessConfigPath(p: string): boolean {
-  return p === ROLES_YAML || isAccessMdPath(p);
-}
-
-/**
- * Approval enforcement binds markdown KB nodes AND the access-config files
- * (`roles.yaml`, `access.md`) that have someone eligible to approve them per
- * the access tree. Files with no eligible approvers, and other non-md files,
- * are outside the gate — they neither warn nor block. Shared between the gate
- * and any call-site that needs the "does this participate in approvals"
- * question answered consistently.
- */
-function isGateRelevant(a: FileApprovalState): boolean {
-  const hasEligible =
-    a.eligibleApprovers.roles.length > 0 || a.eligibleApprovers.users.length > 0;
-  const lower = a.path.toLowerCase();
-  return hasEligible && (lower.endsWith('.md') || isAccessConfigPath(a.path));
+function isGateRelevant(a: Pick<FileApprovalState, 'eligibleApprovers'>): boolean {
+  return a.eligibleApprovers.roles.length > 0 || a.eligibleApprovers.users.length > 0;
 }
 
 /** Human-friendly label for the eligible-approver set, used in gate warnings. */
@@ -188,6 +215,48 @@ function eligibleLabel(a: FileApprovalState): string {
     );
   }
   return parts.join('; ') || 'someone with write access';
+}
+
+/**
+ * The gate split by what can override it: `hardReasons` (closed, merged, no
+ * files) refuse every merge; `warnings` (missing approvals) refuse too, but
+ * an admin may merge past them with the bypass flag.
+ */
+function evaluateGateParts(input: MergeGateInput): { hardReasons: string[]; warnings: string[] } {
+  const reasons: string[] = [];
+  const warnings: string[] = [];
+
+  if (input.state === 'merged') {
+    reasons.push('This pull request has already been merged.');
+  } else if (input.state === 'closed') {
+    reasons.push('This pull request is closed.');
+  }
+
+  // Empty approvals = empty files array = nothing to approve. That's not
+  // mergeable either — a PR that touches no files shouldn't be opened in
+  // the first place, let alone merged.
+  if (input.approvals.length === 0 && input.state === 'open') {
+    reasons.push('This pull request has no file changes to approve.');
+  }
+
+  // Ownership enforcement binds every file with an eligible approver,
+  // whatever its extension; files nobody can approve are silent. For the
+  // gate-relevant files, "owner hasn't approved the current head" is a
+  // missing approval — it blocks, and only an admin bypass merges past it.
+  for (const a of input.approvals) {
+    if (!isGateRelevant(a)) continue;
+    if (a.isApproved) continue;
+
+    const hasStale = a.approvedBy.some((e) => e.isStale);
+    const label = eligibleLabel(a);
+    if (hasStale) {
+      warnings.push(`${label} need to re-approve ${a.path} after the latest push.`);
+    } else {
+      warnings.push(`Waiting on approval for ${a.path} from ${label}.`);
+    }
+  }
+
+  return { hardReasons: reasons, warnings };
 }
 
 function assertValidPath(p: unknown): asserts p is string | undefined {
@@ -270,7 +339,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .insert(prComments)
       .values({
         prNumber,
-        authorEmail: user.email.trim().toLowerCase(),
+        authorEmail: canonicalEmail(user.email),
         authorName: user.name,
         path: input.path ?? null,
         line: input.line ?? null,
@@ -299,7 +368,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .where(and(eq(prComments.id, commentId), eq(prComments.prNumber, prNumber)))
       .limit(1);
     if (existing.length === 0) throw new CommentAuthError('not-found');
-    if (existing[0].authorEmail !== user.email.trim().toLowerCase()) {
+    if (existing[0].authorEmail !== canonicalEmail(user.email)) {
       throw new CommentAuthError('forbidden');
     }
     const [row] = await this.db
@@ -319,7 +388,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .where(and(eq(prComments.id, commentId), eq(prComments.prNumber, prNumber)))
       .limit(1);
     if (existing.length === 0) throw new CommentAuthError('not-found');
-    if (existing[0].authorEmail !== user.email.trim().toLowerCase()) {
+    if (existing[0].authorEmail !== canonicalEmail(user.email)) {
       throw new CommentAuthError('forbidden');
     }
     await this.db
@@ -365,6 +434,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     // the caller is unauthenticated. The frontend can still surface the
     // eligible roles/users list; it just won't render an Approve button.
     let viewerCanApproveByPath: Map<string, boolean> = new Map();
+    let eligibilityResolved = false;
     if (workspaceId) {
       await this.workspaceService.ensureRemotesFetched(workspaceId).catch(() => undefined);
       try {
@@ -373,15 +443,15 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           baseRef,
           paths,
         );
-        if (resolved) eligibilityByPath = resolved;
+        if (resolved) {
+          eligibilityByPath = resolved;
+          eligibilityResolved = true;
+        }
       } catch (err) {
         // An unreadable tree is not "no eligible writers": that answer would
         // drop every file out of the merge gate. Fail closed instead.
         if (err instanceof AccessUnreadableError) throw err;
-        console.warn(
-          `[review-workflow] eligibleWritersForPathsAtRef failed for PR #${prNumber} (base=${baseBranch}):`,
-          err,
-        );
+        log.warn(`eligibleWritersForPathsAtRef failed for PR #${prNumber} (base=${baseBranch}):`, { err });
       }
 
       if (viewerEmail) {
@@ -395,10 +465,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           if (batch) viewerCanApproveByPath = batch;
         } catch (err) {
           if (err instanceof AccessUnreadableError) throw err;
-          console.warn(
-            `[review-workflow] canWriteBatchAtRef failed for PR #${prNumber} viewer=${viewerEmail}:`,
-            err,
-          );
+          log.warn(`canWriteBatchAtRef failed for PR #${prNumber} viewer=${viewerEmail}:`, { err });
         }
       }
     }
@@ -448,13 +515,15 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           },
         );
 
-      return {
+      const state = {
         path: file.path,
         eligibleApprovers: { roles: eligible.roles, users: eligible.users },
         approvedBy,
+        eligibilityResolved,
         isApproved: hasEligibleApproval,
         viewerCanApprove: viewerCanApproveByPath.get(file.path) === true,
       };
+      return { ...state, inMergeGate: isGateRelevant(state) };
     });
   }
 
@@ -491,20 +560,48 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     );
     if (canApprove === null) throw new ApprovalAuthError('no-eligible-approvers');
     if (!canApprove) throw new ApprovalAuthError('not-eligible');
-    const callerEmail = user.email.trim().toLowerCase();
+    const callerEmail = canonicalEmail(user.email);
 
     // Unique index on (prNumber, path, approverEmail, headSha) makes this
     // idempotent — `onConflictDoNothing` turns a double-click into a no-op.
-    await this.db
-      .insert(prFileApprovals)
-      .values({
-        prNumber,
-        path,
-        approverEmail: callerEmail,
-        approverName: user.name,
-        headSha,
-      })
-      .onConflictDoNothing();
+    //
+    // Under the same per-request lock the carry-forward takes: an approval
+    // that landed between that copy's select and its insert would be pinned to
+    // the head the update was replacing and silently dropped from the request
+    // it was made on. Serialized, the approval either precedes the copy and is
+    // carried with the rest, or follows it and is honestly an approval of a
+    // head that has already moved — which the dialog then shows as stale.
+    await this.withApprovalLock(prNumber, async (tx) => {
+      // Is there still an account to record this in the name of?
+      //
+      // The route proved there was before the access read above, and that read
+      // fetches remotes — seconds, on a cold clone. An erasure that commits in
+      // that window has already rewritten every row this person's address was
+      // on, so an insert landing after it would put the address back, on a row
+      // created after the last trace of them was supposed to be gone. The lock
+      // makes the two orderings the only two: erased first and this finds
+      // nothing and refuses; approved first and the erasure's own rewrite —
+      // which waits for this transaction — takes the new row with the rest.
+      //
+      // By id, not by address: a NEW account signed in at the same address
+      // since is a different person, and this caller is not them.
+      const [account] = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, user.id))
+        .limit(1);
+      if (!account) throw new ApprovalAccountGoneError();
+      await tx
+        .insert(prFileApprovals)
+        .values({
+          prNumber,
+          path,
+          approverEmail: callerEmail,
+          approverName: user.name,
+          headSha,
+        })
+        .onConflictDoNothing();
+    });
 
     // WITH the caller as viewer: these approvals go straight back to the UI
     // that just clicked, and omitting the viewer computed every
@@ -513,41 +610,35 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     return this.getApprovalStates(prNumber, files, headSha, baseBranch, prAuthorIdHash, workspaceId, user.email);
   }
 
+  /**
+   * See the interface. The lock is taken right before the statement it has to
+   * cover, not at the top of the caller's transaction: what it orders is this
+   * rewrite and everything after it, and every millisecond earlier is that
+   * much longer for approvals to queue behind an erasure.
+   */
+  async eraseApprover(
+    tx: ApprovalTx,
+    email: string,
+    erased: { email: string; name: string },
+  ): Promise<void> {
+    await takeEveryApprovalLock(tx);
+    await tx
+      .update(prFileApprovals)
+      .set({ approverEmail: erased.email, approverName: erased.name })
+      .where(eq(prFileApprovals.approverEmail, email));
+  }
+
+  /**
+   * Pure in `this`: the whole verdict comes out of `evaluateGateParts`, a
+   * module-level function. Call-sites borrow this off the prototype against a
+   * bare object to get the real gate without a service, so keep it that way —
+   * reaching for an instance field here breaks them with a TypeError.
+   */
   evaluateMergeGate(input: MergeGateInput): MergeGateResult {
-    const reasons: string[] = [];
-    const warnings: string[] = [];
-
-    if (input.state === 'merged') {
-      reasons.push('This pull request has already been merged.');
-    } else if (input.state === 'closed') {
-      reasons.push('This pull request is closed.');
-    }
-
-    // Empty approvals = empty files array = nothing to approve. That's not
-    // mergeable either — a PR that touches no files shouldn't be opened in
-    // the first place, let alone merged.
-    if (input.approvals.length === 0 && input.state === 'open') {
-      reasons.push('This pull request has no file changes to approve.');
-    }
-
-    // Ownership enforcement only binds markdown KB nodes. Non-md files (TS,
-    // JSON, images, etc.) and ownerless md files are silent — they neither
-    // warn nor block. For the remaining gate-relevant files, "owner hasn't
-    // approved the current head" is surfaced as a *warning* the caller can
-    // bypass explicitly, not a hard block.
-    for (const a of input.approvals) {
-      if (!isGateRelevant(a)) continue;
-      if (a.isApproved) continue;
-
-      const hasStale = a.approvedBy.some((e) => e.isStale);
-      const label = eligibleLabel(a);
-      if (hasStale) {
-        warnings.push(`${label} need to re-approve ${a.path} after the latest push.`);
-      } else {
-        warnings.push(`Waiting on approval for ${a.path} from ${label}.`);
-      }
-    }
-
+    // A missing approval is both: a blocking reason (the request is not
+    // mergeable while it remains) and a warning (the admin bypass names it).
+    const { hardReasons, warnings } = evaluateGateParts(input);
+    const reasons = [...hardReasons, ...warnings];
     return { mergeable: reasons.length === 0, reasons, warnings };
   }
 
@@ -568,11 +659,11 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     if (!workspaceId) throw new WorkflowValidationError('workspace id is required');
 
     // Server-side re-validation — never trust the frontend's cached gate.
-    // Hard blocks always refuse. Soft warnings refuse unless the caller opted
-    // into bypass; with bypass, the bypassed warnings get inlined in the merge
-    // commit body so git history captures the decision.
-    const gate = this.evaluateMergeGate({ prNumber, state, approvals });
-    if (!gate.mergeable) throw new MergeBlockedError(gate.reasons);
+    // Hard blocks always refuse. Missing approvals refuse unless the caller
+    // opted into bypass; with bypass, the bypassed warnings get inlined in the
+    // merge commit body so git history captures the decision.
+    const gate = evaluateGateParts({ prNumber, state, approvals });
+    if (gate.hardReasons.length > 0) throw new MergeBlockedError(gate.hardReasons);
     if (gate.warnings.length > 0 && !opts.bypass) {
       throw new MergeBlockedError(gate.warnings);
     }
@@ -614,7 +705,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       ]);
     }
 
-    const triggeredByEmail = user.email.trim().toLowerCase();
+    const triggeredByEmail = canonicalEmail(user.email);
     const [logRow] = await this.db
       .insert(prMergeLog)
       .values({
@@ -782,6 +873,112 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     };
   }
 
+  /**
+   * Carry the per-file approvals across a commit that the APPROVERS did not
+   * make — the merge an update-from-target lands on the proposal's branch.
+   *
+   * An approval is pinned to a head sha (that is what makes an author's own
+   * later edit reset it), so a merge commit voided every approval on the
+   * request, including the many files it never touched. Reviewers then had to
+   * re-approve text nobody had changed, which is how automatic updates would
+   * have turned every stale request into a second round of review.
+   *
+   * What survives is decided by CONTENT, not by trust: `changedPaths` is
+   * every path whose bytes differ between the two heads, and only a path
+   * absent from it keeps its approval. The original `approvedAt` travels with
+   * the row, because the reviewer approved then, not now. Idempotent under
+   * the unique index, so a retried or concurrent update inserts nothing twice.
+   *
+   * Read and write sit inside one `withApprovalLock` transaction because a
+   * REVOKE landing between them would otherwise be undone: `unapproveFile`
+   * deletes the approver's rows at every head, and a copy taken before that
+   * delete would re-insert the row it just removed, silently restoring an
+   * approval its owner withdrew. Under the lock the two orderings are the only
+   * two possible ones — revoke first, and the select finds nothing to carry;
+   * carry first, and the revoke's delete sees both rows and takes both.
+   *
+   * Returns how many rows were actually WRITTEN (`returning()`, not the size
+   * of the candidate list): on a retry where every row already exists nothing
+   * is written, and the caller re-reads the detail only when that is non-zero.
+   */
+  async carryApprovalsForward(
+    prNumber: number,
+    fromHeadSha: string,
+    toHeadSha: string,
+    changedPaths: string[],
+  ): Promise<number> {
+    assertValidPrNumber(prNumber);
+    if (!fromHeadSha || !toHeadSha) {
+      throw new WorkflowValidationError('both head shas are required');
+    }
+    if (fromHeadSha === toHeadSha) return 0;
+
+    const written = await this.withApprovalLock(prNumber, async (tx) => {
+      const rows = await tx
+        .select()
+        .from(prFileApprovals)
+        .where(
+          and(eq(prFileApprovals.prNumber, prNumber), eq(prFileApprovals.headSha, fromHeadSha)),
+        );
+      const touched = new Set(changedPaths);
+      const carried = rows
+        .filter((r) => !touched.has(r.path))
+        .map((r) => ({
+          prNumber,
+          path: r.path,
+          approverEmail: r.approverEmail,
+          approverName: r.approverName,
+          headSha: toHeadSha,
+          approvedAt: r.approvedAt,
+        }));
+      if (carried.length === 0) return [];
+      return tx.insert(prFileApprovals).values(carried).onConflictDoNothing().returning();
+    });
+    if (written.length === 0) return 0;
+
+    log.info(
+      `carried ${written.length} approval(s) forward on PR #${prNumber} from ${fromHeadSha} to ${toHeadSha}`,
+    );
+    return written.length;
+  }
+
+  /**
+   * Run one change request's approval write under the lock every writer of
+   * these rows takes (see `approval-lock.ts` for what it orders and why),
+   * inside one transaction that holds it until it commits or rolls back.
+   *
+   * Every approval write this service makes goes through here — carry forward,
+   * approve, revoke — because a write that skipped it would be exactly the one
+   * that interleaves with the others. Account erasure, in another module,
+   * takes the same lock's exclusive form.
+   *
+   * Keep the body SHORT — no git, no network, no access-control read. This
+   * holds a lock and a pooled connection; `approveFile` and `unapproveFile`
+   * deliberately leave their access checks and their detail re-read outside.
+   *
+   * The wait is bounded, and hitting that bound is reported as the retryable
+   * refusal it is: nothing was written.
+   */
+  private async withApprovalLock<T>(
+    prNumber: number,
+    fn: (tx: ApprovalTx) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await this.db.transaction(async (tx) => {
+        await takeApprovalLock(tx, prNumber);
+        return fn(tx);
+      });
+    } catch (err) {
+      if (isApprovalLockTimeout(err)) {
+        log.warn(
+          `gave up waiting for the approval lock on PR #${prNumber} after ${APPROVAL_LOCK_TIMEOUT_MS}ms`,
+        );
+        throw new ApprovalBusyError();
+      }
+      throw err;
+    }
+  }
+
   async unapproveFile(
     prNumber: number,
     path: string,
@@ -796,20 +993,27 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     assertValidPath(path);
     if (!headSha) throw new WorkflowValidationError('head sha is required');
 
-    const callerEmail = user.email.trim().toLowerCase();
+    const callerEmail = canonicalEmail(user.email);
 
     // Only revoke the caller's OWN approval — never someone else's. Filter on
     // (PR, path, approverEmail) without pinning the SHA so a user revoking
     // after a force-push can drop their stale row in one click.
-    await this.db
-      .delete(prFileApprovals)
-      .where(
-        and(
-          eq(prFileApprovals.prNumber, prNumber),
-          eq(prFileApprovals.path, path),
-          eq(prFileApprovals.approverEmail, callerEmail),
-        ),
-      );
+    //
+    // Under the same per-request lock `carryApprovalsForward` takes: an
+    // automatic update copies the approvals of the head it is replacing onto
+    // the new one, and a delete that interleaved with that copy would be
+    // undone by it — the revoked approval would come back at the new head.
+    await this.withApprovalLock(prNumber, async (tx) => {
+      await tx
+        .delete(prFileApprovals)
+        .where(
+          and(
+            eq(prFileApprovals.prNumber, prNumber),
+            eq(prFileApprovals.path, path),
+            eq(prFileApprovals.approverEmail, callerEmail),
+          ),
+        );
+    });
 
     // WITH the caller as viewer: these approvals go straight back to the UI
     // that just clicked, and omitting the viewer computed every

@@ -99,8 +99,11 @@ export class InternalTokenService {
     return this.ttlMs;
   }
 
-  /** @param ttlMs Override the default lifetime — e.g. the MCP proxy mints
-   *   session-loopback tokens that must outlive its 4h session idle TTL. */
+  /** @param ttlMs Override the default lifetime — for a caller whose token
+   *   must live a different span than the default: the MCP proxy's loopback
+   *   bearer (`MCP_LOOPBACK_TOKEN_TTL_MS`, longer, so a long tool call is not
+   *   cut off mid-way) and the external-proxy token minted for a grant, whose
+   *   life is bounded by the grant's remaining time (`mcp.routes.ts`). */
   mint(claim: InternalTokenClaim, ttlMs?: number): string {
     const payload: SignedPayload = { ...claim, exp: this.now() + (ttlMs ?? this.ttlMs) };
     const body = b64url(Buffer.from(JSON.stringify(payload), 'utf8'));

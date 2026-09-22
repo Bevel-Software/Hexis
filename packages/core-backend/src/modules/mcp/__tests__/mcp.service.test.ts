@@ -5,8 +5,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { CallTemplate } from '@utcp/sdk';
 import { McpService } from '../mcp.service.js';
-import { McpSessionStore } from '../mcp-session-store.js';
 import { SpillStore } from '../../workspace/spill-store.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
@@ -15,7 +15,7 @@ import { PLATFORM_HEADER, TOOL_PREFIX_LINE } from '../../agent-instructions/inde
 
 /**
  * End-to-end proxy test: a real express app serving the registry-driven tool
- * surface over loopback, a real per-session `UtcpClient` discovering it, and a
+ * surface over loopback, a real per-request `UtcpClient` discovering it, and a
  * real MCP `Client` driving the proxy over an in-memory transport. Exercises
  * discovery, prefix stripping, schema/args passthrough, dispatch, result
  * mapping, and error translation — without any UTCP/MCP fakes.
@@ -29,7 +29,13 @@ const cleanups: Array<() => Promise<void>> = [];
 async function setup(deps?: {
   secretsVault?: unknown;
   toolManuals?: unknown;
-  /** Session auth kind: a connection-key id (default), or null for an OAuth/JWT session. */
+  /**
+   * Manuals the loopback catalog (`GET /api/agent/all-tools`) lists beside the
+   * KB manual. Without this the harness serves no catalog at all and every
+   * request sees the KB manual alone — which is what most cases want.
+   */
+  extraManuals?: CallTemplate[] | ((loopbackBase: string) => CallTemplate[]);
+  /** Caller auth kind: a connection-key id (default), or null for an OAuth/JWT caller. */
   tokenId?: string | null;
   /** Spy for the session-grant reset fired on broken sign-ins. */
   revokeOAuthAccess?: (bearer: string) => Promise<void>;
@@ -85,14 +91,51 @@ async function setup(deps?: {
     res.json({ text: `echo: ${b.prompt}`, sessionId: typeof b.sessionId === 'string' ? b.sessionId : 'new-sess' });
   });
   app.post('/api/agent/tools/boom', (_req, res) => res.status(500).json({ error: 'kaboom' }));
+  // A live UTCP manual a catalog entry can point at — one tool, dispatched back
+  // to the echo above. Mounted always (it costs one route) so a test can add a
+  // MANUAL to the served catalog, not merely a tool to the registry: what a
+  // `.tool` commit produces is a new entry in `/api/agent/all-tools`, and only
+  // registering one end to end proves the request discovered it.
+  app.get('/api/test/late-manual', (_req, res) =>
+    res.json({
+      utcp_version: '1.1.0',
+      manual_version: '1.0.0',
+      tools: [
+        {
+          name: 'late_arrival',
+          description: 'released after the first request',
+          inputs: { type: 'object', properties: { body: { type: 'object', properties: {} } } },
+          outputs: { type: 'object', properties: {} },
+          tags: [],
+          tool_call_template: {
+            call_template_type: 'http',
+            http_method: 'POST',
+            // Literal, not `${API_URL}`: only Bevel-hosted manuals are seeded
+            // that variable, and this one stands in for a third-party server.
+            url: `${loopbackBase}/api/agent/tools/ask`,
+            content_type: 'application/json',
+          },
+        },
+      ],
+    }),
+  );
+  // Resolved after listen; the catalog handler runs later and reads it then,
+  // so a manual can point back at this loopback (a live manual endpoint).
+  let loopbackBase = '';
+  if (deps?.extraManuals) {
+    const extra = deps.extraManuals;
+    app.get('/api/agent/all-tools', (_req, res) =>
+      res.json({ manuals: typeof extra === 'function' ? extra(loopbackBase) : extra }),
+    );
+  }
   app.use('/api', createManualRoutes(registry, noAuth));
   httpServer = await new Promise<HttpServer>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
   const port = (httpServer.address() as { port: number }).port;
+  loopbackBase = `http://127.0.0.1:${port}`;
 
   const mcp = new McpService(
-    new McpSessionStore(),
     {
       loopbackBaseUrl: `http://127.0.0.1:${port}`,
       manualName: 'KNOWLEDGE_BASE',
@@ -107,8 +150,26 @@ async function setup(deps?: {
     undefined, // internalTokens — the fake loopback here accepts any bearer
     deps?.revokeOAuthAccess,
   );
+  lastService = mcp;
   const tokenId = deps?.tokenId === undefined ? 'tok-1' : deps.tokenId;
-  const { server } = await mcp.createSession('user-A', tokenId, 'bevel_testkey', () => {});
+  return connectClient(mcp, tokenId);
+}
+
+/** The service `setup` built last — for a test that needs a SECOND request against the same service. */
+let lastService: McpService | undefined;
+
+/**
+ * One request's server, driven over an in-memory pair. The route builds one
+ * server per HTTP request; a test that needs to observe state the service
+ * keeps ACROSS requests (the failure memo, the pool) opens a second one here.
+ * The initialize message is passed so the server carries instructions,
+ * exactly as the route's initialize request would.
+ */
+async function connectClient(mcp: McpService, tokenId: string | null): Promise<Client> {
+  const server = await mcp.createRequestServer(
+    { userId: 'user-A', tokenId, bearer: 'bevel_testkey' },
+    { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test-client', version: '0.0.0' } } },
+  );
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -449,7 +510,11 @@ describe('McpService — agent instructions', () => {
       extraTools: KB_TOOLS,
     });
     expect(client.getInstructions()).toBe(PLATFORM_HEADER);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('mcp-description.md'), 'disk');
+    // The error itself rides along, so a terminal shows its stack.
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('mcp-description.md'),
+      expect.objectContaining({ message: 'disk' }),
+    );
     // And the four tools carry the fixed line alone.
     const { tools } = await client.listTools();
     for (const name of KB_TOOLS) {
@@ -490,5 +555,128 @@ describe('McpService — agent instructions', () => {
     for (const name of KB_TOOLS) {
       expect(tools.find((t) => t.name === name)?.description.startsWith(`${TOOL_PREFIX_LINE} Acme.`)).toBe(true);
     }
+  });
+});
+
+describe('McpService — manual names that rewrite to one identifier', () => {
+  // The shared layer rewrites `[^\w]` to `_`, so these two are one name to it.
+  const colliding = (name: string): CallTemplate =>
+    ({ name, call_template_type: 'http', url: 'http://127.0.0.1:9/never-dialed', http_method: 'GET' }) as CallTemplate;
+
+  it('registers neither colliding manual, names both in the warning, and keeps the rest of the surface', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const client = await setup({ extraManuals: [colliding('notion-eu'), colliding('notion.eu')] });
+
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    // The KB manual's tools are untouched by the collision.
+    expect(names).toContain('ask');
+    // Neither collider made it into the surface — no tool carries the shared prefix.
+    expect(names.some((n) => n.startsWith('notion_eu'))).toBe(false);
+
+    // Each warning names BOTH manuals, so pick each by the one it is about.
+    const messages = warn.mock.calls.map((c) => String(c[0]));
+    const forEu = messages.find((m) => m.includes('skipping manual "notion-eu"'));
+    const forDotEu = messages.find((m) => m.includes('skipping manual "notion.eu"'));
+    expect(forEu).toMatch(/rewrites to "notion_eu".*"notion\.eu"/);
+    expect(forDotEu).toMatch(/rewrites to "notion_eu".*"notion-eu"/);
+  });
+
+  it('a manual whose name rewrites to the KB manual’s loses; the KB manual keeps its name', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const client = await setup({ extraManuals: [colliding('KNOWLEDGE-BASE')] });
+
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).toContain('ask');
+    expect(warn.mock.calls.map((c) => String(c[0])).some((m) => m.includes('"KNOWLEDGE-BASE"') && m.includes('rewrites to'))).toBe(true);
+  });
+});
+
+describe('McpService — the stateless endpoint reads the live catalog', () => {
+  /**
+   * The freshness the STATELESS hosted endpoint gets for free, against the
+   * real service rather than a stand-in: because every request discovers the
+   * live catalog for itself, a manual released between two requests is in the
+   * second one's answer — no session to invalidate, no notification to honour,
+   * no reconnect. This is the half of the guarantee `/api/mcp` owes; the
+   * commit → catalog half is `catalog-cache-invalidation.ts`'s.
+   *
+   * Asserted through `McpService` itself, and through the CATALOG the loopback
+   * serves (`GET /api/agent/all-tools`) rather than the registry behind the KB
+   * manual — that catalog is what a committed `.tool` lands in, so a manual
+   * appearing there and being discovered, registered and listed within one
+   * request is the whole path the criterion names. A stub that re-reads a
+   * mutable array proves only that the array was re-read; this fails if the
+   * service caches its tool surface, its catalog fetch, or its registrations
+   * across requests.
+   */
+  /** The catalog entry a committed `.tool` becomes: a manual to go and read. */
+  const lateManual = (loopbackBase: string): CallTemplate =>
+    ({
+      name: 'late_manual',
+      call_template_type: 'http',
+      url: `${loopbackBase}/api/test/late-manual`,
+      http_method: 'GET',
+    }) as CallTemplate;
+
+  it("a manual released between two requests is in the second request's answer", async () => {
+    // The catalog the loopback serves, read afresh by each request.
+    let released = false;
+    const client = await setup({ extraManuals: (base) => (released ? [lateManual(base)] : []) });
+    expect((await client.listTools()).tools.some((t) => t.name.includes('late_arrival'))).toBe(false);
+
+    // The commit lands: a `.tool` is released and the catalog now lists it.
+    // Nothing reconnects, nothing is told.
+    released = true;
+
+    const second = await connectClient(lastService!, 'tok-1');
+    const after = (await second.listTools()).tools.map((t) => t.name);
+    expect(after.some((n) => n.includes('late_arrival'))).toBe(true);
+    // Still everything it had before: a new manual is added to the surface,
+    // not swapped for it.
+    expect(after).toContain('ask');
+
+    // The first request's own server, meanwhile, keeps the surface it
+    // discovered — one catalog per request, shared by that request's messages
+    // and nothing beyond. That is not a staleness bug but the shape of the
+    // endpoint: a client here makes a NEW request, and the new request sees
+    // the new manual. The long-lived-connection case is what the local
+    // bridge's catalog watch exists for.
+    expect((await client.listTools()).tools.some((t) => t.name.includes('late_arrival'))).toBe(false);
+  });
+});
+
+describe('McpService — a collision ends when its sibling is renamed away', () => {
+  const collider = (name: string): CallTemplate =>
+    ({ name, call_template_type: 'http', url: 'http://127.0.0.1:9/never-dialed', http_method: 'GET' }) as CallTemplate;
+
+  it('does not carry the collision in the memo: the survivor is retried the next request, not skipped for the TTL', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // The catalog the loopback serves; the second request reads it after the edit.
+    const catalog: CallTemplate[] = [collider('notion-eu'), collider('notion.eu')];
+    const client = await setup({ extraManuals: () => catalog });
+
+    // Request 1: the pair collides and each is refused with the collision reason.
+    await client.listTools();
+    const collisionWarned = (name: string) =>
+      warn.mock.calls.map((c) => String(c[0])).some((m) => m.includes(`skipping manual "${name}"`) && m.includes('rewrites to'));
+    expect(collisionWarned('notion-eu')).toBe(true);
+    warn.mockClear();
+
+    // The admin renames one away; the survivor no longer collides. Request 2,
+    // same service and same failure memo.
+    catalog.splice(1, 1);
+    await (await connectClient(lastService!, 'tok-1')).listTools();
+
+    // Positive proof of a fresh attempt: the survivor now reaches real
+    // registration and fails on its unreachable URL, logging the plain
+    // registration-failure warning `skipping manual "notion-eu": <net error>`.
+    // That message is distinct from BOTH the collision warning (`rewrites to`)
+    // and the memo short-circuit (`recent failure, not retried`) — so its
+    // presence, with those two absent, is exactly "retried this request".
+    const messagesFor = (name: string) => warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes(`"${name}"`));
+    const survivor = messagesFor('notion-eu');
+    expect(survivor.some((m) => m.includes('recent failure, not retried'))).toBe(false);
+    expect(survivor.some((m) => m.includes('rewrites to'))).toBe(false);
+    expect(survivor.some((m) => m.startsWith('[mcp] skipping manual "notion-eu": ') && !m.includes('rewrites to'))).toBe(true);
   });
 });

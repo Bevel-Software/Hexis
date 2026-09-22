@@ -93,6 +93,31 @@
      seven of these at three different alphas. */
   --color-scrim: rgba(55, 53, 47, 0.28);
 
+  /* ── layout ─────────────────────────────────────────────────────────
+     ONE header height, for the two rows that sit side by side under the
+     toolbar: the sidebar's header row and a page's title bar.
+
+     Before this token each side owned its own arithmetic — the sidebar
+     frame's column padding plus whatever its header slot happened to be
+     tall, against the page column's top padding plus an `<h1>`'s line box —
+     and the two answers were about 20px apart. The seam between them is the
+     first thing anyone sees below the toolbar, so "close enough, twice"
+     reads as a broken layout.
+
+     Tailwind compiles this into `.h-header { height: var(--spacing-header) }`,
+     which is the rule `shared/theme/header.ts` hands to both call sites. Do
+     NOT write a height on either header row directly: a second number is the
+     drift this token exists to prevent, and `__tests__/header-band.test.ts`
+     fails if one appears.
+
+     48px is the smallest 4px step that holds BOTH sides at their present
+     size, which is why the fix moves the page title bar onto the sidebar's
+     line rather than either side onto a new one. The sidebar's pill is
+     31.5px (`py-1.5` over `--text-ui` 13px at a 1.5 line height); a page's
+     `--text-display` heading is 29.9px (26px at 1.15). The band centres the
+     taller of the two with 9px of air above and below.                     */
+  --spacing-header: 48px;
+
   /* ── radii ────────────────────────────────────────────────────────────
      Six ROLES, collapsed from the prototype's 16 hand-tuned values:
        xs  tags, inline code

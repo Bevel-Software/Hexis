@@ -142,4 +142,153 @@ describe('GitService.mergeChangeRequest', () => {
     const status = await gitOut(baseRepo, ['status', '--porcelain=v1']);
     expect(status.trim()).toBe('');
   });
+
+  /**
+   * `merge_branch` runs this in the TARGET BRANCH'S OWN workspace — the clone
+   * the file tools read and write — where the `reset --hard` discards
+   * anything unpublished. A change request's merge never had that problem: it
+   * runs in a repo-global clone where only a previous attempt can be dirty.
+   *
+   * The guard has to live inside this method's workspace reservation. Asked by
+   * the caller instead, a save landing in the gap between the question and the
+   * reset is destroyed silently, and the gap is the whole git round-trip.
+   */
+  describe('requireCleanTarget', () => {
+    it('refuses, touching nothing, when the target workspace holds an unsaved edit', async () => {
+      const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+      await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+        await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+      });
+      const before = (await gitOut(baseRepo, ['rev-parse', 'HEAD'])).trim();
+      // A save that has not been shared yet, exactly as a file tool leaves it.
+      await fs.writeFile(path.join(baseRepo, 'base.md'), 'edited but not shared\n');
+
+      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+      await expect(
+        git.mergeChangeRequest(
+          baseWsId, 'alice/add', BASE, { subject: 'Add (#1)', body: 'x' }, USER,
+          { requireCleanTarget: true },
+        ),
+      ).rejects.toMatchObject({ status: 409, payload: { kind: 'merge-target-busy' } });
+
+      // The edit survives and nothing was merged or pushed.
+      expect(await fs.readFile(path.join(baseRepo, 'base.md'), 'utf8')).toBe('edited but not shared\n');
+      expect((await gitOut(baseRepo, ['rev-parse', 'HEAD'])).trim()).toBe(before);
+      const verify = path.join(root, 'verify-dirty');
+      await runGit(root, ['clone', '-b', BASE, upstream, verify]);
+      await expect(fs.readFile(path.join(verify, 'feature.md'), 'utf8')).rejects.toThrow();
+    });
+
+    it('refuses on a commit that was never pushed', async () => {
+      const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+      await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+        await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+      });
+      await fs.writeFile(path.join(baseRepo, 'local.md'), 'committed, never pushed\n');
+      await runGit(baseRepo, ['add', '-A']);
+      await runGit(baseRepo, ['commit', '-m', 'local only']);
+
+      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+      await expect(
+        git.mergeChangeRequest(
+          baseWsId, 'alice/add', BASE, { subject: 'Add (#1)', body: 'x' }, USER,
+          { requireCleanTarget: true },
+        ),
+      ).rejects.toMatchObject({ status: 409, payload: { kind: 'merge-target-busy' } });
+      expect(await fs.readFile(path.join(baseRepo, 'local.md'), 'utf8')).toBe('committed, never pushed\n');
+    });
+
+    it('merges a clean target as usual', async () => {
+      const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+      await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+        await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+      });
+      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+      const result = await git.mergeChangeRequest(
+        baseWsId, 'alice/add', BASE, { subject: 'Add (#1)', body: 'x' }, USER,
+        { requireCleanTarget: true },
+      );
+      expect(result.kind).toBe('merged');
+    });
+  });
+
+  /**
+   * The authorization hook. It decides on the tip this merge is BUILT on,
+   * inside the same reservation as the fetch — not on a workspace `HEAD` that
+   * a failed best-effort pull can have left behind origin, where the roles
+   * read are the ones this very merge is about to change.
+   */
+  describe('authorize', () => {
+    it('decides on the freshly fetched target tip, not the clone\'s stale HEAD', async () => {
+      const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+      await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+        await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+      });
+      // BASE moves on origin while this clone stays where it was — the shape a
+      // failed post-merge pull leaves behind.
+      await pushFeatureBranch(root, upstream, 'tmp-advance', async (dir) => {
+        await fs.writeFile(path.join(dir, 'base.md'), 'advanced\n');
+      });
+      const advancer = path.join(root, 'advancer');
+      await runGit(root, ['clone', '-b', 'tmp-advance', upstream, advancer]);
+      await runGit(advancer, ['push', 'origin', 'tmp-advance:' + BASE]);
+      const staleHead = (await gitOut(baseRepo, ['rev-parse', 'HEAD'])).trim();
+      const publishedTip = (await gitOut(advancer, ['rev-parse', 'HEAD'])).trim();
+      expect(staleHead).not.toBe(publishedTip);
+
+      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+      const seen: { sha: string; changedPaths: string[] }[] = [];
+      const result = await git.mergeChangeRequest(
+        baseWsId, 'alice/add', BASE, { subject: 'Add (#1)', body: 'x' }, USER,
+        { authorize: async (t) => { seen.push(t); } },
+      );
+
+      expect(result.kind).toBe('merged');
+      expect(seen).toHaveLength(1);
+      expect(seen[0].sha).toBe(publishedTip);
+      expect(seen[0].changedPaths).toEqual(['feature.md']);
+    });
+
+    it('refuses before anything is committed or pushed when the hook throws', async () => {
+      const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+      await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+        await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+      });
+      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+      await expect(
+        git.mergeChangeRequest(
+          baseWsId, 'alice/add', BASE, { subject: 'Add (#1)', body: 'x' }, USER,
+          { authorize: async () => { throw new Error('denied'); } },
+        ),
+      ).rejects.toThrow('denied');
+
+      const verify = path.join(root, 'verify-denied');
+      await runGit(root, ['clone', '-b', BASE, upstream, verify]);
+      await expect(fs.readFile(path.join(verify, 'feature.md'), 'utf8')).rejects.toThrow();
+    });
+
+    it('reports BOTH sides of a rename, so a deleted roles.yaml is in the decision', async () => {
+      // Renaming roles.yaml DELETES roles.yaml. `--name-only` would report only
+      // the new name, and the caller would authorize a merge that removes a
+      // file it never asked about.
+      const { upstream, baseWsId, baseRepo } = await seed(root, {
+        'base.md': 'base\n',
+        'roles.yaml': 'roles:\n  admin: []\n',
+      });
+      await pushFeatureBranch(root, upstream, 'alice/rename', async (dir) => {
+        await runGit(dir, ['mv', 'roles.yaml', 'people.yaml']);
+      });
+
+      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+      const seen: string[][] = [];
+      const result = await git.mergeChangeRequest(
+        baseWsId, 'alice/rename', BASE, { subject: 'Rename (#1)', body: 'x' }, USER,
+        { authorize: async (t) => { seen.push(t.changedPaths); } },
+      );
+
+      expect(result.kind).toBe('merged');
+      expect(seen[0]).toContain('roles.yaml');
+      expect(seen[0]).toContain('people.yaml');
+    });
+  });
 });

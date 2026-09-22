@@ -33,6 +33,9 @@
  */
 
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('roles.recover');
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
@@ -83,6 +86,23 @@ export interface RoleRosterEntry {
   displayName: string;
   /** Individual member EMAILS (group assignments are split into `groups`). */
   members: string[];
+  /**
+   * Emails that hold this role NO MATTER WHAT `roles.yaml` says — today the
+   * deployment admins (`ADMIN_EMAIL`) on the Admin role, empty on every other
+   * role. They are not editable from this surface: the resolver admits them
+   * ahead of the roles file (`isAdminEmail`), so removing one here would
+   * change the file and nothing else. Listing them is the point of this
+   * field — without it an admin who removes their own deployment-owner
+   * address watches the chip vanish while the privilege stays.
+   *
+   * Reported SEPARATELY from `members` rather than merged into it: the Admin
+   * "at least one direct email" invariant counts what is in the FILE, and a
+   * fixed member the file does not name must not make the UI believe there is
+   * one more direct member than there is. The two lists legitimately overlap
+   * (a seeded `roles.yaml` names `ADMIN_EMAIL`); the page renders such an
+   * email once, as fixed.
+   */
+  fixedMembers: string[];
   /** Canonical names of groups this role is assigned to (`group:` members). */
   groups: string[];
   isAdmin: boolean;
@@ -135,6 +155,21 @@ export class RolesAdminService {
   private readonly locked: AdminLockedCommits;
   /** Shared cached reference scanner — see module doc. */
   private readonly references: KbReferenceScanner;
+  /**
+   * `deploymentAdmins` canonicalised and de-duplicated, blanks dropped — the
+   * composition root passes `[config.adminEmail]` unconditionally, so an
+   * unset `ADMIN_EMAIL` arrives as `['']` and must not become a fixed member
+   * spelled "". Canonicalised with the SAME function the resolver uses, so
+   * membership comparisons here agree with `isAdminEmail`.
+   */
+  private readonly fixedAdminEmails: readonly string[];
+  /**
+   * The one explanation both Admin-role refusals carry, verbatim: the note the
+   * page prints beside a fixed member. Kept as a named constant so the refusal
+   * an API caller reads and the note a UI reader sees cannot drift apart.
+   */
+  private static readonly FIXED_ADMIN_NOTE =
+    'Deployment admin, set in the server configuration; cannot be removed here';
 
   constructor(
     private readonly workspaceService: IWorkspaceService,
@@ -158,12 +193,14 @@ export class RolesAdminService {
      */
     private readonly eventBus?: WorkflowEventBus,
     /**
-     * This deployment's configured admins (`ADMIN_EMAIL`), the roster the
-     * break-glass recovery restores. Recovery refuses outright when empty: a
-     * recovered roles.yaml with no Admin is exactly the unusable state
-     * recovery exists to escape.
+     * This deployment's configured admins (`ADMIN_EMAIL`) — the same list the
+     * resolver treats as `deploymentOwners`, so it serves two purposes here:
+     * it is the roster the break-glass recovery restores (recovery refuses
+     * outright when empty — a recovered roles.yaml with no Admin is exactly
+     * the unusable state recovery exists to escape), and it is what the Admin
+     * role reports as {@link RoleRosterEntry.fixedMembers}.
      */
-    private readonly recoveryAdmins: readonly string[] = [],
+    private readonly deploymentAdmins: readonly string[] = [],
   ) {
     this.locked = new AdminLockedCommits({
       workspaceService,
@@ -182,6 +219,18 @@ export class RolesAdminService {
     // grant/revoke on any access.md happens outside this service, and the
     // scanner invalidates its cache on those writes' events (TTL as backstop).
     this.references = new KbReferenceScanner(workspaceService, kbDirName, eventBus);
+    this.fixedAdminEmails = [
+      ...new Set(deploymentAdmins.filter(Boolean).map((e) => canonicalEmail(e)).filter(Boolean)),
+    ];
+  }
+
+  /**
+   * Is `email` a deployment admin — an address the server configuration makes
+   * an Admin, ahead of `roles.yaml`? Drives both the fixed member rows and
+   * the add/remove refusals on the Admin role.
+   */
+  private isFixedAdmin(email: string): boolean {
+    return this.fixedAdminEmails.includes(canonicalEmail(email));
   }
 
   /** Resolved per call — see the constructor note on `defaultBranchOf`. */
@@ -269,14 +318,18 @@ export class RolesAdminService {
     for (const role of model) {
       const canonical = canonicalRoleName(role.displayName);
       const registryEntry = capabilityRoleFor(role.displayName);
+      const isAdmin = canonical === ADMIN_CANONICAL;
       out.push({
         canonical,
         displayName: role.displayName,
         members: role.members.filter((m) => !isGroupRefMember(m)),
+        // Only Admin has fixed members: `deploymentOwners` is an Admin rescue
+        // in the resolver, never a general grant, so no other role gains one.
+        fixedMembers: isAdmin ? [...this.fixedAdminEmails] : [],
         groups: role.members
           .filter(isGroupRefMember)
           .map((m) => canonicalRoleName(m.slice(GROUP_REF_PREFIX.length))),
-        isAdmin: canonical === ADMIN_CANONICAL,
+        isAdmin,
         capability: registryEntry
           ? { description: registryEntry.description, groupAssignable: registryEntry.groupAssignable }
           : null,
@@ -335,10 +388,7 @@ export class RolesAdminService {
       await this.workflowService.resetToRemote(workspaceId, this.defaultBranch);
       this.accessControl.invalidate(workspaceId);
     } catch (err) {
-      console.warn(
-        '[roles.recover] could not sync with origin before recovery; proceeding with local state:',
-        err instanceof Error ? err.message : err,
-      );
+      log.warn('could not sync with origin before recovery; proceeding with local state:', { err });
     }
 
     const current = await this.readRolesYaml(workspaceId);
@@ -352,7 +402,7 @@ export class RolesAdminService {
       );
     }
 
-    if (this.recoveryAdmins.length === 0) {
+    if (this.deploymentAdmins.length === 0) {
       // 409, not 500: this is a CONFIGURATION refusal in a break-glass flow —
       // the operator needs the actionable message, and the route helper hides
       // every >=500 body behind a generic "Internal error." on purpose.
@@ -373,7 +423,7 @@ export class RolesAdminService {
       fsys.writeFiles(
         [
           { path: `${this.kbDirName}/${OLD_ROLES_YAML}`, content: current },
-          { path: `${this.kbDirName}/${ROLES_YAML}`, content: renderRecoveryRolesYaml(this.recoveryAdmins) },
+          { path: `${this.kbDirName}/${ROLES_YAML}`, content: renderRecoveryRolesYaml(this.deploymentAdmins) },
         ],
         'Bevel recovery: reset corrupted roles.yaml',
       ),
@@ -390,9 +440,31 @@ export class RolesAdminService {
   // so the admin surface cannot mint, rebrand, or retire one. Legacy roles
   // migrate out via convertRoleToGroup.
 
+  /**
+   * Add a member email to a role. Refuses (422) to add a DEPLOYMENT ADMIN to
+   * the Admin role: that address is already a fixed member — the resolver
+   * admits it ahead of `roles.yaml` — so the write would add a row that means
+   * nothing, next to the fixed row the page already shows. Other roles are
+   * unaffected: a deployment admin is an ordinary member of "Sales".
+   */
   async addMember(actor: AuthUser, canonical: string, email: string): Promise<RoleRosterEntry[]> {
+    this.assertNotFixedAdmin(canonical, email);
     await this.runEdit(actor, (text) => editAddMember(text, canonical, email));
     return this.getRoster();
+  }
+
+  /**
+   * Guard both Admin-membership edits for a deployment admin. Scoped to the
+   * Admin role because that is the only role the server configuration fixes.
+   */
+  private assertNotFixedAdmin(canonical: string, email: string): void {
+    if (canonical !== ADMIN_CANONICAL || !this.isFixedAdmin(email)) return;
+    throw new RolesAdminError(
+      `${RolesAdminService.FIXED_ADMIN_NOTE}. ${canonicalEmail(email)} is always an Admin, ` +
+        'so its Admin membership cannot be added or removed from this page.',
+      422,
+      { kind: 'fixed-deployment-admin' },
+    );
   }
 
   /**
@@ -402,6 +474,12 @@ export class RolesAdminService {
    * connection becomes an admin lockout. Removing the caller's OWN last
    * Admin membership requires `confirm` (409 otherwise) — no silent
    * self-lockout, since admin status is read live from this file.
+   *
+   * Also refuses (422) to remove a DEPLOYMENT ADMIN from Admin, the mirror of
+   * {@link addMember}'s refusal: the page shows that address as a fixed
+   * member with no remove control, and the resolver would keep it an Admin
+   * anyway — a removal that silently does nothing is the confusion this
+   * ticket exists to end.
    */
   async removeMember(
     actor: AuthUser,
@@ -409,6 +487,7 @@ export class RolesAdminService {
     email: string,
     confirm: boolean,
   ): Promise<RoleRosterEntry[]> {
+    this.assertNotFixedAdmin(canonical, email);
     await this.runEdit(actor, (text) => {
       const target = canonicalEmail(email);
       if (canonical === ADMIN_CANONICAL) {

@@ -4,8 +4,12 @@ import { authFetch } from '../../../lib/api';
 /** One configurable setting, as the server describes it. */
 export interface SettingStatus {
   key: string;
-  /** The environment variable that still wins if it is set. */
-  envVar: string;
+  /**
+   * The environment variable that still wins if it is set. Absent for a
+   * setting no variable can override — the knowledge-base layout, which is
+   * entered here and nowhere else.
+   */
+  envVar?: string;
   section: 'knowledge-base' | 'sign-in';
   source: 'env' | 'stored' | 'unset';
   /** Absent for secrets — the server never sends a stored secret back. */
@@ -41,9 +45,41 @@ export interface SyncStatus {
   last: LastSync | null;
 }
 
+/**
+ * Whether the single sign-on configuration in effect is known to work: proven
+ * against the provider (or by a sign-in), configured but unproven, absent — or
+ * configured with SECRETS_ENC_KEY unset (`unrecordable`), when no
+ * verification can be kept.
+ */
+export type OidcVerification = 'verified' | 'unverified' | 'not-configured' | 'unrecordable';
+
+/** Why the setup-time knowledge-base initialization failed — mirrors the backend's `GitFailureKind`. */
+export type KbInitFailureKind =
+  | 'credentials-rejected'
+  | 'not-found'
+  | 'unreachable'
+  | 'write-refused'
+  | 'push-refused-by-policy'
+  | 'step-failed'
+  | 'unknown';
+
+/**
+ * A failed initialization, as the server classifies it. `cause` is a sentence
+ * telling the admin what to do; the raw error never leaves the server log.
+ */
+export interface KbInitFailure {
+  kind: KbInitFailureKind;
+  cause: string;
+}
+
 export interface SetupStatus {
   /** Reachable knowledge base AND a process that can serve it. */
   complete: boolean;
+  /**
+   * Admins only: the setup-completing save stored the settings, but the
+   * knowledge base could not be initialized. Present while that failure stands.
+   */
+  kbInit?: KbInitFailure;
   /**
    * Answered, but the running process still holds the old branch model. Should
    * be rare — saving applies it — and means a restart, not another answer.
@@ -54,6 +90,8 @@ export interface SetupStatus {
   settings?: SettingStatus[];
   /** Admins only. Absent on a build without the sync module. */
   sync?: SyncStatus;
+  /** Admins only. Absent from an older server. */
+  oidcVerification?: OidcVerification;
 }
 
 export interface SaveResult {
@@ -61,6 +99,7 @@ export interface SaveResult {
   complete: boolean;
   awaitingRestart?: boolean;
   settings: SettingStatus[];
+  oidcVerification?: OidcVerification;
 }
 
 /** Field-keyed messages, so the form can mark the input that was wrong. */
@@ -76,6 +115,21 @@ export class SettingsProblems extends Error {
   }
 }
 
+/**
+ * The save went through, but the knowledge-base initialization it triggered
+ * did not. Distinct from a failed save: the values are stored, and retrying
+ * needs none of them re-entered.
+ */
+export class KbInitFailed extends Error {
+  readonly kbInit: KbInitFailure;
+
+  constructor(kbInit: KbInitFailure) {
+    super('Saved, but the knowledge base could not be initialized.');
+    this.name = 'KbInitFailed';
+    this.kbInit = kbInit;
+  }
+}
+
 async function readError(res: Response): Promise<never> {
   let body: unknown;
   try {
@@ -83,8 +137,9 @@ async function readError(res: Response): Promise<never> {
   } catch {
     throw new Error(`Request failed (${res.status})`);
   }
-  const data = body as { error?: string; problems?: Record<string, string> };
+  const data = body as { error?: string; problems?: Record<string, string>; kbInit?: KbInitFailure };
   if (data.problems) throw new SettingsProblems(data.problems);
+  if (data.kbInit) throw new KbInitFailed(data.kbInit);
   throw new Error(data.error || `Request failed (${res.status})`);
 }
 
@@ -155,7 +210,16 @@ export async function saveSettings(settings: Record<string, string>): Promise<Sa
 }
 
 export interface ConnectionTest {
+  /** True only for a connection the host accepts for reading AND writing. */
   ok: boolean;
+  /**
+   * Which of the three answers this is: read and write; reads but may not
+   * push (`error` names the permission to grant); or turned down before it
+   * could read — bad credentials, no repository, unreachable host.
+   */
+  outcome?: 'connected' | 'read-only' | 'rejected';
+  /** The field a failure is about, when the server says. */
+  field?: string;
   /** The remote answered but has no branches yet — a supported starting point. */
   empty?: boolean;
   branches?: string[];
@@ -165,6 +229,12 @@ export interface ConnectionTest {
    * exactly, and being one character off is a failure nobody can see.
    */
   defaultBranch?: string | null;
+  /**
+   * The repository's top-level folder names on that branch — empty for an
+   * empty repository, null (or absent, from an older server) when they could
+   * not be listed. The screen checks the three root folder fields against it.
+   */
+  rootFolders?: string[] | null;
   error?: string;
 }
 
@@ -172,6 +242,13 @@ export interface ConnectionTest {
  * Try the credentials against the real remote before saving anything. Values
  * are sent as typed so an admin tests what is on screen, not what is stored;
  * omitted fields fall back to what is already in effect.
+ *
+ * A 400 is an ANSWER, not a failure to ask: the server looked at these values
+ * and refused them ("enter the access token for that repository", "the URL
+ * must start with https://"). It comes back as the rejection it is, so no
+ * caller can mistake it for "could not check" and carry on past it. Any other
+ * failure throws — a 401/403 is about the session, not the repository, and
+ * must not be shown as the host refusing these values.
  */
 export async function testConnection(fields: Record<string, string>): Promise<ConnectionTest> {
   const res = await authFetch('/api/setup/test-connection', {
@@ -179,6 +256,66 @@ export async function testConnection(fields: Record<string, string>): Promise<Co
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(fields),
   });
+  if (res.status === 400) {
+    let data: { error?: string; field?: string } = {};
+    try {
+      data = (await res.json()) as typeof data;
+    } catch {
+      // No body worth reading — the status alone still says "refused".
+    }
+    return {
+      ok: false,
+      outcome: 'rejected',
+      field: data.field,
+      error: data.error || `The connection check was refused (${res.status}).`,
+    };
+  }
   if (!res.ok) await readError(res);
   return (await res.json()) as ConnectionTest;
+}
+
+export interface OidcTest {
+  /** True for credentials the provider accepted, or an issuer checked on its own. */
+  ok: boolean;
+  /**
+   * `verified`: the provider accepted the application ID and secret.
+   * `issuer-verified`: the address is a sign-in provider; no credentials to try yet.
+   * `unverified`: the provider is fine, but its answer said nothing definite
+   * about the credentials — saving is allowed and shows as Unverified.
+   * `rejected`: the address or the credentials were turned down (`field` says which).
+   */
+  outcome?: 'verified' | 'issuer-verified' | 'unverified' | 'rejected';
+  field?: string;
+  error?: string;
+  /** The configuration in effect, after this test. */
+  oidcVerification?: OidcVerification;
+}
+
+/**
+ * Try the single sign-on values against the provider before saving them. As
+ * with {@link testConnection}, a 400 is the server refusing these values and
+ * comes back as a rejection; any other failure throws.
+ */
+export async function testOidc(fields: Record<string, string>): Promise<OidcTest> {
+  const res = await authFetch('/api/setup/test-oidc', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  });
+  if (res.status === 400) {
+    let data: { error?: string; field?: string } = {};
+    try {
+      data = (await res.json()) as typeof data;
+    } catch {
+      // The status alone still says "refused".
+    }
+    return {
+      ok: false,
+      outcome: 'rejected',
+      field: data.field,
+      error: data.error || `The sign-in check was refused (${res.status}).`,
+    };
+  }
+  if (!res.ok) await readError(res);
+  return (await res.json()) as OidcTest;
 }

@@ -3,13 +3,14 @@ import { ChevronRight, Check, X, Clock } from 'lucide-react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { Badge } from '../../../shared/components';
+import { SIDEBAR_CHILD_INDENT, SIDEBAR_ROW_INSET } from '../../layout/components/SidebarFrame';
 import { listPullRequestsForMe } from '../services/pr.api';
 import { friendlyGitError } from '../services/error-messages';
 import { useGit } from '../state/git.context';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
-import { PR_STALE_EVENT } from '../../../core/events';
+import { PR_STALE_EVENT, PR_STALE_FALLBACK_MS, subscribePrStale } from '../../../core/events';
 
-const POLL_INTERVAL_MS = 60_000;
+const POLL_INTERVAL_MS = PR_STALE_FALLBACK_MS;
 
 export function PullRequestsForMe() {
   const git = useGit();
@@ -133,12 +134,12 @@ export function PullRequestsForMe() {
         console.error('[PullRequestsForMe] initial load failed', e);
       });
     document.addEventListener('visibilitychange', handleVisibility);
-    window.addEventListener(PR_STALE_EVENT, handlePrStale);
+    const offStale = subscribePrStale(handlePrStale);
 
     return () => {
       cancelled = true;
       document.removeEventListener('visibilitychange', handleVisibility);
-      window.removeEventListener(PR_STALE_EVENT, handlePrStale);
+      offStale();
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, [available, deleteBranch, refreshBranches]);
@@ -156,7 +157,14 @@ export function PullRequestsForMe() {
     // one hairline, a disclosure header with an amber count, and rows in the
     // same two type sizes the tree above and the Library nav use, so the whole
     // sidebar is one typographic system rather than three.
-    <div className="flex max-h-60 shrink-0 flex-col border-t border-line px-2">
+    //
+    // The hairline and the space above it are the FRAME's now
+    // (`SIDEBAR_FOOTER_SLOT`): this dock shares the footer with the Library's
+    // setup reminder, and a dock that drew its own rule put a second one
+    // directly under the reminder's. What is left here is the dock, and it
+    // sits flush in the column so its rows can take the sidebar's row inset
+    // exactly as the tree rows above do.
+    <div className="flex max-h-60 shrink-0 flex-col">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
@@ -165,7 +173,10 @@ export function PullRequestsForMe() {
         // SCOPE in words, because this queue is deliberately narrower than the
         // dots in the tree — it is the requests that are yours to act on.
         aria-label="Change requests for you"
-        className="flex items-center gap-[7px] px-1.5 pt-2.5 pb-2 text-label uppercase text-ink-faint transition-colors hover:text-ink"
+        className={cn(
+          'flex items-center gap-[7px] pt-2.5 pb-2 text-label uppercase text-ink-faint transition-colors hover:text-ink',
+          SIDEBAR_ROW_INSET,
+        )}
       >
         <span className="flex w-3 flex-none items-center justify-center">
           <ChevronRight
@@ -173,9 +184,13 @@ export function PullRequestsForMe() {
             className={cn('transition-transform duration-150', expanded && 'rotate-90')}
           />
         </span>
-        <span className="flex-1 text-left">Change requests</span>
+        {/* `min-w-0` + `truncate`, so the count keeps its place. A flex item's
+            automatic minimum is its own content, so at 180px — the narrowest
+            the sidebar goes — the label refused to give way and pushed the
+            badge past the right edge of the row instead. */}
+        <span className="min-w-0 flex-1 truncate text-left">Change requests</span>
         {prs.length > 0 && (
-          <Badge tone="wait" size="xs">
+          <Badge tone="wait" size="xs" className="flex-none">
             {prs.length}
           </Badge>
         )}
@@ -183,7 +198,11 @@ export function PullRequestsForMe() {
 
       {expanded && (
         <div className="flex flex-col gap-px overflow-y-auto pb-1.5">
-          {error && <div className="pl-[25px] pr-1.5 py-2 text-meta text-danger">{error}</div>}
+          {error && (
+            <div className={cn('py-2', SIDEBAR_ROW_INSET)}>
+              <div className={cn('text-meta text-danger', SIDEBAR_CHILD_INDENT)}>{error}</div>
+            </div>
+          )}
           {!error &&
             prs.map((pr) => <PrRow key={pr.number} pr={pr} onOpen={() => setOpenCr(pr)} />)}
         </div>
@@ -228,23 +247,31 @@ function PrRow({ pr, onOpen }: { pr: PullRequestSummary; onOpen(): void }) {
           onOpen();
         }
       }}
-      className="group block cursor-pointer rounded-sm pl-[25px] pr-[7px] py-1.5 transition-colors hover:bg-hover"
+      className={cn(
+        'group block cursor-pointer rounded-sm py-1.5 transition-colors hover:bg-hover',
+        SIDEBAR_ROW_INSET,
+      )}
       title={pr.title}
     >
-      <div className="flex min-w-0 gap-1.5 text-ui text-ink-muted group-hover:text-ink">
-        <span className="flex-none tabular-nums text-ink-faint">#{pr.number}</span>
-        {/* The ellipsis has to live on the TEXT, not on the flex row — a flex
-            container clips its children without ever drawing one. */}
-        <span className="min-w-0 truncate">{pr.title}</span>
-      </div>
-      <div className="mt-px flex items-center gap-2 text-meta text-ink-faint">
-        <span className="truncate">{who}</span>
-        <ReviewBadge review={pr.review} />
-        {touched > 0 && (
-          <span className="flex-none">
-            {touched} file{touched === 1 ? '' : 's'}
-          </span>
-        )}
+      {/* The indent is on the CONTENT, not on the row: the row keeps the
+          sidebar's own inset, so it spans the full column the way a tree row
+          does and its hover fill starts where theirs does. */}
+      <div className={SIDEBAR_CHILD_INDENT}>
+        <div className="flex min-w-0 gap-1.5 text-ui text-ink-muted group-hover:text-ink">
+          <span className="flex-none tabular-nums text-ink-faint">#{pr.number}</span>
+          {/* The ellipsis has to live on the TEXT, not on the flex row — a flex
+              container clips its children without ever drawing one. */}
+          <span className="min-w-0 truncate">{pr.title}</span>
+        </div>
+        <div className="mt-px flex items-center gap-2 text-meta text-ink-faint">
+          <span className="truncate">{who}</span>
+          <ReviewBadge review={pr.review} />
+          {touched > 0 && (
+            <span className="flex-none">
+              {touched} file{touched === 1 ? '' : 's'}
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );

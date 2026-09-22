@@ -14,6 +14,7 @@ const item = (over: Partial<LibraryItem>): LibraryItem => ({
   name: 'x',
   description: '',
   owned: false,
+  canWrite: false,
   status: { state: 'ok', text: 'Ready' },
   plugin: null,
   path: 'Skills/x',
@@ -75,10 +76,15 @@ describe('pluginEntriesFor', () => {
     expect(again?.member).toBe(true);
   });
 
-  it('Owned by me keeps the plugins the caller manages, own space first', () => {
+  it('Owned by me keeps the plugins the caller OWNS (`isOwner`), own space first — managing is not owning', () => {
     const entries = pluginEntriesFor(
       [],
-      [summary({ name: 'gtm', canWrite: true }), summary({ name: 'ops', displayName: 'Ops', canWrite: false })],
+      [
+        summary({ name: 'gtm', canWrite: true, isOwner: true }),
+        // A manager (an Admin by role, say) who is not in the owner list.
+        summary({ name: 'ops', displayName: 'Ops', canWrite: true, isOwner: false }),
+        summary({ name: 'hr', displayName: 'HR', canWrite: false, isOwner: false }),
+      ],
       { kind: 'owned' },
       [],
       '',

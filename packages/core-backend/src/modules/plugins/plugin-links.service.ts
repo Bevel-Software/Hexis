@@ -12,6 +12,7 @@ import {
   type AuthUser,
 } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { AccessMutationService, accessMdPathForFolder } from '../access/access-mutation.service.js';
 import { pluginPrincipalKey } from '../access-model/access-grammar.js';
@@ -198,8 +199,6 @@ export class PluginLinksService {
           root,
         });
       }
-      // The same retired-skill rule as `link`: a repair re-grants on the root.
-      await this.resolvedSkills(root);
       await this.grantTokens(wsId, user, folder, root);
       this.changed(wsId);
       return { root };
@@ -252,22 +251,11 @@ export class PluginLinksService {
 
   /**
    * Released skills under the root — the catalog's answer, not the file
-   * system's. A RETIRED skill is kept for its owners and never shared onward:
-   * the grant lands on the ROOT folder, so a root that holds a retired skill
-   * anywhere beneath it cannot be linked at all — the grant would reach the
-   * retired one too. The refusal names them so the manager can link the
-   * active skills individually instead.
+   * system's. The grant lands on the ROOT folder, so every skill beneath it
+   * is reached by the link.
    */
   private async resolvedSkills(root: string): Promise<string[]> {
     const under = (await this.skillService.listSkills(undefined)).filter((s) => skillUnderRoot(s.path, root));
-    const retired = under.filter((s) => s.lifecycle === 'retired').map((s) => s.path);
-    if (retired.length > 0) {
-      throw new PluginLinkError(
-        `"${root}" holds retired skills (${retired.join(', ')}); a retired skill is never shared onward. Link the active skills one by one.`,
-        422,
-        { kind: 'retired-skills', root, retired },
-      );
-    }
     return under.map((s) => s.path);
   }
 
@@ -328,8 +316,7 @@ export class PluginLinksService {
       // folder deserves. Any other failure must surface: the caller writes the
       // manifest back, and a skeleton over a real one would erase its
       // version, description and MCP extension block.
-      const code = (err as { code?: unknown } | null)?.code;
-      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+      if (!isAbsence(err)) throw err;
     }
     if (text !== null) {
       try {

@@ -2,7 +2,12 @@ import { DEFAULT_BRANCH, PLUGINS_DIR, type PullRequestSummary } from '@bevel-sof
 import { authFetch } from '../../../lib/api';
 import { handleApiResponse } from '../../git/services/git.api';
 import { createBranch } from '../../git/services/git.api';
-import { deleteFile, getOrCreateWorkspace, writeFile } from '../../workspace/services/workspace.api';
+import {
+  deleteFile,
+  getOrCreateWorkspace,
+  writeFile,
+  type SkillToolWarning,
+} from '../../workspace/services/workspace.api';
 import { openChangeRequest } from '../../pr/services/pr-open.api';
 import { postPrComment } from '../../pr/services/pr-comments.api';
 import { branchSegment } from '../../change-requests/services/propose.api';
@@ -47,10 +52,6 @@ export interface LibrarySkillSummary {
   path: string;
   /** Every plugin holding this skill. Absent from an older server. */
   plugins?: PluginMembership[];
-  /** The governance owner (`metadata.owner`), when declared. */
-  owner?: string;
-  /** The governance lifecycle (`metadata.lifecycle`), lowercased: `active`, `deprecated`, `retired`. */
-  lifecycle?: string;
 }
 
 /** The open write-access requests on a skill — `[]` to anyone but its editors. */
@@ -95,6 +96,13 @@ export interface LibrarySkill extends LibrarySkillSummary {
   allowedTools?: string[];
   /** Repo-root-relative bundled file paths (SKILL.md itself is not listed). */
   files: string[];
+  /**
+   * `allowed-tools` entries that look like platform tools but name none the
+   * caller can see. Advisory, and about the skill as it reads NOW — so the page
+   * can say so on open, before anyone saves. Absent from a backend built before
+   * the check existed.
+   */
+  warnings?: SkillToolWarning[];
 }
 
 /**
@@ -120,7 +128,7 @@ interface SkillFilePayload {
 }
 
 type GetSkillPayload =
-  | { ok: true; kind: 'skill'; skill: LibrarySkill }
+  | { ok: true; kind: 'skill'; skill: LibrarySkill; warnings?: SkillToolWarning[] }
   | { ok: true; kind: 'file'; file: SkillFilePayload }
   | { ok: false; error: 'not_found' | 'forbidden' | 'invalid_file' };
 
@@ -136,7 +144,9 @@ export async function getSkill(name: string): Promise<LibrarySkill> {
     await authFetch(`/api/skills/${encodeURIComponent(name)}`),
   );
   if (!data.ok || data.kind !== 'skill') throw new Error("Couldn't load this skill.");
-  return data.skill;
+  // The warnings ride beside the skill on the wire (as `get_skill` returns
+  // them); the page reads one object, so they are folded onto it here.
+  return Array.isArray(data.warnings) ? { ...data.skill, warnings: data.warnings } : data.skill;
 }
 
 /**
@@ -202,7 +212,7 @@ export interface ProposeChangeInput {
  */
 export async function proposeChange(
   input: ProposeChangeInput,
-): Promise<{ branch: string; kbDirName: string }> {
+): Promise<{ branch: string; kbDirName: string; warnings?: SkillToolWarning[] }> {
   const branch = input.existingCr?.branch ?? suggestionBranchFor(input.userEmail, input.skillName);
 
   if (!input.existingCr) {
@@ -215,7 +225,7 @@ export async function proposeChange(
   }
 
   const { workspace } = await getOrCreateWorkspace(branch);
-  await writeFile(
+  const saved = await writeFile(
     workspace.id,
     `${workspace.kbDirName}/${input.repoRelativePath}`,
     input.content,
@@ -233,23 +243,30 @@ export async function proposeChange(
       description: input.note || undefined,
     });
   }
-  return { branch, kbDirName: workspace.kbDirName };
+  return { branch, kbDirName: workspace.kbDirName, ...(saved?.warnings ? { warnings: saved.warnings } : {}) };
 }
 
 /**
- * What a brand-new SKILL.md contains: the frontmatter fence, an empty
- * `description`, and nothing else.
+ * What a brand-new SKILL.md contains: the Agent Skills frontmatter — the
+ * skill's `name`, an empty `description` to fill in, and a first
+ * `metadata.version` — and nothing else.
  *
  * Not zero bytes, and the difference matters. The catalog reads a skill's
- * description straight out of this frontmatter (`skills.service.ts`
+ * description and version straight out of this frontmatter (`skills.service.ts`
  * `parseSkillFrontmatter`), so a file with no fence at all lists as a card with
  * a blank subtitle and no visible hint that a description is a thing it could
- * have. The fence is the shape of the thing; the emptiness inside it is the
- * point. The skill's NAME is deliberately not written here — identity falls
- * back to the folder name, and two places to change a skill's name is one place
- * too many.
+ * have. The fence is the shape of the thing; the emptiness of `description` is
+ * the point. `name` is the folder's name, which is what the catalog would fall
+ * back to anyway — written out because the Agent Skills format expects it, and
+ * so a copy of the file carried elsewhere still says what it is. `version`
+ * starts at `1.0.0`: `get_skill` can load a skill by version, and a skill
+ * that never declared one has no history to load by.
  */
-export const EMPTY_SKILL_MD = '---\ndescription:\n---\n\n';
+export function newSkillMarkdown(name: string): string {
+  // Quoted: a folder name is free text short of `/` and `\`, and a bare
+  // `#draft` or `a: b` would parse as a comment or a nested mapping.
+  return `---\nname: ${JSON.stringify(name)}\ndescription:\nmetadata:\n  version: "1.0.0"\n---\n\n`;
+}
 
 export type CreateSkillInput = {
   /** The skill's name, which becomes its folder name. */
@@ -305,12 +322,13 @@ export async function createEmptySkill(input: CreateSkillInput): Promise<Created
       ? `${PLUGINS_DIR}/${(await ensurePersonalPlugin()).folder}`
       : input.parentPath;
   const repoRelativePath = `${parentPath}/${input.name}/SKILL.md`;
+  const content = newSkillMarkdown(input.name);
 
   if (!('personal' in input) && !input.canWrite) {
     const { branch, kbDirName } = await proposeChange({
       skillName: input.name,
       repoRelativePath,
-      content: EMPTY_SKILL_MD,
+      content,
       userEmail: input.userEmail,
       userName: input.userName,
     });
@@ -328,7 +346,7 @@ export async function createEmptySkill(input: CreateSkillInput): Promise<Created
   // that can be stale, so the backend must be the one to refuse a name that
   // was claimed since — a plain write here would silently empty the existing
   // SKILL.md. The 409 surfaces through the panel's normal error toast.
-  await writeFile(workspace.id, workspacePath, EMPTY_SKILL_MD, { ifAbsent: true });
+  await writeFile(workspace.id, workspacePath, content, { ifAbsent: true });
   return { repoRelativePath, workspacePath, branch: DEFAULT_BRANCH, direct: true };
 }
 

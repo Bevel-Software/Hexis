@@ -18,16 +18,23 @@ they may read.
 
 ## Register the platform once (an Owner of your Claude organization)
 
-1. In the platform, open **Deployment** and find **Claude connection**. It
-   shows generated credentials: hostname, App ID, Client ID, client secret,
-   webhook secret and private key.
+1. In the platform, open **Deployment** and find the **Marketplace** section
+   (it is also on the first-run setup screen, as an optional step you can
+   skip). Open **Register this deployment with Claude**: it shows generated
+   credentials: hostname, App ID, Client ID, client secret, webhook secret and
+   private key.
 2. In Claude, open **Admin settings → Claude Code**, scroll to **Self-hosted
    infrastructure**, and choose **Add manually** beside GitHub Enterprise.
    Paste the fields from step 1. Any display name will do, port 443 is right,
    and read replicas stay empty. Choose **Add configuration** to save them.
 
+3. Back in the Marketplace section, choose **Mark as registered**. Until an
+   admin does, **External agent access** shows people a notice that an admin
+   has to configure the marketplace instead of the steps below.
+
 The webhook URL Claude generates can be ignored. Rotate the credentials from
-the same card if they are ever exposed; the Owner then re-enters them.
+the same section if they are ever exposed; the Owner then re-enters them.
+Rotating does not unmark the registration.
 
 Registering connects the platform to your Claude organization, not to any
 person: every person, the Owner included, connects their own account before
@@ -52,6 +59,14 @@ they can add the marketplace.
    choose **Add** on **Hexis all** for everything you may read in one plugin
    (every skill, and the knowledge base as an MCP server), or single plugins
    for a subset. **Update** in Claude pulls what changed.
+5. Add the connector. Installing the plugin does not connect its MCP server:
+   open the plugin's **tools and data sources** list and the `hexis` row reads
+   **Not added**. Choose **Add for your team**, which opens Claude's **Add
+   custom connector** dialog with the name and URL already filled in, then
+   **Continue**, and approve the sign-in on the platform. The step worked when
+   the row no longer reads **Not added**. Without organization-admin rights in
+   Claude you are offered the connector for yourself instead, which works the
+   same for you; ask an admin to add it for the team.
 
 Your connection appears under **Marketplaces → Your Claude connections**,
 where you can disconnect it. Disconnecting stops updates; connecting again
@@ -61,8 +76,22 @@ account: step 1 has not happened, or the connection it made was since
 disconnected here. Connect again from step 1; if that does not take, the
 server log says why (below).
 
-The same steps are a five-screen walkthrough on the **External agent access**
-page in the app. The registration half is shown to admins only.
+A connector that will not attach is a different failure from a marketplace
+that will not sync, and the two are worth telling apart: the marketplace is
+fetched by Claude's servers over git, while the connector opens an MCP session
+against the platform's `/api/mcp` endpoint. If the row falls back to **Not
+added** after you approve, or the dialog says the server could not be reached,
+check the URL the dialog filled in — it has to be the platform's public HTTPS
+address, the same one the marketplace is served from, with `/api/mcp` on the
+end. A deployment reached on a second domain, or through a proxy that does not
+forward that path, is the usual cause. Remove the connector in Claude and add
+it again to re-run the sign-in. If approving never lands you back in Claude at
+all, that is the account connection in step 1, not the connector.
+
+The same steps are a six-screen walkthrough on the **External agent access**
+page in the app, identical for admins and everyone else once the deployment is
+marked registered. The registration half lives in **Deployment → Marketplace**
+and ends on the same connector step.
 
 ## When connecting does not take
 

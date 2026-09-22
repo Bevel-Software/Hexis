@@ -1,19 +1,26 @@
 import { useEffect, useId, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ChevronRight } from 'lucide-react';
+import { HEADER_BAND, HEADER_BAND_LEAD, PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
 import { cn } from '../../../../lib/utils';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
+import { announceToolCredentialsChanged } from '../../../../core/events';
 import { useToolPage } from '../../hooks/useToolPage';
 import { useToolSource } from '../../hooks/useToolSource';
 import { McpServerSection } from './McpServerSection';
-import { libraryHomeForItemPath, LIBRARY_ROOT } from '../../routes/library-paths';
+import { libraryHomeForItemPath, pathForPlugin, LIBRARY_ROOT } from '../../routes/library-paths';
 import { useLibrary } from '../../state/library-data';
-import { pluginLabel, pluginNameForPath } from '../../utils/plugin-summary';
+import { pluginHoldingPath, pluginLabel, pluginNameForPath } from '../../utils/plugin-summary';
 import { readOAuthFragment } from '../../utils/oauth-fragment';
 import type { ToolCapability } from '../../services/tools.api';
 import type { LibrarySkillSummary } from '../../services/library.api';
 import { ToolConnectionSection } from './ToolConnectionSection';
 import { ToolLogo } from '../ToolLogo';
+import { PageActions } from '../PageActions';
+import { DeleteToolDialog } from './DeleteToolDialog';
+import { copyToClipboard } from '../../utils/clipboard';
+import { useLibraryToast } from '../../state/toast.context';
+import { NameWithBadges } from '../NameWithBadges';
 
 /**
  * One tool, as a page.
@@ -59,15 +66,22 @@ export function ToolPage({
    * endpoint must not survive the change.
    */
   const [serverRevision, setServerRevision] = useState(0);
+  /** Whether the tool's delete confirmation is up. */
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   useEffect(() => {
     // Consume the OAuth `#…` fragment, KEEPING the query string: on an
     // mcp-declared tool the `?server=<slug>` param is the page's identity, and
     // replacing with the bare pathname stranded a refresh (or any URL copy) on
     // the ambiguous mcp.json address, which bounces to the plugin page.
-    if (oauthOutcome) {
-      window.history.replaceState(null, '', window.location.pathname + window.location.search);
-    }
+    if (!oauthOutcome) return;
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    // Authorized OR error: a round-trip we did not perform ourselves has just
+    // had its say about this tool's sign-in, so what the catalog believes
+    // about it is an answer from before the browser left. An error is not a
+    // failed save — nothing here wrote anything, and the outcome we were
+    // handed is the only evidence either way — so both outcomes re-read.
+    announceToolCredentialsChanged();
   }, [oauthOutcome]);
 
   // Same rule as the skill page: back goes to the page the tool LIVES on —
@@ -86,6 +100,17 @@ export function ToolPage({
       {`‹ ${home.label}`}
     </Button>
   );
+  const toast = useLibraryToast();
+  // Ownership of the plugin the tool LIVES IN — not of the tool file, which
+  // has no rules of its own. The same folder verdict the backend re-derives,
+  // so the menu item and the endpoint agree about who may delete.
+  //
+  // AND its links have to be ours to write: a plugin read from an external
+  // format is edited in its own repository, and the DELETE route refuses one
+  // (422). Offering the item to its owner would be offering a button whose
+  // only outcome is that refusal.
+  const holder = toolPath ? pluginHoldingPath(toolPath, data.pluginSummaries) : null;
+  const canDelete = (holder?.isOwner ?? false) && (holder?.linksAreManaged ?? false);
 
   if (page.loading) {
     return <div className="py-16 text-center text-ui text-ink-muted">Loading…</div>;
@@ -134,23 +159,71 @@ export function ToolPage({
         </Banner>
       )}
 
-      {backLink}
+      <header>
+        {/* The logo and the name are the title BAR — one band, the height the
+            sidebar's header row is. The description reads below it: a line of
+            prose inside the row would make this page's header taller than
+            every other page's, which is the drift the band removes. The way
+            back rides ON the band, as its leading item, for the same reason:
+            a back link in a row above would push the title bar off the line
+            the sidebar's header row holds. (The error and not-found returns
+            above still lead with it on its own row — they have no title bar
+            to hold a line with.) */}
+        <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-4')}>
+          <div className={HEADER_BAND_LEAD}>{backLink}</div>
+          {/* The mark and the title through `NameWithBadges`, so this page
+              states its name the way a card and a plugin row do: truncated
+              with an ellipsis, whole in the DOM, whole in `title`.
 
-      <header className="mt-4 flex items-start gap-4">
-        <ToolLogo slug={tool.slug} name={tool.name} size="lg" className="mt-1" />
-        <div className="min-w-0 flex-1">
-          <h1 className="text-display font-semibold text-ink">{tool.name}</h1>
-          {page.detail?.description && (
-            <p className="mt-1.5 max-w-[56ch] text-lede text-ink-muted">
-              {page.detail.description}
-            </p>
-          )}
+              What it does NOT take is the floor, and the reason is the band.
+              A floor is only worth having where something can give the space
+              back, and the only thing that can is a badge taking a second
+              line. This header has no badges, and it could not wrap them if
+              it had: `HEADER_BAND` is one row tall, exactly as tall as the
+              sidebar's header row beside it, so a second line here hangs out
+              of the band rather than growing it. A floor granted against the
+              back link — which is not even inside this component — bought
+              nothing and cost the title its place on the band at every phone
+              width. `wrap={false}` says that out loud, so the day somebody
+              adds a badge the band clips instead of quietly growing.
+
+              `overflow-hidden` is the other half of a row that cannot wrap,
+              exactly as on the plugin page: with nowhere to go, anything
+              past the width goes across the way back unless it is clipped.
+              Clipped, the title gives way first and the way back stays
+              clickable. */}
+          <NameWithBadges
+            as="h1"
+            wrap={false}
+            className="min-w-0 flex-1 overflow-hidden"
+            gap="gap-4"
+            leading={<ToolLogo slug={tool.slug} name={tool.name} size="lg" />}
+            name={tool.name}
+            nameClassName="text-display font-semibold text-ink"
+          />
         </div>
+        {page.detail?.description && (
+          <p className="mt-1.5 max-w-[56ch] text-lede text-ink-muted">
+            {page.detail.description}
+          </p>
+        )}
         {/* No `Manage access` here, deliberately. Access is decided at the
             PLUGIN — a tool inherits its folder's `access.md`, so an editor on
             this page would either duplicate the plugin's one or quietly write a
             per-file override that nobody looking at the plugin would see. The
-            plugin's `Share` panel is the single place. */}
+            plugin's `Share` panel is the single place.
+
+            The `⋯` menu, though, is the same one the plugin page carries, in
+            the same spot — Delete belongs where people already look for it.
+            `onAdd` is absent: there is nothing to add to a tool. */}
+        <PageActions
+          onCopyLink={() => copyToClipboard(window.location.href)}
+          // The OWNER's verb, and the same verdict the DELETE route enforces
+          // (ownership of the plugin holding the tool) — so the item appears
+          // for exactly the people the backend will let through.
+          onDelete={canDelete ? () => setDeleteOpen(true) : undefined}
+          deleteLabel="Delete tool"
+        />
       </header>
 
       {actionError && (
@@ -210,6 +283,23 @@ export function ToolPage({
           make this tool — the `.tool`, or the plugin `mcp.json` that declares
           the server. */}
       <SourceSection path={tool.path} />
+
+      {deleteOpen && (
+        <DeleteToolDialog
+          slug={tool.slug}
+          name={tool.name}
+          onClose={() => setDeleteOpen(false)}
+          onDeleted={(plugin) => {
+            toast(`Deleted ${tool.name}.`);
+            // This page's subject just ceased to exist — the plugin it lived
+            // in is the honest landing, as the plugin delete lands on the
+            // index. Reloads follow so the cards and the sidebar agree.
+            navigate(pathForPlugin(plugin));
+            data.reload();
+            data.reloadPlugins();
+          }}
+        />
+      )}
     </Article>
   );
 }

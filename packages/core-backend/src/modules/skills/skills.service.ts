@@ -1,4 +1,7 @@
 import path from 'node:path';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('skills');
 import fs from 'node:fs/promises';
 import { parseDocument } from 'yaml';
 import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
@@ -6,17 +9,26 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { extractFrontmatter, resolveDeclaredId, dedupeById } from '../../shared/frontmatter-id.js';
-import { walkFiles } from '../../shared/fs-walk.js';
+import type { IgnoreRules, ITreeWalker } from '../../shared/fs.contract.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
-import { BevelIgnoreStack } from '../workspace/bevel-ignore.js';
 import type {
+  GetSkillOptions,
   ISkillService,
   GetSkillResult,
   Skill,
+  SkillHistorySource,
   SkillSummary,
 } from './skills.contract.js';
 
 const CACHE_TTL_MS = 60_000;
+
+/**
+ * How far back a `version` is looked for: commits of the skill's `SKILL.md`,
+ * newest first. Bounded because each commit costs one read of the file at
+ * that commit; a skill's own history is short, and a version older than two
+ * hundred edits of one file is one nobody is going to ask an agent for.
+ */
+const VERSION_HISTORY_LIMIT = 200;
 
 interface ParsedSkill {
   summary: SkillSummary;
@@ -32,14 +44,26 @@ interface ParsedSkill {
  */
 export class SkillService implements ISkillService {
   private readonly cache: TtlCache<ParsedSkill[]>;
+  /**
+   * Where a `version` is read from — git, attached by the composition root
+   * once the git service exists (it is built after this one). Without it a
+   * `version` cannot be answered and is reported as not found, listing none.
+   */
+  private history: SkillHistorySource | null = null;
 
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly accessControl: IAccessControl,
     private readonly kbDirName: string,
+    private readonly disk: ITreeWalker,
     now: () => number = Date.now,
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
+  }
+
+  /** Attach the history source a `version` is answered from. */
+  setHistory(history: SkillHistorySource): void {
+    this.history = history;
   }
 
   invalidate(): void {
@@ -50,12 +74,7 @@ export class SkillService implements ISkillService {
     const skills = await this.scan();
     const summaries = skills.map((s) => s.summary);
     if (!userEmail) return summaries;
-    const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
-    const allowed = await this.accessControl.canReadBatch(
-      wsId,
-      userEmail,
-      summaries.map((s) => `${s.path}/SKILL.md`),
-    );
+    const allowed = await this.readable(userEmail, summaries.map((s) => s.path));
     // Fail closed: keep a skill only on an explicit `true` verdict — a missing
     // entry counts as denied, matching the KB's default-deny read model (and the
     // tool-manuals catalog). `!== false` would silently EXPOSE a skill any time
@@ -63,14 +82,43 @@ export class SkillService implements ISkillService {
     return summaries.filter((s) => allowed.get(`${s.path}/SKILL.md`) === true);
   }
 
-  async getSkill(userEmail: string, name: string, file?: string): Promise<GetSkillResult> {
+  async getSkill(
+    userEmail: string,
+    name: string,
+    file?: string,
+    options: GetSkillOptions = {},
+  ): Promise<GetSkillResult> {
     if (!isSafeSkillName(name)) return { ok: false, error: 'not_found' };
     const found = (await this.scan()).find((s) => s.summary.name === name);
     if (!found) return { ok: false, error: 'not_found' };
 
     const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
-    if (!(await this.accessControl.canRead(wsId, userEmail, `${found.summary.path}/SKILL.md`))) {
+    // Through `readable`, not a bare `canRead`: the two gates must never
+    // disagree. `canRead` reads a file's own frontmatter rules off disk on
+    // every call while `canReadBatch` resolves them through a per-workspace
+    // memo, so the same skill at the same instant could be loadable by name
+    // and absent from the listing — an author who writes a skill and then
+    // lists them not seeing their own work, and an agent discovering by
+    // listing unable to find a skill it could load. One resolver, one answer.
+    //
+    // The price of the shared gate is that this path now reads through that
+    // memo rather than off disk, so a SKILL.md that rewrites its own `read:`
+    // rules would be authorized against the previous verdict until the memo
+    // expires. It is not: `registerCatalogCacheInvalidation` drops the gate on
+    // the same default-branch signal that drops this catalog, so the listing
+    // and the load are refreshed by one event or by neither.
+    const allowed = await this.readable(userEmail, [found.summary.path]);
+    if (allowed.get(`${found.summary.path}/SKILL.md`) !== true) {
       return { ok: false, error: 'forbidden' };
+    }
+
+    // A version other than the one on disk now is read out of history —
+    // after the access check above, which is the caller's access to the skill
+    // as it is now. The version on disk IS the latest, whatever it is called,
+    // so asking for it by name answers from disk like asking for nothing.
+    const wanted = options.version?.trim();
+    if (wanted !== undefined && wanted.length > 0 && wanted !== found.summary.version) {
+      return this.getSkillAtVersion(wsId, found, name, wanted, file);
     }
 
     if (file !== undefined) {
@@ -97,6 +145,79 @@ export class SkillService implements ISkillService {
   }
 
   // --- internal ---------------------------------------------------------------
+
+  /**
+   * The skill as it was at the most recent default-branch commit whose
+   * `SKILL.md` declared `wanted` — walking that file's history newest first,
+   * so a version that was published, superseded and republished answers with
+   * its latest copy. Every version the walk met is collected on the way, so
+   * a miss can say what there is to ask for.
+   *
+   * The bundled files come from the tree at that commit, without the ignore
+   * rules the live listing applies (those are the rules in force NOW, about a
+   * tree that was different then); `SKILL.md` itself is left out as always.
+   */
+  private async getSkillAtVersion(
+    wsId: string,
+    found: ParsedSkill,
+    name: string,
+    wanted: string,
+    file: string | undefined,
+  ): Promise<GetSkillResult> {
+    if (file !== undefined && !isSafeRelFile(file)) return { ok: false, error: 'invalid_file' };
+    const history = this.history;
+    if (!history) return { ok: false, error: 'version_not_found', versions: [] };
+    const folder = found.summary.path;
+    const skillMd = `${folder}/SKILL.md`;
+    const versions: string[] = [];
+    const seen = new Set<string>();
+    const shas = await history.pathHistory(wsId, 'HEAD', skillMd, VERSION_HISTORY_LIMIT);
+    for (const sha of shas) {
+      const raw = await history.readFileAtRef(wsId, sha, skillMd);
+      if (raw === null) continue;
+      const fm = parseSkillFrontmatter(raw);
+      if (fm.version === undefined) continue;
+      if (!seen.has(fm.version)) {
+        seen.add(fm.version);
+        versions.push(fm.version);
+      }
+      if (fm.version !== wanted) continue;
+
+      const files = (await history.listFilesAtRef(wsId, sha, folder))
+        .filter((p) => p !== skillMd)
+        .sort();
+      if (file !== undefined) {
+        const repoPath = `${folder}/${file}`;
+        if (!files.includes(repoPath)) return { ok: false, error: 'not_found' };
+        const content = await history.readFileAtRef(wsId, sha, repoPath);
+        if (content === null) return { ok: false, error: 'not_found' };
+        return { ok: true, kind: 'file', file: { name, file, path: repoPath, content } };
+      }
+      const skill: Skill = {
+        ...found.summary,
+        description: fm.description,
+        version: fm.version,
+        body: fm.body,
+        allowedTools: fm.allowedTools,
+        files,
+      };
+      return { ok: true, kind: 'skill', skill };
+    }
+    return { ok: false, error: 'version_not_found', versions };
+  }
+
+  /**
+   * The ONE read gate both surfaces resolve through, keyed by each skill's
+   * `SKILL.md`. Shared so `listSkills` and `getSkill` can only ever give the
+   * same verdict about the same skill — see the note at the `getSkill` call.
+   */
+  private async readable(userEmail: string, skillFolders: string[]): Promise<Map<string, boolean>> {
+    return this.accessControl.canReadBatch(
+      workspaceIdForBranch(DEFAULT_BRANCH),
+      userEmail,
+      skillFolders.map((p) => `${p}/SKILL.md`),
+    );
+  }
 
   private async scan(): Promise<ParsedSkill[]> {
     const cached = this.cache.get();
@@ -139,60 +260,62 @@ export class SkillService implements ISkillService {
     // from the Knowledge tree, and a rule that hides a root from the browser
     // must not empty the catalog that root exists to feed.
     const out: ParsedSkill[] = [];
-    const walk = async (dir: string, relFolder: string, ignore: BevelIgnoreStack): Promise<void> => {
-      let entries: import('node:fs').Dirent[];
-      try {
-        entries = await fs.readdir(dir, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      ignore = await ignore.extendedWith(dir);
-      if (entries.some((e) => e.isFile() && e.name === 'SKILL.md')) {
-        // A skill folder is a LEAF whatever the ignore rules say of it: a rule
-        // naming its SKILL.md suppresses the skill, it does not turn the
-        // folder's assets into skills of their own.
-        if (ignore.isIgnored(path.join(dir, 'SKILL.md'), false)) return;
-        let raw: string;
-        try {
-          raw = await fs.readFile(path.join(dir, 'SKILL.md'), 'utf-8');
-        } catch {
-          return;
-        }
-        const fm = parseSkillFrontmatter(raw);
-        // Identity via the shared rule: frontmatter `id` → `name` → folder name.
-        // `getSkill()` refuses unsafe names (path separators, `.`/`..`), so a
-        // declared id that fails the same check would list but never fetch —
-        // fall back to the folder name (a readdir entry, safe by construction)
-        // to keep listing and lookup consistent.
-        const declared = resolveDeclaredId(fm.frontmatter, path.basename(dir));
-        const name = isSafeSkillName(declared) ? declared : path.basename(dir);
-        out.push({
-          summary: {
-            name,
-            description: fm.description,
-            version: fm.version,
-            owner: fm.owner,
-            lifecycle: fm.lifecycle,
-            path: relFolder,
+    const isSkillFolder = (entries: readonly { name: string; isFile(): boolean }[]) =>
+      entries.some((e) => e.isFile() && e.name === 'SKILL.md');
+    const disk = this.disk;
+    const walkRoot = async (rootRel: string): Promise<void> => {
+      await disk.walk(
+        path.join(kbRoot, rootRel),
+        {
+          skip: (e) => e.isDirectory() && e.name.startsWith('.'),
+          ignore: true,
+          // A skill folder is a LEAF whatever the ignore rules say of it — so
+          // judged on what is THERE: a rule naming its SKILL.md suppresses the
+          // skill (below), it does not turn the folder's assets into skills of
+          // their own.
+          leaf: (dir) => isSkillFolder(dir.listed),
+        },
+        [
+          {
+            async onDir(rel, entries, { abs: dir, listed, ignore }) {
+              if (!isSkillFolder(listed)) return;
+              if (!isSkillFolder(entries)) return; // the SKILL.md is ignored: no skill
+              const relFolder = rel ? `${rootRel}/${rel}` : rootRel;
+              let raw: string;
+              try {
+                raw = await fs.readFile(path.join(dir, 'SKILL.md'), 'utf-8');
+              } catch {
+                return;
+              }
+              const fm = parseSkillFrontmatter(raw);
+              // Identity via the shared rule: frontmatter `id` → `name` → folder name.
+              // `getSkill()` refuses unsafe names (path separators, `.`/`..`), so a
+              // declared id that fails the same check would list but never fetch —
+              // fall back to the folder name (a readdir entry, safe by construction)
+              // to keep listing and lookup consistent.
+              const declared = resolveDeclaredId(fm.frontmatter, path.basename(dir));
+              const name = isSafeSkillName(declared) ? declared : path.basename(dir);
+              out.push({
+                summary: {
+                  name,
+                  description: fm.description,
+                  version: fm.version,
+                  path: relFolder,
+                },
+                body: fm.body,
+                allowedTools: fm.allowedTools,
+                files: await listBundledFiles(disk, dir, relFolder, ignore),
+              });
+            },
           },
-          body: fm.body,
-          allowedTools: fm.allowedTools,
-          files: await listBundledFiles(dir, relFolder, ignore),
-        });
-        return; // a skill folder is a leaf — its subfolders hold assets, not skills
-      }
-      for (const entry of entries) {
-        if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
-        const abs = path.join(dir, entry.name);
-        if (ignore.isIgnored(abs, true)) continue;
-        await walk(abs, `${relFolder}/${entry.name}`, ignore);
-      }
+        ],
+      );
     };
     // Each root starts its own ignore stack (the walk extends it with the
     // root's own file first). Order is cosmetic: the sort below is by name
     // then path, so a same-named pair resolves the same way regardless.
-    await walk(path.join(kbRoot, SKILLS_DIR), SKILLS_DIR, BevelIgnoreStack.empty());
-    await walk(path.join(kbRoot, PLUGINS_DIR), PLUGINS_DIR, BevelIgnoreStack.empty());
+    await walkRoot(SKILLS_DIR);
+    await walkRoot(PLUGINS_DIR);
     // A skill's id (frontmatter `id`/`name`, else folder name) is how getSkill()
     // resolves it, so it must be unique. Sort by (name, root, path) for a
     // deterministic winner — the shared root FIRST, since `Skills/` is a
@@ -207,8 +330,8 @@ export class SkillService implements ISkillService {
         a.summary.path.localeCompare(b.summary.path),
     );
     return dedupeById(out, (s) => s.summary.name, (s, id) =>
-      console.warn(
-        `[skills] skipping "${s.summary.path}": id "${id}" is already used by another skill — ` +
+      log.warn(
+        `skipping "${s.summary.path}": id "${id}" is already used by another skill — ` +
           'give it a unique `id`/`name` in its SKILL.md frontmatter.',
       ),
     );
@@ -240,6 +363,12 @@ function scalarToString(value: unknown): string | undefined {
   return undefined;
 }
 
+/** The mapping under `key`, or an empty one when there is none (or it is not a mapping). */
+function nested(data: Record<string, unknown>, key: string): Record<string, unknown> {
+  const value = data[key];
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
 /**
  * Exported for the pending-skill surface, which parses a SKILL.md read at a
  * change request's ref rather than off disk. Same parser deliberately: a
@@ -249,10 +378,6 @@ function scalarToString(value: unknown): string | undefined {
 export function parseSkillFrontmatter(raw: string): {
   description: string;
   version?: string;
-  /** `metadata.owner` (or a top-level `owner`) — the governance record's owner, verbatim. */
-  owner?: string;
-  /** `metadata.lifecycle` (or top-level) — e.g. `active`, `deprecated`, `retired`; lowercased. */
-  lifecycle?: string;
   allowedTools?: string[];
   body: string;
   /** The parsed frontmatter object (for shared id resolution: `id`/`name`). */
@@ -275,13 +400,13 @@ export function parseSkillFrontmatter(raw: string): {
   }
 
   const description = typeof data.description === 'string' ? data.description.trim() : '';
-  const metadata = (data.metadata ?? {}) as Record<string, unknown>;
-  const version = scalarToString(data.version) ?? scalarToString(metadata.version);
-  // The governance record: `metadata.owner` / `metadata.lifecycle` first (the
-  // agentskills convention this catalog reads), a top-level spelling second.
-  const owner = (scalarToString(metadata.owner) ?? scalarToString(data.owner))?.trim() || undefined;
-  const lifecycle =
-    (scalarToString(metadata.lifecycle) ?? scalarToString(data.lifecycle))?.trim().toLowerCase() || undefined;
+  // `metadata.version` is where the Agent Skills format keeps a version and
+  // what the platform writes; a top-level `version` and `lifecycle.version`
+  // (other conventions a skill may arrive with) are read when it is absent.
+  const version =
+    scalarToString(nested(data, 'metadata').version) ??
+    scalarToString(data.version) ??
+    scalarToString(nested(data, 'lifecycle').version);
 
   // `allowed-tools` is a space-separated string (agentskills) or a YAML list.
   const at = data['allowed-tools'];
@@ -291,7 +416,7 @@ export function parseSkillFrontmatter(raw: string): {
       ? at.split(/\s+/).filter(Boolean)
       : undefined;
 
-  return { description, version, owner, lifecycle, allowedTools, body, frontmatter: data };
+  return { description, version, allowedTools, body, frontmatter: data };
 }
 
 /**
@@ -301,15 +426,20 @@ export function parseSkillFrontmatter(raw: string): {
  * hides an asset from the listing, and therefore (see `getSkill`) from
  * being served.
  */
-async function listBundledFiles(dir: string, relFolder: string, ignore: BevelIgnoreStack): Promise<string[]> {
-  const hidden = (rel: string): boolean => {
-    const parts = rel.split('/');
-    for (let i = 1; i < parts.length; i++) {
-      if (ignore.isIgnored(path.join(dir, ...parts.slice(0, i)), true)) return true;
-    }
-    return ignore.isIgnored(path.join(dir, ...parts), false);
-  };
-  return (await walkFiles(dir, () => true))
-    .filter((rel) => rel !== 'SKILL.md' && !hidden(rel))
-    .map((rel) => `${relFolder}/${rel}`);
+async function listBundledFiles(disk: ITreeWalker, dir: string, relFolder: string, rules: IgnoreRules): Promise<string[]> {
+  const rels: string[] = [];
+  await disk.walkKb(
+    dir,
+    [
+      {
+        onFile(sub, name) {
+          if (sub || name !== 'SKILL.md') rels.push(sub ? `${sub}/${name}` : name);
+        },
+      },
+    ],
+    // `rules` are those in force in the skill folder itself; the walk layers
+    // its own file once more (a no-op) and any deeper one on the way down.
+    { ignore: rules },
+  );
+  return rels.sort().map((rel) => `${relFolder}/${rel}`);
 }

@@ -3,6 +3,7 @@ import { render, screen, waitFor, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { useEffect, useState } from 'react';
+import { PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
 import type {
   BranchInfo,
   FileTreeEntry,
@@ -85,6 +86,9 @@ vi.mock('../../../change-requests/services/change-requests.api', () => ({
   listOpenChangeRequests: vi.fn(async () => []),
   listMyChangeRequests: myCrsMock,
   readFileOnBranch: readBranchMock,
+  // No fork point: the change boxes fall back to the default branch, which is
+  // what these tests diff against.
+  readFileAtForkPoint: vi.fn(async () => ({ content: null, forkSha: null })),
 }));
 
 // The access sheet is a 1200-line dialog with its own suite and its own
@@ -256,6 +260,8 @@ function ViewerHarness({
     kbDirName,
     fileTree,
     bootstrapError: null,
+    workspaceBranch: 'main',
+    retryBootstrap: () => {},
     openTabs: tab ? [tab] : [],
     activeTab: tab,
     dirtyTabFilenames: [],
@@ -265,8 +271,8 @@ function ViewerHarness({
     hasUnsavedFileChanges: false,
     pendingFileContent,
     setActiveTabContent: captureTyped ? (v: string) => setOpenFileContent(v) : () => {},
-    uploadError: null,
-    uploadNotice: null,
+    uploadErrors: new Map(),
+    uploadNotices: new Map(),
     clearUploadNotice: () => {},
     isUploading: false,
     uploadProgress: null,
@@ -280,7 +286,7 @@ function ViewerHarness({
     activateTab: () => {},
     reorderTab: () => {},
     closeAllTabs: () => {},
-    hydrateTabs: async () => ({ surviving: [], dropped: [], denied: [] }),
+    hydrateTabs: async () => ({ surviving: [], dropped: [], denied: [], superseded: false }),
     createFile: async () => {},
     createDirectory: async () => {},
     unzipHere: async () => ({ extracted: 0, skipped: [], destination: '' }),
@@ -386,6 +392,7 @@ describe('FileViewer', () => {
       owners: EMPTY_ELIGIBLE,
     };
     accessMock.fetchFileAccess.mockClear();
+    readBranchMock.mockImplementation(async () => '');
     // Restore the default "acquire succeeds" behaviour so a per-test 403
     // override doesn't leak into the next test.
     vi.mocked(acquireLockMock).mockImplementation(async () => ({
@@ -400,6 +407,41 @@ describe('FileViewer', () => {
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       },
     }));
+  });
+
+  /**
+   * The seam, in the page that broke it.
+   *
+   * `HeaderAlignment.test.tsx` measures the band's HEIGHT and checks that a
+   * document column opens on it. This checks the thing only the real page can
+   * say: that the file page actually hands its title bar to that slot. It
+   * used to render `<EditorTabs />` above `<KbPageHeader>` inside the column,
+   * so the title bar opened 54px below the sidebar header row it is supposed
+   * to line up with — at every width, unaffected by collapsing or resizing the
+   * sidebar, and invisible to a suite in which no test rendered the header
+   * anywhere near a tab strip. Staging found it; this is what would have.
+   *
+   * Structural, not measured: happy-dom has no layout engine, so "nothing is
+   * drawn above the band" is the checkable form of "the band's top edge is
+   * the column's top edge".
+   */
+  it('opens the document column with the title bar, above the tab strip', async () => {
+    render(<ViewerHarness initialContent="Base content" />);
+
+    const band = await screen.findByTestId(PAGE_HEADER_TESTID);
+    // The harness opens one tab, so the strip really is rendered — without it
+    // this test would pass on the broken code too.
+    const tabs = screen.getByRole('tablist', { name: 'Open files' });
+
+    // Nothing above the band inside its column — the checkable form of "its
+    // top edge is the column's top edge".
+    expect(band.previousElementSibling).toBeNull();
+    // And the strip did not leave the column to get there; it went below the
+    // title. One column still holds the title, the tabs and the text
+    // (proto:700-705) — this only changed the order inside it.
+    const column = band.parentElement!;
+    expect(column.contains(tabs)).toBe(true);
+    expect(band.compareDocumentPosition(tabs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('immediately enters review mode when pending arrives on a clean file', async () => {
@@ -889,6 +931,63 @@ describe('FileViewer', () => {
     ).toBeInTheDocument();
   });
 
+  /**
+   * "Waiting on you and N others" counts the people who can APPROVE — the
+   * write: grants — not the owner: list. A file written by Bob and Carl (plus
+   * the inherited Admin role) with no owners must not tell Bob he is the only
+   * one it waits on.
+   */
+  it('counts the other approvers from the write grants, not the owners', async () => {
+    accessMock.result = {
+      canWrite: true,
+      canOwner: false,
+      eligible: {
+        roles: ['Admin'],
+        users: [
+          { name: 'Bob', email: 'bob@example.com' },
+          { name: 'Carl', email: 'carl@example.com' },
+        ],
+      },
+      owners: EMPTY_ELIGIBLE,
+    };
+    // The proposal must actually differ from the file, or the box reads
+    // "Already up to date" and has no verdict to wait on.
+    readBranchMock.mockImplementation((async (branch: string) =>
+      branch.startsWith('suggestions/') ? 'proposed' : 'current') as never);
+    render(
+      <ViewerHarness
+        initialContent="contested"
+        branch="target-company-state"
+        authUser={{ id: 'u-bob', email: 'bob@example.com', name: 'Bob' }}
+        changeRequests={[{ number: 33, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+
+    expect(await screen.findByText('Waiting on you and 2 others')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument();
+  });
+
+  /**
+   * A failed access lookup default-allows with an EMPTY grant list. That list
+   * is not the approver set, so the box must not claim "Waiting on you".
+   */
+  it('makes no waiting-on claim when the approver grants never loaded', async () => {
+    accessMock.fetchFileAccess.mockRejectedValueOnce(new Error('network down'));
+    readBranchMock.mockImplementation((async (branch: string) =>
+      branch.startsWith('suggestions/') ? 'proposed' : 'current') as never);
+    render(
+      <ViewerHarness
+        initialContent="contested"
+        branch="target-company-state"
+        authUser={{ id: 'u-bob', email: 'bob@example.com', name: 'Bob' }}
+        changeRequests={[{ number: 33, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+
+    expect(await screen.findByText('You can decide this.')).toBeInTheDocument();
+    expect(screen.queryByText(/Waiting on you/)).not.toBeInTheDocument();
+  });
+
   it('says nothing on a file nobody has proposed a change to', () => {
     render(<ViewerHarness initialContent="quiet" />);
     expect(screen.queryByText(/proposed a change/)).not.toBeInTheDocument();
@@ -1144,7 +1243,15 @@ describe('FileViewer: proposing a change without write access', () => {
  * away from the pages it holds. It offers those pages now.
  */
 describe('FileViewer: nothing open', () => {
-  const TREE: FileTreeEntry = {
+  /** The workspace root the API returns, wrapping whatever the checkout holds. */
+  const workspace = (checkout: FileTreeEntry): FileTreeEntry => ({
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [checkout],
+  });
+
+  const CHECKOUT: FileTreeEntry = {
     name: 'knowledge-base',
     relativePath: 'knowledge-base',
     type: 'directory',
@@ -1193,6 +1300,22 @@ describe('FileViewer: nothing open', () => {
       { name: 'access.md', relativePath: 'knowledge-base/access.md', type: 'file' },
     ],
   };
+
+  const TREE = workspace(CHECKOUT);
+
+  /**
+   * The strays that sat beside the checkout on core-staging. Nothing here is
+   * the repository, so nothing here is ever offered as a page.
+   */
+  const STRAYS: FileTreeEntry[] = [
+    {
+      name: 'KnowledgeBase',
+      relativePath: 'KnowledgeBase',
+      type: 'directory',
+      children: [{ name: 'Planted.md', relativePath: 'KnowledgeBase/Planted.md', type: 'file' }],
+    },
+    { name: 'Stray.md', relativePath: 'Stray.md', type: 'file' },
+  ];
 
   it('does not send the reader off to an assistant', async () => {
     render(<ViewerHarness filePath={null} fileTree={TREE} />);
@@ -1278,6 +1401,30 @@ describe('FileViewer: nothing open', () => {
     expect(await screen.findByRole('button', { name: /Handbook/ })).toBeEnabled();
   });
 
+  /**
+   * The strays on core-staging put a `KnowledgeBase/` beside the checkout.
+   * The offer is the checkout's, so they change nothing — and when the
+   * checkout itself is gone there is nothing to offer, rather than whatever
+   * was written next to it.
+   */
+  it('offers the same pages with strays beside the checkout, and none without one', async () => {
+    const { unmount } = render(
+      <ViewerHarness
+        filePath={null}
+        fileTree={{ ...TREE, children: [...STRAYS, CHECKOUT] }}
+      />,
+    );
+    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Planted/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Stray/ })).toBeNull();
+    unmount();
+
+    render(<ViewerHarness filePath={null} fileTree={{ ...TREE, children: STRAYS }} />);
+    await screen.findByRole('heading', { name: /Open a page/ });
+    expect(screen.queryByRole('button', { name: /Planted/ })).toBeNull();
+    expect(screen.getByText('Pick anything from the file tree.')).toBeInTheDocument();
+  });
+
   /** A knowledge base with nothing in it has nothing to suggest, and says so. */
   it('promises nothing when there is nothing to open', async () => {
     render(<ViewerHarness filePath={null} fileTree={null} />);
@@ -1294,14 +1441,14 @@ describe('FileViewer: nothing open', () => {
     render(
       <ViewerHarness
         filePath={null}
-        fileTree={{
+        fileTree={workspace({
           name: 'knowledge-base',
           relativePath: 'knowledge-base',
           type: 'directory',
           children: [
             { name: 'Charter.md', relativePath: 'knowledge-base/Charter.md', type: 'file' },
           ],
-        }}
+        })}
       />,
     );
     expect(await screen.findByRole('button', { name: /Charter/ })).toBeInTheDocument();

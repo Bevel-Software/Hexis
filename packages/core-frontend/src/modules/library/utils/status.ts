@@ -1,4 +1,5 @@
-import { formatRelativeTime } from '../../../lib/utils';
+import { skillUnderRoot } from '@bevel-software/platform-shared';
+import { probeWords } from '../../secrets-vault/probe/probe-verdict';
 import type { ProbeVerdict, ToolSecrets, ToolVarStatus } from '../../secrets-vault/services/tool-secrets.api';
 
 /**
@@ -41,14 +42,6 @@ export interface AttentionStatus {
    */
   hint?: string;
 }
-
-/**
- * Stored, and PROVEN to work by a real call.
- *
- * Reachable ONLY from a passing probe verdict. Nothing derived from what is
- * merely stored may return this — that inference is the entire bug.
- */
-const OK: AttentionStatus = { state: 'ok', text: 'Connected' };
 
 /**
  * In place, and untested — all a STORED value can ever support.
@@ -99,10 +92,17 @@ function varStatus(v: ToolVarStatus, canWrite: boolean): AttentionStatus {
  * The word for a tool that is fully SET UP, decided by whether the credential
  * has actually been tested.
  *
- * Three outcomes, and the reason there are three: `Connected` is a claim we can
- * back — something called the provider and it answered. `Key saved` is the
- * narrower claim we can back when nothing tested it: a value is stored, and
- * that is genuinely all we know. `Not working` is the provider's own verdict.
+ * Four outcomes, and the reason there are four: `Connected` is a claim we can
+ * back — something called the provider and it answered. `Not working` is the
+ * provider's own verdict. `Unverified` is what a probe that reached no verdict
+ * leaves behind — most often a manual that defines no health check, so there
+ * is nothing to call. `Key saved` is the narrower claim for a tool NOTHING has
+ * probed at all: a value is stored, and that is genuinely all we know.
+ *
+ * The first three are `probeWords`, shared verbatim with the Connect page and
+ * the vault, which probe after their own saves now. The fourth is this
+ * module's alone, because it is the one a list of cards can reach — no verdict
+ * was ever asked for there.
  *
  * `Key saved` stays GREEN. It is a complete, true statement about a tool that
  * needs nothing from anybody, and painting it amber would put a permanent
@@ -114,18 +114,16 @@ function varStatus(v: ToolVarStatus, canWrite: boolean): AttentionStatus {
  * lie in a component whose entire job is to stop telling small lies.
  */
 function healthStatus(tool: ToolSecrets, verdict?: ProbeVerdict | null): AttentionStatus {
-  if (verdict?.status === 'ok') {
-    // The app's one relative-time formatter, not a local dialect of it. A
-    // verdict with no usable timestamp still just happened — it cannot outlive
-    // the component holding it — so "just now" is the honest fallback.
-    return { ...OK, hint: `Checked ${formatRelativeTime(verdict.checkedAt) || 'just now'}.` };
-  }
-  if (verdict?.status === 'failed') {
-    return {
-      state: 'err',
-      text: 'Not working',
-      hint: verdict.detail ?? 'The provider rejected this credential.',
-    };
+  // A verdict exists: the probe's own vocabulary wins outright, and it is the
+  // SAME vocabulary the Connect page and the vault render — `probeWords` is
+  // the single place those sentences are written, so one provider rejection
+  // cannot come out as two different complaints depending on where the key was
+  // typed. `Unverified` included: a manual with no health check has nothing to
+  // prove "Key saved" with either, and saying the narrower true thing is the
+  // rule this module is built on.
+  if (verdict) {
+    const { tone, text, hint } = probeWords(verdict);
+    return { state: tone, text, hint };
   }
   // The word has to match what the user actually did. A tool with no variables
   // asked nothing of them, so "Key saved" would name a key that does not exist;
@@ -137,7 +135,7 @@ function healthStatus(tool: ToolSecrets, verdict?: ProbeVerdict | null): Attenti
   return {
     state: 'ok',
     text,
-    hint: verdict?.detail ?? "Not verified — this tool hasn't been tested yet.",
+    hint: "Not verified — this tool hasn't been tested yet.",
   };
 }
 
@@ -277,6 +275,7 @@ export interface LibraryFilterable {
   id?: string;
   name: string;
   description: string;
+  /** Named in the item's `owner:` grant — "Owned by me" lists exactly these. */
   owned: boolean;
   /** Folder plugin from the item's KB path, or null when it sits in none. */
   plugin: string | null;
@@ -295,9 +294,13 @@ export interface LibraryFilterable {
   plugins?: { name: string }[];
 }
 
-/** "Yours alone": in no plugin folder AND not a shared skill. */
-export function isUngrouped(item: Pick<LibraryFilterable, 'plugin' | 'shared'>): boolean {
-  return item.plugin === null && !item.shared;
+/**
+ * "Yours alone": in no plugin folder, not a shared skill, and in no plugin
+ * by link either — a tool under a root a plugin links arrives on that
+ * plugin's page with the skills beside it, so it is not alone.
+ */
+export function isUngrouped(item: Pick<LibraryFilterable, 'plugin' | 'shared' | 'plugins'>): boolean {
+  return item.plugin === null && !item.shared && !(item.plugins?.length ?? 0);
 }
 
 /** Whether an item belongs to `plugin` — by folder, or by a link from the plugin's manifest. */
@@ -313,7 +316,7 @@ export function isInPlugin(item: Pick<LibraryFilterable, 'plugin' | 'plugins'>, 
  * not amber: it locks other people out, and the sidebar count for the plugin
  * is the same colour. Healthy links are untouched.
  */
-export function withLinkHealth<T extends LibraryFilterable & { status: AttentionStatus }>(
+export function withLinkHealth<T extends LibraryFilterable & { status: AttentionStatus; canWrite?: boolean }>(
   item: T,
   plugin: string,
 ): T {
@@ -329,10 +332,54 @@ export function withLinkHealth<T extends LibraryFilterable & { status: Attention
     ...item,
     status: {
       state: 'urgent',
-      text: item.owned ? 'Needs setup: share with plugin members' : 'Needs setup',
+      text: item.canWrite ? 'Needs setup: share with plugin members' : 'Needs setup',
       hint: `The skill's access rules no longer name ${plugin}'s members. Repair the link from the skill page.`,
     },
   };
+}
+
+/**
+ * Where an item that reaches `plugin` by LINK actually lives — the folder
+ * holding it, which is what the card's Linked pill names on hover.
+ *
+ * Null for an item the plugin's own folder holds, and for one that is not in
+ * the plugin at all: an inline card has nothing to disclose, and a page that
+ * pilled every card would be saying nothing with three more words.
+ *
+ * The answer is the MANIFEST'S ROOT, not the item's parent folder: the pill
+ * discloses the place somebody linked, and a manifest may name a whole shelf
+ * (`Skills/Testing`, which HOLDS the skill folder) or one skill folder
+ * outright (`Skills/Testing/test-shared-linking`, which IS it). Dropping the
+ * path's last segment gets the first case right and the second wrong — it
+ * would answer `Skills/Testing` for a skill whose shelf nobody linked. A tool
+ * is the same question asked of a file. Deepest root wins, as everywhere else
+ * a path is attributed to a place.
+ *
+ * No roots is the degraded read — the plugins endpoint failed, or its summary
+ * has not arrived — and the parent folder stands in, which is where the item
+ * lives in every case but the one above.
+ */
+export function linkedHomeOf(
+  item: Pick<LibraryFilterable, 'plugins'> & { path: string },
+  plugin: string,
+  linkedRoots: readonly string[] = [],
+): string | null {
+  const membership = (item.plugins as { name: string; linked?: boolean }[] | undefined)?.find(
+    (m) => m.name === plugin,
+  );
+  if (!membership?.linked) return null;
+  // `skillUnderRoot` is the one containment rule for a linked root — a tool
+  // under the root is under it the same way a skill is.
+  let root: string | null = null;
+  for (const candidate of linkedRoots) {
+    if (!skillUnderRoot(item.path, candidate)) continue;
+    if (root === null || candidate.length > root.length) root = candidate;
+  }
+  if (root !== null) return root;
+  const cut = item.path.lastIndexOf('/');
+  // A path with no parent (nothing this catalog serves, but the slice would
+  // otherwise silently answer with the empty string) names itself.
+  return cut > 0 ? item.path.slice(0, cut) : item.path;
 }
 
 /** The distinct plugin names an item belongs to. */

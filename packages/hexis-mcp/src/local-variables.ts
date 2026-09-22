@@ -1,7 +1,7 @@
 import { type VariableLoader, VariableLoaderSerializer, Serializer } from '@utcp/sdk';
 import { utcpNamespacePrefix } from '@bevel-software/platform-mcp-core';
 import type { HexisMcpConfig } from './config.js';
-import { fetchLocalToolVariables, type LocalManualInfo, type LocalToolVariables } from './deployment.js';
+import { ConnectionKeyRejectedError, fetchLocalToolVariables, type LocalManualInfo, type LocalToolVariables } from './deployment.js';
 
 /**
  * Resolving a LOCAL tool's `${VAR}`s from the deployment's Secrets Vault.
@@ -52,6 +52,13 @@ interface ResolverState {
   cache: Map<string, { at: number; values: Record<string, string> }>;
   inFlight: Map<string, Promise<LocalToolVariables>>;
   /**
+   * Bumped by every cache drop. A fetch that was in flight when the cache was
+   * dropped carries the generation it started under and, on arrival, stores
+   * nothing unless that is still the current one — otherwise the values of a
+   * manual's OLD definition would land in the cache the refresh just cleared.
+   */
+  generation: number;
+  /**
    * Collisions this binding has already reported — a shared namespace, or a
    * nested manual pair. Per binding, not per process: a host that creates
    * servers over time would otherwise grow the set forever, and a second
@@ -90,7 +97,15 @@ export function bindLocalVariableResolver(
   now: () => number = Date.now,
 ): string {
   const id = `binding-${nextBindingId++}`;
-  bindings.set(id, { config, local, cache: new Map(), inFlight: new Map(), reportedCollisions: new Set(), now });
+  bindings.set(id, {
+    config,
+    local,
+    cache: new Map(),
+    inFlight: new Map(),
+    reportedCollisions: new Set(),
+    now,
+    generation: 0,
+  });
   return id;
 }
 
@@ -105,6 +120,28 @@ export function bindLocalVariableResolver(
 export function resetLocalVariableResolver(id?: string): void {
   if (id === undefined) bindings.clear();
   else bindings.delete(id);
+}
+
+/**
+ * Forget every value a binding has resolved so far, keeping the binding.
+ *
+ * For a catalog refresh that swaps the set of local manuals under a live
+ * client: a manual that kept its name but changed its file may now declare
+ * other variables, or be addressed by another slug, and the values cached
+ * against its OLD definition would otherwise be handed to its new tools for
+ * the rest of the cache's life. In-flight resolutions are left to finish —
+ * their result is dropped on arrival, because the generation they started
+ * under is no longer the current one (see `variablesFor`) — and collision
+ * reports are cleared with the values, so a collision the new set removed is
+ * not still suppressed, and one it introduced is reported once.
+ */
+export function dropLocalVariableCache(id: string): void {
+  const s = bindings.get(id);
+  if (!s) return;
+  s.generation += 1;
+  s.cache.clear();
+  s.inFlight.clear();
+  s.reportedCollisions.clear();
 }
 
 /**
@@ -256,12 +293,19 @@ async function variablesFor(s: ResolverState, manual: string, info: LocalManualI
   const pending = s.inFlight.get(manual);
   if (pending) return pending;
 
+  // Stored — and forgotten as in flight — only while the cache this fetch
+  // was started for is still the current one. After a drop the answer goes
+  // to its askers and no further: it describes a definition that is gone,
+  // and the drop has already forgotten this entry.
+  const generation = s.generation;
   const request = fetchLocalToolVariables(s.config, info.slug)
     .then((result) => {
-      if (result.ok) s.cache.set(manual, { at: s.now(), values: result.values });
+      if (result.ok && s.generation === generation) s.cache.set(manual, { at: s.now(), values: result.values });
       return result;
     })
-    .finally(() => s.inFlight.delete(manual));
+    .finally(() => {
+      if (s.inFlight.get(manual) === request) s.inFlight.delete(manual);
+    });
   s.inFlight.set(manual, request);
   return request;
 }
@@ -288,7 +332,10 @@ export class HexisLocalVariableLoader implements VariableLoader {
     if (!state) return null;
     try {
       return await resolve(state, effectiveKey);
-    } catch {
+    } catch (err) {
+      // A rejected key fails the call with its own sentence: falling through
+      // to `process.env` would run the tool without the credentials it lost.
+      if (err instanceof ConnectionKeyRejectedError) throw err;
       // `fetchLocalToolVariables` already logs; an unresolved variable falls
       // through to `process.env` rather than failing the call outright.
       return null;

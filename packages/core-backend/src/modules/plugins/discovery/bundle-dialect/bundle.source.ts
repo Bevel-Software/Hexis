@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isPersonalPluginDir, normalizeSkillRoot, pluginManifestName } from '@bevel-software/platform-shared';
-import { isAbsence } from '../../../../shared/fs-errors.js';
+import { isAbsence } from '../../../../shared/fs.contract.js';
 import type { DiscoveredPlugin } from '../plugin-source.js';
 import { expandProfile, parseRegistry, type McpRegistry } from './registry.js';
 
@@ -36,6 +36,10 @@ import { expandProfile, parseRegistry, type McpRegistry } from './registry.js';
  */
 export const BUNDLE_FILE = 'plugin.bundle.json';
 export const DEFAULT_REGISTRY_PATH = 'configs/mcp/registry.json';
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
 
 /** The registry, when the repository has one; a missing file is null, a broken one warns. */
 export async function loadRegistry(kbRoot: string, warnings: string[]): Promise<McpRegistry | null> {
@@ -110,20 +114,37 @@ export async function readBundlePlugin(
     }
   }
 
-  const ui =
-    typeof bundle.interface === 'object' && bundle.interface !== null
-      ? (bundle.interface as Record<string, unknown>)
-      : {};
+  // A record, or nothing: a list where the block should be is not a block.
+  const ui = isRecord(bundle.interface) ? bundle.interface : {};
+  // The bundle's own rule for what it is called: `interface.displayName`,
+  // else the FOLDER — this dialect is a foreign repository's, read-only, and
+  // its folders are its presentation. The synthesized manifest carries the
+  // answer so the shared reader (`pluginDisplayNameOf`, manifest-only) tells
+  // anyone who asks the same thing this discovery reports.
+  const displayName = typeof ui.displayName === 'string' && ui.displayName.trim() ? ui.displayName.trim() : leaf;
+  // The presentation block is carried as written (below) — except for the
+  // one field that is also a name: the block gets the SAME answer the
+  // manifest does. The compile step fills `interface.displayName` only when
+  // it is blank, so a padded or blank spelling left here would ship a Codex
+  // manifest whose `interface` calls the plugin something the catalog and
+  // the API do not — the split answer this whole rule removes.
+  const carriedUi = typeof ui.displayName === 'string' ? { ...ui, displayName } : ui;
   const manifest: Record<string, unknown> = { name: pluginManifestName(name) };
   if (typeof bundle.version === 'string') manifest.version = bundle.version;
   if (typeof bundle.description === 'string') manifest.description = bundle.description;
-  if (typeof ui.displayName === 'string') manifest.displayName = ui.displayName;
+  manifest.displayName = displayName;
+  // What the bundle says about itself beyond the four fields above — who
+  // wrote it, what it is for, how a catalogue should present it — is carried
+  // as written, so the compiled plugin can say the same. Shapes are the
+  // vendor manifests' own (`author` an object or a string, `keywords` a list,
+  // `interface` the Codex presentation block); anything else is left where it is.
+  if (isRecord(bundle.author) || typeof bundle.author === 'string') manifest.author = bundle.author;
+  if (Array.isArray(bundle.keywords) && bundle.keywords.every((k) => typeof k === 'string')) manifest.keywords = bundle.keywords;
+  if (Object.keys(carriedUi).length > 0) manifest.interface = carriedUi;
 
   return {
     name,
-    // The shared contract (`DiscoveredPlugin.displayName`): the declared
-    // display name, else the FOLDER — never the identity.
-    displayName: typeof ui.displayName === 'string' && ui.displayName.trim() ? ui.displayName.trim() : leaf,
+    displayName,
     folder,
     relFolder,
     // The same rule as the native reader: a reserved personal folder directly

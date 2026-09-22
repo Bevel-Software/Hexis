@@ -1,17 +1,14 @@
 import {
-  DEFAULT_BRANCH,
   PLUGINS_DIR,
   SKILLS_DIR,
-  type ChangeRequest,
-  type IWorkflowService,
 } from '@bevel-software/platform-shared';
 import { type WorkspaceService } from '../workspace/workspace.service.js';
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { hashEmail } from '../../shared/hash-email.js';
 import { resolveDeclaredId } from '../../shared/frontmatter-id.js';
+import { visibleProposedFiles } from '../../shared/pending-proposals.js';
 import { isSafeSkillName, parseSkillFrontmatter } from './skills.service.js';
 import type { IPendingSkillService, ISkillService, PendingSkill } from './skills.contract.js';
+import type { IWorkflowService } from '@bevel-software/platform-shared';
 
 const SKILL_DOC = 'SKILL.md';
 
@@ -27,14 +24,11 @@ const SKILL_DOC = 'SKILL.md';
  * rather than a widening of the catalog — an unapproved skill must never become
  * loadable just because it became visible.
  *
- * WHO MAY SEE ONE is narrower than who may see the catalog: the author, and
- * whoever could approve it. "Could approve it" is not re-stated here as a
- * plugin-admin check — it is `canWrite` on the SKILL.md the request would
- * create. The new folder carries no `access.md` of its own, so that verdict
- * inherits from the plugin folder, which IS the plugin's admin; asking the access
- * tree keeps this surface and the merge gate answering with one voice, and it
- * keeps working for skills nested in a category subfolder that carries rules of
- * its own.
+ * WHO MAY SEE ONE, and how a proposal is read at its own branch, live in
+ * `shared/pending-proposals.ts` — shared with the tool surface, which is the
+ * same shape for the same reasons. What stays here is what is specific to a
+ * skill: which touched paths are a skill of their own, and how a SKILL.md
+ * names itself.
  *
  * Everything degrades to "nothing pending" rather than throwing: this hangs off
  * the library's list load, and a review surface that cannot answer must not
@@ -49,17 +43,6 @@ export class PendingSkillsService implements IPendingSkillService {
   ) {}
 
   async listPendingSkills(userEmail: string): Promise<PendingSkill[]> {
-    const email = userEmail.trim().toLowerCase();
-    if (!email) return [];
-
-    let crs: ChangeRequest[];
-    try {
-      crs = (await this.workflow.listChangeRequests()).filter((c) => c.state === 'open');
-    } catch {
-      return [];
-    }
-    if (crs.length === 0) return [];
-
     // The released set, UNFILTERED by the caller's read access. A skill someone
     // else can read and this caller cannot is still released — counting it as
     // pending would invent a review that is not happening, and would leak the
@@ -71,81 +54,37 @@ export class PendingSkillsService implements IPendingSkillService {
       return [];
     }
 
-    const candidates = crs.flatMap((cr) =>
-      cr.touchedNodePaths
-        .filter((p) => isSkillDoc(p) && !released.has(folderOf(p)))
-        .map((p) => ({ cr, docPath: p, folder: folderOf(p) })),
+    const proposed = await visibleProposedFiles(
+      {
+        workspaceService: this.workspaceService,
+        accessControl: this.accessControl,
+        workflow: this.workflow,
+      },
+      userEmail,
+      (p) => isSkillDoc(p) && !released.has(folderOf(p)),
     );
-    if (candidates.length === 0) return [];
 
-    const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
-    const authorHash = hashEmail(email);
-
-    // One access load for every candidate. Resolved on the DEFAULT branch —
-    // the tree as it stands is what says who owns the plugin the skill is
-    // arriving into; the branch's own copy is written by the proposer and must
-    // not get a say in who reviews them.
-    const writable = await this.accessControl
-      .canWriteBatch(
-        wsId,
-        email,
-        candidates.map((c) => c.docPath),
-      )
-      .catch(() => new Map<string, boolean>());
-
-    // The branch copies are read through the default branch's clone at
-    // `origin/<branch>`, so a proposal never needs a clone of its own. Refresh
-    // first, best-effort: a request pushed seconds ago is worth one fetch, and
-    // a failed fetch should degrade to "read what we have".
-    await this.workspaceService.ensureRemotesFetched(wsId).catch(() => undefined);
-
-    const out: PendingSkill[] = [];
-    for (const { cr, docPath, folder } of candidates) {
-      const isAuthor = !!cr.authorId && cr.authorId === authorHash;
-      // Fail closed, matching the catalog: only an explicit `true` admits a
-      // reviewer. A missing entry (the batch skipped the path, the tree could
-      // not be read) means denied, never shown.
-      if (!isAuthor && writable.get(docPath) !== true) continue;
-
-      const raw = await this.readAt(wsId, cr.branch, docPath);
-      // Nothing to describe: the request touched the path but the file is gone
-      // at its head (proposed then withdrawn within the branch), or unreadable.
-      if (raw === null) continue;
-
-      const fm = parseSkillFrontmatter(raw);
+    const out: PendingSkill[] = proposed.map(({ cr, path, content, isAuthor }) => {
+      const folder = folderOf(path);
+      const fm = parseSkillFrontmatter(content);
       const folderName = folder.split('/').pop() ?? folder;
       const declared = resolveDeclaredId(fm.frontmatter, folderName);
-      out.push({
+      return {
         name: isSafeSkillName(declared) ? declared : folderName,
         description: fm.description,
         version: fm.version,
-        owner: fm.owner,
-        lifecycle: fm.lifecycle,
         path: folder,
         changeRequestNumber: cr.number,
         branch: cr.branch,
         authorName: cr.appAuthor?.name ?? cr.author.name ?? 'Someone',
         createdAt: cr.createdAt,
         isAuthor,
-      });
-    }
+      };
+    });
     // Oldest first — the one that has been waiting longest is the one that
     // needs answering, and a list that reorders as requests arrive moves under
     // the pointer.
     return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  }
-
-  /** The file at a branch, or null when it is absent/unreadable there. */
-  private async readAt(
-    wsId: string,
-    branch: string,
-    repoRelPath: string,
-  ): Promise<string | null> {
-    try {
-      return await this.workspaceService.readFileAtRef(wsId, `origin/${branch}`, repoRelPath);
-    } catch {
-      return null;
-    }
   }
 }
 

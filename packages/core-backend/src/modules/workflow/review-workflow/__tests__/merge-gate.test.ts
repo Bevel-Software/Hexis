@@ -27,6 +27,7 @@ function approval(overrides: Partial<FileApprovalState>): FileApprovalState {
     approvedBy: [],
     isApproved: false,
     viewerCanApprove: false,
+    inMergeGate: true,
     ...overrides,
   };
 }
@@ -87,38 +88,22 @@ describe('evaluateMergeGate', () => {
     expect(result.reasons[0]).toMatch(/no file changes/i);
   });
 
-  it('ignores md files with no eligible approvers — no warning, no block', () => {
-    // Files outside the access-controlled surface (no roles/users grant
-    // write) are not part of the gate.
+  it('ignores files with no eligible approvers, of any type — no warning, no block', () => {
+    // Nobody could approve these, so counting them would deadlock the request.
     const result = svc.evaluateMergeGate({
       prNumber: 1,
       state: 'open',
       approvals: [
         approval({ path: 'A.md', isApproved: true, approvedBy: [entry({})] }),
         approval({ path: 'Legacy.md', eligibleApprovers: EMPTY_ELIGIBLE }),
-      ],
-    });
-    expect(result.mergeable).toBe(true);
-    expect(result.reasons).toEqual([]);
-    expect(result.warnings).toEqual([]);
-  });
-
-  it('ignores non-md files regardless of eligibility', () => {
-    // TypeScript sources, JSON, images etc. don't participate in the gate.
-    const result = svc.evaluateMergeGate({
-      prNumber: 1,
-      state: 'open',
-      approvals: [
-        approval({ path: 'src/foo.ts', eligibleApprovers: ADMIN_ELIGIBLE }),
         approval({ path: 'assets/logo.png', eligibleApprovers: EMPTY_ELIGIBLE }),
+        approval({ path: 'Makefile', eligibleApprovers: EMPTY_ELIGIBLE }),
       ],
     });
-    expect(result.mergeable).toBe(true);
-    expect(result.reasons).toEqual([]);
-    expect(result.warnings).toEqual([]);
+    expect(result).toEqual({ mergeable: true, reasons: [], warnings: [] });
   });
 
-  it('treats unapproved md-with-eligible-approvers as a warning, not a hard block', () => {
+  it('reports an unapproved file with eligible approvers as a blocking reason and a warning', () => {
     const result = svc.evaluateMergeGate({
       prNumber: 1,
       state: 'open',
@@ -133,14 +118,14 @@ describe('evaluateMergeGate', () => {
         }),
       ],
     });
-    expect(result.mergeable).toBe(true);
-    expect(result.reasons).toEqual([]);
-    expect(result.warnings).toEqual([
-      'Waiting on approval for B.md from Product Manager; Bob <bob@bevel.software>.',
-    ]);
+    const message = 'Waiting on approval for B.md from Product Manager; Bob <bob@bevel.software>.';
+    expect(result.mergeable).toBe(false);
+    expect(result.reasons).toEqual([message]);
+    // The warning list is what an admin bypass merges past and records.
+    expect(result.warnings).toEqual([message]);
   });
 
-  it('distinguishes stale approvals from never-approved in warnings', () => {
+  it('distinguishes stale approvals from never-approved', () => {
     const result = svc.evaluateMergeGate({
       prNumber: 1,
       state: 'open',
@@ -157,12 +142,13 @@ describe('evaluateMergeGate', () => {
         }),
       ],
     });
-    expect(result.mergeable).toBe(true);
+    expect(result.mergeable).toBe(false);
     expect(result.warnings).toContain('Admin need to re-approve A.md after the latest push.');
     expect(result.warnings).toContain('Waiting on approval for B.md from Admin.');
+    expect(result.reasons).toEqual(result.warnings);
   });
 
-  it('surfaces only the hard block when the PR is closed, not soft warnings', () => {
+  it('lists the hard block before the missing approvals when the PR is closed', () => {
     const result = svc.evaluateMergeGate({
       prNumber: 1,
       state: 'closed',
@@ -173,29 +159,13 @@ describe('evaluateMergeGate', () => {
     });
     expect(result.mergeable).toBe(false);
     expect(result.reasons[0]).toMatch(/closed/i);
+    expect(result.reasons).toContain('Waiting on approval for B.md from Admin.');
   });
 
-  it('is case-insensitive on the .md extension check', () => {
-    const result = svc.evaluateMergeGate({
-      prNumber: 1,
-      state: 'open',
-      approvals: [
-        approval({
-          path: 'Knowledge/FOO.MD',
-          eligibleApprovers: ADMIN_ELIGIBLE,
-          approvedBy: [],
-        }),
-      ],
-    });
-    expect(result.warnings).toContain('Waiting on approval for Knowledge/FOO.MD from Admin.');
-  });
-
-  // Regression: roles.yaml is the file that decides Admin membership, but it
-  // isn't a `.md` KB node — so before this gate it slipped through with zero
-  // warnings, and a roles.yaml-only change request could merge into a protected
-  // branch with no approval and no admin check, letting its author self-promote
-  // to Admin. The gate must bind roles.yaml (and access.md) like an md node.
-  it('treats an unapproved roles.yaml change as a warning (privilege-escalation guard)', () => {
+  // Regression: roles.yaml is the file that decides Admin membership. Before it
+  // was gated, a roles.yaml-only change request could merge into a protected
+  // branch with no approval and no admin check, letting its author self-promote.
+  it('blocks an unapproved roles.yaml change (privilege-escalation guard)', () => {
     const result = svc.evaluateMergeGate({
       prNumber: 1,
       state: 'open',
@@ -203,18 +173,12 @@ describe('evaluateMergeGate', () => {
         approval({ path: 'roles.yaml', eligibleApprovers: ADMIN_ELIGIBLE, approvedBy: [] }),
       ],
     });
-    // mergeable stays true (it's a soft warning, bypassable only by an admin in
-    // mergePr) — the point is that the warning EXISTS, so a non-admin merge of a
-    // roles.yaml-only PR is no longer silently waved through.
-    expect(result.warnings).toContain('Waiting on approval for roles.yaml from Admin.');
-    // Pin the non-blocking contract: this PR's guarantee is "warn, don't block".
-    // If evaluateMergeGate ever starts adding blocking reasons or flipping
-    // mergeable to false for an access-config file, these must fail.
-    expect(result.mergeable).toBe(true);
-    expect(result.reasons).toEqual([]);
+    expect(result.mergeable).toBe(false);
+    expect(result.reasons).toEqual(['Waiting on approval for roles.yaml from Admin.']);
+    expect(result.warnings).toEqual(['Waiting on approval for roles.yaml from Admin.']);
   });
 
-  it('treats an unapproved access.md change as a warning, at root and nested', () => {
+  it('blocks an unapproved access.md change, at root and nested', () => {
     const result = svc.evaluateMergeGate({
       prNumber: 1,
       state: 'open',
@@ -223,11 +187,9 @@ describe('evaluateMergeGate', () => {
         approval({ path: 'Knowledge/Sales/access.md', eligibleApprovers: ADMIN_ELIGIBLE, approvedBy: [] }),
       ],
     });
-    expect(result.warnings).toContain('Waiting on approval for access.md from Admin.');
-    expect(result.warnings).toContain('Waiting on approval for Knowledge/Sales/access.md from Admin.');
-    // Same non-blocking contract as roles.yaml: warn, never block.
-    expect(result.mergeable).toBe(true);
-    expect(result.reasons).toEqual([]);
+    expect(result.mergeable).toBe(false);
+    expect(result.reasons).toContain('Waiting on approval for access.md from Admin.');
+    expect(result.reasons).toContain('Waiting on approval for Knowledge/Sales/access.md from Admin.');
   });
 
   it('a roles.yaml change WITH a non-stale eligible approval passes cleanly', () => {
@@ -241,18 +203,68 @@ describe('evaluateMergeGate', () => {
     expect(result).toEqual({ mergeable: true, reasons: [], warnings: [] });
   });
 
-  it('does not gate roles.yaml when no one is eligible to approve it', () => {
-    // Mirrors the md path: a config file with no eligible approver can't be
-    // approved, so it neither warns nor blocks (the merge-gate would otherwise
-    // deadlock on an un-approvable file).
-    const result = svc.evaluateMergeGate({
-      prNumber: 1,
-      state: 'open',
-      approvals: [
-        approval({ path: 'roles.yaml', eligibleApprovers: EMPTY_ELIGIBLE }),
-      ],
+  // The gate is extension-blind: a Markdown note, a binary and an extensionless
+  // file with owners all need an approval, and all pass once they have one.
+  describe('every file type', () => {
+    const KINDS = [
+      ['an extensionless file', 'Knowledge/Ops/Makefile'],
+      ['a binary file', 'Knowledge/Finance/report.pdf'],
+      ['a Markdown file', 'Knowledge/Foo.md'],
+      ['an upper-case Markdown file', 'Knowledge/FOO.MD'],
+    ] as const;
+
+    for (const [kind, path] of KINDS) {
+      it(`blocks ${kind} that lacks an approval`, () => {
+        const result = svc.evaluateMergeGate({
+          prNumber: 1,
+          state: 'open',
+          approvals: [approval({ path, approvedBy: [] })],
+        });
+        expect(result.mergeable).toBe(false);
+        expect(result.reasons).toEqual([`Waiting on approval for ${path} from Admin.`]);
+        expect(result.warnings).toEqual([`Waiting on approval for ${path} from Admin.`]);
+      });
+
+      it(`passes ${kind} that has an approval`, () => {
+        const result = svc.evaluateMergeGate({
+          prNumber: 1,
+          state: 'open',
+          approvals: [approval({ path, isApproved: true, approvedBy: [entry({})] })],
+        });
+        expect(result).toEqual({ mergeable: true, reasons: [], warnings: [] });
+      });
+    }
+
+    it('names exactly the unapproved files in a mixed request', () => {
+      const result = svc.evaluateMergeGate({
+        prNumber: 1,
+        state: 'open',
+        approvals: [
+          approval({ path: 'Knowledge/Foo.md', isApproved: true, approvedBy: [entry({})] }),
+          approval({ path: 'Knowledge/Finance/report.pdf', approvedBy: [] }),
+          approval({ path: 'Knowledge/Ops/Makefile', approvedBy: [] }),
+          approval({ path: 'Knowledge/Unowned.bin', eligibleApprovers: EMPTY_ELIGIBLE }),
+        ],
+      });
+      expect(result.mergeable).toBe(false);
+      expect(result.reasons).toEqual([
+        'Waiting on approval for Knowledge/Finance/report.pdf from Admin.',
+        'Waiting on approval for Knowledge/Ops/Makefile from Admin.',
+      ]);
+      expect(result.warnings).toEqual(result.reasons);
     });
-    expect(result.mergeable).toBe(true);
-    expect(result.warnings).toEqual([]);
+
+    it('passes a mixed request once every owned file is approved', () => {
+      const result = svc.evaluateMergeGate({
+        prNumber: 1,
+        state: 'open',
+        approvals: [
+          approval({ path: 'Knowledge/Foo.md', isApproved: true, approvedBy: [entry({})] }),
+          approval({ path: 'Knowledge/Finance/report.pdf', isApproved: true, approvedBy: [entry({})] }),
+          approval({ path: 'Knowledge/Ops/Makefile', isApproved: true, approvedBy: [entry({})] }),
+        ],
+      });
+      expect(result).toEqual({ mergeable: true, reasons: [], warnings: [] });
+    });
   });
 });

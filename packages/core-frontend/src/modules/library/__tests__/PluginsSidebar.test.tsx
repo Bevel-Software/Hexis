@@ -10,7 +10,6 @@ import type { LibraryFilter } from '../utils/status';
 
 function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
   const onSelect = vi.fn();
-  const onFinishSetup = vi.fn();
   const props: PluginsSidebarProps = {
     filter: { kind: 'all' },
     onSelect,
@@ -21,8 +20,6 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
       { name: 'GTM', count: 3, urgent: 2 },
       { name: 'Product', count: 0, urgent: 0 },
     ],
-    attentionCount: 2,
-    onFinishSetup,
     onCreatePlugin: vi.fn(),
     canCreatePlugin: false,
     ...over,
@@ -30,7 +27,6 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
   render(<PluginsSidebar {...props} />);
   return {
     onSelect,
-    onFinishSetup,
     onCreatePlugin: props.onCreatePlugin as Mock,
   };
 }
@@ -222,14 +218,18 @@ describe('PluginsSidebar', () => {
     expect(within(row(/^Owned by me/)).getByText('1')).toHaveClass('text-wait');
   });
 
-  it('sends the setup footer to Connect', () => {
-    const { onFinishSetup } = renderSidebar();
-    fireEvent.click(row(/integrations need setup/));
-    expect(onFinishSetup).toHaveBeenCalledTimes(1);
-  });
-
-  it('hides the setup footer when nothing needs setup', () => {
-    renderSidebar({ attentionCount: 0 });
+  /**
+   * The setup reminder is no longer the nav's last row — it is a footer row
+   * the layout passes to the frame (`IntegrationsSetupReminder`), which is
+   * what puts it on the same grid as the change-request dock beneath it.
+   * What this file has to hold is that the nav does NOT place it any more;
+   * the row itself is covered in `IntegrationsSetupReminder.test.tsx`.
+   */
+  it('is the nav and nothing else — no row of its own below it', () => {
+    renderSidebar();
     expect(screen.queryByRole('button', { name: /needs? setup/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Finish now/)).not.toBeInTheDocument();
+    const nav = screen.getByRole('navigation', { name: 'Library navigation' });
+    expect(nav.parentElement?.childElementCount).toBe(1);
   });
 });

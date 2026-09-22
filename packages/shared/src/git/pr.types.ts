@@ -44,7 +44,39 @@ export interface PullRequestSummary {
   /** Relative paths within `knowledge-base/`. Empty if not yet computed. */
   touchedNodePaths: string[];
   review: PullRequestReviewStatus;
+  /**
+   * Link to the change request: absolute (`<public frontend address>/change-requests/<number>`)
+   * when the deployment has a public address configured, else the in-app relative path.
+   */
   url: string;
+  /** Present when `url` is relative — says how to get absolute links. */
+  urlNote?: string;
+  /**
+   * The most recent apply attempt that did not land, while the request is
+   * still open — so its author and every other viewer see the refusal the
+   * person who clicked Apply saw. Replaced by a newer refusal; null or
+   * absent when there is nothing to report.
+   */
+  lastApplyFailure?: ChangeRequestApplyFailure | null;
+}
+
+/**
+ * What refused an apply: the merge gate (approvals it still waits on), git
+ * (conflicts with the target), or anything else (a push, the roles.yaml guard,
+ * an internal error). Decides which later change makes the refusal obsolete.
+ */
+export type ChangeRequestApplyFailureKind = 'gate' | 'conflicts' | 'error';
+
+/** Why the last apply of a change request failed, as persisted on the request. */
+export interface ChangeRequestApplyFailure {
+  /** Human-readable reason, credentials already redacted. */
+  reason: string;
+  /** True when git refused the merge on conflicts with the target. */
+  conflicts: boolean;
+  /** ISO timestamp of the failed attempt. */
+  at: string;
+  /** Display name of whoever attempted the apply. */
+  byName: string;
 }
 
 export type PrFileStatus =
@@ -146,15 +178,30 @@ export interface FileApprovalState {
   };
   approvedBy: FileApprovalEntry[];
   /**
+   * True only when `eligibleApprovers` is the access tree's actual answer for
+   * this file. False (or absent) when it could not be resolved — no workspace,
+   * no usable access config on the base, a failed lookup — in which case the
+   * empty approver set means "unknown", not "outside the gate", and anything
+   * granted on the strength of that emptiness must fail closed.
+   */
+  eligibilityResolved?: boolean;
+  /**
    * True iff at least one eligible approver has submitted a non-stale
    * approval. Always `false` when `eligibleApprovers` is empty — with no
    * eligible set, nobody can satisfy the check.
    * Whether the gate *cares* about this file is a separate concern handled
-   * by the merge-gate logic: non-md files and files with no eligible
-   * approvers are silently excluded from the gate, so `isApproved: false`
+   * by the merge-gate logic: files with no eligible approvers, whatever
+   * their type, are silently excluded from the gate, so `isApproved: false`
    * on one of them does not block merge.
    */
   isApproved: boolean;
+  /**
+   * Whether the merge gate binds this file at all — the backend's one
+   * relevance rule, stamped per file so clients read the verdict instead of
+   * re-deriving it. False files neither warn nor block a merge, so no surface
+   * should count them as pending or name anyone to wait on.
+   */
+  inMergeGate: boolean;
   /**
    * Pre-computed for the requesting viewer: would `approveFile` accept their
    * click? True iff their email resolves to `write` on this path under the
@@ -184,21 +231,21 @@ export interface PullRequestDetail extends PullRequestSummary {
    */
   approvals: FileApprovalState[];
   /**
-   * True iff no *hard* block applies — the PR is open, has files, and isn't
-   * merged/closed. Soft warnings (missing owner approvals on md files) do
-   * **not** set this to false; the UI handles them via the bypass dialog.
-   * The button is disabled only when this is false.
+   * True iff no blocking reason remains — the PR is open, has files, isn't
+   * merged/closed, and every file with an eligible approver (of any file
+   * type) holds a current approval. False while any approval is missing; an
+   * admin may still merge past missing approvals with the bypass flag.
    */
   mergeableInBevel: boolean;
   /**
-   * Hard-block reasons — merging is impossible until these resolve (PR state,
-   * no files, etc.). Empty when the PR can be merged (possibly after bypass).
+   * Blocking reasons — hard blocks (PR state, no files) followed by each
+   * missing approval. Empty exactly when `mergeableInBevel` is true.
    */
   mergeBlockedReasons: string[];
   /**
-   * Soft warnings — md files with an owner who hasn't approved (or whose
-   * approval is stale). Merging is allowed but the UI asks for an explicit
-   * bypass confirmation first. Non-md files and ownerless md files are silent.
+   * The missing approvals alone — files of any type with an eligible approver
+   * who hasn't approved (or whose approval is stale). An admin bypass merges
+   * past exactly these and records them. Files nobody can approve are silent.
    */
   mergeWarnings: string[];
   /**
@@ -221,6 +268,25 @@ export interface PullRequestDetail extends PullRequestSummary {
    * tree can't be resolved.
    */
   viewerCanCancel: boolean;
+  /**
+   * The commit this request forked from its target (merge base of `headSha`
+   * and `baseSha`). Every file diff in the request reads its "before" side
+   * here, never at the target tip — an edit made on the target after the
+   * proposal must not look like something the proposal deletes. `null` when
+   * the branches share no history (or no workspace could resolve them).
+   */
+  mergeBaseSha: string | null;
+  /**
+   * True iff the target holds commits the proposal does not contain — the
+   * request needs updating. False for anything not open.
+   */
+  behind: boolean;
+  /**
+   * True iff the viewer may Update the request (merge its target into it):
+   * the request is open AND the viewer is its author or may apply it. A UX
+   * hint — the update route re-checks the same predicate server-side.
+   */
+  viewerCanUpdate: boolean;
 }
 
 /**

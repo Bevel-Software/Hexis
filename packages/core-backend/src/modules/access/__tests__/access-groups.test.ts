@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -70,7 +71,7 @@ describe('group files as access principals', () => {
     for (const [rel, contents] of Object.entries(files)) {
       await writeFile(repo, rel, contents);
     }
-    return new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR);
+    return new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR, new NodeFs());
   }
 
   it('manual mode: a groups.yaml group grants access when named in access.md', async () => {
@@ -214,13 +215,10 @@ describe('group files as access principals', () => {
     });
     expect(active.groups.size).toBe(0); // NOT the retired manual groups
     expect(active.health).toMatchObject({ ok: false, file: 'synced-groups.yaml' });
-    // While genuine absence (ENOENT) still means manual mode:
+    // While genuine absence — the reader's null, judged through the fs
+    // probe — still means manual mode:
     const manual = await loadActiveGroups(async (f) => {
-      if (f === 'synced-groups.yaml') {
-        const err = new Error('ENOENT') as NodeJS.ErrnoException;
-        err.code = 'ENOENT';
-        throw err;
-      }
+      if (f === 'synced-groups.yaml') return null;
       return 'groups:\n  Live Team:\n    - here@x.io\n';
     });
     expect(manual.health).toEqual({ ok: true });
@@ -245,11 +243,7 @@ describe('group files as access principals', () => {
     ).rejects.toBeInstanceOf(AccessUnreadableError);
     await expect(
       loadActiveGroups(async (f) => {
-        if (f === 'synced-groups.yaml') {
-          const err = new Error('ENOENT') as NodeJS.ErrnoException;
-          err.code = 'ENOENT';
-          throw err;
-        }
+        if (f === 'synced-groups.yaml') return null; // absent: manual mode
         throw unreadable(f); // groups.yaml unreadable
       }),
     ).rejects.toBeInstanceOf(AccessUnreadableError);
@@ -403,7 +397,7 @@ describe('group files as access principals', () => {
     // — the at-ref answer must come from the commit, not the tree.
     await fs.writeFile(path.join(repo, 'synced-groups.yaml'), 'groups: {}\n'.replace('{}', ''));
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR, new NodeFs());
     expect(await svc.canWriteAtRef(workspaceId, 'main', 'ada@x.io', 'Knowledge/Doc.md')).toBe(true);
     expect(await svc.canWriteAtRef(workspaceId, 'main', 'zoe@x.io', 'Knowledge/Doc.md')).toBe(false);
   });
@@ -430,7 +424,7 @@ describe('group files as access principals', () => {
 
   it('synced-groups.yaml is machine-owned: only the sync bot writes it, ever', async () => {
     const { workspaceDir } = await seedWorkspace(root, workspaceId);
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR, new NodeFs());
 
     // The bot needs no roles/grants — the rule resolves before the model
     // loads (this workspace has no git repo at all).
@@ -452,5 +446,44 @@ describe('group files as access principals', () => {
     const eligible = await svc.eligibleWritersAtRef(workspaceId, 'HEAD', 'synced-groups.yaml');
     expect(eligible?.users.map((u) => u.email)).toEqual(['directory-sync@bevel.local']);
     expect(eligible?.roles).toEqual([]);
+  });
+});
+
+describe('a role given to a group (`- group:<Name>`), as the agent guide documents it', () => {
+  let root: string;
+  const workspaceId = 'ws-groups-role-ref';
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  async function makeService(files: Record<string, string>) {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    for (const [rel, contents] of Object.entries(files)) {
+      await writeFile(repo, rel, contents);
+    }
+    return new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR, new NodeFs());
+  }
+
+  it('a denial of the role removes its contribution for the whole group; a direct grant to a person is unaffected', async () => {
+    const svc = await makeService({
+      // Spelled differently from groups.yaml: matched case- and whitespace-insensitively.
+      'roles.yaml': 'roles:\n  Admin:\n    - admin@x.io\n    - group:engineering\n',
+      'groups.yaml': GROUPS_YAML_TEXT,
+      'access.md': '---\nread:\n  - Admin\n---\n',
+      'Sub/access.md': '---\nread:\n  - deny Admin\n  - Bo <bo@x.io>\n---\n',
+    });
+    // Group members and direct emails hold the role alike.
+    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Doc.md')).toBe(true);
+    expect(await svc.canRead(workspaceId, 'admin@x.io', 'Doc.md')).toBe(true);
+    // The role denial reaches everyone who held the role, group members included…
+    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Sub/Doc.md')).toBe(false);
+    expect(await svc.canRead(workspaceId, 'admin@x.io', 'Sub/Doc.md')).toBe(false);
+    // …but not a person granted by name.
+    expect(await svc.canRead(workspaceId, 'bo@x.io', 'Sub/Doc.md')).toBe(true);
   });
 });

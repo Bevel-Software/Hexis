@@ -10,6 +10,45 @@ import { KbDocumentShell } from '../KbDocumentShell';
  * lands on — rather than computed pixels.
  */
 describe('KbDocumentShell', () => {
+  /**
+   * The `header` slot's whole contract, in one assertion per variant: the
+   * band opens the column, whatever else the page puts in it.
+   *
+   * It is a slot rather than the caller's first child because a caller
+   * forgot — `FileViewer` rendered the tab strip above its title bar and put
+   * the file page's band 54px below the sidebar header row it lines up with.
+   * What that costs, and the offset each variant opens on, is asserted at the
+   * seam in `layout/__tests__/HeaderAlignment.test.tsx`; that the file page
+   * really uses the slot is asserted in `FileViewer.test.tsx`.
+   */
+  it.each([
+    ['prose', {}],
+    ['full-bleed', { variant: 'full-bleed' as const }],
+    ['with a rail', { rail: <p>About this file</p> }],
+  ])('puts the header first in the column (%s)', (_name, props) => {
+    render(
+      <KbDocumentShell {...props} header={<h1>The title bar</h1>}>
+        <div>Everything else the page renders</div>
+      </KbDocumentShell>,
+    );
+    const band = screen.getByText('The title bar');
+    const content = screen.getByText('Everything else the page renders');
+
+    // IN the column, not above it. "First" on its own is satisfied by a band
+    // hoisted into a wrapper of its own — which is the regression that
+    // reaches the seam, because a wrapper outside the column does not carry
+    // the column's `HEADER_COLUMN_TOP` and can put anything underneath it.
+    // Tying the band to the content is what makes the next two lines mean
+    // "opens the column" rather than "opens something".
+    expect(band.parentElement).toBe(content.parentElement);
+    expect(band.previousElementSibling).toBeNull();
+    expect(band.nextElementSibling).toBe(content);
+
+    // And the column is inside the shell's own scrolling box in every
+    // variant, so nothing can render between the two.
+    expect(screen.getByTestId('kb-document-shell')).toContainElement(band);
+  });
+
   it('renders children inside a centred, measured column', () => {
     render(
       <KbDocumentShell>

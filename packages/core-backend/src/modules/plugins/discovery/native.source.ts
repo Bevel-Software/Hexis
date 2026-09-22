@@ -9,7 +9,7 @@ import {
   pluginDisplayNameOf,
   pluginIdentityOf,
 } from '@bevel-software/platform-shared';
-import { isAbsence } from '../../../shared/fs-errors.js';
+import { isAbsence, type IFsProbe } from '../../../shared/fs.contract.js';
 import type { DiscoveredPlugin } from './plugin-source.js';
 
 /**
@@ -25,6 +25,7 @@ import type { DiscoveredPlugin } from './plugin-source.js';
  * failure is a warning and nothing more.
  */
 export async function readNativePlugin(
+  disk: IFsProbe,
   dir: string,
   folder: string,
   relFolder: string,
@@ -52,7 +53,13 @@ export async function readNativePlugin(
   // in, and the mismatch is said out loud so a grant written against the
   // manifest's spelling is not a mystery.
   const name = pluginIdentityOf(manifest, folderName);
-  const displayName = pluginDisplayNameOf(manifest, folderName);
+  // The display name comes from the MANIFEST alone — `displayName`, else
+  // `name` — never from the folder. `|| name` is not a folder fallback in
+  // disguise: it catches only the manifest that names nothing usable, the
+  // same shape `pluginIdentityOf` just stood the folder in for, so the
+  // display name follows the identity the reader resolved rather than
+  // arriving empty.
+  const displayName = pluginDisplayNameOf(manifest) || name;
   // Any PRESENT name that is not an identifier is worth a word — a number or
   // an object as much as a capitalised string. Only an absent name is silent.
   if (manifest && manifest.name !== undefined && !isPluginIdentifier(manifest.name)) {
@@ -72,7 +79,18 @@ export async function readNativePlugin(
     mcp && typeof mcp.mcpServers === 'object' && mcp.mcpServers !== null && !Array.isArray(mcp.mcpServers)
       ? (mcp.mcpServers as Record<string, unknown>)
       : null;
-  const exists = await fs.stat(path.join(dir, 'access.md')).then((s) => s.isFile(), () => false);
+  // The plugin EXISTS to the index when its folder carries an `access.md`
+  // (links followed). Absence is "no rules yet"; a probe that fails for any
+  // other reason is a hole like an unreadable manifest — the plugin is not
+  // listed under a guessed answer, and a writer can refuse.
+  let exists: boolean;
+  try {
+    exists = (await disk.statOrNull(path.join(dir, 'access.md')))?.isFile() ?? false;
+  } catch (err) {
+    warnings.push(`${folder}/access.md could not be read — ${err instanceof Error ? err.message : String(err)}`);
+    unreadable.push(`${folder}/access.md`);
+    return null;
+  }
   return {
     name,
     displayName,

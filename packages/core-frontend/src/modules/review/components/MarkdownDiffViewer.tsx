@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import Markdown from 'react-markdown';
-import type { FileDiffPayload } from '@bevel-software/platform-shared';
+import { isFrontmatterFence, type FileDiffPayload } from '@bevel-software/platform-shared';
 import { computeDiff, type DiffLine } from '../../workspace/utils/diff';
 import { parseFrontmatter, labelFor, type FrontmatterData } from '../../workspace/utils/frontmatter';
 import { escapeSpacesInLinkDestinations } from '../../../shared/markdown/Markdown';
@@ -156,10 +156,13 @@ function countNewlines(s: string): number {
  * frontmatter so callers can skip the frontmatter-split logic.
  */
 function frontmatterLineCount(content: string): number {
-  const lines = content.split('\n').map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l));
-  if (lines[0] !== '---') return 0;
+  // The platform's fence rule, not a second one: `parseFrontmatter` (the panel
+  // beside this diff) splits with the same rule, so a near-miss fence cannot
+  // fill the panel while its lines are rendered as body.
+  const lines = content.split('\n');
+  if (!isFrontmatterFence(lines[0])) return 0;
   for (let i = 1; i < lines.length; i++) {
-    if (lines[i] === '---') return i + 1;
+    if (isFrontmatterFence(lines[i])) return i + 1;
   }
   return 0;
 }

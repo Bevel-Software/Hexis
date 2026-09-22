@@ -55,7 +55,7 @@ exactly what you can see and can do exactly what you can do, nothing more.
 
 ## Good to know
 
-- The repo root's `AGENTS.md` is the full reference your agents read. It is
+- The repo root's `{{agentsFile}}` is the full reference your agents read. It is
   maintained by the platform, so leave it as it is; team conventions belong in
   documents like this one.
 - Nothing is ever really lost: every version of every file stays in the

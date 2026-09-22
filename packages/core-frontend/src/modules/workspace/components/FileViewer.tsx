@@ -33,6 +33,7 @@ import {
   readFileOnBranch,
 } from '../../change-requests/services/change-requests.api';
 import { FileChangeBoxes } from '../../change-requests/components/FileChangeBoxes';
+import { othersPendingBesides } from '../../change-requests/utils/author';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
 import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
@@ -864,8 +865,8 @@ export function FileViewer() {
   // in the empty branch below because that branch is a `return` and this is a
   // hook — and it costs nothing while a file IS open, which is the common case.
   const suggestions = useMemo(
-    () => suggestedPages(fileTree, SUGGESTION_LIMIT),
-    [fileTree],
+    () => suggestedPages(fileTree, kbDirName, SUGGESTION_LIMIT),
+    [fileTree, kbDirName],
   );
   // Opening a suggestion is NAVIGATION, the same as clicking the file in the
   // explorer or a tab: the URL is the canonical record of what is open, and a
@@ -1150,56 +1151,67 @@ export function FileViewer() {
           the Propose changes affordance already says what they CAN do, and the
           detailed who-may-edit copy still appears where it answers a question
           (the disabled-save tooltip). */}
-      {/* ONE column holds the tabs, the title and the text at the same width,
+      {/* ONE column holds the title, the tabs and the text at the same width,
           so they share an edge and the page reads as a single centred block
-          (proto:700-705). `editorContainerRef` goes to `scrollRef` because the
-          shell is now the element that scrolls — the capture-phase listener
-          bound to it is the file lock's only activity signal for a reader. */}
+          (proto:700-705). The prototype puts the tab strip above the title;
+          this does not, because the title bar has to open the column to hold
+          its line with the sidebar's header row — see `KbDocumentShell.header`.
+          `editorContainerRef` goes to `scrollRef` because the shell is the
+          element that scrolls — the capture-phase listener bound to it is the
+          file lock's only activity signal for a reader. */}
       <KbDocumentShell
-              roomy={explorerHidden}
+        roomy={explorerHidden}
         variant={shellVariant}
         scrollRef={editorContainerRef}
+        // The document names itself, and its actions sit beside its name.
+        // Everything the deleted 40px strip carried is here — the three chips
+        // as Badges, Edit with the same handlers and the same lock semantics,
+        // the copy-link that used to be an icon in the corner — plus Share and
+        // the overflow the prototype puts on the page.
+        //
+        // It goes in the SLOT, not in the children, because the slot is what
+        // makes it the column's first row — see `KbDocumentShell.header`. It
+        // was the first child once, under `<EditorTabs />`, and a 36px tab
+        // strip plus its 18px gap pushed the file page's title bar 54px below
+        // the sidebar header row it lines up with.
+        header={
+          <KbPageHeader
+            path={openFilePath}
+            canWrite={access.canWrite}
+            editMode={editMode}
+            entering={isEnteringEdit}
+            proposeMode={proposeMode}
+            proposalBusy={proposalBusy}
+            onPropose={handleEnterPropose}
+            onSendProposal={() => void handleSendProposal()}
+            onDiscardProposal={handleDiscardProposal}
+            // `viewOnly` rides the same flag: it tells the header "the write
+            // action is not yours to render" — and the pane bar renders none.
+            writeActionInPane={shellVariant === 'prose' || viewOnly}
+            // Prose gets a pane card, and the card's bar carries Version history
+            // beside Edit. Not `viewOnly`: a view-only full-bleed file has no bar.
+            historyInPane={shellVariant === 'prose'}
+            historyButtonRef={headerClockRef}
+            titleRef={titleRef}
+            lockedBy={fileLock.externalLock?.holderName ?? null}
+            historyAvailable={historyAvailable}
+            isDirty={isManualDirty}
+            waitingOnAgentUpdate={waitingOnAgentUpdate}
+            isReviewingPending={isReviewingPending}
+            activeTab={activeTab}
+            onEdit={handleEnterEditMode}
+            onDone={handleExitEditMode}
+            // While the log is open the column is full-bleed, so the header
+            // carries the clock (pressed). A second click on a pressed clock is a
+            // request to put the document back, not to open the log again.
+            onOpenHistory={activeTab === 'history' ? backToDocument : openHistory}
+            onShare={handleShare}
+            onCopyPage={canCopyPage ? handleCopyPage : undefined}
+            onCopyLink={handleCopyLink}
+          />
+        }
       >
       <EditorTabs />
-      {/* The document names itself, and its actions sit beside its name.
-          Everything the deleted 40px strip carried is here — the three chips
-          as Badges, Edit with the same handlers and the same lock semantics,
-          the copy-link that used to be an icon in the corner — plus Share and
-          the overflow the prototype puts on the page. */}
-      <KbPageHeader
-        path={openFilePath}
-        canWrite={access.canWrite}
-        editMode={editMode}
-        entering={isEnteringEdit}
-        proposeMode={proposeMode}
-        proposalBusy={proposalBusy}
-        onPropose={handleEnterPropose}
-        onSendProposal={() => void handleSendProposal()}
-        onDiscardProposal={handleDiscardProposal}
-        // `viewOnly` rides the same flag: it tells the header "the write
-        // action is not yours to render" — and the pane bar renders none.
-        writeActionInPane={shellVariant === 'prose' || viewOnly}
-        // Prose gets a pane card, and the card's bar carries Version history
-        // beside Edit. Not `viewOnly`: a view-only full-bleed file has no bar.
-        historyInPane={shellVariant === 'prose'}
-        historyButtonRef={headerClockRef}
-        titleRef={titleRef}
-        lockedBy={fileLock.externalLock?.holderName ?? null}
-        historyAvailable={historyAvailable}
-        isDirty={isManualDirty}
-        waitingOnAgentUpdate={waitingOnAgentUpdate}
-        isReviewingPending={isReviewingPending}
-        activeTab={activeTab}
-        onEdit={handleEnterEditMode}
-        onDone={handleExitEditMode}
-        // While the log is open the column is full-bleed, so the header
-        // carries the clock (pressed). A second click on a pressed clock is a
-        // request to put the document back, not to open the log again.
-        onOpenHistory={activeTab === 'history' ? backToDocument : openHistory}
-        onShare={handleShare}
-        onCopyPage={canCopyPage ? handleCopyPage : undefined}
-        onCopyLink={handleCopyLink}
-      />
 
       {/* Content stopped being a tab: the document IS the page, and history
           and comparison are two things you can go and look at. Each renders in
@@ -1421,6 +1433,21 @@ export function FileViewer() {
                     requests={requestsOnThisFile}
                     canDecide={access.canWrite === true}
                     ownersLabel={ownersLabel}
+                    // Counted over `eligible` (the write: grants, which are what
+                    // approval rights and the merge gate resolve against), NOT
+                    // `owners` — a file can have writers and no owner: at all.
+                    // Only when those grants were actually loaded: a draft, a
+                    // non-KB path or a failed lookup default-allows with an
+                    // EMPTY list, which would claim the viewer is the only one.
+                    // Nor mid-lookup: the hook keeps the PREVIOUS file's grants
+                    // while the next file's lookup is in flight.
+                    othersPending={
+                      !access.error &&
+                      !access.loading &&
+                      (access.eligible.roles.length > 0 || access.eligible.users.length > 0)
+                        ? othersPendingBesides(access.eligible, auth.user?.email)
+                        : undefined
+                    }
                     onApplied={() => {
                       reloadTabFromDisk(openFilePath).catch(() => {});
                     }}

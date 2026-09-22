@@ -3,9 +3,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultKbTemplateDir } from './assets.js';
 import { assertKeyDecodesTo32Bytes } from './shared/token-crypto.js';
+import { DEFAULT_GIT_TIMEOUT_MS } from './modules/workflow/git/node-git-runner.js';
+import { logger } from './shared/logging.js';
+
+const log = logger('config');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+
+/** The largest delay a Node timer honours; anything larger fires at once. */
+const MAX_TIMER_MS = 2_147_483_647;
 
 /**
  * The Postgres connection string: `DATABASE_URL` if given, otherwise built
@@ -34,6 +41,20 @@ export function resolveDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string
   const port = (env.POSTGRES_PORT || '5432').trim();
   const database = encodeURIComponent(env.POSTGRES_DB || 'bevel');
   return `postgresql://${user}:${password}@${host}:${port}/${database}`;
+}
+
+/**
+ * `url` with any `user:pass@` removed and EVERY OTHER BYTE KEPT. Not a
+ * `new URL(...).toString()` round-trip: that drops a default port, lowercases
+ * the host and re-encodes, and a provider comparing redirect URIs as exact
+ * strings (Entra, Okta) would refuse the one an admin registered.
+ *
+ * Through the LAST `@` before the path, query or fragment: a password can
+ * carry an unencoded `@` of its own (`https://u:p@ss@host`), and stopping at
+ * the first would leave `ss@` — most of the credential — in what is kept.
+ */
+export function withoutUserinfo(url: string): string {
+  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i, '$1');
 }
 
 /**
@@ -226,6 +247,17 @@ export class CoreConfig {
    */
   readonly trustProxy: string;
   /**
+   * Deadline in milliseconds on every git command, after which the child is
+   * killed and the call fails (see `modules/workflow/git/node-git-runner.ts`).
+   *
+   * Configurable because the right ceiling depends on the deployment's own git
+   * host and the size of its knowledge base: a first clone over a slow link can
+   * legitimately take minutes, and a deadline that cuts it off turns a working
+   * deployment into a broken one. Without a knob the remedy for a false timeout
+   * would be a release.
+   */
+  readonly gitTimeoutMs: number;
+  /**
    * Public base URL of THIS backend, used to build OAuth redirect URIs.
    * Must match a redirect URI registered with the OAuth provider(s).
    * Defaults to `https://<DOMAIN>` when `DOMAIN` is set.
@@ -238,6 +270,14 @@ export class CoreConfig {
    * development.
    */
   readonly publicFrontendUrl: string;
+  /**
+   * The public frontend address when one is actually configured
+   * (`PUBLIC_FRONTEND_URL`, `https://<DOMAIN>`, or a production
+   * `PUBLIC_BACKEND_URL`), else null. Unlike `publicFrontendUrl` it never
+   * falls back to a local default, so a link built from it is one a person
+   * outside the deployment can open.
+   */
+  readonly configuredPublicFrontendUrl: string | null;
 
   constructor() {
     this.port = parseInt(process.env.PORT || '3001', 10);
@@ -369,12 +409,30 @@ export class CoreConfig {
     // stays expressible.
     const domain = (process.env.DOMAIN || '').trim();
     this.trustProxy = (process.env.TRUST_PROXY || (domain ? '1' : '')).trim();
-    this.publicBackendUrl = (
-      process.env.PUBLIC_BACKEND_URL ||
-      (domain ? `https://${domain}` : `http://localhost:${this.port}`)
-    )
+    // A non-numeric or non-positive value is a misconfiguration whose effect
+    // would be "no deadline at all", so it falls back to the default rather
+    // than being honoured. So does one past Node's largest timer delay
+    // (2^31-1 ms, ~24.8 days): `setTimeout` silently coerces that to 1ms,
+    // which would time every git command out on the spot.
+    const gitTimeout = Number(process.env.GIT_TIMEOUT_MS);
+    this.gitTimeoutMs =
+      Number.isFinite(gitTimeout) && gitTimeout > 0 && gitTimeout <= MAX_TIMER_MS
+        ? gitTimeout
+        : DEFAULT_GIT_TIMEOUT_MS;
+    // Userinfo stripped HERE, once, so no consumer can hand it on: a
+    // `PUBLIC_BACKEND_URL` spelled with `user:pass@` (a basic-auth proxy in
+    // front of the deployment) must not reach an identity provider in a
+    // redirect URI, a third-party OAuth provider, or `/api/config`.
+    const backendUrl = (process.env.PUBLIC_BACKEND_URL || (domain ? `https://${domain}` : `http://localhost:${this.port}`))
       .trim()
       .replace(/\/+$/, '');
+    this.publicBackendUrl = withoutUserinfo(backendUrl);
+    if (this.publicBackendUrl !== backendUrl) {
+      // Said out loud — it is likely a mistake — but never with the credential.
+      log.warn(
+        `PUBLIC_BACKEND_URL contains credentials (user:pass@); they are ignored and the public address is ${this.publicBackendUrl}.`,
+      );
+    }
     // Unset, the frontend origin is the backend's own in production (the
     // backend serves the built SPA — under docker compose this is what makes
     // a bare `up -d` bounce logins back to the right place), and Vite's dev
@@ -389,6 +447,14 @@ export class CoreConfig {
     )
       .trim()
       .replace(/\/+$/, '');
+    // Only an address someone set counts — the localhost fallbacks above are
+    // no link to hand a person. In production an explicit backend origin is
+    // the frontend's too (the backend serves the SPA).
+    const frontendConfigured =
+      Boolean((process.env.PUBLIC_FRONTEND_URL || '').trim()) ||
+      Boolean(domain) ||
+      (this.nodeEnv === 'production' && Boolean((process.env.PUBLIC_BACKEND_URL || '').trim()));
+    this.configuredPublicFrontendUrl = frontendConfigured ? this.publicFrontendUrl : null;
     // Parse-validate so a malformed URL fails at boot rather than producing a
     // broken OAuth redirect later. (We intentionally don't force https / reject
     // localhost in production: local Docker runs prod mode over http://localhost.)

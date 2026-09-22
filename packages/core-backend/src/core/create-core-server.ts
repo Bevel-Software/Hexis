@@ -1,9 +1,16 @@
 import express from 'express';
+import { logger } from '../shared/logging.js';
+
+const startupLog = logger('kb-startup');
+const crLog = logger('cr');
 import cors from 'cors';
 import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
 import { createAuthRoutes } from '../modules/auth/auth.routes.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
+import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals.middleware.js';
+import { noteBesideCheckout } from '../modules/workspace/startup/beside-checkout.js';
+import { printable } from '../shared/printable.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
 import { createWorkflowRoutes } from '../modules/workflow/workflow.routes.js';
 import { createEventsRoutes } from '../modules/workflow/events.routes.js';
@@ -12,6 +19,7 @@ import { createMcpRoutes } from '../modules/mcp/mcp.routes.js';
 import { createOAuthConsentRoutes } from '../modules/mcp/oauth/oauth-consent.routes.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { createManualRoutes } from '../modules/tool-registry/manual.routes.js';
+import { createCatalogRevisionRoutes } from './catalog-revision.js';
 import {
   createToolManualsAgentRoutes,
   createToolManualsBrowserRoutes,
@@ -20,7 +28,12 @@ import {
 import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
-import { registerSkillsTools, createSkillsRoutes, createSkillAccessRequestRoutes } from '../modules/skills/index.js';
+import {
+  registerSkillsTools,
+  createSkillsRoutes,
+  createSkillAccessRequestRoutes,
+  AllowedToolsChecker,
+} from '../modules/skills/index.js';
 import {
   createPluginCreationRoutes,
   createPluginsRoutes,
@@ -40,6 +53,9 @@ import { createUpdateCheckRoutes } from '../modules/update-check/update-check.ro
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
+import { oidcRedirectUri } from '../modules/auth/oidc-auth-provider.js';
+import { repositoryConnectionCheck } from '../modules/settings/connection-check.js';
+import { rootFolderListerFor } from '../modules/settings/git-root-folders.js';
 import {
   createKbSyncRoutes,
   isSyncRawBodyPath,
@@ -53,6 +69,8 @@ import {
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import { publicConfig } from './public-config.js';
+import { createReadiness } from './readiness.js';
+import { KbRemoteUnreachableError } from '../modules/workspace/startup/kb-startup-runner.js';
 import { createAgentInstructionsRoutes } from '../modules/agent-instructions/index.js';
 import type { CoreServices } from './create-core-services.js';
 
@@ -86,6 +104,13 @@ export interface ServerExtensions {
    * overlay's own router installs a larger parser for them (body-parser
    * ignores a second parse once the first has run — see the comment at the
    * parser below).
+   *
+   * An exempt path under `/api/workspace/:id` has its body parsed AFTER the
+   * git-internals route guard has looked at it, so a path-bearing field in
+   * that body is not refused ahead of the route the way every other
+   * workspace body is. The services refuse the git folder on their own, so
+   * nothing reaches it; but such a router should run `gitGuardedInputs` on
+   * the parsed body itself if it wants the same early, sanitized 403.
    */
   jsonParserExemptPaths?: string[];
   /**
@@ -139,12 +164,9 @@ export async function createCoreServer(
   // page still can't read events on the user's behalf.
   //
   // `exposedHeaders` lets a BROWSER-based MCP client (e.g. MCP Inspector) read
-  // the Streamable-HTTP session header off the `initialize` response — custom
-  // response headers are hidden from browser JS unless exposed, so without this
-  // the client can't send `Mcp-Session-Id` back at all, and every follow-up
-  // 400s with "Bad Request: Mcp-Session-Id header is required" — the
-  // missing-header case, not the unknown-session one (that answers 404
-  // "Session not found"). `WWW-Authenticate` is
+  // custom response headers, which are hidden from browser JS unless exposed.
+  // The MCP endpoint is stateless and never sends `Mcp-Session-Id`, so only
+  // `Mcp-Protocol-Version` is exposed for it. `WWW-Authenticate` is
   // exposed so a browser client can read the 401 challenge and start the OAuth
   // discovery flow. (Native clients like Claude Code aren't subject to CORS.)
   app.use(
@@ -153,7 +175,7 @@ export async function createCoreServer(
       credentials: true,
       // `SYNC_RESPONSE_HEADER` is how the browser tells the sync endpoint's
       // own 503 from a reverse proxy's — see `kb-sync.routes.ts`.
-      exposedHeaders: ['Mcp-Session-Id', 'Mcp-Protocol-Version', 'WWW-Authenticate', SYNC_RESPONSE_HEADER],
+      exposedHeaders: ['Mcp-Protocol-Version', 'WWW-Authenticate', SYNC_RESPONSE_HEADER],
     }),
   );
   // Global JSON body parser. Some overlay routes carry a whole document dump
@@ -167,6 +189,14 @@ export async function createCoreServer(
   // which a parsed-and-reserialised body cannot reproduce.
   const jsonExemptPaths = new Set(ext.jsonParserExemptPaths ?? []);
   const globalJson = express.json({ limit: '10mb' });
+  // The git folder is refused BEFORE the body parser: a request naming it in
+  // the query with a malformed body would otherwise be answered 400 by the
+  // parser, and the promise is one sanitized 403 for such a path whatever else
+  // is wrong with the request. Only the query can be judged this early — a
+  // body that does not parse names nothing anyone can read — so the same guard
+  // is mounted again below, once the body is parsed and once the caller is
+  // known (see the two mounts under `/api/workspace/:id`).
+  app.use('/api/workspace/:id', createGitInternalsRouteGuard(core.workspaceService));
   app.use((req, res, next) => {
     if (jsonExemptPaths.has(req.path) || isSyncRawBodyPath(req.path)) return next();
     return globalJson(req, res, next);
@@ -177,6 +207,34 @@ export async function createCoreServer(
   // rollout matches the merged commit before smoke-testing it.
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', sha: GIT_SHA, timestamp: Date.now() });
+  });
+
+  // Readiness: the facts `/api/health` never carried — is the database
+  // reachable, is the commit queue draining and how far behind is it, did the
+  // last attempt to reach the git remote succeed, how much disk is left.
+  // Computed per request, never stored; 503 only when the database is gone,
+  // because a restart cures none of the other conditions and costs every
+  // in-flight request. See `core/readiness.ts`.
+  const readiness = createReadiness({
+    db: core.db,
+    oldestQueuedAt: () => core.pendingCommitsService.oldestQueuedAt(),
+    drains: () => core.commitWorker.held,
+    // Whichever of the two layers reached the remote most recently: the
+    // workspace layer's fetches once the deployment is open, the startup
+    // phase's `ls-remote` at boot — which on a gated deployment is the only
+    // contact there is, and the one that says why it is gated.
+    lastRemoteContact: () => {
+      const contacts = [core.gitService.lastRemoteContact(), core.kbStartupRunner.lastRemoteContact()];
+      return contacts.reduce<{ at: number; ok: boolean } | null>(
+        (latest, c) => (c !== null && (latest === null || c.at > latest.at) ? c : latest),
+        null,
+      );
+    },
+    freeBytes: () => core.disk.freeBytes(core.config.workspacesRoot),
+  });
+  app.get('/api/ready', async (_req, res) => {
+    const report = await readiness();
+    res.status(report.status === 'unavailable' ? 503 : 200).json(report);
   });
 
   /**
@@ -252,12 +310,50 @@ export async function createCoreServer(
   // Overlay boot-time side effects (startup reconciles, periodic sweeps).
   await ext.onBoot?.(core);
 
+  // What is already sitting beside a checkout, named once per boot and touched
+  // by nothing. Outside the KB startup phase below on purpose: that phase is
+  // gated on the branch model and the repository URL, and a deployment whose
+  // setup never finished — or whose remote is down — is exactly one whose
+  // strays would otherwise go unmentioned. A diagnostic never stops a boot, so
+  // an unreadable workspaces root is logged and the boot carries on.
+  try {
+    await noteBesideCheckout(core.config.workspacesRoot, core.kbDirName);
+  } catch (err) {
+    // `printable`, because the message quotes a path off the disk (an ENOENT
+    // or EACCES names the file it failed on) and a name carrying a control
+    // character would forge a second line of the operator's log.
+    startupLog.warn('could not look for content beside the checkouts:', {
+      detail: printable(err instanceof Error ? err.message : String(err)),
+    });
+  }
+
   // The KB startup phase — AFTER the distribution's onBoot, because a FATAL
   // template finding raised there must stop the boot before anything seeds
   // from that template; the runner then brings every branch up to this build
   // before any route can serve KB content. Throws to stop the boot (the
   // container's restart policy is the retry) — see kb-startup-runner.ts.
-  await core.kbStartupRunner.runAll();
+  //
+  // Runs in the booting process whether or not it holds the commit-worker
+  // lease, so on a redeploy it overlaps the outgoing holder's commits for the
+  // seconds it takes — the documented window at `holdCommitWorkerLease`.
+  try {
+    await core.kbStartupRunner.runAll();
+  } catch (err) {
+    // The one failure a boot survives: the remote cannot be reached. That
+    // says nothing about the knowledge base — what we would write is not
+    // known to be wrong, we cannot get there — so refusing to boot only took
+    // away the login and setup screens an operator needs to fix it (a
+    // rotated token, say). The deployment comes up GATED: the setup routes
+    // read the runner's standing failure and keep the app shut, the setup
+    // screen shows why, saving it retries, and the runner keeps trying on
+    // its own. Every other failure still stops the boot, because it means
+    // the template or a step would write something wrong.
+    if (!(err instanceof KbRemoteUnreachableError)) throw err;
+    startupLog.error('booting UNMAINTAINED and gated — the knowledge-base remote could not be reached:', {
+      detail: err.message,
+    });
+    core.kbStartupRunner.retryUntilMaintained();
+  }
 
   // Close change requests whose source branch has been deleted. SEQUENCED
   // AFTER the startup phase above, for two reasons: the sweep's fresh fetch
@@ -275,10 +371,29 @@ export async function createCoreServer(
     .closeChangeRequestsWithDeletedBranches()
     .then((n) => {
       if (n > 0) {
-        console.log(`[cr] closed ${n} change request${n === 1 ? '' : 's'} with a deleted branch`);
+        crLog.info(`closed ${n} change request${n === 1 ? '' : 's'} with a deleted branch`);
       }
     })
-    .catch((err) => console.warn('[cr] deleted-branch sweep failed:', err));
+    .catch((err) => crLog.warn('deleted-branch sweep failed:', { err }));
+
+  // Recorded join requests that are still owed, resumed — now, and then on a
+  // timer. SEQUENCED AFTER the startup phase for the same reason as the sweep
+  // above: the work needs the default-branch clone the runner maintains and
+  // the plugin catalog read from it, and a sweep that ran first would refuse
+  // every row for a knowledge base that simply was not ready — telling people
+  // their request could not be sent when nothing had gone wrong with it.
+  //
+  // ON A TIMER rather than at boot alone, because boot cannot cover the
+  // redeploy: this process sweeps while the outgoing one still holds a
+  // record, skips it (correctly — two servers must not do git on one branch),
+  // and the outgoing process then exits mid-work. Nothing else would look at
+  // that row again. The requester cannot prompt it either: a pending record
+  // shows them the "Requested" card, not a button.
+  //
+  // Not awaited, and nothing to report here but the failure to read the table
+  // at all: a first request from a person is a full clone, nothing else at
+  // boot depends on it, and each row records its own outcome.
+  core.pluginJoinRequestJobs.startSweeping();
 
   // Auth routes (unprotected — login endpoint must be accessible)
   app.use(
@@ -376,9 +491,13 @@ export async function createCoreServer(
     recoveryBotEmail: RECOVERY_BOT_EMAIL,
     hooks: core.workflowService.hooks,
   };
+  // A skill's `allowed-tools`, checked against what the caller can see — on
+  // every save surface (agent write tools, the app's PUT /file) and on
+  // `get_skill`. Warnings only; it never refuses a save.
+  const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kbDirName);
   registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kbDirName);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink);
-  registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate);
+  registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
   registerPluginsTools(core.toolRegistry);
@@ -409,12 +528,28 @@ export async function createCoreServer(
     core.toolManualService,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
-    { workspaceService: core.workspaceService, accessControl: core.accessControl, kbDirName: core.kbDirName },
+    {
+      workspaceService: core.workspaceService,
+      accessControl: core.accessControl,
+      kbDirName: core.kbDirName,
+      disk: core.disk,
+      pluginIndex: core.pluginIndexService,
+    },
   ));
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the
   // External agent access card. Same `manualAuth`, same router, as `all-tools`.
   toolsRouter.use(createAgentInstructionsRoutes(core.manualAuthMiddleware, core.readAgentPreamble));
+  // The fingerprint of the caller's released catalog. The local `hexis-mcp`
+  // server polls it to learn that a manual or a skill changed under a
+  // connection it cannot be pushed to; nothing else consults it. Same
+  // `manualAuth`, same router, as `all-tools`.
+  toolsRouter.use(createCatalogRevisionRoutes({
+    toolManuals: core.toolManualService,
+    skills: core.skillService,
+    manualAuth: core.manualAuthMiddleware,
+    resolveUserEmail: async (userId) => (await core.authService.getUserById(userId))?.email,
+  }));
   // The only core route that returns secret VALUES: a local `.tool`'s declared
   // variables, for the local MCP server that will execute it. It re-reads the
   // declaring knowledge-base file server-side, so the file is the allowlist and
@@ -427,6 +562,15 @@ export async function createCoreServer(
     async (userId) => (await core.authService.getUserById(userId))?.email,
   ));
   app.use('/api', toolsRouter);
+
+  // The same guard on the PARSED body, for the WHOLE `/workspace/:id` prefix
+  // and ahead of EVERY router under it — the file routes, the review, workflow
+  // and access ones, and whatever an extension mounts below. Mounted here,
+  // before the extension phase, so an overlay surface added there is covered
+  // by its prefix rather than by remembering this. No auth in front of it: the
+  // lexical rule reads the caller's own string and touches no disk, so it
+  // answers nothing; the resolved half waits for the JWT check below.
+  app.use('/api/workspace/:id', createGitInternalsRouteGuard(core.workspaceService));
 
   // Non-JWT overlay surfaces that sit between the tools router and the
   // JWT-protected `/api` routes (LLM proxy, embed, upload — see the phase
@@ -456,6 +600,10 @@ export async function createCoreServer(
   );
 
   // Protected routes
+  // The same guard again, now BEHIND the JWT check, so an authenticated
+  // request also gets the resolved form judged — a link in the repository that
+  // points into the git folder — before any read gate or lock.
+  app.use('/api/workspace/:id', core.authMiddleware, createGitInternalsRouteGuard(core.workspaceService));
   app.use('/api', core.authMiddleware, createWorkspaceRoutes(
     core.workspaceService,
     core.authService,
@@ -465,6 +613,9 @@ export async function createCoreServer(
     core.kbDirName,
     core.creatorAccess,
     core.adminAccess,
+    core.disk,
+    allowedToolsChecker,
+    core.changeGate,
   ));
   // Workflow is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes
@@ -503,7 +654,7 @@ export async function createCoreServer(
   app.use(
     '/api',
     core.authMiddleware,
-    createSkillsRoutes(core.skillService, core.pendingSkillsService, core.pluginLinkIndex, core.accessControl),
+    createSkillsRoutes(core.skillService, core.pendingSkillsService, core.pluginLinkIndex, core.accessControl, allowedToolsChecker),
   );
   // Asking for write on a shared skill — the join-request machinery pointed
   // at a skill folder. Same JWT gate, same fail-closed shape.
@@ -531,10 +682,9 @@ export async function createCoreServer(
     core.pluginIndexService,
     core.accessControl,
     core.workflowService,
-    core.workspaceService,
     core.joinRequestsService,
+    core.pluginJoinRequestJobs,
     core.pluginProvisionService,
-    core.kbDirName,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
     core.pluginLinksService,
     core.pluginRenameService,
@@ -570,6 +720,7 @@ export async function createCoreServer(
     core.authService,
     core.adminAccess,
     core.accountErasureService,
+    core.userAccessRemovalService,
   ));
   // Connection keys across the deployment (list per account, revoke any) —
   // admin-gated inside. The per-user key surface stays on /api/mcp/…
@@ -585,20 +736,33 @@ export async function createCoreServer(
   app.use(
     '/api',
     core.authMiddleware,
-    createSetupRoutes(core.settings, core.adminAccess, core.kbStartupRunner, {
-      // Same address family as the MCP endpoint above, userinfo stripped for
-      // the same reason: this string is handed to admins to paste elsewhere.
-      url: syncUrl.toString(),
-      lastSync: () => core.kbSyncService.lastSync(),
-    }),
+    createSetupRoutes(
+      core.settings,
+      core.adminAccess,
+      core.kbStartupRunner,
+      {
+        // Same address family as the MCP endpoint above, userinfo stripped for
+        // the same reason: this string is handed to admins to paste elsewhere.
+        url: syncUrl.toString(),
+        lastSync: () => core.kbSyncService.lastSync(),
+      },
+      // The connection probe's git — and the root-folder listing's — runs
+      // through the deployment's one runner.
+      repositoryConnectionCheck(core.gitRunner),
+      rootFolderListerFor(core.gitRunner),
+      oidcRedirectUri(core.config.publicBackendUrl),
+    ),
   );
-  app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService, {
-    service: core.mcpServerEditService,
-    getUser: async (userId) => {
-      const u = await core.authService.getUserById(userId);
-      return u ? ({ id: u.id, email: u.email, name: u.name } as AuthUser) : undefined;
-    },
-  }));
+  const toolPageUser = async (userId: string): Promise<AuthUser | undefined> => {
+    const u = await core.authService.getUserById(userId);
+    return u ? ({ id: u.id, email: u.email, name: u.name } as AuthUser) : undefined;
+  };
+  app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(
+    core.toolManualService,
+    { service: core.mcpServerEditService, getUser: toolPageUser },
+    { service: core.toolDeleteService, getUser: toolPageUser },
+    core.pendingToolsService,
+  ));
   app.use('/api', core.authMiddleware, createSecretsVaultRoutes(secretsVaultRoutesDeps));
   // The authed tail of the MCP OAuth flow: /connect calls these to describe
   // the pending authorization and, on Finish, to mint the one-time code. The
@@ -615,7 +779,8 @@ export async function createCoreServer(
   }));
 
   // What an Owner pastes into Claude's admin settings to register this
-  // deployment as a GitHub Enterprise Server — admins only.
+  // deployment as a GitHub Enterprise Server — admins only — plus whether it
+  // is registered, a boolean every signed-in person may read.
   app.use('/api', core.authMiddleware, createGitHubFacadeAdminRoutes({
     credentials: core.githubFacadeCredentials,
     isAdmin: (email) => core.adminAccess.isAdmin(email),

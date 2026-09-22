@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -50,7 +51,7 @@ describe('AccessControlService.grantSources', () => {
     repo = path.join(workspaceDir, PROCESS_MAP_DIR);
     await fs.mkdir(repo, { recursive: true });
     await writeFile(repo, 'roles.yaml', ROLES_YAML);
-    svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
   });
 
   afterEach(async () => {
@@ -218,7 +219,7 @@ describe('grantSources — principal kind under group shadowing', () => {
     // A GROUP named Engineer shadows the Engineer ROLE: the bare token is the
     // group's, `role/engineer` is the role's.
     await writeFile(repo, 'groups.yaml', 'groups:\n  Engineer:\n    - pat@x.io\n');
-    svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
   });
 
   afterEach(async () => {

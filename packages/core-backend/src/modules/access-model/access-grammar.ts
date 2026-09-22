@@ -12,7 +12,17 @@
  */
 
 import { parse as parseFullYaml } from 'yaml';
-import { pluginManifestName } from '@bevel-software/platform-shared';
+import {
+  KNOWN_VERBS,
+  VERB_REQUIRES,
+  VERBS_BROADEST_FIRST,
+  pluginManifestName,
+  requiredVerbsFor,
+  sourceVerbsFor,
+  type Verb,
+} from '@bevel-software/platform-shared';
+import { canonicalEmail } from '../../shared/email-identity.js';
+import { scanFrontmatter } from './frontmatter-lines.js';
 import type { GroupsIndex } from './group-files.js';
 
 // ---------------------------------------------------------------------------
@@ -28,44 +38,47 @@ export const ADMIN_CANONICAL = 'admin';
  *
  * `read` controls who may VIEW a path (the file viewer, embed surface, and
  * the agent's read tools). It is **default-deny**: a path with no effective
- * `read:` or `owner:` grant is not readable. To make content public, list the
- * built-in role `everyone` under `read:`.
+ * `read:`, `write:`, `download:` or `owner:` grant is not readable. To make
+ * content public, list the built-in role `everyone` under `read:`.
  *
  * The verbs nest: `owner` is a superset of `read` + `write` + `download`, and
- * `write` is itself a superset of `read` (anyone who can edit can view). An
- * `owner` grant therefore confers all three lower verbs, a `write` grant
- * additionally confers `read`, and `owner` also marks the principal as a
- * contact point for the node (surfaced in the UI so users know who to ask).
- * See `sourceVerbsFor` for how these implications fold into resolution.
+ * `write` and `download` are each a superset of `read` (anyone who can edit, or
+ * who may save a copy, can view). An `owner` grant therefore confers all three
+ * lower verbs, and a `write` or `download` grant additionally confers `read`;
+ * `owner` also marks the principal as a contact point for the node (surfaced in
+ * the UI so users know who to ask). `write` and `download` stay independent of
+ * each other — neither confers the other. Denials run the other way: a verb
+ * denied at a scope takes every verb that presupposes it down with it there.
+ *
+ * The verbs, the dependency graph between them (`VERB_REQUIRES`) and the two
+ * lists derived from it (`sourceVerbsFor`, `requiredVerbsFor`) live in
+ * `@bevel-software/platform-shared` (`workspace/access-verbs.ts`), because the
+ * share dialog folds the same verbs on the client and must never do it by a
+ * second table. They are re-exported here so the grammar remains the one
+ * import for everything on the server side.
  */
-export const KNOWN_VERBS = ['read', 'write', 'download', 'owner'] as const;
-export type Verb = (typeof KNOWN_VERBS)[number];
+export { KNOWN_VERBS, VERB_REQUIRES, VERBS_BROADEST_FIRST, requiredVerbsFor, sourceVerbsFor };
+export type { Verb };
 const KNOWN_VERBS_SET: ReadonlySet<string> = new Set<string>(KNOWN_VERBS);
 export const EVERYONE_CANONICAL = 'everyone';
 /** Display name for the built-in `everyone` role in the share UI. */
 export const EVERYONE_DISPLAY = 'Everyone';
 
-/**
- * Verbs whose entries contribute to resolving `verb`, target verb first.
- * `owner` implies `read`, `write`, and `download`; `write` additionally
- * implies `read`. So resolving `read` folds in `write` and `owner`, resolving
- * `write`/`download` folds in `owner`, and resolving `owner` uses only `owner`.
+/*
+ * How the graph is applied on the server (the table itself is in shared):
  *
- * The implication is **grant-only** (see `resolveAtPath`): a superset grant
- * confers the lower verb, but a superset *denial* does not — `deny write` says
- * nothing about `read`, so it never strips a separate read grant. The target
- * verb itself contributes both its grants and its denials.
+ *   - `resolveScopes` reads `sourceVerbsFor` for the grants that confer the
+ *     target verb and `requiredVerbsFor` for the denials that strip it. Within
+ *     ONE scope a grant of the verb, or of one that confers it, beats a denial
+ *     of the verb or of one it presupposes.
+ *   - `plugin-principals.ts` reads `sourceVerbsFor` to decide who lands in
+ *     `plugin/<slug>/read`; `personal-spaces.step.ts` reads it to ask whether
+ *     a space is already open.
+ *
+ * `download` presupposes `read` because the pair is otherwise a DEAD
+ * combination: the raw-file route read-gates before it download-gates, so a
+ * download-only grant let its holder neither open the file nor save it.
  */
-export function sourceVerbsFor(verb: Verb): Verb[] {
-  switch (verb) {
-    case 'owner':
-      return ['owner'];
-    case 'read':
-      return ['read', 'write', 'owner'];
-    default:
-      return [verb, 'owner'];
-  }
-}
 export const RESERVED_ROLE_NAMES = new Set(['deny', EVERYONE_CANONICAL]);
 export const DENY_PREFIX = 'deny ';
 /**
@@ -494,26 +507,18 @@ export function parseYamlSubset(
 export function extractFrontmatter(
   text: string,
 ): { ok: true; frontmatter: string } | { ok: false; error: string } {
-  const lines = text.split(/\r?\n/);
-  if (lines.length === 0 || lines[0].trim() !== '---') {
-    return { ok: false, error: 'expected `---` on the first line' };
+  const scan = scanFrontmatter(text);
+  if (scan.kind === 'none') return { ok: false, error: 'expected `---` on the first line' };
+  if (scan.kind === 'unterminated') {
+    return { ok: false, error: 'unterminated frontmatter — no closing `---` found' };
   }
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') {
-      return { ok: true, frontmatter: lines.slice(1, i).join('\n') };
-    }
-  }
-  return { ok: false, error: 'unterminated frontmatter — no closing `---` found' };
+  return { ok: true, frontmatter: scan.fm.join('\n') };
 }
 
-/** The text AFTER the closing frontmatter fence ('' when there is no fence). */
+/** The text AFTER the closing frontmatter fence ('' when there is no closed block). */
 export function bodyAfterFrontmatter(text: string): string {
-  const lines = text.split(/\r?\n/);
-  if (lines.length === 0 || lines[0].trim() !== '---') return '';
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') return lines.slice(i + 1).join('\n');
-  }
-  return '';
+  const scan = scanFrontmatter(text);
+  return scan.kind === 'frontmatter' ? scan.post.slice(1).join('\n') : '';
 }
 
 // ---------------------------------------------------------------------------
@@ -526,9 +531,13 @@ export function canonicalRoleName(name: string): string {
   return canonicalPluginToken(name) ?? name.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-export function canonicalEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
+/**
+ * Re-exported from `shared/email-identity.ts`, where it lives beside the
+ * identity HASH that must normalise identically. The grammar keeps the name
+ * because its parsers and splices read as prose with it, and its own callers
+ * keep importing it from here.
+ */
+export { canonicalEmail };
 
 // ---------------------------------------------------------------------------
 // Entry parser

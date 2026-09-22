@@ -4,7 +4,7 @@ import type { Database } from '../database/connection.js';
 import type { CoreConfig } from '../../core-config.js';
 import { users } from '../database/schema.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { hashEmail } from '../../shared/hash-email.js';
+import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
   hashPassword,
   verifyPassword,
@@ -13,6 +13,15 @@ import {
 } from './password-hash.js';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * What every caller is told when it tries to give the deployment admin a
+ * stored password — the Account page's own change and an admin's "Set
+ * password" on the User Accounts page alike. One sentence in one place, so the
+ * two surfaces cannot end up explaining the same rule differently.
+ */
+const ENV_ADMIN_PASSWORD_REFUSAL =
+  "This account's password is set in the deployment environment and cannot be changed here";
 
 /**
  * Decoy hash verified when the email is unknown or has no password set, so
@@ -61,6 +70,14 @@ export interface AuthConfig {
   adminEmail: string;
   adminPassword: string;
   allowedEmailDomains: string[];
+  /**
+   * Whether password sign-in is offered at all (`LOGIN_PASSWORD`, default
+   * true). With it off, `ADMIN_PASSWORD` is a credential nothing accepts, so
+   * the deployment admin is not reported as one whose password lives in the
+   * environment — the Account page would otherwise send them to a login
+   * method the deployment has switched off.
+   */
+  loginPasswordEnabled?: boolean;
 }
 
 export class AuthService {
@@ -81,6 +98,11 @@ export class AuthService {
    *     their Account page). Accounts that only ever signed in via SSO have
    *     no hash and are refused here.
    *
+   * The two are alternatives, not a fallback chain: source 1 never falls
+   * through to source 2, so the deployment admin is refused outright when the
+   * environment password is wrong — see the guard below for why a hash on
+   * that row must not become a second way in.
+   *
    * A generic "Invalid credentials" error for every failure mode — never
    * reveal whether the email exists or has a password.
    */
@@ -88,30 +110,55 @@ export class AuthService {
     email: string,
     password: string,
   ): Promise<{ token: string; user: AuthUser }> {
-    const normalizedEmail = (email ?? '').trim().toLowerCase();
+    const normalizedEmail = canonicalEmail(email ?? '');
 
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Invalid credentials');
     }
 
     const provided = password ?? '';
-    const isEnvAdmin =
-      this.config.adminEmail.length > 0 &&
-      this.config.adminPassword.length > 0 &&
-      normalizedEmail === this.config.adminEmail &&
-      timingSafeStringEqual(provided, this.config.adminPassword);
 
-    if (isEnvAdmin) {
-      const defaultName = normalizedEmail.split('@')[0] || normalizedEmail;
-      const user = await this.upsertUserByEmail(normalizedEmail, defaultName);
-      return { token: this.signToken(user.id, user.email), user: toAuthUser(user) };
-    }
-
+    // Looked up for EVERY email, including the deployment admin's, whose hash
+    // is then ignored below. Skipping the query for that one address would
+    // make its wrong-password response measurably cheaper than every other
+    // address's — one round trip short — and repeated timings would then
+    // disclose which email the deployment configured as `ADMIN_EMAIL`. The
+    // decoy hash already buys that uniformity for the scrypt half; this keeps
+    // the database half uniform too.
     const [user] = await this.db
       .select()
       .from(users)
       .where(eq(users.email, normalizedEmail))
       .limit(1);
+
+    if (this.isEnvAdminEmail(normalizedEmail)) {
+      // While `ADMIN_PASSWORD` is set, the environment's password is this
+      // account's ONLY credential — the row was read above, but its hash is
+      // never consulted for this address. A hash can still be sitting on that
+      // row (planted before this rule existed, or left by an ordinary account
+      // that only later became `ADMIN_EMAIL`), and accepting it would defeat
+      // the point of refusing to write new ones: rotating `ADMIN_PASSWORD`
+      // would leave the old credential signing in.
+      //
+      // Refused rather than deleted, deliberately. The rule is reversible the
+      // same way every other env-admin fact is — unset `ADMIN_PASSWORD` and
+      // the identity goes back to being an ordinary account, stored password
+      // included, exactly as `isEnvAdmin` stops being reported — and a login
+      // path that destroys credentials would be a far worse thing to get
+      // wrong than one that ignores them.
+      if (!timingSafeStringEqual(provided, this.config.adminPassword)) {
+        // One scrypt verification here too — against the decoy, never against
+        // `user`'s hash — so that together with the lookup above a wrong
+        // password for this address costs what a wrong password for any other
+        // address does.
+        await verifyPassword(provided, await decoyHash());
+        throw new Error('Invalid credentials');
+      }
+      const defaultName = normalizedEmail.split('@')[0] || normalizedEmail;
+      const admin = await this.upsertUserByEmail(normalizedEmail, defaultName);
+      return { token: this.signToken(admin.id, admin.email), user: this.toClientUser(admin) };
+    }
+
     // Always run one scrypt verification — against the stored hash when there
     // is one, against the decoy otherwise — so unknown emails and
     // password-less (SSO-only) accounts take the same time as a wrong
@@ -121,7 +168,7 @@ export class AuthService {
     if (!user?.passwordHash || !matches) {
       throw new Error('Invalid credentials');
     }
-    return { token: this.signToken(user.id, user.email), user: toAuthUser(user) };
+    return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
   }
 
   /**
@@ -135,14 +182,14 @@ export class AuthService {
     email: string,
     name: string,
   ): Promise<{ token: string; user: AuthUser }> {
-    const normalizedEmail = (email ?? '').trim().toLowerCase();
+    const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Sign-in returned an invalid email');
     }
     this.assertAllowedDomain(normalizedEmail);
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
     const user = await this.upsertUserByEmail(normalizedEmail, displayName);
-    return { token: this.signToken(user.id, user.email), user: toAuthUser(user) };
+    return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
   }
 
   /**
@@ -150,15 +197,28 @@ export class AuthService {
    * the user by email and sets their password — re-provisioning an existing
    * account (e.g. one that first arrived via SSO, or a reset for a locked-out
    * user) is deliberate admin behavior, not an error.
+   *
+   * The deployment admin is the one target this refuses, for the reason
+   * {@link changePassword} refuses it: that account's password is the
+   * environment's, so a stored hash would not replace it but ADD a second
+   * credential — one that keeps signing in after `ADMIN_PASSWORD` is rotated,
+   * and that the deployment owner never chose. The refusal belongs here and
+   * not only on the page, because this is the route any other admin reaches
+   * with an arbitrary email.
    */
   async createAccount(
     email: string,
     name: string | undefined,
     password: string,
   ): Promise<AuthUser> {
-    const normalizedEmail = (email ?? '').trim().toLowerCase();
+    const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Invalid email');
+    }
+    // Before the policy check, so the refusal names the real reason rather
+    // than sending the admin off to pick a longer password first.
+    if (this.isEnvAdminEmail(normalizedEmail)) {
+      throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
     }
     this.assertPasswordPolicy(password);
     const suppliedName = (name ?? '').trim();
@@ -178,23 +238,86 @@ export class AuthService {
           : { passwordHash, updatedAt: new Date() },
       })
       .returning();
-    return toAuthUser(row);
+    return this.toClientUser(row);
+  }
+
+  /**
+   * Is `email` the deployment admin — the account whose password is set in
+   * the deployment environment (`ADMIN_EMAIL` while `ADMIN_PASSWORD` is set)
+   * rather than stored on its row? The single definition behind
+   * {@link loginWithPassword} (which accepts only the environment password
+   * for it), {@link changePassword} and {@link createAccount} (which both
+   * refuse to store a hash for it), so those three can never disagree about
+   * who the deployment admin is. `email` must already be canonical.
+   *
+   * Independent of whether password sign-in is switched on: the refusals
+   * hold while it is off too, or a hash could be stored for that address in
+   * the meantime — a credential the row is never meant to carry. What a
+   * client is TOLD does follow the switch: {@link reportsAsEnvAdmin}.
+   */
+  private isEnvAdminEmail(email: string): boolean {
+    return (
+      this.config.adminEmail.length > 0 &&
+      this.config.adminPassword.length > 0 &&
+      email === this.config.adminEmail
+    );
+  }
+
+  /**
+   * Whether a client is told `email` is the deployment admin — behind
+   * {@link toClientUser} and {@link listAccounts}. The identity is
+   * {@link isEnvAdminEmail}; the switch is password sign-in: with
+   * `LOGIN_PASSWORD=false`, `ADMIN_PASSWORD` is a credential nothing accepts,
+   * and reporting the account as the environment's admin would send its
+   * owner to a login method the deployment does not offer.
+   */
+  private reportsAsEnvAdmin(email: string): boolean {
+    return (this.config.loginPasswordEnabled ?? true) && this.isEnvAdminEmail(email);
+  }
+
+  /**
+   * {@link toAuthUser} plus the one fact that is not on the row: whether this
+   * is the deployment admin. Computed from the configuration on each read
+   * rather than stored, so unsetting `ADMIN_PASSWORD` turns the flag off at
+   * once and the account goes back to being an ordinary one — the same
+   * reasoning that keeps the credential itself out of the database. Every
+   * path that hands a user to a client goes through here, so the Account page
+   * sees the same answer whether it came from a fresh login or `/auth/me`.
+   */
+  private toClientUser(user: Parameters<typeof toAuthUser>[0]): AuthUser {
+    return { ...toAuthUser(user), isEnvAdmin: this.reportsAsEnvAdmin(user.email) };
   }
 
   /**
    * Self-service password change (the Account page). The current password is
    * required whenever one is set; an SSO-only account (no hash yet) may set
-   * its first password without one. The env bootstrap-admin credential is not
-   * affected — it lives in the environment, not in this row.
+   * its first password without one.
+   *
+   * The deployment admin is refused outright. Its password lives in the
+   * environment, so a stored hash would not replace it: both credentials
+   * would then sign in, the planted one would survive rotating
+   * `ADMIN_PASSWORD`, and every later change typing the environment password
+   * as the current one would be refused against that stray hash. Worse, the
+   * account starts with no hash, so without this guard the "SSO-only first
+   * password" path below accepts a WRONG current password — any holder of the
+   * session could plant a lasting credential without knowing one. The
+   * environment password is the platform's rescue path into a deployment and
+   * is changed there, which is what the Account page says in place of the
+   * form.
    */
   async changePassword(
     userId: string,
     currentPassword: string | undefined,
     newPassword: string,
   ): Promise<void> {
-    this.assertPasswordPolicy(newPassword);
     const [user] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!user) throw new Error('User not found');
+    // Before the policy check, so the deployment admin is told the real reason
+    // rather than being sent to fix a password that would be refused anyway.
+    if (this.isEnvAdminEmail(user.email)) {
+      throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
+    }
+    this.assertPasswordPolicy(newPassword);
     if (user.passwordHash) {
       if (!currentPassword || !(await verifyPassword(currentPassword, user.passwordHash))) {
         throw new Error('Current password is incorrect');
@@ -207,9 +330,22 @@ export class AuthService {
       .where(eq(users.id, userId));
   }
 
-  /** Accounts overview for the admin management screen (never exposes hashes). */
+  /**
+   * Accounts overview for the admin management screen (never exposes hashes).
+   * The two password facts are independent: `hasPassword` is a stored hash;
+   * `isEnvAdmin` is the env bootstrap credential (`ADMIN_EMAIL` while
+   * `ADMIN_PASSWORD` is set), which signs in whether or not a hash exists —
+   * the same condition {@link loginWithPassword} checks first.
+   */
   async listAccounts(): Promise<
-    Array<{ id: string; email: string; name: string; hasPassword: boolean; createdAt: Date }>
+    Array<{
+      id: string;
+      email: string;
+      name: string;
+      hasPassword: boolean;
+      isEnvAdmin: boolean;
+      createdAt: Date;
+    }>
   > {
     const rows = await this.db.select().from(users).orderBy(users.email);
     return rows.map((row) => ({
@@ -217,6 +353,7 @@ export class AuthService {
       email: row.email,
       name: row.name,
       hasPassword: row.passwordHash != null,
+      isEnvAdmin: this.reportsAsEnvAdmin(row.email),
       createdAt: row.createdAt,
     }));
   }
@@ -243,7 +380,7 @@ export class AuthService {
     email: string,
     name?: string,
   ): Promise<{ id: string; email: string; name: string } | null> {
-    const normalizedEmail = (email ?? '').trim().toLowerCase();
+    const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) return null;
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
     const user = await this.upsertUserByEmail(normalizedEmail, displayName);
@@ -300,7 +437,29 @@ export class AuthService {
 
     if (!user) return null;
 
-    return toAuthUser(user);
+    return this.toClientUser(user);
+  }
+
+  /**
+   * The account at this ADDRESS, or null when none answers to it.
+   *
+   * By address rather than by id because some work outlives the session that
+   * asked for it: a recorded plugin join request carries the requester's
+   * email — the same key its branch is cut from — and the sweep that resumes
+   * it after a restart has no session and no id to resolve the author from.
+   * Canonicalised on the way in, like every other lookup here, so the stored
+   * spelling of an address is never what decides whether it is found.
+   */
+  async getUserByEmail(email: string): Promise<AuthUser | null> {
+    const [user] = await this.db
+      .select()
+      .from(users)
+      .where(eq(users.email, canonicalEmail(email ?? '')))
+      .limit(1);
+
+    if (!user) return null;
+
+    return this.toClientUser(user);
   }
 
   /**
@@ -329,7 +488,7 @@ export class AuthService {
   isEmailDomainAllowed(email: string): boolean {
     const allowed = this.config.allowedEmailDomains;
     if (allowed.length === 0) return true;
-    const domain = (email ?? '').trim().toLowerCase().split('@')[1] ?? '';
+    const domain = canonicalEmail(email ?? '').split('@')[1] ?? '';
     if (!domain) return false;
     return allowed.some((d) => domain === d || domain.endsWith(`.${d}`));
   }

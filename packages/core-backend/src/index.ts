@@ -25,6 +25,20 @@ export {
   type ToolSurfaceCtx,
 } from './core/create-core-server.js';
 export { noopRecoveryAgent, type CorePorts } from './core/core-ports.js';
+// Logging: the contract, the slot a shell installs its sink into, and the
+// tagged-logger lookup every module logs through. See shared/logging.ts.
+export { setLogger, logger, createConsoleLogger } from './shared/logging.js';
+export type { ILogger, LogFields } from './shared/logger.contract.js';
+// The shutdown sequence a shell's signal handlers call, and the lease-loop
+// handle type `CoreServices.commitWorker` carries.
+export {
+  createShutdown,
+  withStartupTask,
+  type ShutdownDeps,
+  type ShutdownOptions,
+  type LeaseLoopHandle,
+  type LeasedWorker,
+} from './core/lifecycle.js';
 
 // Packaged assets (migrations/, kb-template/) + the migration runners.
 export { coreMigrationsDir, defaultKbTemplateDir } from './assets.js';

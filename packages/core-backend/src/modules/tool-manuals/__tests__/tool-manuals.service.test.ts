@@ -1,4 +1,9 @@
-import { describe, test, expect, beforeEach, afterEach } from 'vitest';
+import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
+
+/** The one disk, as production wires it: the service and its discovery read the same one. */
+const disk = new NodeFs();
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -64,7 +69,7 @@ describe('ToolManualService', () => {
       new Map(paths.map((p) => [p, !p.includes('weather')])),
   } as unknown as IAccessControl;
 
-  const svc = (access: IAccessControl = allowAll) => new ToolManualService(workspaceService, access, KB_DIR);
+  const svc = (access: IAccessControl = allowAll) => new ToolManualService(workspaceService, access, KB_DIR, disk, new KbPluginSource(disk));
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'tools-'));
@@ -226,6 +231,107 @@ describe('ToolManualService', () => {
       { name: 'ORG_ID', scope: 'admin' },
       { name: 'PLAIN', scope: 'admin' },
     ]);
+  });
+
+  /**
+   * A bad manual costs its author their own tool and NOBODY ELSE anything.
+   *
+   * Asserted here rather than taken on trust because the refresh work makes
+   * the catalog re-scan far more often — on every default-branch commit rather
+   * than once a minute — so a broken file is now read, and skipped, many times
+   * more often than it used to be. One file that could take the listing down
+   * would take it down constantly.
+   */
+  test('a `.tool` that cannot be read or parsed, beside good ones, costs only itself', async () => {
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
+    // Four ways a manual can be wrong. Three are about its CONTENT: unparseable
+    // bytes, a valid document that is not a manual, and a manual with an
+    // invalid field.
+    await writeFile(join(tools, 'truncated.tool'), '{ "name": "truncated", "type": "htt');
+    await writeFile(join(tools, 'nottool.tool'), JSON.stringify({ hello: 'world' }));
+    await writeFile(
+      join(tools, 'badscope.tool'),
+      JSON.stringify({ name: 'badscope', type: 'http', url: 'https://x/m', variables: [{ name: 'K', scope: 'root' }] }),
+    );
+    // The fourth is the scan failing to READ the file at all — a separate
+    // branch from parsing, and the one a permissions mistake or a half-written
+    // checkout actually produces. A directory with a `.tool` name is the
+    // honest way to induce it: the walk lists it, and the read throws EISDIR
+    // with no mocking anywhere near the code under test.
+    await mkdir(join(tools, 'adirectory.tool'), { recursive: true });
+
+    const list = await svc().listAccessible('user@x.eu');
+    expect(list.map((m) => m.name).sort()).toEqual(['billing', 'weather']);
+    // And the valid ones are still usable, not merely counted.
+    expect(list.find((m) => m.name === 'billing')!.type).toBe('http');
+  });
+
+  /**
+   * The catalog fingerprint — what `GET /api/agent/catalog-revision` hashes,
+   * and therefore what decides whether a long-lived MCP client re-registers.
+   *
+   * The hard half is the change that is invisible in a listing: a `.tool` that
+   * keeps its name, path, type and description while its `url`, its headers or
+   * an inline manual's embedded tools change is a DIFFERENT callable thing,
+   * and a client still holding the old definition has to be told. Hence the
+   * source digest on the line; these pin that it is there and that it is not
+   * so eager it fires on a scan of a file nobody touched.
+   */
+  describe('catalogFingerprints', () => {
+    const tools = () => join(root, wsId, KB_DIR, 'Plugins');
+    const line = async (access = allowAll) =>
+      (await svc(access).catalogFingerprints('user@x.eu')).find((l) => l.includes('billing'))!;
+
+    test('is stable across scans of a catalog nobody touched', async () => {
+      expect(await line()).toBe(await line());
+    });
+
+    test.each([
+      ['its url', { name: 'billing', type: 'http', url: 'https://api.example.com/moved' }],
+      [
+        'a header',
+        {
+          name: 'billing',
+          type: 'http',
+          url: 'https://api.example.com/utcp',
+          headers: { Authorization: 'Bearer ${BILLING_KEY}', 'X-Tenant': 'acme' },
+        },
+      ],
+    ])('moves when %s changes, though no listing field did', async (_what, rewritten) => {
+      const before = await line();
+      await writeFile(join(tools(), 'billing.tool'), JSON.stringify(rewritten));
+
+      const after = await line();
+      expect(after).not.toBe(before);
+      // The point of the case: nothing a person browsing the catalog sees has
+      // changed, so a fingerprint built from the summary alone would not move.
+      const [summary] = (await svc().listAccessible('user@x.eu')).filter((m) => m.name === 'billing');
+      expect([summary.slug, summary.name, summary.path, summary.type, summary.description]).toEqual([
+        'billing',
+        'billing',
+        'Plugins/billing.tool',
+        'http',
+        undefined,
+      ]);
+    });
+
+    test("moves when an inline manual's embedded tools change", async () => {
+      const inlineLine = async () =>
+        (await svc().catalogFingerprints('user@x.eu')).find((l) => l.includes('weather'))!;
+      const before = await inlineLine();
+
+      const withAnother = JSON.parse(INLINE_TOOL);
+      withAnother.tools.push({ ...withAnother.tools[0], name: 'historical' });
+      await writeFile(join(tools(), 'weather.tool'), JSON.stringify(withAnother));
+
+      expect(await inlineLine()).not.toBe(before);
+    });
+
+    test('drops a line for a manual the caller cannot read', async () => {
+      const lines = await svc(denyBilling).catalogFingerprints('user@x.eu');
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('weather');
+    });
   });
 
   test('skips a `.tool` with a malformed `variables` entry (never silently mis-scoped)', async () => {
@@ -605,5 +711,75 @@ describe('ToolManualService', () => {
     const preview = await svc().preview('{ not valid json');
     expect(preview.ok).toBe(false);
     expect(preview.errors?.length).toBeGreaterThan(0);
+  });
+});
+
+describe('ToolManualService.listDeclaredOnlyOnBranch', () => {
+  let root: string;
+  const DRAFT = 'user/add-crm';
+  const draftWs = workspaceIdForBranch(DRAFT);
+
+  /** Cloned here: the default branch, the draft, and `user/gone` (its remote branch since deleted). */
+  const cloned = new Set([wsId, draftWs, workspaceIdForBranch('user/gone')]);
+  const getOrCreateForBranch = vi.fn(async (branch: string) => {
+    if (branch === 'user/gone') throw new Error('branch does not exist');
+    return { id: workspaceIdForBranch(branch) };
+  });
+  const workspaceService = {
+    getOrCreateForBranch,
+    hasBootstrappedWorkspace: async (id: string) => cloned.has(id),
+    getWorkspacePath: async (id: string) => join(root, id),
+  } as unknown as WorkspaceService;
+
+  /** Reads everything on the default branch; on the draft, everything but `Secret Plugin`. */
+  const readGate = {
+    canReadBatch: async (ws: string, _e: string, paths: string[]) =>
+      new Map(paths.map((p) => [p, ws !== draftWs || !p.startsWith('Plugins/Secret Plugin/')])),
+  } as unknown as IAccessControl;
+
+  const writeMcpJson = async (ws: string, plugin: string, servers: string[]) => {
+    const dir = join(root, ws, KB_DIR, 'Plugins', plugin);
+    await mkdir(dir, { recursive: true });
+    const mcpServers = Object.fromEntries(
+      servers.map((s) => [s, { type: 'streamable-http', url: `https://${s.replace(/_/g, '-')}.example.com/mcp` }]),
+    );
+    await writeFile(join(dir, 'mcp.json'), JSON.stringify({ mcpServers }));
+    await writeFile(join(dir, 'plugin.json'), JSON.stringify({ name: plugin.toLowerCase().replace(/ /g, '-') }));
+  };
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'tools-branch-'));
+    // Released: `billing`. The draft carries it too (an edit), plus two new servers,
+    // one of them in a plugin the caller cannot read on that branch.
+    await writeMcpJson(wsId, 'Sales', ['billing']);
+    await writeMcpJson(draftWs, 'Sales', ['billing', 'crm']);
+    await writeMcpJson(draftWs, 'Secret Plugin', ['hidden']);
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const svc = () => new ToolManualService(workspaceService, readGate, KB_DIR, disk, new KbPluginSource(disk));
+
+  test('names only the readable declarations the default branch does not serve', async () => {
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DRAFT)).toEqual([
+      { name: 'crm', path: 'Plugins/Sales/mcp.json', type: 'mcp' },
+    ]);
+  });
+
+  test('is empty for the default branch itself and for a branch without a workspace', async () => {
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DEFAULT_BRANCH)).toEqual([]);
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', 'user/gone')).toEqual([]);
+  });
+
+  test('never bootstraps a branch this process holds no clone of', async () => {
+    getOrCreateForBranch.mockClear();
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', 'someone/private-guess')).toEqual([]);
+    expect(getOrCreateForBranch).not.toHaveBeenCalledWith('someone/private-guess');
+  });
+
+  test('the released catalog never includes the draft declaration', async () => {
+    expect((await svc().listAccessible('user@example.com')).map((m) => m.name)).toEqual(['billing']);
   });
 });

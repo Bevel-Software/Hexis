@@ -1,21 +1,43 @@
 import fs from 'node:fs/promises';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('workspace.routes');
 import path from 'node:path';
-import { IGNORE_FILENAME } from './bevel-ignore.js';
+import { IGNORE_FILENAME, isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
+import { printable } from '../../shared/printable.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
-import { DEFAULT_BRANCH, KNOWLEDGE_DIR, canonicalRelativePath, reservedRootDirNames } from '@bevel-software/platform-shared';
+import {
+  DEFAULT_BRANCH,
+  KNOWLEDGE_DIR,
+  canonicalRelativePath,
+  folderPlaceholderPath,
+  isPlatformFile,
+  isPlatformRestoreShape,
+  platformFileCreationRefusal,
+  platformFileRefusal,
+  reservedRootDirNames,
+} from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
-import type { WorkspaceService } from './workspace.service.js';
+import { EntryExistsError, type WorkspaceService } from './workspace.service.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { canReadWorkspacePath, resolveReadableMap, toKbRelative } from '../access-model/kb-read-filter.js';
 import type { ICreatorAccess } from '../access-model/creator.js';
+import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { isRolesYamlPath, assertRolesYamlParsable } from '../access-model/roles-yaml-guard.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { PathTraversalError, WorkflowDomainError } from '../../shared/domain-errors.js';
+import { domainErrorBody } from '../../shared/http-errors.js';
+import { assertWithinDirectory } from '../../shared/path-containment.js';
+import { normalizeWorkspacePath } from '../kb-fs/repo-path.js';
+import { hasGitInternalsSegment } from '../../shared/git-internals.js';
+import { createGitInternalsRouteGuard } from './git-internals.middleware.js';
+import { removeEmptyDirs } from './empty-dirs.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
+import type { SkillSaveCheck } from './workspace.tools.js';
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
 
@@ -63,8 +85,64 @@ export function createWorkspaceRoutes(
   kbDirName: string,
   creatorAccess: ICreatorAccess,
   adminAccess: IAdminAccessService,
+  disk: ITreeWalker,
+  /** Save-time skill check: `PUT /file` on a SKILL.md answers with `warnings` (advisory, never a refusal). */
+  skillSaveCheck?: SkillSaveCheck,
+  /**
+   * Read-before-write, asked ahead of the lock where a route puts bytes on
+   * disk BEFORE it locks them (archive extraction). Every other route's writes
+   * meet the same gate inside `acquireLock`. Optional so route harnesses that
+   * exercise other behaviour need not wire it.
+   */
+  changeGate?: IChangeReadGate,
 ): express.Router {
   const router = express.Router();
+  const gitInternalsRouteGuard = createGitInternalsRouteGuard(workspaceService);
+
+  // The git folder is refused ahead of every route here by
+  // `createGitInternalsRouteGuard`, which the app mounts once for the whole
+  // `/workspace/:id` prefix (see `git-internals.middleware.ts`). Mounted here
+  // too so this router carries the rule wherever it is mounted on its own.
+  router.use("/workspace/:id", gitInternalsRouteGuard);
+
+  /**
+   * The REPOSITORY path a request names, or `null` once the refusal has been
+   * sent.
+   *
+   * Every handler on this surface calls this FIRST, before the access check and
+   * before the service, so one path is what is checked and what is written.
+   * That was the hole: the access helpers stripped `<kbDirName>/` when it was
+   * there and otherwise took the path as written, so an unprefixed
+   * `KnowledgeBase/Reports` was judged as a repository path and then created
+   * beside the repository — a folder, eight documents and a `Plugins/` tree on
+   * core-staging, none of it ever committed. The normaliser closes it by making
+   * the unprefixed spelling MEAN the repository path it was judged as.
+   */
+  function inRepo(res: express.Response, wsPath: string): string | null {
+    try {
+      return normalizeWorkspacePath(wsPath, kbDirName);
+    } catch (err) {
+      sendError(res, err);
+      return null;
+    }
+  }
+
+  /**
+   * A repository path's absolute location, checked against the repository root.
+   *
+   * The ONE place this router resolves a workspace path — the delete fast-path,
+   * the platform-restore look and the folder-keep all used to call
+   * `path.resolve(workspaceDir, …)` for themselves, against the WORKSPACE dir,
+   * which is the containment an unprefixed path satisfied on its way to being
+   * written beside the checkout. A drift-guard test fails if a second one
+   * appears.
+   */
+  async function absoluteInRepo(workspaceId: string, repoRelative: string): Promise<string> {
+    const workspaceDir = await workspaceService.getWorkspacePath(workspaceId);
+    const absolute = path.resolve(workspaceDir, repoRelative);
+    assertWithinDirectory(absolute, path.join(workspaceDir, kbDirName));
+    return absolute;
+  }
 
   function authenticated(
     req: express.Request,
@@ -104,10 +182,47 @@ export function createWorkspaceRoutes(
       }
       return user;
     } catch (err) {
-      console.error('[workspace.routes] requireUser failed:', err);
+      log.error('requireUser failed:', { err });
       res.status(500).json({ error: 'Internal server error' });
       return null;
     }
+  }
+
+  /**
+   * Whether a failed op is one that provably touched no bytes, so its lock
+   * may be released with the disk and the commit queue left exactly as they
+   * are (`releaseLockUntouched`) rather than reset to HEAD.
+   *
+   * This is not tidiness. A release that discards resets the PATH, not "this
+   * request's changes" — git has no notion of the latter — so when the path
+   * holds a landed save whose commit is still queued (commits run out of band
+   * in the pending-commits worker), the discard destroys that save. Two moves
+   * racing onto the same free name are exactly that situation: the winner
+   * lands and enqueues, the loser then takes the same destination lock, is
+   * refused because the name is now taken, and its unwind would throw the
+   * winner's file away. One refusal, two lost files.
+   *
+   * A destination-taken refusal qualifies because nothing it can do writes:
+   * the preflight throws before the move is attempted, and the move's own
+   * no-clobber calls (`link`, `mkdir`, `open` with `O_EXCL` — see
+   * `shared/rename-no-replace.ts`) fail without creating anything, with the
+   * folder claim rolling itself back. `LockingFilesystem.withLock` draws the
+   * same line for its `CheckRefusal`, in the same words: a refusal that wrote
+   * nothing releases untouched.
+   *
+   * Deliberately a closed list of refusal TYPES rather than a guess at what
+   * an op did. An unrecognised failure keeps the discarding release, which is
+   * the fail-closed side: at worst it throws away bytes nobody promised to
+   * keep, where the other mistake throws away bytes someone was told were
+   * saved.
+   *
+   * One type, not two: the move's lower-level `DestinationTakenError` never
+   * reaches this layer — `moveEntry` converts it into `EntryExistsError`, the
+   * refusal this surface answers 409 with — so recognising it here as well
+   * would be a branch nothing can take.
+   */
+  function wroteNothing(err: unknown): boolean {
+    return err instanceof EntryExistsError;
   }
 
   /**
@@ -137,7 +252,17 @@ export function createWorkspaceRoutes(
      * `skipPush` option is gone — under the queue model commits +
      * pushes happen out of band in the worker, not inline here.)
      */
-    options?: { skipFsTreeEvent?: boolean },
+    options?: {
+      skipFsTreeEvent?: boolean;
+      /**
+       * This acquire is the destination side of an admin putting a misplaced
+       * platform file back, coming from `source`. Passed straight to
+       * `acquireLock`, which VERIFIES both halves — that the move is a restore
+       * at all, and that this caller may make it — rather than believing
+       * either. See the `IWorkflowService.acquireLock` contract.
+       */
+      platformRestore?: { source: string };
+    },
   ): Promise<T> {
     const branch = branchForWorkspaceId(workspaceId);
     // If the caller already holds the lock, do NOT acquire-and-release
@@ -173,7 +298,9 @@ export function createWorkspaceRoutes(
       eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
       return result;
     }
-    const acquired = await workflowService.acquireLock(workspaceId, branch, targetPath, user);
+    const acquired = await workflowService.acquireLock(workspaceId, branch, targetPath, user, {
+      platformRestore: options?.platformRestore,
+    });
     if (!acquired.acquired) {
       const holder = acquired.lock.holderName || 'another user';
       const err: Error & { status?: number } = new Error(
@@ -182,16 +309,22 @@ export function createWorkspaceRoutes(
       err.status = 409;
       throw err;
     }
-    // Two release modes, depending on whether the op succeeded:
+    // Three release modes, the same three `LockingFilesystem.withLock` uses,
+    // depending on what the op did:
     //
-    //   - op() FAILED  → drop the lock WITHOUT enqueueing a commit. The
-    //     op may have written partial bytes to disk before throwing
-    //     (write that errored mid-stream, etc.). A normal `releaseLock`
-    //     would enqueue a commit for whatever's on disk and the worker
-    //     would silently persist that partial state as a real committed
-    //     change. `releaseLockNoCommit` drops the lock row only —
-    //     partial disk state stays where it is but never becomes a
-    //     committed change with the user's name on it.
+    //   - op() FAILED having possibly WRITTEN → drop the lock WITHOUT
+    //     enqueueing a commit. The op may have written partial bytes to disk
+    //     before throwing (write that errored mid-stream, etc.). A normal
+    //     `releaseLock` would enqueue a commit for whatever's on disk and the
+    //     worker would silently persist that partial state as a real
+    //     committed change. `releaseLockNoCommit` resets the path to HEAD, so
+    //     partial bytes never become a committed change with the user's name
+    //     on it.
+    //
+    //   - op() FAILED having written NOTHING → `releaseLockUntouched`: drop
+    //     the lock row and leave both the disk and the commit queue exactly
+    //     as they are. See `wroteNothing` for which refusals qualify and why
+    //     the distinction is load-bearing rather than tidy.
     //
     //   - op() SUCCEEDED → release. The new releaseLock enqueues a
     //     pending-commit row (the actual `commitFile + push` runs out
@@ -205,12 +338,17 @@ export function createWorkspaceRoutes(
       result = await op();
       opSucceeded = true;
     } catch (err) {
+      const untouched = wroteNothing(err);
       try {
-        await workflowService.releaseLockNoCommit(workspaceId, branch, targetPath, user);
+        if (untouched) {
+          await workflowService.releaseLockUntouched(workspaceId, branch, targetPath, user);
+        } else {
+          await workflowService.releaseLockNoCommit(workspaceId, branch, targetPath, user);
+        }
       } catch (releaseErr) {
-        console.warn(
-          `[workspace.routes] releaseLockNoCommit failed after op error for "${targetPath}":`,
-          releaseErr instanceof Error ? releaseErr.message : releaseErr,
+        log.warn(
+          `${untouched ? 'releaseLockUntouched' : 'releaseLockNoCommit'} failed after op error for "${targetPath}":`,
+          { err: releaseErr },
         );
       }
       throw err;
@@ -238,36 +376,70 @@ export function createWorkspaceRoutes(
   }
 
   /**
+   * Keep the folder a removal just emptied. A folder exists until it is
+   * deleted explicitly, so when deleting a file (or a subfolder), or moving
+   * one out, leaves its parent empty, the parent gets the placeholder in its
+   * own lock cycle — committed like any other save, within the same request.
+   * Only folders inside the repository qualify, never the clone folder
+   * itself.
+   *
+   * It runs in the folder's turn, which an explicit folder delete also takes,
+   * and looks again inside it: a folder that is gone by then was deleted
+   * explicitly and stays gone, and one that gained an entry needs nothing.
+   * The placeholder is only ever written into a folder that exists, and never
+   * through a link (see `writeFolderPlaceholder`).
+   *
+   * A failure is the request's failure: the removal landed, but a request
+   * that answers success would leave a folder that vanishes on the next
+   * clone, which is exactly what this rule forbids. It keeps its own status
+   * (a contended placeholder lock is still a 409) and only gains the context.
+   */
+  async function keepFolderOf(
+    workspaceId: string,
+    user: AuthUser,
+    removedPath: string,
+  ): Promise<void> {
+    const trimmed = removedPath.replace(/\/+$/, '');
+    const dir = trimmed.includes('/') ? trimmed.slice(0, trimmed.lastIndexOf('/')) : '';
+    if (!dir.startsWith(`${kbDirName}/`)) return;
+    try {
+      const absolute = await absoluteInRepo(workspaceId, dir);
+      await workspaceService.withFolderTurn(workspaceId, dir, async () => {
+        if (!(await isEmptyFolder(absolute))) return;
+        // One tree refresh per request: the removal already announced it.
+        await withLock(
+          workspaceId,
+          user,
+          folderPlaceholderPath(dir),
+          () => workspaceService.writeFolderPlaceholder(workspaceId, dir),
+          { skipFsTreeEvent: true },
+        );
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      log.error(`could not keep the folder ${printable(dir)} after removing ${printable(removedPath)}: ${printable(reason)}`);
+      throw withKeptFolderContext(err, `"${removedPath}" was removed, but its folder "${dir}" could not be kept: ${reason}`);
+    }
+  }
+
+  /**
    * Map any thrown error to an HTTP response. Centralises the response
    * shape so each route handler stays focused on its own logic.
-   *   - `WorkflowDomainError` → its `.status` + `.payload`
-   *   - Path traversal → 403
-   *   - Invalid path / zip → 400 (Only .zip is also 400)
-   *   - Could not read zip → 422
+   *   - `WorkflowDomainError` → its `.status` + `.payload` (a traversal is a
+   *     403, an invalid path a 400, an unreadable archive a 422 — each by
+   *     its TYPE; this surface used to recognise all three by their message)
    *   - Anything else with a `.status` → that status
    *   - Default → 500
    */
   function sendError(res: express.Response, err: unknown): void {
     if (err instanceof WorkflowDomainError) {
-      res.status(err.status).json({ error: err.message, ...(err.payload ?? {}) });
+      res.status(err.status).json(domainErrorBody(err));
       return;
     }
     const msg = err instanceof Error ? err.message : 'Unknown error';
     const status = (err as { status?: number } | null)?.status;
     if (typeof status === 'number') {
       res.status(status).json({ error: msg });
-      return;
-    }
-    if (msg === 'Path traversal detected') {
-      res.status(403).json({ error: msg });
-      return;
-    }
-    if (msg.startsWith('Invalid path') || msg.startsWith('Only .zip')) {
-      res.status(400).json({ error: msg });
-      return;
-    }
-    if (msg.startsWith('Could not read zip file')) {
-      res.status(422).json({ error: msg });
       return;
     }
     res.status(500).json({ error: msg });
@@ -312,10 +484,7 @@ export function createWorkspaceRoutes(
       // Log the full stack so the next 500 isn't a guessing game — the
       // bare `error.message` we returned before lost most diagnostic
       // signal (cause chain, stack frames, error class).
-      console.error(
-        `[workspace.routes] GET /workspace failed branch=${req.query.branch ?? '(default)'}:`,
-        error instanceof Error ? error.stack ?? error.message : error,
-      );
+      log.error(`GET /workspace failed branch=${req.query.branch ?? '(default)'}:`, { err: error });
       const msg = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: msg });
     }
@@ -408,12 +577,11 @@ export function createWorkspaceRoutes(
     let allowed: boolean;
     try {
       // `download` is a per-path verb in access.md, resolved via the same
-      // chain walk as `write`. Strip the kbDirName prefix so the resolver
-      // receives a repo-relative path (mirrors the lock-acquire gate's
-      // strip in workflow.service.ts's assertCanWriteAtPath).
-      const repoRelative = relativePath.startsWith(`${kbDirName}/`)
-        ? relativePath.slice(kbDirName.length + 1)
-        : relativePath;
+      // chain walk as `write`. The caller has already normalised the path into
+      // the repository, so this only takes the prefix off — where it used to
+      // pass an unprefixed path through untouched and judge a stray as if it
+      // were inside.
+      const repoRelative = toKbRelative(relativePath, kbDirName) ?? relativePath;
       allowed = await accessControl.canDownload(workspaceId, user.email, repoRelative);
     } catch (err) {
       sendError(res, err);
@@ -479,7 +647,7 @@ export function createWorkspaceRoutes(
    */
   function buildTreeReadFilter(workspaceId: string, userEmail: string): ReadTreeFilter {
     return async (wsRelPaths) => {
-      const verdict = await resolveReadableMap(
+      const verdict: Map<string, boolean | 'unlisted'> = await resolveReadableMap(
         (w, e, rels) => accessControl.canReadBatch(w, e, rels),
         workspaceId,
         userEmail,
@@ -504,7 +672,7 @@ export function createWorkspaceRoutes(
       // `.bevelignore` is ADMIN-ONLY. It is the file that decides what the file
       // tree and the agent view show at all, so it is deployment configuration
       // rather than knowledge — and it sits alone in being visible: its
-      // siblings (`.gitignore`, `roles.yaml`, `access.md`, `AGENTS.md`) are
+      // siblings (`.gitignore`, `roles.yaml`, `access.md`, the agent guide) are
       // already hidden from every reader by the shipped ignore rules. Somebody
       // who cannot act on it gains a puzzle; somebody who can needs to reach it.
       //
@@ -517,9 +685,13 @@ export function createWorkspaceRoutes(
       // on the default branch precisely so that editing `roles.yaml` on your
       // own branch cannot promote you, and the same reasoning applies to
       // anything gated on being an admin.
+      //
+      // `'unlisted'`, not `false`: hiding it withholds no content, so a
+      // non-admin in an empty knowledge base (every one ships this file) is
+      // told it is empty, not that something is being kept from them.
       const ignoreFiles = wsRelPaths.filter((wp) => path.basename(wp) === IGNORE_FILENAME);
       if (ignoreFiles.length > 0 && !(await adminAccess.isAdmin(userEmail))) {
-        for (const wp of ignoreFiles) verdict.set(wp, false);
+        for (const wp of ignoreFiles) verdict.set(wp, 'unlisted');
       }
       return verdict;
     };
@@ -534,34 +706,35 @@ export function createWorkspaceRoutes(
    * grant on the same new directory survives. Runs BEFORE the creation itself
    * so the explorer never shows-then-hides the new subtree; if the creation
    * subsequently fails, the leftover is an empty new folder readable only by
-   * its creator. Best-effort by contract: a failure here logs and never
-   * blocks the creation.
+   * its creator.
+   *
+   * A failure here FAILS the creation, and propagates as it is. The seed is
+   * planned only for a new folder at a root the creator cannot read — the one
+   * creation the read gate lets past an unreadable spot — so without the
+   * grant the folder would come into existence invisible to the person who
+   * made it, which is exactly what the gate exists to prevent. The seed's
+   * own lock passes that gate too: if the folder appeared under someone else
+   * between the plan and this write, the refusal is theirs to see, and
+   * nothing lands.
    */
   async function seedCreatorAccessMd(
     workspaceId: string,
     user: AuthUser,
     plan: { wsRelPath: string; apply: (current: string) => string },
   ): Promise<void> {
-    try {
-      await withLock(workspaceId, user, plan.wsRelPath, async () => {
-        let current = '';
-        try {
-          current = await workspaceService.readFile(workspaceId, plan.wsRelPath);
-        } catch {
-          // Not there yet — the normal case for a brand-new directory.
-        }
-        const next = plan.apply(current);
-        if (next !== current) {
-          await workspaceService.writeFile(workspaceId, plan.wsRelPath, next);
-        }
-      });
-      creatorAccess.noteAccessFileWritten(workspaceId);
-    } catch (err) {
-      console.warn(
-        `[workspace.routes] creator access.md seed failed for "${plan.wsRelPath}":`,
-        err instanceof Error ? err.message : err,
-      );
-    }
+    await withLock(workspaceId, user, plan.wsRelPath, async () => {
+      let current = '';
+      try {
+        current = await workspaceService.readFile(workspaceId, plan.wsRelPath);
+      } catch {
+        // Not there yet — the normal case for a brand-new directory.
+      }
+      const next = plan.apply(current);
+      if (next !== current) {
+        await workspaceService.writeFile(workspaceId, plan.wsRelPath, next);
+      }
+    });
+    creatorAccess.noteAccessFileWritten(workspaceId);
   }
 
   /**
@@ -590,11 +763,13 @@ export function createWorkspaceRoutes(
   router.get('/workspace/:id/file/raw', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const filePath = req.query.path as string;
-    if (!filePath) {
+    const requested = req.query.path;
+    if (typeof requested !== 'string' || requested.length === 0) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
+    const filePath = inRepo(res, requested);
+    if (filePath === null) return;
     // `?download=1` flips this from inline-serve (used by PdfRenderer and
     // the image renderers) to "save to disk" — and the save path is gated
     // on per-path `download:` rules in access.md. The inline path stays
@@ -662,9 +837,10 @@ export function createWorkspaceRoutes(
       res.setHeader('Cache-Control', 'private, no-cache');
       res.send(buffer);
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      if (msg === 'Path traversal detected') {
-        res.status(403).json({ error: msg });
+      // A traversal is the caller's 403; every other read failure here is the
+      // route's honest 404 (the image either is not there or cannot be shown).
+      if (error instanceof PathTraversalError) {
+        sendError(res, error);
         return;
       }
       res.status(404).json({ error: 'File not found' });
@@ -699,11 +875,13 @@ export function createWorkspaceRoutes(
     // Trim whitespace and strip trailing slashes — `foo/` would otherwise
     // basename to `''` and produce a misleading `.zip` filename. Done
     // before the empty check so `' / '` is also caught.
-    const folderPath = rawPath.trim().replace(/\/+$/, '');
-    if (!folderPath) {
+    const trimmedPath = rawPath.trim().replace(/\/+$/, '');
+    if (!trimmedPath) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
+    const folderPath = inRepo(res, trimmedPath);
+    if (folderPath === null) return;
     if (req.query.download !== '1') {
       res.status(400).json({ error: 'download=1 is required for folder zip downloads' });
       return;
@@ -729,11 +907,11 @@ export function createWorkspaceRoutes(
         res.status(413).json({ error: error.message });
         return;
       }
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      if (msg === 'Path traversal detected') {
-        res.status(403).json({ error: msg });
+      if (error instanceof PathTraversalError) {
+        sendError(res, error);
         return;
       }
+      const msg = error instanceof Error ? error.message : 'Unknown error';
       if (msg === 'Not a directory') {
         res.status(400).json({ error: msg });
         return;
@@ -746,11 +924,13 @@ export function createWorkspaceRoutes(
   router.get('/workspace/:id/file', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const filePath = requestPath(req.query.path);
-    if (filePath === null) {
+    const requested = requestPath(req.query.path);
+    if (requested === null) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
+    const filePath = inRepo(res, requested);
+    if (filePath === null) return;
     if (!(await requireReadPermission(req, res, id, filePath))) return;
     try {
       const content = await workspaceService.readFile(id, filePath);
@@ -768,14 +948,14 @@ export function createWorkspaceRoutes(
       // than the template has no such file yet), so dressing an unreadable
       // file up as a missing one would offer an empty editor over content the
       // save then overwrites.
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') {
+      if (isAbsence(error) || (error as NodeJS.ErrnoException).code === 'EISDIR') {
         res.status(404).json({ error: 'File not found' });
         return;
       }
       // Traversal stays a 403 and a malformed workspace id its domain status:
-      // both carry messages written to be read by the caller.
-      if (error instanceof WorkflowDomainError || (error as Error)?.message === 'Path traversal detected') {
+      // both carry messages written to be read by the caller. (A traversal IS
+      // a domain error now, so the one check covers both.)
+      if (error instanceof WorkflowDomainError) {
         sendError(res, error);
         return;
       }
@@ -785,10 +965,7 @@ export function createWorkspaceRoutes(
       // response body. The distinction this route exists to make is still
       // made — an unreadable file is not a missing one — it is just not
       // narrated to the client.
-      console.warn(
-        `[workspace.routes] GET /file failed for "${filePath}" in "${id}":`,
-        error instanceof Error ? error.message : error,
-      );
+      log.warn(`GET /file failed for "${filePath}" in "${id}":`, { err: error });
       res.status(500).json({ error: "Couldn't read the file." });
     }
   });
@@ -796,11 +973,13 @@ export function createWorkspaceRoutes(
   router.delete('/workspace/:id/file', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const filePath = requestPath(req.query.path);
-    if (filePath === null) {
+    const requested = requestPath(req.query.path);
+    if (requested === null) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
+    const filePath = inRepo(res, requested);
+    if (filePath === null) return;
     const user = await requireUser(req, res);
     if (!user) return;
     try {
@@ -814,19 +993,12 @@ export function createWorkspaceRoutes(
       // emits are also coalesced into a single end-of-batch event so the
       // explorer doesn't refresh N times.
       const workspaceDir = await workspaceService.getWorkspacePath(id);
-      const absolute = path.resolve(workspaceDir, filePath);
-      // Boundary check before any `fs.*` call. The single-file path
-      // bottoms out in `workspaceService.deleteFile` (which asserts the
-      // boundary itself), but this fast-path resolves the absolute
-      // ourselves and then `fs.stat` / `fs.rm` / `enumerateFilesUnder`
-      // it. Without this guard, a `../escape` `filePath` would let the
-      // dir-delete branch operate on directories outside the workspace.
-      const workspaceRoot = path.resolve(workspaceDir);
-      if (absolute !== workspaceRoot && !absolute.startsWith(workspaceRoot + path.sep)) {
-        const err: Error & { status?: number } = new Error('Path traversal detected');
-        err.status = 403;
-        throw err;
-      }
+      // Boundary check before any `fs.*` call — against the REPOSITORY root,
+      // which is where `absoluteInRepo` holds it. The single-file path bottoms
+      // out in `workspaceService.deleteFile` (which resolves inside the
+      // repository itself), but this fast-path needs the absolute for
+      // `fs.stat` / `fs.rm` / `enumerateFilesUnder`.
+      const absolute = await absoluteInRepo(id, filePath);
       let stat: { isDirectory: () => boolean } | null = null;
       try {
         stat = await fs.stat(absolute);
@@ -834,56 +1006,77 @@ export function createWorkspaceRoutes(
         // Not on disk — let workspaceService.deleteFile return its own 404.
       }
       if (stat?.isDirectory()) {
-        const filesInDir = await enumerateFilesUnder(absolute, workspaceDir);
         const branch = branchForWorkspaceId(id);
-        for (const relFile of filesInDir) {
-          await withLock(
-            id,
-            user,
-            relFile,
-            async () => {
-              await workspaceService.deleteFile(id, relFile);
-            },
-            { skipFsTreeEvent: true },
-          );
-        }
-        // No explicit push here — each per-file release enqueues a
-        // pending-commits row, and the background worker drains them
-        // (commit + push) on its own schedule. The N round-trips that
-        // the old skipPush+pushBranch pattern collapsed into one happen
-        // serially in the worker; user perception is unchanged because
-        // the disk-side delete is what other sessions see via
-        // `fs-tree-changed`.
-        // Sweep the now-empty directory subtree off disk. Git doesn't track
-        // empty folders, so there's nothing to commit; this is just disk
-        // hygiene so the file tree stops showing the empty containers.
-        //
-        // This MUST recurse: a folder that held *subfolders* still has those
-        // (now-empty) subdirectory shells on disk after the per-file deletes,
-        // so a single non-recursive `rmdir(absolute)` would see a non-empty
-        // dir and bail — leaving the folder visible in the tree and looking
-        // undeletable (BEVA-132). `removeEmptyDirs` walks bottom-up and only
-        // removes dirs that are *actually empty* at the moment it visits them,
-        // so a concurrent writer's new file (and its parent chain) is
-        // preserved — the same safety property the old non-recursive check had.
+        // In the folder's turn: keeping a folder under this one (a file delete
+        // racing this one) waits until the sweep is done, and then finds the
+        // folder gone instead of writing it back.
+        let filesInDir: string[];
         try {
-          await removeEmptyDirs(absolute);
-        } catch (rmErr) {
-          // Directory already gone (raced delete), or a concurrent writer
-          // repopulated it. Either way, skip removal — the per-file deletes
-          // are what's load-bearing.
-          console.warn(
-            `[workspace.routes] dir cleanup skipped for "${filePath}":`,
-            rmErr instanceof Error ? rmErr.message : rmErr,
-          );
+          filesInDir = await workspaceService.withFolderTurn(id, filePath, async () => {
+            const files = await enumerateFilesUnder(disk, absolute, workspaceDir);
+            for (const relFile of files) {
+              await withLock(
+                id,
+                user,
+                relFile,
+                async () => {
+                  await workspaceService.deleteFile(id, relFile);
+                },
+                { skipFsTreeEvent: true },
+              );
+            }
+            // No explicit push here — each per-file release enqueues a
+            // pending-commits row, and the background worker drains them
+            // (commit + push) on its own schedule. The N round-trips that
+            // the old skipPush+pushBranch pattern collapsed into one happen
+            // serially in the worker; user perception is unchanged because
+            // the disk-side delete is what other sessions see via
+            // `fs-tree-changed`.
+            // This is the EXPLICIT folder delete — the one operation that removes
+            // a folder — so the walk above deleted the placeholders too, and the
+            // now-empty directory subtree is swept off disk. Git doesn't track
+            // empty folders, so there's nothing more to commit; this is disk
+            // hygiene so the file tree stops showing the deleted containers.
+            //
+            // This MUST recurse: a folder that held *subfolders* still has those
+            // (now-empty) subdirectory shells on disk after the per-file deletes,
+            // so a single non-recursive `rmdir(absolute)` would see a non-empty
+            // dir and bail — leaving the folder visible in the tree and looking
+            // undeletable (BEVA-132). `removeEmptyDirs` walks bottom-up and only
+            // removes dirs that are *actually empty* at the moment it visits them,
+            // so a concurrent writer's new file (and its parent chain) is
+            // preserved — the same safety property the old non-recursive check had.
+            // A folder that vanished or filled up under a concurrent writer
+            // is passed over inside the sweep; what reaches here is a real
+            // failure (permissions, I/O) that left the folder on disk, and
+            // the request fails — as the agent's delete does — rather than
+            // the response reporting gone a folder the tree still shows. The
+            // per-file deletes have landed either way, and the next delete
+            // of the now-empty folder either sweeps it or says why not. The
+            // cause is logged; the answer carries no path of the host's.
+            try {
+              await removeEmptyDirs(absolute);
+            } catch (rmErr) {
+              log.warn(`dir cleanup failed for ${printable(filePath)}`, { err: rmErr });
+              throw new Error('The files were deleted, but the empty folder could not be removed. Delete it again.');
+            }
+            return files;
+          });
+          // The folder that HELD the deleted one was not asked to go.
+          await keepFolderOf(id, user, filePath);
+        } finally {
+          // Single tree-refresh signal for the whole batch (we suppressed
+          // the per-file ones via `skipFsTreeEvent`) — sent on failure too:
+          // a batch that stops part way, or a parent that could not be kept,
+          // has still changed the tree.
+          eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
         }
-        // Single tree-refresh signal for the whole batch (we suppressed
-        // the per-file ones via `skipFsTreeEvent`).
-        eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
         res.json({ status: 'deleted', count: filesInDir.length });
         return;
       }
       await withLock(id, user, filePath, () => workspaceService.deleteFile(id, filePath));
+      // Deleting content is not deleting structure: an emptied folder stays.
+      await keepFolderOf(id, user, filePath);
       res.json({ status: 'deleted' });
     } catch (err) {
       sendError(res, err);
@@ -894,12 +1087,18 @@ export function createWorkspaceRoutes(
     const id = authenticated(req, res);
     if (id === null) return;
     const body = (req.body ?? {}) as { oldPath?: unknown; newPath?: unknown };
-    const oldPath = requestPath(body.oldPath);
-    const newPath = requestPath(body.newPath);
-    if (oldPath === null || newPath === null) {
+    const requestedOld = requestPath(body.oldPath);
+    const requestedNew = requestPath(body.newPath);
+    if (requestedOld === null || requestedNew === null) {
       res.status(400).json({ error: 'oldPath and newPath are required in body' });
       return;
     }
+    // Both ends inside the repository before anything is judged: the platform-file
+    // rules, the locks and the rename all read the same two paths.
+    const oldPath = inRepo(res, requestedOld);
+    if (oldPath === null) return;
+    const newPath = inRepo(res, requestedNew);
+    if (newPath === null) return;
     // Two spellings of one file are now ONE path, so a move can arrive with
     // both ends equal. `withLock` below would survive it — the inner
     // acquisition sees the lock the outer just took, held by this same user,
@@ -913,6 +1112,43 @@ export function createWorkspaceRoutes(
     const user = await requireUser(req, res);
     if (!user) return;
     try {
+      // A platform file stays in the folder the platform reads it from —
+      // rename, move and drag all arrive here, and all three are refused.
+      // Moving one out is not a choice to confirm: once the root has no
+      // `access.md`, write on the root denies everyone and the move that
+      // would undo it is the move the gate refuses.
+      //
+      // The single exception is that repair: an admin putting a misplaced
+      // copy BACK. `isPlatformRestoreShape` says whether the MOVE is that
+      // repair — it is judged on the source's name and the destination, not
+      // on the source being a platform file where it currently sits, because
+      // a stray `roles.yaml` in a folder is ordinary content there and is
+      // still the copy the root is missing. `canRestorePlatformFile` then
+      // decides who may make it, and whether the disk agrees.
+      const oldRel = toKbRelative(oldPath, kbDirName);
+      const newRel = toKbRelative(newPath, kbDirName);
+      let platformRestore = false;
+      if (oldRel !== null && newRel !== null && isPlatformRestoreShape(oldRel, newRel)) {
+        platformRestore = await accessControl.canRestorePlatformFile(id, user.email, newRel);
+      }
+      // A platform file stays where the platform reads it …
+      if (oldRel !== null && isPlatformFile(oldRel) && !platformRestore) {
+        res.status(409).json({ error: platformFileRefusal(oldRel) });
+        return;
+      }
+      // … and nothing else becomes one. `moveEntry` is a plain rename, so
+      // without this a note renamed to `access.md` would come back as the
+      // folder's rules, and a note dragged ONTO the root's `access.md` would
+      // replace the rules that are there — neither of which the rule above,
+      // which reads only the SOURCE, says anything about. The agent's move
+      // tool has refused both since it shipped; this is the same sentence,
+      // from the same place. Only the restore lands on a platform path, and
+      // only where the file is missing (`canRestorePlatformFile` checked the
+      // disk; the destination lock below checks it again, under the lock).
+      if (newRel !== null && isPlatformFile(newRel) && !platformRestore) {
+        res.status(409).json({ error: platformFileCreationRefusal(newRel) });
+        return;
+      }
       // Move = rename on disk + commit on both sides. We lock-and-release
       // the destination first (commits the new file's appearance), then
       // lock-and-release the source path (commits its deletion). Two
@@ -933,11 +1169,46 @@ export function createWorkspaceRoutes(
       // not a single merge-style rename commit, but git's log/blame
       // rename detection still groups them visually after the fact.
       const [firstLock, secondLock] = oldPath < newPath ? [oldPath, newPath] : [newPath, oldPath];
-      await withLock(id, user, firstLock, () =>
-        withLock(id, user, secondLock, () =>
-          workspaceService.moveEntry(id, oldPath, newPath),
-        ),
+      // Only the DESTINATION side carries the restore claim. The source is an
+      // ordinary write the caller must already hold: the exception exists so a
+      // file can land where the platform reads it, not so an admin can take
+      // one out of a folder that denies them.
+      const restoreAt = (p: string) => ({
+        platformRestore: platformRestore && p === newPath ? { source: oldPath } : undefined,
+      });
+      // The restore was authorised against a destination that was missing when
+      // the access module looked. Both locks are in hand by the time this runs,
+      // so nothing else can take that path from under the rename — but between
+      // the two a writer still could, and a restore that lands on a platform
+      // file replaces the rules it came to bring back. So the last thing the
+      // move does before renaming is look again, inside the window it holds.
+      const move = async () => {
+        if (platformRestore) {
+          const absoluteNew = await absoluteInRepo(id, newPath);
+          const taken = await fs.stat(absoluteNew).then(
+            () => true,
+            // Genuine absence is the only "free": anything else is not an
+            // answer, and an unanswered question does not clear the way onto
+            // a platform file.
+            (err: unknown) => !isAbsence(err),
+          );
+          if (taken) {
+            const err: Error & { status?: number } = new Error(platformFileRefusal(newPath));
+            err.status = 409;
+            throw err;
+          }
+        }
+        return workspaceService.moveEntry(id, oldPath, newPath);
+      };
+      await withLock(
+        id,
+        user,
+        firstLock,
+        () => withLock(id, user, secondLock, move, restoreAt(secondLock)),
+        restoreAt(firstLock),
       );
+      // Moving the last entry out leaves its folder in place, like a delete.
+      await keepFolderOf(id, user, oldPath);
       res.json({ status: 'moved' });
     } catch (err) {
       sendError(res, err);
@@ -953,11 +1224,13 @@ export function createWorkspaceRoutes(
     // turn, the workflow lock row, and the bytes themselves. Two clients
     // spelling one file differently would otherwise take two different locks
     // and both pass their own precondition.
-    const filePath = requestPath(req.query.path);
-    if (filePath === null) {
+    const requested = requestPath(req.query.path);
+    if (requested === null) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
+    const filePath = inRepo(res, requested);
+    if (filePath === null) return;
     const { content, ifAbsent, ifMatch } = req.body as {
       content?: string;
       ifAbsent?: boolean;
@@ -1000,14 +1273,15 @@ export function createWorkspaceRoutes(
       await workspaceService.withPathTurn(id, filePath, async () => {
         // A stale `ifMatch` is refused before anything commits.
         if (ifMatch !== undefined) await workspaceService.assertContentMatches(id, filePath, ifMatch);
-        // Creator read grant: a brand-new file at a spot whose access chain
-        // doesn't grant the creator `read` would vanish from their own explorer
-        // (read is default-deny). Plan BEFORE the write: a new subtree gets its
-        // access.md seeded first; a loose .md carries the grant in its own
-        // frontmatter as part of this same single write.
+        // Creator read grant: a file that starts a new folder at a root the
+        // creator cannot read would vanish from their own explorer (read is
+        // default-deny). Plan BEFORE the write: the new folder gets its
+        // access.md seeded first. Anywhere else the lock's read gate has
+        // already decided — a creation the creator could not see is refused,
+        // and one they can see needs no grant.
         const plan = await creatorAccess.planForCreate(id, user, filePath, 'file');
         if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
-        const toWrite = plan?.kind === 'frontmatter' ? plan.apply(content) : content;
+        const toWrite = content;
         // `ifAbsent` = exclusive create: the service's `wx` write turns a
         // concurrent or stale create against an existing file into a 409
         // instead of a silent replace. `withLock`'s failure arm releases
@@ -1023,7 +1297,10 @@ export function createWorkspaceRoutes(
           }),
         );
       });
-      res.json({ status: 'written' });
+      // After the write, and only ever advisory: the check reports what the
+      // saved skill names, it has no say in whether it saved.
+      const warnings = skillSaveCheck ? await skillSaveCheck.checkSave(user.email, filePath, content) : [];
+      res.json({ status: 'written', ...(warnings.length > 0 ? { warnings } : {}) });
     } catch (err) {
       sendError(res, err);
     }
@@ -1032,11 +1309,17 @@ export function createWorkspaceRoutes(
   router.post('/workspace/:id/directory', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const { path: dirPath, defer } = req.body as { path?: string; defer?: boolean };
-    if (!dirPath) {
+    const { path: requested, defer } = req.body as { path?: string; defer?: boolean };
+    const canonical = requestPath(requested);
+    if (canonical === null) {
       res.status(400).json({ error: 'path is required in body' });
       return;
     }
+    // The folder this call creates, as a repository path. `KnowledgeBase/Reports`
+    // is `<kbDirName>/KnowledgeBase/Reports` — the access plan below, the
+    // `.gitkeep` lock and the mkdir all use this one spelling.
+    const dirPath = inRepo(res, canonical);
+    if (dirPath === null) return;
     const user = await requireUser(req, res);
     if (!user) return;
     try {
@@ -1079,19 +1362,45 @@ export function createWorkspaceRoutes(
     const id = authenticated(req, res);
     if (id === null) return;
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const zipPath = body.path;
-    const destination = body.destination;
-    if (typeof zipPath !== 'string' || zipPath.length === 0) {
+    const requestedZip = body.path;
+    const requestedDest = body.destination;
+    if (typeof requestedZip !== 'string' || requestedZip.length === 0) {
       res.status(400).json({ error: 'path is required in body and must be a string' });
       return;
     }
-    if (destination !== undefined && (typeof destination !== 'string' || destination.length === 0)) {
+    if (requestedDest !== undefined && (typeof requestedDest !== 'string' || requestedDest.length === 0)) {
       res.status(400).json({ error: 'destination, if provided, must be a non-empty string' });
       return;
+    }
+    const zipPath = inRepo(res, requestedZip);
+    if (zipPath === null) return;
+    let destination: string | undefined;
+    if (requestedDest !== undefined) {
+      const normalizedDest = inRepo(res, requestedDest);
+      if (normalizedDest === null) return;
+      destination = normalizedDest;
     }
     const user = await requireUser(req, res);
     if (!user) return;
     try {
+      // The destination is asked about BEFORE anything is extracted: this is
+      // the one route whose bytes land on disk ahead of the lock, so the
+      // lock's read gate would find them already there. Same verdict, same
+      // refusal, one step earlier. A destination inside a folder the caller
+      // cannot read is refused whole; a folder they can read — or a new
+      // folder directly under a root — extracts, and each file then meets
+      // the lock as any other write does.
+      //
+      // A new root folder gets its creator's access.md seeded first, as
+      // every other creation route does: extraction would otherwise bring
+      // the folder into existence itself, and the first file's lock would
+      // then find an existing folder the caller cannot read.
+      // Both spellings are already repository paths, so the inferred parent is
+      // one too — the same destination the service resolves.
+      const destDir = destination ?? path.posix.dirname(zipPath);
+      const plan = await creatorAccess.planForCreate(id, user, destDir, 'dir');
+      if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
+      await changeGate?.assertMayChange(id, user.email, destDir, 'dir');
       // Extract first (all files land on disk), then sweep each extracted
       // file through a lock+release so it commits + pushes as its own
       // one-file change. Per-file commits mean the validator runs N times
@@ -1099,27 +1408,18 @@ export function createWorkspaceRoutes(
       // but correct for a 100-file zip. If a single file's release fails
       // (e.g. validator 422), the loop stops there so the user sees the
       // first concrete problem rather than a list of N similar failures.
-      const result = await workspaceService.unzipFile(id, zipPath, destination);
+      //
+      // Each entry is asked about before it is written, through the same
+      // gate: an archive can carry a path into a nested folder the caller
+      // cannot read, which the destination check above cannot see. Such an
+      // entry is skipped and reported, never written and then refused.
+      const result = await workspaceService.unzipFile(id, zipPath, destination, async (entryPath) => {
+        await changeGate?.assertMayChange(id, user.email, entryPath, 'file');
+      });
       for (const relFile of result.extracted) {
-        await withLock(id, user, relFile, async () => {
-          // The file is already on disk from the unzip; the release commits +
-          // pushes it. If the extraction landed a markdown node the creator
-          // can't read (default-deny chains), splice their read grant into
-          // its frontmatter first so the committed change already carries it.
-          // Best-effort: a failed grant write must not throw — withLock's
-          // failure path releases WITHOUT committing and would discard the
-          // extracted file from disk, turning a cosmetic grant failure into
-          // data loss.
-          try {
-            const granted = await creatorAccess.grantInExtractedFile(id, user, relFile);
-            if (granted !== null) await workspaceService.writeFile(id, relFile, granted);
-          } catch (err) {
-            console.warn(
-              `[workspace.routes] creator grant on extracted "${relFile}" failed:`,
-              err instanceof Error ? err.message : err,
-            );
-          }
-        });
+        // The file is already on disk from the unzip; the release commits +
+        // pushes it.
+        await withLock(id, user, relFile, async () => undefined);
       }
       res.json(result);
     } catch (err) {
@@ -1130,11 +1430,16 @@ export function createWorkspaceRoutes(
   router.post('/workspace/:id/upload', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const filePath = req.query.path as string;
-    if (!filePath) {
+    const requested = requestPath(req.query.path);
+    if (requested === null) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
+    // An upload with no folder lands at the repository ROOT inside the
+    // checkout, not beside it — eight staging test documents sat beside it
+    // because this route took the path as written.
+    const filePath = inRepo(res, requested);
+    if (filePath === null) return;
     // `?defer=true` is the bulk-upload caller's signal to suppress the
     // per-file `fs-tree-changed` SSE — the caller emits one combined
     // refresh at end-of-burst via `POST /flush`. Pushing isn't deferred
@@ -1162,21 +1467,17 @@ export function createWorkspaceRoutes(
         chunks.push(buf);
       }
       const data = Buffer.concat(chunks);
-      // Creator read grant, mirroring PUT /file: seed a new subtree's
-      // access.md first, or fold the grant into an uploaded markdown file's
-      // frontmatter. Binary uploads into a pre-existing unreadable folder
-      // can't carry a per-file grant (no frontmatter) and proceed ungranted.
+      // Creator read grant, mirroring PUT /file: an upload that starts a new
+      // folder at a root seeds that folder's access.md first. An upload into
+      // a folder the caller cannot read never gets this far — the lock's read
+      // gate refuses it.
       const plan = await creatorAccess.planForCreate(id, user, filePath, 'file');
       if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
-      const toWrite =
-        plan?.kind === 'frontmatter'
-          ? Buffer.from(plan.apply(data.toString('utf8')), 'utf8')
-          : data;
       await withLock(
         id,
         user,
         filePath,
-        () => workspaceService.writeFileBinary(id, filePath, toWrite),
+        () => workspaceService.writeFileBinary(id, filePath, data),
         defer ? { skipFsTreeEvent: true } : undefined,
       );
       res.json({ status: 'uploaded' });
@@ -1191,6 +1492,8 @@ export function createWorkspaceRoutes(
   // happens out of band in the worker, so this route's only remaining
   // responsibility is to emit the single combined `fs-tree-changed`
   // event the bulk caller suppressed per file.
+  // It takes NO path: there is nothing for the normaliser to place, which is
+  // why this route is the one on the surface that does not call it.
   router.post('/workspace/:id/flush', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
@@ -1214,62 +1517,61 @@ export function createWorkspaceRoutes(
  * a recursive directory delete into per-file lock+release cycles so each
  * deletion lands as its own one-file change.
  *
- * Skips `.git` to avoid trying to commit the internal git index when a
- * caller targets it accidentally. Returns paths in stable lexical order
- * for predictable commit sequencing.
+ * Skips the git folder, in any spelling (`hasGitInternalsSegment`), so a
+ * folder delete never enumerates — or deletes — the repository's git data. Returns paths in the walk's order — stable
+ * and lexical — for predictable commit sequencing. A link counts as a file:
+ * it is deleted as one, never followed. A folder that cannot be listed is
+ * the delete's error: an enumeration with a hole in it would delete what it
+ * saw and report success over what it did not.
  */
-async function enumerateFilesUnder(absoluteDir: string, workspaceDir: string): Promise<string[]> {
+async function enumerateFilesUnder(disk: ITreeWalker, absoluteDir: string, workspaceDir: string): Promise<string[]> {
   const out: string[] = [];
-  async function walk(dir: string): Promise<void> {
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      if (entry.name === '.git' && entry.isDirectory()) continue;
-      const child = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        await walk(child);
-      } else {
-        out.push(path.relative(workspaceDir, child).replace(/\\/g, '/'));
-      }
-    }
+  const relOf = (dir: string, name: string) =>
+    path.relative(workspaceDir, path.join(absoluteDir, dir, name)).replace(/\\/g, '/');
+  try {
+    await disk.walk(absoluteDir, { skip: (e) => hasGitInternalsSegment(e.name), unreadable: 'throw' }, [
+      {
+        onFile: (dir, name) => void out.push(relOf(dir, name)),
+        onOther: (dir, e) => void out.push(relOf(dir, e.name)),
+      },
+    ]);
+  } catch (err) {
+    // The operator's line carries the errno and the path; the caller's answer
+    // names only the folder they asked about — an OS message would leak the
+    // server's spelling of the workspace, and would not help them anyway.
+    // Both halves of the log line are user- or disk-controlled text, so both
+    // go through `printable`: a folder name or an OS message carrying a
+    // control character must not steer the terminal or forge a log line.
+    const folder = path.relative(workspaceDir, absoluteDir).replace(/\\/g, '/');
+    const reason = err instanceof Error ? err.message : String(err);
+    logger('workspace').error(`could not list every file under ${printable(folder)} for a delete: ${printable(reason)}`);
+    throw Object.assign(new Error(`Could not list every file under "${folder}" — nothing was deleted. Try again, or ask an admin.`), {
+      status: 500,
+    });
   }
-  await walk(absoluteDir);
   return out;
 }
 
 /**
- * Recursively remove empty directories under `absoluteDir`, bottom-up, then
- * remove `absoluteDir` itself if it ends up empty. A directory is removed only
- * if it contains nothing at the moment it's visited, so any file a concurrent
- * writer dropped in mid-delete — and every parent directory on its path —
- * survives. `.git` is left alone. Used after a recursive folder delete to
- * sweep the leftover empty-folder shells off disk so the file tree (which
- * lists on-disk directories, not just tracked files) stops showing the
- * deleted container.
+ * The error a failed folder keep answers: the original one — its type,
+ * status and payload decide the response — with `message` saying what
+ * landed and what did not. Anything that is not an Error becomes one.
  */
-async function removeEmptyDirs(absoluteDir: string): Promise<void> {
-  let entries: import('node:fs').Dirent[];
+function withKeptFolderContext(err: unknown, message: string): Error {
+  if (!(err instanceof Error)) return new Error(message);
+  err.message = message;
+  return err;
+}
+
+/**
+ * Whether a folder exists and holds nothing. A folder that is gone answers
+ * false: it was deleted explicitly, and keeping it would bring it back.
+ */
+async function isEmptyFolder(absoluteDir: string): Promise<boolean> {
   try {
-    entries = await fs.readdir(absoluteDir, { withFileTypes: true });
-  } catch {
-    // Already gone (raced delete) — nothing to do.
-    return;
-  }
-  for (const entry of entries) {
-    if (entry.name === '.git' && entry.isDirectory()) continue;
-    if (entry.isDirectory()) {
-      await removeEmptyDirs(path.join(absoluteDir, entry.name));
-    }
-  }
-  // Re-read after pruning children: a subdir we just emptied now lets this
-  // dir become removable too. Any surviving file (or `.git`) keeps it.
-  const remaining = await fs.readdir(absoluteDir);
-  if (remaining.length === 0) {
-    await fs.rmdir(absoluteDir);
+    return (await fs.readdir(absoluteDir)).length === 0;
+  } catch (err) {
+    if (isAbsence(err)) return false;
+    throw err;
   }
 }

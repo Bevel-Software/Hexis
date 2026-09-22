@@ -9,8 +9,8 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { Database } from '../../database/connection.js';
 import { createAccessRoutes } from '../access.routes.js';
+import { usersDbDouble } from './users-db-double.js';
 
 /**
  * HTTP contract for `GET /access/overrides`. The scan itself is covered in
@@ -80,13 +80,14 @@ async function makeHarness(opts: {
       if (text === undefined) throw new Error(`ENOENT ${wsRel}`);
       return text;
     }),
+    withPathTurn: async (_id: string, _p: string, op: () => Promise<unknown>) => op(),
     getOrCreateForBranch: vi.fn(async () => ({ id: WS, name: WS, kbDirName: KB })),
   } as unknown as WorkspaceService;
 
   const authService = { getUserById: vi.fn(async () => USER) } as unknown as AuthService;
   const workflowService = {} as unknown as WorkflowService;
   const eventBus = { emit: vi.fn() } as unknown as WorkflowEventBus;
-  const db = {} as unknown as Database;
+  const db = usersDbDouble();
 
   const app = express();
   app.use(express.json());

@@ -68,5 +68,19 @@ export function publicConfig({ marketplaceGitUrl, mcpUrl }: PublicConfigAddresse
      * bridge would read as an expired sign-in.
      */
     agentInstructions: true as const,
+    /**
+     * This deployment serves `GET /api/agent/catalog-revision`, the per-caller
+     * fingerprint of the released tool manuals and skills (see
+     * core/catalog-revision.ts). The local `hexis-mcp` bridge polls it to
+     * learn that a manual or a skill changed under a connection nobody can
+     * push to; without it the bridge keeps the toolset it started with.
+     *
+     * A capability flag rather than a probe, for exactly the reason above: an
+     * unknown `/api/*` path on an older deployment falls through to the JWT
+     * mounts and answers 401, and a poller reading that as a dead credential
+     * would tell the user to mint a new key for a route that simply is not
+     * there.
+     */
+    catalogRevision: true as const,
   };
 }

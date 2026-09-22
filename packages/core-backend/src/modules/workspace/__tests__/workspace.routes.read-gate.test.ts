@@ -2,6 +2,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
@@ -95,6 +96,7 @@ async function makeHarness(opts: {
       KB,
       stubCreatorAccess,
       { isAdmin: async () => opts.isAdmin === true } as unknown as IAdminAccessService,
+      new NodeFs(),
     ),
   );
   const server = await new Promise<Server>((resolve) => {
@@ -134,13 +136,28 @@ describe('read-permission gates on human read routes', () => {
     expect(h.canRead).toHaveBeenCalledWith(WS, USER.email, 'Knowledge/Secret/x.md');
   });
 
-  it('GET /file: a non-KB path (reserved workspace file) is not read-gated', async () => {
+  it('GET /file: an unprefixed path is placed in the repository and gated THERE', async () => {
     h = await makeHarness();
-    // Outside `kbDirName` → carries no read rules → served without a canRead
-    // check (matches the agent tools and diff routes). Previously this 403'd
-    // because the full path was passed to default-deny canRead.
+    // No route path can be outside `kbDirName` any more: the normaliser places
+    // `reserved-config.json` at the repository root, and the read gate is asked
+    // about exactly the repo-relative path the read will use. Before this it was
+    // taken as a workspace file, carried no read rules, and was served ungated
+    // — the same reading that let a write land beside the checkout.
     const res = await get(`/file?path=${encodeURIComponent('reserved-config.json')}`);
     expect(res.status).toBe(200);
+    expect(h.canRead).toHaveBeenCalledWith(WS, USER.email, 'reserved-config.json');
+    // …and a denied one is refused on that same repo-relative name.
+    const denied = await get(`/file?path=${encodeURIComponent('Secret-config.json')}`);
+    expect(denied.status).toBe(403);
+    expect(h.canRead).toHaveBeenCalledWith(WS, USER.email, 'Secret-config.json');
+  });
+
+  it('GET /file: the clone folder itself carries no read rules', async () => {
+    h = await makeHarness();
+    // `toKbRelative` gives nothing for the folder itself, so there is no
+    // repo-relative path to resolve rules against — unchanged.
+    const res = await get(`/file?path=${encodeURIComponent(KB)}`);
+    expect(res.status).not.toBe(403);
     expect(h.canRead).not.toHaveBeenCalled();
   });
 
@@ -312,7 +329,9 @@ describe('.bevelignore is admin-only in the file tree', () => {
       `${KB}/.bevelignore`,
       `${KB}/Knowledge/Open/a.md`,
     ]);
-    expect(verdict.get(`${KB}/.bevelignore`)).toBe(false);
+    // Unlisted, not denied: hiding it withholds no content, so it never
+    // counts toward the tree's `withheld`.
+    expect(verdict.get(`${KB}/.bevelignore`)).toBe('unlisted');
     // Only that one file — the rest of the tree is untouched.
     expect(verdict.get(`${KB}/Knowledge/Open/a.md`)).toBe(true);
   });
@@ -325,7 +344,7 @@ describe('.bevelignore is admin-only in the file tree', () => {
   /** The stack is hierarchical — a nested one governs its own subtree. */
   it('hides a nested one too, not just the repo-root file', async () => {
     const verdict = await (await treeFilter(false))([`${KB}/KnowledgeBase/Product/.bevelignore`]);
-    expect(verdict.get(`${KB}/KnowledgeBase/Product/.bevelignore`)).toBe(false);
+    expect(verdict.get(`${KB}/KnowledgeBase/Product/.bevelignore`)).toBe('unlisted');
   });
 
   /** Basename match, not substring: a file merely NAMED after it stays visible. */

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -46,7 +47,7 @@ describe('WorkspaceService.listFiles — read filter', () => {
     // readers, say), and its files are readable.
     await mkFile(workspaceDir, 'Scopes/Deploy/SKILL.md');
     await mkFile(workspaceDir, 'Scopes/other.md');
-    svc = new WorkspaceService(root, 'https://example.invalid/repo.git', KB);
+    svc = new WorkspaceService(root, 'https://example.invalid/repo.git', KB, new NodeFs());
     await svc.getWorkspacePath(workspaceId);
   });
 
@@ -135,6 +136,60 @@ describe('WorkspaceService.listFiles — read filter', () => {
     const mixed = findNode(tree as never);
     expect(mixed).not.toBeNull();
     expect((mixed!.children ?? []).length).toBe(0);
+  });
+
+  describe('withheld — how many entries the read rules kept out, never which', () => {
+    it('is absent when nothing was filtered out (no filter, or everything readable)', async () => {
+      const allowAll: ReadTreeFilter = async (ps) => new Map(ps.map((p) => [p, true]));
+      expect((await svc.listFiles(workspaceId)).withheld).toBeUndefined();
+      expect((await svc.listFiles(workspaceId, allowAll)).withheld).toBeUndefined();
+    });
+
+    it('counts exactly the dropped entries: denied files and denied folders with nothing readable beneath', async () => {
+      // Denied: Mixed/hidden.md, and Secret/ with its whole subtree —
+      // Secret, Secret/s1.md, Secret/Vault, Secret/Vault/v1.md. Everything
+      // else, Mixed/ included, is readable.
+      const filter: ReadTreeFilter = async (ps) =>
+        new Map(ps.map((p) => [p, !(p.includes('Secret') || p.endsWith('hidden.md'))]));
+      expect((await svc.listFiles(workspaceId, filter)).withheld).toBe(5);
+    });
+
+    it('counts per folder as well: each folder that stays carries what was kept out beneath it', async () => {
+      const filter: ReadTreeFilter = async (ps) =>
+        new Map(ps.map((p) => [p, !(p.includes('Secret') || p.endsWith('hidden.md'))]));
+      const tree = await svc.listFiles(workspaceId, filter);
+      const byPath = new Map(tree.children!.map((c) => [c.relativePath, c]));
+      // Mixed/ lost its one file; Open/ lost nothing and says nothing.
+      expect(byPath.get('Mixed')?.withheld).toBe(1);
+      expect(byPath.get('Open')?.withheld).toBeUndefined();
+      // The root has the total: Secret/ (4, its subtree included) + Mixed/hidden.md.
+      expect(tree.withheld).toBe(5);
+    });
+
+    it('does not count a closed folder kept as the way to a grant below it', async () => {
+      // Scopes/ is closed but stays as a container; only Scopes/other.md is dropped.
+      const filter: ReadTreeFilter = async (ps) =>
+        new Map(ps.map((p) => [p, p !== 'Scopes' && p !== 'Scopes/other.md']));
+      const tree = await svc.listFiles(workspaceId, filter);
+      expect(paths(tree)).toContain('Scopes');
+      expect(tree.withheld).toBe(1);
+    });
+
+    it('does not count an entry the filter marks unlisted', async () => {
+      const filter: ReadTreeFilter = async (ps) =>
+        new Map(ps.map((p) => [p, p === 'top.md' ? 'unlisted' : true]));
+      const tree = await svc.listFiles(workspaceId, filter);
+      expect(paths(tree)).not.toContain('top.md');
+      expect(tree.withheld).toBeUndefined();
+    });
+
+    it('counts every entry of a tree the caller may read none of', async () => {
+      const filter: ReadTreeFilter = async () => new Map();
+      const tree = await svc.listFiles(workspaceId, filter);
+      expect(tree.children).toEqual([]);
+      // Every entry below the root, exactly — the root itself is never withheld.
+      expect(tree.withheld).toBe(paths(await svc.listFiles(workspaceId)).length - 1);
+    });
   });
 
   it('fails closed: a path not marked readable is dropped', async () => {

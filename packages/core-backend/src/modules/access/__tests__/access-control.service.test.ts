@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -68,7 +69,7 @@ describe('AccessControlService', () => {
     await writeFile(repo, 'roles.yaml', ROLES_YAML);
     await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(true);
     expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(false);
   });
@@ -84,7 +85,7 @@ describe('AccessControlService', () => {
       '---\nid: weather\nwrite:\n  - Product Manager\n---\ntype: http\nurl: https://x/m\n',
     );
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     // The file-own `write: Product Manager` grants felix write on THIS tool…
     expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Tools/weather.tool')).toBe(true);
     // …but nowhere else (root access.md is Admin-only).
@@ -99,7 +100,7 @@ describe('AccessControlService', () => {
     await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
     await writeFile(repo, 'Knowledge/Sales/access.md', '---\nwrite:\n  - Product Manager\n---\n');
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Sales/Foo.md')).toBe(true);
     expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Other/Foo.md')).toBe(false);
     // Admin grant from root flows through.
@@ -116,7 +117,7 @@ describe('AccessControlService', () => {
       '---\nwrite:\n  - Product Manager\n  - deny Felix Kissel <felix@example.com>\n---\n',
     );
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Sales/Foo.md')).toBe(false);
     expect(await svc.canWrite(workspaceId, 'sara@example.com', 'Knowledge/Sales/Foo.md')).toBe(true);
   });
@@ -126,7 +127,7 @@ describe('AccessControlService', () => {
     await writeFile(repo, 'roles.yaml', ROLES_YAML);
     await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n  - deny Engineer\n---\n');
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     // razvan is both Admin and Engineer; Admin grant must still apply.
     expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(true);
     // ali is only Engineer — denied.
@@ -142,7 +143,7 @@ describe('AccessControlService', () => {
       '---\nwrite:\n  - Admin\n  - Product Manager\n  - Engineer\n---\n',
     );
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'roles.yaml')).toBe(true);
     expect(await svc.canWrite(workspaceId, 'felix@example.com', 'roles.yaml')).toBe(false);
     expect(await svc.canWrite(workspaceId, 'ali@bevel.software', 'roles.yaml')).toBe(false);
@@ -154,7 +155,7 @@ describe('AccessControlService', () => {
     await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
     await writeFile(repo, 'Knowledge/Sales/access.md', '---\nwrite:\n  - Product Manager\n---\n');
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     const result = await svc.canWriteBatch(workspaceId, 'felix@example.com', [
       'Knowledge/Sales/A.md',
       'Knowledge/Other/B.md',
@@ -174,15 +175,16 @@ describe('AccessControlService', () => {
       '---\nwrite:\n  - everyone\ndownload:\n  - everyone\nowner:\n  - everyone\n---\n',
     );
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     expect(await svc.canWrite(workspaceId, 'nobody@example.com', 'Knowledge/Foo.md')).toBe(true);
     expect(await svc.canDownload(workspaceId, 'nobody@example.com', 'Knowledge/Foo.md')).toBe(true);
     expect(await svc.canOwner(workspaceId, 'nobody@example.com', 'Knowledge/Foo.md')).toBe(true);
     // read is granted via the implicit owner→read fold, not an explicit `read: everyone`.
     expect(await svc.canRead(workspaceId, 'nobody@example.com', 'Knowledge/Foo.md')).toBe(true);
 
+    // Admin is listed too: the root write floor holds it whatever the root says.
     const writers = await svc.eligibleWriters(workspaceId, 'Knowledge/Foo.md');
-    expect(writers.roles).toEqual(['everyone']);
+    expect(writers.roles).toEqual(['Admin', 'everyone']);
   });
 
   it('deny everyone can narrow a non-read public grant', async () => {
@@ -195,7 +197,7 @@ describe('AccessControlService', () => {
       '---\nwrite:\n  - deny everyone\n  - Product Manager\n---\n',
     );
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     expect(await svc.canWrite(workspaceId, 'nobody@example.com', 'Knowledge/Public.md')).toBe(true);
     expect(await svc.canWrite(workspaceId, 'nobody@example.com', 'Knowledge/Secret/Foo.md')).toBe(false);
     expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Secret/Foo.md')).toBe(true);
@@ -207,7 +209,7 @@ describe('AccessControlService', () => {
     await writeFile(repo, 'access.md', '---\nwrite:\n  - everyone\n---\n');
     await writeFile(repo, 'Knowledge/Secret/access.md', '---\nwrite:\n  - deny Engineer\n---\n');
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     // everyone grants write at the root; a closer `deny Engineer` carves out
     // Engineers — a role-level denial, not an email one.
     expect(await svc.canWrite(workspaceId, 'nobody@example.com', 'Knowledge/Secret/Foo.md')).toBe(true);
@@ -222,7 +224,7 @@ describe('AccessControlService', () => {
     // A closer scope opens the subtree to everyone (the least specific tier).
     await writeFile(repo, 'Knowledge/Open/access.md', '---\nread:\n  - everyone\n---\n');
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     // Closeness wins over tier: the closer `read: everyone` grant beats the
     // farther by-name deny.
     expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Open/Foo.md')).toBe(true);
@@ -240,7 +242,7 @@ describe('AccessControlService', () => {
       '---\nread:\n  - Ali <ali@bevel.software>\nwrite:\n  - Engineer\n  - deny Ali <ali@bevel.software>\n---\n',
     );
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     // razvan is an Engineer (write) and has no explicit read grant → can read
     // solely via the write ⊇ read fold.
     expect(await svc.canRead(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(true);
@@ -264,7 +266,7 @@ describe('AccessControlService', () => {
     );
     await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     await expect(
       svc.canWrite(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md'),
     ).rejects.toBeInstanceOf(AccessConfigError);
@@ -279,7 +281,7 @@ describe('AccessControlService', () => {
       '---\nwrite:\n  - Admin\n  - Felix Kissel <felix@example.com>\n  - deny Engineer\n---\n',
     );
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     const e = await svc.eligibleWriters(workspaceId, 'Knowledge/Foo.md');
     expect(e.roles).toEqual(['Admin']);
     expect(e.users.map((u) => u.email)).toEqual(['felix@example.com']);
@@ -295,7 +297,7 @@ describe('AccessControlService', () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
     await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     await expect(
       svc.canWrite(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md'),
     ).rejects.toBeInstanceOf(AccessConfigError);
@@ -313,7 +315,7 @@ describe('AccessControlService', () => {
     await writeFile(repo, 'roles.yaml', ROLES_YAML);
     await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n  - Ghost Role\n---\n');
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     // Admin grant survives the parse; Ghost Role entry is silently dropped.
     expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(true);
     expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(false);
@@ -329,7 +331,7 @@ describe('AccessControlService', () => {
         '---\nwrite:\n  - Admin\ndownload:\n  - Product Manager\n---\n',
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canDownload(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(true);
       expect(await svc.canDownload(workspaceId, 'sara@example.com', 'Knowledge/Foo.md')).toBe(true);
     });
@@ -339,7 +341,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'roles.yaml', ROLES_YAML);
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\ndownload:\n  - Admin\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       // ali is an Engineer; neither admin nor download.
       expect(await svc.canDownload(workspaceId, 'ali@bevel.software', 'Knowledge/Foo.md')).toBe(false);
       expect(await svc.canDownload(workspaceId, 'unknown@example.com', 'Knowledge/Foo.md')).toBe(false);
@@ -358,7 +360,7 @@ describe('AccessControlService', () => {
         '---\nwrite:\n  - Admin\ndownload:\n  - Product Manager\n---\n',
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(true);
       expect(await svc.canDownload(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(false);
     });
@@ -373,7 +375,7 @@ describe('AccessControlService', () => {
         '---\ndownload:\n  - Product Manager\n---\n',
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canDownload(workspaceId, 'felix@example.com', 'Knowledge/Sales/Foo.md')).toBe(true);
       expect(await svc.canDownload(workspaceId, 'felix@example.com', 'Knowledge/Other/Foo.md')).toBe(false);
     });
@@ -384,7 +386,7 @@ describe('AccessControlService', () => {
       // write only — no download verb anywhere in the tree.
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canDownload(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(false);
     });
 
@@ -393,7 +395,7 @@ describe('AccessControlService', () => {
       // surfaces identically to canWrite. The download route catches and
       // routes through sendError so the caller sees the rich payload.
       const { workspaceDir } = await seedWorkspace(root, workspaceId);
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       await expect(svc.canDownload(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md'))
         .rejects.toBeInstanceOf(AccessConfigError);
     });
@@ -409,7 +411,7 @@ describe('AccessControlService', () => {
         '---\nwrite:\n  - Admin\ndownload:\n  - Product Manager\n  - Ana <ana@example.com>\n---\n',
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       const d = await svc.eligibleDownloaders(workspaceId, 'Knowledge/Foo.md');
       expect(d.roles).toEqual(['Product Manager']);
       expect(d.users.map((u) => u.email)).toEqual(['ana@example.com']);
@@ -424,7 +426,7 @@ describe('AccessControlService', () => {
         '---\nowner:\n  - Product Manager\n---\n',
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       const d = await svc.eligibleDownloaders(workspaceId, 'Knowledge/Foo.md');
       expect(d.roles).toEqual(['Product Manager']);
     });
@@ -434,7 +436,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'roles.yaml', ROLES_YAML);
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       const d = await svc.eligibleDownloaders(workspaceId, 'Knowledge/Foo.md');
       expect(d.roles).toEqual([]);
       expect(d.users).toEqual([]);
@@ -445,7 +447,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'roles.yaml', ROLES_YAML);
       await writeFile(repo, 'access.md', '---\ndownload:\n  - everyone\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       const d = await svc.eligibleDownloaders(workspaceId, 'Knowledge/Foo.md');
       expect(d.roles).toContain('everyone');
     });
@@ -462,7 +464,7 @@ describe('AccessControlService', () => {
         '---\nwrite:\n  - Admin\nowner:\n  - Product Manager\n---\n',
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       // felix is a Product Manager → owner → both write and download.
       expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(true);
       expect(await svc.canDownload(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(true);
@@ -474,10 +476,47 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'roles.yaml', ROLES_YAML);
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\nowner:\n  - Product Manager\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       // razvan (Admin) can write but is not designated an owner here.
       expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(true);
       expect(await svc.canOwner(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(false);
+    });
+
+    it('canOwnerBatch is the Owner pill: owner-listed yes, writers and role-derived Admins no, ownerless nobody', async () => {
+      const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+      await writeFile(repo, 'roles.yaml', ROLES_YAML);
+      // Admin writes everywhere by role. `owned` names Product Manager (a role)
+      // and ali by email; `ownerless` grants write but no owner at any scope.
+      await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
+      await writeFile(
+        repo,
+        'Skills/owned/access.md',
+        '---\nwrite:\n  - Engineer\nowner:\n  - Product Manager\n  - Ali <ali@bevel.software>\n---\n',
+      );
+      await writeFile(repo, 'Skills/ownerless/access.md', '---\nwrite:\n  - Product Manager\n---\n');
+      const paths = ['Skills/owned/SKILL.md', 'Skills/ownerless/SKILL.md', 'Tools/weather.tool'];
+
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
+      const verdicts = async (email: string) =>
+        Object.fromEntries(await svc.canOwnerBatch(workspaceId, email, paths));
+
+      // Via a role named in `owner:`, and directly by email.
+      expect((await verdicts('felix@example.com'))['Skills/owned/SKILL.md']).toBe(true);
+      expect((await verdicts('ali@bevel.software'))['Skills/owned/SKILL.md']).toBe(true);
+      // razvan is Admin (+ Engineer): write on all three, owner on none.
+      expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'Skills/owned/SKILL.md')).toBe(true);
+      expect(await verdicts('razvan@bevel.software')).toEqual({
+        'Skills/owned/SKILL.md': false,
+        'Skills/ownerless/SKILL.md': false,
+        'Tools/weather.tool': false,
+      });
+      // A writer with no owner grant anywhere in scope owns nothing.
+      expect(await svc.canWrite(workspaceId, 'sara@example.com', 'Skills/ownerless/SKILL.md')).toBe(true);
+      expect((await verdicts('sara@example.com'))['Skills/ownerless/SKILL.md']).toBe(false);
+      for (const email of ['felix@example.com', 'ali@bevel.software', 'razvan@bevel.software', 'sara@example.com']) {
+        const v = await verdicts(email);
+        expect([v['Skills/ownerless/SKILL.md'], v['Tools/weather.tool']]).toEqual([false, false]);
+      }
     });
 
     it('owners are folded into the write-eligibility (approval) set', async () => {
@@ -489,7 +528,7 @@ describe('AccessControlService', () => {
         '---\nwrite:\n  - Admin\nowner:\n  - Sara Lee <sara@example.com>\n---\n',
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       const writers = await svc.eligibleWriters(workspaceId, 'Knowledge/Foo.md');
       // Admin role (write) + the owner user both appear — owners can approve.
       expect(writers.roles).toEqual(['Admin']);
@@ -505,7 +544,7 @@ describe('AccessControlService', () => {
         '---\nwrite:\n  - Admin\nowner:\n  - Product Manager\n  - Sara Lee <sara@example.com>\n---\n',
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       const owners = await svc.eligibleOwners(workspaceId, 'Knowledge/Foo.md');
       expect(owners.roles).toEqual(['Product Manager']);
       expect(owners.users.map((u) => u.email)).toEqual(['sara@example.com']);
@@ -521,7 +560,7 @@ describe('AccessControlService', () => {
         '---\nowner:\n  - Product Manager\n---\n',
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       // felix owns inside Sales → can write + download there, but not elsewhere.
       expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Sales/Foo.md')).toBe(true);
       expect(await svc.canDownload(workspaceId, 'felix@example.com', 'Knowledge/Sales/Foo.md')).toBe(true);
@@ -541,7 +580,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'Knowledge/Sales/Foo.md', NODE('owner:\n  - Product Manager\n'));
       await writeFile(repo, 'Knowledge/Sales/Bar.md', NODE(''));
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       // Foo's own owner: grant lifts felix to write + download + owner there.
       expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Sales/Foo.md')).toBe(true);
       expect(await svc.canDownload(workspaceId, 'felix@example.com', 'Knowledge/Sales/Foo.md')).toBe(true);
@@ -557,7 +596,7 @@ describe('AccessControlService', () => {
       // Scalar (not a list) — the natural way to name one owner in a node.
       await writeFile(repo, 'NodeTypes/Process.md', NODE('owner: Test <test@test.com>\n'));
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canWrite(workspaceId, 'test@test.com', 'NodeTypes/Process.md')).toBe(true);
       expect(await svc.canDownload(workspaceId, 'test@test.com', 'NodeTypes/Process.md')).toBe(true);
       expect(await svc.canOwner(workspaceId, 'test@test.com', 'NodeTypes/Process.md')).toBe(true);
@@ -572,7 +611,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'Knowledge/W.md', NODE('write: Product Manager\n'));
       await writeFile(repo, 'Knowledge/D.md', NODE('download: Felix Kissel <felix@example.com>\n'));
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/W.md')).toBe(true);
       // write scalar does not confer download
       expect(await svc.canDownload(workspaceId, 'felix@example.com', 'Knowledge/W.md')).toBe(false);
@@ -585,7 +624,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
       await writeFile(repo, 'Knowledge/Foo.md', NODE('write:\n  - Product Manager\n'));
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(true);
       expect(await svc.canDownload(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(false);
       expect(await svc.canOwner(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(false);
@@ -600,7 +639,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'Knowledge/Sales/Foo.md', NODE('write:\n  - deny Product Manager\n'));
       await writeFile(repo, 'Knowledge/Sales/Bar.md', NODE(''));
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Sales/Foo.md')).toBe(false);
       // Sibling still inherits the folder grant.
       expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Sales/Bar.md')).toBe(true);
@@ -616,7 +655,7 @@ describe('AccessControlService', () => {
         NODE('owner:\n  - Sara Lee <sara@example.com>\n'),
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       const writers = await svc.eligibleWriters(workspaceId, 'Knowledge/Foo.md');
       // Admin (folder write) + the per-file owner can both approve this file.
       expect(writers.roles).toEqual(['Admin']);
@@ -634,7 +673,7 @@ describe('AccessControlService', () => {
       // Only nodeType in frontmatter — no access verbs → folder rule applies.
       await writeFile(repo, 'Knowledge/Foo.md', NODE(''));
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(true);
       expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(false);
     });
@@ -646,7 +685,7 @@ describe('AccessControlService', () => {
       // Plain free-form note — no leading `---` block whatsoever.
       await writeFile(repo, 'Knowledge/Plain.md', '# Just a note\n\nSome prose, no frontmatter.\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       // Folder rule (Admin) still governs; no per-file override, no throw.
       expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'Knowledge/Plain.md')).toBe(true);
       expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Plain.md')).toBe(false);
@@ -659,7 +698,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'roles.yaml', ROLES_YAML);
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       // No Ghost.md on disk — readOwnEntries swallows the ENOENT and falls back.
       expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'Knowledge/Ghost.md')).toBe(true);
       expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Ghost.md')).toBe(false);
@@ -677,7 +716,7 @@ describe('AccessControlService', () => {
         '---\nwrite:\n  - Admin\narchive:\n  - Admin\nnotes: skip-me\n---\n',
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(true);
       expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(false);
     });
@@ -694,7 +733,7 @@ describe('AccessControlService', () => {
         '---\nwrite:\n  - Admin\n  - Ghost Role\n---\n',
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       // Admin still has write (Ghost Role entry was dropped, Admin remained).
       expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(true);
     });
@@ -706,7 +745,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'roles.yaml', ROLES_YAML);
       await writeFile(repo, 'access.md', '---\nwrite: not-a-list\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       // Default-deny for non-admins on the rest of the tree (no rules in force),
       // but admins keep their rescue.
       expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'access.md')).toBe(true);
@@ -723,7 +762,7 @@ describe('AccessControlService', () => {
       // Note: Admin NOT in write list.
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Product Manager\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'access.md')).toBe(true);
       // Non-admins still gated normally.
       expect(await svc.canWrite(workspaceId, 'ali@bevel.software', 'access.md')).toBe(false);
@@ -740,7 +779,7 @@ describe('AccessControlService', () => {
         '---\nwrite:\n  - Product Manager\n---\n',
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'Knowledge/Sales/access.md')).toBe(true);
     });
 
@@ -749,7 +788,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'roles.yaml', ROLES_YAML);
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\ndownload:\n  - Product Manager\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       // Admin still can't download access.md — they aren't listed under download.
       expect(await svc.canDownload(workspaceId, 'razvan@bevel.software', 'access.md')).toBe(false);
     });
@@ -760,7 +799,7 @@ describe('AccessControlService', () => {
     await writeFile(repo, 'roles.yaml', ROLES_YAML);
     await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
 
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     expect(await svc.canWrite(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(false);
 
     // Broaden access — but cache will still say false until we invalidate.
@@ -777,7 +816,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'roles.yaml', ROLES_YAML);
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(false);
       expect(await svc.canRead(workspaceId, 'nobody@example.com', 'Knowledge/Foo.md')).toBe(false);
       // razvan is Admin, so the root `write: Admin` confers read (write ⊇ read).
@@ -789,7 +828,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'roles.yaml', ROLES_YAML);
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\nread:\n  - everyone\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(true);
       expect(await svc.canRead(workspaceId, 'nobody@example.com', 'Knowledge/Foo.md')).toBe(true);
     });
@@ -804,7 +843,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\nread:\n  - everyone\n---\n');
       await writeFile(repo, 'Knowledge/Secret/access.md', '---\nread:\n  - deny Product Manager\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       // felix is a Product Manager, denied at the closer child scope → no read.
       expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Secret/Foo.md')).toBe(false);
       // A user with no roles has no verdict at the child scope, so resolution
@@ -818,7 +857,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
       await writeFile(repo, 'Knowledge/Sales/access.md', '---\nread:\n  - Product Manager\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       // Inside the restricted subtree: only Product Managers may read.
       expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Sales/Foo.md')).toBe(true);
       expect(await svc.canRead(workspaceId, 'ali@bevel.software', 'Knowledge/Sales/Foo.md')).toBe(false);
@@ -836,7 +875,7 @@ describe('AccessControlService', () => {
         '---\nread:\n  - deny everyone\n  - Product Manager\n---\n',
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canRead(workspaceId, 'nobody@example.com', 'Knowledge/Public.md')).toBe(true);
       expect(await svc.canRead(workspaceId, 'ali@bevel.software', 'Knowledge/Secret/Foo.md')).toBe(false);
       expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Secret/Foo.md')).toBe(true);
@@ -848,7 +887,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
       await writeFile(repo, 'Knowledge/Secret/access.md', '---\nread:\n  - Product Manager\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       // The leaf directory is included in the chain, so its own access.md applies
       // to the folder node — not just to files beneath it.
       expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Secret')).toBe(true);
@@ -865,7 +904,7 @@ describe('AccessControlService', () => {
         '---\nwrite:\n  - Admin\nread:\n  - Admin\nowner:\n  - Felix Kissel <felix@example.com>\n---\n',
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(true); // owner → read
       expect(await svc.canRead(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(true); // Admin
       expect(await svc.canRead(workspaceId, 'sara@example.com', 'Knowledge/Foo.md')).toBe(false); // neither
@@ -880,7 +919,7 @@ describe('AccessControlService', () => {
         '---\nwrite:\n  - Admin\nread:\n  - Product Manager\n  - deny Felix Kissel <felix@example.com>\n---\n',
       );
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(false);
       expect(await svc.canRead(workspaceId, 'sara@example.com', 'Knowledge/Foo.md')).toBe(true);
     });
@@ -892,7 +931,7 @@ describe('AccessControlService', () => {
       // writer here, so there's no rescue path to read (unlike write on access.md).
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Product Manager\nread:\n  - Product Manager\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       // razvan is Admin but not a Product Manager — restricted read denies him.
       expect(await svc.canRead(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(false);
     });
@@ -906,7 +945,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'Knowledge/Secret.md', NODE('read:\n  - Product Manager\n'));
       await writeFile(repo, 'Knowledge/Plain.md', NODE(''));
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Secret.md')).toBe(true);
       expect(await svc.canRead(workspaceId, 'ali@bevel.software', 'Knowledge/Secret.md')).toBe(false);
       // The sibling without a read: rule remains default-denied.
@@ -919,7 +958,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
       await writeFile(repo, 'Knowledge/Sales/access.md', '---\nread:\n  - Product Manager\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       const result = await svc.canReadBatch(workspaceId, 'ali@bevel.software', [
         'Knowledge/Open.md',
         'Knowledge/Sales/Restricted.md',
@@ -934,7 +973,7 @@ describe('AccessControlService', () => {
       await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\nread:\n  - everyone\n---\n');
       await writeFile(repo, 'Knowledge/Sales/access.md', '---\nread:\n  - deny everyone\n  - Product Manager\n---\n');
 
-      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
       const result = await svc.canReadBatch(workspaceId, 'ali@bevel.software', [
         'Knowledge/Open.md',
         'Knowledge/Sales/Restricted.md',
@@ -947,11 +986,12 @@ describe('AccessControlService', () => {
       it('reports restricted=true with no readers for a default-denied node', async () => {
         const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
         await writeFile(repo, 'roles.yaml', ROLES_YAML);
-        // Only `download` is granted — it does not confer read (read ⊄ download),
-        // so no principal can read this node.
-        await writeFile(repo, 'access.md', '---\ndownload:\n  - Admin\n---\n');
+        // The only line in the tree is a DENIAL — a denial grants nobody, and
+        // no verb that folds into read grants anyone either, so the node is
+        // default-denied with no readers to name.
+        await writeFile(repo, 'access.md', '---\nread:\n  - deny everyone\n---\n');
 
-        const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+        const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
         const e = await svc.eligibleReaders(workspaceId, 'Knowledge/Foo.md');
         expect(e).toEqual({ restricted: true, principals: [], roles: [], users: [], publicVia: [] });
       });
@@ -961,7 +1001,7 @@ describe('AccessControlService', () => {
         await writeFile(repo, 'roles.yaml', ROLES_YAML);
         await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\nread:\n  - everyone\n---\n');
 
-        const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+        const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
         const e = await svc.eligibleReaders(workspaceId, 'Knowledge/Foo.md');
         // The flag says public; the lists still name the grants (write folds into read).
         expect(e).toEqual({
@@ -983,7 +1023,7 @@ describe('AccessControlService', () => {
         await writeFile(repo, 'access.md', '---\nread:\n  - deny Felix Kissel <felix@example.com>\n---\n');
         await writeFile(repo, 'Knowledge/Open/access.md', '---\nread:\n  - everyone\n---\n');
 
-        const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+        const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
         // felix actually reads here (the closer everyone grant wins), so the
         // node really is readable by everyone — not restricted.
         expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Open/Foo.md')).toBe(true);
@@ -1006,7 +1046,7 @@ describe('AccessControlService', () => {
           '---\nread:\n  - everyone\n  - deny Felix Kissel <felix@example.com>\n---\n',
         );
 
-        const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+        const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
         // felix is carved out (email tier beats everyone within the scope), so
         // it's not readable by *everyone*.
         expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Foo.md')).toBe(false);
@@ -1022,7 +1062,7 @@ describe('AccessControlService', () => {
           '---\nwrite:\n  - Admin\nread:\n  - Product Manager\nowner:\n  - Ada Lovelace <ada@example.com>\n---\n',
         );
 
-        const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+        const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
         const e = await svc.eligibleReaders(workspaceId, 'Knowledge/Foo.md');
         expect(e.restricted).toBe(true);
         expect(e.roles).toContain('Product Manager');
@@ -1063,30 +1103,35 @@ describe('AccessControlService', () => {
 
     it('may write roles.yaml even when roles.yaml does not list them', async () => {
       const ws = await seeded();
-      const svc = new AccessControlService(ws, PROCESS_MAP_DIR, [OWNER]);
+      const svc = new AccessControlService(ws, PROCESS_MAP_DIR, new NodeFs(), [OWNER]);
       expect(await svc.canWrite(workspaceId, OWNER, 'roles.yaml')).toBe(true);
     });
 
     it('may write an access.md — the same rescue the Admin role gets', async () => {
       const ws = await seeded();
-      const svc = new AccessControlService(ws, PROCESS_MAP_DIR, [OWNER]);
+      const svc = new AccessControlService(ws, PROCESS_MAP_DIR, new NodeFs(), [OWNER]);
       expect(await svc.canWrite(workspaceId, OWNER, 'Knowledge/access.md')).toBe(true);
     });
 
     /**
-     * The rescue is exactly two files wide. It is not a general grant: the
-     * owner is admitted to the hardcoded `write` overrides and to nothing
-     * else, so ordinary content still answers to the access tree.
+     * Beyond the two rescue files, the owner gets exactly what the Admin role
+     * gets: the root write floor, and nothing a nearer rule takes away. Read
+     * and download still answer to the access tree.
      */
-    it('gets no ordinary write from being the owner', async () => {
+    it('gets write only through the root floor, never past a subfolder that excludes Admin', async () => {
       const ws = await seeded();
-      const svc = new AccessControlService(ws, PROCESS_MAP_DIR, [OWNER]);
-      expect(await svc.canWrite(workspaceId, OWNER, 'Knowledge/Foo.md')).toBe(false);
+      const { repo } = await seedWorkspace(root, workspaceId);
+      await writeFile(repo, 'HR/access.md', '---\nwrite:\n  - deny Admin\n---\n');
+      const svc = new AccessControlService(ws, PROCESS_MAP_DIR, new NodeFs(), [OWNER]);
+      expect(await svc.canWrite(workspaceId, OWNER, 'Knowledge/Foo.md')).toBe(true);
+      expect(await svc.canWrite(workspaceId, OWNER, 'HR/Salaries.md')).toBe(false);
+      expect(await svc.canRead(workspaceId, OWNER, 'Knowledge/Foo.md')).toBe(false);
+      expect(await svc.canDownload(workspaceId, OWNER, 'Knowledge/Foo.md')).toBe(false);
     });
 
     it('is matched case-insensitively, like every other email here', async () => {
       const ws = await seeded();
-      const svc = new AccessControlService(ws, PROCESS_MAP_DIR, ['OWNER@Bevel.Software']);
+      const svc = new AccessControlService(ws, PROCESS_MAP_DIR, new NodeFs(), ['OWNER@Bevel.Software']);
       expect(await svc.canWrite(workspaceId, OWNER, 'roles.yaml')).toBe(true);
     });
 
@@ -1097,7 +1142,7 @@ describe('AccessControlService', () => {
      */
     it('changes nothing when no owner is configured', async () => {
       const ws = await seeded();
-      const svc = new AccessControlService(ws, PROCESS_MAP_DIR);
+      const svc = new AccessControlService(ws, PROCESS_MAP_DIR, new NodeFs());
       expect(await svc.canWrite(workspaceId, OWNER, 'roles.yaml')).toBe(false);
       expect(await svc.canWrite(workspaceId, 'someone-else@example.com', 'roles.yaml')).toBe(true);
     });

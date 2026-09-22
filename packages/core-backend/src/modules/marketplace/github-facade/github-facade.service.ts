@@ -1,4 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('github-facade');
 import type { KeyKindSpec, MintedExternalApiKey } from '../../tool-auth/external-api-key.interface.js';
 import { signAuthRequest, type McpAuthRequestState } from '../../mcp/oauth/oauth-state.js';
 import type { GitHubFacadeCredentialsService } from './github-facade-credentials.service.js';
@@ -230,8 +233,8 @@ export class GitHubFacade {
     const minted = await this.deps.keys.mint(spent.userId, consumer?.keyLabel ?? 'GitHub-compatible link', {
       kind: GITHUB_LINK_KEY_KIND,
     });
-    console.info(
-      `[github-facade] ${printable(consumer?.name ?? 'a consumer')} connected user ${printable(spent.userId)}: link key ${printable(minted.summary.id)} minted`,
+    log.info(
+      `${printable(consumer?.name ?? 'a consumer')} connected user ${printable(spent.userId)}: link key ${printable(minted.summary.id)} minted`,
     );
     return { access_token: minted.plaintext, token_type: 'bearer', scope: '' };
   }

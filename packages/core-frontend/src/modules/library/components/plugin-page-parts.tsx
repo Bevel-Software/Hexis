@@ -6,6 +6,7 @@ import { cn } from '../../../lib/utils';
 import { Banner, Button, Dialog, IconButton } from '../../../shared/components';
 import { pathForPluginsIndex } from '../routes/library-paths';
 import type { LibraryItem } from '../state/library-data';
+import { linkedHomeOf } from '../utils/status';
 import { removeLibraryItem } from '../services/library.api';
 import { unlinkSkill } from '../services/plugins.api';
 import { LibraryCard } from './LibraryCard';
@@ -20,17 +21,30 @@ import { LibraryCard } from './LibraryCard';
  * promise drift the first time either is touched.
  */
 
-/** `Everything › {name}` — the page's place in the Library, and the way back. */
-export function PluginBreadcrumb({ name }: { name: string }) {
+/**
+ * `Everything ›` — the page's place in the Library, and the way back.
+ *
+ * It belongs ON the page's title band, as the band's leading item, and not in
+ * a row above it. A row above the band pushes the title bar down off the line
+ * the sidebar's header row holds, which is the seam `shared/theme/header`
+ * exists to keep — and the seam is the first thing anyone sees below the
+ * toolbar.
+ *
+ * The trail stops SHORT of the current page for the same reason: the `<h1>`
+ * standing beside it IS the current page, and a crumb repeating the heading
+ * it sits next to says the name twice on one line. That also makes the trail
+ * a fixed width, so it never competes with the title for the row's space.
+ */
+export function PluginBreadcrumb() {
   return (
-    <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-detail text-ink-faint">
+    <nav
+      aria-label="Breadcrumb"
+      className="flex flex-none items-center gap-1.5 text-detail text-ink-faint"
+    >
       <Link to={pathForPluginsIndex()} className="rounded-xs hover:text-ink">
         Everything
       </Link>
       <span aria-hidden="true">›</span>
-      <span aria-current="page" className="truncate text-ink-muted">
-        {name}
-      </span>
     </nav>
   );
 }
@@ -111,11 +125,24 @@ export function PluginSection({
 export function CardGrid({
   items,
   onOpen,
+  onShare,
   onRemove,
   canRemove,
+  linkedIn,
+  linkedRoots,
 }: {
   items: LibraryItem[];
   onOpen(item: LibraryItem): void;
+  /**
+   * Open Manage access on a SKILL's own folder — the skill page's `Share`,
+   * from the card's `…` menu. Absent: no card carries a menu.
+   *
+   * Only skills are offered it, and the card's props enforce that: access to a
+   * tool is decided at the plugin that carries it, so a tool has no rules of
+   * its own to open. A PROPOSED skill is left out too — its folder is on a
+   * change request's branch and does not exist on the one the dialog reads.
+   */
+  onShare?(item: LibraryItem): void;
   /**
    * The manager's "remove from this place". Present only when the caller
    * runs the page the grid is on — the pages decide that, not the grid.
@@ -129,6 +156,24 @@ export function CardGrid({
    * item. A verb the server would refuse is not offered.
    */
   canRemove?(item: LibraryItem): boolean;
+  /**
+   * The plugin whose page this grid is on. With it, a card whose membership in
+   * that plugin is by LINK wears the Linked pill, naming on hover the folder
+   * the item actually lives in.
+   *
+   * Absent on every surface that is not one plugin's page: your own space has
+   * no manifest to link from, and a gallery card belongs to as many plugins as
+   * it belongs to — there is no "this plugin" for it to be linked from.
+   */
+  linkedIn?: string;
+  /**
+   * That plugin's `linkedRoots` — the folders its manifest names. The pill's
+   * tooltip names the root a card came in through, and only the manifest
+   * knows which root that is (see `linkedHomeOf`). Absent or empty when the
+   * summary has not arrived, which the tooltip degrades around rather than
+   * waiting for.
+   */
+  linkedRoots?: readonly string[];
 }) {
   return (
     <div
@@ -138,22 +183,33 @@ export function CardGrid({
       )}
     >
       {items.map((item) => {
-        // The change-request number is part of the key, not decoration: two
-        // people can propose a skill of the same name into different plugins,
-        // and until one of them merges neither is in the catalog to collide
-        // with — so the name alone is not yet unique.
-        const key = `${item.kind}:${item.id}:${item.pending?.changeRequestNumber ?? ''}`;
+        // The change-request number AND the declaration's path are part of the
+        // key, not decoration. A released item's id is unique because the
+        // catalog refuses a collision; a PROPOSAL has been refused nothing yet.
+        // Two people can propose the same name into different plugins, and one
+        // request can add `weather.tool` to two plugin folders at once — same
+        // id, same request number, and the path is what tells them apart.
+        const key = item.pending
+          ? `${item.kind}:${item.id}:${item.pending.changeRequestNumber}:${item.path}`
+          : `${item.kind}:${item.id}`;
         // The flavor badge names the DECLARATION file — which file an owner
         // edits — not the transport: a `.tool` manual whose call template is
         // `type: mcp` still edits as a UTCP manual, so the path suffix is the
         // authoritative signal, not the tool's `type` metadata.
+        // Whether THIS card carries a `…`, which the remove overlay below has
+        // to know: both are corner controls on the same card, and two things
+        // pinned to the same corner is one thing you cannot click.
+        const menued = item.kind === 'skill' && !!onShare && !item.pending;
         const kindProps =
           item.kind === 'integration'
             ? ({
                 kind: 'integration',
                 flavor: item.path.endsWith('/mcp.json') ? 'mcp' : 'utcp',
               } as const)
-            : ({ kind: 'skill' } as const);
+            : ({
+                kind: 'skill',
+                onShare: menued ? () => onShare!(item) : undefined,
+              } as const);
         const card = (
           <LibraryCard
             key={key}
@@ -164,7 +220,9 @@ export function CardGrid({
             owned={item.owned}
             status={item.status}
             version={item.version}
-            lifecycle={item.lifecycle}
+            // Null (inline, or no plugin in question) has to become `undefined`
+            // — the prop is "there is a folder to name", and `null` is not it.
+            linkedHome={(linkedIn ? linkedHomeOf(item, linkedIn, linkedRoots) : null) ?? undefined}
             pending={
               item.pending && {
                 authorName: item.pending.authorName,
@@ -191,8 +249,12 @@ export function CardGrid({
               title={`Remove ${item.name}`}
               onClick={() => onRemove(item)}
               className={cn(
-                'absolute right-1.5 top-1.5 rounded-sm border border-line bg-surface p-1 text-ink-faint',
+                'absolute top-1.5 rounded-sm border border-line bg-surface p-1 text-ink-faint',
                 'opacity-0 transition-opacity hover:text-danger focus-visible:opacity-100 group-hover/removable:opacity-100',
+                // The overflow `…` keeps the corner — that is where every menu
+                // in this product lives — so Remove steps left of it on a card
+                // that has one, and keeps the corner on a card that does not.
+                menued ? 'right-8' : 'right-1.5',
               )}
             >
               <Trash2 size={13} />
@@ -295,6 +357,7 @@ export function PluginItemSections({
   skillItems,
   toolItems,
   onOpen,
+  onShare,
   onRemove,
   canRemove,
   emptySkills,
@@ -302,14 +365,22 @@ export function PluginItemSections({
   hideEmpty = false,
   skillControls,
   skillControlsActive = false,
+  linkedIn,
+  linkedRoots,
 }: {
   skillItems: LibraryItem[];
   toolItems: LibraryItem[];
   onOpen(item: LibraryItem): void;
+  /** See {@link CardGrid} — the skill cards' `Share`. Tools never get one. */
+  onShare?(item: LibraryItem): void;
   /** See {@link CardGrid} — present only when the caller manages this place. */
   onRemove?(item: LibraryItem): void;
   /** See {@link CardGrid}. */
   canRemove?(item: LibraryItem): boolean;
+  /** See {@link CardGrid} — the plugin a card can be linked FROM. */
+  linkedIn?: string;
+  /** See {@link CardGrid} — that plugin's linked roots, for the pill's tooltip. */
+  linkedRoots?: readonly string[];
   /**
    * A plain sentence, or an `EmptySkillsNudge`. A string still gets the band's
    * standard paragraph; a node is trusted to bring its own — the nudge carries
@@ -352,7 +423,15 @@ export function PluginItemSections({
               emptySkills
             )
           ) : (
-            <CardGrid items={skillItems} onOpen={onOpen} onRemove={onRemove} canRemove={canRemove} />
+            <CardGrid
+              items={skillItems}
+              onOpen={onOpen}
+              onShare={onShare}
+              onRemove={onRemove}
+              canRemove={canRemove}
+              linkedIn={linkedIn}
+              linkedRoots={linkedRoots}
+            />
           )}
         </PluginSection>
       )}
@@ -362,7 +441,14 @@ export function PluginItemSections({
           {toolItems.length === 0 ? (
             <p className="text-ui text-ink-faint">{emptyTools}</p>
           ) : (
-            <CardGrid items={toolItems} onOpen={onOpen} onRemove={onRemove} canRemove={canRemove} />
+            <CardGrid
+              items={toolItems}
+              onOpen={onOpen}
+              onRemove={onRemove}
+              canRemove={canRemove}
+              linkedIn={linkedIn}
+              linkedRoots={linkedRoots}
+            />
           )}
         </PluginSection>
       )}

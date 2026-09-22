@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import {
   WorkspaceContext,
@@ -26,6 +26,7 @@ const apiMock = vi.hoisted(() => ({
   approvePrFile: vi.fn(),
   getOrCreateWorkspace: vi.fn(),
   writeFile: vi.fn(),
+  listSkillAccessRequests: vi.fn(async (): Promise<unknown[]> => []),
 }));
 vi.mock('../services/library.api', () => ({
   defaultWorkspaceId: () => 'target-company-state',
@@ -33,8 +34,9 @@ vi.mock('../services/library.api', () => ({
   getSkillFile: apiMock.getSkillFile,
   proposeChange: apiMock.proposeChange,
   listSkills: vi.fn(),
-  // The write-access request surface: nothing pending, nothing asked.
-  listSkillAccessRequests: vi.fn(async () => []),
+  // The write-access request surface: nothing pending, nothing asked — unless
+  // a test puts a request on it.
+  listSkillAccessRequests: apiMock.listSkillAccessRequests,
   reconcileSkillAccessRequest: vi.fn(async () => false),
   requestSkillAccess: vi.fn(async () => ({ number: 1 })),
   // Real behaviour, not a stub: the page resolves the caller's own request by
@@ -55,6 +57,9 @@ vi.mock('../../change-requests/services/change-requests.api', () => ({
   listOpenChangeRequests: vi.fn(async () => []),
   listMyChangeRequests: vi.fn(async () => []),
   readFileOnBranch: apiMock.readFileOnBranch,
+  // No fork point: the change boxes fall back to the default branch, which is
+  // what these tests diff against.
+  readFileAtForkPoint: vi.fn(async () => ({ content: null, forkSha: null })),
 }));
 vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: apiMock.mergePullRequest }));
 vi.mock('../../pr/services/pr-cancel.api', () => ({
@@ -101,11 +106,17 @@ const accessMock = vi.hoisted(() => ({
     owners: { roles: [], users: [] },
   },
   fetchFileAccess: vi.fn(),
+  // The Manage-access dialog's own calls — Share opens the real dialog.
+  grantAccess: vi.fn(),
+  suggestPrincipals: vi.fn(),
 }));
 accessMock.fetchFileAccess.mockImplementation(async () => accessMock.result);
-vi.mock('../../access/api', () => ({
+vi.mock('../../access/api', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
   fetchFileAccess: accessMock.fetchFileAccess,
   fetchFileAccessBatch: vi.fn(async () => ({ results: {} })),
+  grantAccess: accessMock.grantAccess,
+  suggestPrincipals: accessMock.suggestPrincipals,
 }));
 
 // The page reads the catalog through `useLibrary()`. Mocking the hook rather
@@ -201,7 +212,13 @@ const foreignCr = {
   url: '',
 } as unknown as PullRequestSummary;
 
-function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: number[] = []): LibraryContextValue {
+function libraryValue(
+  owned: boolean,
+  crs: PullRequestSummary[] = [],
+  mine: number[] = [],
+  /** Write on SKILL.md — defaults to `owned`: an owner writes. */
+  canWrite: boolean = owned,
+): LibraryContextValue {
   return {
     crs,
     myCrNumbers: new Set(mine),
@@ -212,6 +229,7 @@ function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: numb
         name: 'newsletter',
         description: skillSummary.description,
         owned,
+        canWrite,
         plugin: null,
         path: skillSummary.path,
         status: { state: 'ok', text: '' },
@@ -221,6 +239,8 @@ function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: numb
     tools: [slackTool],
     allowedToolsBySkill: new Map([['newsletter', ['slack_post_message']]]),
     ownedSkills: owned ? new Set(['newsletter']) : new Set<string>(),
+    writableSkills: canWrite ? new Set(['newsletter']) : new Set<string>(),
+    ownedTools: new Set<string>(),
     loading: false,
     error: null,
     reload: () => {},
@@ -385,6 +405,7 @@ beforeEach(() => {
         isApproved: false,
         approvedBy: [],
         eligibleApprovers: { roles: ['Newsroom'], users: [] },
+        inMergeGate: true,
       },
     ],
   });
@@ -533,20 +554,36 @@ describe('SkillPage', () => {
     );
   });
 
-  it('shows the Owner badge to an owner. But never access', async () => {
+  it('shows the Owner badge to an owner', async () => {
     renderPage(true);
     await screen.findByRole('heading', { name: 'newsletter' });
 
     expect(screen.getByText('Owner')).toBeInTheDocument();
-    // A skill inherits its plugin folder's rules; the plugin's Share panel is the
-    // one place they are decided, for owner and non-owner alike.
-    expect(screen.queryByRole('button', { name: 'Manage access' })).toBeNull();
   });
 
   it('hides the Owner badge from non-owners', async () => {
     renderPage(false);
     await screen.findByRole('heading', { name: 'newsletter' });
 
+    expect(screen.queryByText('Owner')).toBeNull();
+  });
+
+  /**
+   * The pill is ownership; the editor-side verbs are write. A writer who is
+   * not in the `owner:` grant — an Admin by role — loses the pill and keeps
+   * every one of them: the dock, and the verdict on someone else's change.
+   */
+  it('hides the Owner badge from a writer who is not an owner, and keeps their editor affordances', async () => {
+    const writer = libraryValue(false, [foreignCr], [], true);
+    renderPage(false, [foreignCr], [], makeFakeBus(), undefined, {
+      items: writer.items,
+      writableSkills: writer.writableSkills,
+    });
+
+    expect(
+      await screen.findByRole('complementary', { name: 'Change requests for this skill' }),
+    ).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Approve' })).toBeInTheDocument();
     expect(screen.queryByText('Owner')).toBeNull();
   });
 
@@ -620,6 +657,83 @@ describe('SkillPage', () => {
     expect(await screen.findByText(/Saved: the skill now reads with your change/)).toBeInTheDocument();
     // Direct means DIRECT: nothing rode the proposal path.
     expect(apiMock.proposeChange).not.toHaveBeenCalled();
+  });
+
+  it('a save whose allowed-tools name unknown platform tools lands, and says so in the status area', async () => {
+    accessMock.result = {
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    };
+    apiMock.getOrCreateWorkspace.mockResolvedValue({
+      workspace: { id: 'target-company-state', kbDirName: 'knowledge-base' },
+    });
+    apiMock.writeFile.mockResolvedValue({
+      warnings: [
+        {
+          entry: 'hubspot.serch',
+          message: '"hubspot.serch" in allowed-tools is not a tool you can use here. Did you mean "hubspot.search"?',
+          suggestion: 'hubspot.search',
+        },
+      ],
+    });
+    renderPage(true);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const box = await screen.findByRole('textbox', { name: 'Edit SKILL.md' });
+    fireEvent.change(box, { target: { value: '---\nallowed-tools: Bash hubspot.serch\n---\n' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    // Never a block: the save still closes the editor and confirms.
+    expect(await screen.findByText(/Saved: the skill now reads with your change/)).toBeInTheDocument();
+    const status = (await screen.findByText('Some tools this skill lists are not available')).closest('[role="status"]');
+    expect(status).not.toBeNull();
+    expect(within(status as HTMLElement).getByText(/Did you mean "hubspot.search"/)).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Edit SKILL.md' })).toBeNull();
+  });
+
+  it('warnings the skill already carries show on open, before any save', async () => {
+    // A manual retired after the skill was written: nobody saved anything, so
+    // the only way the page can know is from the skill it loads.
+    apiMock.getSkill.mockResolvedValue({
+      ...skillDetail,
+      warnings: [{ entry: 'legacy_crm', message: '"legacy_crm" in allowed-tools is not a tool you can use here.' }],
+    });
+    renderPage(true);
+
+    const status = (await screen.findByText('Some tools this skill lists are not available')).closest('[role="status"]');
+    expect(status).not.toBeNull();
+    expect(within(status as HTMLElement).getByText(/"legacy_crm" in allowed-tools/)).toBeInTheDocument();
+  });
+
+  it('saving a bundled file leaves the loaded warnings in place', async () => {
+    // Only a SKILL.md save has an answer about allowed-tools. A bundled file's
+    // save answers with none, and taking that for "none" would clear a banner
+    // that is about the skill, not about sources.yaml.
+    accessMock.result = {
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    };
+    apiMock.getOrCreateWorkspace.mockResolvedValue({
+      workspace: { id: 'target-company-state', kbDirName: 'knowledge-base' },
+    });
+    apiMock.writeFile.mockResolvedValue({});
+    apiMock.getSkill.mockResolvedValue({
+      ...skillDetail,
+      warnings: [{ entry: 'legacy_crm', message: '"legacy_crm" in allowed-tools is not a tool you can use here.' }],
+    });
+    renderPage(true);
+    await screen.findByText('Some tools this skill lists are not available');
+
+    fireEvent.click(screen.getByRole('tab', { name: 'sources.yaml' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const box = await screen.findByRole('textbox', { name: 'Edit sources.yaml' });
+    fireEvent.change(box, { target: { value: 'watchlist:\n  - topic: robotics\n' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText(/Saved: the skill now reads with your change/)).toBeInTheDocument();
+    expect(screen.getByText('Some tools this skill lists are not available')).toBeInTheDocument();
   });
 
   it('arriving with startEditing in router state opens the editor without a click', async () => {
@@ -914,7 +1028,7 @@ describe('SkillPage: deciding on a change', () => {
     renderPage(true, [foreignCr]);
 
     const approve = await screen.findByRole('button', { name: 'Approve' });
-    expect(screen.getByText('You decide. You own this.')).toBeInTheDocument();
+    expect(screen.getByText('You can decide this.')).toBeInTheDocument();
 
     fireEvent.click(approve);
 
@@ -942,12 +1056,14 @@ describe('SkillPage: deciding on a change', () => {
           isApproved: false,
           approvedBy: [],
           eligibleApprovers: { roles: ['Newsroom'], users: [] },
+          inMergeGate: true,
         },
         {
           path: 'Skills/newsletter/sources.yaml',
           isApproved: false,
           approvedBy: [],
           eligibleApprovers: { roles: [], users: [] },
+          inMergeGate: false,
         },
       ],
     });
@@ -1381,5 +1497,147 @@ describe('SkillPage: links and images in the file', () => {
     } as unknown as WorkspaceContextValue);
     await settled();
     expect(screen.getByTestId('image-probe').textContent).toBe('"no-resolver"');
+  });
+});
+
+/**
+ * Share manages the SKILL's folder: the real Manage-access dialog (not a stub
+ * — the grant it sends is the point), pinned to the default branch, on the
+ * folder the skill lives in whether or not a plugin holds it.
+ */
+describe('SkillPage: Share', () => {
+  const MAIN = encodeURIComponent(DEFAULT_BRANCH);
+  /** Enough of the resolver's answer for the dialog to render and to grant. */
+  const FOLDER_VIEW = {
+    canRead: true,
+    canWrite: true,
+    canDownload: false,
+    canOwner: false,
+    eligible: { roles: [], users: [] },
+    readers: { restricted: true, roles: [], users: [] },
+    owners: { roles: [], users: [] },
+    downloaders: { roles: [], users: [] },
+    sources: {},
+  };
+
+  beforeEach(() => {
+    accessMock.result = FOLDER_VIEW as typeof accessMock.result;
+    accessMock.fetchFileAccess.mockClear();
+    accessMock.grantAccess.mockReset().mockResolvedValue(FOLDER_VIEW);
+    accessMock.suggestPrincipals.mockReset().mockResolvedValue({
+      roles: [],
+      groups: ['GTM Team'],
+      people: [],
+      peopleWithheld: false,
+    });
+    apiMock.listSkillAccessRequests.mockReset().mockResolvedValue([]);
+  });
+
+  it('a standalone skill offers Share, and it opens Manage access on the skill folder', async () => {
+    renderPage(false);
+    await settled();
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    expect(await screen.findByRole('dialog', { name: 'Manage access' })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(accessMock.fetchFileAccess).toHaveBeenCalledWith(MAIN, 'Skills/newsletter', 'folder'),
+    );
+  });
+
+  it("a plugin-bundled skill offers Share on ITS folder, not the plugin's", async () => {
+    const path = 'Plugins/newsroom/skills/newsletter';
+    apiMock.getSkill.mockResolvedValue({ ...skillDetail, path, files: [`${path}/sources.yaml`] });
+    renderPage(false, [], [], makeFakeBus(), undefined, {
+      items: libraryValue(false).items.map((i) => ({ ...i, path, plugin: 'newsroom' })),
+      skills: [{ ...skillSummary, path }],
+    });
+    await settled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    expect(await screen.findByRole('dialog', { name: 'Manage access' })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(accessMock.fetchFileAccess).toHaveBeenCalledWith(MAIN, path, 'folder'),
+    );
+    expect(accessMock.fetchFileAccess).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'Plugins/newsroom',
+      'folder',
+    );
+  });
+
+  it('a grant from Share is the ordinary FOLDER grant on the skill folder — the one that creates access.md', async () => {
+    // The backend half — the first folder grant writes `access.md`, later ones
+    // edit it — is `access-mutation.service.test.ts`. What the page owns is
+    // sending THAT request: kind folder, the skill's folder, the default
+    // branch. The path goes out workspace-relative, as from every other
+    // surface; the grant route strips the KB dir.
+    renderPage(true);
+    await settled();
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Manage access' });
+
+    fireEvent.change(await screen.findByPlaceholderText(/add people, groups, roles or plugins/i), {
+      target: { value: 'gtm' },
+    });
+    fireEvent.click(await screen.findByRole('button', { name: /GTM Team/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: /^Share$/ }));
+
+    await waitFor(() =>
+      expect(accessMock.grantAccess).toHaveBeenCalledWith(
+        MAIN,
+        expect.objectContaining({
+          path: 'knowledge-base/Skills/newsletter',
+          kind: 'folder',
+          principal: { kind: 'group', group: 'GTM Team' },
+        }),
+      ),
+    );
+  });
+
+  it("the access-requests banner's Manage access still opens the same, single dialog", async () => {
+    apiMock.listSkillAccessRequests.mockResolvedValue([
+      {
+        number: 3,
+        branch: 'access/olga/newsletter',
+        requesterName: 'Olga Martin',
+        createdAt: new Date().toISOString(),
+        proposals: [
+          {
+            verb: 'write',
+            id: 'olga@x.com',
+            principal: { kind: 'user', email: 'olga@x.com', displayName: 'Olga Martin' },
+            label: 'Olga Martin',
+          },
+        ],
+      },
+    ]);
+    renderPage(true);
+    await settled();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage access' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Manage access' });
+    await waitFor(() =>
+      expect(accessMock.fetchFileAccess).toHaveBeenCalledWith(MAIN, 'Skills/newsletter', 'folder'),
+    );
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+    // The other door, onto the same dialog — never a second one.
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+    await screen.findByRole('dialog', { name: 'Manage access' });
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+  });
+
+  it('offers no Share before the KB dir is known. There is no folder path to hand over yet', async () => {
+    renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, git, {
+      workspaceId: 'target-company-state',
+      kbDirName: null,
+    } as unknown as WorkspaceContextValue);
+    await settled();
+    expect(screen.queryByRole('button', { name: 'Share' })).toBeNull();
   });
 });

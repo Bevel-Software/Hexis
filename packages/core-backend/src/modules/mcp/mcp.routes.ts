@@ -1,8 +1,10 @@
 import express, { type Request, type Response, type RequestHandler } from 'express';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('mcp');
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import type { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   InvalidTokenLabelError,
   TokenNotFoundError,
@@ -15,12 +17,6 @@ import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
 import type { ILlmUsageMeter } from '../tool-auth/llm-usage-meter.js';
 import '../tool-auth/external-api-key.interface.js'; // req.externalApiKeyId augmentation
 
-interface ActiveSession {
-  transport: StreamableHTTPServerTransport;
-  server: Server;
-  userId: string;
-}
-
 /** Pull the raw bearer token off an already-authenticated request. */
 function extractBearer(req: Request): string {
   const header = req.headers.authorization ?? '';
@@ -29,81 +25,31 @@ function extractBearer(req: Request): string {
 }
 
 /**
- * The two JSON-RPC codes the Streamable HTTP transport defines for a session
- * fault, paired with the HTTP status each rides on.
- *
- * `SESSION_NOT_FOUND` (404) is the one that carries meaning to a client: the
- * spec makes a 404 on a request bearing an `Mcp-Session-Id` the trigger to
- * start a new session with a fresh `initialize`. `BAD_REQUEST` (400) is the
- * client-side mistake — a non-initialize request that never carried a session
- * id at all — and has no recovery, because there is nothing to recover.
+ * `-32000` is the code the MCP SDK's own transport pairs with its 4xx transport
+ * refusals (including its 405); ours match it so a client sees one vocabulary.
  */
-const SESSION_NOT_FOUND = -32001;
-const BAD_REQUEST = -32000;
-/**
- * The 403: a session id that exists but belongs to someone else. Its own code,
- * in the same implementation-defined range (-32000..-32099), because it is
- * neither of the two above — the request was well-formed and the session is
- * live; the caller simply may not have it. A client that reads only
- * `error.code` must not mistake an authorization refusal for a malformed
- * request, and must not re-initialize on it either. -32002 is skipped: the
- * MCP SDK spends it on "resource not found".
- */
-const FORBIDDEN = -32003;
-/** JSON-RPC 2.0's own code for a fault on our side, used for the 500 catch-alls. */
+const TRANSPORT_ERROR = -32000;
+/** JSON-RPC 2.0's own code for a fault on our side, used for the 500 catch-all. */
 const INTERNAL_ERROR = -32603;
 
 /**
  * Answer in the transport's own wire shape
- * (`{ jsonrpc, error: { code, message }, id: null }`).
- *
- * These misses are caught by THIS router, one layer before the request would
- * have reached an SDK transport, so the router has to speak the transport's
- * language itself — a client that parses the body as JSON-RPC must not get a
- * bare `{ error }` blob just because we answered early. `id: null` matches the
- * SDK: the request id is not reliably known on a body we may never have
- * parsed as a single message.
+ * (`{ jsonrpc, error: { code, message }, id: null }`), for the answers this
+ * router gives without ever reaching an SDK transport. `id: null` matches the
+ * SDK: the request id is not reliably known on a body we may never have parsed
+ * as a single message.
  */
 function jsonRpcError(res: Response, status: number, code: number, message: string): void {
   res.status(status).json({ jsonrpc: '2.0', error: { code, message }, id: null });
 }
 
 /**
- * The answer to a session this router cannot resolve, shared by all three verbs.
- *
- * POST and GET/DELETE reach the miss from opposite directions — POST falls
- * through to it, GET/DELETE test for it up front — but owe the caller the same
- * two answers, and they were hand-synchronised copies of the same pair of
- * codes and strings. Sharing the mechanism makes that parity structural
- * instead of merely asserted by tests.
- *
- * Call only once the session is known to be a miss; a live session id never
- * reaches here.
- */
-function rejectSessionMiss(res: Response, sessionIdHeader: string | undefined): void {
-  if (sessionIdHeader) {
-    // A session id we hold no transport for: the store evicted it, or the
-    // process restarted and this in-memory map went with it. 404 + `-32001`
-    // is what the spec reserves for that, and it is the signal a client keys
-    // its re-initialize on. Answering 400 here read as "you sent a malformed
-    // request" and stranded the client on a session that can never come
-    // back — every connected agent, on every restart, until a human
-    // reconnected it by hand.
-    jsonRpcError(res, 404, SESSION_NOT_FOUND, 'Session not found');
-    return;
-  }
-  // No session id at all: the one case here that genuinely is the caller's
-  // mistake, and the only one 400 fits.
-  jsonRpcError(res, 400, BAD_REQUEST, 'Bad Request: Mcp-Session-Id header is required');
-}
-
-/**
  * Routes for the remote MCP server + the connection-key management endpoints.
  *
  * Layout:
- *   POST   /mcp           — client→server MCP messages (initialize + tool calls)
- *   GET    /mcp           — server→client SSE channel (session-bound)
- *   DELETE /mcp           — terminate a session
+ *   POST   /mcp           — every client→server MCP message, each request on its own
+ *   GET    /mcp           — 405: no standalone server→client stream (stateless)
+ *   DELETE /mcp           — 405: there is no session to terminate (stateless)
  *
  *   GET    /mcp/external-api-keys         — list this user's connection keys
  *   POST   /mcp/external-api-keys         — mint a new key (returns plaintext ONCE)
@@ -112,7 +58,7 @@ function rejectSessionMiss(res: Response, sessionIdHeader: string | undefined): 
  *   POST   /mcp/local-token               — exchange an MCP OAuth access token
  *                                           for a loopback internal token
  *
- * The `/mcp` endpoints accept either a connection key or a JWT (see
+ * The `/mcp` POST accepts either a connection key or a JWT/OAuth token (see
  * McpAuthMiddleware). The `/mcp/external-api-keys/*` endpoints accept only the JWT —
  * minting/revoking via a connection key would let a leaked key roll itself
  * over and stay alive forever. `/mcp/local-token` accepts ONLY an MCP OAuth
@@ -132,101 +78,61 @@ export function createMcpRoutes(
 ): express.Router {
   const router = express.Router();
 
-  // Per-process map of live MCP sessions. In-memory mirror of McpSessionStore
-  // — McpSessionStore holds the *domain* state (userId, threadId, idle TTL),
-  // this map holds the *transport* state (the SDK objects we need to route
-  // a subsequent HTTP request to the correct session). Both are cleared on
-  // restart; clients re-initialize.
-  const active = new Map<string, ActiveSession>();
+  // ── MCP transport (stateless) ──────────────────────────────────────────
 
-  // When McpSessionStore drops a session on its own (idle-TTL sweep or
-  // size-cap eviction), the matching transport pair would otherwise leak
-  // here — `active.has(id)` would still return true and route requests to a
-  // McpServer whose backing domain state is gone. Subscribe to the store and
-  // tear down the transport so the resources free immediately and the next
-  // request with that id correctly 404s.
-  mcpService.onSessionEvicted((sessionId) => {
-    const entry = active.get(sessionId);
-    if (!entry) return;
-    active.delete(sessionId);
-    // close() is async; fire-and-forget so a slow socket teardown can't
-    // block the store's eviction loop. transport.onclose still fires but
-    // its `active.delete` is now a no-op.
-    void entry.transport.close().catch((err) => {
-      console.warn('[mcp] transport close on eviction failed:', err);
-    });
-  });
-
-  // ── MCP transport ──────────────────────────────────────────────────────
-
+  /**
+   * One request, one MCP server, one transport — and nothing kept afterwards.
+   *
+   * The Streamable HTTP transport makes the session id OPTIONAL: a server that
+   * never assigns one (`sessionIdGenerator: undefined`, the SDK's stateless
+   * profile) is served by clients that treat every request independently. So
+   * there is no `initialize`-first rule, no session to look up, and no
+   * "Session not found" to answer: identity, the metering key and the
+   * ACL-filtered tool surface all come from THIS request's bearer. A platform
+   * restart between two requests of one conversation is therefore invisible —
+   * the next request is served exactly as it would have been before it.
+   *
+   * A stale `Mcp-Session-Id` from a client that connected before this endpoint
+   * went stateless is ignored by the stateless transport, not refused.
+   *
+   * Notifications a request emits (tool-call progress) ride that request's own
+   * response stream. The server and transport are closed when the response
+   * closes — finished, or abandoned by the client mid-call.
+   */
   router.post('/mcp', mcpAuthMiddleware, async (req, res) => {
+    let server: Server | undefined;
+    res.on('close', () => {
+      // Closing the server closes its transport too.
+      void server?.close().catch((err) => {
+        log.warn('closing a request server failed:', { err });
+      });
+    });
     try {
-      const sessionIdHeader = req.headers['mcp-session-id'] as string | undefined;
-      const body = req.body;
-
-      // Four request shapes on POST /mcp, in this order:
-      //  1. Session id naming a live session → forward to its transport
-      //     (unless it is someone else's → 403 (`-32003`)).
-      //  2. An initialize body → spin up a new transport, whatever stale
-      //     session id the client still has attached.
-      //  3. A session id we have no transport for → 404 (`-32001`).
-      //  4. No session id on a non-initialize request → 400 (`-32000`).
-      if (sessionIdHeader && active.has(sessionIdHeader)) {
-        const session = active.get(sessionIdHeader)!;
-        // Defense in depth: the auth middleware bound a userId for this
-        // request; refuse if it doesn't match the session's owner. Stops
-        // a leaked session id from being used cross-user even if the
-        // attacker has their own valid connection key.
-        if (session.userId !== req.userId) {
-          jsonRpcError(res, 403, FORBIDDEN, 'Session does not belong to this user');
-          return;
-        }
-        await session.transport.handleRequest(req, res, body);
-        return;
-      }
-
-      // An initialize starts a fresh session even when the client is STILL
-      // sending a stale `mcp-session-id`. Requiring the header to be absent
-      // deadlocked exactly the client this endpoint most needs to let back in:
-      // one whose session died with the server and that re-initializes without
-      // first clearing the id — it got the catch-all below forever. The SDK's
-      // own transport orders the two checks this way for the same reason:
-      // initialize is never session-validated. A LIVE session id is still
-      // caught by the branch above, so re-initializing over a working session
-      // stays the SDK's `-32600 Server already initialized`, not a silent
-      // second session.
-      if (isInitializeRequest(body)) {
-        // The proxy authenticates its loopback calls with the SAME bearer the
-        // client used here, so it acts on the request exactly as the caller
-        // would. Captured at initialize and seeded into the session's UtcpClient.
-        const { transport, server } = await mcpService.createSession(
-          req.userId!,
+      const built = await mcpService.createRequestServer(
+        {
+          userId: req.userId!,
           // Connection-key id (set by mcpAuthMiddleware for `bevel_…` bearers;
-          // undefined for browser JWT) — kept for audit/diagnostics.
-          req.externalApiKeyId ?? null,
-          extractBearer(req),
-          (sessionId) => {
-            active.set(sessionId, { transport, server, userId: req.userId! });
-          },
-        );
-        // Closing the transport (DELETE /mcp, or client disconnect during
-        // close) should drop both the active map and the McpSessionStore
-        // entry. McpService wired onsessionclosed → sessionStore.delete; we
-        // mirror it here.
-        transport.onclose = () => {
-          if (transport.sessionId) active.delete(transport.sessionId);
-        };
-        await server.connect(transport);
-        await transport.handleRequest(req, res, body);
+          // undefined for OAuth/JWT) — resolved per request, so per-key metering
+          // never depends on anything remembered from an earlier request.
+          tokenId: req.externalApiKeyId ?? null,
+          // The proxy authenticates its loopback calls with the SAME bearer the
+          // client used here, so it acts on the request exactly as the caller would.
+          bearer: extractBearer(req),
+        },
+        req.body,
+      );
+      // The client gave up while the server was being built: nothing to answer.
+      if (res.writableEnded || res.destroyed) {
+        await built.close().catch(() => {});
         return;
       }
-
-      // Neither a live session nor an initialize: whichever miss this is,
-      // `rejectSessionMiss` owns both answers.
-      rejectSessionMiss(res, sessionIdHeader);
+      server = built;
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      console.error('[mcp] POST /mcp failed:', msg);
+      log.error('POST /mcp failed:', { detail: msg });
       if (!res.headersSent) {
         jsonRpcError(res, 500, INTERNAL_ERROR, msg);
       } else {
@@ -235,37 +141,25 @@ export function createMcpRoutes(
     }
   });
 
-  const sessionRequest: RequestHandler = async (req, res) => {
-    const sessionIdHeader = req.headers['mcp-session-id'] as string | undefined;
-    // The same two answers POST gives, from the same helper: these were
-    // collapsed into a single 404 — right for the unknown-session case, wrong
-    // for the missing-header one, and neither parseable as JSON-RPC.
-    if (!sessionIdHeader || !active.has(sessionIdHeader)) {
-      rejectSessionMiss(res, sessionIdHeader);
-      return;
-    }
-    const session = active.get(sessionIdHeader)!;
-    if (session.userId !== req.userId) {
-      jsonRpcError(res, 403, FORBIDDEN, 'Session does not belong to this user');
-      return;
-    }
-    try {
-      await session.transport.handleRequest(req, res);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Unknown error';
-      console.error('[mcp] session request failed:', msg);
-      if (!res.headersSent) jsonRpcError(res, 500, INTERNAL_ERROR, msg);
-      else res.end();
-    }
+  /**
+   * GET and DELETE are retired, per the stateless profile.
+   *
+   * GET would open a standalone server→client stream; with no session there is
+   * nothing to push on one, and the spec's answer for a server that offers none
+   * is 405 — which spec-conformant clients (the SDK's among them) treat as "no
+   * stream", not as a failure. DELETE would terminate a session; there is none,
+   * and 405 is the spec's answer for a server that does not support it.
+   *
+   * Deliberately NOT behind the auth middleware: the answer is the same for
+   * everyone and reveals nothing, and a 401 here would send an OAuth-capable
+   * client into an authorization flow for a stream that does not exist.
+   */
+  const methodNotAllowed: RequestHandler = (_req, res) => {
+    res.setHeader('Allow', 'POST');
+    jsonRpcError(res, 405, TRANSPORT_ERROR, 'Method not allowed.');
   };
-
-  // GET is the server→client SSE channel for session-scoped notifications.
-  router.get('/mcp', mcpAuthMiddleware, sessionRequest);
-
-  // DELETE terminates the session — SDK closes the transport, our
-  // onclose handler cleans up the active map, and McpService's
-  // onsessionclosed clears the McpSessionStore entry.
-  router.delete('/mcp', mcpAuthMiddleware, sessionRequest);
+  router.get('/mcp', methodNotAllowed);
+  router.delete('/mcp', methodNotAllowed);
 
   // ── Connection-key management (JWT-only) ───────────────────────────────
 
@@ -363,16 +257,16 @@ export function createMcpRoutes(
    * Why it exists: the LOCAL MCP server's REST reads — the all-tools manual,
    * `list_local_tools`, the plugin archive — live on `/api/agent/*`, which
    * accepts connection keys and internal tokens ONLY; an MCP OAuth access
-   * token deliberately 401s there. Hosted OAuth sessions cross that gap
-   * inside `McpService.createSession`, which mints a loopback internal token
-   * for the resolved user. This endpoint is the same exchange for an external
-   * caller: the one bridge that lets a local server configured via the
+   * token deliberately 401s there. Hosted OAuth requests cross that gap
+   * inside `McpService.createRequestServer`, which mints a loopback internal
+   * token for the resolved user. This endpoint is the same exchange for an
+   * external caller: the one bridge that lets a local server configured via the
    * deployment's MCP OAuth (instead of a connection key) reach those reads.
    *
    * Why it is NOT a widening of the trust boundary: the caller must present a
    * VERIFIED OAuth grant for this exact user — the same credential that
    * already drives full tool execution through the hosted `/mcp` endpoint.
-   * The minted token is identical in shape to createSession's loopback bearer
+   * The minted token is identical in shape to the hosted proxy's loopback bearer
    * (`{ userId, externalProxy: true }` → resolved as `source: 'external'` by
    * the tool-auth verifier, admitted to the external surface, refused from
    * internal-only tools) and carries the same TTL — CAPPED to the presented
@@ -472,7 +366,7 @@ export function createMcpRoutes(
       if (err instanceof InvalidTokenError) {
         unauthorized('Invalid, expired, or revoked access token');
       } else {
-        console.error('[mcp] local-token exchange failed:', err);
+        log.error('local-token exchange failed:', { err });
         res.status(500).json({ error: 'Authentication backend unavailable' });
       }
     }

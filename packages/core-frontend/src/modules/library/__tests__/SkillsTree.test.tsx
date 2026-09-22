@@ -106,11 +106,13 @@ describe('SkillsTree', () => {
     const createDirectory = vi.fn().mockResolvedValue(undefined);
     const dispatchUpload = vi.fn().mockResolvedValue(undefined);
     renderTree('/skills-and-tools', { fileTree: noSkills, createDirectory, dispatchUpload });
-    // The row is there, empty: nothing beneath it, and — with nothing to
-    // open — no claim to be expanded either.
+    // The row is there, empty: nothing beneath it but the muted "Empty" row
+    // the open folder shows — a folder, caret and all, not a file.
     const skills = row('Skills');
     expect(skills).toBeInTheDocument();
-    expect(skills).not.toHaveAttribute('aria-expanded');
+    expect(skills).toHaveAttribute('aria-expanded', 'true');
+    expect(skills.querySelectorAll('svg')).toHaveLength(1);
+    expect(screen.getByText('Empty')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Engineering' })).not.toBeInTheDocument();
     // What writes is offered; what would read a folder that is not there is not.
     fireEvent.contextMenu(skills);
@@ -126,10 +128,15 @@ describe('SkillsTree', () => {
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(createDirectory).toHaveBeenCalledWith(`${KB}/Skills/Marketing`);
 
-    // So does a drop.
+    // So does a drop — stamped with the tree that took it, so the upload's
+    // banners appear here and not in the Plugins tree below.
     const dropped = new File(['x'], 'SKILL.md');
     fireEvent.drop(skills, { dataTransfer: { getData: () => '', items: undefined, files: [dropped] } });
-    expect(dispatchUpload).toHaveBeenCalledWith({ kind: 'files', files: [dropped] }, `${KB}/Skills`);
+    expect(dispatchUpload).toHaveBeenCalledWith(
+      { kind: 'files', files: [dropped] },
+      `${KB}/Skills`,
+      'library:Skills',
+    );
   });
 
   it('renders nothing while the tree has not loaded', () => {
@@ -144,7 +151,11 @@ describe('SkillsTree', () => {
     fireEvent.drop(row('Skills'), {
       dataTransfer: { getData: () => '', items: undefined, files: [dropped] },
     });
-    expect(dispatchUpload).toHaveBeenCalledWith({ kind: 'files', files: [dropped] }, `${KB}/Skills`);
+    expect(dispatchUpload).toHaveBeenCalledWith(
+      { kind: 'files', files: [dropped] },
+      `${KB}/Skills`,
+      'library:Skills',
+    );
   });
 
   it('cannot be dragged away — a reserved root stays where the platform put it', () => {
@@ -262,7 +273,11 @@ describe('PluginsTree', () => {
     const none = dir('.', [dir(KB, [dir(`${KB}/KnowledgeBase`, [])])]);
     renderPlugins('/skills-and-tools', { fileTree: none });
     expect(row('Plugins')).toBeInTheDocument();
-    expect(row('Plugins')).not.toHaveAttribute('aria-expanded');
+    expect(row('Plugins')).toHaveAttribute('aria-expanded', 'true');
+    // The same row component as Knowledge: an open empty folder says so.
+    expect(screen.getByText('Empty')).toBeInTheDocument();
+    fireEvent.click(row('Plugins'));
+    expect(screen.queryByText('Empty')).not.toBeInTheDocument();
   });
 
   it("offers New plugin on every folder's menu when wired — after the tree's own create items — and on no file's", () => {
@@ -320,5 +335,127 @@ describe('SkillsTree: menu', () => {
     renderTree('/skills-and-tools');
     fireEvent.contextMenu(row('Engineering'));
     expect(within(screen.getByRole('menu', { name: 'Actions for Engineering' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
+  });
+});
+
+/**
+ * The Skills tree reads the same filtered listing as Knowledge's explorer, so
+ * it answers the same way — for ITS root. The server counts what it withheld
+ * per folder, and the notice reads the Skills folder's own count: what was
+ * kept out of Knowledge says nothing about Skills.
+ */
+describe('SkillsTree: an empty tree says why', () => {
+  const EMPTY_KB = (withheld: { listing?: number; skills?: number } = {}): FileTreeEntry => {
+    const skills: FileTreeEntry = { ...dir(`${KB}/Skills`, []), ...(withheld.skills ? { withheld: withheld.skills } : {}) };
+    return {
+      ...dir('.', [dir(KB, [dir(`${KB}/KnowledgeBase`, []), dir(`${KB}/Plugins`, []), skills])]),
+      ...(withheld.listing ? { withheld: withheld.listing } : {}),
+    };
+  };
+
+  it('says nothing is shared when entries were withheld from the Skills folder', () => {
+    // The folder's own count alone decides; the listing total is not consulted.
+    renderTree('/skills-and-tools', { fileTree: EMPTY_KB({ skills: 4 }) });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(
+      'Nothing here is shared with you yet. Ask an admin to grant you access.',
+    );
+  });
+
+  it('says the knowledge base is empty, with the create hint for a writer, when nothing was withheld', () => {
+    renderTree('/skills-and-tools', { fileTree: EMPTY_KB() });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(/^This knowledge base is empty\./);
+    expect(screen.getByTestId('tree-empty-create-hint')).toBeInTheDocument();
+  });
+
+  it('says empty, not "nothing shared", when what was withheld lies elsewhere in the listing', () => {
+    renderTree('/skills-and-tools', { fileTree: EMPTY_KB({ listing: 4 }) });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(/^This knowledge base is empty\./);
+    expect(screen.queryByText(/Nothing here is shared/)).not.toBeInTheDocument();
+  });
+
+  it('shows neither message once one entry is visible', () => {
+    renderTree('/skills-and-tools', { fileTree: { ...TREE, withheld: 2 } });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * WHERE the two Library trees take their roots from. `Skills/` and `Plugins/`
+ * are children of the checkout — the `<kbDirName>/` folder the deployment
+ * names — and of nothing else. On core-staging a stray `Plugins/` beside the
+ * checkout became the whole Plugins tree (one plugin instead of ten) and the
+ * Skills tree, finding no `Skills/` there, showed Empty.
+ */
+describe('The Library trees root at the checkout', () => {
+  /** What sat beside the checkout on core-staging on 2026-09-22. */
+  const STRAYS: FileTreeEntry[] = [
+    dir('KnowledgeBase', [file('KnowledgeBase/Planted.md')]),
+    dir('Plugins', [dir('Plugins/zz-stray', [file('Plugins/zz-stray/plugin.json')])]),
+    dir('Skills', [dir('Skills/stray-scope', [file('Skills/stray-scope/SKILL.md')])]),
+    file('Stray.docx'),
+  ];
+
+  /** One checkout holding both roots, so one fixture serves both trees. */
+  const CHECKOUT = dir(KB, [
+    dir(`${KB}/KnowledgeBase`, [file(`${KB}/KnowledgeBase/Handbook.md`)]),
+    dir(`${KB}/Skills`, [dir(`${KB}/Skills/Engineering`, [])]),
+    dir(`${KB}/Plugins`, [dir(`${KB}/Plugins/GTM`, []), dir(`${KB}/Plugins/Product`, [])]),
+  ]);
+
+  function renderBoth(tree: FileTreeEntry | null) {
+    const workspace = makeWorkspaceFixture({ fileTree: tree, kbDirName: KB });
+    return render(
+      <MemoryRouter initialEntries={['/skills-and-tools']}>
+        <WorkspaceContext.Provider value={workspace}>
+          <SkillsTree />
+          <PluginsTree />
+        </WorkspaceContext.Provider>
+      </MemoryRouter>,
+    );
+  }
+
+  /** Every row on screen, by the path it addresses. */
+  const paths = () =>
+    Array.from(document.querySelectorAll('[data-tree-path]')).map(
+      (el) => (el as HTMLElement).dataset.treePath!,
+    );
+
+  it('renders the checkout\'s Skills and Plugins, and exactly those with strays beside them', () => {
+    const { unmount } = renderBoth(dir('.', [CHECKOUT]));
+    const clean = paths();
+    expect(clean).toContain(`${KB}/Skills`);
+    expect(clean).toContain(`${KB}/Plugins`);
+    unmount();
+
+    renderBoth(dir('.', [...STRAYS, CHECKOUT]));
+    expect(paths()).toEqual(clean);
+  });
+
+  it('renders no row outside the checkout — the stray plugin and scope are not theirs', () => {
+    renderBoth(dir('.', [...STRAYS, CHECKOUT]));
+    for (const p of paths()) expect(p.startsWith(`${KB}/`)).toBe(true);
+    expect(screen.queryByText('zz-stray')).toBeNull();
+    expect(screen.queryByText('stray-scope')).toBeNull();
+    expect(screen.getByText('GTM')).toBeInTheDocument();
+    expect(screen.getByText('Engineering')).toBeInTheDocument();
+  });
+
+  it('shows the empty state naming the missing checkout in both trees, and no row at all', () => {
+    renderBoth(dir('.', STRAYS));
+    const notices = screen.getAllByTestId('tree-empty-notice');
+    expect(notices).toHaveLength(2);
+    for (const n of notices) {
+      expect(n).toHaveTextContent('Nothing to show here: the repository checkout is missing.');
+    }
+    expect(paths()).toEqual([]);
+    expect(screen.queryByText('Skills')).toBeNull();
+    expect(screen.queryByText('Plugins')).toBeNull();
+  });
+
+  it('still renders nothing at all while the tree is loading', () => {
+    renderBoth(null);
+    expect(screen.queryByTestId('tree-empty-notice')).toBeNull();
+    expect(screen.queryByTestId('skills-tree')).toBeNull();
+    expect(screen.queryByTestId('plugins-tree')).toBeNull();
   });
 });

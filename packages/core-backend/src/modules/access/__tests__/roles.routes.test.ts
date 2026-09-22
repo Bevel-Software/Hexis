@@ -5,15 +5,16 @@ import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 
 import type { IAccessControl } from '../access-control.interface.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { Database } from '../../database/connection.js';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { createAccessRoutes } from '../access.routes.js';
+import { usersDbDouble } from './users-db-double.js';
 
 /**
  * HTTP-level contract tests for the /api/access/roles routes: the admin gate
@@ -58,6 +59,7 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
   const realAccess = new AccessControlService(
     { getWorkspacePath: async () => workspaceDir, readFile: async () => ROLES } as unknown as WorkspaceService,
     KB,
+    new NodeFs(),
   );
   const accessControl = {
     // Admin gate: the route's assertCanMutate calls canWrite('roles.yaml').
@@ -89,6 +91,7 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
     return { name: path.basename(absDir), relativePath: rel || '.', type: 'directory', children };
   };
   const workspaceService = {
+    withPathTurn: async (_id: string, _p: string, op: () => Promise<unknown>) => op(),
     getOrCreateForBranch: vi.fn(async () => ({})),
     getWorkspacePath: vi.fn(async () => workspaceDir),
     listFiles: vi.fn(async () => buildTree(workspaceDir)),
@@ -126,7 +129,7 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
   } as unknown as WorkflowService;
 
   const eventBus = { emit: vi.fn() } as unknown as WorkflowEventBus;
-  const db = {} as unknown as Database;
+  const db = usersDbDouble();
 
   const app = express();
   app.use(express.json());

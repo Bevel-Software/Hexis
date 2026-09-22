@@ -1,4 +1,5 @@
 import { branchSegment } from '../git/branchAuthor.js';
+import { PREAMBLE_FILE } from './agent-preamble.js';
 import { validateFilename } from './filename.js';
 
 /**
@@ -103,19 +104,224 @@ export let SKILLS_DIR = 'Skills';
  */
 export let PLUGINS_DIR = 'Plugins';
 
-/** The three renameable roots, as a deployment declares them and `/api/config` serves them. */
+/**
+ * The file name of the platform's MANAGED agent guide at the repository root —
+ * the document every connected agent is told to read first, written and
+ * refreshed from the packaged template on every start.
+ *
+ * Configurable for one reason: `AGENTS.md` is the name coding agents look for
+ * by convention, so a customer arriving with a repository of their own very
+ * often already HAS one, and under the default name the platform would
+ * overwrite it on the first boot and on every boot after. Renaming the managed
+ * guide (`HEXIS.md`, say) hands that name back: `AGENTS.md` becomes ordinary
+ * content the platform never writes, never refreshes and never hides, and the
+ * customer's file is the one that points at ours (see
+ * {@link agentsFilePointerSentence}).
+ *
+ * A live binding like the three roots above — read it inside a function body,
+ * never capture it at module scope.
+ */
+export let AGENTS_FILE = 'AGENTS.md';
+
+/**
+ * The name the managed guide had when it was the only name it could have.
+ *
+ * Referenced ONLY by the code that has to tell OUR file from THEIRS — the
+ * boot-time removal of a platform-written `AGENTS.md`, the ignore rule that
+ * stops hiding it, the instruction telling an agent to read the customer's
+ * file too. In the spirit of {@link LEGACY_GROUPS_DIR}: a second live spelling
+ * of the CURRENT name is how two layouts start being supported by accident, so
+ * this one is a constant and means exactly one thing.
+ */
+export const LEGACY_AGENTS_FILE = 'AGENTS.md';
+
+/**
+ * The platform files whose names are FIXED — the ones no deployment renames.
+ * The guide is the fourth platform file and is deliberately absent here: its
+ * name is {@link AGENTS_FILE}, and `platform-files.ts` composes the two into
+ * the set every gate reads.
+ *
+ * It lives in this module rather than beside that composition because the
+ * LAYOUT has to validate against it (a guide may not be called `access.md`),
+ * and `platform-files.ts` already reads this module — the other direction
+ * would be a cycle.
+ */
+export const FIXED_PLATFORM_FILE_NAMES: readonly string[] = Object.freeze([
+  'access.md',
+  'roles.yaml',
+  '.bevelignore',
+]);
+
+/**
+ * The three renameable roots and the guide's file name, as a deployment
+ * declares them and `/api/config` serves them.
+ */
 export interface KbLayout {
   knowledgeBaseDir: string;
   skillsDir: string;
   pluginsDir: string;
+  /**
+   * The managed agent guide's file name. OPTIONAL, and deliberately: a layout
+   * that predates the setting — an older server's `/api/config` body, a saved
+   * deployment that never named one — carries three folders and no guide, and
+   * the right answer to that is the right answer to an unset field, which is
+   * `AGENTS.md`. Read it through {@link agentsFileOf} rather than directly, so
+   * "absent" and "the default" can never come to mean two different things.
+   */
+  agentsFile?: string;
 }
 
 /** The layout a deployment gets when it names nothing. */
-export const DEFAULT_KB_LAYOUT: Readonly<KbLayout> = Object.freeze({
+export const DEFAULT_KB_LAYOUT: Readonly<Required<KbLayout>> = Object.freeze({
   knowledgeBaseDir: 'KnowledgeBase',
   skillsDir: 'Skills',
   pluginsDir: 'Plugins',
+  agentsFile: 'AGENTS.md',
 });
+
+/** The guide's name in a layout, with the default standing in for an absent one. */
+export function agentsFileOf(layout: KbLayout): string {
+  return (layout.agentsFile ?? '').trim() || DEFAULT_KB_LAYOUT.agentsFile;
+}
+
+/**
+ * `name` as one literal gitignore pattern. The guide's name is the
+ * operator's, and the name rules admit characters gitignore reads as syntax:
+ * a leading `#` is a comment and a leading `!` a negation (the rule would
+ * silently hide nothing), `[`, `]`, `*` and `?` are globs, and a backslash is
+ * the escape itself. Each is escaped so the pattern names exactly the file.
+ */
+export function gitignoreLiteral(name: string): string {
+  return name.replace(/[[\]*?\\]/g, '\\$&').replace(/^([#!])/, '\\$1');
+}
+
+/**
+ * The ONE sentence the platform offers to keep in a customer's own
+ * `AGENTS.md`, pointing at the managed guide beside it.
+ *
+ * Defined here, once, because two surfaces must produce the identical text:
+ * the deployment-settings field previews it before the admin consents, and the
+ * startup step appends it. A sentence written twice is a sentence that drifts,
+ * and a drifted one appends a SECOND copy to every customer file on the boot
+ * after the drift — which is the one thing this whole feature exists to stop.
+ *
+ * A guide name is a FILE NAME, not an identifier: everything `validateFilename`
+ * admits can appear in it — spaces, brackets, parentheses, `#`, `%` — and each
+ * of those means something in an inline link. So the link is BUILT rather than
+ * interpolated: the label backslash-escaped ({@link markdownLinkLabel}), the
+ * destination percent-encoded ({@link agentsFileLinkPath}). A name that only
+ * parenthesised would break the destination; `#` would turn the rest of the
+ * name into a URL fragment, and the link would point at the customer's own
+ * file.
+ *
+ * Neither spelling need match the name as it is on disk, so nothing may ask
+ * whether this sentence is present by searching for the RAW name — see
+ * {@link mentionsAgentsFile}, which is how the startup step asks.
+ */
+export function agentsFilePointerSentence(agentsFile: string = AGENTS_FILE): string {
+  return `Read [${markdownLinkLabel(agentsFile)}](${agentsFileLinkPath(agentsFile)})${POINTER_SENTENCE_TAIL}`;
+}
+
+/**
+ * Everything of the sentence that does NOT depend on the guide's name — split
+ * out so the one definition above can also be RECOGNISED, by the pattern below,
+ * when the name it was written with is no longer the name in effect.
+ */
+const POINTER_SENTENCE_TAIL =
+  " before working in this knowledge base — it is the platform's guide to its layout, files and rules.";
+
+/**
+ * A pointer sentence the platform wrote, naming ANY guide.
+ *
+ * The label admits a backslash escape (`\[`, `\]`) because that is what
+ * {@link markdownLinkLabel} puts there; the destination cannot contain a `)`
+ * or a newline because {@link agentsFileLinkPath} encodes both. Anchored at
+ * both ends by text the platform fixed, so the shape is the provenance —
+ * a customer would have to reproduce our sentence word for word to be taken
+ * for us, which is the same bar the managed-guide header sets.
+ */
+const POINTER_SENTENCE_PATTERN = new RegExp(
+  `Read \\[(?:[^\\]\\n\\\\]|\\\\[\\s\\S])*\\]\\(\\.\\/[^)\\n]*\\)${escapeRegExp(POINTER_SENTENCE_TAIL)}`,
+  'g',
+);
+
+/** `text` as a literal inside a regular expression. */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * `text` with every pointer sentence THE PLATFORM WROTE aimed at `agentsFile`
+ * — or null when it holds none of ours.
+ *
+ * This is what a SECOND rename needs. The guide's name is a setting an admin
+ * may change again: a knowledge base whose `AGENTS.md` was given a sentence
+ * pointing at `HEXIS.md` and is then renamed to `GUIDE.md` must have that
+ * sentence aimed at the new file, not a second one appended beneath a first
+ * that now points at nothing. Asking only whether the NEW name is mentioned
+ * cannot see that — the old sentence does not mention it.
+ *
+ * Returning the text unchanged (rather than null) when the sentence is already
+ * right is deliberate: "ours and correct" and "not ours at all" are different
+ * answers, and only the caller knows that the second one means "consider
+ * appending".
+ */
+export function retargetAgentsFilePointer(text: string, agentsFile: string = AGENTS_FILE): string | null {
+  let found = false;
+  const wanted = agentsFilePointerSentence(agentsFile);
+  const updated = text.replace(POINTER_SENTENCE_PATTERN, () => {
+    found = true;
+    return wanted;
+  });
+  return found ? updated : null;
+}
+
+/**
+ * `text` as an inline link's LABEL: the characters that would end the label or
+ * start emphasis or code inside it, backslash-escaped. Nothing else is touched
+ * — a filename is read by people, and `AGENTS\.md` helps no one.
+ */
+function markdownLinkLabel(text: string): string {
+  return text.replace(/[\\[\]`*_]/g, (c) => `\\${c}`);
+}
+
+/**
+ * The guide as an inline link's DESTINATION: `./` and the name, percent-encoded.
+ *
+ * `encodeURI` does most of it (a space, a bracket, and `%` itself, so an
+ * already-encoded-looking name is not decoded by a reader). Three more are
+ * encoded by hand because `encodeURI` leaves them and each one ENDS the path
+ * early: `#` opens a fragment, and `(`/`)` close the destination in
+ * CommonMark's bare form. `?` and the rest of the URL-significant set are
+ * already refused by {@link validateFilename}.
+ *
+ * An ordinary name has none of these and comes out exactly as it went in.
+ */
+function agentsFileLinkPath(agentsFile: string): string {
+  return `./${encodeURI(agentsFile).replace(/[#()]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`;
+}
+
+/**
+ * Whether `text` already points at the guide — the ONE question the startup
+ * step asks before appending {@link agentsFilePointerSentence} to a customer's
+ * own `AGENTS.md`.
+ *
+ * The plain name is the answer that matters: a mention in the customer's own
+ * words, a heading, a link they wrote, all count, and the platform stays out
+ * of a file it does not own. The other two spellings are the platform's OWN,
+ * and they are here for idempotence: the sentence writes the name escaped in
+ * the label and encoded in the destination, so on a punctuated name the file
+ * the last boot wrote need not contain the raw name at all. Asking only for
+ * that one would append a second copy on the next boot, and a third on the
+ * one after — the exact failure this feature exists to prevent.
+ */
+export function mentionsAgentsFile(text: string, agentsFile: string = AGENTS_FILE): boolean {
+  return (
+    text.includes(agentsFile) ||
+    text.includes(markdownLinkLabel(agentsFile)) ||
+    text.includes(agentsFileLinkPath(agentsFile))
+  );
+}
 
 /**
  * What is wrong with one root name, or null. A root is joined onto the repo
@@ -138,11 +344,73 @@ export function validateKbRootName(name: string): string | null {
 }
 
 /**
+ * What is wrong with the agent guide's file name, or null.
+ *
+ * The rules, and what each one is for:
+ *
+ *  - ONE FILE NAME. The name is joined onto the repository root and read from
+ *    there and nowhere else, so a separator would name a file the platform
+ *    would write but never read back.
+ *  - A MARKDOWN NAME. The guide is a markdown document that people open in the
+ *    app and agents read as text; `.md` is also what the per-file access rules
+ *    apply to, so a guide under any other extension would take its folder's
+ *    rules and stop being readable by everyone.
+ *  - NOT `CLAUDE.md`. That is the guide's own pre-rename name; knowledge bases
+ *    seeded before the rename still carry one, and it stays legacy content
+ *    rather than becoming a second managed file.
+ *  - NOT ANOTHER PLATFORM FILE. Two platform roles on one path means whichever
+ *    writer runs last wins, silently.
+ *  - NOT A ROOT FOLDER'S NAME, compared case-insensitively like the roots are
+ *    to each other: the workspaces live on case-insensitive filesystems, where
+ *    a file `Docs.md` and a folder `docs.md` are one entry.
+ *
+ * `roots` is the layout the name is judged against — the names this save would
+ * put in effect, not necessarily the ones running now.
+ */
+export function validateAgentsFileName(
+  name: string,
+  roots: Pick<KbLayout, 'knowledgeBaseDir' | 'skillsDir' | 'pluginsDir'> = currentKbLayout(),
+): string | null {
+  const v = name.trim();
+  if (!v) return 'A file name is required.';
+  if (v.includes('/') || v.includes('\\')) return 'Use a single file name — no folders.';
+  // The ONE rule for what a path component may be called, as everywhere else.
+  const asName = validateFilename(v);
+  if (asName) return asName;
+  const lower = v.toLowerCase();
+  // The taken names come FIRST, so a name that is wrong for a specific reason
+  // is refused with that reason rather than with whichever general rule it
+  // happens to break as well (`roles.yaml` is not merely 'not markdown').
+  if (lower === 'claude.md') {
+    return 'CLAUDE.md is the guide\'s pre-rename name and stays reserved for it.';
+  }
+  for (const reserved of [...FIXED_PLATFORM_FILE_NAMES, PREAMBLE_FILE]) {
+    if (lower === reserved.toLowerCase()) return `${reserved} is a platform file name.`;
+  }
+  // A dot-prefixed name is skipped by every scanner that treats dot-entries as
+  // bookkeeping — including the one that would show the guide in the tree.
+  if (v.startsWith('.')) return 'The name can\'t start with a dot.';
+  if (!v.endsWith('.md')) return 'The name must end in .md.';
+  for (const [label, dir] of [
+    ['knowledge', roots.knowledgeBaseDir],
+    ['skills', roots.skillsDir],
+    ['plugins', roots.pluginsDir],
+  ] as const) {
+    if (lower === (dir ?? '').trim().toLowerCase()) {
+      return `That is already the ${label} folder's name.`;
+    }
+  }
+  return null;
+}
+
+/**
  * What is wrong with a layout, or null — the same rule {@link configureKbLayout}
  * enforces, without applying anything. Separate so the setup screen can judge a
- * proposed layout before it is saved. The three names must differ, compared
- * case-insensitively: the workspaces live on case-insensitive filesystems too,
- * where `Skills` and `skills` are one folder.
+ * proposed layout before it is saved. The three folder names must differ,
+ * compared case-insensitively: the workspaces live on case-insensitive
+ * filesystems too, where `Skills` and `skills` are one folder. The guide's
+ * file name is judged against all three by the same rule (see
+ * {@link validateAgentsFileName}), which makes the four names distinct.
  */
 export function validateKbLayout(layout: KbLayout): string | null {
   for (const [label, value] of [
@@ -164,7 +432,37 @@ export function validateKbLayout(layout: KbLayout): string | null {
   const fixed = [DATA_DIR, AGENTS_DIR, PIPELINES_DIR].map((n) => n.toLowerCase());
   const clash = names.find((n) => fixed.includes(n));
   if (clash) return `"${clash}" is a reserved folder name (${[DATA_DIR, AGENTS_DIR, PIPELINES_DIR].join(', ')}).`;
+  // Judged against the roots THIS layout declares, not the ones in effect: a
+  // save that renames the plugins folder and the guide together must be read
+  // as the pair it is.
+  const guide = validateAgentsFileName(agentsFileOf(layout), layout);
+  if (guide) return `The agent guide's file name: ${guide}`;
   return null;
+}
+
+/** Everything that has asked to hear when the layout is applied. */
+const layoutListeners = new Set<() => void>();
+
+/**
+ * Be told when {@link configureKbLayout} runs — for the few things that cannot
+ * read a live binding at the moment they are used.
+ *
+ * Almost nothing needs this: the roots and the guide's name are `let` bindings
+ * read inside function bodies, so code that follows the rule follows the
+ * layout for free. The exception is a value BUILT ONCE and handed to something
+ * that keeps it — the tool catalog's descriptions, which are validated into
+ * frozen-ish defs at registration and then served to agents from a map. Boot
+ * applies the layout before they are built, but the save that completes
+ * FIRST-RUN SETUP applies it afterwards (see `setup.routes.ts`, which must, so
+ * the KB phase that runs in the same request scaffolds the names the admin
+ * just chose) — and without this the catalog would go on naming `AGENTS.md`
+ * until someone restarted the server.
+ *
+ * Listeners run in registration order, after the bindings are updated and only
+ * when the layout was accepted.
+ */
+export function onKbLayoutApplied(listener: () => void): void {
+  layoutListeners.add(listener);
 }
 
 /**
@@ -178,20 +476,45 @@ export function configureKbLayout(layout: KbLayout): void {
   KNOWLEDGE_BASE_DIR = layout.knowledgeBaseDir.trim();
   SKILLS_DIR = layout.skillsDir.trim();
   PLUGINS_DIR = layout.pluginsDir.trim();
+  AGENTS_FILE = agentsFileOf(layout);
+  for (const listener of layoutListeners) listener();
 }
 
 /** The layout currently in effect. */
-export function currentKbLayout(): KbLayout {
-  return { knowledgeBaseDir: KNOWLEDGE_BASE_DIR, skillsDir: SKILLS_DIR, pluginsDir: PLUGINS_DIR };
+export function currentKbLayout(): Required<KbLayout> {
+  return {
+    knowledgeBaseDir: KNOWLEDGE_BASE_DIR,
+    skillsDir: SKILLS_DIR,
+    pluginsDir: PLUGINS_DIR,
+    agentsFile: AGENTS_FILE,
+  };
+}
+
+/**
+ * Whether a layout — the one in effect, unless one is given — is the default
+ * one. The setup-completing save applies the stored names while this holds,
+ * the same "only from none to some" rule the branch model follows — and also
+ * on a retry after its own failed initialization run, when the process holds
+ * names setup applied but the app never opened (see `setup.routes.ts`). A
+ * layout the process booted with is never replaced here.
+ */
+export function isDefaultKbLayout(layout: KbLayout = currentKbLayout()): boolean {
+  return (
+    layout.knowledgeBaseDir === DEFAULT_KB_LAYOUT.knowledgeBaseDir &&
+    layout.skillsDir === DEFAULT_KB_LAYOUT.skillsDir &&
+    layout.pluginsDir === DEFAULT_KB_LAYOUT.pluginsDir &&
+    agentsFileOf(layout) === DEFAULT_KB_LAYOUT.agentsFile
+  );
 }
 
 /**
  * Render the layout placeholders a managed template carries —
- * `{{knowledgeBaseDir}}`, `{{skillsDir}}`, `{{pluginsDir}}` — with the
- * names in effect. The packaged `AGENTS.md` and `.bevelignore` are written
- * this way so a deployment that renamed its roots hands the agent a guide
- * that names the folders it will actually find. Text without placeholders
- * passes through unchanged.
+ * `{{knowledgeBaseDir}}`, `{{skillsDir}}`, `{{pluginsDir}}`, `{{agentsFile}}`
+ * — with the names in effect. The packaged guide and `.bevelignore` are
+ * written this way so a deployment that renamed its roots hands the agent a
+ * guide that names the folders it will actually find, and a deployment that
+ * renamed the guide gets a guide naming the file it lives in. Text without
+ * placeholders passes through unchanged.
  */
 export function renderKbLayoutPlaceholders(text: string, layout: KbLayout = currentKbLayout()): string {
   // Replacer FUNCTIONS: a string replacement would interpret `$&`, `$$` and
@@ -199,7 +522,8 @@ export function renderKbLayoutPlaceholders(text: string, layout: KbLayout = curr
   return text
     .replaceAll('{{knowledgeBaseDir}}', () => layout.knowledgeBaseDir)
     .replaceAll('{{skillsDir}}', () => layout.skillsDir)
-    .replaceAll('{{pluginsDir}}', () => layout.pluginsDir);
+    .replaceAll('{{pluginsDir}}', () => layout.pluginsDir)
+    .replaceAll('{{agentsFile}}', () => agentsFileOf(layout));
 }
 
 /**
@@ -380,27 +704,53 @@ export function pluginIdentityOf(manifest: Record<string, unknown> | null, folde
 /**
  * What a person sees the plugin called: the manifest's `displayName` (the
  * vendor field Claude Code shows in its picker; any casing, spaces allowed),
- * else the folder name — which is what every plugin made before this field
- * existed was called, so nothing renames itself on upgrade.
+ * else the manifest's `name`.
+ *
+ * THE MANIFEST IS THE ONLY SOURCE — there is no folder argument, on purpose.
+ * The folder's spelling used to stand in here, which made where a plugin
+ * happens to live a hidden input to what everyone sees it called: the API
+ * always answered with a display name while the file sometimes omitted the
+ * field, and moving or re-casing a folder silently renamed the plugin. Every
+ * write path now persists the field (see {@link renderPluginManifest} and
+ * the rename service), and one startup step backfilled the folder's spelling
+ * into the manifests written before that, so nothing renames itself.
+ *
+ * Empty only for a manifest that names nothing at all — the shape discovery
+ * already warns about and stands the folder in as the IDENTITY for; its
+ * display name then follows that identity, never the folder directly.
  */
-export function pluginDisplayNameOf(manifest: Record<string, unknown> | null, folderName: string): string {
+export function pluginDisplayNameOf(manifest: Record<string, unknown> | null): string {
   const declared = manifest?.displayName;
-  return typeof declared === 'string' && declared.trim() ? declared.trim() : folderName;
+  if (typeof declared === 'string' && declared.trim()) return declared.trim();
+  const name = manifest?.name;
+  return typeof name === 'string' ? name.trim() : '';
 }
 
 /**
  * A minimal, valid `plugin.json` for a plugin folder: the identifier the
- * folder name folds into, and — when the folder is spelled differently — the
- * folder's spelling as `displayName`, so a client's picker shows "Sales
- * Team" for `sales-team`. Nothing else: `version`, `license` and the rest
- * are metadata about a DISTRIBUTED package, and inventing values for a
- * folder someone just made in the app would be asserting things nobody said.
+ * folder name folds into, and the name a person sees it by — `displayName`,
+ * ALWAYS written, so a client's picker shows "Sales Team" for `sales-team`
+ * and every reader has the one field to read.
+ *
+ * ONE argument, deliberately: `folderName` is the folder's own leaf, and on
+ * the creation path that leaf IS the name its creator typed, trimmed — the
+ * dialog's route and the `create_plugin` tool make the folder out of the
+ * typed name and hand the same string to both. A second `displayName`
+ * parameter would be a way for the two to disagree that no caller needs.
+ * The field is written even when it equals the identifier: a manifest that
+ * omits it when the two agree is a manifest whose readers need a second rule.
+ *
+ * Nothing else: `version`, `license` and the rest are metadata about a
+ * DISTRIBUTED package, and inventing values for a folder someone just made
+ * in the app would be asserting things nobody said.
  */
 export function renderPluginManifest(folderName: string): string {
   const name = pluginManifestName(folderName);
-  const manifest: Record<string, unknown> = { $schema: PLUGIN_MANIFEST_SCHEMA, name };
-  if (folderName !== name) manifest.displayName = folderName;
-  return `${JSON.stringify(manifest, null, 2)}\n`;
+  // Always a non-blank, trimmed answer: the spelling asked for, else the
+  // identifier — a `displayName` of spaces would be a field present and
+  // saying nothing, which is the shape every reader here exists to avoid.
+  const shown = folderName.trim() || name;
+  return `${JSON.stringify({ $schema: PLUGIN_MANIFEST_SCHEMA, name, displayName: shown }, null, 2)}\n`;
 }
 
 /**
@@ -496,6 +846,19 @@ export function ontologyRoots(): readonly string[] {
  */
 export function reservedRootDirNames(): ReadonlySet<string> {
   return new Set([KNOWLEDGE_BASE_DIR, SKILLS_DIR, PLUGINS_DIR, DATA_DIR, AGENTS_DIR, PIPELINES_DIR]);
+}
+
+/**
+ * The roots anyone may start a new folder in — knowledge, skills and plugins
+ * — whatever the root's own `access.md` grants them. Everywhere else a change
+ * needs read access to where it lands (the "read before write" rule); a new
+ * folder directly under one of these three is the one place that rule does
+ * not apply, because the new folder carries its creator's own grant. A
+ * function, like {@link reservedRootDirNames}, because the names are
+ * configurable.
+ */
+export function creatableRootDirNames(): ReadonlySet<string> {
+  return new Set([KNOWLEDGE_BASE_DIR, SKILLS_DIR, PLUGINS_DIR]);
 }
 
 /** The `Knowledge/` marker subfolder of an ontology (holds the graph nodes). */

@@ -1,4 +1,7 @@
 import express, { type RequestHandler } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('agent-instructions');
 import { composeAgentInstructions } from './compose.js';
 import type { AgentPreambleReader } from './read-preamble.js';
 
@@ -12,8 +15,9 @@ import type { AgentPreambleReader } from './read-preamble.js';
  *                             bridge reads it at startup; the External agent
  *                             access card reads it to show what agents get.
  *
- * The hosted proxy does NOT call this: it composes in-process at session
- * creation (see `McpService.createSession`). `Cache-Control: no-store`
+ * The hosted proxy does NOT call this: it composes in-process while building
+ * each request's server (see `McpService.createRequestServer`).
+ * `Cache-Control: no-store`
  * because the text is privileged: it is read with platform rights and may
  * name folders the caller cannot open. A reader throw is a 500, never an
  * empty preamble, so the caller's own fallback decides what to send.
@@ -28,7 +32,7 @@ export function createAgentInstructionsRoutes(manualAuth: RequestHandler, readPr
     try {
       res.json(composeAgentInstructions(await readPreamble()));
     } catch (err) {
-      console.error('[agent-instructions] reading mcp-description.md failed:', err instanceof Error ? err.message : err);
+      log.error('reading mcp-description.md failed:', { err });
       res.status(500).json({ error: 'Failed to read the agent instructions' });
     }
   });

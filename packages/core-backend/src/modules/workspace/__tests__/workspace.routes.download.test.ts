@@ -2,6 +2,8 @@ import { get as httpGet, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { PathTraversalError } from '../../../shared/domain-errors.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
@@ -36,6 +38,7 @@ const stubCreatorAccess: ICreatorAccess = {
 const USER_ID = 'user-1';
 const USER = { id: USER_ID, email: 'alice@example.com', name: 'Alice' };
 const WORKSPACE_ID = 'target-company-state';
+const KB = 'knowledge-base';
 const FILE_BYTES = Buffer.from('hello world');
 const ZIP_BYTES = Buffer.from('PK\x03\x04 fake-zip-bytes');
 /** The one token the stubbed auth service accepts, for the real-middleware cases. */
@@ -126,10 +129,11 @@ async function makeHarness(opts: {
     workflowService,
     eventBus,
     accessControl,
-    'knowledge-base',
+    KB,
     stubCreatorAccess,
     // Not exercised here — only `.bevelignore`'s tree visibility consults it.
     { isAdmin: async () => false } as unknown as IAdminAccessService,
+    new NodeFs(),
   ));
 
   const server = await new Promise<Server>((resolve) => {
@@ -337,8 +341,12 @@ describe('GET /workspace/:id/folder/zip — gated on Download role', () => {
     expect(dispo).toContain(`filename*=UTF-8''${encodeURIComponent('Sales.zip')}`);
     const buf = Buffer.from(await res.arrayBuffer());
     expect(buf.equals(ZIP_BYTES)).toBe(true);
+    // The access decision and the zip are made on the SAME path: the
+    // unprefixed request is placed inside the repository first, the download
+    // verb is resolved on its repo-relative form, and the service is handed the
+    // repository path it was judged as.
     expect(h.canDownload).toHaveBeenCalledWith(WORKSPACE_ID, USER.email, 'Knowledge/Sales');
-    expect(h.createFolderZip).toHaveBeenCalledWith(WORKSPACE_ID, 'Knowledge/Sales');
+    expect(h.createFolderZip).toHaveBeenCalledWith(WORKSPACE_ID, `${KB}/Knowledge/Sales`);
   });
 
   it('user without Download role gets 403 and no zip is built', async () => {
@@ -376,15 +384,26 @@ describe('GET /workspace/:id/folder/zip — gated on Download role', () => {
     expect(body.error).toContain('524288000');
   });
 
-  it('maps Path traversal detected to 403', async () => {
+  it('maps a traversal refusal to 403 — by its TYPE, not by its wording', async () => {
     h = await makeHarness({
       canDownload: true,
-      folderZip: async () => { throw new Error('Path traversal detected'); },
+      folderZip: async () => { throw new PathTraversalError(); },
     });
+    const res = await fetch(
+      `${h.baseUrl}/api/workspace/${WORKSPACE_ID}/folder/zip?path=${encodeURIComponent(`${KB}/Knowledge/Sales`)}&download=1`,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it('refuses a climbing path itself, before the access check or the service', async () => {
+    h = await makeHarness({ canDownload: true });
     const res = await fetch(
       `${h.baseUrl}/api/workspace/${WORKSPACE_ID}/folder/zip?path=${encodeURIComponent('../escape')}&download=1`,
     );
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain('outside the knowledge base repository');
+    expect(h.canDownload).not.toHaveBeenCalled();
+    expect(h.createFolderZip).not.toHaveBeenCalled();
   });
 
   it('maps Not a directory to 400 (user pointed at a file)', async () => {

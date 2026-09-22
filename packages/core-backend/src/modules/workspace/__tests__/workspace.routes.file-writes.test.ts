@@ -2,6 +2,9 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { PathTraversalError } from '../../../shared/domain-errors.js';
+import { EntryExistsError } from '../workspace.service.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
@@ -9,6 +12,7 @@ import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
+import type { SkillSaveCheck } from '../workspace.tools.js';
 import type { WorkspaceService } from '../workspace.service.js';
 
 /**
@@ -39,14 +43,20 @@ interface Harness {
   planForCreate: ReturnType<typeof vi.fn>;
   seedWrites: string[];
   lockedPaths: string[];
+  /** Paths released with a discard (reset to HEAD) after a failed op. */
+  discardedPaths: string[];
+  /** Paths released leaving disk and queue alone after a failed op. */
+  untouchedPaths: string[];
   /** The paths turns were taken on, so the third coordinator is checked too. */
   turnPaths: string[];
   /** What happened, in order, so the critical section can be asserted. */
   order: string[];
 }
 
-async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
+async function makeHarness(opts: { canRead?: boolean; skillSaveCheck?: SkillSaveCheck } = {}): Promise<Harness> {
   const lockedPaths: string[] = [];
+  const discardedPaths: string[] = [];
+  const untouchedPaths: string[] = [];
   const seedWrites: string[] = [];
   const order: string[] = [];
   const readFileMock = vi.fn(async () => 'CONTENT');
@@ -98,7 +108,6 @@ async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
   });
   const stubCreatorAccess = {
     planForCreate,
-    grantInExtractedFile: async () => null,
     noteAccessFileWritten: () => {},
   } as unknown as ICreatorAccess;
 
@@ -109,7 +118,12 @@ async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
       return { acquired: true, lock: { holderUserId: USER_ID, holderName: 'Alice' } };
     }),
     releaseLock: vi.fn(async () => null),
-    releaseLockNoCommit: vi.fn(async () => undefined),
+    releaseLockNoCommit: vi.fn(async (_w: string, _b: string, p: string) => {
+      discardedPaths.push(p);
+    }),
+    releaseLockUntouched: vi.fn(async (_w: string, _b: string, p: string) => {
+      untouchedPaths.push(p);
+    }),
   } as unknown as IWorkflowService;
 
   const authService = { getUserById: vi.fn(async () => USER) } as unknown as AuthService;
@@ -138,6 +152,8 @@ async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
       KB,
       stubCreatorAccess,
       { isAdmin: async () => true } as unknown as IAdminAccessService,
+      new NodeFs(),
+      opts.skillSaveCheck,
     ),
   );
   const server = await new Promise<Server>((resolve) => {
@@ -154,6 +170,8 @@ async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
     planForCreate,
     seedWrites,
     lockedPaths,
+    discardedPaths,
+    untouchedPaths,
     turnPaths,
     order,
   };
@@ -163,8 +181,8 @@ function close(s: Server): Promise<void> {
   return new Promise((resolve, reject) => s.close((e) => (e ? reject(e) : resolve())));
 }
 
-function put(h: Harness, body: unknown): Promise<Response> {
-  return fetch(`${h.baseUrl}/api/workspace/${WS}/file?path=${encodeURIComponent(FILE)}`, {
+function put(h: Harness, body: unknown, file = FILE): Promise<Response> {
+  return fetch(`${h.baseUrl}/api/workspace/${WS}/file?path=${encodeURIComponent(file)}`, {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -181,6 +199,63 @@ function errno(code: string, message: string): NodeJS.ErrnoException {
   err.code = code;
   return err;
 }
+
+describe('PUT /workspace/:id/file — roles.yaml from the editor', () => {
+  let h: Harness | null = null;
+  afterEach(async () => {
+    if (h) await close(h.server);
+    h = null;
+  });
+
+  it('can still create a role: the agents-never-create-roles rule is not the editor\'s', async () => {
+    h = await makeHarness();
+    const roles = `${KB}/roles.yaml`;
+    const content = 'roles:\n  Admin:\n    - alice@example.com\n  Project Phoenix:\n    - p@example.com\n';
+
+    const res = await put(h, { content }, roles);
+
+    expect(res.status).toBe(200);
+    expect(h.writeFileMock).toHaveBeenCalledWith(WS, roles, content, expect.anything());
+  });
+
+  it('still refuses an unparseable roles.yaml with the 422', async () => {
+    h = await makeHarness();
+    const res = await put(h, { content: 'roles: [oops' }, `${KB}/roles.yaml`);
+    expect(res.status).toBe(422);
+    expect(h.writeFileMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('PUT /workspace/:id/file — allowed-tools warnings', () => {
+  let h: Harness | null = null;
+  afterEach(async () => {
+    if (h) await close(h.server);
+    h = null;
+  });
+
+  const warning = { entry: 'hubspot.serch', message: 'not a tool', suggestion: 'hubspot.search' };
+
+  it('writes the skill, then answers with the warnings for the saving user', async () => {
+    const checkSave = vi.fn(async () => [warning]);
+    h = await makeHarness({ skillSaveCheck: { checkSave, checkSaves: async () => [] } });
+    const skill = `${KB}/Plugins/Sales/rfi/SKILL.md`;
+    const content = '---\nallowed-tools: Bash hubspot.serch\n---\n';
+
+    const res = await put(h, { content }, skill);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: 'written', warnings: [warning] });
+    // Never a block: the bytes landed before the check was even asked.
+    expect(h.writeFileMock).toHaveBeenCalledWith(WS, skill, content, expect.anything());
+    expect(checkSave).toHaveBeenCalledWith(USER.email, skill, content);
+  });
+
+  it('answers the plain shape when there is nothing to warn about', async () => {
+    h = await makeHarness({ skillSaveCheck: { checkSave: async () => [], checkSaves: async () => [] } });
+    const res = await put(h, { content: 'Body.' });
+    expect(await res.json()).toEqual({ status: 'written' });
+  });
+});
 
 describe('PUT /workspace/:id/file — ifMatch', () => {
   let h: Harness | null = null;
@@ -382,6 +457,72 @@ describe('the mutating verbs share one file identity', () => {
     expect(h.lockedPaths).toEqual([]);
   });
 
+  it('PATCH answers a taken destination with 409 and the sentence the sidebar shows', async () => {
+    // The refusal is the service's, and it reaches the client whole: the
+    // rename box renders `error` verbatim, and a client that switches on the
+    // shape has `kind` to switch on.
+    h = await makeHarness();
+    h.moveEntryMock.mockRejectedValueOnce(new EntryExistsError('file', `${KB}/Sales/Notes.md`));
+
+    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/file`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ oldPath: `${KB}/Sales/Report.docx`, newPath: `${KB}/Sales/Notes.md` }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      error: 'A file named Notes.md already exists in Sales.',
+      kind: 'entry-exists',
+      entryKind: 'file',
+    });
+  });
+
+  /**
+   * The refusal must not cost a bystander their file.
+   *
+   * Two moves racing onto one free name end with the winner's file landed and
+   * its commit still queued — commits run out of band in the pending-commits
+   * worker — and the loser then holding the very same destination lock, being
+   * told the name is taken. A discarding release resets that PATH to HEAD, not
+   * "the loser's changes", so it would delete the winner's landed file while
+   * reporting the loser's 409. Nothing the refusal does writes, so the lock
+   * releases untouched instead: disk and queue exactly as they were.
+   */
+  it('PATCH releases both locks UNTOUCHED when the destination is taken, discarding nothing', async () => {
+    h = await makeHarness();
+    h.moveEntryMock.mockRejectedValueOnce(new EntryExistsError('file', `${KB}/Sales/Notes.md`));
+
+    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/file`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ oldPath: `${KB}/Sales/Report.docx`, newPath: `${KB}/Sales/Notes.md` }),
+    });
+
+    expect(res.status).toBe(409);
+    // The destination is the one that matters — it is where the winner's file
+    // is — but the source was not written either, so neither is reset.
+    expect(h.discardedPaths).toEqual([]);
+    expect(h.untouchedPaths.sort()).toEqual([`${KB}/Sales/Notes.md`, `${KB}/Sales/Report.docx`]);
+  });
+
+  it('PATCH still DISCARDS when the move failed for a reason that may have written', async () => {
+    // The fail-closed side: an unrecognised failure keeps the reset, so a
+    // half-written path cannot be published by the next release on it.
+    h = await makeHarness();
+    h.moveEntryMock.mockRejectedValueOnce(new Error('EIO: disk fell over mid-rename'));
+
+    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/file`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ oldPath: `${KB}/Sales/Report.docx`, newPath: `${KB}/Sales/Notes.md` }),
+    });
+
+    expect(res.status).toBe(500);
+    expect(h.untouchedPaths).toEqual([]);
+    expect(h.discardedPaths.sort()).toEqual([`${KB}/Sales/Notes.md`, `${KB}/Sales/Report.docx`]);
+  });
+
   it('PATCH refuses a non-string path in the body', async () => {
     h = await makeHarness();
 
@@ -459,12 +600,25 @@ describe('GET /workspace/:id/file — read failures', () => {
     expect(h.readFileMock).toHaveBeenCalledWith(WS, FILE);
   });
 
-  it('keeps a traversal refusal a 403', async () => {
+  it('keeps a traversal refusal a 403 — by its TYPE, not by its wording', async () => {
     h = await makeHarness();
-    h.readFileMock.mockRejectedValue(new Error('Path traversal detected'));
+    h.readFileMock.mockRejectedValue(new PathTraversalError());
 
     const res = await get(h);
 
     expect(res.status).toBe(403);
+  });
+
+  it('a read failure that merely SAYS "Path traversal detected" is not one', async () => {
+    // The wording used to be the check, so any error carrying it — an
+    // upstream tool quoting our own refusal back at us — answered 403 and
+    // read as a blocked traversal in the log. Only the type decides now.
+    h = await makeHarness();
+    h.readFileMock.mockRejectedValue(new Error('Path traversal detected'));
+
+    // 500, the route's contract for a read failure that is neither an absence
+    // nor a domain refusal — pinned exactly, so a regression to 404 (or a
+    // silent 200) fails here rather than passing a "not 403" check.
+    expect((await get(h)).status).toBe(500);
   });
 });

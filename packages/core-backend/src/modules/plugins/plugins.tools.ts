@@ -36,6 +36,7 @@ const PROVISIONED_OUTPUT = {
     skillsDir: { type: 'string', description: 'Where its skills go: `<path>/skills`. Each skill is a subfolder holding a `SKILL.md`.' },
     folder: { type: 'string', description: 'The same folder as its path below the plugins root.' },
     name: { type: 'string', description: 'The plugin identity (its manifest name), as grants and the marketplace spell it.' },
+    displayName: { type: 'string', description: 'What people see it called — the manifest `displayName`, exactly as persisted: for `create_plugin`, the name that was asked for, trimmed; for `my_plugin`, the personal folder\'s own label.' },
     created: { type: 'boolean', description: 'False when the folder already existed.' },
   },
 } as const;
@@ -45,7 +46,8 @@ export const MY_PLUGIN: UtcpTool = toolDef({
   description:
     "The caller's own private plugin — their personal space in the knowledge base, created on first use. " +
     'Returns its folder and where skills go inside it (`skillsDir`); write a skill there as ' +
-    '`<skillsDir>/<skill-name>/SKILL.md` with the file tools. Readable only by its owner — not even admins — and ' +
+    '`<skillsDir>/<skill-name>/SKILL.md` with the file tools, opening with the Agent Skills frontmatter ' +
+    '(`name`, `description`, and `metadata.version` such as `"1.0.0"`). Readable only by its owner — not even admins — and ' +
     'never listed as a shared plugin. Idempotent: calling it again returns the same folder.',
   path: '/api/plugins/personal',
   inputs: { type: 'object', properties: {}, additionalProperties: false },
@@ -70,7 +72,7 @@ export const CREATE_PLUGIN: UtcpTool = toolDef({
   inputs: {
     type: 'object',
     properties: {
-      name: { type: 'string', minLength: 1, description: 'The plugin name, e.g. `Design`. Becomes the folder name; its identifier is the kebab-case slug.' },
+      name: { type: 'string', minLength: 1, description: 'The plugin name, e.g. `Design`. Becomes the folder name and the display name people see; its identifier is the kebab-case slug.' },
       parent: {
         type: 'string',
         description: 'Optional grouping folder below the plugins root to create it in, e.g. `Teams` or `Teams/EU`. Omit for the root.',

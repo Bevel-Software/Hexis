@@ -12,7 +12,7 @@ import {
   type Verb,
 } from '../../../access-model/access-grammar.js';
 import { spliceGrant } from '../../../access-model/access-splice.js';
-import { isAbsence } from '../../../../shared/fs-errors.js';
+import { isAbsence, type IFsProbe } from '../../../../shared/fs.contract.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 /**
@@ -41,42 +41,39 @@ import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '..
 export class PersonalSpacesStep implements OnServerStart {
   readonly name = 'personal-spaces';
 
+  constructor(private readonly disk: IFsProbe) {}
+
   async run(ctx: ServerStartContext): Promise<StepResult> {
     for (const branch of await ctx.allBranches()) {
-      await closePersonalSpaces(branch);
+      await this.closePersonalSpaces(branch);
     }
     return { outcome: 'ok' };
   }
-}
 
-async function closePersonalSpaces(branch: KbBranch): Promise<void> {
-  const repoDir = await branch.repoDir();
-  let entries: import('node:fs').Dirent[];
-  try {
-    entries = await fs.readdir(path.join(repoDir, PLUGINS_DIR), { withFileTypes: true });
-  } catch (err) {
-    if (isAbsence(err)) return;
-    throw err;
-  }
-  const closed: string[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !isPersonalPluginFolder(entry.name)) continue;
-    const rel = `${PLUGINS_DIR}/${entry.name}/access.md`;
-    let text: string;
-    try {
-      text = await fs.readFile(path.join(repoDir, rel), 'utf8');
-    } catch (err) {
-      if (isAbsence(err)) continue; // a folder with no rules is not a provisioned space
-      throw err;
+  private async closePersonalSpaces(branch: KbBranch): Promise<void> {
+    const repoDir = await branch.repoDir();
+    const entries = await this.disk.listDir(path.join(repoDir, PLUGINS_DIR));
+    if (entries === null) return;
+    const closed: string[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !isPersonalPluginFolder(entry.name)) continue;
+      const rel = `${PLUGINS_DIR}/${entry.name}/access.md`;
+      let text: string;
+      try {
+        text = await fs.readFile(path.join(repoDir, rel), 'utf8');
+      } catch (err) {
+        if (isAbsence(err)) continue; // a folder with no rules is not a provisioned space
+        throw err;
+      }
+      const next = closePersonalSpaceRules(text, rel);
+      if (next === null) continue;
+      branch.write(rel, next);
+      closed.push(entry.name);
     }
-    const next = closePersonalSpaceRules(text, rel);
-    if (next === null) continue;
-    branch.write(rel, next);
-    closed.push(entry.name);
+    if (closed.length === 0) return;
+    branch.note(`Keep ${closed.length === 1 ? 'a personal space' : `${closed.length} personal spaces`} private`);
+    for (const name of closed) branch.note(`${PLUGINS_DIR}/${name}/access.md: read denies everyone`);
   }
-  if (closed.length === 0) return;
-  branch.note(`Keep ${closed.length === 1 ? 'a personal space' : `${closed.length} personal spaces`} private`);
-  for (const name of closed) branch.note(`${PLUGINS_DIR}/${name}/access.md: read denies everyone`);
 }
 
 /**
@@ -108,11 +105,12 @@ function closeFolderRules(text: string, folder: Record<Verb, ParsedEntry[]>): st
   // A file whose folder rules already settle `everyone`'s READ is left as it
   // is: an entry under `read` itself (a denial means the space is closed; a
   // grant means someone opened it on purpose), or a GRANT under a verb that
-  // folds into read (`write`, `owner` — the grammar's own list). A denial
-  // written beside such a grant would change nothing (a same-scope grant
-  // wins) while making the file read as a contradiction. Anything else —
-  // `deny everyone` under write alone, `download: everyone` — says nothing
-  // about read, and the space is still open to an inherited `read: everyone`.
+  // folds into read (`write`, `download`, `owner` — the grammar's own list,
+  // which it reads rather than restates). A denial written beside such a
+  // grant would change nothing (a same-scope grant wins) while making the
+  // file read as a contradiction. Anything else — `deny everyone` under
+  // write alone — says nothing about read, and the space is still open to
+  // an inherited `read: everyone`.
   const settled = sourceVerbsFor('read').some((verb) =>
     folder[verb].some((e) => everyone(e) && (verb === 'read' || !e.deny)),
   );
@@ -126,15 +124,16 @@ function closeFolderRules(text: string, folder: Record<Verb, ParsedEntry[]>): st
 
 /**
  * The frontmatter — the FILE's rules — saying what the folder's say: `deny
- * everyone`, then the people the folder admits (its user grants under
- * `read`, `write` and `owner`). Only for a file whose folder rules settle
+ * everyone`, then the people the folder admits (its user grants under every
+ * verb that folds into read). Only for a file whose folder rules settle
  * `everyone`'s read as DENIED — a denial under `read` with no grant under
- * any verb that folds into read (`write: everyone` opens the folder to all
- * despite the denial, a same-scope grant winning): a space its owner opened
- * on purpose, either way, keeps the file open too. A frontmatter that
- * already mentions `everyone` under `read` — a denial, or a grant that
- * lists the file for all — is left as written; so is a legacy single-block
- * file, whose frontmatter IS the folder's rules and was closed above.
+ * any verb that folds into read (`write: everyone` or `download: everyone`
+ * opens the folder to all despite the denial, a same-scope grant winning):
+ * a space its owner opened on purpose, either way, keeps the file open too.
+ * A frontmatter that already mentions `everyone` under `read` — a denial, or
+ * a grant that lists the file for all — is left as written; so is a legacy
+ * single-block file, whose frontmatter IS the folder's rules and was closed
+ * above.
  */
 function closeFileRules(text: string, relativePath: string): string {
   if (!accessMdDeclaresBodyRules(text)) return text;

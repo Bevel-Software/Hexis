@@ -28,11 +28,14 @@
 export { type HexisMcpConfig, type ResolvedCliConfig, ConfigError, resolveConfig, USAGE } from './config.js';
 export {
   DeploymentError,
+  ConnectionKeyRejectedError,
   resolveMcpUrl,
   resolveDeployment,
   fetchAgentInstructions,
   type ResolvedDeployment,
   fetchAllManuals,
+  fetchCatalogRevision,
+  CatalogRevisionUnsupportedError,
   fetchLocalOnlyManuals,
   fetchLocalToolVariables,
   type LocalManualInfo,
@@ -64,4 +67,32 @@ export {
   type OAuthModeOptions,
 } from './oauth.js';
 export { REMOTE_MANUAL_NAME, remoteManualTemplate, localManualTemplates } from './manuals.js';
-export { createHexisMcpServer, listedTools, type HexisMcpHandle } from './server.js';
+export {
+  createHexisMcpServer,
+  listedTools,
+  discoveryNoticeTool,
+  DISCOVERY_NOTICE_TOOL,
+  type HexisMcpHandle,
+} from './server.js';
+export {
+  createCatalogCheck,
+  CATALOG_CHECK_MIN_INTERVAL_MS,
+  type CatalogCheck,
+  type CatalogCheckOptions,
+} from './catalog-watch.js';
+export {
+  SUPPORTED_NODE,
+  SUPPORTED_NODE_MAJORS,
+  enginesRange,
+  supportedNodePhrase,
+  preflight,
+  nodeMajor,
+  unsupportedNodeSentence,
+  nativeSandboxSentence,
+  missingNativeSandboxSentence,
+  loadNativeSandbox,
+  codeModeInstalled,
+  type PreflightOptions,
+  type NativeSandboxProbe,
+  type SupportedNode,
+} from './preflight.js';

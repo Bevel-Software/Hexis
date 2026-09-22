@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -8,13 +9,24 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
-import { X, Lock, Loader2, ChevronDown, Check, Globe } from 'lucide-react';
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import { X, Lock, Loader2, ChevronDown, Check, Globe, CircleHelp } from 'lucide-react';
+import {
+  canCarryFrontmatter,
+  conferredByOthers,
+  effectiveVerbs,
+  folderGovernsAccessMessage,
+  KNOWN_VERBS,
+  minimalGrantVerbs,
+  VERBS_BROADEST_FIRST,
+  type FileTreeEntry,
+  type VerbSet,
+} from '@bevel-software/platform-shared';
 import {
   Badge,
   Banner,
   Button,
   Dialog,
+  IconButton,
   MenuItem,
   MenuPanel,
   useDismissableMenu,
@@ -34,6 +46,8 @@ import {
   asInheritedError,
   type AccessEligible,
   type AccessResponse,
+  type AccessUser,
+  type DenialSources,
   type GrantVerb,
   type GrantSource,
   type GrantSources,
@@ -68,17 +82,90 @@ interface Props {
    * fallback, not a silent no-op.
    */
   onManageAncestor?: (entry: FileTreeEntry) => void;
+  /**
+   * The target exists only on an open change request's branch. Access is then
+   * read and written on THAT branch — the rules land in the proposed file and
+   * merge with it — and the sheet says so. Takes precedence over `workspaceId`.
+   * `branch: null` (the request could not be resolved) refuses to load rather
+   * than falling back to a workspace the file does not exist on.
+   */
+  proposal?: { number: number; branch: string | null };
 }
 
 type Role = 'Owner' | 'Can edit' | 'Can read' | 'Can download';
 
-/** Which verbs a principal holds at the target (independent flags). */
-interface VerbSet {
-  owner: boolean;
-  write: boolean;
-  read: boolean;
-  download: boolean;
+// `VerbSet` — which verbs a principal holds at the target — and every fold
+// over it (`effectiveVerbs`, `conferredByOthers`, `minimalGrantVerbs`,
+// `VERBS_BROADEST_FIRST`) come from `platform-shared`: the same table the
+// resolver reads, so this sheet can never disagree with it about what an
+// owner may do or which lines a set needs.
+
+/** The three tiers a row can sit at, broadest first; download is not one of them. */
+type Tier = 'Owner' | 'Can edit' | 'Can read';
+const TIERS: Tier[] = ['Owner', 'Can edit', 'Can read'];
+
+/** The tier a set sits at — its highest held one — or null when it holds nothing (a denied row). */
+function tierOf(v: VerbSet): Tier | null {
+  return v.owner ? 'Owner' : v.write ? 'Can edit' : v.read ? 'Can read' : null;
 }
+
+/**
+ * The set a row ends up with after a click on one item of its menu, or null
+ * when the item has nothing to do from where the row is (the item renders
+ * disabled). The dialog then writes the DIFFERENCE between that set and what
+ * the principal effectively has here (denials for what the set drops, grants
+ * for what it adds — see `doApplyVerbSet`).
+ *
+ * The menu is TWO AXES, which is what its separator has always drawn, and a
+ * click moves one axis and leaves the other where it is:
+ *
+ *   - Owner / Can edit / Can read are one exclusive tier. An unchecked tier is
+ *     where the row goes; the held tier steps DOWN one (Owner → Can edit → Can
+ *     read), which is what "unticking" the top of a nested set can mean. Can
+ *     read at the top has nothing below it — taking read away is what Remove
+ *     and Deny are for — so it is disabled there.
+ *   - Can download toggles on its own. Under Owner it is conferred, not chosen,
+ *     so it is disabled there; and a step down from Owner writes nothing for
+ *     it either way (see the return). Turning it on carries read, the
+ *     resolver's own fold (a person trusted with a copy may open it).
+ *
+ * Each item used to apply a fixed whole set instead — Can edit meant "edit and
+ * no download", Can download meant "download and no edit" — so raising one axis
+ * silently wrote a revoke or a denial on the other. That is the bug this
+ * function replaces.
+ */
+function nextVerbSet(current: VerbSet, role: Role): VerbPick | null {
+  if (role === 'Can download') {
+    if (current.owner) return null;
+    // The fold supplies whatever the toggled download carries (read).
+    return effectiveVerbs({ ...current, download: !current.download });
+  }
+  const held = tierOf(current);
+  const target: Tier | null =
+    role === held ? (TIERS[TIERS.indexOf(role) + 1] ?? null) : role;
+  if (target === null) return null;
+  // Below Owner the download axis keeps what the row chose. A row coming DOWN
+  // from Owner is left to the file: the download it shows may be the owner
+  // line's fold (gone with that line) or a line of its own (which stays), and
+  // the view cannot tell the two apart — so nothing is revoked or granted for
+  // it, and the fresh view says which it was.
+  const leaveDownloadToFile = current.owner && target !== 'Owner';
+  const next = effectiveVerbs({
+    owner: target === 'Owner',
+    write: target === 'Can edit',
+    read: target === 'Can read',
+    download: !leaveDownloadToFile && current.download,
+  });
+  return leaveDownloadToFile ? { ...next, download: undefined } : next;
+}
+
+/**
+ * A destination for one row, as `nextVerbSet` states it: the three tier verbs
+ * always, and `download` either stated or LEFT OUT — "write nothing for this
+ * verb; whatever the file says after the other writes stands". The apply loop
+ * neither drops nor grants an omitted verb.
+ */
+type VerbPick = Omit<VerbSet, 'download'> & { download?: boolean };
 
 interface PrincipalRow {
   key: string;
@@ -92,54 +179,108 @@ interface PrincipalRow {
    */
   kind: 'user' | 'role' | 'group' | 'plugin';
   isYou: boolean;
+  /**
+   * For a person row: whether an account exists for the email yet. `false`
+   * earns the "hasn't signed in yet" note beside the name — the grant is
+   * real and unaffected either way. `undefined` means the server did not say
+   * (an older build), which is NOT the same as "no account" and shows
+   * nothing.
+   */
+  hasAccount?: boolean;
   /** The principal to send on grant / revoke. */
   principal: Principal;
   /** Per-verb origin of this row's access (from the resolver). */
   sources?: GrantSources;
   /**
-   * How this row may be managed HERE, derived from `sources` (now MECE —
-   * every source is `direct` or `ancestor`):
-   *   - 'direct'    — ≥1 verb is granted directly on the target; the verb
-   *                   editor is shown and Remove acts in place.
-   *   - 'inherited' — ≥1 verb comes from an ancestor folder (and none direct);
-   *                   Remove opens the "Remove from parent?" flow.
-   *   - 'external'  — no file-backed source for any verb (a defensive fallback;
+   * Per-verb origin of this row's RESTRICTIONS — where each verb the principal
+   * does not hold is denied. A `direct` entry is a denial written on this
+   * target: the row's "restricted here", and what the menu lifts when a higher
+   * set is picked.
+   */
+  denials?: DenialSources;
+  /**
+   * How this row may be managed HERE, derived from its local ENTRIES — grants
+   * and denials alike (both MECE: every source is `direct` or `ancestor`):
+   *   - 'direct'    — ≥1 verb is granted, or denied, directly on the target.
+   *                   The row belongs to this folder's own list, and Remove
+   *                   acts in place.
+   *   - 'inherited' — every entry naming this principal lives in an ancestor
+   *                   folder; Remove opens the "Remove from parent?" flow.
+   *   - 'external'  — no file-backed entry for any verb (a defensive fallback;
    *                   a real grantee row always resolves to direct/ancestor,
    *                   since rows are built from file-named principals). Shown
-   *                   read-only with no Remove.
+   *                   with the menu but no Remove.
+   *
+   * A DENIAL counts as a local entry, and that is the whole point: a person
+   * restricted here has no local grant left, and classifying on grants alone
+   * dropped them into the collapsed inherited section looking removed.
    */
   manage: 'direct' | 'inherited' | 'external';
-  /** The distinct ancestor access.md path(s) this row inherits any verb from. */
+  /**
+   * The distinct ancestor access.md path(s) holding ANY entry for this row —
+   * where the rules naming this principal live, which is what "via Sales" and
+   * the parent-folder grouping report.
+   */
   ancestors: string[];
+  /**
+   * The subset of those that GRANT — the only ones "Remove from <folder>" can
+   * act on. An ancestor that merely denies is not where this person's access
+   * comes from, and revoking them there would LIFT a restriction in answer to a
+   * click that asked to remove access.
+   */
+  grantAncestors: string[];
+  /** True when every verb is denied by an entry on this target — "Denied here". */
+  deniedHere: boolean;
+}
+
+/** The four grant verbs, for whole-set reasoning. */
+const ALL_VERBS: readonly GrantVerb[] = KNOWN_VERBS;
+
+/** Every source list in a per-verb map, empty entries dropped. */
+function sourceLists(map: GrantSources | DenialSources | undefined): GrantSource[][] {
+  return map ? Object.values(map).filter((l): l is GrantSource[] => !!l && l.length > 0) : [];
+}
+
+/** The distinct ancestor `access.md` paths named across per-verb source maps. */
+function ancestorPaths(...maps: (GrantSources | DenialSources | undefined)[]): string[] {
+  return [
+    ...new Set(
+      maps
+        .flatMap(sourceLists)
+        .flatMap((l) => l.filter((s) => s.kind === 'ancestor').map((s) => s.path)),
+    ),
+  ];
 }
 
 /**
- * Classify a row's manageability from its per-verb sources (now MECE — every
- * source is `direct` or `ancestor`):
- *   - any `direct` verb        → 'direct' (editable in place).
- *   - else any `ancestor` verb → 'inherited' (remove-from-parent / deny-here).
- *   - else (no source for any verb) → 'external' (defensive fallback; a real
- *     grantee row always has a file source, since rows are built from
- *     file-named principals).
+ * Classify a row's manageability from its per-verb entries — grants AND
+ * denials, because a restriction is as much an entry on this target as a grant:
+ *   - any verb granted directly, or denied directly → 'direct' (this folder's
+ *     own list; the row is edited in place).
+ *   - else any ancestor entry → 'inherited' (remove-from-parent / restrict here).
+ *   - else no entry at all → 'external' (defensive fallback; a real grantee row
+ *     always has a file entry, since rows are built from file-named principals).
  */
-function classifyManage(sources: GrantSources | undefined): {
-  manage: 'direct' | 'inherited' | 'external';
-  ancestors: string[];
-} {
-  const lists = sources ? Object.values(sources).filter((l): l is GrantSource[] => !!l) : [];
-  // A row is 'direct' (editable in place) when ANY verb's WINNING source (the
-  // closest, `[0]`) is direct — even if that same verb is ALSO inherited from a
-  // parent (`[direct, ancestor]`); the inherited tail still feeds `ancestors`
-  // below, so Remove can chain to the parent after stripping the direct entry.
-  const hasDirectWinner = lists.some((l) => l[0]?.kind === 'direct');
-  // Every ancestor named for any verb (including the tails of direct+ancestor
-  // verbs), so the confirm flow knows all the parents to offer.
-  const ancestors = [
-    ...new Set(lists.flatMap((l) => l.filter((s) => s.kind === 'ancestor').map((s) => (s as { path: string }).path))),
-  ];
-  if (hasDirectWinner) return { manage: 'direct', ancestors };
-  if (ancestors.length > 0) return { manage: 'inherited', ancestors };
-  return { manage: 'external', ancestors: [] };
+function classifyManage(
+  sources: GrantSources | undefined,
+  denials: DenialSources | undefined,
+): { manage: 'direct' | 'inherited' | 'external'; ancestors: string[]; grantAncestors: string[] } {
+  // A row is 'direct' when ANY verb's WINNING grant source (the closest, `[0]`)
+  // is direct — even if that verb is ALSO inherited (`[direct, ancestor]`); the
+  // inherited tail still feeds `ancestors`, so Remove can chain to the parent
+  // after stripping the direct entry. A direct DENIAL counts the same way: it is
+  // a rule this target holds about this principal.
+  const hasLocalEntry =
+    sourceLists(sources).some((l) => l[0]?.kind === 'direct') ||
+    sourceLists(denials).some((l) => l.some((s) => s.kind === 'direct'));
+  const ancestors = ancestorPaths(sources, denials);
+  // Kept apart from `ancestors` on purpose: an ancestor DENIAL is a real entry
+  // (it classifies the row, and it is where the rule lives) but it is not a
+  // place access can be removed from.
+  const grantAncestors = ancestorPaths(sources);
+  if (hasLocalEntry) return { manage: 'direct', ancestors, grantAncestors };
+  if (ancestors.length > 0) return { manage: 'inherited', ancestors, grantAncestors };
+  return { manage: 'external', ancestors: [], grantAncestors: [] };
 }
 
 /**
@@ -149,7 +290,7 @@ function classifyManage(sources: GrantSources | undefined): {
  */
 function folderLabel(accessMdPath: string): string {
   const dir = accessMdPath.replace(/\/?access\.md$/, '');
-  if (dir === '') return 'the root folder';
+  if (dir === '') return WHOLE_WORKSPACE;
   const segs = dir.split('/');
   return segs[segs.length - 1];
 }
@@ -157,7 +298,58 @@ function folderLabel(accessMdPath: string): string {
 /** The full folder path (for a hover title), repo-relative. */
 function folderPath(accessMdPath: string): string {
   const dir = accessMdPath.replace(/\/?access\.md$/, '');
-  return dir === '' ? 'the root folder' : dir;
+  return dir === '' ? WHOLE_WORKSPACE : dir;
+}
+
+/**
+ * What the repository root is called to a business user. "The root folder" is
+ * a repository word; a grant at the root reaches everything in the workspace,
+ * and that is what the reader needs to know.
+ */
+const WHOLE_WORKSPACE = 'the whole workspace';
+
+/** True when an ancestor `access.md` path is the repository root's. */
+function isRootAccessMd(accessMdPath: string): boolean {
+  return accessMdPath.replace(/\/?access\.md$/, '') === '';
+}
+
+/**
+ * One line per kind of grantee, in business words. Shown together behind the
+ * "What can I share with?" control, and one at a time as the tooltip and
+ * accessible description of the group / role / plugin tags, so each word is
+ * explained where it is met.
+ */
+const PRINCIPAL_KIND_HELP = {
+  user: 'People: one person, by email.',
+  group:
+    'Groups: a way to group people together and give them access in the app. A group can be a team or department, like Engineering, or a functional group, like skill reviewers.',
+  role: 'Roles: special app roles that give people extra abilities in the app. They are pre-defined; you can only add or remove people. Example: Admin, which opens the platform and user management screens.',
+  plugin: 'Plugins: the readers, writers or owners of a plugin, whoever they are at the time.',
+} as const satisfies Record<Principal['kind'], string>;
+
+/**
+ * What a person with no account yet is called, beside their chip and beside
+ * their row. Granting ahead of a first sign-in is supported and stays
+ * supported — under single sign-on the account is created BY that sign-in —
+ * so this is a LABEL, never a warning and never a refusal: the grant saves
+ * exactly as any other. It is here so a mistyped address is visible, and it
+ * disappears on its own the first time that person signs in.
+ */
+const NO_ACCOUNT_NOTE = "hasn't signed in yet";
+const NO_ACCOUNT_HELP =
+  'No account for this email yet. The grant is saved and takes effect the moment they first sign in — if you did not expect this, check the spelling.';
+
+/** The note itself — muted and small, the same weight as a row's second line. */
+function NoAccountNote() {
+  return (
+    <span
+      className="shrink-0 whitespace-nowrap text-detail italic text-ink-faint"
+      title={NO_ACCOUNT_HELP}
+      aria-description={NO_ACCOUNT_HELP}
+    >
+      {NO_ACCOUNT_NOTE}
+    </span>
+  );
 }
 
 /**
@@ -190,20 +382,22 @@ function lookupSources(
   return sources?.[key] ?? (key.startsWith('g:') ? sources?.[`r:${key.slice(2)}`] : undefined);
 }
 
-/** The distinct ancestor `access.md` path(s) named across a per-verb sources map. */
-function ancestorsFromSources(sources: GrantSources | undefined): string[] {
-  if (!sources) return [];
-  return [
-    ...new Set(
-      Object.values(sources)
-        .filter((l): l is GrantSource[] => !!l)
-        .flatMap((l) => l.filter((s) => s.kind === 'ancestor').map((s) => (s as { path: string }).path)),
-    ),
-  ];
+/** Look a row/principal key up in a response's `denials` map, same `g:` fallback. */
+function lookupDenials(
+  denials: AccessResponse['denials'] | undefined,
+  key: string,
+): DenialSources | undefined {
+  return denials?.[key] ?? (key.startsWith('g:') ? denials?.[`r:${key.slice(2)}`] : undefined);
 }
 
 /** The checklist order; download is independent and rendered separately. */
-const TIER_ROLES: Role[] = ['Owner', 'Can edit', 'Can read'];
+const TIER_ROLES: Role[] = TIERS;
+
+/**
+ * A row's verb menu, top to bottom — the tiers, then download, then (added by
+ * the row itself) Deny. Broadest first, so "less than this" reads downwards.
+ */
+const MENU_ROLES: Role[] = [...TIER_ROLES, 'Can download'];
 
 /**
  * Muted identity tones (bg/fg pairs) — the same family as the Library's
@@ -254,7 +448,12 @@ function isEveryoneRole(p: Principal): boolean {
   return p.kind === 'role' && p.role.trim().toLowerCase() === 'everyone';
 }
 
-/** A short summary of the verbs a row holds, for the dropdown trigger. */
+/**
+ * A short summary of the verbs a row holds, for the dropdown trigger. Read is
+ * folded in by write/owner/download before a `VerbSet` reaches here (see
+ * `effectiveNewVerbs` and the row aggregation), so a download-only grant reads
+ * “Can read, Can download” — what the resolver actually gives.
+ */
 function summarizeVerbs(v: VerbSet): string {
   const parts: string[] = [];
   if (v.owner) parts.push('Owner');
@@ -262,6 +461,37 @@ function summarizeVerbs(v: VerbSet): string {
   else if (v.read) parts.push('Can read');
   if (v.download) parts.push('Can download');
   return parts.length ? parts.join(', ') : 'No access';
+}
+
+/**
+ * What a row's verb menu says beside ONE verb: where it comes from, or why it
+ * is off. Short enough to sit in a menu item without wrapping — the leaf folder
+ * name, as everywhere else in the sheet.
+ *
+ *   - held from a parent      → "from Sales"
+ *   - denied by an entry here → "restricted here"  (the restriction this ticket
+ *                               exists to make visible; picking a set that
+ *                               includes the verb lifts it)
+ *   - denied by a parent      → "restricted in Sales"
+ *   - held by an entry here, or simply never granted → nothing to explain.
+ */
+function verbNote(row: PrincipalRow, verb: GrantVerb): string | undefined {
+  if (row.verbs[verb]) {
+    const winner = (row.sources?.[verb] ?? [])[0];
+    return winner?.kind === 'ancestor' ? `from ${folderLabel(winner.path)}` : undefined;
+  }
+  const denial = (row.denials?.[verb] ?? [])[0];
+  if (!denial) return undefined;
+  return denial.kind === 'direct' ? 'restricted here' : `restricted in ${folderLabel(denial.path)}`;
+}
+
+/**
+ * What a row's menu trigger reads. A wholly denied principal is not "No access"
+ * — that is what someone never named here would look like. It is a decision
+ * somebody made on this target, and the row says so.
+ */
+function rowSummary(row: PrincipalRow): string {
+  return row.deniedHere ? 'Denied here' : summarizeVerbs(row.verbs);
 }
 
 /** Gap between a trigger and its menu, and the minimum inset from a viewport edge. */
@@ -274,6 +504,13 @@ const MENU_MARGIN = 8;
  * trigger by the difference.
  */
 const MENU_MIN_WIDTH = 200;
+/**
+ * The most a content-sized menu grows to before its items start truncating.
+ * Wide enough for "Can download · from the whole workspace ✓" on one line;
+ * narrow enough that a folder with a very long name cannot turn the menu
+ * into a banner.
+ */
+const MENU_MAX_WIDTH = 360;
 
 /**
  * A dropdown panel that escapes the dialog's scroll container.
@@ -281,7 +518,7 @@ const MENU_MIN_WIDTH = 200;
  * `Dialog` renders its body inside `overflow-y-auto` so a long access list
  * scrolls under the pinned header and footer. An ABSOLUTELY positioned menu in
  * that box is clipped by it: open the verb menu on a low grantee row and
- * everything past the first item or two — "Remove access" included — is cut off
+ * everything past the first item or two — "Can download" included — is cut off
  * at the body's edge, unreachable without scrolling the list out from under the
  * menu.
  *
@@ -326,8 +563,11 @@ function AnchoredMenu({
    */
   triggerRef,
   /**
-   * Panel width in px, or `'anchor'` to match the trigger (the combobox case).
-   * Clamped up to {@link MENU_MIN_WIDTH} either way.
+   * Panel width in px, `'anchor'` to match the trigger (the combobox case), or
+   * `'content'` to fit the widest item (a menu whose items carry notes — "from
+   * the whole workspace" — that a trigger-sized panel would truncate the LABEL
+   * to make room for). Clamped up to {@link MENU_MIN_WIDTH} either way, and
+   * `'content'` is clamped down to {@link MENU_MAX_WIDTH} and the viewport.
    */
   width = MENU_MIN_WIDTH,
   /** Which edge lines up with the anchor's. */
@@ -337,7 +577,7 @@ function AnchoredMenu({
 }: {
   onDismiss?: () => void;
   triggerRef?: RefObject<HTMLElement | null>;
-  width?: number | 'anchor';
+  width?: number | 'anchor' | 'content';
   align?: 'left' | 'right';
   className?: string;
   children: ReactNode;
@@ -362,7 +602,21 @@ function AnchoredMenu({
       const el = panelRef.current;
       const anchor = el?.parentElement?.getBoundingClientRect();
       if (!anchor || !el) return;
-      const w = Math.max(width === 'anchor' ? anchor.width : width, MENU_MIN_WIDTH);
+      let w: number;
+      if (width === 'content') {
+        // Let the panel take its natural width for one measurement, then pin
+        // it: what the widest item needs, within the caps. The observer on
+        // the panel sees only the pinned size, which is unchanged whenever the
+        // content is, so this does not feed it.
+        el.style.width = 'max-content';
+        const natural = el.offsetWidth;
+        w = Math.max(
+          MENU_MIN_WIDTH,
+          Math.min(natural, MENU_MAX_WIDTH, window.innerWidth - 2 * MENU_MARGIN),
+        );
+      } else {
+        w = Math.max(width === 'anchor' ? anchor.width : width, MENU_MIN_WIDTH);
+      }
       // Width BEFORE height: the panel wraps and grows taller when narrower, so
       // measuring at the wrong width picks the wrong side to open on.
       el.style.width = `${w}px`;
@@ -401,12 +655,21 @@ function AnchoredMenu({
     const observer = new ResizeObserver(place);
     if (anchorEl) observer.observe(anchorEl);
     if (panel) observer.observe(panel);
+    // A content-sized panel is PINNED to a width, so the resize observer above
+    // cannot see its items change under it — and they do while a row menu
+    // stays open across writes: notes ("from Sales") and check marks come and
+    // go with each fresh view. Re-measure on any change to what the panel
+    // holds. Children and text only, not attributes: `place` writes the
+    // panel's own style, which must not re-trigger it.
+    const contents = new MutationObserver(place);
+    if (panel) contents.observe(panel, { childList: true, subtree: true, characterData: true });
     window.addEventListener('resize', place);
     // Capture phase: the dialog body is what scrolls, and scroll events don't
     // bubble to `window`.
     window.addEventListener('scroll', place, true);
     return () => {
       observer.disconnect();
+      contents.disconnect();
       window.removeEventListener('resize', place);
       window.removeEventListener('scroll', place, true);
     };
@@ -431,6 +694,157 @@ function AnchoredMenu({
 }
 
 /**
+ * Every row the sheet shows for one resolved access response — ONE row per
+ * principal, carrying its effective verb set, where each held verb comes from,
+ * and where each withheld one is denied.
+ *
+ * A pure function of the response rather than a hook body, because the apply
+ * loop re-derives rows from each intermediate server response as it walks a
+ * picked set: it has to ask "does the principal still hold write after that
+ * call?" between requests, and the answer must come from the same aggregation
+ * the UI renders — not a second, subtly different reading of the payload.
+ */
+function buildRows(data: AccessResponse | null, myEmail: string): PrincipalRow[] {
+  if (!data) return [];
+  // Aggregate the resolver lists into ONE row per principal carrying its
+  // independent verb set. Membership IS the displayed set — we do NOT subtract
+  // the rollup. The resolver already folds owner⊇write⊇read on the lower lists,
+  // so an owner legitimately shows owner+write+read checked; download is its own
+  // axis (owner folds in, write does not), sourced from `downloaders` — and it
+  // folds DOWN into read, so a download row shows read checked too.
+  const rows = new Map<string, PrincipalRow>();
+  // Kinded collective list for one eligible set. Older servers omit
+  // `principals` (version skew) — fall back to the name-only `roles`,
+  // treating everything as a role (the pre-groups display).
+  const collectivesOf = (list: AccessEligible): ResolvedPrincipal[] =>
+    list.principals ?? list.roles.map((name) => ({ name, kind: 'role' as const }));
+  const touchCollective = (c: ResolvedPrincipal): PrincipalRow => {
+    // Rows are keyed by KIND + name (`g:`/`r:`/`p:`) — the backend treats a
+    // bare `Product` (group) and `role/Product` (role) as DIFFERENT
+    // principals, so a group and a role sharing a name are two rows, each
+    // mutating its own grant. Collapsing them to one row silently pointed
+    // every edit at the group and hid the role's grant entirely. A plugin
+    // principal's name is its full `plugin/<Name>/<verb>` token.
+    const key =
+      c.kind === 'group'
+        ? `g:${c.name.toLowerCase()}`
+        : c.kind === 'plugin'
+          ? `p:${c.name.toLowerCase()}`
+          : `r:${c.name.toLowerCase()}`;
+    let row = rows.get(key);
+    if (!row) {
+      const plugin = c.kind === 'plugin' ? parsePluginPrincipalToken(c.name) : null;
+      row = {
+        key,
+        label: plugin ? pluginPrincipalLabel(plugin.plugin, plugin.verb) : c.name,
+        kind: c.kind,
+        isYou: false,
+        principal:
+          c.kind === 'group'
+            ? { kind: 'group', group: c.name }
+            : plugin
+              ? { kind: 'plugin', plugin: plugin.plugin, verb: plugin.verb }
+              : { kind: 'role', role: c.name },
+        verbs: { owner: false, write: false, read: false, download: false },
+        manage: 'direct',
+        ancestors: [],
+        grantAncestors: [],
+        deniedHere: false,
+      };
+      rows.set(key, row);
+    }
+    return row;
+  };
+  const touchUser = (u: AccessUser): PrincipalRow => {
+    const key = `u:${u.email.toLowerCase()}`;
+    let row = rows.get(key);
+    if (!row) {
+      const label = u.name || u.email;
+      row = {
+        key,
+        label,
+        // Only a real display name earns the second line — a nameless user
+        // would otherwise render the same email twice, burning a row of the
+        // scarce width on a duplicate.
+        sub: label.toLowerCase() === u.email.toLowerCase() ? undefined : u.email,
+        kind: 'user',
+        isYou: u.email.toLowerCase() === myEmail,
+        // Whoever names this person first wins — the lists are views of the
+        // same account, so the flag cannot differ between them.
+        hasAccount: u.hasAccount,
+        principal: { kind: 'user', email: u.email, displayName: u.name || u.email },
+        verbs: { owner: false, write: false, read: false, download: false },
+        manage: 'direct',
+        ancestors: [],
+        grantAncestors: [],
+        deniedHere: false,
+      };
+      rows.set(key, row);
+    }
+    return row;
+  };
+
+  for (const c of collectivesOf(data.owners)) touchCollective(c).verbs.owner = true;
+  for (const u of data.owners.users) touchUser(u).verbs.owner = true;
+  for (const c of collectivesOf(data.eligible)) touchCollective(c).verbs.write = true;
+  for (const u of data.eligible.users) touchUser(u).verbs.write = true;
+  // Read grants are rows whether or not the node is public: on a public
+  // node they are what MAKES it public, and a row is the ONE place any
+  // grant is removed. The built-in `everyone` is a row like any principal
+  // — when a file spells it. A derived everyone (public only through a
+  // plugin principal) has no line of its own; the plugin's row is that grant.
+  for (const c of collectivesOf(data.readers)) {
+    if (c.kind === 'role' && isEveryoneRole({ kind: 'role', role: c.name })) {
+      if (!lookupSources(data.sources, 'r:everyone')?.read?.length) continue;
+      const row = touchCollective(c);
+      row.label = 'Everyone';
+      row.verbs.read = true;
+      continue;
+    }
+    touchCollective(c).verbs.read = true;
+  }
+  for (const u of data.readers.users) touchUser(u).verbs.read = true;
+  for (const c of collectivesOf(data.downloaders)) touchCollective(c).verbs.download = true;
+  for (const u of data.downloaders.users) touchUser(u).verbs.download = true;
+
+  // The principals this target RESTRICTS. They hold nothing through it, so no
+  // eligible list carries them — and before the server reported them, writing a
+  // restriction made the person disappear from the sheet that wrote it. They get
+  // a row with an empty verb set; the denial map below supplies the rest.
+  for (const c of data.deniedHere?.principals ?? []) {
+    const row = touchCollective(c);
+    if (c.kind === 'role' && isEveryoneRole({ kind: 'role', role: c.name })) row.label = 'Everyone';
+  }
+  for (const u of data.deniedHere?.users ?? []) touchUser(u);
+
+  // Download implies read, the way write does. The server folds it into
+  // `readers` too, so this is belt-and-braces for an older backend — but it is
+  // also what makes the row's Read box render checked-and-implied next to a
+  // Download it cannot be unticked without.
+  for (const row of rows.values()) row.verbs = effectiveVerbs(row.verbs);
+
+  // Attach each row's per-verb grants and denials, and the manageability they
+  // imply (direct / inherited / external), keyed by the same row key (with the
+  // `g:` → `r:` version-skew fallback for group rows).
+  for (const row of rows.values()) {
+    row.sources = lookupSources(data.sources, row.key);
+    row.denials = lookupDenials(data.denials, row.key);
+    const { manage, ancestors, grantAncestors } = classifyManage(row.sources, row.denials);
+    row.manage = manage;
+    row.ancestors = ancestors;
+    row.grantAncestors = grantAncestors;
+    // "Denied here" is the whole-principal block: every verb denied by an entry
+    // on this target. A partial restriction (edit denied, read still inherited)
+    // is emphatically NOT this — it is a lowered set, and says so per verb.
+    row.deniedHere = ALL_VERBS.every((v) =>
+      (row.denials?.[v] ?? []).some((s) => s.kind === 'direct'),
+    );
+  }
+
+  return [...rows.values()];
+}
+
+/**
  * Google-Drive-style "Manage access" sheet. Reads the resolved access for a KB
  * path and lets anyone who can write the path's access config share it: add one
  * or more people/groups/roles as chips and grant them a shared verb (Owner / Can edit /
@@ -446,15 +860,26 @@ export function ManageAccessDialog({
   onClose,
   workspaceId: workspaceIdProp,
   onManageAncestor,
+  proposal,
 }: Props) {
   // `kbDirName` stays context-sourced: it names the clone directory, which is
   // the same on every branch.
   const { workspaceId: ctxWorkspaceId, kbDirName } = useWorkspace();
-  const workspaceId = workspaceIdProp ?? ctxWorkspaceId;
+  const proposalBranchMissing = !!proposal && !proposal.branch;
+  // Workspace ids are the URL-encoded branch name (see `workspaceIdForBranch`).
+  const workspaceId = proposal
+    ? proposal.branch
+      ? encodeURIComponent(proposal.branch)
+      : null
+    : (workspaceIdProp ?? ctxWorkspaceId);
   const { user } = useAuth();
   const [data, setData] = useState<AccessResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(!proposalBranchMissing);
+  const [error, setError] = useState<string | null>(
+    proposalBranchMissing
+      ? `The branch of change request #${proposal.number} could not be found.`
+      : null,
+  );
 
   // Add-row state. `newVerbs` holds the (independent) verbs to grant the chips;
   // it mirrors the per-row checklist so a new person can be given several at once.
@@ -477,6 +902,11 @@ export function ManageAccessDialog({
   // time), so it always names the button whose menu is on screen.
   const openRowTriggerRef = useRef<HTMLButtonElement>(null);
   const verbTriggerRef = useRef<HTMLButtonElement>(null);
+  /** The add row's text field — where the caret goes back to after a pick. */
+  const queryInputRef = useRef<HTMLInputElement>(null);
+  // The "What can I share with?" explainer beside the add field.
+  const [kindHelpOpen, setKindHelpOpen] = useState(false);
+  const kindHelpTriggerRef = useRef<HTMLButtonElement>(null);
   // When set, the "Remove from parent?" confirmation is open for this principal.
   // `ancestors` are the granting access.md path(s) (repo-relative, opaque) to
   // echo back on remove-from-parent. `verb` scopes the action to a single verb
@@ -538,6 +968,84 @@ export function ManageAccessDialog({
   // including the layering that lets the nested "Remove from parent?" modal
   // take Escape without also closing this one.
 
+  /**
+   * The LATEST thing the server said about each email — from a suggestion or
+   * from the loaded view, whichever spoke most recently. Not a set of
+   * positives: an answer that explicitly says `hasAccount: false` about
+   * someone previously reported as having an account (an account erased while
+   * this dialog is open) has to be able to take the claim back, which an
+   * accumulate-only set cannot do.
+   *
+   * It IS accumulated across answers rather than read off the current one, so
+   * an answer landing after a chip was added still corrects that chip.
+   *
+   * Version skew: a server that says nothing about a person it has named
+   * (`hasAccount === undefined`) is recorded as HAVING an account — silence is
+   * not a claim of absence, so an older build labels nobody.
+   */
+  const [accountStatus, setAccountStatus] = useState<ReadonlyMap<string, boolean>>(
+    () => new Map(),
+  );
+  const learnAccounts = useCallback((people: readonly AccessUser[]) => {
+    if (people.length === 0) return;
+    setAccountStatus((prev) => {
+      let next: Map<string, boolean> | null = null;
+      for (const p of people) {
+        const email = p.email.trim().toLowerCase();
+        if (!email) continue;
+        const has = p.hasAccount !== false;
+        if (prev.get(email) === has) continue;
+        next ??= new Map(prev);
+        next.set(email, has);
+      }
+      return next ?? prev;
+    });
+  }, []);
+
+  /**
+   * Addresses an account-aware suggest answer has actually RULED ON — the
+   * queries such an answer came back for, canonical. Absence from `people` is
+   * evidence of "no account" only for one of these: a lookup that failed, or
+   * one served by a build that does not report accounts, says nothing at all,
+   * and a chip must not be labelled on a guess in either case.
+   */
+  const [lookedUp, setLookedUp] = useState<ReadonlySet<string>>(() => new Set());
+  const noteLookedUp = useCallback((email: string) => {
+    setLookedUp((prev) => (prev.has(email) ? prev : new Set(prev).add(email)));
+  }, []);
+
+  /**
+   * Whether a CHIP earns the note. Two ways to know, and nothing else counts:
+   * the server said `hasAccount: false` about that address, or it answered a
+   * lookup of that exact address and did not name it — which, from a build
+   * that reports accounts, is the same fact stated by omission.
+   *
+   * Rows do NOT go through here — a row reads its own `hasAccount` straight
+   * from the view, which always names the person it is a row for.
+   */
+  const lacksAccount = useCallback(
+    (email: string): boolean => {
+      const key = email.trim().toLowerCase();
+      const status = accountStatus.get(key);
+      return status === undefined ? lookedUp.has(key) : !status;
+    },
+    [accountStatus, lookedUp],
+  );
+
+  // The loaded view is the other place accounts are named: someone already
+  // granted here and already signed in must not pick the note up when their
+  // address is typed again, and someone granted here who never signed in
+  // should carry it on the chip as well as on the row.
+  useEffect(() => {
+    if (!data) return;
+    learnAccounts([
+      ...data.eligible.users,
+      ...data.readers.users,
+      ...data.owners.users,
+      ...data.downloaders.users,
+    ]);
+  }, [data, learnAccounts]);
+
   // Debounced autocomplete. People are withheld server-side until q ≥ 2 chars.
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
@@ -550,123 +1058,30 @@ export function ManageAccessDialog({
     }
     debounceRef.current = setTimeout(() => {
       suggestPrincipals(workspaceId, q)
-        .then(setSuggest)
+        .then((res) => {
+          setSuggest(res);
+          learnAccounts(res.people ?? []);
+          // Only an answer that SAYS it rules on accounts turns "not in the
+          // answer" into "no account". Without that the answer is silent on
+          // the question, so the address stays unjudged and unlabelled.
+          //
+          // `peopleWithheld` is checked here too, not just trusted to have
+          // already made `accountsKnown` false: a withheld list names nobody
+          // by design (the harvesting guard), so reading it as "nobody has an
+          // account" would label every address at once. Either flag alone is
+          // enough to say nothing.
+          if (res.accountsKnown && !res.peopleWithheld) noteLookedUp(q.toLowerCase());
+        })
         .catch(() => setSuggest(null));
     }, 200);
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [query, workspaceId, repoRelative]);
+  }, [query, workspaceId, repoRelative, learnAccounts, noteLookedUp]);
 
   const myEmail = user?.email?.toLowerCase() ?? '';
 
-  const principals = useMemo<PrincipalRow[]>(() => {
-    if (!data) return [];
-    // Aggregate the four resolver lists into ONE row per principal carrying its
-    // independent verb set. Membership IS the displayed set — we do NOT subtract
-    // the rollup. The resolver already folds owner⊇write⊇read on the lower lists,
-    // so an owner legitimately shows owner+write+read checked; download is its own
-    // axis (owner folds in, write does not), sourced from `downloaders`.
-    const rows = new Map<string, PrincipalRow>();
-    // Kinded collective list for one eligible set. Older servers omit
-    // `principals` (version skew) — fall back to the name-only `roles`,
-    // treating everything as a role (the pre-groups display).
-    const collectivesOf = (list: AccessEligible): ResolvedPrincipal[] =>
-      list.principals ?? list.roles.map((name) => ({ name, kind: 'role' as const }));
-    const touchCollective = (c: ResolvedPrincipal): PrincipalRow => {
-      // Rows are keyed by KIND + name (`g:`/`r:`/`p:`) — the backend treats a
-      // bare `Product` (group) and `role/Product` (role) as DIFFERENT
-      // principals, so a group and a role sharing a name are two rows, each
-      // mutating its own grant. Collapsing them to one row silently pointed
-      // every edit at the group and hid the role's grant entirely. A plugin
-      // principal's name is its full `plugin/<Name>/<verb>` token.
-      const key =
-        c.kind === 'group'
-          ? `g:${c.name.toLowerCase()}`
-          : c.kind === 'plugin'
-            ? `p:${c.name.toLowerCase()}`
-            : `r:${c.name.toLowerCase()}`;
-      let row = rows.get(key);
-      if (!row) {
-        const plugin = c.kind === 'plugin' ? parsePluginPrincipalToken(c.name) : null;
-        row = {
-          key,
-          label: plugin ? pluginPrincipalLabel(plugin.plugin, plugin.verb) : c.name,
-          kind: c.kind,
-          isYou: false,
-          principal:
-            c.kind === 'group'
-              ? { kind: 'group', group: c.name }
-              : plugin
-                ? { kind: 'plugin', plugin: plugin.plugin, verb: plugin.verb }
-                : { kind: 'role', role: c.name },
-          verbs: { owner: false, write: false, read: false, download: false },
-          manage: 'direct',
-          ancestors: [],
-        };
-        rows.set(key, row);
-      }
-      return row;
-    };
-    const touchUser = (u: { name: string; email: string }): PrincipalRow => {
-      const key = `u:${u.email.toLowerCase()}`;
-      let row = rows.get(key);
-      if (!row) {
-        const label = u.name || u.email;
-        row = {
-          key,
-          label,
-          // Only a real display name earns the second line — a nameless user
-          // would otherwise render the same email twice, burning a row of the
-          // scarce width on a duplicate.
-          sub: label.toLowerCase() === u.email.toLowerCase() ? undefined : u.email,
-          kind: 'user',
-          isYou: u.email.toLowerCase() === myEmail,
-          principal: { kind: 'user', email: u.email, displayName: u.name || u.email },
-          verbs: { owner: false, write: false, read: false, download: false },
-          manage: 'direct',
-          ancestors: [],
-        };
-        rows.set(key, row);
-      }
-      return row;
-    };
-
-    for (const c of collectivesOf(data.owners)) touchCollective(c).verbs.owner = true;
-    for (const u of data.owners.users) touchUser(u).verbs.owner = true;
-    for (const c of collectivesOf(data.eligible)) touchCollective(c).verbs.write = true;
-    for (const u of data.eligible.users) touchUser(u).verbs.write = true;
-    // Read grants are rows whether or not the node is public: on a public
-    // node they are what MAKES it public, and a row is the ONE place any
-    // grant is removed. The built-in `everyone` is a row like any principal
-    // — when a file spells it. A derived everyone (public only through a
-    // plugin principal) has no line of its own; the plugin's row is that grant.
-    for (const c of collectivesOf(data.readers)) {
-      if (c.kind === 'role' && isEveryoneRole({ kind: 'role', role: c.name })) {
-        if (!lookupSources(data.sources, 'r:everyone')?.read?.length) continue;
-        const row = touchCollective(c);
-        row.label = 'Everyone';
-        row.verbs.read = true;
-        continue;
-      }
-      touchCollective(c).verbs.read = true;
-    }
-    for (const u of data.readers.users) touchUser(u).verbs.read = true;
-    for (const c of collectivesOf(data.downloaders)) touchCollective(c).verbs.download = true;
-    for (const u of data.downloaders.users) touchUser(u).verbs.download = true;
-
-    // Attach each row's per-verb source + manageability (direct / inherited /
-    // external) from the resolver's `sources` map, keyed by the same row key
-    // (with the `g:` → `r:` version-skew fallback for group rows).
-    for (const row of rows.values()) {
-      row.sources = lookupSources(data.sources, row.key);
-      const { manage, ancestors } = classifyManage(row.sources);
-      row.manage = manage;
-      row.ancestors = ancestors;
-    }
-
-    return [...rows.values()];
-  }, [data, myEmail]);
+  const principals = useMemo<PrincipalRow[]>(() => buildRows(data, myEmail), [data, myEmail]);
 
   // Split direct (granted here, editable) from inherited/external (granted at a
   // parent or via a role) so the main list stays clean and the rest collapses
@@ -676,6 +1091,8 @@ export function ManageAccessDialog({
     () => principals.filter((p) => p.manage !== 'direct'),
     [principals],
   );
+  // The read side of a folder-governed file: who can open it, shown read-only.
+  const readerRows = useMemo(() => principals.filter((p) => p.verbs.read), [principals]);
 
   /**
    * The inherited rows, ONE SECTION PER GRANTING FOLDER — the prototype's shape
@@ -728,11 +1145,42 @@ export function ManageAccessDialog({
    *  `state.accOpen` holds a single value. */
   const [openSection, setOpenSection] = useState<string | null>(null);
 
+  /**
+   * Keep the row a write just changed on screen. A write can MOVE a row: revoke
+   * someone's local edit and, if a parent still grants them read, they file
+   * under "People invited to <parent>" — which is collapsed, so the person the
+   * reader was just editing vanishes and looks removed. Open the section the
+   * row now lives in (its nearest granting folder, or the roles group); a row
+   * that stays on this folder needs nothing.
+   */
+  const revealRow = useCallback((row: PrincipalRow | undefined) => {
+    if (!row || row.manage === 'direct') return;
+    setOpenSection(row.ancestors.length === 0 ? 'roles' : row.ancestors[0]!);
+  }, []);
+
   const governed = repoRelative !== null;
+  // A file that cannot carry frontmatter (a PDF, a deck, an image) has no rules
+  // of its own: its folder's rules govern it, and the grant / revoke routes
+  // refuse it. The server's ruling (`governedByFolder`, from the same shared
+  // predicate over the resolver's registered extensions) decides once the view
+  // has loaded; until then the shared predicate's core set stands in, so the
+  // sheet never flashes a field for a PDF.
+  const folderGoverns =
+    targetKind === 'file' &&
+    repoRelative !== null &&
+    (data ? data.governedByFolder !== undefined : !canCarryFrontmatter(repoRelative));
+  const governingFolder =
+    data?.governedByFolder ??
+    (repoRelative !== null && repoRelative.includes('/')
+      ? repoRelative.slice(0, repoRelative.lastIndexOf('/'))
+      : '');
+  const governingFolderLabel =
+    governingFolder === '' ? WHOLE_WORKSPACE : governingFolder.slice(governingFolder.lastIndexOf('/') + 1);
   // The dialog can mutate only if the current user can write this path's access
   // config — exactly what the backend gate enforces. `canWrite` on the path is
   // the same signal (folder access.md / node frontmatter both gate on write).
-  const canManage = !!data?.canWrite;
+  // Never on a folder-governed file: there is nothing here to write to.
+  const canManage = !!data?.canWrite && !folderGoverns;
 
   // Resolve the CURRENT typed query into a principal to append as a chip: an
   // exact group/role match or a free-typed email. (Suggestion clicks append
@@ -765,39 +1213,54 @@ export function ManageAccessDialog({
     );
     setQuery('');
     setSuggest(null);
+    // A pick from the list moved focus onto the list's button, which is about
+    // to unmount; the next name is typed into the field, so put the caret
+    // back there rather than making the person click into the white space.
+    queryInputRef.current?.focus();
   }, []);
+
+  // What the list OFFERS: the server's suggestions minus what is already a
+  // chip. A group picked once has nothing to add a second time, and seeing it
+  // offered again reads as "did that not take?".
+  const offered = useMemo(() => {
+    if (!suggest) return null;
+    const picked = new Set(pickedChips.map(principalKey));
+    return {
+      groups: (suggest.groups ?? []).filter((g) => !picked.has(principalKey({ kind: 'group', group: g }))),
+      roles: (suggest.roles ?? []).filter((r) => !picked.has(principalKey({ kind: 'role', role: r }))),
+      plugins: (suggest.pluginPrincipals ?? [])
+        .flatMap((name) => PLUGIN_PRINCIPAL_VERBS.map((verb) => ({ name, verb })))
+        .filter(({ name, verb }) => !picked.has(principalKey({ kind: 'plugin', plugin: name, verb }))),
+      people: (suggest.people ?? []).filter(
+        (p) => !picked.has(principalKey({ kind: 'user', email: p.email, displayName: p.name })),
+      ),
+    };
+  }, [suggest, pickedChips]);
+  const offersAnything =
+    !!offered &&
+    (offered.groups.length > 0 ||
+      offered.roles.length > 0 ||
+      offered.plugins.length > 0 ||
+      offered.people.length > 0);
 
   const removeChip = useCallback((p: Principal) => {
     setPickedChips((chips) => chips.filter((c) => principalKey(c) !== principalKey(p)));
   }, []);
 
-  // The new-grant checklist stores independent flags, but owner⊇write⊇read folds
-  // for display (selecting Owner implies edit+read; Edit implies read; owner also
-  // folds in download). `effectiveNewVerbs` is what the boxes render as checked.
-  const effectiveNewVerbs = useMemo<VerbSet>(
-    () => ({
-      owner: newVerbs.owner,
-      write: newVerbs.owner || newVerbs.write,
-      read: newVerbs.owner || newVerbs.write || newVerbs.read,
-      download: newVerbs.owner || newVerbs.download,
-    }),
-    [newVerbs],
-  );
+  // The new-grant checklist stores independent flags; the grammar's fold turns
+  // them into what the boxes render as checked (Owner implies edit, download
+  // and read; Edit and Download each imply read).
+  const effectiveNewVerbs = useMemo<VerbSet>(() => effectiveVerbs(newVerbs), [newVerbs]);
 
-  // The minimal verb list to send: the single highest tier verb (the lower ones
-  // fold in server-side) plus download when it's chosen independently of owner.
-  const grantVerbs = useMemo<GrantVerb[]>(() => {
-    const verbs: GrantVerb[] = [];
-    if (effectiveNewVerbs.owner) verbs.push('owner');
-    else if (effectiveNewVerbs.write) verbs.push('write');
-    else if (effectiveNewVerbs.read) verbs.push('read');
-    if (effectiveNewVerbs.download && !effectiveNewVerbs.owner) verbs.push('download');
-    return verbs;
-  }, [effectiveNewVerbs]);
+  // The fewest lines to send for that set — the grammar's own minimisation, so
+  // `owner` is one line and Download alone (or Read + Download) is `download`
+  // with no redundant `read:` beside it.
+  const grantVerbs = useMemo<GrantVerb[]>(() => minimalGrantVerbs(effectiveNewVerbs), [effectiveNewVerbs]);
 
-  const doGrant = useCallback(async () => {
+  /** Grant every picked principal the chosen verbs. Resolves `true` only when all of them landed. */
+  const doGrant = useCallback(async (): Promise<boolean> => {
     if (!workspaceId || repoRelative === null || pickedChips.length === 0 || grantVerbs.length === 0)
-      return;
+      return false;
     setBusy(true);
     setMutateError(null);
     // No batch grant endpoint exists, so apply each principal/verb pair and
@@ -810,17 +1273,14 @@ export function ManageAccessDialog({
         const label = principalLabel(principal);
         // `everyone` is public-read only — the backend rejects any other verb for
         // it, so clamp here to avoid a guaranteed failure when a higher verb is
-        // also selected for the other chips.
+        // also selected for the other chips. Every selection that reaches this
+        // point confers read (Share is disabled while `grantVerbs` is empty, and
+        // each of the four boxes now implies read), so the clamp always has a
+        // verb to send: "Can download" on Everyone shares it publicly readable
+        // and drops only the download half the backend would refuse anyway.
         const verbsForPrincipal = isEveryoneRole(principal)
-          ? (effectiveNewVerbs.read ? (['read'] as GrantVerb[]) : [])
+          ? (['read'] as GrantVerb[])
           : grantVerbs;
-        // Don't silently drop the Everyone chip when nothing read-equivalent was
-        // picked (e.g. only "Can download"): record it as a failure so the chip
-        // stays visible and the user is told why, rather than a no-op clear.
-        if (isEveryoneRole(principal) && verbsForPrincipal.length === 0) {
-          failures.push(`${label}: "Everyone" can only be granted read access. Select "Can read".`);
-          continue;
-        }
         for (const verb of verbsForPrincipal) {
           try {
             await grantAccess(workspaceId, {
@@ -843,16 +1303,24 @@ export function ManageAccessDialog({
           `${failures.length} grant${failures.length === 1 ? '' : 's'} failed (the rest were applied):\n${failures.join('\n')}`,
         );
       }
+      return failures.length === 0;
     } finally {
       reload();
       setBusy(false);
     }
-  }, [workspaceId, repoRelative, pickedChips, entry.relativePath, targetKind, grantVerbs, effectiveNewVerbs, reload]);
+  }, [workspaceId, repoRelative, pickedChips, entry.relativePath, targetKind, grantVerbs, reload]);
 
-  // WHY the node is public, said in the band and acted on in the rows: every
-  // literal `everyone` line (here, or in a parent) is the Everyone row's
+  // The footer's one primary action. With picks it shares them and closes; a
+  // grant that fails keeps the dialog — and the picks — up with the failure
+  // shown. With nothing picked it only closes.
+  const doShare = useCallback(async () => {
+    if (await doGrant()) onClose();
+  }, [doGrant, onClose]);
+
+  // WHY the node is public, said in the reach line and acted on in the rows:
+  // every literal `everyone` line (here, or in a parent) is the Everyone row's
   // source; every public plugin principal granted read is that plugin's
-  // row. The band only describes — one mechanism removes, and it is the
+  // row. The line only describes — one mechanism removes, and it is the
   // same one for every principal.
   const publicReasons = [
     ...(lookupSources(data?.sources, 'r:everyone')?.read ?? []).map((s) =>
@@ -864,76 +1332,128 @@ export function ManageAccessDialog({
     }),
   ];
 
-  // Toggle a single verb on an existing grantee: check → grant that verb, uncheck
-  // → revoke just that verb. The server's fresh view is authoritative (we never
-  // flip optimistically); a refused revoke (e.g. lock contention) surfaces its
-  // message and we re-sync.
-  const doToggleVerb = useCallback(
-    async (principal: Principal, role: Role, currentlyOn: boolean) => {
+  // The item's reach, in one line: the only place the sheet says whether it is
+  // restricted or public. A statement, not a control — each public reason is a
+  // grant with a row below, and the row is where it is removed.
+  const reachLine = data ? (
+    <p className="mt-2 flex items-start gap-1.5 text-detail text-ink-muted">
+      {data.readers.restricted ? (
+        <Lock size={13} aria-hidden className="mt-0.5 shrink-0" />
+      ) : (
+        <Globe size={13} aria-hidden className="mt-0.5 shrink-0 text-ok" />
+      )}
+      <span className="min-w-0">
+        {data.readers.restricted
+          ? 'Restricted: only the people below can open it'
+          : `Public: anyone signed in can read it${
+              publicReasons.length > 0 ? ` — ${publicReasons.join(', ')}` : ''
+            }. Editing needs access.`}
+      </span>
+    </p>
+  ) : null;
+
+  /**
+   * Apply a whole verb set to one existing row — the single action behind every
+   * item of a row's menu, including Deny (`picked: null`).
+   *
+   * The user states the set they want; the dialog writes the DIFFERENCE between
+   * that and what the principal effectively has here, with no prompt in between:
+   *
+   *   - a verb the set drops, held only through an entry on this target → revoke
+   *     it here (there is nothing left to shadow once it is gone);
+   *   - a verb the set drops that a PARENT still grants → a verb-scoped `deny` on
+   *     this target, which is what "restrict just this folder" always wrote, now
+   *     written straight from the row;
+   *   - a verb the set adds that is denied here → lift that denial, which alone
+   *     may restore it from the parent;
+   *   - a verb the set adds that nothing confers → grant it here.
+   *
+   * Order is broadest-verb-first for both halves; see {@link VERBS_BROADEST_FIRST}
+   * for why neither half is safe in the other order. Each call answers with the
+   * server's fresh view, and the next step re-reads the row from it rather than
+   * from a predicted state — so a partial failure leaves the sheet showing what
+   * actually landed, and the steps already applied stand.
+   */
+  const doApplyVerbSet = useCallback(
+    async (row: PrincipalRow, picked: VerbPick | null) => {
       if (!workspaceId || repoRelative === null) return;
+      // The menu stays OPEN across the writes, as the per-verb checklist did:
+      // its items freeze on `busy`, and when the fresh view lands they re-render
+      // showing the set that actually took — including, per verb, "from <parent>"
+      // or "restricted here". Closing it would hide exactly that answer.
       setBusy(true);
       setMutateError(null);
+      const base = { path: entry.relativePath, kind: targetKind, principal: row.principal };
+      let latest = data;
+      /** The row as the LATEST server response describes it — never a guess. */
+      const current = (): PrincipalRow | undefined =>
+        buildRows(latest, myEmail).find((r) => r.key === row.key);
+      const step = async (send: () => Promise<AccessResponse>) => {
+        latest = await send();
+        setData(latest);
+      };
       try {
-        const grantVerb = ROLE_TO_VERB[role];
-        const res = currentlyOn
-          ? await revokeAccess(workspaceId, {
-              path: entry.relativePath,
-              kind: targetKind,
-              principal,
-              verb: grantVerb,
-            })
-          : await grantAccess(workspaceId, {
-              path: entry.relativePath,
-              kind: targetKind,
-              verb: grantVerb,
-              principal,
-            });
-        setData(res);
-        // When UNCHECKING, the direct entry for this verb was stripped (200) but
-        // the principal may STILL hold the SAME verb via an ancestor — i.e. the
-        // verb was `[direct, ancestor]`. The fresh view still lists them with the
-        // ancestor for this verb; chain into the verb-scoped "Remove from parent?"
-        // so one uncheck finishes the job instead of a half-removal (the direct
-        // bit gone, the inherited bit silently remaining and the box re-checking).
-        if (currentlyOn) {
-          const key = principalKey(principal);
-          const stillForVerb = lookupSources(res.sources, key)?.[grantVerb] ?? [];
-          const ancestors = ancestorsFromSources({ [grantVerb]: stillForVerb });
-          if (ancestors.length > 0) {
-            setConfirmRemove({
-              principal,
-              label: principalLabel(principal),
-              ancestors,
-              verb: grantVerb,
-            });
+        // Deny is the whole-principal case and the server does it in one write:
+        // `deny-here` with no verb strips every local grant and denies all four,
+        // read included.
+        if (picked === null) {
+          await step(() => revokeAccess(workspaceId, { ...base, mode: 'deny-here' }));
+          return;
+        }
+
+        // ---- lower: what the set drops -------------------------------------
+        // Only a verb the pick states as OFF is dropped; one it leaves out is
+        // left to the file (see `VerbPick`).
+        for (const verb of VERBS_BROADEST_FIRST) {
+          if (picked[verb] !== false) continue;
+          const now = current();
+          if (!now?.verbs[verb]) continue; // already gone
+          const src = now.sources?.[verb] ?? [];
+          // Purely local → a plain revoke is enough and leaves no `deny` line
+          // behind to explain later. Anything else (inherited, or conferred with
+          // no entry of its own) needs the denial: removing what is not written
+          // here cannot take it away.
+          const localOnly = src.length > 0 && src.every((s) => s.kind === 'direct');
+          await step(() =>
+            revokeAccess(
+              workspaceId,
+              localOnly ? { ...base, verb } : { ...base, mode: 'deny-here', verb },
+            ),
+          );
+          // A local grant that turned out to be doubled by a parent: the revoke
+          // landed, the verb survived it. Finish the job with the denial rather
+          // than leave a half-applied set behind.
+          if (localOnly && current()?.verbs[verb]) {
+            await step(() => revokeAccess(workspaceId, { ...base, mode: 'deny-here', verb }));
           }
         }
-      } catch (err) {
-        // Unchecking a verb the principal holds via INHERITANCE (e.g. they're
-        // direct on `download` but inherit `write`) can't be done in place — the
-        // target splice no-ops and the route 409s. Convert that into the same
-        // "Remove from parent?" flow a Remove uses, instead of a raw error toast.
-        const inherited = asInheritedError(err);
-        if (inherited) {
-          const label = principalLabel(principal);
-          // Scope the confirmation to the single verb the user unchecked, so
-          // "Restrict just this file" / "Remove from parent" act on THAT verb
-          // only and leave the principal's other (e.g. direct download) verbs.
-          setConfirmRemove({
-            principal,
-            label,
-            ancestors: ancestorsFromSources(inherited.sources),
-            verb: ROLE_TO_VERB[role],
-          });
-        } else {
-          setMutateError(err instanceof Error ? err.message : String(err));
-          reload(); // re-sync after a refused/rolled-back toggle
+
+        // ---- raise: lift the restrictions the new set no longer needs ------
+        for (const verb of VERBS_BROADEST_FIRST) {
+          if (!picked[verb]) continue;
+          if (!(current()?.denials?.[verb] ?? []).some((s) => s.kind === 'direct')) continue;
+          await step(() => revokeAccess(workspaceId, { ...base, verb }));
         }
+
+        // ---- raise: grant what still nothing confers -----------------------
+        // `minimalGrantVerbs` already drops the verbs the set's own higher ones
+        // confer, so this writes at most two lines (a tier, plus download) and
+        // never a redundant `read:` under a grant that carries read anyway.
+        for (const verb of minimalGrantVerbs(picked)) {
+          if (current()?.verbs[verb]) continue;
+          await step(() => grantAccess(workspaceId, { ...base, verb }));
+        }
+      } catch (err) {
+        setMutateError(err instanceof Error ? err.message : String(err));
+        reload(); // re-sync on whatever the server actually holds now
       } finally {
         setBusy(false);
+        // Wherever the writes left the row, keep it in view — from the latest
+        // response, so a partial failure reveals where it actually is.
+        revealRow(current());
       }
     },
-    [workspaceId, repoRelative, entry.relativePath, targetKind, reload],
+    [workspaceId, repoRelative, entry.relativePath, targetKind, data, myEmail, reload, revealRow],
   );
 
   const doRevoke = useCallback(
@@ -945,7 +1465,12 @@ export function ManageAccessDialog({
         setConfirmRemove({
           principal: row.principal,
           label: row.label,
-          ancestors: row.ancestors,
+          // GRANT ancestors only. The dialog's offer is "remove their access
+          // from <folder>"; an ancestor that denies holds no access to remove,
+          // and acting there would strip that folder's restriction instead. A
+          // row whose only ancestor entry is a denial falls to the no-ancestor
+          // branch, which offers restricting here and nothing else.
+          ancestors: row.grantAncestors,
         });
         return;
       }
@@ -958,13 +1483,22 @@ export function ManageAccessDialog({
           principal: row.principal,
         });
         setData(res);
+        // If a parent still grants them something, the row has just moved into
+        // that folder's collapsed section: keep it on screen (the prompt below
+        // may be declined, and the person must not look removed when it is).
+        revealRow(buildRows(res, myEmail).find((r) => r.key === row.key));
         // The direct entry was removed, but the FRESH view may still list this
         // principal with only `ancestor` source(s) — i.e. they're still inherited
         // from a parent. Open "Remove from parent?" so the one Remove click can
         // finish the job instead of leaving a row that reappears as inherited (a
         // silent half-removal). We read the just-revoked row's post-revoke sources
         // straight from the response, so it reflects the real current tree.
-        const ancestors = ancestorsFromSources(lookupSources(res.sources, row.key));
+        //
+        // GRANTS, deliberately — `res.denials` is not consulted. A parent that
+        // still DENIES this principal is not unfinished business: the removal
+        // already left them with nothing here, and chaining to that folder would
+        // offer to delete its restriction.
+        const ancestors = ancestorPaths(lookupSources(res.sources, row.key));
         if (ancestors.length > 0) {
           setConfirmRemove({ principal: row.principal, label: row.label, ancestors });
         }
@@ -976,7 +1510,7 @@ export function ManageAccessDialog({
           setConfirmRemove({
             principal: row.principal,
             label: row.label,
-            ancestors: ancestorsFromSources(inherited.sources),
+            ancestors: ancestorPaths(inherited.sources),
           });
         } else {
           setMutateError(err instanceof Error ? err.message : String(err));
@@ -986,7 +1520,7 @@ export function ManageAccessDialog({
         setBusy(false);
       }
     },
-    [workspaceId, repoRelative, entry.relativePath, targetKind, reload],
+    [workspaceId, repoRelative, entry.relativePath, targetKind, reload, myEmail, revealRow],
   );
 
   /** Cascade up: remove the principal from the granting ancestor folder (optionally scoped to one verb). */
@@ -1054,9 +1588,33 @@ export function ManageAccessDialog({
     return names.slice(0, 3).join(', ');
   }, [data]);
 
-  // One grantee row. Direct rows get the inline verb editor; inherited rows are
-  // read-only with a Remove that opens the cascade flow; external rows are
-  // read-only with no action.
+  // Every managed row ends in the same two slots: the verb control, then
+  // Remove. A row with nothing removable here (a role or policy grant) keeps
+  // the slot empty, so the verb control still lines up with its neighbours'.
+  //
+  // The accessible names are the ones these actions had before they shared a
+  // slot: on a direct grant this is the old dropdown item "Remove access", on an
+  // inherited grant the old "Remove" button. The name still contains the visible
+  // word, so voice control ("click Remove") reaches both.
+  const removeSlot = (p: PrincipalRow | null) => (
+    <span className="flex w-16 shrink-0 justify-end">
+      {p && (
+        <Button
+          variant="danger"
+          size="tiny"
+          disabled={busy}
+          aria-label={p.manage === 'direct' ? 'Remove access' : undefined}
+          onClick={() => doRevoke(p)}
+        >
+          Remove
+        </Button>
+      )}
+    </span>
+  );
+
+  // One grantee row. Direct rows get the inline verb editor and a Remove that
+  // revokes in place; inherited rows are read-only with a Remove that opens the
+  // cascade flow; external rows are read-only with no action.
   const renderRow = (p: PrincipalRow) => {
     const tone = avatarTone(p.label);
     return (
@@ -1081,110 +1639,146 @@ export function ManageAccessDialog({
           <div className="flex min-w-0 items-center gap-1.5">
             <span className="truncate text-ui font-medium text-ink">{p.label}</span>
             {p.isYou && <span className="shrink-0 text-ui text-ink-faint">(you)</span>}
+            {/* Granted, but nobody has signed in as this address yet. Beside
+                the name, where the chip put it before the grant was saved —
+                and gone by itself once they do sign in. */}
+            {p.kind === 'user' && p.hasAccount === false && <NoAccountNote />}
             {p.kind !== 'user' && (
               // The same chip vocabulary as the suggest menu's trailing tags:
               // a role is a capability, a group is an audience — badge which.
-              <Badge tone="outline" size="xs" className="shrink-0 uppercase">
+              <Badge
+                tone="outline"
+                size="xs"
+                className="shrink-0 uppercase"
+                title={PRINCIPAL_KIND_HELP[p.kind]}
+                aria-description={PRINCIPAL_KIND_HELP[p.kind]}
+              >
                 {p.kind === 'group' ? 'Group' : p.kind === 'plugin' ? 'Plugin' : 'Role'}
               </Badge>
             )}
           </div>
           {p.sub && <div className="truncate text-detail text-ink-muted">{p.sub}</div>}
         </div>
-        {canManage && p.manage === 'inherited' ? (
-          // Inherited from a parent folder — read-only here. Leaf folder name only
-          // (full path on hover); Remove opens the "Remove from parent?" flow.
+        {canManage ? (
+          // ONE set of controls for every row the caller can manage — direct,
+          // inherited or external alike. An inherited row used to be read-only
+          // text here, which made "give this person less than the parent does" a
+          // thing the sheet could describe but not do; the menu below does it, by
+          // writing the restriction in the background.
           <div className="ml-auto flex max-w-full shrink-0 items-center gap-2">
-            <span
-              className="min-w-0 max-w-40 truncate text-detail italic text-ink-faint"
-              title={p.ancestors.map(folderPath).join(', ')}
-            >
-              via {p.ancestors.map(folderLabel).join(', ')}
-            </span>
-            <span className="whitespace-nowrap text-detail text-ink-faint">
-              {summarizeVerbs(p.verbs)}
-            </span>
-            <Button variant="danger" size="tiny" disabled={busy} onClick={() => doRevoke(p)}>
-              Remove
-            </Button>
-          </div>
-        ) : canManage && p.manage === 'external' ? (
-          // No file-backed grant to remove here — managed elsewhere (a role or
-          // group's membership, the everyone policy, or admin rescue).
-          <span
-            className="ml-auto shrink-0 text-detail text-ink-faint"
-            title="Granted via a role or policy. Manage it there"
-          >
-            {summarizeVerbs(p.verbs)}
-          </span>
-        ) : canManage ? (
-          <div className="ml-auto shrink-0">
-            {/* Not `disabled={busy}`: the checklist's items freeze while a
-                grant or revoke is in flight, and this button only opens or
-                closes the checklist. Disabled, it could not take focus back
-                on Escape (`.focus()` on a disabled button is a no-op), and
-                focus fell to `document`. */}
-            <Button
-              ref={openRowKey === p.key ? openRowTriggerRef : undefined}
-              variant="quiet"
-              size="sm"
-              onClick={() => setOpenRowKey((k) => (k === p.key ? null : p.key))}
-              trailingIcon={<ChevronDown size={14} />}
-            >
-              {summarizeVerbs(p.verbs)}
-            </Button>
-            {openRowKey === p.key && (
-              <AnchoredMenu onDismiss={() => setOpenRowKey(null)} triggerRef={openRowTriggerRef}>
-                {/* Everyone is public READ only (the grant route refuses the
-                    rest), so its row offers exactly the verb it can hold. */}
-                {(isEveryoneRole(p.principal) ? (['Can read'] as Role[]) : TIER_ROLES).map((role) => {
-                  const k = ROLE_TO_KEY[role];
-                  const checked = p.verbs[k];
-                  const disabled =
-                    busy ||
-                    (role === 'Can edit' && p.verbs.owner) ||
-                    (role === 'Can read' && (p.verbs.owner || p.verbs.write));
-                  return (
-                    <MenuItem
-                      key={role}
-                      disabled={disabled}
-                      active={checked}
-                      onClick={() => doToggleVerb(p.principal, role, checked)}
-                      trailing={checked ? <Check size={14} className="text-accent" /> : undefined}
-                    >
-                      {role}
-                    </MenuItem>
-                  );
-                })}
-                {!isEveryoneRole(p.principal) && <div className="my-1 border-t border-line" />}
-                {!isEveryoneRole(p.principal) &&
-                  (() => {
-                    const checked = p.verbs.download;
-                    const disabled = busy || p.verbs.owner;
-                    return (
-                      <MenuItem
-                        disabled={disabled}
-                        active={checked}
-                        onClick={() => doToggleVerb(p.principal, 'Can download', checked)}
-                        trailing={checked ? <Check size={14} className="text-accent" /> : undefined}
-                      >
-                        Can download
-                      </MenuItem>
-                    );
-                  })()}
-                <div className="my-1 border-t border-line" />
-                <MenuItem
-                  tone="danger"
-                  disabled={busy}
-                  onClick={() => {
-                    setOpenRowKey(null);
-                    doRevoke(p);
-                  }}
-                >
-                  Remove access
-                </MenuItem>
-              </AnchoredMenu>
+            {p.manage === 'inherited' && (
+              // Leaf folder name only (full path on hover) — where the entries
+              // naming this principal live, when none of them is here.
+              <span
+                className="min-w-0 max-w-40 truncate text-detail italic text-ink-faint"
+                title={p.ancestors.map(folderPath).join(', ')}
+              >
+                via {p.ancestors.map(folderLabel).join(', ')}
+              </span>
             )}
+            {/* Its own box: the menu anchors to its DOM parent, which must be
+                the trigger alone, not the trigger and Remove together. */}
+            <div>
+              {/* Not `disabled={busy}`: the menu's items freeze while a grant or
+                  revoke is in flight, and this button only opens or closes the
+                  menu. Disabled, it could not take focus back on Escape
+                  (`.focus()` on a disabled button is a no-op), and focus fell to
+                  `document`. */}
+              <Button
+                ref={openRowKey === p.key ? openRowTriggerRef : undefined}
+                variant="quiet"
+                size="sm"
+                onClick={() => setOpenRowKey((k) => (k === p.key ? null : p.key))}
+                trailingIcon={<ChevronDown size={14} />}
+              >
+                {rowSummary(p)}
+              </Button>
+              {openRowKey === p.key && (
+                <AnchoredMenu
+                  onDismiss={() => setOpenRowKey(null)}
+                  triggerRef={openRowTriggerRef}
+                  // Sized to the items, not the trigger: a row that reads
+                  // "Can read" opens a narrow panel, and its items carry
+                  // notes ("from the whole workspace") that would otherwise
+                  // squeeze the label itself down to "C…".
+                  width="content"
+                >
+                  {/* Everyone is public READ only (the grant route refuses the
+                      rest), so its row offers exactly the verb it can hold —
+                      plus Deny, which takes even that away. */}
+                  {(isEveryoneRole(p.principal) ? (['Can read'] as Role[]) : MENU_ROLES).map(
+                    (role, i) => {
+                      const checked = p.verbs[ROLE_TO_KEY[role]];
+                      const note = verbNote(p, ROLE_TO_VERB[role]);
+                      // Where a click on this item takes the row; null means
+                      // nowhere from here, and the item says so by being off.
+                      const next = nextVerbSet(p.verbs, role);
+                      return (
+                        // A Fragment, not a wrapper div: the items must stay
+                        // DIRECT children of the panel, which is the box the
+                        // menu measures and the keyboard walks.
+                        <Fragment key={role}>
+                          {/* Download is its own axis, not a lower tier — the
+                              rule the separator has always drawn. */}
+                          {role === 'Can download' && i > 0 && (
+                            <div className="my-1 border-t border-line" />
+                          )}
+                          <MenuItem
+                            disabled={busy || next === null}
+                            active={checked}
+                            aria-pressed={checked}
+                            // The note is the row's own explanation, not part of
+                            // what the item DOES: keep it out of the name ("Can
+                            // read"), and give it to assistive tech as the
+                            // description it is.
+                            aria-description={note}
+                            onClick={() => next && doApplyVerbSet(p, next)}
+                            trailing={
+                              <span className="flex items-center gap-1.5">
+                                {note && (
+                                  // The note is what gives way when the panel
+                                  // is at its cap, never the label: bounded and
+                                  // truncated, with the full text on hover.
+                                  <span
+                                    aria-hidden
+                                    title={note}
+                                    className="max-w-44 truncate text-meta text-ink-faint"
+                                  >
+                                    {note}
+                                  </span>
+                                )}
+                                {checked && <Check size={14} className="text-accent" />}
+                              </span>
+                            }
+                          >
+                            {role}
+                          </MenuItem>
+                        </Fragment>
+                      );
+                    },
+                  )}
+                  <div className="my-1 border-t border-line" />
+                  {/* Last, and the only destructive item: denies every verb here,
+                      read included. The row stays — the block is a rule about
+                      this person on this target, and this menu is where it is
+                      lifted again. */}
+                  <MenuItem
+                    tone="danger"
+                    disabled={busy}
+                    active={p.deniedHere}
+                    aria-description={`Block ${p.label} on this ${targetKind}, whatever a parent folder grants`}
+                    onClick={() => doApplyVerbSet(p, null)}
+                    trailing={p.deniedHere ? <Check size={14} className="text-danger" /> : undefined}
+                  >
+                    Deny
+                  </MenuItem>
+                </AnchoredMenu>
+              )}
+            </div>
+            {/* An external row has no entry here to remove — the verb menu can
+                still write one (a denial), but Remove would have nothing to act
+                on, so the slot stays empty and the row still lines up. */}
+            {removeSlot(p.manage === 'external' ? null : p)}
           </div>
         ) : (
           <span className="ml-auto shrink-0 text-detail text-ink-muted">
@@ -1203,21 +1797,41 @@ export function ManageAccessDialog({
         title="Manage access"
         size="lg"
         footer={
-          <Button variant="primary" size="sm" onClick={onClose}>
-            Done
-          </Button>
+          // One primary action, named for what it will do: Share while
+          // anything is picked, Done when there is nothing to grant.
+          pickedChips.length > 0 ? (
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={grantVerbs.length === 0 || busy}
+              onClick={doShare}
+              leadingIcon={busy ? <Loader2 size={14} className="animate-spin" /> : undefined}
+            >
+              Share
+            </Button>
+          ) : (
+            <Button variant="primary" size="sm" onClick={onClose}>
+              Done
+            </Button>
+          )
         }
       >
         <p className="truncate text-detail text-ink-muted" title={entry.relativePath}>
           {entry.name}
         </p>
 
+        {proposal && (
+          <Banner tone="neutral" role="status" className="mt-3">
+            {`You're editing access on change request #${proposal.number}. It takes effect when the request merges.`}
+          </Banner>
+        )}
+
         {governed && canManage && (
           <div className="mt-3">
-            {/* `items-start`, not `items-stretch`: the buttons are `rounded-full`,
-                so stretching them to match the chip box turned Share into a
-                circle the moment a chip wrapped the box onto a second line.
-                `flex-wrap` lets them drop below the box rather than crushing it. */}
+            {/* `items-start`, not `items-stretch`: the verb button is `rounded-full`,
+                so stretching it to match the chip box turned it into a pill the
+                height of the box the moment a chip wrapped onto a second line.
+                `flex-wrap` lets it drop below the box rather than crushing it. */}
             <div className="relative flex flex-wrap items-start gap-1.5">
               <div className="relative min-w-48 flex-1">
                 {/* A TextField that grew chips: same border, radius and focus
@@ -1225,16 +1839,32 @@ export function ManageAccessDialog({
                 <div className="flex w-full flex-wrap items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2 py-1 focus-within:border-transparent focus-within:outline-2 focus-within:-outline-offset-1 focus-within:outline-accent">
                   {pickedChips.map((c) => {
                     const label = principalLabel(c);
+                    // Nobody has signed in as this address — say so, and grant
+                    // it anyway. Only an answer that ruled on this exact
+                    // address earns the note (see `lacksAccount`); until one
+                    // arrives the chip is simply unlabelled, never guessed at.
+                    const noAccount = c.kind === 'user' && lacksAccount(c.email);
                     return (
+                      // `max-w-full` bounds the chip by the field it sits in, so a
+                      // long email can never push its own border past the box;
+                      // `min-w-0` lets the label inside it actually shrink (a flex
+                      // item's automatic minimum is its content, ellipsis or not).
                       <span
                         key={principalKey(c)}
-                        className="inline-flex items-center gap-1 rounded-sm bg-sunken px-2 py-0.5 text-detail text-ink"
+                        className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-sm bg-sunken px-2 py-0.5 text-detail text-ink"
                       >
-                        {label}
+                        {/* The label is the only part that gives way — it
+                            truncates and carries the full name as its tooltip. */}
+                        <span className="min-w-0 truncate" title={label}>
+                          {label}
+                        </span>
+                        {noAccount && <NoAccountNote />}
                         <button
                           type="button"
                           onClick={() => removeChip(c)}
-                          className="rounded-xs text-ink-faint hover:text-danger"
+                          // `shrink-0`: the remove control stays whole and visible
+                          // at the end of the chip however long the label is.
+                          className="shrink-0 rounded-xs text-ink-faint hover:text-danger"
                           aria-label={`Remove ${label}`}
                         >
                           <X size={12} />
@@ -1243,6 +1873,7 @@ export function ManageAccessDialog({
                     );
                   })}
                   <input
+                    ref={queryInputRef}
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     onKeyDown={(e) => {
@@ -1251,7 +1882,7 @@ export function ManageAccessDialog({
                         addChip(addPending);
                       }
                     }}
-                    placeholder={pickedChips.length ? '' : 'Add people, groups, or roles…'}
+                    placeholder={pickedChips.length ? '' : 'Add people, groups, roles or plugins…'}
                     className="min-w-32 flex-1 bg-transparent px-1 py-1 text-ui text-ink placeholder:text-ink-faint focus:outline-none"
                   />
                 </div>
@@ -1259,14 +1890,20 @@ export function ManageAccessDialog({
                     `roles` or `groups` (version skew) must degrade to an empty
                     section, never a crash. Groups lead — they are the audience
                     concept grants are meant for; roles remain grantable below. */}
-                {query.trim() && suggest && ((suggest.groups?.length ?? 0) > 0 || (suggest.roles?.length ?? 0) > 0 || (suggest.pluginPrincipals?.length ?? 0) > 0 || (suggest.people?.length ?? 0) > 0) && (
+                {query.trim() && offered && offersAnything && (
                   <AnchoredMenu width="anchor" align="left" className="max-h-56 overflow-auto">
-                    {(suggest.groups ?? []).map((g) => (
+                    {offered.groups.map((g) => (
                       <MenuItem
                         key={`grp:${g}`}
                         onClick={() => addChip({ kind: 'group', group: g })}
                         trailing={
-                          <span className="text-label uppercase text-ink-faint">group</span>
+                          <span
+                              className="text-label uppercase text-ink-faint"
+                              title={PRINCIPAL_KIND_HELP.group}
+                              aria-description={PRINCIPAL_KIND_HELP.group}
+                            >
+                              group
+                            </span>
                         }
                       >
                         <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
@@ -1275,12 +1912,18 @@ export function ManageAccessDialog({
                         <span className="min-w-0 flex-1 truncate">{g}</span>
                       </MenuItem>
                     ))}
-                    {(suggest.roles ?? []).map((g) => (
+                    {offered.roles.map((g) => (
                       <MenuItem
                         key={`g:${g}`}
                         onClick={() => addChip({ kind: 'role', role: g })}
                         trailing={
-                          <span className="text-label uppercase text-ink-faint">role</span>
+                          <span
+                              className="text-label uppercase text-ink-faint"
+                              title={PRINCIPAL_KIND_HELP.role}
+                              aria-description={PRINCIPAL_KIND_HELP.role}
+                            >
+                              role
+                            </span>
                         }
                       >
                         <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
@@ -1291,13 +1934,18 @@ export function ManageAccessDialog({
                     ))}
                     {/* A plugin is three grantees — its readers, its writers, its
                         owners — each following the plugin's own roster live. */}
-                    {(suggest.pluginPrincipals ?? []).flatMap((name) =>
-                      PLUGIN_PRINCIPAL_VERBS.map((verb) => (
+                    {offered.plugins.map(({ name, verb }) => (
                         <MenuItem
                           key={`pl:${name}/${verb}`}
                           onClick={() => addChip({ kind: 'plugin', plugin: name, verb })}
                           trailing={
-                            <span className="text-label uppercase text-ink-faint">plugin</span>
+                            <span
+                              className="text-label uppercase text-ink-faint"
+                              title={PRINCIPAL_KIND_HELP.plugin}
+                              aria-description={PRINCIPAL_KIND_HELP.plugin}
+                            >
+                              plugin
+                            </span>
                           }
                         >
                           <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
@@ -1305,9 +1953,8 @@ export function ManageAccessDialog({
                           </span>
                           <span className="min-w-0 flex-1 truncate">{pluginPrincipalLabel(name, verb)}</span>
                         </MenuItem>
-                      )),
-                    )}
-                    {(suggest.people ?? []).map((p) => {
+                    ))}
+                    {offered.people.map((p) => {
                       const tone = avatarTone(p.name || p.email);
                       return (
                         <MenuItem
@@ -1333,6 +1980,35 @@ export function ManageAccessDialog({
                 )}
               </div>
 
+              {/* People, groups, roles and plugins are the words the field and
+                  its suggestions use; this says what each one is. */}
+              <div className="flex h-8 shrink-0 items-center">
+                <IconButton
+                  ref={kindHelpTriggerRef}
+                  aria-label="What can I share with?"
+                  aria-expanded={kindHelpOpen}
+                  active={kindHelpOpen}
+                  onClick={() => setKindHelpOpen((o) => !o)}
+                >
+                  <CircleHelp size={16} />
+                </IconButton>
+                {kindHelpOpen && (
+                  <AnchoredMenu
+                    onDismiss={() => setKindHelpOpen(false)}
+                    triggerRef={kindHelpTriggerRef}
+                    width={320}
+                  >
+                    <ul aria-label="What can I share with?" className="flex flex-col gap-2 px-3 py-2">
+                      {(['user', 'group', 'role', 'plugin'] as const).map((k) => (
+                        <li key={k} className="text-detail leading-snug text-ink">
+                          {PRINCIPAL_KIND_HELP[k]}
+                        </li>
+                      ))}
+                    </ul>
+                  </AnchoredMenu>
+                )}
+              </div>
+
               <div className="shrink-0">
                 <Button
                   ref={verbTriggerRef}
@@ -1349,16 +2025,26 @@ export function ManageAccessDialog({
                     {TIER_ROLES.map((role) => {
                       const k = ROLE_TO_KEY[role];
                       const checked = effectiveNewVerbs[k];
-                      const disabled =
-                        (role === 'Can edit' && effectiveNewVerbs.owner) ||
-                        (role === 'Can read' && (effectiveNewVerbs.owner || effectiveNewVerbs.write));
+                      // Checked because another tick confers it: not a choice here.
+                      const disabled = conferredByOthers(newVerbs, k);
                       return (
                         <MenuItem
                           key={role}
                           disabled={disabled}
                           active={checked}
                           aria-pressed={checked}
-                          onClick={() => setNewVerbs((v) => ({ ...v, [k]: !v[k] }))}
+                          onClick={() =>
+                            setNewVerbs((v) => {
+                              const on = !v[k];
+                              // Turning a tier OFF is "less than this", and less
+                              // than edit is read, not nothing: the Read the tier
+                              // implied stays selected in its own right. Read's
+                              // own item is the one that takes read away.
+                              return on || k === 'read'
+                                ? { ...v, [k]: on }
+                                : { ...v, [k]: false, read: true };
+                            })
+                          }
                           trailing={checked ? <Check size={14} className="text-accent" /> : undefined}
                         >
                           {role}
@@ -1367,10 +2053,16 @@ export function ManageAccessDialog({
                     })}
                     <div className="my-1 border-t border-line" />
                     <MenuItem
-                      disabled={effectiveNewVerbs.owner}
+                      disabled={conferredByOthers(newVerbs, 'download')}
                       active={effectiveNewVerbs.download}
                       aria-pressed={effectiveNewVerbs.download}
-                      onClick={() => setNewVerbs((v) => ({ ...v, download: !v.download }))}
+                      // Same rule as the tiers: unticking download keeps the
+                      // read it implied.
+                      onClick={() =>
+                        setNewVerbs((v) =>
+                          v.download ? { ...v, download: false, read: true } : { ...v, download: true },
+                        )
+                      }
                       trailing={
                         effectiveNewVerbs.download ? (
                           <Check size={14} className="text-accent" />
@@ -1382,21 +2074,11 @@ export function ManageAccessDialog({
                   </AnchoredMenu>
                 )}
               </div>
-
-              <Button
-                variant="primary"
-                size="sm"
-                className="shrink-0"
-                disabled={pickedChips.length === 0 || grantVerbs.length === 0 || busy}
-                onClick={doGrant}
-                leadingIcon={busy ? <Loader2 size={14} className="animate-spin" /> : undefined}
-              >
-                Share
-              </Button>
             </div>
+            {reachLine}
             {query.trim() && !addPending && !suggest?.peopleWithheld && (
               <p className="mt-1.5 text-detail text-ink-muted">
-                Type a full email to add someone, or pick a group or role from the list.
+                Type a full email to add someone, or pick a group, role or plugin from the list.
               </p>
             )}
             {pickedChips.some(isEveryoneRole) && (
@@ -1426,153 +2108,163 @@ export function ManageAccessDialog({
           </Banner>
         ) : (
           <>
-            {!canManage && (
-              <Banner tone="neutral" role="note" className="mt-3">
-                Only people with edit access can share this {targetKind}.
-                {ownerNames && <> Ask an owner: {ownerNames}.</>}
-              </Banner>
-            )}
-
-            {/* Names WHICH RULE you are editing, and adapts to the target
-                (proto:3625: `On this ` + file|folder). The sheet mixes rules
-                set HERE with rules inherited from above, so a heading that
-                says only "People with access" leaves the reader to work out
-                which of the two lists below is which. The count rides it, as
-                on every band in the app. */}
-            <h3 className="mb-1 mt-4 flex items-baseline gap-2 text-label uppercase text-ink-faint">
-              On this {targetKind}
-              {directRows.length > 0 && (
-                <span className="text-meta normal-case tabular-nums">{directRows.length}</span>
-              )}
-            </h3>
-
-            {/* A statement, not a control: it says the node is public and
-                why. Each reason is a grant with a row below — the Everyone
-                row for a literal line, the plugin's row for a public plugin
-                principal — and the row is where it is removed. */}
-            {data && !data.readers.restricted && (
-              <div className="flex items-center gap-3 py-1.5">
-                <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-ok-soft text-ok">
-                  <Globe size={16} />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="text-ui text-ink">Anyone can read</div>
-                  <div className="text-detail text-ink-muted">
-                    {`Public: every signed-in user can read this ${targetKind}${
-                      publicReasons.length > 0 ? ` — ${publicReasons.join(', ')}` : ''
-                    }.`}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {directRows.length === 0 ? (
-              <p className="py-2 text-ui text-ink-muted">
-                {inheritedRows.length > 0
-                  ? 'No one is granted directly here. Everyone below inherits access from a parent folder.'
-                  : 'No explicit grants at this path.'}
-              </p>
+            {/* No field to sit under: the reach line leads the sheet instead. */}
+            {!canManage && reachLine}
+            {folderGoverns ? (
+              <>
+                {/* No field and no rules here: say where the rules are, and
+                    go there. Who can open the file is still worth knowing. */}
+                <Banner tone="neutral" role="note" className="mt-3">
+                  {folderGovernsAccessMessage(governingFolderLabel)}
+                </Banner>
+                {onManageAncestor && kbDirName && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-2"
+                    title={governingFolder || WHOLE_WORKSPACE}
+                    onClick={() =>
+                      onManageAncestor({
+                        name: governingFolderLabel,
+                        relativePath: governingFolder ? `${kbDirName}/${governingFolder}` : kbDirName,
+                        type: 'directory',
+                      })
+                    }
+                  >
+                    {`Manage access on ${governingFolderLabel}`}
+                  </Button>
+                )}
+                <h3 className="mb-1 mt-4 flex items-baseline gap-2 text-label uppercase text-ink-faint">
+                  Who can open it
+                  {readerRows.length > 0 && (
+                    <span className="text-meta normal-case tabular-nums">{readerRows.length}</span>
+                  )}
+                </h3>
+                {readerRows.length === 0 ? (
+                  <p className="py-2 text-ui text-ink-muted">No one is named here.</p>
+                ) : (
+                  readerRows.map(renderRow)
+                )}
+              </>
             ) : (
-              directRows.map(renderRow)
-            )}
+              <>
+                {!canManage && (
+                  <Banner tone="neutral" role="note" className="mt-3">
+                    Only people with edit access can share this {targetKind}.
+                    {ownerNames && <> Ask an owner: {ownerNames}.</>}
+                  </Banner>
+                )}
 
-            {inheritedRows.length > 0 && (
-              <div className="mt-3 border-t border-line pt-2">
-                {inheritedByFolder.folders.map(([ancestor, rows]) => {
-                  const open = openSection === ancestor;
-                  return (
-                    <div key={ancestor}>
-                      <button
-                        type="button"
-                        aria-expanded={open}
-                        title={folderPath(ancestor)}
-                        onClick={() => setOpenSection(open ? null : ancestor)}
-                        className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
-                      >
-                        <ChevronDown
-                          size={14}
-                          className={`shrink-0 transition-transform ${open ? 'rotate-180' : '-rotate-90'}`}
-                        />
-                        <span className="min-w-0 truncate">
-                          People invited to <b className="font-semibold">{folderLabel(ancestor)}</b>
-                        </span>
-                        <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
-                          {rows.length}
-                        </span>
-                      </button>
-                      {open && (
-                        <div className="mb-1">
-                          {rows.map(renderRow)}
-                          {/* The folder is both what the heading means and
-                              where it changes (proto:3647). Without this the
-                              only act available on an inherited grant is the
-                              destructive one behind Remove. */}
-                          {onManageAncestor && kbDirName && (
-                            <Button
-                              variant="quiet"
-                              size="tiny"
-                              className="mt-0.5"
-                              onClick={() => {
-                                const dir = ancestor.replace(/\/?access\.md$/, '');
-                                onManageAncestor({
-                                  // The same name the button just said. A
-                                  // root-level `access.md` leaves `dir` empty,
-                                  // and `''.split('/').pop()` is `''` — a
-                                  // dialog with no title.
-                                  name: folderLabel(ancestor),
-                                  relativePath: `${kbDirName}/${dir}`,
-                                  type: 'directory',
-                                });
-                              }}
-                            >
-                              {`Manage ${folderLabel(ancestor)} →`}
-                            </Button>
+                {/* Names WHICH RULE you are editing, and adapts to the target
+                    (proto:3625: `On this ` + file|folder). The sheet mixes rules
+                    set HERE with rules inherited from above, so a heading that
+                    says only "People with access" leaves the reader to work out
+                    which of the two lists below is which. The count rides it, as
+                    on every band in the app. */}
+                <h3 className="mb-1 mt-4 flex items-baseline gap-2 text-label uppercase text-ink-faint">
+                  On this {targetKind}
+                  {directRows.length > 0 && (
+                    <span className="text-meta normal-case tabular-nums">{directRows.length}</span>
+                  )}
+                </h3>
+
+                {directRows.length === 0 ? (
+                  <p className="py-2 text-ui text-ink-muted">
+                    {inheritedRows.length > 0
+                      ? 'No one is granted directly here. Everyone below inherits access from a parent folder.'
+                      : 'No explicit grants at this path.'}
+                  </p>
+                ) : (
+                  directRows.map(renderRow)
+                )}
+
+                {inheritedRows.length > 0 && (
+                  <div className="mt-3 border-t border-line pt-2">
+                    {inheritedByFolder.folders.map(([ancestor, rows]) => {
+                      const open = openSection === ancestor;
+                      return (
+                        <div key={ancestor}>
+                          <button
+                            type="button"
+                            aria-expanded={open}
+                            title={folderPath(ancestor)}
+                            onClick={() => setOpenSection(open ? null : ancestor)}
+                            className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
+                          >
+                            <ChevronDown
+                              size={14}
+                              className={`shrink-0 transition-transform ${open ? 'rotate-180' : '-rotate-90'}`}
+                            />
+                            <span className="min-w-0 truncate">
+                              People invited to <b className="font-semibold">{folderLabel(ancestor)}</b>
+                            </span>
+                            <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
+                              {rows.length}
+                            </span>
+                          </button>
+                          {open && (
+                            <div className="mb-1">
+                              {rows.map(renderRow)}
+                              {/* The folder is both what the heading means and
+                                  where it changes (proto:3647). Without this the
+                                  only act available on an inherited grant is the
+                                  destructive one behind Remove. */}
+                              {onManageAncestor && kbDirName && (
+                                <Button
+                                  variant="quiet"
+                                  size="tiny"
+                                  className="mt-0.5"
+                                  onClick={() => {
+                                    const dir = ancestor.replace(/\/?access\.md$/, '');
+                                    onManageAncestor({
+                                      // The same name the button just said. A
+                                      // root-level `access.md` leaves `dir` empty,
+                                      // and `''.split('/').pop()` is `''` — a
+                                      // dialog with no title.
+                                      name: folderLabel(ancestor),
+                                      relativePath: `${kbDirName}/${dir}`,
+                                      type: 'directory',
+                                    });
+                                  }}
+                                >
+                                  {`Manage ${folderLabel(ancestor)} →`}
+                                </Button>
+                              )}
+                            </div>
                           )}
                         </div>
-                      )}
-                    </div>
-                  );
-                })}
+                      );
+                    })}
 
-                {/* A role that grants at the workspace level belongs to no
-                    folder, so it cannot be filed under one. Named for what it
-                    is rather than swept into the folder sections. */}
-                {inheritedByFolder.external.length > 0 && (
-                  <div>
-                    <button
-                      type="button"
-                      aria-expanded={openSection === 'roles'}
-                      onClick={() => setOpenSection(openSection === 'roles' ? null : 'roles')}
-                      className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
-                    >
-                      <ChevronDown
-                        size={14}
-                        className={`shrink-0 transition-transform ${openSection === 'roles' ? 'rotate-180' : '-rotate-90'}`}
-                      />
-                      <span className="min-w-0 truncate">People with access through a role</span>
-                      <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
-                        {inheritedByFolder.external.length}
-                      </span>
-                    </button>
-                    {openSection === 'roles' && (
-                      <div className="mb-1">{inheritedByFolder.external.map(renderRow)}</div>
+                    {/* A role that grants at the workspace level belongs to no
+                        folder, so it cannot be filed under one. Named for what it
+                        is rather than swept into the folder sections. */}
+                    {inheritedByFolder.external.length > 0 && (
+                      <div>
+                        <button
+                          type="button"
+                          aria-expanded={openSection === 'roles'}
+                          onClick={() => setOpenSection(openSection === 'roles' ? null : 'roles')}
+                          className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
+                        >
+                          <ChevronDown
+                            size={14}
+                            className={`shrink-0 transition-transform ${openSection === 'roles' ? 'rotate-180' : '-rotate-90'}`}
+                          />
+                          <span className="min-w-0 truncate">People with access through a role</span>
+                          <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
+                            {inheritedByFolder.external.length}
+                          </span>
+                        </button>
+                        {openSection === 'roles' && (
+                          <div className="mb-1">{inheritedByFolder.external.map(renderRow)}</div>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}
-              </div>
+              </>
             )}
-
-            <div className="mt-4 flex items-center gap-3 border-t border-line pt-4">
-              <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-sunken text-ink-muted">
-                <Lock size={16} />
-              </span>
-              <div className="flex-1">
-                <div className="text-ui font-semibold text-ink">Restricted</div>
-                <div className="text-detail text-ink-muted">
-                  Only people granted access can edit this item.
-                </div>
-              </div>
-            </div>
           </>
         )}
       </Dialog>
@@ -1584,7 +2276,11 @@ export function ManageAccessDialog({
           onClose={() => setConfirmRemove(null)}
           size="md"
           title={
-            confirmRemove.ancestors.length ? 'Remove from parent folder?' : 'Restrict access here?'
+            confirmRemove.ancestors.length === 1 && isRootAccessMd(confirmRemove.ancestors[0])
+              ? `Remove from ${WHOLE_WORKSPACE}?`
+              : confirmRemove.ancestors.length
+                ? 'Remove from parent folder?'
+                : 'Restrict access here?'
           }
         >
           {(() => {

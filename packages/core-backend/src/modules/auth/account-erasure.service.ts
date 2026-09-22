@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('account-erasure');
+import { and, eq, notExists } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
+import type { IReviewWorkflowService } from '../workflow/review-workflow/review-workflow.interface.js';
 import {
   changeRequests,
   externalApiKeys,
@@ -8,11 +12,22 @@ import {
   oauthAuthCodes,
   oauthTokens,
   pendingCommits,
+  pluginJoinRequests,
   prComments,
   prFileApprovals,
   prMergeLog,
   users,
 } from '../database/schema.js';
+
+/** The anonymised id of one erasure — how a commit or log may name the account. */
+export function erasedAccountId(erasureId: string): string {
+  return `deleted-${erasureId}`;
+}
+
+/** The placeholder email anonymised audit rows carry for one erasure. */
+export function erasedEmailFor(erasureId: string): string {
+  return `${erasedAccountId(erasureId)}@erased.invalid`;
+}
 
 /** A user row as the admin surface needs it (no avatar, no timestamps churn). */
 export interface AdminUserView {
@@ -86,13 +101,24 @@ export interface IErasureParticipant {
  */
 export interface IAccountErasureService {
   listUsers(): Promise<AdminUserView[]>;
-  /** Erase `userId`. Returns false when no such user exists. */
-  eraseUser(userId: string): Promise<boolean>;
+  /**
+   * Erase `userId`. Returns false when no such user exists. `erasureId` fixes
+   * the anonymised identity (`deleted-<erasureId>@erased.invalid`) so a caller
+   * can name the erased account elsewhere — e.g. a commit message — without
+   * the email; random when omitted.
+   */
+  eraseUser(userId: string, opts?: { erasureId?: string }): Promise<boolean>;
 }
 
 export class AccountErasureService implements IAccountErasureService {
   constructor(
     private readonly db: Database,
+    /**
+     * The review workflow owns the approvals and the lock their writers take,
+     * so it does the rewrite (see `IReviewWorkflowService.eraseApprover`);
+     * this module only decides WHEN, inside its own transaction.
+     */
+    private readonly reviewWorkflow: Pick<IReviewWorkflowService, 'eraseApprover'>,
     private readonly participants: IErasureParticipant[] = [],
   ) {}
 
@@ -104,14 +130,14 @@ export class AccountErasureService implements IAccountErasureService {
     return rows.map((r) => ({ ...r, createdAt: r.createdAt.getTime() }));
   }
 
-  async eraseUser(userId: string): Promise<boolean> {
+  async eraseUser(userId: string, opts: { erasureId?: string } = {}): Promise<boolean> {
     const [user] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!user) return false;
 
     const target: ErasureTarget = {
       userId,
       email: user.email.toLowerCase(),
-      erasedEmail: `deleted-${randomUUID()}@erased.invalid`,
+      erasedEmail: erasedEmailFor(opts.erasureId ?? randomUUID()),
       erasedName: 'Deleted user',
     };
 
@@ -133,12 +159,42 @@ export class AccountErasureService implements IAccountErasureService {
 
       // Personal-data rows the core owns.
       await tx.delete(fileLocks).where(eq(fileLocks.holderUserId, userId));
+      // Recorded plugin join requests. DELETED, not anonymised like the audit
+      // rows below: the row carries the person's address and name, it is not
+      // part of the review trail (the change request it opened is, and that
+      // is anonymised with the rest), and the table is unique on
+      // `(requester_email, plugin_key)` — so a row left behind would be
+      // INHERITED by a later account signing in with the same address, which
+      // would see a stranger's request as its own and be unable to make a new
+      // one. Sign-in is get-or-create by email, so that is not hypothetical.
+      //
+      // A JOB MAY BE MID-FLIGHT against one of these rows, and this statement
+      // says nothing to it — it is a background clone and push in another
+      // stack, possibly in another process, with no transaction to join. What
+      // stops it opening a change request in an erased person's name is the
+      // other side of the same delete: the job holds a fencing token from
+      // `plugin_join_requests.claim_token`, it re-beats that claim before the
+      // change request (see `PluginJoinRequestJobs.attempt`), and a beat
+      // against a row that no longer exists matches nothing. The job reads
+      // that as its claim being gone and stops without opening anything or
+      // writing anything back — so no row is resurrected here either.
+      await tx
+        .delete(pluginJoinRequests)
+        .where(eq(pluginJoinRequests.requesterEmail, target.email));
 
       // Audit rows: anonymize in place (no user FK on these; they key by email).
-      await tx
-        .update(prFileApprovals)
-        .set({ approverEmail: target.erasedEmail, approverName: target.erasedName })
-        .where(eq(prFileApprovals.approverEmail, target.email));
+      //
+      // The approvals belong to the review workflow, and so does the lock
+      // their writers take — one of those writers COPIES rows (a change request
+      // bringing itself up to date re-pins the approvals its merge did not
+      // disturb onto the new head), and a copy that read this person's row a
+      // moment before the rewrite would insert their real address back
+      // afterwards. The workflow takes that lock exclusively and rewrites the
+      // rows, in THIS transaction, so it stays held until the erasure commits.
+      await this.reviewWorkflow.eraseApprover(tx, target.email, {
+        email: target.erasedEmail,
+        name: target.erasedName,
+      });
       await tx
         .update(prMergeLog)
         .set({ triggeredByEmail: target.erasedEmail, triggeredByName: target.erasedName })
@@ -173,11 +229,62 @@ export class AccountErasureService implements IAccountErasureService {
       await tx.delete(users).where(eq(users.id, userId));
     });
 
+    // The two second passes below run BEFORE the callbacks, not after them: a
+    // callback talks to an external store and can reject, and the erasure it
+    // would abandon is already committed — `eraseUser` cannot be retried into
+    // it, so a pass sequenced behind a failing callback is a pass that may
+    // never run at all. Nothing here depends on a callback having succeeded.
+
+    // The second pass for the approvals, for the same kind of reason as the one
+    // the change requests already had.
+    //
+    // The lock above orders this erasure against every writer that takes it,
+    // and `approveFile` re-reads the account under that lock before it writes
+    // — so an approval in flight when this commits is refused rather than
+    // landing in the erased name. This is the belt to that pair of braces: it
+    // costs one statement, it is idempotent, and it means the guarantee does
+    // not rest on every future writer of this table remembering the lock. A
+    // row that got in anyway is rewritten here.
+    //
+    // Only while NO account answers to the address, exactly as below: someone
+    // who signs in again at it since the commit is a new person, and the
+    // approvals they make are their own.
+    await this.db
+      .update(prFileApprovals)
+      .set({ approverEmail: target.erasedEmail, approverName: target.erasedName })
+      .where(
+        and(
+          eq(prFileApprovals.approverEmail, target.email),
+          notExists(this.db.select({ id: users.id }).from(users).where(eq(users.email, target.email))),
+        ),
+      );
+
+    // Once more, after the commit, for the one writer that can still be
+    // holding the person's name: a join-request job that confirmed its claim
+    // just before the delete above landed and opened its change request just
+    // after. The delete is what stops it — the next confirmation finds no
+    // row — but the open it was already inside lands in the real name. The
+    // update is idempotent, so a second pass costs one statement and closes
+    // that window for a request that landed by now; the job's own re-check
+    // of the requester right before it opens (see `PluginJoinRequestJobs`)
+    // narrows what can land after. Only while NO account answers to the
+    // address: one made again with the same email since the commit is a new
+    // person, and their requests are their own.
+    await this.db
+      .update(changeRequests)
+      .set({ authorEmail: target.erasedEmail, authorName: target.erasedName })
+      .where(
+        and(
+          eq(changeRequests.authorEmail, target.email),
+          notExists(this.db.select({ id: users.id }).from(users).where(eq(users.email, target.email))),
+        ),
+      );
+
     // Post-commit callbacks (e.g. Mastra memory cleanup for chat threads
     // captured inside the transaction).
     for (const cb of postCommit) await cb();
 
-    console.log(`[account-erasure] erased user id=${userId}`);
+    log.info(`erased user id=${userId}`);
     return true;
   }
 }

@@ -1,7 +1,11 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('tools');
 import type { IExternalApiKeyService } from './external-api-key.interface.js';
 import type { AuthService } from '../auth/auth.service.js';
 import { InternalTokenService } from './internal-token.service.js';
+import { INVALID_CONNECTION_KEY_CHALLENGE, INVALID_CONNECTION_KEY_MESSAGE } from './connection-key-rejection.js';
 
 /**
  * What the `toolAuth` middleware resolves a bearer to, before the per-call
@@ -88,10 +92,15 @@ export const requireExternalSource: RequestHandler = (req, res, next) => {
   next();
 };
 
-/** Outcome of verifying a bearer token — either a normalized identity or a status+message to surface. */
+/**
+ * Outcome of verifying a bearer token — either a normalized identity or a
+ * status+message to surface. `challenge` overrides the default
+ * `WWW-Authenticate` value on a 401 (a rejected connection key answers with
+ * its own plain `invalid_token` challenge).
+ */
 export type VerifyResult =
   | { ok: true; auth: ToolAuth }
-  | { ok: false; status: number; message: string };
+  | { ok: false; status: number; message: string; challenge?: string };
 
 /**
  * The framework-agnostic verify core: bearer token (the value AFTER `Bearer `) →
@@ -129,7 +138,7 @@ export function createTokenVerifier(
       const resolved = await externalApiKeyService.verifyAndLoadToken(token);
       return resolved
         ? { ok: true, auth: { source: 'external', userId: resolved.user.id, tokenId: resolved.tokenId, scope: 'write' } }
-        : { ok: false, status: 401, message: 'Invalid or revoked connection key' };
+        : { ok: false, status: 401, message: INVALID_CONNECTION_KEY_MESSAGE, challenge: INVALID_CONNECTION_KEY_CHALLENGE };
     }
 
     return missing;
@@ -158,14 +167,14 @@ export function createToolAuthMiddleware(
     try {
       const result = await verify(token);
       if (!result.ok) {
-        if (result.status === 401) res.setHeader('WWW-Authenticate', WWW_AUTH);
+        if (result.status === 401) res.setHeader('WWW-Authenticate', result.challenge ?? WWW_AUTH);
         res.status(result.status).json({ error: result.message });
         return;
       }
       req.toolAuth = result.auth;
       next();
     } catch (err) {
-      console.error('[tools] connection-key verification failed:', err);
+      log.error('connection-key verification failed:', { err });
       res.status(500).json({ error: 'Authentication backend unavailable' });
     }
   };
@@ -202,14 +211,14 @@ export function createManualAuthMiddleware(
       try {
         const result = await verify(token);
         if (!result.ok) {
-          if (result.status === 401) res.setHeader('WWW-Authenticate', WWW_AUTH);
+          if (result.status === 401) res.setHeader('WWW-Authenticate', result.challenge ?? WWW_AUTH);
           res.status(result.status).json({ error: result.message });
           return;
         }
         req.toolAuth = result.auth;
         next();
       } catch (err) {
-        console.error('[tools] connection-key verification failed:', err);
+        log.error('connection-key verification failed:', { err });
         res.status(500).json({ error: 'Authentication backend unavailable' });
       }
       return;

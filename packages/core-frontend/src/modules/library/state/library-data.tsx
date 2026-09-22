@@ -1,8 +1,8 @@
-import { PR_STALE_EVENT } from '../../../core/events';
+import { subscribePrStale, TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode,  } from 'react';
 import { LibraryContext } from './library-context';
 import { SKILLS_DIR } from '@bevel-software/platform-shared';
-import { pluginNameForPath } from '../utils/plugin-summary';
+import { pluginNameForPath, pluginsHoldingTool } from '../utils/plugin-summary';
 import type { PluginMembership } from '../services/library.api';
 
 /**
@@ -58,16 +58,27 @@ export interface LibraryItem {
   id: string;
   name: string;
   description: string;
+  /**
+   * The caller is named in the item's `owner:` grant, directly or through a
+   * role — the Owner pill and "Owned by me". Write access is not ownership.
+   */
   owned: boolean;
+  /**
+   * The caller may write the item — a skill's SKILL.md, a tool's `.tool`
+   * file. What the editor-side affordances go by, owner or not.
+   */
+  canWrite: boolean;
   status: AttentionStatus;
   /** Folder plugin from the KB path, or null when the item is in none. */
   plugin: string | null;
   /** Under the shared `Skills/` root — see `LibraryFilterable.shared`. */
   shared?: boolean;
-  /** Every plugin holding a skill, inline or linked (skills only). */
+  /**
+   * Every plugin holding the item, inline or linked. A skill's comes from the
+   * server, which keeps the link index; a TOOL's is derived here from where
+   * its file sits and which roots each plugin links (`pluginsHoldingTool`).
+   */
   plugins?: PluginMembership[];
-  /** A skill's governance lifecycle (`metadata.lifecycle`), when declared. */
-  lifecycle?: string;
   /** Repo-root-relative path — the skill's folder, or the `.tool` file. */
   path: string;
   /**
@@ -77,12 +88,15 @@ export interface LibraryItem {
    */
   version?: string;
   /**
-   * Set only on a skill that does not exist yet — it lives on an open change
-   * request's branch and is waiting on somebody to approve it.
+   * Set only on an item that does not exist yet — it lives on an open change
+   * request's branch and is waiting on somebody to approve it. A skill's
+   * `SKILL.md`, a tool's `.tool` manual or `mcp.json` server: the same flag,
+   * because the reader's question ("can I use this yet?") and the card's
+   * answer are the same for both.
    *
    * Deliberately NOT folded into `status`: `AttentionStatus` answers "is
    * anything standing in this item's way?", which drives the setup filter and
-   * the amber counts, and a skill under review is not a broken skill. Callers
+   * the amber counts, and an item under review is not a broken one. Callers
    * that must treat a proposal differently — the card, the click — read this.
    */
   pending?: {
@@ -185,10 +199,10 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       name: s.name,
       description: s.description,
       owned: data.ownedSkills.has(s.name),
+      canWrite: data.writableSkills.has(s.name),
       plugin: pluginOfItem(s.path, s.plugins, pluginSummaries),
       shared: isSharedPath(s.path),
       plugins: s.plugins ?? [],
-      lifecycle: s.lifecycle,
       path: s.path,
       version: s.version,
       status: skillStatus(
@@ -212,6 +226,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       name: s.name,
       description: s.description,
       owned: false,
+      canWrite: false,
       plugin: pluginOfItem(s.path, undefined, pluginSummaries),
       shared: isSharedPath(s.path),
       path: s.path,
@@ -224,24 +239,79 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
         mine: s.isAuthor,
       },
     }));
-    const toolItems: LibraryItem[] = data.tools.map((t) => ({
-      kind: 'integration',
-      id: t.slug,
-      name: t.name,
-      // The browser tool surface exposes no human description for a `.tool`
-      // manual yet (see report) — the card stays clean; detail lives behind it.
-      description: '',
-      owned: t.canWrite,
-      plugin: pluginOfItem(t.path, undefined, pluginSummaries),
-      path: t.path,
-      status: toolStatus(t),
-    }));
-    return [...skillItems, ...pendingItems, ...toolItems];
+    const toolItems: LibraryItem[] = data.tools.map((t) => {
+      // A tool's memberships are DERIVED, not served — the tool surface knows
+      // where the file is, the summaries know which roots each plugin links,
+      // and `pluginsHoldingTool` is the one place those two meet. With them a
+      // tool under a linked root is on the plugin's page, pill and all, the
+      // way a linked skill is.
+      const plugins = pluginsHoldingTool(t.path, pluginSummaries);
+      return {
+        kind: 'integration',
+        id: t.slug,
+        name: t.name,
+        // The browser tool surface exposes no human description for a `.tool`
+        // manual yet (see report) — the card stays clean; detail lives behind it.
+        description: '',
+        owned: data.ownedTools.has(t.slug),
+        canWrite: t.canWrite,
+        plugin: pluginOfItem(t.path, plugins, pluginSummaries),
+        plugins,
+        path: t.path,
+        status: toolStatus(t),
+      };
+    });
+    /**
+     * Proposed tools, beside the released ones exactly as proposed skills sit
+     * beside released skills — and for the very same bug: a tool an agent
+     * proposed was nowhere in the library at all until somebody merged it, so
+     * the person who asked for it had no way to see that it was on its way.
+     *
+     * `owned`/`canWrite` are false and stay false: there is no file on the
+     * default branch to own or to edit, and every affordance that reads them
+     * would address a path that is not there. Membership is derived from the
+     * declaration's own path — where the file will land — by the same
+     * `pluginsHoldingTool` the released tools use, so a proposal into a root a
+     * plugin LINKS is on that plugin's page the way its released neighbours
+     * are. Without it a linked-root proposal would belong to no plugin here and
+     * simply never appear.
+     */
+    const pendingToolItems: LibraryItem[] = data.pendingTools.map((t) => {
+      const plugins = pluginsHoldingTool(t.path, pluginSummaries);
+      return {
+        kind: 'integration',
+        id: t.slug,
+        name: t.name,
+        // The released tool cards carry no description either — detail lives
+        // behind the card — and a proposal has even less standing to differ.
+        description: '',
+        owned: false,
+        canWrite: false,
+        plugin: pluginOfItem(t.path, plugins, pluginSummaries),
+        plugins,
+        path: t.path,
+        // The neutral `ok`, as for a proposed skill: a proposal has no
+        // credential resolved against it, and reporting `warn` would put it in
+        // the setup filter and the plugin's amber count as though an integration
+        // somebody has to configure had appeared.
+        status: { state: 'ok', text: 'In review' },
+        pending: {
+          changeRequestNumber: t.changeRequestNumber,
+          branch: t.branch,
+          authorName: t.authorName,
+          mine: t.isAuthor,
+        },
+      };
+    });
+    return [...skillItems, ...pendingItems, ...toolItems, ...pendingToolItems];
   }, [
     data.skills,
     data.pendingSkills,
     data.tools,
+    data.pendingTools,
     data.ownedSkills,
+    data.writableSkills,
+    data.ownedTools,
     data.allowedToolsBySkill,
     pluginSummaries,
   ]);
@@ -272,10 +342,18 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   // event; so does the whole Library, or the two would disagree after a
   // proposal lands or is resolved — and a merged change can move plugin
   // links and access, so the summaries refresh with the catalog here too.
+  useEffect(() => subscribePrStale(reloadAll), [reloadAll]);
+
+  // A credential landing anywhere in the app is a catalog change here: every
+  // "needs setup" in the Library — the cards, the plugin page's banner, the
+  // sidebar count — is derived from the tool rows this catalog carries, and
+  // they were loaded before the save. The tool page re-probes itself, which is
+  // why the bug only ever showed up one click LATER: on the page the reader
+  // went back to.
   useEffect(() => {
-    const onStale = () => reloadAll();
-    window.addEventListener(PR_STALE_EVENT, onStale);
-    return () => window.removeEventListener(PR_STALE_EVENT, onStale);
+    const onCredentials = () => reloadAll();
+    window.addEventListener(TOOL_CREDENTIALS_STALE_EVENT, onCredentials);
+    return () => window.removeEventListener(TOOL_CREDENTIALS_STALE_EVENT, onCredentials);
   }, [reloadAll]);
 
   const value = useMemo(
@@ -339,25 +417,35 @@ export function workspaceHasNoPlugins(lib: LibraryContextValue): boolean {
  * concern, not a setup one, and belong to a different surface.
  */
 export interface PluginAttention {
-  /** Everything that needs a person: integrations to set up plus broken links. */
+  /** Everything that needs a person: integrations to set up, broken links, and what the definition left out. */
   total: number;
   /** The broken-link part alone — what turns the count orange. */
   brokenLinks: number;
+  /** What the platform could not keep of the plugin's definition — a server, a skill root — as the server reports it. */
+  warnings: number;
 }
 
 export function attentionOf(
   items: readonly LibraryItem[],
   plugin: string,
-  summaries: readonly Pick<PluginSummary, 'name' | 'brokenLinks'>[] = [],
+  summaries: readonly Pick<PluginSummary, 'name' | 'brokenLinks' | 'warnings'>[] = [],
 ): PluginAttention {
   // One pass for the links, returned beside the total: every caller wants
   // both, and computing the part again for the tone would filter the whole
   // catalog a second time per plugin.
   const brokenLinks = brokenLinksOf(items, plugin, summaries);
+  // `!i.pending` is said out loud rather than left to the neutral `ok` a
+  // proposal carries: this count drives the sidebar badge and the setup
+  // filter, and "somebody has to configure this integration" is never true of
+  // a tool that does not exist yet. A future status change on the proposal
+  // side must not be able to leak into the amber count by accident.
   const integrations = items.filter(
-    (i) => isInPlugin(i, plugin) && i.kind === 'integration' && i.status.state !== 'ok',
+    (i) => isInPlugin(i, plugin) && i.kind === 'integration' && !i.pending && i.status.state !== 'ok',
   ).length;
-  return { total: integrations + brokenLinks, brokenLinks };
+  // Amber, like an integration to set up: it needs a person who can edit
+  // the plugin's files, and blocks nobody but the users of what is missing.
+  const warnings = summaries.find((s) => s.name === plugin)?.warnings?.length ?? 0;
+  return { total: integrations + brokenLinks + warnings, brokenLinks, warnings };
 }
 
 /**

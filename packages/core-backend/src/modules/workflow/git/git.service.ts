@@ -1,7 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { logger } from '../../../shared/logging.js';
 import type {
   AuthUser,
   BranchInfo,
@@ -13,11 +12,13 @@ import type {
   ShareChangesRequest,
   WorkingTreeStatus,
 } from '@bevel-software/platform-shared';
+import { isFolderPlaceholder } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { WorkspaceMutex } from '../../kb-fs/mutex.js';
+import { isAbsence } from '../../../shared/fs.contract.js';
 import { assertInsideRepo } from '../../kb-fs/repo-path.js';
 import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../../kb-fs/clone-config.js';
 import {
@@ -30,24 +31,28 @@ import {
 } from '../../kb-fs/branch-name.js';
 import {
   BranchAuthorshipError,
+  WorkflowDomainError,
   WorkflowValidationError,
   ProtectedBranchError,
   PullRebaseConflictError,
   RemoteBranchGoneError,
   isMissingRemoteBranchFailure,
 } from '../../../shared/domain-errors.js';
+import {
+  GitRunError,
+  isGitTimeout,
+  redactGitToken,
+  type GitRunOptions,
+  type GitRunResult,
+  type IGitRunner,
+} from '../../../shared/git.contract.js';
+import { NodeGitRunner } from './node-git-runner.js';
+import { printable } from '../../../shared/printable.js';
+import { sanitizeError } from '../sanitize-error.js';
 
-const execFileAsync = promisify(execFile);
+const log = logger('git');
+const crLog = logger('cr');
 
-interface GitRunResult {
-  stdout: string;
-  stderr: string;
-}
-
-function redact(msg: string): string {
-  const token = process.env.GITHUB_TOKEN;
-  return token ? msg.replaceAll(token, '***') : msg;
-}
 
 /**
  * Fallback committer identity. Every workflow commit overrides the author via
@@ -243,24 +248,22 @@ async function synthesizeUntrackedSideDiff(
       ? synthesizeNewFileDiff(relativePath, text)
       : synthesizeDeletedFileDiff(relativePath, text);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return '';
+    if (isAbsence(err)) return '';
     throw err;
   }
 }
 
 /**
- * `stat` for the stray check: false only when nothing can be there (ENOENT,
- * or ENOTDIR when a parent segment is a file). Permission and I/O failures
- * propagate: treating them as "absent" would let an unreadable stray pass as
- * committed.
+ * `stat` for the stray check: false only when nothing can be there — the
+ * disk's own definition of absence. Permission and I/O failures propagate:
+ * treating them as "absent" would let an unreadable stray pass as committed.
  */
 async function existsForCommitCheck(absolutePath: string): Promise<boolean> {
   try {
     await fs.stat(absolutePath);
     return true;
   } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+    if (isAbsence(err)) return false;
     throw err;
   }
 }
@@ -296,6 +299,14 @@ export class GitService implements IGitService {
     private readonly kbDirName: string,
     private readonly mutex: WorkspaceMutex = new WorkspaceMutex(),
     private readonly accessControl: IAccessControl | null = null,
+    /**
+     * How git is actually run — see `shared/git.contract.ts`. The composition
+     * root passes the one runner, carrying the deployment's configured
+     * deadline; the default here is the same runner on its default deadline,
+     * so a directly constructed service (every suite in this module) still has
+     * one rather than none.
+     */
+    private readonly gitRunner: IGitRunner = new NodeGitRunner(),
   ) {}
 
   /**
@@ -310,6 +321,19 @@ export class GitService implements IGitService {
 
   setPendingCommitsProbe(probe: (workspaceId: string) => Promise<boolean>): void {
     this.pendingCommitsProbe = probe;
+  }
+
+  /**
+   * Late-bound by the composition root: notified with the branch names every
+   * `listBranches` returns. A listing is the one moment the platform sees
+   * origin's set of branches, and the workspace layer needs that memory to
+   * tell a branch that was deleted from a name that never existed — see
+   * `WorkspaceService.noteBranchesListed`.
+   */
+  private onBranchesListed: ((names: string[]) => void) | null = null;
+
+  setBranchesListedListener(listener: (names: string[]) => void): void {
+    this.onBranchesListed = listener;
   }
 
   /**
@@ -328,6 +352,22 @@ export class GitService implements IGitService {
   }
 
   /**
+   * The most recent attempt any workspace made to reach the remote, and
+   * whether it succeeded — for the readiness answer. Null before the first
+   * attempt of this process's life. Read off the per-workspace fetch record
+   * above rather than kept separately, so it cannot disagree with it.
+   */
+  lastRemoteContact(): { at: number; ok: boolean } | null {
+    let latest: { at: number; ok: boolean } | null = null;
+    for (const [workspaceId, at] of this.lastImplicitFetchAt) {
+      if (latest === null || at > latest.at) {
+        latest = { at, ok: this.lastImplicitFetchOk.get(workspaceId) ?? false };
+      }
+    }
+    return latest;
+  }
+
+  /**
    * Run the registered ADVISORY commit-validation hooks at a commit site.
    * Preserves the semantics of the injected validator this replaced: a
    * `mustFix` report is logged (via `formatWarning`) but never blocks, and a
@@ -343,11 +383,11 @@ export class GitService implements IGitService {
       try {
         const report = await hook(ctx);
         if (report && report.mustFix.length > 0) {
-          console.warn(formatWarning(report));
+          log.warn(formatWarning(report));
         }
       } catch (validatorErr) {
         // Validator failure is non-fatal — advisory only.
-        console.warn('[git] validator crashed (advisory only, ignoring):', validatorErr instanceof Error ? validatorErr.message : validatorErr);
+        log.warn('validator crashed (advisory only, ignoring):', { err: validatorErr });
       }
     }
   }
@@ -520,6 +560,17 @@ export class GitService implements IGitService {
           }
         }),
       );
+      // Every name this listing showed — origin's refs and the local heads
+      // alike, since a branch checked out here is one the platform has
+      // plainly heard of. A listener that misbehaves must not turn a good
+      // listing into a failed one.
+      try {
+        this.onBranchesListed?.(infos.map((info) => info.name));
+      } catch (err) {
+        log.error(`branches-listed listener failed for workspace ${workspaceId}:`, {
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
       return infos;
     });
   }
@@ -575,7 +626,7 @@ export class GitService implements IGitService {
         this.lastImplicitFetchOk.set(workspaceId, true);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[git] implicit fetch failed for workspace ${workspaceId}: ${msg}`);
+        log.warn(`implicit fetch failed for workspace ${workspaceId}: ${msg}`);
         // Stamp the TTL on failure too so a hard-down origin doesn't make
         // every subsequent listBranches retry the (still-failing) fetch and
         // pile up 10s timeouts. Stale local refs are better than spinning.
@@ -938,19 +989,13 @@ export class GitService implements IGitService {
       }
       if (trackedAtHead) {
         await this.git(cwd, ['checkout', 'HEAD', '--', repoRelativePath]).catch((err) => {
-          console.warn(
-            `[git] discardPath checkout failed for "${repoRelativePath}":`,
-            err instanceof Error ? err.message : err,
-          );
+          log.warn(`discardPath checkout failed for "${repoRelativePath}":`, { err });
         });
       } else {
         // Untracked new file — remove from working tree.
         const fileAbs = path.join(cwd, repoRelativePath);
         await fs.rm(fileAbs, { force: true }).catch((err) => {
-          console.warn(
-            `[git] discardPath rm failed for "${repoRelativePath}":`,
-            err instanceof Error ? err.message : err,
-          );
+          log.warn(`discardPath rm failed for "${repoRelativePath}":`, { err });
         });
       }
     });
@@ -966,8 +1011,30 @@ export class GitService implements IGitService {
     assertValidRelativePath(relativePath);
     assertValidAuthor(user);
     const repoRelativePath = this.stripRepoPrefix(relativePath);
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () =>
+      this.commitFileUnlocked(
+        workspaceId,
+        await this.repoDir(workspaceId),
+        user,
+        relativePath,
+        repoRelativePath,
+        summary,
+        skipValidator,
+      ),
+    );
+  }
+
+  /** `commitFile`'s body, for a caller that already holds the workspace's reservation. */
+  private async commitFileUnlocked(
+    workspaceId: string,
+    cwd: string,
+    user: AuthUser,
+    relativePath: string,
+    repoRelativePath: string,
+    summary?: string,
+    skipValidator?: boolean,
+  ): Promise<CommitAttribution | null> {
+    {
       const branch = await this.currentBranch(cwd);
 
       // Path-scoped status — is this specific file dirty? `--porcelain` on
@@ -1038,7 +1105,7 @@ export class GitService implements IGitService {
         subject: subj ?? subject,
         committedAt: committedAt?.trim() ?? new Date().toISOString(),
       };
-    });
+    }
   }
 
   /**
@@ -1195,8 +1262,19 @@ export class GitService implements IGitService {
     user: AuthUser,
     opts?: { systemAuthorized?: boolean },
   ): Promise<void> {
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () =>
+      this.pushUnlocked(workspaceId, await this.repoDir(workspaceId), user, opts),
+    );
+  }
+
+  /** `push`'s body, for a caller that already holds the workspace's reservation. */
+  private async pushUnlocked(
+    workspaceId: string,
+    cwd: string,
+    user: AuthUser,
+    opts?: { systemAuthorized?: boolean },
+  ): Promise<void> {
+    {
       const branch = await this.currentBranch(cwd);
 
       // Access gate fires only when pushing to a protected branch. Pushing
@@ -1225,7 +1303,7 @@ export class GitService implements IGitService {
       }
 
       await this.git(cwd, ['push', '-u', 'origin', branch]);
-    });
+    }
   }
 
   // `forcePush` method removed. The workflow layer no longer auto-force-pushes
@@ -1358,6 +1436,34 @@ export class GitService implements IGitService {
     targetBranch: string,
     commit: { subject: string; body: string },
     user: AuthUser,
+    opts: {
+      /**
+       * Refuse before touching the clone when the target's working tree holds
+       * edits that are not published yet. A change request's merge runs in a
+       * repo-global clone where nothing but a previous attempt can be dirty;
+       * this method is also the agent `merge_branch` path, which runs in the
+       * TARGET BRANCH'S OWN workspace — the one the file tools read and write.
+       * There the `reset --hard` below would silently destroy a save.
+       *
+       * Checked HERE, inside the reservation, and not by the caller: a save
+       * landing between a caller's check and this reset is exactly the window
+       * that has to be closed.
+       */
+      requireCleanTarget?: boolean;
+      /**
+       * Decide whether `user` may land this merge, given the target commit it
+       * is actually built on and every path it writes. Throwing refuses, and
+       * refuses before anything is committed or pushed.
+       *
+       * Also here rather than in the caller, and for the same reason: the
+       * caller's workspace `HEAD` can be behind origin (a best-effort pull
+       * that failed leaves it there), so authorizing against it would read
+       * roles that the commit being published has already changed. The fetch
+       * below is what makes the ref current, and a fetch that fails throws
+       * instead of falling back to the stale one.
+       */
+      authorize?: (target: { sha: string; changedPaths: string[] }) => Promise<void>;
+    } = {},
   ): Promise<{ kind: 'merged'; sha: string } | { kind: 'conflicts'; paths: string[] }> {
     assertValidBranchName(sourceBranch);
     assertValidBranchName(targetBranch);
@@ -1371,6 +1477,17 @@ export class GitService implements IGitService {
       // unknown" on a clone that lacks it).
       await this.git(cwd, ['config', 'user.name', BOT_NAME]);
       await this.git(cwd, ['config', 'user.email', BOT_EMAIL]);
+      if (opts.requireCleanTarget) {
+        const { stdout: dirty } = await this.git(cwd, ['status', '--porcelain=v1', '-z']);
+        const unpushed = await this.hasUnpushedCommitsAt(cwd);
+        if (parsePorcelainZ(dirty).length > 0 || unpushed) {
+          throw new WorkflowDomainError(
+            `"${targetBranch}" has edits that are not shared yet. Try the merge again once they are saved.`,
+            409,
+            { kind: 'merge-target-busy', targetBranch },
+          );
+        }
+      }
       for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
         // Explicit destination refspecs, because the two `origin/<branch>`
         // reads below MUST see the tips this fetch just retrieved. A bare
@@ -1398,6 +1515,20 @@ export class GitService implements IGitService {
         await this.git(cwd, ['checkout', targetBranch]);
         await this.git(cwd, ['reset', '--hard', `origin/${targetBranch}`]);
 
+        if (opts.authorize) {
+          // The tip this attempt merges into, and the paths it writes against
+          // that tip. Re-read every attempt: a retry happens BECAUSE the
+          // target moved, which can move its roles and its file set too.
+          const { stdout: targetSha } = await this.git(cwd, ['rev-parse', `origin/${targetBranch}`]);
+          const changedPaths = await this.prChangedPathsAt(
+            cwd,
+            `origin/${targetBranch}`,
+            `origin/${sourceBranch}`,
+            { forAccessCheck: true },
+          );
+          await opts.authorize({ sha: targetSha.trim(), changedPaths });
+        }
+
         // `--no-commit --no-ff` so we author the merge commit as the human and
         // never fast-forward past the merge record.
         try {
@@ -1409,7 +1540,7 @@ export class GitService implements IGitService {
           // Not a conflict — surface the underlying git error so the real cause
           // (e.g. missing identity, unrelated histories) is diagnosable.
           throw new Error(
-            `git merge failed without detectable conflicts: ${redact(
+            `git merge failed without detectable conflicts: ${redactGitToken(
               err instanceof Error ? err.message : String(err),
             )}`,
           );
@@ -1590,7 +1721,9 @@ export class GitService implements IGitService {
     try {
       const { stdout } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', rev]);
       return stdout.trim() || null;
-    } catch {
+    } catch (err) {
+      // Null is "no such rev"; a deadline is not that answer (see GitRunError).
+      if (isGitTimeout(err)) throw err;
       return null;
     }
   }
@@ -1816,19 +1949,128 @@ export class GitService implements IGitService {
    * only ever see settled states.
    */
   async hasUnpushedCommits(workspaceId: string): Promise<boolean> {
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
-      const branch = await this.currentBranch(cwd);
-      try {
-        const { stdout } = await this.git(cwd, [
-          'rev-list', '--count', `refs/remotes/origin/${branch}..HEAD`,
-        ]);
-        return Number(stdout.trim()) > 0;
-      } catch {
-        return true;
-      }
-    });
+    return this.mutex.run(workspaceId, async () => this.hasUnpushedCommitsAt(await this.repoDir(workspaceId)));
   }
+
+  /**
+   * `hasUnpushedCommits` without the workspace reservation — for a caller that
+   * already holds one (`mergeChangeRequest`, which has to ask inside the same
+   * reservation as the reset that would discard the answer). Fails closed: a
+   * question that cannot be answered counts as "yes, unpushed".
+   */
+  private async hasUnpushedCommitsAt(cwd: string): Promise<boolean> {
+    const branch = await this.currentBranch(cwd);
+    try {
+      const { stdout } = await this.git(cwd, [
+        'rev-list', '--count', `refs/remotes/origin/${branch}..HEAD`,
+      ]);
+      return Number(stdout.trim()) > 0;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Revert paths in several workspaces and publish the result as ONE git
+   * operation. Every workspace involved is reserved together (`runAll`), and
+   * reading each HEAD, restoring and committing every path, pushing each
+   * branch and — when a step fails — undoing, all happen inside that single
+   * reservation: no other git operation on those workspaces can land between
+   * the HEAD an undo returns to and the commits it undoes.
+   *
+   * - Each workspace's HEAD is read first; one that can't be read throws
+   *   before anything changes.
+   * - Every path in every workspace is restored from its `ref` and committed
+   *   (`subject`) before anything is pushed. A failed restore or commit
+   *   undoes all of them and rethrows: nothing is pushed.
+   * - Branches are then pushed in order. A failed push undoes that workspace
+   *   and every later one and is reported in `failed`; the earlier pushes
+   *   stand, since a remote can't be un-pushed.
+   *
+   * An undo never rewrites history: each touched path is restored from the
+   * HEAD recorded at the start and committed (`undoSubject`), so unpushed work
+   * the checkout already had stays exactly as it was. Each path is undone on
+   * its own, so one that fails doesn't leave the rest reverted.
+   */
+  async revertPathsAndPush(
+    user: AuthUser,
+    plans: {
+      workspaceId: string;
+      paths: { path: string; ref: string; subject: string; undoSubject: string }[];
+    }[],
+  ): Promise<{ pushed: string[]; failed: { workspaceId: string; error: unknown } | null }> {
+    assertValidAuthor(user);
+    for (const plan of plans) for (const entry of plan.paths) assertValidRelativePath(entry.path);
+    return this.mutex.runAll(
+      plans.map((plan) => plan.workspaceId),
+      async () => {
+        const steps: {
+          workspaceId: string;
+          cwd: string;
+          head: string;
+          paths: (typeof plans)[number]['paths'];
+        }[] = [];
+        for (const plan of plans) {
+          const cwd = await this.repoDir(plan.workspaceId);
+          const { stdout } = await this.git(cwd, ['rev-parse', '--verify', 'HEAD^{commit}']);
+          steps.push({ workspaceId: plan.workspaceId, cwd, head: stdout.trim(), paths: plan.paths });
+        }
+        const undo = async (unpushed: typeof steps) => {
+          for (const step of unpushed) {
+            for (const entry of step.paths) {
+              try {
+                await this.restorePathUnlocked(step.cwd, step.head, entry.path);
+                await this.commitFileUnlocked(
+                  step.workspaceId,
+                  step.cwd,
+                  user,
+                  entry.path,
+                  entry.path,
+                  entry.undoSubject,
+                  true, // skipValidator — this puts back the checkout's own version
+                );
+              } catch (err) {
+                log.warn(
+                  `undo of ${printable(entry.path)} failed in workspace ${printable(step.workspaceId)}: ${printable(sanitizeError(err))}`,
+                );
+              }
+            }
+          }
+        };
+        try {
+          for (const step of steps) {
+            for (const entry of step.paths) {
+              await this.restorePathUnlocked(step.cwd, entry.ref, entry.path);
+              await this.commitFileUnlocked(
+                step.workspaceId,
+                step.cwd,
+                user,
+                entry.path,
+                entry.path,
+                entry.subject,
+                true, // skipValidator — this restores an already-validated version
+              );
+            }
+          }
+        } catch (err) {
+          await undo(steps);
+          throw err;
+        }
+        const pushed: string[] = [];
+        for (const [i, step] of steps.entries()) {
+          try {
+            await this.pushUnlocked(step.workspaceId, step.cwd, user);
+          } catch (error) {
+            await undo(steps.slice(i));
+            return { pushed, failed: { workspaceId: step.workspaceId, error } };
+          }
+          pushed.push(step.workspaceId);
+        }
+        return { pushed, failed: null };
+      },
+    );
+  }
+
 
   /**
    * Hard-reset the workspace's checked-out branch to `origin/<branch>`, fetching
@@ -2219,8 +2461,8 @@ export class GitService implements IGitService {
     const cwd = await this.repoDir(workspaceId);
     await this.fetchPrRefs(cwd, baseBranch, headBranch);
     return this.mutex.run(workspaceId, async () => {
-      const baseRef = await this.resolveBranchRef(cwd, baseBranch);
-      const headRef = await this.resolveBranchRef(cwd, headBranch);
+      const baseRef = await this.resolvePublishedBranchRef(cwd, baseBranch);
+      const headRef = await this.resolvePublishedBranchRef(cwd, headBranch);
       const [{ stdout: baseSha }, { stdout: headSha }] = await Promise.all([
         this.git(cwd, ['rev-parse', baseRef]),
         this.git(cwd, ['rev-parse', headRef]),
@@ -2269,8 +2511,8 @@ export class GitService implements IGitService {
     const cwd = await this.repoDir(workspaceId);
     if (!opts.at) await this.fetchPrRefs(cwd, baseBranch, headBranch);
     return this.mutex.run(workspaceId, async () => {
-      const baseRef = opts.at ? opts.at.baseSha : await this.resolveBranchRef(cwd, baseBranch);
-      const headRef = opts.at ? opts.at.headSha : await this.resolveBranchRef(cwd, headBranch);
+      const baseRef = opts.at ? opts.at.baseSha : await this.resolvePublishedBranchRef(cwd, baseBranch);
+      const headRef = opts.at ? opts.at.headSha : await this.resolvePublishedBranchRef(cwd, headBranch);
       const range = `${baseRef}...${headRef}`; // three-dot = changes on head since merge-base
 
       const [{ stdout: nameStatusOut }, { stdout: numstatOut }] = await Promise.all([
@@ -2286,8 +2528,17 @@ export class GitService implements IGitService {
       // land. Filter it from the review surface entirely; the neutralisation
       // reads the raw refs itself and is unaffected. Both lists are filtered
       // IN STEP so the index-zip below stays aligned.
-      if (statuses.some((s) => s.path === 'roles.yaml')) {
-        const keep = statuses.map((s) => s.path !== 'roles.yaml');
+      // The empty-folder placeholder is filtered the same way: it is never
+      // content, so it is not a file to review or approve. It still merges
+      // with the rest, and `changedPathsForPr` keeps it, so a request that
+      // only creates a folder is not mistaken for an empty one and closed.
+      // An empty file deleted as its folder gets the (equally empty)
+      // placeholder reads to `-M` as a RENAME onto it; the real side of such
+      // a pair is first made the plain removal (or addition) it is, so
+      // dropping the placeholder never drops the file with it.
+      statuses = statuses.map(withoutPlaceholderRename);
+      if (statuses.some((s) => s.path === 'roles.yaml' || isFolderPlaceholder(s.path))) {
+        const keep = statuses.map((s) => s.path !== 'roles.yaml' && !isFolderPlaceholder(s.path));
         statuses = statuses.filter((_, i) => keep[i]);
         if (counts.length === keep.length) counts = counts.filter((_, i) => keep[i]);
       }
@@ -2299,8 +2550,8 @@ export class GitService implements IGitService {
       // +/- to a file.
       const aligned = counts.length === statuses.length;
       if (!aligned) {
-        console.warn(
-          `[cr] diff name-status/numstat length mismatch (${statuses.length} vs ${counts.length}) ` +
+        crLog.warn(
+          `diff name-status/numstat length mismatch (${statuses.length} vs ${counts.length}) ` +
             `for ${range} — reporting file list without +/- counts`,
         );
       }
@@ -2336,35 +2587,103 @@ export class GitService implements IGitService {
    * Just the repo-relative paths changed by a change request (three-dot), no
    * patches — the cheap version used to build CR-list summaries and owner
    * routing. `changedFilesForPr` is the full version with statuses + diffs.
+   *
+   * `fetch: false` skips the per-request ref fetch, for a caller that has
+   * ALREADY refreshed the clone's remote-tracking refs — which is the whole
+   * clone in one round trip, against one per request here. A CR list is
+   * exactly that caller: at five open requests the per-request fetch was
+   * measured at ~0.55s each, and the list is re-read on every proposal and
+   * every 60s poll. Only pass it when a fetch of the clone really has just
+   * happened; the refs are otherwise as old as the last one, and the diff
+   * would describe a stale head.
+   *
+   * It is a skip, not a promise never to fetch: a branch this clone has
+   * never heard of is fetched anyway. That case is not a stale diff, it is
+   * NO diff — an empty touched-path set, which is a change request missing
+   * from its own author's tree. Two local `rev-parse`s are worth not being
+   * that.
    */
   async changedPathsForPr(
     workspaceId: string,
     baseBranch: string,
     headBranch: string,
+    opts: {
+      fetch?: boolean;
+      /**
+       * Every path the change WRITES, for authorizing it rather than
+       * describing it: `roles.yaml` kept (a merge, unlike a change request's,
+       * does not strip it) and BOTH sides of every rename. A rename writes the
+       * old path too — it deletes it — so an access check that saw only the
+       * new name would clear a caller who cannot touch what the merge removes.
+       */
+      forAccessCheck?: boolean;
+    } = {},
   ): Promise<string[]> {
     assertValidBranchName(baseBranch);
     assertValidBranchName(headBranch);
     // Fetch outside the mutex (network round-trip) so origin latency can't hold
     // the workspace lock; the lock guards only the local diff below.
     const cwd = await this.repoDir(workspaceId);
-    await this.fetchPrRefs(cwd, baseBranch, headBranch);
+    // The skip decision and the diff are ONE reading of the refs, not two.
+    // Both are resolved here, to COMMITS, and the commits are what the diff
+    // below runs on — the same pinning `changedFilesForPr`'s `at` does. A
+    // concurrent `fetch --prune origin` (`ensureRemotesFetched` and
+    // `fetchPrRefs` both run outside this mutex, deliberately) can drop a
+    // remote-tracking ref between the two, and re-resolving inside the mutex
+    // would then throw `WorkflowValidationError` — which `touchedPathsFor`
+    // swallows into an empty touched-path set, i.e. exactly the change
+    // request missing from its own author's tree that the skip is guarded
+    // against. The commits stay readable whatever happens to the ref names.
+    const pinned =
+      opts.fetch === false ? await this.publishedPrCommits(cwd, baseBranch, headBranch) : null;
+    if (!pinned) {
+      await this.fetchPrRefs(cwd, baseBranch, headBranch);
+    }
     return this.mutex.run(workspaceId, async () => {
-      const baseRef = await this.resolveBranchRef(cwd, baseBranch);
-      const headRef = await this.resolveBranchRef(cwd, headBranch);
-      const { stdout } = await this.git(cwd, [
-        'diff', '-M', '--name-only', `${baseRef}...${headRef}`,
-      ]);
-      return (
-        stdout
-          .split('\n')
-          .map((s) => s.trim())
-          .filter(Boolean)
+      const baseRef = pinned ? pinned.base : await this.resolvePublishedBranchRef(cwd, baseBranch);
+      const headRef = pinned ? pinned.head : await this.resolvePublishedBranchRef(cwd, headBranch);
+      return this.prChangedPathsAt(cwd, baseRef, headRef, opts);
+    });
+  }
+
+  /**
+   * The shaping behind `changedPathsForPr`, without its workspace
+   * reservation: the caller must already hold one. `mergeChangeRequest` reads
+   * the same set inside its OWN reservation, where re-entering this one would
+   * deadlock — and where the refs are the ones the merge is actually built on.
+   */
+  private async prChangedPathsAt(
+    cwd: string,
+    baseRef: string,
+    headRef: string,
+    opts: { forAccessCheck?: boolean } = {},
+  ): Promise<string[]> {
+    const { stdout } = await this.git(cwd, [
+      'diff', '-M', '-z', '--name-status', `${baseRef}...${headRef}`,
+    ]);
+    // Deduped: both sides of a rename can collide with another entry's path.
+    return [
+      ...new Set(
+        parseNameStatusZ(stdout)
+          // A rename onto or off the placeholder is a real file removed or
+          // added (see `withoutPlaceholderRename`): both of its paths are
+          // touched, or filtering the placeholder would lose the file.
+          //
+          // Authorizing the change needs both sides of EVERY rename, not just
+          // the placeholder's: git reports a rename under its new name alone,
+          // and the old name is a path the change deletes.
+          .flatMap((s) =>
+            s.previousPath &&
+            (opts.forAccessCheck || isFolderPlaceholder(s.path) || isFolderPlaceholder(s.previousPath))
+              ? [s.previousPath, s.path]
+              : [s.path],
+          )
           // Same rule as `changedFilesForPr`: a roles.yaml change never
           // survives a merge, so it is not a touched path for routing or
           // summaries either.
-          .filter((p) => p !== 'roles.yaml')
-      );
-    });
+          .filter((p) => opts.forAccessCheck || p !== 'roles.yaml'),
+      ),
+    ];
   }
 
   /**
@@ -2383,8 +2702,8 @@ export class GitService implements IGitService {
     const cwd = await this.repoDir(workspaceId);
     await this.fetchPrRefs(cwd, baseBranch, headBranch);
     return this.mutex.run(workspaceId, async () => {
-      const baseRef = await this.resolveBranchRef(cwd, baseBranch);
-      const headRef = await this.resolveBranchRef(cwd, headBranch);
+      const baseRef = await this.resolvePublishedBranchRef(cwd, baseBranch);
+      const headRef = await this.resolvePublishedBranchRef(cwd, headBranch);
       try {
         const { stdout } = await this.git(cwd, ['merge-base', baseRef, headRef]);
         return stdout.trim() || null;
@@ -2392,6 +2711,143 @@ export class GitService implements IGitService {
         // Exit 1 is git's specific "no common ancestor" answer; anything else
         // is an infra failure that must not masquerade as it.
         if ((err as { exitCode?: number }).exitCode === 1) return null;
+        throw err;
+      }
+    });
+  }
+
+  /**
+   * Where a change request forked from its target, and whether the target has
+   * moved on since — for the two commits a detail read has ALREADY resolved
+   * (no fetch, no ref resolution, same contract as `changedFilesForPr`'s `at`).
+   *
+   * `mergeBaseSha` is the "before" every file in the request is read against,
+   * so an edit made on the target after the proposal never shows as something
+   * the proposal deletes. `behind` is true when the target holds commits the
+   * proposal does not (`head..base` is non-empty) — the proposal needs
+   * updating before its diff and its eventual merge describe the same text.
+   * No shared history: `mergeBaseSha: null`, and `behind` stays honest (the
+   * target certainly has commits the proposal lacks).
+   */
+  async forkPointForPr(
+    workspaceId: string,
+    at: { baseSha: string; headSha: string },
+  ): Promise<{ mergeBaseSha: string | null; behind: boolean }> {
+    for (const sha of [at.baseSha, at.headSha]) {
+      if (!/^[0-9a-f]{40,64}$/.test(sha)) {
+        throw new WorkflowValidationError(`invalid commit sha: ${sha}`);
+      }
+    }
+    const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () => {
+      let mergeBaseSha: string | null = null;
+      try {
+        const { stdout } = await this.git(cwd, ['merge-base', at.baseSha, at.headSha]);
+        mergeBaseSha = stdout.trim() || null;
+      } catch (err) {
+        // Exit 1 is git's "no common ancestor"; anything else is infra.
+        if ((err as { exitCode?: number }).exitCode !== 1) throw err;
+      }
+      const { stdout: count } = await this.git(cwd, [
+        'rev-list', '--count', `${at.headSha}..${at.baseSha}`,
+      ]);
+      return { mergeBaseSha, behind: Number.parseInt(count.trim(), 10) > 0 };
+    });
+  }
+
+  /**
+   * Every repo-relative path whose content differs between two commits on a
+   * change request's own branch — what an update from the target actually
+   * CHANGED about the proposal.
+   *
+   * Two-dot, because that is the question: not "what does this request
+   * propose" (three-dot, against the target) but "what did the merge move
+   * under the reviewers who already approved". `--no-renames` is what makes
+   * the answer the conservative one: git detects renames BY DEFAULT
+   * (`diff.renames` has been on since 2.9) and then reports only the new
+   * path, which would leave an approval on the path a merge renamed AWAY
+   * reading as untouched. Switched off, a rename reports as the old path
+   * removed and the new one added, so an approval on either side is correctly
+   * read as touched — a path that appears here loses its approval, and only a
+   * path that does not appear keeps it.
+   */
+  async pathsChangedBetween(
+    workspaceId: string,
+    fromSha: string,
+    toSha: string,
+  ): Promise<string[]> {
+    for (const sha of [fromSha, toSha]) {
+      if (!/^[0-9a-f]{40,64}$/.test(sha)) {
+        throw new WorkflowValidationError(`invalid commit sha: ${sha}`);
+      }
+    }
+    const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () => {
+      const { stdout } = await this.git(cwd, [
+        'diff', '--no-renames', '-z', '--name-only', fromSha, toSha,
+      ]);
+      // `-z` terminates each name with NUL, so the trailing field is empty —
+      // and a tracked name may legally carry leading or trailing spaces, so
+      // nothing is trimmed here.
+      return [...new Set(stdout.split('\0').filter((name) => name !== ''))];
+    });
+  }
+
+  /**
+   * One file as it stood at a change request's fork point — the "before" side
+   * of the request dialog's diff. `sha` must be a commit on the target
+   * branch's published history (`origin/<baseBranch>`); anything else is
+   * refused, so this can never become a read of an arbitrary commit. `null`
+   * means the path did not exist at the fork point (the request adds it).
+   */
+  async readFileAtForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    sha: string,
+    relativePath: string,
+  ): Promise<string | null> {
+    assertValidBranchName(baseBranch);
+    assertValidRelativePath(relativePath);
+    if (!/^[0-9a-f]{40,64}$/.test(sha)) {
+      throw new WorkflowValidationError(`invalid commit sha: ${sha}`);
+    }
+    const repoRelativePath = this.stripRepoPrefix(relativePath);
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      const baseRef = await this.resolvePublishedBranchRef(cwd, baseBranch);
+      try {
+        await this.git(cwd, ['merge-base', '--is-ancestor', sha, baseRef]);
+      } catch (err) {
+        if ((err as { exitCode?: number }).exitCode === 1) {
+          throw new WorkflowDomainError(
+            `That commit is not part of "${baseBranch}" — it is not this request's fork point.`,
+            404,
+          );
+        }
+        throw err;
+      }
+      await this.assertNotTreeAtRef(cwd, sha, repoRelativePath, relativePath);
+      return this.readFileAtRef(workspaceId, sha, repoRelativePath);
+    });
+  }
+
+  /**
+   * Whether `repoRelativePath` exists (as a file or tree) at `ref`. ONLY
+   * git's own "that path is not at this ref" answer is false; an unresolvable
+   * ref, a timeout, a locked or corrupt repository PROPAGATE — a revert that
+   * read one of those as "absent" would decide wrongly what to restore.
+   */
+  async pathExistsAtRef(workspaceId: string, ref: string, repoRelativePath: string): Promise<boolean> {
+    assertValidRelativePath(repoRelativePath);
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      try {
+        await this.git(cwd, ['cat-file', '-e', `${ref}:${repoRelativePath}`]);
+        return true;
+      } catch (err) {
+        const stderr =
+          (err as { stderr?: string }).stderr ?? (err instanceof Error ? err.message : String(err));
+        if (/does not exist in|exists on disk, but not in/.test(stderr)) return false;
         throw err;
       }
     });
@@ -2410,8 +2866,14 @@ export class GitService implements IGitService {
     repoRelativePath: string,
   ): Promise<void> {
     assertValidRelativePath(repoRelativePath);
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () =>
+      this.restorePathUnlocked(await this.repoDir(workspaceId), ref, repoRelativePath),
+    );
+  }
+
+  /** `restorePathFromRef`'s body, for a caller that already holds the workspace's reservation. */
+  private async restorePathUnlocked(cwd: string, ref: string, repoRelativePath: string): Promise<void> {
+    {
       let existsAtRef = true;
       try {
         await this.git(cwd, ['cat-file', '-e', `${ref}:${repoRelativePath}`]);
@@ -2433,7 +2895,7 @@ export class GitService implements IGitService {
         // missing from disk is exactly what `git add` records as deleted.
         await fs.rm(path.join(cwd, repoRelativePath), { force: true });
       }
-    });
+    }
   }
 
   /** Fetch the two branches a CR spans so origin refs reflect the latest push. */
@@ -2505,6 +2967,69 @@ export class GitService implements IGitService {
   }
 
   /**
+   * The COMMITS both of a change request's branches point at in this clone
+   * already, or null when either is unknown to it — the question behind
+   * `changedPathsForPr`'s `fetch: false`, answered with the resolution itself
+   * so the caller diffs precisely what it decided on. Only git's own "no such
+   * ref" answers null; every other failure is the caller's to see, and
+   * treating it as "not here" would spend a network fetch on a clone that is
+   * broken for some other reason.
+   */
+  private async publishedPrCommits(
+    cwd: string,
+    baseBranch: string,
+    headBranch: string,
+  ): Promise<{ base: string; head: string } | null> {
+    const shas: string[] = [];
+    for (const branch of [baseBranch, headBranch]) {
+      try {
+        shas.push((await this.resolvePublishedBranch(cwd, branch)).sha);
+      } catch (err) {
+        if (err instanceof WorkflowValidationError) return null;
+        throw err;
+      }
+    }
+    return { base: shas[0], head: shas[1] };
+  }
+
+  /**
+   * `resolveBranchRef` with the preference reversed: the PUBLISHED ref
+   * (`origin/<branch>`, just fetched by `fetchPrRefs`) before the local head.
+   * A change request is a pair of published branches, and a clone's local
+   * copy of the OTHER branch is whatever it was when the clone last touched
+   * it — in a proposal's own workspace the local target is typically the
+   * target as of the fork. Reading that made every request look up to date
+   * and diffed it against a stale target. A local-only branch still resolves.
+   */
+  private async resolvePublishedBranchRef(cwd: string, branch: string): Promise<string> {
+    return (await this.resolvePublishedBranch(cwd, branch)).ref;
+  }
+
+  /**
+   * {@link resolvePublishedBranchRef} with the commit it resolved to — the
+   * `rev-parse` that verifies the ref already prints it, so pinning a diff to
+   * the commit costs nothing over naming the ref.
+   */
+  private async resolvePublishedBranch(
+    cwd: string,
+    branch: string,
+  ): Promise<{ ref: string; sha: string }> {
+    for (const ref of [`refs/remotes/origin/${branch}`, `refs/heads/${branch}`]) {
+      try {
+        const { stdout } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', ref]);
+        return { ref, sha: stdout.trim() };
+      } catch (err) {
+        // Only git's own "no such ref" (exit 1 under --quiet) moves on to the
+        // next candidate. A deadline or any other failure is not that answer:
+        // skipping past it would pick the stale local copy, or call a real
+        // branch unknown.
+        if (!(err instanceof GitRunError) || err.timedOut || err.exitCode !== 1) throw err;
+      }
+    }
+    throw new WorkflowValidationError(`unknown branch: ${branch}`);
+  }
+
+  /**
    * Resolve a branch name to a concrete ref the local clone knows about.
    * Tries the local head first, falls back to the matching remote-tracking
    * ref. The workspace clone fetches all remotes on creation, so protected
@@ -2553,14 +3078,14 @@ export class GitService implements IGitService {
       }
       const dirtyList = porcelain.stdout.trim().replace(/\s+/g, ' ');
       if (queueExplainsIt) {
-        console.log(
-          `[git] workspace=${workspaceId} branch=${branch} working tree is dirty while ` +
+        log.info(
+          `workspace=${workspaceId} branch=${branch} working tree is dirty while ` +
             `pending commits drain (expected — the background worker is catching up). ` +
             `Files: ${dirtyList}`,
         );
       } else {
-        console.warn(
-          `[git] workspace=${workspaceId} branch=${branch} has a non-clean working ` +
+        log.warn(
+          `workspace=${workspaceId} branch=${branch} has a non-clean working ` +
             `tree under save=share with NO queued pending commits — this should never ` +
             `happen and likely indicates a missed lock-release commit. Files: ${dirtyList}`,
         );
@@ -2711,6 +3236,41 @@ export class GitService implements IGitService {
   }
 
   /**
+   * The commits on `ref` that touched `repoRelativePath`, newest first, at
+   * most `limit` of them. What a skill's `version` is looked up through: each
+   * commit is a copy of the file that may have declared a version. Renames are
+   * not followed — a moved skill's earlier history is the old path's.
+   */
+  async pathHistory(
+    workspaceId: string,
+    ref: string,
+    repoRelativePath: string,
+    limit: number,
+  ): Promise<string[]> {
+    const cwd = await this.repoDir(workspaceId);
+    const { stdout } = await this.git(cwd, [
+      'rev-list',
+      `--max-count=${Math.max(1, Math.trunc(limit))}`,
+      ref,
+      '--',
+      repoRelativePath,
+    ]);
+    return stdout.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+  }
+
+  /**
+   * Every file under `folder` at `ref`, repo-root-relative and in tree order.
+   * A folder that does not exist at that ref lists nothing. NUL-delimited, so
+   * a non-ASCII name comes back as itself rather than C-quoted, and one with
+   * a leading or trailing space keeps it.
+   */
+  async listFilesAtRef(workspaceId: string, ref: string, folder: string): Promise<string[]> {
+    const cwd = await this.repoDir(workspaceId);
+    const { stdout } = await this.git(cwd, ['ls-tree', '-r', '-z', '--name-only', ref, '--', folder]);
+    return stdout.split('\0').filter((line) => line.length > 0);
+  }
+
+  /**
    * A clean `git status` for a path has two honest readings (already
    * committed; a queued re-apply of something that landed) and one dishonest
    * one: the bytes exist, but BESIDE the repository, because a caller wrote a
@@ -2756,69 +3316,32 @@ export class GitService implements IGitService {
     return stdout.trim().length > 0;
   }
 
-  private async git(
-    cwd: string,
-    args: string[],
-    opts?: {
-      /**
-       * Bytes to feed the subprocess on stdin — used by the
-       * `--pathspec-from-file=-` commit/add paths so a several-hundred-file
-       * batch never has to ride the argv (Windows caps a command line at
-       * ~32K chars).
-       */
-      input?: string;
-    },
-  ): Promise<GitRunResult> {
-    try {
-      const pending = execFileAsync('git', args, {
-        cwd,
-        // `GIT_LITERAL_PATHSPECS=1` makes git treat every pathspec literally
-        // instead of interpreting `[`, `]`, `*`, `?`, `!`, or `:(magic)` as
-        // glob / magic syntax. KB files routinely arrive with bracketed
-        // prefixes like `[Approved] foo.docx` or `[Updated 2025] bar.md`; the
-        // upload pipeline (`writeFileBinary` + `releaseLock` + `commitFile`)
-        // passes the relative path straight through to `git add` / `git
-        // checkout -- <path>`, which would otherwise glob and either match the
-        // wrong file or no file at all. Setting it once here covers every git
-        // subprocess this service spawns.
-        //
-        // `LC_ALL=C` / `LANG=C` force git's human-readable output (including
-        // stderr) to stable, English, locale-independent text. Callers that
-        // classify errors by message — e.g. `readFileAtRef` distinguishing a
-        // "path does not exist in <ref>" absence from a hard failure — would
-        // otherwise misread a translated message on a non-English host and, for
-        // the fail-closed roles.yaml preservation path, fail OPEN.
-        env: { ...process.env, GIT_LITERAL_PATHSPECS: '1', LC_ALL: 'C', LANG: 'C' },
-        maxBuffer: 32 * 1024 * 1024,
-      });
-      if (opts?.input !== undefined && pending.child.stdin) {
-        // A dying git can close stdin mid-write; the promise below still
-        // rejects with the exit code, which is the error we want to surface.
-        pending.child.stdin.on('error', () => undefined);
-        pending.child.stdin.write(opts.input);
-        pending.child.stdin.end();
-      }
-      const { stdout, stderr } = await pending;
-      return { stdout: stdout.toString(), stderr: stderr.toString() };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // Skip past any leading `-c key=val` pairs so the error names the actual
-      // git subcommand that failed (e.g. "git fetch failed:" not "git -c failed:").
-      let i = 0;
-      while (i < args.length && args[i] === '-c') i += 2;
-      const subcommand = args[i] ?? args[0];
-      const wrapped = new Error(`git ${subcommand} failed: ${redact(msg)}`) as Error & {
-        exitCode?: number;
-        stderr?: string;
-      };
-      // Preserve the underlying exit code / stderr so callers can distinguish
-      // expected non-zero exits (e.g. merge-base exit 1 = no common ancestor)
-      // from infra failures (ENOENT, exit 128) without parsing message strings.
-      const original = err as { code?: unknown; stderr?: unknown };
-      if (typeof original.code === 'number') wrapped.exitCode = original.code;
-      if (typeof original.stderr === 'string') wrapped.stderr = redact(original.stderr);
-      throw wrapped;
-    }
+  /**
+   * Every git invocation this service makes goes through here, and from here
+   * through the injected runner — which is what puts a deadline on it. The
+   * environment, the buffer ceiling, the stdin handling and the error shape all
+   * live in `NodeGitRunner` now; see `shared/git.contract.ts` for why.
+   *
+   * Errors arrive as `GitRunError`, which still carries `exitCode` and
+   * `stderr`, so the callers that read those to tell an expected non-zero exit
+   * from a real failure are unaffected.
+   */
+  private git(cwd: string, args: string[], opts?: Omit<GitRunOptions, 'encoding'>): Promise<GitRunResult> {
+    return this.gitRunner.run(cwd, args, {
+      ...opts,
+      // `GIT_LITERAL_PATHSPECS=1` makes git treat every pathspec literally
+      // instead of interpreting `[`, `]`, `*`, `?`, `!`, or `:(magic)` as glob
+      // / magic syntax. KB files routinely arrive with bracketed prefixes like
+      // `[Approved] foo.docx` or `[Updated 2025] bar.md`; the upload pipeline
+      // (`writeFileBinary` + `releaseLock` + `commitFile`) passes the relative
+      // path straight through to `git add` / `git checkout -- <path>`, which
+      // would otherwise glob and either match the wrong file or no file at all.
+      //
+      // THIS service's setting, not the runner's: the startup runner spells its
+      // literal paths as `:(literal)<path>`, which this variable would turn into
+      // a search for a file literally named that.
+      env: { GIT_LITERAL_PATHSPECS: '1', ...opts?.env },
+    });
   }
 }
 
@@ -2867,6 +3390,23 @@ export function parseNameStatusZ(out: string): NameStatusEntry[] {
     }
   }
   return entries;
+}
+
+/**
+ * Undo a rename git detected between a real file and the empty-folder
+ * placeholder. Deleting a folder's last file writes the placeholder, and
+ * when that file was empty too, `-M` pairs the two as a 100% rename. The
+ * pair is really a removal (or, the other way round, an addition) plus the
+ * placeholder, which is never reviewed — so the entry becomes the real side
+ * alone, and the caller's placeholder filter has nothing of it to drop.
+ */
+export function withoutPlaceholderRename(entry: NameStatusEntry): NameStatusEntry {
+  const { previousPath } = entry;
+  if (!previousPath || entry.status !== 'renamed') return entry;
+  const toPlaceholder = isFolderPlaceholder(entry.path);
+  const fromPlaceholder = isFolderPlaceholder(previousPath);
+  if (toPlaceholder === fromPlaceholder) return entry;
+  return toPlaceholder ? { status: 'removed', path: previousPath } : { status: 'added', path: entry.path };
 }
 
 interface NumstatEntry {

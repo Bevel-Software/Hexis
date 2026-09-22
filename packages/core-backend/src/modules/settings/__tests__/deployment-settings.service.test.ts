@@ -4,6 +4,7 @@ import {
   DeploymentSettingsService,
   SettingsValidationError,
   CORE_SETTINGS,
+  LEGACY_LAYOUT_ENV_VARS,
 } from '../deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
 
@@ -37,7 +38,10 @@ function makeDb() {
 let saved: NodeJS.ProcessEnv;
 beforeEach(() => {
   saved = { ...process.env };
-  for (const def of CORE_SETTINGS) delete process.env[def.envVar];
+  for (const def of CORE_SETTINGS) if (def.envVar) delete process.env[def.envVar];
+  // Retired, and so no longer in the catalogue — but a test about the import
+  // has to start from a process that is not already carrying one.
+  for (const envVar of Object.values(LEGACY_LAYOUT_ENV_VARS)) delete process.env[envVar];
   delete process.env.GITHUB_TOKEN;
 });
 afterEach(() => {
@@ -151,23 +155,170 @@ describe('DeploymentSettingsService — secrets', () => {
 });
 
 describe('DeploymentSettingsService — KB layout', () => {
-  it('resolves the three roots to their defaults when nothing names them', () => {
+  it('resolves the four names to their defaults when nothing names them', () => {
     const { db } = makeDb();
     const settings = new DeploymentSettingsService(db, ENC_KEY);
     expect(settings.resolveKbLayout()).toEqual({
       knowledgeBaseDir: 'KnowledgeBase',
       skillsDir: 'Skills',
       pluginsDir: 'Plugins',
+      agentsFile: 'AGENTS.md',
+    });
+    // The pointer is on until someone says otherwise.
+    expect(settings.resolveAgentsFileLink()).toBe(true);
+  });
+
+  /**
+   * The checkout folder may not be named like a repository root: every path
+   * under that root would then read as the checkout itself. Setup applies a
+   * saved layout to the running process without a restart, so the collision
+   * has to be refused at save time, whichever side of it the operator typed.
+   */
+  it('refuses a layout root named like the checkout folder, and a checkout folder named like a root', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    // The knowledge root renamed onto the checkout's default name.
+    await expect(settings.save({ knowledgeBaseDir: 'knowledge-base' }, null)).rejects.toMatchObject({
+      problems: { knowledgeBaseDir: expect.stringContaining('knowledgeBaseDir ("knowledge-base")') },
+    });
+    // The checkout renamed onto the knowledge root's name, in another case.
+    await expect(settings.save({ kbDirName: 'knowledgebase' }, null)).rejects.toMatchObject({
+      problems: { kbDirName: expect.stringContaining('knowledgeBaseDir ("KnowledgeBase")') },
+    });
+    // Nothing was written by either refusal, and an unrelated rename still lands.
+    expect(settings.resolveKbLayout().knowledgeBaseDir).toBe('KnowledgeBase');
+    await expect(settings.save({ kbDirName: 'checkout' }, null)).resolves.toBeTruthy();
+  });
+
+  /**
+   * The layout is entered in the app and nowhere else now. A variable still
+   * sitting in the environment cannot outrank the saved answer, and cannot
+   * lock the field the way an environment-backed setting does.
+   */
+  it('ignores the environment for the four layout names', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.save({ skillsDir: 'skills', pluginsDir: 'plugins', agentsFile: 'HEXIS.md' }, null);
+    process.env.KB_SKILLS_DIR = 'capabilities';
+    expect(settings.resolveKbLayout()).toMatchObject({ skillsDir: 'skills', agentsFile: 'HEXIS.md' });
+    expect(settings.sourceOf('skillsDir')).toBe('stored');
+    // Not locked: the field stays editable in the app, and a save of it is
+    // accepted rather than refused as 'set by the environment'.
+    await expect(settings.save({ skillsDir: 'abilities' }, null)).resolves.toBeTruthy();
+    expect(settings.resolveKbLayout().skillsDir).toBe('abilities');
+    // The catalogue no longer advertises a variable for them at all.
+    const described = settings.describe().find((d) => d.key === 'skillsDir');
+    expect(described?.envVar).toBeUndefined();
+    expect(described?.source).toBe('stored');
+  });
+
+  /**
+   * The upgrade path for a deployment that set the roots in its environment:
+   * one import, then the environment is over.
+   */
+  describe('the one-time import of the retired layout variables', () => {
+    it('saves a still-set variable when nothing is saved, and says the variable can go', async () => {
+      const { db, rows } = makeDb();
+      const settings = new DeploymentSettingsService(db, ENC_KEY);
+      await settings.load();
+      process.env.KB_PLUGINS_DIR = 'plugins';
+      const noted = vi.spyOn(console, 'log').mockImplementation(() => {});
+      await settings.importLegacyLayoutEnv();
+      expect(rows).toContainEqual(expect.objectContaining({ key: 'pluginsDir', value: 'plugins' }));
+      // The layout is unchanged by the import — that is the whole point.
+      expect(settings.resolveKbLayout().pluginsDir).toBe('plugins');
+      expect(noted.mock.calls.flat().join(' ')).toMatch(/KB_PLUGINS_DIR[\s\S]*can be removed/);
+      noted.mockRestore();
+    });
+
+    it('keeps a differing saved value and warns that the variable is ignored', async () => {
+      const { db, rows } = makeDb();
+      const settings = new DeploymentSettingsService(db, ENC_KEY);
+      await settings.save({ pluginsDir: 'Plugins' }, null);
+      process.env.KB_PLUGINS_DIR = 'plugins';
+      const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await settings.importLegacyLayoutEnv();
+      expect(settings.resolveKbLayout().pluginsDir).toBe('Plugins');
+      expect(rows.filter((r) => r.key === 'pluginsDir')).toEqual([
+        expect.objectContaining({ value: 'Plugins' }),
+      ]);
+      expect(warned.mock.calls.flat().join(' ')).toMatch(/KB_PLUGINS_DIR is ignored/);
+      warned.mockRestore();
+    });
+
+    it('does nothing at all when no variable is set', async () => {
+      const { db, rows } = makeDb();
+      const settings = new DeploymentSettingsService(db, ENC_KEY);
+      await settings.load();
+      await settings.importLegacyLayoutEnv();
+      expect(rows).toHaveLength(0);
+      expect(settings.resolveKbLayout()).toMatchObject({ pluginsDir: 'Plugins', skillsDir: 'Skills' });
     });
   });
 
-  it('takes a renamed root from the environment first, then the store', async () => {
+  /**
+   * The guide's file name is saved beside the folders and judged with them:
+   * the four must differ, and a name that is not one markdown file is refused
+   * with the rule it broke.
+   */
+  it('refuses a guide name that is not one markdown file of its own', async () => {
     const { db } = makeDb();
     const settings = new DeploymentSettingsService(db, ENC_KEY);
-    await settings.save({ skillsDir: 'skills', pluginsDir: 'plugins' }, null);
-    expect(settings.resolveKbLayout()).toMatchObject({ skillsDir: 'skills', pluginsDir: 'plugins' });
-    process.env.KB_SKILLS_DIR = 'capabilities';
-    expect(settings.resolveKbLayout().skillsDir).toBe('capabilities');
+    for (const bad of ['guides/HEXIS.md', 'HEXIS.txt', 'CLAUDE.md', 'access.md', 'roles.yaml']) {
+      await expect(settings.save({ agentsFile: bad }, null)).rejects.toBeInstanceOf(
+        SettingsValidationError,
+      );
+    }
+    await expect(settings.save({ agentsFile: 'HEXIS.md' }, null)).resolves.toBeTruthy();
+  });
+
+  it('refuses a guide named after a root folder, from either side of the pair', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    // The plugins folder already in effect, named by the guide alone.
+    await settings.save({ pluginsDir: 'Guide.md' }, null);
+    await expect(settings.save({ agentsFile: 'guide.md' }, null)).rejects.toBeInstanceOf(
+      SettingsValidationError,
+    );
+    // And the other way round, in one batch.
+    await expect(
+      settings.save({ agentsFile: 'HEXIS.md', skillsDir: 'hexis.md' }, null),
+    ).rejects.toBeInstanceOf(SettingsValidationError);
+  });
+
+  it('marks the guide name and its pointer setting as restart-to-apply', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    expect((await settings.save({ agentsFile: 'HEXIS.md' }, null)).restartKeys).toContain('agentsFile');
+    expect((await settings.save({ agentsFileLink: 'false' }, null)).restartKeys).toContain(
+      'agentsFileLink',
+    );
+    expect(settings.resolveAgentsFileLink()).toBe(false);
+  });
+
+  /**
+   * A restart is owed for a CHANGE, and saving what a deployment is already
+   * running on is not one. Both of these settings mean something while unset —
+   * the guide is `AGENTS.md`, the pointer is on — so the first save of that
+   * same answer changes nothing the process would pick up at a restart.
+   */
+  it('owes no restart for saving the value an unset setting already meant', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    // The checkbox arrives ticked, and ticked is what an unset one already is.
+    expect((await settings.save({ agentsFileLink: 'true' }, null)).restartKeys).not.toContain(
+      'agentsFileLink',
+    );
+    expect((await settings.save({ agentsFile: 'AGENTS.md' }, null)).restartKeys).not.toContain(
+      'agentsFile',
+    );
+    expect((await settings.save({ skillsDir: 'Skills' }, null)).restartKeys).not.toContain('skillsDir');
+    // And the setting still reads as it did.
+    expect(settings.resolveAgentsFileLink()).toBe(true);
+    // Turning it off from there IS a change, and still reports one.
+    expect((await settings.save({ agentsFileLink: 'false' }, null)).restartKeys).toContain(
+      'agentsFileLink',
+    );
   });
 
   /**
@@ -309,5 +460,36 @@ describe('DeploymentSettingsService — validation', () => {
     expect(live.restartRequired).toBe(false);
     const staged = await settings.save({ kbDirName: 'company-brain' }, null);
     expect(staged.restartRequired).toBe(true);
+  });
+
+  /** The OIDC provider reads these on every sign-in, so saving them owes no restart. */
+  it('never asks for a restart for the single sign-on settings', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    const sso = await settings.save(
+      {
+        oidcIssuerUrl: 'https://idp.example.com',
+        oidcClientId: 'hexis',
+        oidcClientSecret: 'sso-very-secret',
+        oidcScopes: 'openid email',
+        oidcProviderLabel: 'Company SSO',
+      },
+      null,
+    );
+    expect(sso).toEqual({ restartRequired: false, restartKeys: [] });
+    const changed = await settings.save(
+      { oidcIssuerUrl: 'https://other-idp.example.com', oidcProviderLabel: 'Acme login' },
+      null,
+    );
+    expect(changed.restartRequired).toBe(false);
+    // …while one that genuinely needs it, saved alongside, still says so.
+    const mixed = await settings.save(
+      { oidcClientId: 'hexis-2', allowedEmailDomains: 'example.com' },
+      null,
+    );
+    expect(mixed.restartKeys).toEqual(['allowedEmailDomains']);
+    expect(
+      settings.describe().filter((s) => s.key.startsWith('oidc') && s.restartToApply),
+    ).toEqual([]);
   });
 });
