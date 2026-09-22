@@ -63,10 +63,13 @@ function asSafeError(err: unknown): Error {
       }
     }
     // An AggregateError from another realm keeps its failures under a
-    // non-enumerable `errors` too; carried by name, and escaped one by one
-    // by the same rule (`oneLineError` walks `errors`).
+    // non-enumerable `errors` too; carried by name, each failure first put
+    // through this same re-rooting (a foreign Error inside is as foreign as
+    // its parent), so `oneLineError` and pino then treat every one as an
+    // error of this realm.
     if (Array.isArray(source.errors)) {
-      Object.defineProperty(like, 'errors', { value: source.errors, enumerable: false, writable: true, configurable: true });
+      const errors = source.errors.map((e) => (e && typeof e === 'object' ? asSafeError(e) : e));
+      Object.defineProperty(like, 'errors', { value: errors, enumerable: false, writable: true, configurable: true });
     }
     return oneLineError(like);
   }

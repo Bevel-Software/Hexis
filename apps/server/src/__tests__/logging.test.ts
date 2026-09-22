@@ -49,12 +49,23 @@ describe('createPinoLogger — the err field', () => {
     const foreign = Object.create(null) as Record<string, unknown>;
     Object.defineProperty(foreign, 'name', { value: 'AggregateError', enumerable: false });
     Object.defineProperty(foreign, 'message', { value: 'several', enumerable: false });
-    Object.defineProperty(foreign, 'errors', { value: [new Error('one\nA'), 'two\nB'], enumerable: false });
+    // One failure is itself from the other realm: no `Error` prototype, its
+    // message and stack non-enumerable.
+    const foreignInner = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(foreignInner, 'name', { value: 'Error', enumerable: false });
+    Object.defineProperty(foreignInner, 'message', { value: 'three\nC', enumerable: false });
+    Object.defineProperty(foreignInner, 'stack', { value: 'Error: three\nC\n    at z (w:1:1)', enumerable: false });
+    Object.defineProperty(foreign, 'errors', {
+      value: [new Error('one\nA'), 'two\nB', foreignInner],
+      enumerable: false,
+    });
     logger.error('failed', { err: foreign });
     const err = lines()[0]?.err as { message: string; errors: unknown[] };
     expect(err.message).toBe('several');
     expect((err.errors[0] as { message: string }).message).toBe('one\\nA');
     expect(err.errors[1]).toBe('two\\nB');
+    expect((err.errors[2] as { message: string; stack: string }).message).toBe('three\\nC');
+    expect((err.errors[2] as { message: string; stack: string }).stack).toBe('Error: three\\nC\n    at z (w:1:1)');
   });
 
   it('escapes a plain string reason', () => {

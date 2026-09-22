@@ -73,6 +73,18 @@ describe('useLibraryData', () => {
     expect(result.current.loading).toBe(false);
   });
 
+  it('a retry after a FAILED first load is loud again: there is nothing on screen to keep', async () => {
+    api.listSkills.mockRejectedValueOnce(new Error('network down'));
+    const { result } = renderHook(() => useLibraryData());
+    await waitFor(() => expect(result.current.error).toBe('network down'));
+    expect(result.current.loading).toBe(false);
+    act(() => result.current.reload());
+    expect(result.current.loading).toBe(true);
+    expect(result.current.error).toBeNull();
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.skills).toEqual([SKILL]);
+  });
+
   it('a reload that fails keeps the catalog and reports the error, without going loud', async () => {
     const { result } = renderHook(() => useLibraryData());
     await waitFor(() => expect(result.current.loading).toBe(false));

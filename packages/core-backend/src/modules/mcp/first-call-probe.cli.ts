@@ -19,20 +19,7 @@
  */
 import { probeFirstCall, formatProbeReport, ProbeOptionsError } from './first-call-probe.js';
 import { ConfigError, parseCliRequest, USAGE } from './first-call-probe.cli-args.js';
-
-/**
- * The report as JSON a terminal can show. `JSON.stringify` escapes the C0
- * controls and leaves the C1 range and the line separators raw — and the
- * report quotes what the remote said, so a U+009B in an error body would
- * start an ANSI sequence on the operator's screen. Those are escaped as
- * `\uXXXX`, which is still the same JSON to any reader of it.
- */
-function terminalSafeJson(value: unknown): string {
-  return JSON.stringify(value, null, 2).replace(
-    /[\x7F-\x9F\u{2028}\u{2029}]/gu,
-    (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
-  );
-}
+import { terminalSafeJson } from '../../shared/printable.js';
 
 async function main(): Promise<void> {
   const request = parseCliRequest(process.argv.slice(2));
@@ -48,7 +35,9 @@ async function main(): Promise<void> {
   const report = await probeFirstCall(request.options).catch((err: unknown) => {
     throw err instanceof ProbeOptionsError ? new ConfigError(err.message) : err;
   });
-  console.log(request.json ? terminalSafeJson(report) : formatProbeReport(report));
+  // The report quotes what the remote said, so the JSON is made terminal-safe
+  // the way every other operator-facing text is (see `terminalSafeJson`).
+  console.log(request.json ? terminalSafeJson(JSON.stringify(report, null, 2)) : formatProbeReport(report));
   if (report.failed > 0) process.exitCode = 1;
 }
 

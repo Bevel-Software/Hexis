@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { fetchFileAccessBatch } from '../../access/api';
 import { listToolSecrets, type ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
@@ -105,6 +105,8 @@ export function useLibraryData(): LibraryData {
     myCrNumbers: new Set(),
   });
   const [revision, setRevision] = useState(0);
+  /** Whether any load has answered with a catalog — what makes a reload quiet. */
+  const loadedOnce = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -156,6 +158,7 @@ export function useLibraryData(): LibraryData {
       // Fail closed: a path missing from the verdicts is a no.
       const skillsWhere = (results: Record<string, boolean>) =>
         new Set(skills.filter((s) => results[`${s.path}/SKILL.md`] === true).map((s) => s.name));
+      loadedOnce.current = true;
       setState({
         loading: false,
         refreshing: false,
@@ -192,7 +195,11 @@ export function useLibraryData(): LibraryData {
   // reload is quiet: `refreshing` behind what is on screen, the error
   // cleared for the new attempt.
   const reload = useCallback(() => {
-    setState((s) => (s.loading ? s : { ...s, refreshing: true, error: null }));
+    // Quiet only once a load has ANSWERED: a retry after a failed first load
+    // has nothing on screen to keep, and goes loud like the first attempt.
+    setState((s) =>
+      s.loading ? s : loadedOnce.current ? { ...s, refreshing: true, error: null } : { ...s, loading: true, error: null },
+    );
     setRevision((r) => r + 1);
   }, []);
 
