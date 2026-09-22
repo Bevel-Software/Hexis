@@ -18,7 +18,12 @@ import { mergeGroupsIntoRoles, parseRolesYaml } from '../../../../access-model/a
 import { TemplateFilesStep } from '../template-files.step.js';
 import { buildSeedTree } from '../seed-tree.js';
 import { defaultKbTemplateDir } from '../../../../../assets.js';
-import { DEFAULT_KB_LAYOUT, configureKbLayout, renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
+import {
+  DEFAULT_KB_LAYOUT,
+  agentsFilePointerSentence,
+  configureKbLayout,
+  renderKbLayoutPlaceholders,
+} from '@bevel-software/platform-shared';
 import { PLATFORM_HEADER, TOOL_PREFIX_LINE, composeAgentInstructions } from '../../../../agent-instructions/index.js';
 
 const execFileAsync = promisify(execFile);
@@ -749,6 +754,304 @@ describe('TemplateFilesStep', () => {
     const dir = await checkout(DEFAULT_BRANCH);
     expect((await git(dir, ['rev-list', '--count', 'HEAD'])).trim()).toBe('1'); // init only
   });
+
+  /**
+   * The guide under a name of the deployment's own — and what becomes of the
+   * `AGENTS.md` beside it, which on such a deployment is the CUSTOMER'S file.
+   */
+  describe('a renamed agent guide', () => {
+    /** The scaffold minus the guide, so each test says for itself what `AGENTS.md` holds. */
+    async function scaffoldWithoutGuide(): Promise<Record<string, string>> {
+      const scaffold = await fullScaffold();
+      delete scaffold['AGENTS.md'];
+      return scaffold;
+    }
+
+    const CUSTOMER_GUIDE = '# Acme conventions\n\nWrite tickets in the present tense.\n';
+
+    it('writes and refreshes the guide under the configured name, on every protected branch', async () => {
+      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      await seedUpstream({ 'marker.txt': 'seeded' });
+      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+
+      for (const branch of PROTECTED) {
+        const dir = await checkout(branch);
+        const guide = norm(await fs.readFile(path.join(dir, 'HEXIS.md'), 'utf8'));
+        // The header names the file it lives in, not the name it ships under.
+        expect(guide).toContain('`HEXIS.md`');
+        expect(guide).not.toContain('{{');
+        expect(await exists(dir, 'AGENTS.md')).toBe(false);
+      }
+
+      // A second boot sees the rendered guide as current: no churn commit…
+      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+      expect((await git(await checkout(DEFAULT_BRANCH), ['rev-list', '--count', 'HEAD'])).trim()).toBe('2');
+
+      // …and a drifted copy is replaced, exactly as `AGENTS.md` is by default.
+      const dir = await checkout(DEFAULT_BRANCH);
+      await fs.writeFile(path.join(dir, 'HEXIS.md'), 'stale conventions\n', 'utf8');
+      await git(dir, ['commit', '-am', 'drift']);
+      await git(dir, ['push', 'origin', DEFAULT_BRANCH]);
+      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+      const after = await checkout(DEFAULT_BRANCH);
+      expect(norm(await fs.readFile(path.join(after, 'HEXIS.md'), 'utf8'))).toContain('# Knowledge base');
+      expect((await git(after, ['log', '--format=%s', '-1'])).trim()).toBe(
+        'Update HEXIS.md to the current platform template',
+      );
+    });
+
+    it('leaves a customer AGENTS.md byte for byte alone, and shows it in the tree', async () => {
+      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      // Their file already names the guide, so the pointer has nothing to add
+      // — this test is about the bytes and the ignore rules alone.
+      const theirs = `${CUSTOMER_GUIDE}\nSee HEXIS.md for the platform.\n`;
+      await seedUpstream({ ...(await scaffoldWithoutGuide()), 'AGENTS.md': theirs });
+      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+
+      const dir = await checkout(DEFAULT_BRANCH);
+      expect(norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'))).toBe(theirs);
+      expect(await exists(dir, 'HEXIS.md')).toBe(true);
+      const ignore = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))
+        .split('\n')
+        .map((l) => l.trim());
+      // The configured file is hidden; the customer's shows.
+      expect(ignore).toContain('HEXIS.md');
+      expect(ignore).not.toContain('AGENTS.md');
+    });
+
+    it('removes the platform-written AGENTS.md — only its own header proves it ours', async () => {
+      // A knowledge base the platform seeded, whose admin then renames the guide.
+      await seedUpstream({ 'marker.txt': 'seeded' });
+      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+      expect(await exists(await checkout(DEFAULT_BRANCH), 'AGENTS.md')).toBe(true);
+
+      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+
+      // On EVERY protected branch: the step tops up each one, and a rename
+      // that only reached the default branch would leave the others carrying a
+      // stale platform guide under the customer's name.
+      for (const branch of PROTECTED) {
+        const dir = await checkout(branch);
+        expect(await exists(dir, 'AGENTS.md'), branch).toBe(false);
+        expect(await exists(dir, 'HEXIS.md'), branch).toBe(true);
+        const message = await git(dir, ['log', '--format=%B', '-1']);
+        expect(message, branch).toContain(
+          'Remove the platform-written AGENTS.md — the agent guide is now HEXIS.md',
+        );
+      }
+    });
+
+    it('keeps an AGENTS.md it cannot prove it wrote, and says so', async () => {
+      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      // Edited by the customer: the managed header is gone, so it is theirs.
+      const edited = `${CUSTOMER_GUIDE}\nMentions HEXIS.md already.\n`;
+      await seedUpstream({ ...(await scaffoldWithoutGuide()), 'AGENTS.md': edited });
+      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+
+      for (const branch of PROTECTED) {
+        const dir = await checkout(branch);
+        expect(norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8')), branch).toBe(edited);
+        expect(await git(dir, ['log', '--format=%B', '-1']), branch).toContain('Keep AGENTS.md');
+      }
+    });
+
+    it('leaves a root AGENTS.md that is a symbolic link exactly where it points', async () => {
+      // Following the link would read the managed header at the other end and
+      // delete the customer's entry — or, with the pointer on, write our
+      // sentence into a file nobody asked us to edit.
+      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      await seedUpstream({ ...(await scaffoldWithoutGuide()), 'conventions/ours.md': await template('AGENTS.md') });
+      // Committed as a link, so every checkout the step makes carries one.
+      const seeding = await checkout(DEFAULT_BRANCH);
+      await fs.symlink('conventions/ours.md', path.join(seeding, 'AGENTS.md'));
+      await git(seeding, ['add', '-A']);
+      await git(seeding, ['commit', '-m', 'link AGENTS.md at our own file']);
+      await git(seeding, ['push', 'origin', DEFAULT_BRANCH]);
+
+      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+
+      const dir = await checkout(DEFAULT_BRANCH);
+      expect((await fs.lstat(path.join(dir, 'AGENTS.md'))).isSymbolicLink()).toBe(true);
+      expect(await fs.readlink(path.join(dir, 'AGENTS.md'))).toBe('conventions/ours.md');
+      // The file at the other end is untouched — neither removed nor appended to.
+      expect(norm(await fs.readFile(path.join(dir, 'conventions/ours.md'), 'utf8'))).toBe(
+        norm(await template('AGENTS.md')),
+      );
+    });
+
+    it("keeps an operator's own AGENTS.md ignore rule while dropping the platform's", async () => {
+      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      const scaffold = await scaffoldWithoutGuide();
+      // Their own rule, written by hand, nowhere near the template's slot.
+      scaffold['.bevelignore'] = '# mine\nAGENTS.md\nMyStuff/\n';
+      scaffold['AGENTS.md'] = `${CUSTOMER_GUIDE}\nSee HEXIS.md.\n`;
+      await seedUpstream(scaffold);
+      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+
+      const text = norm(
+        await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), '.bevelignore'), 'utf8'),
+      );
+      expect(text).toContain('# mine\nAGENTS.md\nMyStuff/');
+      expect(text.split('\n').map((l) => l.trim())).toContain('HEXIS.md');
+    });
+
+    it("keeps an operator's rule that merely happens to sit under .gitattributes", async () => {
+      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      const scaffold = await scaffoldWithoutGuide();
+      // Hand-written, and by coincidence in the position the template's own
+      // rule used to occupy. One matching line above is not provenance — the
+      // block the template wrote is not there, so the rule is theirs.
+      scaffold['.bevelignore'] = '# ours\n.gitattributes\nAGENTS.md\nMyStuff/\n';
+      scaffold['AGENTS.md'] = `${CUSTOMER_GUIDE}\nSee HEXIS.md.\n`;
+      await seedUpstream(scaffold);
+      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+
+      const text = norm(
+        await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), '.bevelignore'), 'utf8'),
+      );
+      expect(text).toContain('# ours\n.gitattributes\nAGENTS.md\nMyStuff/');
+      expect(text.split('\n').map((l) => l.trim())).toContain('HEXIS.md');
+    });
+
+    it("drops the bare rule an earlier release seeded in the template's hygiene block", async () => {
+      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      const scaffold = await scaffoldWithoutGuide();
+      // The `.bevelignore` of a knowledge base seeded before the rule had a
+      // comment above it: bare, at the end of the template's own block.
+      scaffold['.bevelignore'] =
+        '# Repo hygiene files that clutter the tree without being node content.\n' +
+        '.gitignore\n.gitattributes\nAGENTS.md\nroles.yaml\n';
+      scaffold['AGENTS.md'] = `${CUSTOMER_GUIDE}\nSee HEXIS.md.\n`;
+      await seedUpstream(scaffold);
+      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+
+      const lines = norm(
+        await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), '.bevelignore'), 'utf8'),
+      )
+        .split('\n')
+        .map((l) => l.trim());
+      // The platform's line goes; the block above it is content and stays.
+      expect(lines).not.toContain('AGENTS.md');
+      expect(lines).toContain('.gitattributes');
+      expect(lines).toContain('.gitignore');
+      expect(lines).toContain('HEXIS.md');
+    });
+
+    describe('the pointer in the customer\'s own AGENTS.md', () => {
+      /** Boot once with the guide renamed, against a root `AGENTS.md` holding `theirs`. */
+      async function bootWith(theirs: string | null, link = true): Promise<string> {
+        configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+        const scaffold = await scaffoldWithoutGuide();
+        if (theirs !== null) scaffold['AGENTS.md'] = theirs;
+        await seedUpstream(scaffold);
+        await makeRunner([new TemplateFilesStep(new NodeFs(), [], () => link)]).runAll();
+        return checkout(DEFAULT_BRANCH);
+      }
+
+      const SENTENCE = agentsFilePointerSentence('HEXIS.md');
+
+      it('appends the sentence when the guide is not mentioned, and says so', async () => {
+        const dir = await bootWith(CUSTOMER_GUIDE);
+        const text = norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'));
+        // Their bytes, then a blank line, then exactly the shared sentence.
+        expect(text).toBe(`${CUSTOMER_GUIDE.replace(/\n+$/, '')}\n\n${SENTENCE}\n`);
+        expect(await git(dir, ['log', '--format=%B', '-1'])).toContain(
+          'Add a pointer to HEXIS.md at the end of AGENTS.md',
+        );
+      });
+
+      /**
+       * The sentence spells a punctuated name twice and neither spelling is
+       * the raw one — the label is escaped, the destination percent-encoded.
+       * A second boot must still see the guide as mentioned, or it appends
+       * another copy, and the boot after that a third.
+       */
+      it('appends once and only once, even when the name is nothing but punctuation', async () => {
+        const guide = 'Our [Agent] Guide (v2).md';
+        configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: guide });
+        await seedUpstream({ ...(await scaffoldWithoutGuide()), 'AGENTS.md': CUSTOMER_GUIDE });
+        const boot = () => makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+
+        await boot();
+        const once = norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), 'AGENTS.md'), 'utf8'));
+        expect(once).toBe(
+          `${CUSTOMER_GUIDE.replace(/\n+$/, '')}\n\n${agentsFilePointerSentence(guide)}\n`,
+        );
+
+        const head = (await git(await checkout(DEFAULT_BRANCH), ['rev-parse', 'HEAD'])).trim();
+        await boot();
+        const after = await checkout(DEFAULT_BRANCH);
+        expect(norm(await fs.readFile(path.join(after, 'AGENTS.md'), 'utf8'))).toBe(once);
+        // And the second boot committed nothing at all.
+        expect((await git(after, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+      });
+
+      /**
+       * The guide's name is a setting, and a setting can be changed twice. The
+       * sentence the last rename wrote points at a file that is no longer
+       * there, and the new name is nowhere in the text — so "is it mentioned?"
+       * says no and an unaimed sentence would be joined by a second one.
+       */
+      it('aims the sentence it already wrote at the new guide, rather than adding another', async () => {
+        configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+        await seedUpstream({ ...(await scaffoldWithoutGuide()), 'AGENTS.md': CUSTOMER_GUIDE });
+        await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+        expect(norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), 'AGENTS.md'), 'utf8'))).toContain(
+          agentsFilePointerSentence('HEXIS.md'),
+        );
+
+        // The admin renames the guide a second time.
+        configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'GUIDE.md' });
+        await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+
+        const dir = await checkout(DEFAULT_BRANCH);
+        const text = norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'));
+        // Their bytes, then ONE sentence, pointing at the guide that exists.
+        expect(text).toBe(
+          `${CUSTOMER_GUIDE.replace(/\n+$/, '')}\n\n${agentsFilePointerSentence('GUIDE.md')}\n`,
+        );
+        expect(text).not.toContain('HEXIS.md');
+        expect(await git(dir, ['log', '--format=%B', '-1'])).toContain(
+          'Point the sentence in AGENTS.md at GUIDE.md',
+        );
+      });
+
+      it('writes nothing when the name appears anywhere in the text, in any wording', async () => {
+        const theirs = `${CUSTOMER_GUIDE}\nThe platform keeps its own notes in HEXIS.md; read those too.\n`;
+        const dir = await bootWith(theirs);
+        expect(norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'))).toBe(theirs);
+      });
+
+      it('writes nothing while the setting is off', async () => {
+        const dir = await bootWith(CUSTOMER_GUIDE, false);
+        expect(norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'))).toBe(CUSTOMER_GUIDE);
+      });
+
+      it('never creates an AGENTS.md for the pointer', async () => {
+        const dir = await bootWith(null);
+        expect(await exists(dir, 'AGENTS.md')).toBe(false);
+        expect(await exists(dir, 'HEXIS.md')).toBe(true);
+      });
+
+      it('never appends to a file the platform wrote — it removes that one instead', async () => {
+        const dir = await bootWith(await template('AGENTS.md'));
+        expect(await exists(dir, 'AGENTS.md')).toBe(false);
+      });
+
+      it('does nothing at all under the default name', async () => {
+        const theirs = `${CUSTOMER_GUIDE}`;
+        // The default guide IS AGENTS.md, so the platform owns that file and
+        // the pointer question never arises: the drifted copy is replaced.
+        await seedUpstream({ ...(await fullScaffold()), 'AGENTS.md': theirs });
+        await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+        const dir = await checkout(DEFAULT_BRANCH);
+        const text = norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'));
+        expect(text).toBe(norm(await template('AGENTS.md')));
+        expect(text).not.toContain(agentsFilePointerSentence('AGENTS.md'));
+      });
+    });
+  });
 });
 
 describe('RolesYamlStep', () => {
@@ -849,6 +1152,49 @@ describe('buildSeedTree', () => {
     await fs.mkdir(dest, { recursive: true });
     const generated = await seed(dest);
     expect(generated.sort()).toEqual(['Docs/.gitkeep', 'Plugins/.gitkeep', 'roles.yaml', 'skills/.gitkeep']);
+  });
+
+  /**
+   * An empty remote seeded by a deployment that renamed its guide. Done in the
+   * SEED rather than left to the top-up step, which would otherwise lay down
+   * `AGENTS.md` and delete it one commit later — two commits saying opposite
+   * things about a knowledge base nobody has used yet.
+   */
+  it('seeds the packaged guide under the configured name, and no AGENTS.md beside it', async () => {
+    configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+    const dest = path.join(root, 'seed-dest-guide');
+    await fs.mkdir(dest, { recursive: true });
+    await buildSeedTree(new NodeFs(), TEMPLATE_DIR, [], ['admin@example.com'])(dest);
+    expect(await exists(dest, 'AGENTS.md')).toBe(false);
+    const guide = norm(await fs.readFile(path.join(dest, 'HEXIS.md'), 'utf8'));
+    expect(guide).toContain('`HEXIS.md`');
+    expect(guide).not.toContain('{{');
+    // And the ignore file hides the name it actually seeded.
+    const ignore = norm(await fs.readFile(path.join(dest, '.bevelignore'), 'utf8'))
+      .split('\n')
+      .map((l) => l.trim());
+    expect(ignore).toContain('HEXIS.md');
+    expect(ignore).not.toContain('AGENTS.md');
+  });
+
+  it('lets the managed guide win a template that carries a root file of the same name', async () => {
+    // A custom KB_TEMPLATE_DIR that happens to ship `HEXIS.md` at its root, on
+    // a deployment that named its guide `HEXIS.md`: two walk entries, one
+    // destination. Whichever the walk reached last used to decide what an
+    // empty deployment was seeded with. The managed guide decides.
+    const customTemplate = path.join(root, 'custom-template-guide-clash');
+    await fs.cp(TEMPLATE_DIR, customTemplate, { recursive: true });
+    await fs.writeFile(path.join(customTemplate, 'HEXIS.md'), '# Not the platform guide\n', 'utf8');
+
+    configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+    const dest = path.join(root, 'seed-dest-guide-clash');
+    await fs.mkdir(dest, { recursive: true });
+    await buildSeedTree(new NodeFs(), customTemplate, [], ['admin@example.com'])(dest);
+
+    const guide = norm(await fs.readFile(path.join(dest, 'HEXIS.md'), 'utf8'));
+    expect(guide).toContain('`HEXIS.md`');
+    expect(guide).not.toContain('Not the platform guide');
+    expect(await exists(dest, 'AGENTS.md')).toBe(false);
   });
 
   it('names a template that is not there — a missing directory is a broken build, not an empty seed', async () => {

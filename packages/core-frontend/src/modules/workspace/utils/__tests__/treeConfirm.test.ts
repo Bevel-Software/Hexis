@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
+import { DEFAULT_KB_LAYOUT, configureKbLayout } from '@bevel-software/platform-shared';
 import type { AccessPrincipalRef, PathPrincipals } from '../../../access/api';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
@@ -51,6 +52,9 @@ const group = (name: string): AccessPrincipalRef => ({ kind: 'group', name });
 const role = (name: string): AccessPrincipalRef => ({ kind: 'role', name });
 const person = (name: string, email: string): AccessPrincipalRef => ({ kind: 'person', name, email });
 const plugin = (token: string): AccessPrincipalRef => ({ kind: 'plugin', name: token });
+
+/** The layout is module state shared by the whole file; each test that names one puts the defaults back. */
+afterEach(() => configureKbLayout({ ...DEFAULT_KB_LAYOUT }));
 
 const side = (read: AccessPrincipalRef[], write: AccessPrincipalRef[] = []): PathPrincipals => ({
   read,
@@ -240,6 +244,23 @@ describe('platformFileMoveRefusal', () => {
     expect(platformFileMoveRefusal(`${KB}/Sales/AGENTS.md`, KB)).toBeNull();
     // Exact spelling, as the platform reads it.
     expect(platformFileMoveRefusal(`${KB}/Sales/Access.md`, KB)).toBeNull();
+  });
+
+  /**
+   * The tree's copy of the rule reads the layout the browser was served, so a
+   * deployment that renamed its guide gets the same two answers here as it
+   * does from the server: ours is managed, theirs is a page.
+   */
+  it('follows the configured guide name — and lets go of AGENTS.md when it differs', () => {
+    configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+    expect(platformFileMoveRefusal(`${KB}/HEXIS.md`, KB))
+      .toBe('HEXIS.md is a platform file and stays in its folder.');
+    // The customer's own conventions file moves, renames and deletes like any
+    // page — which is the whole point of naming ours something else.
+    expect(platformFileMoveRefusal(`${KB}/AGENTS.md`, KB)).toBeNull();
+    expect(platformFileDragRefusal(`${KB}/AGENTS.md`, KB, false)).toBeNull();
+    // Root-only, like `roles.yaml`: a nested copy of ours is content too.
+    expect(platformFileMoveRefusal(`${KB}/Sales/HEXIS.md`, KB)).toBeNull();
   });
 
   it('refuses nothing outside the KB clone, or before the clone folder is known', () => {

@@ -292,7 +292,7 @@ export interface IWorkflowService {
    *
    * `opts.platformRestore` CLAIMS that this acquire is the destination side of
    * an admin putting a misplaced platform file back (`access.md`, `roles.yaml`,
-   * `.bevelignore`, `AGENTS.md`), and names the move's `source` — the path the
+   * `.bevelignore`, the agent guide), and names the move's `source` — the path the
    * file is coming FROM, in the same spelling as `path`.
    *
    * It is a claim, not an authorisation. The implementation re-asks both

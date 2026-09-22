@@ -343,10 +343,14 @@ export async function createCoreServices(
     protectedBranches: settings.resolve('protectedBranches'),
   };
   if (!validateBranchModel(branchModel)) configureBranchModel(branchModel);
-  // The KB layout — the three renameable roots — applied the same way and at
-  // the same moment, before any service captures a root name. Unlike the
-  // branch model it always resolves (every root has a default), so an invalid
-  // value is a real misconfiguration and stops the boot.
+  // The layout variables that were retired this release, folded into their
+  // saved settings before anything reads the layout — so the boot that imports
+  // them also RUNS on the imported names rather than on the defaults.
+  await settings.importLegacyLayoutEnv();
+  // The KB layout — the three renameable roots and the agent guide's file name
+  // — applied the same way and at the same moment, before any service captures
+  // one of them. Unlike the branch model it always resolves (every name has a
+  // default), so an invalid value is a real misconfiguration and stops the boot.
   configureKbLayout(settings.resolveKbLayout());
   // A token supplied through the setup screen has to reach the credential
   // helper, which reads `$GITHUB_TOKEN` at call time.
@@ -391,7 +395,10 @@ export async function createCoreServices(
     // backfill would walk a tree still missing those manifests.
     new PluginDisplayNamesStep(disk),
     new PersonalSpacesStep(disk),
-    new TemplateFilesStep(disk, extraDirs),
+    // A getter, not a value: the step is built here, while the process may
+    // still hold the defaults, and the save that completes first-run setup
+    // applies the admin's answer afterwards.
+    new TemplateFilesStep(disk, extraDirs, () => settings.resolveAgentsFileLink()),
     new RolesYamlStep(disk, [config.adminEmail]),
     ...(ports.kbStartupSteps ?? []),
   ];

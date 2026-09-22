@@ -6,6 +6,8 @@ import type { Database } from '../database/connection.js';
 import { deploymentSettings } from '../database/core-schema.js';
 import {
   DEFAULT_KB_LAYOUT,
+  type KbLayout,
+  validateAgentsFileName,
   validateBranchModel,
   validateKbLayout,
   validateKbRootName,
@@ -23,7 +25,18 @@ import { normalizeIssuerUrl } from './oidc-check.js';
  */
 export interface SettingDef {
   key: string;
-  envVar: string;
+  /**
+   * The environment variable that still WINS over a stored row, when there is
+   * one — see {@link DeploymentSettingsService}.
+   *
+   * Absent for the knowledge-base layout (the three root folders and the agent
+   * guide's file name): those are entered in the app and nowhere else. They had
+   * variables once; a deployment that still sets one gets its value imported
+   * into the saved setting on the first boot after the upgrade, and the
+   * variable ignored from then on (see
+   * {@link DeploymentSettingsService.importLegacyLayoutEnv}).
+   */
+  envVar?: string;
   /** Which block of the setup screen it belongs to. */
   section: 'knowledge-base' | 'sign-in';
   secret?: boolean;
@@ -35,6 +48,17 @@ export interface SettingDef {
    * was copied into a service at construction is not.
    */
   restartToApply?: boolean;
+  /**
+   * What an UNSET setting already means to the code that reads it — the
+   * layout's defaults, the pointer consent's "on unless turned off".
+   *
+   * Only `restartToApply` settings need it, and only for one question: saving
+   * a value the deployment is ALREADY running on changes nothing, so it owes
+   * no restart. Without it, ticking a box that was ticked all along, or typing
+   * `AGENTS.md` into a field that was showing `AGENTS.md`, tells the admin to
+   * restart for a change that never happened.
+   */
+  unsetMeans?: string;
 }
 
 /**
@@ -105,32 +129,68 @@ export const CORE_SETTINGS: SettingDef[] = [
   /**
    * The KB layout: the three root folders a deployment may rename so hexis can
    * read a repository laid out by someone else (`skills/` and `plugins/` in
-   * lowercase, say). Restart-to-apply like the branch model — the names are
-   * applied once at boot through `configureKbLayout` and served to the browser
-   * once by `/api/config`. Each has a default, so an unset field means the
-   * default, not an unconfigured deployment. Checked as a trio in `save`: the
-   * three must differ, and one field alone cannot see the other two.
+   * lowercase, say), and the file name of the managed agent guide.
+   * Restart-to-apply like the branch model — the names are applied once at boot
+   * through `configureKbLayout` and served to the browser once by
+   * `/api/config`. Each has a default, so an unset field means the default, not
+   * an unconfigured deployment. Checked as a QUARTET in `save`: the four must
+   * differ, and one field alone cannot see the other three.
+   *
+   * NO `envVar`, on any of the four. Layout is deployment configuration that is
+   * entered once in the app; the three that used to be environment-driven are
+   * imported into their saved setting on the first boot after the upgrade
+   * ({@link DeploymentSettingsService.importLegacyLayoutEnv}) so nothing
+   * silently reverts to the defaults.
    */
   {
     key: 'knowledgeBaseDir',
-    envVar: 'KB_KNOWLEDGE_BASE_DIR',
     section: 'knowledge-base',
     validate: validateKbRootName,
     restartToApply: true,
+    unsetMeans: DEFAULT_KB_LAYOUT.knowledgeBaseDir,
   },
   {
     key: 'skillsDir',
-    envVar: 'KB_SKILLS_DIR',
     section: 'knowledge-base',
     validate: validateKbRootName,
     restartToApply: true,
+    unsetMeans: DEFAULT_KB_LAYOUT.skillsDir,
   },
   {
     key: 'pluginsDir',
-    envVar: 'KB_PLUGINS_DIR',
     section: 'knowledge-base',
     validate: validateKbRootName,
     restartToApply: true,
+    unsetMeans: DEFAULT_KB_LAYOUT.pluginsDir,
+  },
+  {
+    /**
+     * The managed agent guide's file name. Its own validator says what a guide
+     * may be called; the quartet check in `plan` is what keeps it clear of the
+     * three folder names it is saved beside.
+     */
+    key: 'agentsFile',
+    section: 'knowledge-base',
+    validate: (v) => validateAgentsFileName(v),
+    restartToApply: true,
+    unsetMeans: DEFAULT_KB_LAYOUT.agentsFile,
+  },
+  {
+    /**
+     * Whether to keep the platform's one-sentence pointer in a customer's own
+     * `AGENTS.md` — the admin's consent to the only text the platform ever adds
+     * to a file it does not own. On unless it is explicitly turned off, because
+     * a renamed guide nothing points at is a guide no coding agent will find.
+     *
+     * Restart-to-apply like the name it belongs to: the check runs once per
+     * start, in the KB startup phase.
+     */
+    key: 'agentsFileLink',
+    section: 'knowledge-base',
+    validate: (v) => (v === 'true' || v === 'false' ? null : 'Use "true" or "false".'),
+    restartToApply: true,
+    // On unless explicitly turned off — the reading `resolveAgentsFileLink` applies.
+    unsetMeans: 'true',
   },
 
 
@@ -227,6 +287,20 @@ export const CORE_SETTINGS: SettingDef[] = [
 ];
 
 /**
+ * The environment variables the KB layout USED to be read from, and the
+ * settings they now live in. Referenced only by
+ * {@link DeploymentSettingsService.importLegacyLayoutEnv} — nothing else may
+ * read them, or they would be back to being a second source of truth. The
+ * guide's file name is deliberately absent: it never had a variable, so there
+ * is nothing to import.
+ */
+export const LEGACY_LAYOUT_ENV_VARS: Readonly<Record<string, string>> = Object.freeze({
+  knowledgeBaseDir: 'KB_KNOWLEDGE_BASE_DIR',
+  skillsDir: 'KB_SKILLS_DIR',
+  pluginsDir: 'KB_PLUGINS_DIR',
+});
+
+/**
  * Whether the single sign-on configuration in effect is known to work:
  * `verified` (the provider accepted its credentials, or someone signed in with
  * it), `unverified` (configured, never proven — sign in once to confirm), or
@@ -264,7 +338,8 @@ export type SettingSource = 'env' | 'stored' | 'unset';
 
 export interface ResolvedSetting {
   key: string;
-  envVar: string;
+  /** Omitted for a setting no environment variable can override. */
+  envVar?: string;
   section: SettingDef['section'];
   source: SettingSource;
   /** Omitted entirely for secrets — `configured` is all a client ever learns. */
@@ -285,6 +360,14 @@ export interface ResolvedSetting {
  *    infrastructure config that is under review in someone's repo;
  *  - and "why is it not using my env var" never becomes a question, because
  *    the answer is always "it is".
+ *
+ * ONE EXCEPTION, and it is a setting-by-setting one rather than a hole in the
+ * rule: a definition with no {@link SettingDef.envVar} has no variable to be
+ * outranked by. That is the knowledge-base layout — the three root folders and
+ * the agent guide's file name — which is deployment configuration entered once
+ * in the app. The three variables it used to read are imported into their saved
+ * settings on the first boot after the upgrade ({@link
+ * DeploymentSettingsService.importLegacyLayoutEnv}) and ignored after that.
  *
  * Values are cached in memory after {@link load}. Reads happen on every clone
  * and every git call, and a database round-trip there would be a tax on the
@@ -360,7 +443,7 @@ export class DeploymentSettingsService {
   resolve(key: string): string {
     const def = this.defs.get(key);
     if (!def) return '';
-    const fromEnv = (process.env[def.envVar] ?? '').trim();
+    const fromEnv = def.envVar ? (process.env[def.envVar] ?? '').trim() : '';
     if (fromEnv) return fromEnv;
     return (this.stored.get(key) ?? '').trim();
   }
@@ -369,19 +452,87 @@ export class DeploymentSettingsService {
    * The KB layout in effect: each root from the environment, else the stored
    * row, else its default. The composition root applies this once at boot.
    */
-  resolveKbLayout(): { knowledgeBaseDir: string; skillsDir: string; pluginsDir: string } {
+  resolveKbLayout(): Required<KbLayout> {
     return {
       knowledgeBaseDir: this.resolve('knowledgeBaseDir') || DEFAULT_KB_LAYOUT.knowledgeBaseDir,
       skillsDir: this.resolve('skillsDir') || DEFAULT_KB_LAYOUT.skillsDir,
       pluginsDir: this.resolve('pluginsDir') || DEFAULT_KB_LAYOUT.pluginsDir,
+      agentsFile: this.resolve('agentsFile') || DEFAULT_KB_LAYOUT.agentsFile,
     };
+  }
+
+  /**
+   * Whether the platform should keep its pointer sentence in a customer-owned
+   * `AGENTS.md`. On unless the admin turned it off — an unset setting is a
+   * deployment that never saw the checkbox, and the sentence is what makes a
+   * renamed guide findable at all.
+   */
+  resolveAgentsFileLink(): boolean {
+    return this.resolve('agentsFileLink') !== 'false';
+  }
+
+  /**
+   * Import the retired layout environment variables into their saved settings,
+   * ONCE, on a deployment that still sets them.
+   *
+   * The three roots were environment-first until this release. Simply dropping
+   * the variables would put such a deployment back on `KnowledgeBase/`,
+   * `Skills/` and `Plugins/` at its next boot — against a repository laid out
+   * under other names, which is a knowledge base that scaffolds three empty
+   * folders and imports nothing. So on the first boot after the upgrade each
+   * still-set variable's value becomes the saved setting, and the log says the
+   * variable can be removed.
+   *
+   * Only where nothing is saved. A saved value is the admin's own answer,
+   * entered in the app, and it wins — with a warning, because a variable that
+   * no longer does anything is exactly the kind of thing someone later reads
+   * as the reason for a name. Equal values say nothing: there is nothing to
+   * tell anyone about.
+   *
+   * Called before `configureKbLayout`, so the boot that imports also RUNS on
+   * the imported names rather than on the defaults.
+   */
+  async importLegacyLayoutEnv(): Promise<void> {
+    for (const [key, envVar] of Object.entries(LEGACY_LAYOUT_ENV_VARS)) {
+      const fromEnv = (process.env[envVar] ?? '').trim();
+      if (!fromEnv) continue;
+      const saved = (this.stored.get(key) ?? '').trim();
+      if (saved) {
+        if (saved !== fromEnv) {
+          log.warn(
+            `${envVar} is ignored — the saved setting ("${saved}") wins. Remove the variable.`,
+          );
+        }
+        continue;
+      }
+      // Validated like any save: a variable holding something no folder may be
+      // called is a misconfiguration, and importing it would move the failure
+      // to the first write into a folder nobody can name.
+      const problem = validateKbRootName(fromEnv);
+      if (problem) {
+        log.warn(`${envVar} ("${fromEnv}") is not a usable folder name (${problem}) — not imported.`);
+        continue;
+      }
+      await this.db
+        .insert(deploymentSettings)
+        .values({ key, value: fromEnv, encrypted: false, updatedBy: null })
+        .onConflictDoUpdate({
+          target: deploymentSettings.key,
+          set: { value: fromEnv, encrypted: false, updatedBy: null, updatedAt: new Date() },
+        });
+      this.stored.set(key, fromEnv);
+      log.info(`Imported ${envVar} ("${fromEnv}") into the saved setting — the variable can be removed.`);
+    }
   }
 
   /** Where {@link resolve} got its answer — what the setup screen labels the field with. */
   sourceOf(key: string): SettingSource {
     const def = this.defs.get(key);
     if (!def) return 'unset';
-    if ((process.env[def.envVar] ?? '').trim()) return 'env';
+    // A setting with no variable can never read `env`, whatever the process
+    // environment happens to hold — which is what makes the layout fields
+    // editable in the app on a deployment that still sets the old variables.
+    if (def.envVar && (process.env[def.envVar] ?? '').trim()) return 'env';
     return (this.stored.get(key) ?? '').trim() ? 'stored' : 'unset';
   }
 
@@ -395,7 +546,7 @@ export class DeploymentSettingsService {
       const source = this.sourceOf(def.key);
       const base = {
         key: def.key,
-        envVar: def.envVar,
+        ...(def.envVar ? { envVar: def.envVar } : {}),
         section: def.section,
         source,
         configured: source !== 'unset',
@@ -430,11 +581,11 @@ export class DeploymentSettingsService {
     /** The settings this save changed that a running server cannot pick up. */
     const restartKeys: string[] = [];
     for (const { key, value, def } of toWrite) {
-      // Compared against the EFFECTIVE value: a layout root that was unset
-      // was already running on its default, so saving that default changes
-      // nothing a restart would pick up.
-      const effective =
-        this.resolve(key) || (DEFAULT_KB_LAYOUT as Record<string, string | undefined>)[key] || '';
+      // Compared against the EFFECTIVE value: a setting that was unset was
+      // already running on whatever its readers make of "unset" — the layout
+      // roots on their defaults, the pointer consent on — so saving that same
+      // answer changes nothing a restart would pick up.
+      const effective = this.resolve(key) || def.unsetMeans || '';
       if (def.restartToApply && effective !== value) restartKeys.push(key);
       const encrypted = def.secret === true;
       const stored = encrypted ? this.crypto!.encrypt(value) : value;
@@ -517,10 +668,12 @@ export class DeploymentSettingsService {
       if (problem) problems.protectedBranches = problem;
     }
 
-    // The layout trio is the other cross-field rule: three names that must
-    // differ. Judged on the layout this save WOULD produce, with the default
-    // standing in for anything neither written nor stored.
-    const layoutKeys = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'] as const;
+    // The layout quartet is the other cross-field rule: three folder names and
+    // a guide file name that must all differ. Judged on the layout this save
+    // WOULD produce, with the default standing in for anything neither written
+    // nor stored — so renaming the plugins folder to what the guide is already
+    // called is refused whichever of the two the save names.
+    const layoutKeys = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir', 'agentsFile'] as const;
     if (toWrite.some((w) => (layoutKeys as readonly string[]).includes(w.key))) {
       const effective = (key: (typeof layoutKeys)[number]) =>
         toWrite.find((w) => w.key === key)?.value || this.resolve(key) || DEFAULT_KB_LAYOUT[key];
@@ -528,6 +681,7 @@ export class DeploymentSettingsService {
         knowledgeBaseDir: effective('knowledgeBaseDir'),
         skillsDir: effective('skillsDir'),
         pluginsDir: effective('pluginsDir'),
+        agentsFile: effective('agentsFile'),
       });
       // Against the field being written — the first one in the batch — since
       // any of the three could be the one that collides.

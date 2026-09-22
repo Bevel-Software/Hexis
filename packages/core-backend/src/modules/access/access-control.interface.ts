@@ -628,7 +628,7 @@ export interface IAccessControl {
    * is one nobody can repair through the app: the root then resolves to
    * default-deny and the move that would fix it is the move the gate refuses.
    * So an admin (the `Admin` role or the deployment owner) may move a file
-   * named `roles.yaml`, `.bevelignore` or `AGENTS.md` into the repository
+   * named `roles.yaml`, `.bevelignore` or the agent guide into the repository
    * root, and a file named `access.md` into a folder that has none.
    *
    * Only where the file is MISSING: a destination that already holds it is

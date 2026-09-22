@@ -633,7 +633,7 @@ export function createWorkspaceRoutes(
       // `.bevelignore` is ADMIN-ONLY. It is the file that decides what the file
       // tree and the agent view show at all, so it is deployment configuration
       // rather than knowledge — and it sits alone in being visible: its
-      // siblings (`.gitignore`, `roles.yaml`, `access.md`, `AGENTS.md`) are
+      // siblings (`.gitignore`, `roles.yaml`, `access.md`, the agent guide) are
       // already hidden from every reader by the shipped ignore rules. Somebody
       // who cannot act on it gains a puzzle; somebody who can needs to reach it.
       //
