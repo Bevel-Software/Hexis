@@ -12,7 +12,15 @@
  */
 
 import { parse as parseFullYaml } from 'yaml';
-import { pluginManifestName } from '@bevel-software/platform-shared';
+import {
+  KNOWN_VERBS,
+  VERB_REQUIRES,
+  VERBS_BROADEST_FIRST,
+  pluginManifestName,
+  requiredVerbsFor,
+  sourceVerbsFor,
+  type Verb,
+} from '@bevel-software/platform-shared';
 import { canonicalEmail } from '../../shared/email-identity.js';
 import { scanFrontmatter } from './frontmatter-lines.js';
 import type { GroupsIndex } from './group-files.js';
@@ -41,90 +49,36 @@ export const ADMIN_CANONICAL = 'admin';
  * the UI so users know who to ask). `write` and `download` stay independent of
  * each other — neither confers the other. Denials run the other way: a verb
  * denied at a scope takes every verb that presupposes it down with it there.
- * See `VERB_REQUIRES` — the one place this graph is written — and the two
- * lists derived from it, `sourceVerbsFor` and `requiredVerbsFor`.
+ *
+ * The verbs, the dependency graph between them (`VERB_REQUIRES`) and the two
+ * lists derived from it (`sourceVerbsFor`, `requiredVerbsFor`) live in
+ * `@bevel-software/platform-shared` (`workspace/access-verbs.ts`), because the
+ * share dialog folds the same verbs on the client and must never do it by a
+ * second table. They are re-exported here so the grammar remains the one
+ * import for everything on the server side.
  */
-export const KNOWN_VERBS = ['read', 'write', 'download', 'owner'] as const;
-export type Verb = (typeof KNOWN_VERBS)[number];
+export { KNOWN_VERBS, VERB_REQUIRES, VERBS_BROADEST_FIRST, requiredVerbsFor, sourceVerbsFor };
+export type { Verb };
 const KNOWN_VERBS_SET: ReadonlySet<string> = new Set<string>(KNOWN_VERBS);
 export const EVERYONE_CANONICAL = 'everyone';
 /** Display name for the built-in `everyone` role in the share UI. */
 export const EVERYONE_DISPLAY = 'Everyone';
 
-/**
- * THE DEPENDENCY GRAPH OF THE VERBS — what holding each one presupposes,
- * declared once, here, beside the verbs themselves. `owner` presupposes `write`
- * and `download`; `write` and `download` each presuppose `read`; `read`
- * presupposes nothing. Everything about how verbs fold into one another is
- * DERIVED from this table, in both directions:
+/*
+ * How the graph is applied on the server (the table itself is in shared):
  *
- *   - a GRANT confers, downwards, every verb the granted one presupposes
- *     (`sourceVerbsFor`: resolving `read` folds in `write`, `download` and
- *     `owner` grants; resolving `write` or `download` folds in `owner`;
- *     resolving `owner` uses only `owner`);
- *   - a DENIAL strips, upwards, every verb that presupposes the denied one
- *     (`requiredVerbsFor`: resolving `owner` honours `deny write`, `deny
- *     download` and `deny read`; resolving `write` or `download` honours
- *     `deny read`; `read` honours only `deny read`). Nobody owns what they may
- *     not edit, and nobody edits or saves what they may not open.
- *
- * Neither converse is implied: a `deny write` says nothing about `read` (a
- * superset denial leaves a separate lower grant standing), and a `read` grant
- * confers no `write`. Within ONE scope a grant of the verb, or of one that
- * confers it, beats a denial of the verb or of one it presupposes — see
- * `resolveScopes`.
+ *   - `resolveScopes` reads `sourceVerbsFor` for the grants that confer the
+ *     target verb and `requiredVerbsFor` for the denials that strip it. Within
+ *     ONE scope a grant of the verb, or of one that confers it, beats a denial
+ *     of the verb or of one it presupposes.
+ *   - `plugin-principals.ts` reads `sourceVerbsFor` to decide who lands in
+ *     `plugin/<slug>/read`; `personal-spaces.step.ts` reads it to ask whether
+ *     a space is already open.
  *
  * `download` presupposes `read` because the pair is otherwise a DEAD
  * combination: the raw-file route read-gates before it download-gates, so a
  * download-only grant let its holder neither open the file nor save it.
- * Someone trusted with a copy on their own disk is trusted to look at it in
- * the app.
- *
- * THIS TABLE IS THE ONLY COPY. Add a verb, or change what one presupposes,
- * here and nowhere else: the resolver (`resolveScopes`), the plugin roster
- * synthesis in `plugin-principals.ts` that decides who lands in
- * `plugin/<slug>/read`, and `personal-spaces.step.ts` asking whether a space
- * is already open all read the two derived lists below rather than restating
- * them. A fold written out by hand somewhere else is how one of them comes to
- * disagree with resolution about the same file.
  */
-export const VERB_REQUIRES: Readonly<Record<Verb, readonly Verb[]>> = {
-  read: [],
-  write: ['read'],
-  download: ['read'],
-  owner: ['write', 'download'],
-};
-
-/** `verb` and everything it presupposes, transitively. */
-function presupposedBy(verb: Verb): ReadonlySet<Verb> {
-  const out = new Set<Verb>();
-  const visit = (v: Verb) => {
-    if (out.has(v)) return;
-    out.add(v);
-    for (const dep of VERB_REQUIRES[v]) visit(dep);
-  };
-  visit(verb);
-  return out;
-}
-
-/**
- * Verbs whose GRANT confers `verb`, target verb first: `verb` itself, then
- * every verb that presupposes it, in `KNOWN_VERBS` order. Derived from
- * `VERB_REQUIRES`.
- */
-export function sourceVerbsFor(verb: Verb): Verb[] {
-  return [verb, ...KNOWN_VERBS.filter((v) => v !== verb && presupposedBy(v).has(verb))];
-}
-
-/**
- * Verbs whose DENIAL strips `verb`, target verb first: `verb` itself, then
- * every verb it presupposes, in `KNOWN_VERBS` order. Derived from
- * `VERB_REQUIRES`.
- */
-export function requiredVerbsFor(verb: Verb): Verb[] {
-  const needs = presupposedBy(verb);
-  return [verb, ...KNOWN_VERBS.filter((v) => v !== verb && needs.has(v))];
-}
 export const RESERVED_ROLE_NAMES = new Set(['deny', EVERYONE_CANONICAL]);
 export const DENY_PREFIX = 'deny ';
 /**

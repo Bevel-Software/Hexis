@@ -1,3 +1,4 @@
+import type { Verb } from '@bevel-software/platform-shared';
 import { authFetch } from '../../lib/api';
 import { GitApiError, handleApiResponse } from '../git/services/git.api';
 
@@ -221,8 +222,8 @@ export type Principal =
   /** Everyone holding `verb` on the plugin folder — written as `plugin/<Name>/<verb>`. */
   | { kind: 'plugin'; plugin: string; verb: PluginPrincipalVerb };
 
-/** Verbs the share dialog can grant. */
-export type GrantVerb = 'read' | 'write' | 'owner' | 'download';
+/** Verbs the share dialog can grant — the grammar's own list, from `platform-shared`. */
+export type GrantVerb = Verb;
 
 /**
  * The suggest payload. Every field is read DEFENSIVELY (`?.` / `?? []`) in

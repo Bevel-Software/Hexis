@@ -8,9 +8,13 @@ import type {
   IAccessControl,
   ResolvedPrincipal,
 } from './access-control.interface.js';
-import { canonicalRoleName, EVERYONE_CANONICAL, ROLE_TOKEN_PREFIX } from '../access-model/access-grammar.js';
-
-type Verb = 'read' | 'write' | 'download' | 'owner';
+import {
+  canonicalRoleName,
+  EVERYONE_CANONICAL,
+  KNOWN_VERBS,
+  ROLE_TOKEN_PREFIX,
+  type Verb,
+} from '../access-model/access-grammar.js';
 
 /**
  * The resolved access view of one target, as the Manage access dialog reads it
@@ -209,7 +213,7 @@ export function accessRoster(view: AccessView, kind: AccessTargetKind, repoRelTa
   const sourcesFor = (key: string, verb: Verb) =>
     (view.sources[key]?.[verb] ?? []).map((s) => toDecisionSource(s, kind, repoRelTarget));
   const roster = {} as AccessRoster;
-  for (const verb of ['read', 'write', 'download', 'owner'] as const) {
+  for (const verb of KNOWN_VERBS) {
     const list = lists[verb];
     const kinded = list.principals ?? list.roles.map((name) => ({ name, kind: 'role' as const }));
     roster[verb] = [
