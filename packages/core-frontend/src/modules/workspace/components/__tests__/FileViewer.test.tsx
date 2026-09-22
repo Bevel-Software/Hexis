@@ -392,6 +392,9 @@ describe('FileViewer', () => {
       owners: EMPTY_ELIGIBLE,
     };
     accessMock.fetchFileAccess.mockClear();
+    // mockClear keeps the implementation: a test that parks the lookup
+    // in flight would park every test after it.
+    accessMock.fetchFileAccess.mockImplementation(async () => accessMock.result);
     readBranchMock.mockImplementation(async () => '');
     // Restore the default "acquire succeeds" behaviour so a per-test 403
     // override doesn't leak into the next test.
@@ -986,6 +989,52 @@ describe('FileViewer', () => {
 
     expect(await screen.findByText('You can decide this.')).toBeInTheDocument();
     expect(screen.queryByText(/Waiting on you/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * Switching files keeps the PREVIOUS file's grants in the access hook until
+   * the next lookup answers — which is why the "and N others" count is gated on
+   * `!access.loading`. The "Waiting on …" line is the same hazard: it names
+   * people, and naming the OUTGOING file's owners over the incoming file's box
+   * is a false statement about who decides this change. Mid-lookup it has to
+   * fall back to the anonymous wording.
+   */
+  it('never names the previous file’s owners while the next lookup is in flight', async () => {
+    accessMock.result = {
+      canWrite: false,
+      canOwner: false,
+      eligible: { roles: ['Docs'], users: [] },
+      owners: { roles: ['Docs'], users: [] },
+    };
+    readBranchMock.mockImplementation((async (branch: string) =>
+      branch.startsWith('suggestions/') ? 'proposed' : 'current') as never);
+    // A file with no proposal of its own: its only job is to be the file we
+    // switch AWAY from, leaving its owners behind in the hook.
+    const { rerender } = render(
+      <ViewerHarness
+        initialContent="outgoing"
+        branch="target-company-state"
+        filePath="knowledge-base/Knowledge/Other.md"
+        changeRequests={[{ number: 34, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+    await waitFor(() => expect(accessMock.fetchFileAccess).toHaveBeenCalled());
+
+    // The incoming file's lookup never answers, so the box renders for the
+    // whole of the in-flight window.
+    accessMock.fetchFileAccess.mockImplementation(() => new Promise(() => {}));
+    rerender(
+      <ViewerHarness
+        initialContent="incoming"
+        branch="target-company-state"
+        filePath="knowledge-base/Knowledge/Foo.md"
+        changeRequests={[{ number: 34, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+
+    expect(await screen.findByText(/proposed a change/)).toBeInTheDocument();
+    expect(screen.getByText('Waiting on the owners')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting on Docs')).not.toBeInTheDocument();
   });
 
   it('says nothing on a file nobody has proposed a change to', () => {

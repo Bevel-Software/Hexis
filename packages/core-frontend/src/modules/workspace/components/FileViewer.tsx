@@ -985,8 +985,13 @@ export function FileViewer() {
     kbDirName && openFilePath.startsWith(`${kbDirName}/`)
       ? openFilePath.slice(kbDirName.length + 1)
       : null;
+  // Named owners only once THIS file's lookup has answered. The hook keeps the
+  // previous file's grants while the next request is in flight, and "Waiting on
+  // Docs" over the incoming file's box is a false statement about who decides
+  // it — the same staleness `othersPending` guards against below. The anonymous
+  // wording is always true, so it is what the window gets.
   const ownersLabel =
-    access.owners.roles.length > 0 || access.owners.users.length > 0
+    !access.loading && (access.owners.roles.length > 0 || access.owners.users.length > 0)
       ? formatEligible(access.owners)
       : 'the owners';
 
