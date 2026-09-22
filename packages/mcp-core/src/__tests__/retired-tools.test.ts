@@ -83,6 +83,7 @@ describe('retired tools', () => {
     for (const failure of [
       '[ERROR] Code execution failed: Error: No such file: Skills/merge_change_request/SKILL.md',
       'Request failed: the server said "merge_change_request" in its reply',
+      'Request failed with status 500: "merge_change_request is not a function"',
     ]) {
       expect(retiredToolInFailure(failure), failure).toBeUndefined();
     }

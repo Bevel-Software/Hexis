@@ -353,8 +353,9 @@ roles:
   'Reviewer'`), and nothing is saved. Create the group first, or fix the name.
 - **A group under `Admin` makes every member a full admin** — including anyone
   added to the group later, and including the right to edit `roles.yaml`
-  itself. Only propose it when your user explicitly asks for exactly that, and
-  say so in the change request. `Admin` must also always keep at least one
+  itself. Only make that edit when your user is an Admin and explicitly asks
+  for exactly that, and say so in the commit summary; for anyone else, tell
+  them what it would mean and who can do it (below). `Admin` must also always keep at least one
   direct email member; a group entry alone is not enough, so a broken
   directory can never leave the deployment without an admin.
 - **With direct emails.** Group entries and emails add up: the role's members

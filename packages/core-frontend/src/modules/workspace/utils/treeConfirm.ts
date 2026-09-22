@@ -112,7 +112,9 @@ export function deleteSentence(
   if (entry.type === 'file') return `Delete ${entry.name}?`;
   const n = countFiles(entry, isProposed);
   const files = `${n} ${n === 1 ? 'file' : 'files'}`;
-  if (partial) return `Delete ${entry.name} and everything in it? (${files} you can see; it holds more you can't.)`;
+  // "On this branch": a proposed-only row is shown but not counted, since the
+  // delete does not take it.
+  if (partial) return `Delete ${entry.name} and everything in it? (${files} on this branch you can see; it holds more you can't.)`;
   return `Delete ${entry.name} and its ${files}?`;
 }
 

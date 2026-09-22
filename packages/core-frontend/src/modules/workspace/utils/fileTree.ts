@@ -67,7 +67,7 @@ export function treeHasVisibleEntries(tree: FileTreeEntry | null, kbDirName: str
  * that is not in the listing at all shows nothing.
  */
 export function subtreeHasVisibleEntries(tree: FileTreeEntry | null, rootPath: string): boolean {
-  const root = tree ? findByPath(tree, rootPath) : null;
+  const root = findEntryByPath(tree, rootPath);
   return (root?.children ?? []).some((c) => c.type !== 'file' || c.name !== '.bevelignore');
 }
 
@@ -77,18 +77,7 @@ export function subtreeHasVisibleEntries(tree: FileTreeEntry | null, rootPath: s
  * folder the listing does not have, or one nothing was kept out of.
  */
 export function subtreeWithheld(tree: FileTreeEntry | null, rootPath: string): number {
-  return (tree ? findByPath(tree, rootPath) : null)?.withheld ?? 0;
-}
-
-function findByPath(node: FileTreeEntry, relativePath: string): FileTreeEntry | null {
-  if (node.relativePath === relativePath) return node;
-  for (const child of node.children ?? []) {
-    if (child.type !== 'directory') continue;
-    if (relativePath === child.relativePath || relativePath.startsWith(`${child.relativePath}/`)) {
-      return findByPath(child, relativePath);
-    }
-  }
-  return null;
+  return findEntryByPath(tree, rootPath)?.withheld ?? 0;
 }
 
 /** Documents, as opposed to the data, config and archives beside them. */

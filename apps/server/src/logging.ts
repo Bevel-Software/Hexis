@@ -31,10 +31,27 @@ export function createPinoLogger(opts: { level?: string } = {}): ILogger {
   return wrap(
     pino({
       level: opts.level ?? process.env.LOG_LEVEL ?? 'info',
-      serializers: { err: (err: unknown) => pino.stdSerializers.err(err instanceof Error ? oneLineError(err) : (err as Error)) },
+      serializers: { err: (err: unknown) => pino.stdSerializers.err(asSafeError(err)) },
       base: { service: 'hexis' },
     }),
   );
+}
+
+/**
+ * What arrives under `err` is not always an Error: an unhandled rejection's
+ * reason can be a string or a bare object with a `message` and a `stack` of
+ * its own. Those strings are escaped like any other before pino's serializer
+ * sees them, so the shape does not decide whether the text is made safe.
+ */
+function asSafeError(err: unknown): Error {
+  if (err instanceof Error) return oneLineError(err);
+  if (typeof err === 'string') return new Error(oneLine(err));
+  if (err && typeof err === 'object') {
+    return Object.fromEntries(
+      Object.entries(err).map(([k, v]) => [k, typeof v === 'string' ? oneLine(v) : v]),
+    ) as unknown as Error;
+  }
+  return err as Error;
 }
 
 function wrap(instance: Pino): ILogger {

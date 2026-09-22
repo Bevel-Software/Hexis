@@ -670,6 +670,9 @@ describe('DiffService refuses the git folder on its own', () => {
 
   it('a refused fileDiff on a fresh workspace seeds nothing — the refusal comes before the ledger', async () => {
     await expect(diffService.fileDiff(WS, `${KB}/.git/config`)).rejects.toMatchObject({ status: 403 });
+    // Through a link as well: the resolved form is judged before the seed too.
+    await symlink('.git', join(workspaceDir, KB, 'gitlink-diff'));
+    await expect(diffService.fileDiff(WS, `${KB}/gitlink-diff/config`)).rejects.toMatchObject({ status: 403 });
     await expect(stat(join(root, 'backups'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 

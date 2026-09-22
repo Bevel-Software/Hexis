@@ -1004,11 +1004,17 @@ export function createWorkspaceRoutes(
             // A folder that vanished or filled up under a concurrent writer
             // is passed over inside the sweep; what reaches here is a real
             // failure (permissions, I/O) that left the folder on disk, and
-            // it propagates — as it does on the agent's delete — rather than
+            // the request fails — as the agent's delete does — rather than
             // the response reporting gone a folder the tree still shows. The
             // per-file deletes have landed either way, and the next delete
-            // of the now-empty folder either sweeps it or says why not.
-            await removeEmptyDirs(absolute);
+            // of the now-empty folder either sweeps it or says why not. The
+            // cause is logged; the answer carries no path of the host's.
+            try {
+              await removeEmptyDirs(absolute);
+            } catch (rmErr) {
+              log.warn(`dir cleanup failed for ${printable(filePath)}`, { err: rmErr });
+              throw new Error('The files were deleted, but the empty folder could not be removed. Delete it again.');
+            }
             return files;
           });
           // The folder that HELD the deleted one was not asked to go.

@@ -45,7 +45,9 @@ was started by the window server rather than by a login shell and never read
 the profile that puts Homebrew's or nvm's `npx` on PATH. Cursor and Claude
 Desktop on macOS are the usual pair. Run `which npx` in a terminal (`where.exe npx`
 in PowerShell) and use the full path it prints as the `"command"` in the
-configuration; leave `args` alone. If the client then says `env: node: No such
+configuration — on Windows with each backslash doubled (`"C:\\Program
+Files\\nodejs\\npx.cmd"`) or with forward slashes, since the field is JSON;
+leave `args` alone. If the client then says `env: node: No such
 file or directory`, that `npx` is a script whose `#!/usr/bin/env node` line hits
 the same PATH gap — add the folder that path names to the client's `"env"`,
 keeping the system folders after it, because the first-run sign-in opens your

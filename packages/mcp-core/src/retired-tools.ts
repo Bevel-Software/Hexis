@@ -66,7 +66,10 @@ export function retiredToolMessage(name: string): string | undefined {
  */
 export function retiredToolInFailure(failure: string): string | undefined {
   for (const [retired, message] of Object.entries(RETIRED_TOOL_MESSAGES)) {
-    if (new RegExp(`\\b${retired} is not (?:a function|defined)\\b`).test(failure)) return message;
+    // The name as an identifier or a member (`X.name`), not as quoted text:
+    // a server that echoes the sentence back inside quotes is a different
+    // failure, and the quote mark before the name is what tells them apart.
+    if (new RegExp(`(?:^|[\\s.])${retired} is not (?:a function|defined)\\b`).test(failure)) return message;
   }
   return undefined;
 }
