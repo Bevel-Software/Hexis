@@ -54,21 +54,40 @@ export async function noteBesideCheckout(
   const workspaces = await entries(workspacesRoot);
   for (const workspace of workspaces) {
     if (!workspace.isDirectory()) continue;
-    const strays = (await entries(path.join(workspacesRoot, workspace.name)))
-      .filter((e) => e.name !== kbDirName)
+    const workspaceDir = path.join(workspacesRoot, workspace.name);
+    const found: string[] = [];
+    for (const entry of await entries(workspaceDir)) {
+      // The exemption is the CHECKOUT's, not the name's. A regular file called
+      // `knowledge-base` is not a clone — `WorkspaceService` refuses the
+      // workspace outright as a squatted clone path — so a name-only filter
+      // would hide the one thing an operator has to remove to get the
+      // deployment working. Judged by `stat`, which FOLLOWS links, exactly as
+      // the service judges it: a clone mounted elsewhere is the operator's
+      // business, here as it is there.
+      if (entry.name === kbDirName && (await isDirectory(path.join(workspaceDir, entry.name)))) continue;
       // A trailing slash marks the folders, so one line says which is which
       // without the operator having to go and look. Then `printable`, because
       // every name here is disk-controlled text on its way into an operator's
       // log: one carrying a control character must not steer the terminal or
       // forge a second line of the note, and the quotes it adds keep a name
       // with a space or a comma in it readable in the list.
-      .map((e) => printable(e.isDirectory() ? `${e.name}/` : e.name))
-      .sort();
+      found.push(printable(entry.isDirectory() ? `${entry.name}/` : entry.name));
+    }
+    const strays = found.sort();
     if (strays.length === 0) continue;
     note(
       `${BESIDE_CHECKOUT_NOTE} ${strays.join(', ')} — in the workspace for ${printable(workspace.name)}, ` +
         'outside the git clone, so never committed or pushed. Nothing was deleted or moved; remove them by hand when you have looked.',
     );
+  }
+}
+
+/** Whether `p` is a directory, links followed. Anything unreadable is not one. */
+async function isDirectory(p: string): Promise<boolean> {
+  try {
+    return (await fs.stat(p)).isDirectory();
+  } catch {
+    return false;
   }
 }
 

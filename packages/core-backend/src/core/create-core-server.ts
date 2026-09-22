@@ -10,6 +10,7 @@ import { createAuthRoutes } from '../modules/auth/auth.routes.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
 import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals.middleware.js';
 import { noteBesideCheckout } from '../modules/workspace/startup/beside-checkout.js';
+import { printable } from '../shared/printable.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
 import { createWorkflowRoutes } from '../modules/workflow/workflow.routes.js';
 import { createEventsRoutes } from '../modules/workflow/events.routes.js';
@@ -311,8 +312,11 @@ export async function createCoreServer(
   try {
     await noteBesideCheckout(core.config.workspacesRoot, core.kbDirName);
   } catch (err) {
+    // `printable`, because the message quotes a path off the disk (an ENOENT
+    // or EACCES names the file it failed on) and a name carrying a control
+    // character would forge a second line of the operator's log.
     startupLog.warn('could not look for content beside the checkouts:', {
-      detail: err instanceof Error ? err.message : String(err),
+      detail: printable(err instanceof Error ? err.message : String(err)),
     });
   }
 

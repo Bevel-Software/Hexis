@@ -110,6 +110,38 @@ describe('noteBesideCheckout', () => {
     expect(notes[0].split('\n')).toHaveLength(1);
   });
 
+  it('names a FILE squatting the checkout name — it is not a clone', async () => {
+    // The exemption belongs to the checkout, not to the name. A regular file
+    // called `knowledge-base` is the state `WorkspaceService` refuses the
+    // workspace over ("exists but is not a directory"), and the operator only
+    // learns it is there if the note says so.
+    const dir = path.join(root, 'main');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, KB), 'not a clone', 'utf-8');
+
+    await scan();
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain(`${BESIDE_CHECKOUT_NOTE} "${KB}"`);
+    // Named, not touched.
+    expect(await fs.readFile(path.join(dir, KB), 'utf-8')).toBe('not a clone');
+  });
+
+  it.runIf(process.platform !== 'win32')('says nothing when the checkout is a link to a clone elsewhere', async () => {
+    // Links are followed, as the service follows them: a clone mounted
+    // elsewhere is the operator's business, not a stray.
+    const elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), 'beside-checkout-clone-'));
+    await fs.mkdir(path.join(elsewhere, '.git'), { recursive: true });
+    const dir = path.join(root, 'main');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.symlink(elsewhere, path.join(dir, KB), 'dir');
+
+    await scan();
+
+    expect(notes).toEqual([]);
+    await fs.rm(elsewhere, { recursive: true, force: true });
+  });
+
   it('is quiet on a cold start, with no workspaces root on disk yet', async () => {
     await noteBesideCheckout(path.join(root, 'not-yet'), KB, (line) => notes.push(line));
     expect(notes).toEqual([]);
