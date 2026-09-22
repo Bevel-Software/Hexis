@@ -2762,11 +2762,14 @@ export class GitService implements IGitService {
    *
    * Two-dot, because that is the question: not "what does this request
    * propose" (three-dot, against the target) but "what did the merge move
-   * under the reviewers who already approved". Renames are NOT followed
-   * (`-M` is deliberately absent): a rename reports as the old path removed
-   * and the new one added, so an approval on either side is correctly read
-   * as touched. The list is the conservative one — a path that appears here
-   * loses its approval, and only a path that does not appear keeps it.
+   * under the reviewers who already approved". `--no-renames` is what makes
+   * the answer the conservative one: git detects renames BY DEFAULT
+   * (`diff.renames` has been on since 2.9) and then reports only the new
+   * path, which would leave an approval on the path a merge renamed AWAY
+   * reading as untouched. Switched off, a rename reports as the old path
+   * removed and the new one added, so an approval on either side is correctly
+   * read as touched — a path that appears here loses its approval, and only a
+   * path that does not appear keeps it.
    */
   async pathsChangedBetween(
     workspaceId: string,
@@ -2781,7 +2784,7 @@ export class GitService implements IGitService {
     const cwd = await this.repoDir(workspaceId);
     return this.mutex.run(workspaceId, async () => {
       const { stdout } = await this.git(cwd, [
-        'diff', '-z', '--name-only', fromSha, toSha,
+        'diff', '--no-renames', '-z', '--name-only', fromSha, toSha,
       ]);
       // `-z` terminates each name with NUL, so the trailing field is empty —
       // and a tracked name may legally carry leading or trailing spaces, so

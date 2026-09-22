@@ -312,7 +312,21 @@ export function ChangeRequestDialog({
     // held back while the request is being brought up to date is not skipped:
     // `bringingUpToDate` is a dependency, so it fires the moment the update
     // settles — against the head the merge left, never the one it replaced.
-    if (!bringingUpToDate && selected && !selectedIsBinary && !asked.current.has(selected)) {
+    //
+    // Nothing is read before the DETAIL either, even though a dialog opened
+    // about a file has a selection from the first render (`initialPath`): until
+    // the detail says whether this request is behind and whether this reader
+    // may update it, there is no way to know that the branch is not about to
+    // move. Reading first would spend a request on content the update then
+    // throws away, and the pane cannot draw a diff before the detail names its
+    // fork point regardless.
+    if (
+      detail !== null &&
+      !bringingUpToDate &&
+      selected &&
+      !selectedIsBinary &&
+      !asked.current.has(selected)
+    ) {
       const token = {};
       asked.current.set(selected, token);
       const current = () => asked.current.get(selected) === token;
@@ -333,7 +347,7 @@ export function ChangeRequestDialog({
           }),
         );
     }
-  }, [selected, selectedIsBinary, cr.branch, branchRevision, bringingUpToDate]);
+  }, [selected, selectedIsBinary, cr.branch, branchRevision, bringingUpToDate, detail]);
 
   /**
    * Read the selected file again, both sides — the Retry link the retryable

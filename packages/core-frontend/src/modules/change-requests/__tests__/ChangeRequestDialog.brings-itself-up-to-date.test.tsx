@@ -1,3 +1,5 @@
+import { StrictMode } from 'react';
+import type { ReactElement } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import type { FileApprovalState, PullRequestSummary } from '@bevel-software/platform-shared';
@@ -226,17 +228,61 @@ describe('ChangeRequestDialog: a stale request brings itself up to date', () => 
     expect(screen.queryByText(READER_NOTICE)).not.toBeInTheDocument();
   });
 
-  it('runs at most once per open, however many times the detail changes under it', async () => {
+  it.each([
+    ['plainly', (ui: ReactElement) => ui],
+    ['under StrictMode, which mounts every effect twice', (ui: ReactElement) => <StrictMode>{ui}</StrictMode>],
+  ])('runs at most once per open, however many times the detail changes under it — %s', async (_how, wrap) => {
     // The re-read after the merge still reports `behind` — a second change
     // landed on the target while this one was merging. The dialog must not
     // chase it: one update per open, and the next open picks up the rest.
+    //
+    // The StrictMode row is why the guard is a REF: React mounts, unmounts and
+    // re-mounts every effect in development, and a guard held in state is read
+    // as its initial value by the second mount. It double-mounts the detail
+    // fetch too, so the count below also pins that a request is not merged
+    // twice because the dialog was mounted twice.
     detailMock.fetchPrDetail.mockResolvedValue(detail());
-    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    render(wrap(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />));
 
     await waitFor(() => expect(mergeApi.refreshChangeRequestFromTarget).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByText(DONE)).toBeInTheDocument());
     await new Promise((r) => setTimeout(r, 30));
     expect(mergeApi.refreshChangeRequestFromTarget).toHaveBeenCalledTimes(1);
+  });
+
+  it('opened ABOUT a file, it reads nothing until the update has settled', async () => {
+    // A dialog opened from a file surface knows its selection before the
+    // detail arrives (`initialPath`). That must not become a read: until the
+    // detail says whether this request is behind, the branch copy it would
+    // fetch is the one the update is about to replace.
+    let land: (v: unknown) => void = () => {};
+    mergeApi.refreshChangeRequestFromTarget.mockImplementation(
+      () => new Promise((resolve) => (land = resolve)),
+    );
+    detailMock.fetchPrDetail
+      .mockResolvedValueOnce(detail())
+      .mockResolvedValue(detail({ behind: false }));
+
+    render(
+      <ChangeRequestDialog
+        cr={CR}
+        initialPath="Sales/deal.yaml"
+        onClose={() => {}}
+        onResolved={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText(RUNNING)).toBeInTheDocument();
+    expect(filesApi.readFileOnBranch).not.toHaveBeenCalled();
+    expect(filesApi.readFileAtForkPoint).not.toHaveBeenCalled();
+
+    land({});
+    expect(await screen.findByText(DONE)).toBeInTheDocument();
+    // And afterwards it reads the file it was opened about — against the head
+    // the merge left.
+    await waitFor(() =>
+      expect(filesApi.readFileOnBranch).toHaveBeenCalledWith(CR.branch, 'Sales/deal.yaml'),
+    );
   });
 
   it('two people opening the same stale request at once: the second finds nothing to merge, and neither sees an error', async () => {

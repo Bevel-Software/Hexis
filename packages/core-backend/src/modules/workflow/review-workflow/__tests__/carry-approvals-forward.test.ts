@@ -73,11 +73,28 @@ function conditions(clause: unknown): Record<string, unknown> {
 function makeService(stored: ApprovalRow[]) {
   const selected: Record<string, unknown>[] = [];
   const inserted: ApprovalRow[][] = [];
-  const db = {
+  /**
+   * What the service did, in order. The carry-forward's read and write have to
+   * happen INSIDE one transaction that took the per-request lock first, or a
+   * revoke landing between them is silently undone — so the order is part of
+   * what these tests pin, not an implementation detail.
+   */
+  const order: string[] = [];
+  const locked: unknown[][] = [];
+  const tx = {
+    execute: async (statement: { queryChunks?: unknown[] }) => {
+      order.push('lock');
+      // The lock's two keys, dug out of the tagged template's chunks: drizzle
+      // keeps the literal text in `StringChunk` objects and the interpolated
+      // numbers as bare primitives between them.
+      locked.push((statement.queryChunks ?? []).filter((c) => typeof c === 'number'));
+      return { rows: [] };
+    },
     select: () => ({
       from: () => ({
         where: (clause: unknown) => {
           const where = conditions(clause);
+          order.push('select');
           selected.push(where);
           return Promise.resolve(
             stored.filter(
@@ -91,24 +108,40 @@ function makeService(stored: ApprovalRow[]) {
     }),
     insert: () => ({
       values: (v: ApprovalRow[]) => ({
-        onConflictDoNothing: async () => {
-          inserted.push(v);
+        onConflictDoNothing: () => ({
           // The unique index is on (pr, path, approver, headSha), so a row
           // that is already there is silently dropped — modelled here so a
-          // second update over the same merge stays a no-op.
-          for (const r of v) {
-            const dup = stored.some(
-              (e) =>
-                e.prNumber === r.prNumber &&
-                e.path === r.path &&
-                e.approverEmail === r.approverEmail &&
-                e.headSha === r.headSha,
-            );
-            if (!dup) stored.push(r);
-          }
-        },
+          // second update over the same merge stays a no-op, and `returning`
+          // answers with the rows that were actually WRITTEN, as Postgres does.
+          returning: async () => {
+            order.push('insert');
+            inserted.push(v);
+            const written: ApprovalRow[] = [];
+            for (const r of v) {
+              const dup = stored.some(
+                (e) =>
+                  e.prNumber === r.prNumber &&
+                  e.path === r.path &&
+                  e.approverEmail === r.approverEmail &&
+                  e.headSha === r.headSha,
+              );
+              if (!dup) {
+                stored.push(r);
+                written.push(r);
+              }
+            }
+            return written;
+          },
+        }),
       }),
     }),
+  };
+  const db = {
+    ...tx,
+    transaction: async <T,>(fn: (t: typeof tx) => Promise<T>) => {
+      order.push('begin');
+      return fn(tx);
+    },
   } as unknown as Database;
   const svc = new ReviewWorkflowService(
     db,
@@ -116,7 +149,7 @@ function makeService(stored: ApprovalRow[]) {
     {} as unknown as WorkspaceService,
     {} as unknown as GitService,
   );
-  return { svc, stored, selected, inserted };
+  return { svc, stored, selected, inserted, order, locked };
 }
 
 describe('ReviewWorkflowService.carryApprovalsForward', () => {
@@ -167,9 +200,25 @@ describe('ReviewWorkflowService.carryApprovalsForward', () => {
 
   it('is idempotent — running the same update twice writes the rows once', async () => {
     const h = makeService([row('Sales/Deal.md')]);
-    await h.svc.carryApprovalsForward(PR, OLD_HEAD, NEW_HEAD, []);
-    await h.svc.carryApprovalsForward(PR, OLD_HEAD, NEW_HEAD, []);
+    await expect(h.svc.carryApprovalsForward(PR, OLD_HEAD, NEW_HEAD, [])).resolves.toBe(1);
+    // The rows were all already there, so nothing was WRITTEN — and the count
+    // says so, which is what keeps the caller from re-reading the detail for a
+    // merge that changed no approval at all.
+    await expect(h.svc.carryApprovalsForward(PR, OLD_HEAD, NEW_HEAD, [])).resolves.toBe(0);
     expect(h.stored.filter((r) => r.headSha === NEW_HEAD)).toHaveLength(1);
+  });
+
+  it('reads and writes inside one transaction that takes the per-request lock first', async () => {
+    // A reviewer revoking an approval while this runs must not have it
+    // resurrected by a copy taken before the delete. The lock both writes
+    // share is what rules that out; taken BEFORE the read, or the read has
+    // already seen the pre-revoke row.
+    const h = makeService([row('Sales/Deal.md')]);
+    await h.svc.carryApprovalsForward(PR, OLD_HEAD, NEW_HEAD, []);
+    expect(h.order).toEqual(['begin', 'lock', 'select', 'insert']);
+    // Keyed by this request, under this file's lock class — never a bare PR
+    // number that another subsystem's advisory lock could collide with.
+    expect(h.locked).toEqual([[4207, PR]]);
   });
 
   it('does nothing at all when the head did not move', async () => {

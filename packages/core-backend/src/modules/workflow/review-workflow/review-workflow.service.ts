@@ -1,4 +1,4 @@
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { logger } from '../../../shared/logging.js';
 
 const log = logger('review-workflow');
@@ -36,6 +36,15 @@ import type {
 // trail — squashing would collapse them into one. A merge commit preserves every
 // commit on the branch.
 const MERGE_METHOD = 'merge' as const;
+/**
+ * Lock class for the per-change-request approval lock (`withApprovalLock`).
+ * Postgres advisory locks share one namespace across the whole database, so
+ * the two-key form keys every lock this file takes by (this class, PR number)
+ * — a PR number can never collide with some other subsystem's key.
+ */
+const APPROVAL_LOCK_CLASS = 4207;
+/** The handle `db.transaction` hands its callback — a `Database` minus the pool. */
+type ApprovalTx = Parameters<Parameters<Database['transaction']>[0]>[0];
 const EVERYONE_CANONICAL = 'everyone';
 
 function redactTokens(msg: string): string {
@@ -802,8 +811,17 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
    * the row, because the reviewer approved then, not now. Idempotent under
    * the unique index, so a retried or concurrent update inserts nothing twice.
    *
-   * Returns how many rows were written — the caller re-reads the detail only
-   * when that is non-zero.
+   * Read and write sit inside one `withApprovalLock` transaction because a
+   * REVOKE landing between them would otherwise be undone: `unapproveFile`
+   * deletes the approver's rows at every head, and a copy taken before that
+   * delete would re-insert the row it just removed, silently restoring an
+   * approval its owner withdrew. Under the lock the two orderings are the only
+   * two possible ones — revoke first, and the select finds nothing to carry;
+   * carry first, and the revoke's delete sees both rows and takes both.
+   *
+   * Returns how many rows were actually WRITTEN (`returning()`, not the size
+   * of the candidate list): on a retry where every row already exists nothing
+   * is written, and the caller re-reads the detail only when that is non-zero.
    */
   async carryApprovalsForward(
     prNumber: number,
@@ -817,30 +835,56 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     }
     if (fromHeadSha === toHeadSha) return 0;
 
-    const rows = await this.db
-      .select()
-      .from(prFileApprovals)
-      .where(
-        and(eq(prFileApprovals.prNumber, prNumber), eq(prFileApprovals.headSha, fromHeadSha)),
-      );
-    const touched = new Set(changedPaths);
-    const carried = rows
-      .filter((r) => !touched.has(r.path))
-      .map((r) => ({
-        prNumber,
-        path: r.path,
-        approverEmail: r.approverEmail,
-        approverName: r.approverName,
-        headSha: toHeadSha,
-        approvedAt: r.approvedAt,
-      }));
-    if (carried.length === 0) return 0;
+    const written = await this.withApprovalLock(prNumber, async (tx) => {
+      const rows = await tx
+        .select()
+        .from(prFileApprovals)
+        .where(
+          and(eq(prFileApprovals.prNumber, prNumber), eq(prFileApprovals.headSha, fromHeadSha)),
+        );
+      const touched = new Set(changedPaths);
+      const carried = rows
+        .filter((r) => !touched.has(r.path))
+        .map((r) => ({
+          prNumber,
+          path: r.path,
+          approverEmail: r.approverEmail,
+          approverName: r.approverName,
+          headSha: toHeadSha,
+          approvedAt: r.approvedAt,
+        }));
+      if (carried.length === 0) return [];
+      return tx.insert(prFileApprovals).values(carried).onConflictDoNothing().returning();
+    });
+    if (written.length === 0) return 0;
 
-    await this.db.insert(prFileApprovals).values(carried).onConflictDoNothing();
     log.info(
-      `carried ${carried.length} approval(s) forward on PR #${prNumber} from ${fromHeadSha} to ${toHeadSha}`,
+      `carried ${written.length} approval(s) forward on PR #${prNumber} from ${fromHeadSha} to ${toHeadSha}`,
     );
-    return carried.length;
+    return written.length;
+  }
+
+  /**
+   * Run one change request's approval write under a lock every other approval
+   * write on that request also takes — `pg_advisory_xact_lock`, held for the
+   * transaction the callback runs in and released when it commits or rolls
+   * back. In the DATABASE rather than in this process, because two app
+   * instances share the rows but not a mutex.
+   *
+   * Taken as the transaction's first statement so the reads inside it are
+   * already serialized: Postgres gives each statement in a READ COMMITTED
+   * transaction a fresh snapshot, so a select made after the lock sees
+   * everything the previous holder committed.
+   *
+   * Keep the body SHORT — no git, no network, no access-control read. This
+   * holds a lock and a pooled connection; `unapproveFile` deliberately leaves
+   * its detail re-read outside.
+   */
+  private withApprovalLock<T>(prNumber: number, fn: (tx: ApprovalTx) => Promise<T>): Promise<T> {
+    return this.db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(${APPROVAL_LOCK_CLASS}, ${prNumber})`);
+      return fn(tx);
+    });
   }
 
   async unapproveFile(
@@ -862,15 +906,22 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     // Only revoke the caller's OWN approval — never someone else's. Filter on
     // (PR, path, approverEmail) without pinning the SHA so a user revoking
     // after a force-push can drop their stale row in one click.
-    await this.db
-      .delete(prFileApprovals)
-      .where(
-        and(
-          eq(prFileApprovals.prNumber, prNumber),
-          eq(prFileApprovals.path, path),
-          eq(prFileApprovals.approverEmail, callerEmail),
-        ),
-      );
+    //
+    // Under the same per-request lock `carryApprovalsForward` takes: an
+    // automatic update copies the approvals of the head it is replacing onto
+    // the new one, and a delete that interleaved with that copy would be
+    // undone by it — the revoked approval would come back at the new head.
+    await this.withApprovalLock(prNumber, async (tx) => {
+      await tx
+        .delete(prFileApprovals)
+        .where(
+          and(
+            eq(prFileApprovals.prNumber, prNumber),
+            eq(prFileApprovals.path, path),
+            eq(prFileApprovals.approverEmail, callerEmail),
+          ),
+        );
+    });
 
     // WITH the caller as viewer: these approvals go straight back to the UI
     // that just clicked, and omitting the viewer computed every

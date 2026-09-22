@@ -1988,6 +1988,28 @@ export class WorkflowService implements IWorkflowService {
       }
       throw err;
     }
+    // The head an approval is pinned to is whatever is PUBLISHED on the
+    // request's branch — and the pull above may just have moved it: an agent,
+    // or the author from another client, can push while this dialog is still
+    // reading the detail. Resolve it HERE rather than trusting the
+    // `detail.headSha` read before the pull: an approval made against that
+    // newer head carries a sha the pre-pull detail does not name, so carrying
+    // forward from the stale one would find no rows and void every approval
+    // the merge never touched.
+    //
+    // Best effort, like the carry-forward it feeds: the bookkeeping must never
+    // be what stops a request from being brought up to date, so a failed
+    // resolve falls back to the sha the detail reported.
+    let headBeforeMerge = detail.headSha;
+    try {
+      const at = await this.git.resolvePrShas(workspaceId, detail.base, detail.branch);
+      headBeforeMerge = at.headSha;
+    } catch (err) {
+      log.warn(
+        `could not resolve the published head of change request #${number} before updating it from target; falling back to the head its detail reported`,
+        { err },
+      );
+    }
     const outcome = await this.git.mergeFromOrigin(
       workspaceId,
       detail.branch,
@@ -2021,16 +2043,16 @@ export class WorkflowService implements IWorkflowService {
     // those are. Best effort: a request that IS up to date is worth far more
     // than the bookkeeping, so a failure here is logged and the fresh detail
     // still goes back.
-    if (!outcome.alreadyUpToDate && detail.headSha && refreshed.headSha !== detail.headSha) {
+    if (!outcome.alreadyUpToDate && headBeforeMerge && refreshed.headSha !== headBeforeMerge) {
       try {
         const changedPaths = await this.git.pathsChangedBetween(
           workspaceId,
-          detail.headSha,
+          headBeforeMerge,
           refreshed.headSha,
         );
         const carried = await this.reviewWorkflow.carryApprovalsForward(
           number,
-          detail.headSha,
+          headBeforeMerge,
           refreshed.headSha,
           changedPaths,
         );

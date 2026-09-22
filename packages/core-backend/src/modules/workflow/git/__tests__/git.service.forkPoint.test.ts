@@ -195,6 +195,32 @@ describe('GitService — fork point, behind, and Update', () => {
     await expect(git.pathsChangedBetween(WS, 'HEAD', headAfter)).rejects.toThrow(
       /invalid commit sha/,
     );
+    await expect(git.pathsChangedBetween(WS, headAfter.slice(0, 12), headAfter)).rejects.toThrow(
+      /invalid commit sha/,
+    );
+  });
+
+  it('a rename the update lands names BOTH paths — the approval on the old one is not kept', async () => {
+    // git detects renames by default and would report only the new path,
+    // which would leave the approval on the path that no longer exists
+    // reading as untouched. What the reviewer approved is gone either way, so
+    // both sides have to appear.
+    const RENAMED = 'Sales/Deal-2026.md';
+    await fs.writeFile(path.join(repo, 'Sales/Terms.md'), 'term: 24 months\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'propose terms']);
+    await runGit(repo, ['push', '-u', 'origin', SOURCE]);
+
+    await runGit(other, ['mv', DEAL, RENAMED]);
+    await runGit(other, ['commit', '-m', 'rename the deal']);
+    await runGit(other, ['push', 'origin', TARGET]);
+
+    const headBefore = await gitOut(repo, ['rev-parse', 'HEAD']);
+    await git.mergeFromOrigin(WS, SOURCE, TARGET, USER);
+    const headAfter = await gitOut(repo, ['rev-parse', 'HEAD']);
+
+    const moved = await git.pathsChangedBetween(WS, headBefore, headAfter);
+    expect([...moved].sort()).toEqual([RENAMED, DEAL]);
   });
 
   it('a conflicting Update leaves the proposal branch untouched and reports the files', async () => {

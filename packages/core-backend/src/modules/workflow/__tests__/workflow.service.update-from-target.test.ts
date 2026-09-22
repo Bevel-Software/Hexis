@@ -53,6 +53,9 @@ function detail(overrides: Partial<PullRequestDetail> = {}): PullRequestDetail {
 
 function harness(opts: {
   first?: PullRequestDetail | null;
+  /** The published head of the proposal branch as resolved just before the merge. */
+  publishedHead?: string;
+  resolveError?: Error;
   merge?: { kind: 'clean'; alreadyUpToDate: boolean } | { kind: 'conflicts'; paths: string[] };
   pullError?: Error;
   /** What the merge commit moved, as git would report it between the heads. */
@@ -72,6 +75,12 @@ function harness(opts: {
     pathsChangedBetween: opts.changedPathsError
       ? vi.fn().mockRejectedValue(opts.changedPathsError)
       : vi.fn().mockResolvedValue(opts.changedPaths ?? []),
+    resolvePrShas: opts.resolveError
+      ? vi.fn().mockRejectedValue(opts.resolveError)
+      : vi.fn().mockResolvedValue({
+          baseSha: 'b'.repeat(40),
+          headSha: opts.publishedHead ?? HEAD,
+        }),
   };
   const refreshed = detail({ behind: false, headSha: MERGED_HEAD });
   const getPrDetail = vi
@@ -214,6 +223,43 @@ describe('WorkflowService.updateFromTarget: the approvals the merge did not touc
   it('touches nothing when the merge conflicted — the rows describe a head that still stands', async () => {
     const h = harness({ merge: { kind: 'conflicts', paths: ['Sales/Deal.md'] } });
     await h.svc.updateFromTarget(WS, USER, 7).catch(() => undefined);
+    expect(h.git.pathsChangedBetween).not.toHaveBeenCalled();
+    expect(h.reviewWorkflow.carryApprovalsForward).not.toHaveBeenCalled();
+  });
+
+  it('carries them from the head the branch is actually ON, not the one the detail read', async () => {
+    // Somebody pushed to the proposal branch between the detail read and the
+    // pull — an agent, or the author from another client. The approvals a
+    // reviewer made in that window are pinned to THAT head; carrying forward
+    // from the sha the stale detail reported would find no rows and void every
+    // approval the merge never touched.
+    const PUSHED = 'e'.repeat(40);
+    const h = harness({ publishedHead: PUSHED, changedPaths: ['Sales/Deal.md'], carried: 1 });
+
+    await h.svc.updateFromTarget(WS, USER, 7);
+
+    // Resolved after the pull and before the merge, from the branch itself.
+    expect(h.git.resolvePrShas).toHaveBeenCalledWith(WS, 'current-company-state', 'alice/deal');
+    expect(h.git.pathsChangedBetween).toHaveBeenCalledWith(WS, PUSHED, MERGED_HEAD);
+    expect(h.reviewWorkflow.carryApprovalsForward).toHaveBeenCalledWith(7, PUSHED, MERGED_HEAD, [
+      'Sales/Deal.md',
+    ]);
+  });
+
+  it('falls back to the head the detail reported when that head cannot be resolved', async () => {
+    // Bookkeeping never costs the update: an unresolvable ref leaves the
+    // carry-forward working off the detail's head, exactly as it did before.
+    const h = harness({ resolveError: new Error('no such ref'), carried: 1 });
+    await h.svc.updateFromTarget(WS, USER, 7);
+    expect(h.git.push).toHaveBeenCalledWith(WS, USER);
+    expect(h.reviewWorkflow.carryApprovalsForward).toHaveBeenCalledWith(7, HEAD, MERGED_HEAD, []);
+  });
+
+  it('carries nothing when the branch was already at the head the merge produced', async () => {
+    // The published head resolved before the merge IS the head afterwards:
+    // there is no pair of heads to compare, so there is nothing to re-pin.
+    const h = harness({ publishedHead: MERGED_HEAD });
+    await h.svc.updateFromTarget(WS, USER, 7);
     expect(h.git.pathsChangedBetween).not.toHaveBeenCalled();
     expect(h.reviewWorkflow.carryApprovalsForward).not.toHaveBeenCalled();
   });
