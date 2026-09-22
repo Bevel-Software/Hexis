@@ -378,3 +378,84 @@ describe('SkillsTree: an empty tree says why', () => {
     expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
   });
 });
+
+/**
+ * WHERE the two Library trees take their roots from. `Skills/` and `Plugins/`
+ * are children of the checkout — the `<kbDirName>/` folder the deployment
+ * names — and of nothing else. On core-staging a stray `Plugins/` beside the
+ * checkout became the whole Plugins tree (one plugin instead of ten) and the
+ * Skills tree, finding no `Skills/` there, showed Empty.
+ */
+describe('The Library trees root at the checkout', () => {
+  /** What sat beside the checkout on core-staging on 2026-09-22. */
+  const STRAYS: FileTreeEntry[] = [
+    dir('KnowledgeBase', [file('KnowledgeBase/Planted.md')]),
+    dir('Plugins', [dir('Plugins/zz-stray', [file('Plugins/zz-stray/plugin.json')])]),
+    dir('Skills', [dir('Skills/stray-scope', [file('Skills/stray-scope/SKILL.md')])]),
+    file('Stray.docx'),
+  ];
+
+  /** One checkout holding both roots, so one fixture serves both trees. */
+  const CHECKOUT = dir(KB, [
+    dir(`${KB}/KnowledgeBase`, [file(`${KB}/KnowledgeBase/Handbook.md`)]),
+    dir(`${KB}/Skills`, [dir(`${KB}/Skills/Engineering`, [])]),
+    dir(`${KB}/Plugins`, [dir(`${KB}/Plugins/GTM`, []), dir(`${KB}/Plugins/Product`, [])]),
+  ]);
+
+  function renderBoth(tree: FileTreeEntry | null) {
+    const workspace = makeWorkspaceFixture({ fileTree: tree, kbDirName: KB });
+    return render(
+      <MemoryRouter initialEntries={['/skills-and-tools']}>
+        <WorkspaceContext.Provider value={workspace}>
+          <SkillsTree />
+          <PluginsTree />
+        </WorkspaceContext.Provider>
+      </MemoryRouter>,
+    );
+  }
+
+  /** Every row on screen, by the path it addresses. */
+  const paths = () =>
+    Array.from(document.querySelectorAll('[data-tree-path]')).map(
+      (el) => (el as HTMLElement).dataset.treePath!,
+    );
+
+  it('renders the checkout\'s Skills and Plugins, and exactly those with strays beside them', () => {
+    const { unmount } = renderBoth(dir('.', [CHECKOUT]));
+    const clean = paths();
+    expect(clean).toContain(`${KB}/Skills`);
+    expect(clean).toContain(`${KB}/Plugins`);
+    unmount();
+
+    renderBoth(dir('.', [...STRAYS, CHECKOUT]));
+    expect(paths()).toEqual(clean);
+  });
+
+  it('renders no row outside the checkout — the stray plugin and scope are not theirs', () => {
+    renderBoth(dir('.', [...STRAYS, CHECKOUT]));
+    for (const p of paths()) expect(p.startsWith(`${KB}/`)).toBe(true);
+    expect(screen.queryByText('zz-stray')).toBeNull();
+    expect(screen.queryByText('stray-scope')).toBeNull();
+    expect(screen.getByText('GTM')).toBeInTheDocument();
+    expect(screen.getByText('Engineering')).toBeInTheDocument();
+  });
+
+  it('shows the empty state naming the missing checkout in both trees, and no row at all', () => {
+    renderBoth(dir('.', STRAYS));
+    const notices = screen.getAllByTestId('tree-empty-notice');
+    expect(notices).toHaveLength(2);
+    for (const n of notices) {
+      expect(n).toHaveTextContent('Nothing to show here: the repository checkout is missing.');
+    }
+    expect(paths()).toEqual([]);
+    expect(screen.queryByText('Skills')).toBeNull();
+    expect(screen.queryByText('Plugins')).toBeNull();
+  });
+
+  it('still renders nothing at all while the tree is loading', () => {
+    renderBoth(null);
+    expect(screen.queryByTestId('tree-empty-notice')).toBeNull();
+    expect(screen.queryByTestId('skills-tree')).toBeNull();
+    expect(screen.queryByTestId('plugins-tree')).toBeNull();
+  });
+});

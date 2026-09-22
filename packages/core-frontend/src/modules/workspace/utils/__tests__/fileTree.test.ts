@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
+  checkoutRoot,
   mergePendingIntoTree,
   omitPathFromTree,
   pathExistsInTree,
@@ -9,6 +10,8 @@ import {
   suggestedPages,
   treeHasVisibleEntries,
 } from '../fileTree';
+
+const KB = 'knowledge-base';
 
 /**
  * A Library tree is one root of the listing, empty on its own terms: a
@@ -141,9 +144,47 @@ const TREE: FileTreeEntry = dir('', [
   ]),
 ]);
 
+/**
+ * The one way anything reaches the repository. It is a LOOKUP of the name the
+ * deployment gave the checkout — never a search for a folder that looks like
+ * a knowledge base, which is what put a stray `KnowledgeBase/` on screen as
+ * "Knowledge" while the real clone was folded in underneath it.
+ */
+describe('checkoutRoot', () => {
+  const STRAYS = [
+    dir('KnowledgeBase', [file('KnowledgeBase/Planted.md')]),
+    dir('Plugins', [dir('Plugins/zz-stray', [file('Plugins/zz-stray/plugin.json')])]),
+    dir('Skills', [dir('Skills/stray', [file('Skills/stray/SKILL.md')])]),
+    file('Stray.docx'),
+  ];
+
+  it("is the workspace root's child of that name, and the same one with strays beside it", () => {
+    const clean = dir('', [dir(KB, [dir(`${KB}/KnowledgeBase`, [])])]);
+    const strewn = dir('', [...STRAYS, dir(KB, [dir(`${KB}/KnowledgeBase`, [])]), file('roles.yaml')]);
+    expect(checkoutRoot(clean, KB)?.relativePath).toBe(KB);
+    expect(checkoutRoot(strewn, KB)?.relativePath).toBe(KB);
+    expect(checkoutRoot(strewn, KB)?.children?.map((c) => c.name)).toEqual(['KnowledgeBase']);
+  });
+
+  it('is null when the checkout is absent — never the stray that carries a well-known name', () => {
+    expect(checkoutRoot(dir('', STRAYS), KB)).toBeNull();
+    expect(checkoutRoot(null, KB)).toBeNull();
+    expect(checkoutRoot(dir('', [dir(KB, [])]), null)).toBeNull();
+  });
+
+  it('looks exactly one level down: a namesake deeper in the tree is not the checkout', () => {
+    const nested = dir('', [dir('wrapper', [dir(`wrapper/${KB}`, [dir(`wrapper/${KB}/KnowledgeBase`, [])])])]);
+    expect(checkoutRoot(nested, KB)).toBeNull();
+  });
+
+  it("is not fooled by a FILE of the checkout's name", () => {
+    expect(checkoutRoot(dir('', [file(KB)]), KB)).toBeNull();
+  });
+});
+
 describe('suggestedPages', () => {
   it('offers documents, never a folder\'s access rules — at any depth, in any case', () => {
-    const offered = suggestedPages(TREE, 10).map((e) => e.relativePath);
+    const offered = suggestedPages(TREE, KB, 10).map((e) => e.relativePath);
     expect(offered).toEqual([
       'knowledge-base/KnowledgeBase/Onboarding.md',
       'knowledge-base/KnowledgeBase/GTM/Pricing.md',
@@ -162,13 +203,25 @@ describe('suggestedPages', () => {
         ]),
       ]),
     ]);
-    expect(suggestedPages(tree, 10).map((e) => e.name)).toEqual(['People.md']);
+    expect(suggestedPages(tree, KB, 10).map((e) => e.name)).toEqual(['People.md']);
   });
 
   it('honours the limit breadth-first and reports an empty knowledge base as such', () => {
-    expect(suggestedPages(TREE, 1).map((e) => e.name)).toEqual(['Onboarding.md']);
-    expect(suggestedPages(dir('', [dir('knowledge-base', [dir('knowledge-base/KnowledgeBase', [])])]), 3)).toEqual([]);
-    expect(suggestedPages(null, 3)).toEqual([]);
+    expect(suggestedPages(TREE, KB, 1).map((e) => e.name)).toEqual(['Onboarding.md']);
+    expect(suggestedPages(dir('', [dir(KB, [dir(`${KB}/KnowledgeBase`, [])])]), KB, 3)).toEqual([]);
+    expect(suggestedPages(null, KB, 3)).toEqual([]);
+  });
+
+  it('offers nothing from outside the checkout, and nothing at all without one', () => {
+    const strewn = dir('', [
+      dir('KnowledgeBase', [file('KnowledgeBase/Planted.md')]),
+      ...(TREE.children ?? []),
+    ]);
+    expect(suggestedPages(strewn, KB, 10).map((e) => e.relativePath)).toEqual([
+      `${KB}/KnowledgeBase/Onboarding.md`,
+      `${KB}/KnowledgeBase/GTM/Pricing.md`,
+    ]);
+    expect(suggestedPages(dir('', [dir('KnowledgeBase', [file('KnowledgeBase/Planted.md')])]), KB, 10)).toEqual([]);
   });
 });
 
@@ -224,5 +277,11 @@ describe('treeHasVisibleEntries', () => {
   it('reads a tree without the split from the KB clone folder down', () => {
     expect(treeHasVisibleEntries(d('.', [d('kb')]), 'kb')).toBe(false);
     expect(treeHasVisibleEntries(d('.', [d('kb', [f('kb/a.md')])]), 'kb')).toBe(true);
+  });
+
+  it('counts nothing outside the checkout, and nothing when there is no checkout', () => {
+    const strays = [d('KnowledgeBase', [f('KnowledgeBase/Planted.md')]), f('Stray.docx')];
+    expect(treeHasVisibleEntries(d('.', [...strays, d('kb', [d('kb/KnowledgeBase')])]), 'kb')).toBe(false);
+    expect(treeHasVisibleEntries(d('.', strays), 'kb')).toBe(false);
   });
 });

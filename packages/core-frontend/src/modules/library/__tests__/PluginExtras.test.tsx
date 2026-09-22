@@ -159,16 +159,27 @@ describe('ClientExtensionsSection', () => {
   });
 
   /**
-   * The fileTree can carry workspace/KB-clone wrapper levels above the kb dir
-   * (`findKbRoot` exists for exactly this shape). The section must find the
-   * plugin's namespace dirs through them, not assume the root's direct child
-   * is the kb dir.
+   * A `Plugins/` that is not the checkout's is not this deployment's. The
+   * section used to reach the kb dir by descending the tree until the names
+   * looked right, which found one under a wrapper level — and, on staging,
+   * found a stray beside the checkout instead of the checkout itself.
    */
-  it('finds the namespace dirs through wrapper levels above the kb dir', async () => {
+  it('reads no Plugins outside the checkout, wrapped or strewn beside it', async () => {
     const wrapped = dir('root', [dir('workspace-clone', TREE.children ?? [])]);
-    renderSection({ workspaceId: encodeURIComponent(DEFAULT_BRANCH), fileTree: wrapped });
+    const { unmount } = renderSection({
+      workspaceId: encodeURIComponent(DEFAULT_BRANCH),
+      fileTree: wrapped,
+    });
+    await waitFor(() => expect(screen.queryByText('com.example.client/')).not.toBeInTheDocument());
+    unmount();
+
+    const strewn = dir('root', [
+      dir('Plugins', [dir('GTM', [dir('com.example.stray', [dir('hooks', [file('planted.js')])])])]),
+      ...(TREE.children ?? []),
+    ]);
+    renderSection({ workspaceId: encodeURIComponent(DEFAULT_BRANCH), fileTree: strewn });
     expect(await screen.findByText('com.example.client/')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'hooks/on-save.js' })).toBeInTheDocument();
+    expect(screen.queryByText('com.example.stray/')).not.toBeInTheDocument();
   });
 
   it('finds the namespace dirs of a plugin nested below the root — the folder is a path, walked a segment at a time', async () => {
