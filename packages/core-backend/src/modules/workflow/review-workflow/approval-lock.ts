@@ -15,9 +15,20 @@ import type { Database } from '../../database/connection.js';
  * the erasure landed.
  *
  * In the DATABASE, not in this process: two app instances share the rows but
- * not a mutex. Advisory locks share one namespace across the whole database,
- * so everything here is keyed by (this class, a key) and can never collide
- * with another subsystem's.
+ * not a mutex.
+ *
+ * WHY NOT `AdvisoryLock` (see `modules/database/advisory-lock.ts`). That
+ * registry keys every lock it owns as (its shared namespace, one id per
+ * concern), which spends the second slot on naming the concern. These locks
+ * need that slot for the change request: approvals of #12 must not queue
+ * behind approvals of #13. Sharing the registry's namespace would put a
+ * request number where its lock ids live, so the approvals of change request
+ * #1 would BE the `Migrations` lock and #3's the `CommitWorker` lease — a
+ * boot migration and a reviewer clicking Approve, excluding each other for no
+ * reason anyone could find from either side. Hence a class of this file's own,
+ * with the request number beneath it. The registry's rule still holds within
+ * it: the two keys below are the whole set, and a third belongs here beside
+ * them rather than as a number at a call site.
  */
 const APPROVAL_LOCK_CLASS = 4207;
 /**
