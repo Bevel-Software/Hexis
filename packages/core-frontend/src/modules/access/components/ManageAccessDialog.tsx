@@ -1145,6 +1145,19 @@ export function ManageAccessDialog({
    *  `state.accOpen` holds a single value. */
   const [openSection, setOpenSection] = useState<string | null>(null);
 
+  /**
+   * Keep the row a write just changed on screen. A write can MOVE a row: revoke
+   * someone's local edit and, if a parent still grants them read, they file
+   * under "People invited to <parent>" — which is collapsed, so the person the
+   * reader was just editing vanishes and looks removed. Open the section the
+   * row now lives in (its nearest granting folder, or the roles group); a row
+   * that stays on this folder needs nothing.
+   */
+  const revealRow = useCallback((row: PrincipalRow | undefined) => {
+    if (!row || row.manage === 'direct') return;
+    setOpenSection(row.ancestors.length === 0 ? 'roles' : row.ancestors[0]!);
+  }, []);
+
   const governed = repoRelative !== null;
   // A file that cannot carry frontmatter (a PDF, a deck, an image) has no rules
   // of its own: its folder's rules govern it, and the grant / revoke routes
@@ -1435,9 +1448,12 @@ export function ManageAccessDialog({
         reload(); // re-sync on whatever the server actually holds now
       } finally {
         setBusy(false);
+        // Wherever the writes left the row, keep it in view — from the latest
+        // response, so a partial failure reveals where it actually is.
+        revealRow(current());
       }
     },
-    [workspaceId, repoRelative, entry.relativePath, targetKind, data, myEmail, reload],
+    [workspaceId, repoRelative, entry.relativePath, targetKind, data, myEmail, reload, revealRow],
   );
 
   const doRevoke = useCallback(
@@ -1467,6 +1483,10 @@ export function ManageAccessDialog({
           principal: row.principal,
         });
         setData(res);
+        // If a parent still grants them something, the row has just moved into
+        // that folder's collapsed section: keep it on screen (the prompt below
+        // may be declined, and the person must not look removed when it is).
+        revealRow(buildRows(res, myEmail).find((r) => r.key === row.key));
         // The direct entry was removed, but the FRESH view may still list this
         // principal with only `ancestor` source(s) — i.e. they're still inherited
         // from a parent. Open "Remove from parent?" so the one Remove click can
@@ -1500,7 +1520,7 @@ export function ManageAccessDialog({
         setBusy(false);
       }
     },
-    [workspaceId, repoRelative, entry.relativePath, targetKind, reload],
+    [workspaceId, repoRelative, entry.relativePath, targetKind, reload, myEmail, revealRow],
   );
 
   /** Cascade up: remove the principal from the granting ancestor folder (optionally scoped to one verb). */
