@@ -14,6 +14,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { createHmac } from 'node:crypto';
 import { TokenCrypto } from '../../shared/token-crypto.js';
+import { assertKbDirNameFree } from '../kb-fs/repo-path.js';
 import { normalizeIssuerUrl } from './oidc-check.js';
 
 /**
@@ -688,6 +689,35 @@ export class DeploymentSettingsService {
       if (problem) {
         const first = toWrite.find((w) => (layoutKeys as readonly string[]).includes(w.key))!;
         problems[first.key] = problem;
+      }
+    }
+
+    // The checkout folder and the layout are the third cross-field rule: the
+    // folder the repository is cloned into may not share a name with any of
+    // the repository's own roots, or every path under that root would be read
+    // as the checkout itself (see `assertKbDirNameFree`). Judged on what this
+    // save would put in effect, like the two rules above, and here rather than
+    // only at boot because setup applies a saved layout to the running process
+    // without a restart — a save that gets through would take effect at once.
+    const collisionKeys = ['kbDirName', ...layoutKeys] as const;
+    if (toWrite.some((w) => (collisionKeys as readonly string[]).includes(w.key))) {
+      const effective = (key: (typeof collisionKeys)[number]) =>
+        toWrite.find((w) => w.key === key)?.value ||
+        this.resolve(key) ||
+        (key === 'kbDirName' ? 'knowledge-base' : DEFAULT_KB_LAYOUT[key]);
+      try {
+        assertKbDirNameFree(effective('kbDirName'), {
+          knowledgeBaseDir: effective('knowledgeBaseDir'),
+          skillsDir: effective('skillsDir'),
+          pluginsDir: effective('pluginsDir'),
+          agentsFile: effective('agentsFile'),
+        });
+      } catch (err) {
+        // Against the field this save is writing — the checkout name when that
+        // is what moved, else the first layout field in the batch — since
+        // either side of the collision could be the one the operator typed.
+        const first = toWrite.find((w) => (collisionKeys as readonly string[]).includes(w.key))!;
+        problems[first.key] = err instanceof Error ? err.message : String(err);
       }
     }
 

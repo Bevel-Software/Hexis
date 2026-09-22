@@ -32,6 +32,7 @@ import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { PathTraversalError, WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
+import { normalizeWorkspacePath } from '../kb-fs/repo-path.js';
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { createGitInternalsRouteGuard } from './git-internals.middleware.js';
 import { removeEmptyDirs } from './empty-dirs.js';
@@ -103,6 +104,45 @@ export function createWorkspaceRoutes(
   // `/workspace/:id` prefix (see `git-internals.middleware.ts`). Mounted here
   // too so this router carries the rule wherever it is mounted on its own.
   router.use("/workspace/:id", gitInternalsRouteGuard);
+
+  /**
+   * The REPOSITORY path a request names, or `null` once the refusal has been
+   * sent.
+   *
+   * Every handler on this surface calls this FIRST, before the access check and
+   * before the service, so one path is what is checked and what is written.
+   * That was the hole: the access helpers stripped `<kbDirName>/` when it was
+   * there and otherwise took the path as written, so an unprefixed
+   * `KnowledgeBase/Reports` was judged as a repository path and then created
+   * beside the repository — a folder, eight documents and a `Plugins/` tree on
+   * core-staging, none of it ever committed. The normaliser closes it by making
+   * the unprefixed spelling MEAN the repository path it was judged as.
+   */
+  function inRepo(res: express.Response, wsPath: string): string | null {
+    try {
+      return normalizeWorkspacePath(wsPath, kbDirName);
+    } catch (err) {
+      sendError(res, err);
+      return null;
+    }
+  }
+
+  /**
+   * A repository path's absolute location, checked against the repository root.
+   *
+   * The ONE place this router resolves a workspace path — the delete fast-path,
+   * the platform-restore look and the folder-keep all used to call
+   * `path.resolve(workspaceDir, …)` for themselves, against the WORKSPACE dir,
+   * which is the containment an unprefixed path satisfied on its way to being
+   * written beside the checkout. A drift-guard test fails if a second one
+   * appears.
+   */
+  async function absoluteInRepo(workspaceId: string, repoRelative: string): Promise<string> {
+    const workspaceDir = await workspaceService.getWorkspacePath(workspaceId);
+    const absolute = path.resolve(workspaceDir, repoRelative);
+    assertWithinDirectory(absolute, path.join(workspaceDir, kbDirName));
+    return absolute;
+  }
 
   function authenticated(
     req: express.Request,
@@ -363,7 +403,7 @@ export function createWorkspaceRoutes(
     const dir = trimmed.includes('/') ? trimmed.slice(0, trimmed.lastIndexOf('/')) : '';
     if (!dir.startsWith(`${kbDirName}/`)) return;
     try {
-      const absolute = path.resolve(await workspaceService.getWorkspacePath(workspaceId), dir);
+      const absolute = await absoluteInRepo(workspaceId, dir);
       await workspaceService.withFolderTurn(workspaceId, dir, async () => {
         if (!(await isEmptyFolder(absolute))) return;
         // One tree refresh per request: the removal already announced it.
@@ -537,12 +577,11 @@ export function createWorkspaceRoutes(
     let allowed: boolean;
     try {
       // `download` is a per-path verb in access.md, resolved via the same
-      // chain walk as `write`. Strip the kbDirName prefix so the resolver
-      // receives a repo-relative path (mirrors the lock-acquire gate's
-      // strip in workflow.service.ts's assertCanWriteAtPath).
-      const repoRelative = relativePath.startsWith(`${kbDirName}/`)
-        ? relativePath.slice(kbDirName.length + 1)
-        : relativePath;
+      // chain walk as `write`. The caller has already normalised the path into
+      // the repository, so this only takes the prefix off — where it used to
+      // pass an unprefixed path through untouched and judge a stray as if it
+      // were inside.
+      const repoRelative = toKbRelative(relativePath, kbDirName) ?? relativePath;
       allowed = await accessControl.canDownload(workspaceId, user.email, repoRelative);
     } catch (err) {
       sendError(res, err);
@@ -724,11 +763,13 @@ export function createWorkspaceRoutes(
   router.get('/workspace/:id/file/raw', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const filePath = req.query.path as string;
-    if (!filePath) {
+    const requested = req.query.path;
+    if (typeof requested !== 'string' || requested.length === 0) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
+    const filePath = inRepo(res, requested);
+    if (filePath === null) return;
     // `?download=1` flips this from inline-serve (used by PdfRenderer and
     // the image renderers) to "save to disk" — and the save path is gated
     // on per-path `download:` rules in access.md. The inline path stays
@@ -834,11 +875,13 @@ export function createWorkspaceRoutes(
     // Trim whitespace and strip trailing slashes — `foo/` would otherwise
     // basename to `''` and produce a misleading `.zip` filename. Done
     // before the empty check so `' / '` is also caught.
-    const folderPath = rawPath.trim().replace(/\/+$/, '');
-    if (!folderPath) {
+    const trimmedPath = rawPath.trim().replace(/\/+$/, '');
+    if (!trimmedPath) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
+    const folderPath = inRepo(res, trimmedPath);
+    if (folderPath === null) return;
     if (req.query.download !== '1') {
       res.status(400).json({ error: 'download=1 is required for folder zip downloads' });
       return;
@@ -881,11 +924,13 @@ export function createWorkspaceRoutes(
   router.get('/workspace/:id/file', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const filePath = requestPath(req.query.path);
-    if (filePath === null) {
+    const requested = requestPath(req.query.path);
+    if (requested === null) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
+    const filePath = inRepo(res, requested);
+    if (filePath === null) return;
     if (!(await requireReadPermission(req, res, id, filePath))) return;
     try {
       const content = await workspaceService.readFile(id, filePath);
@@ -928,11 +973,13 @@ export function createWorkspaceRoutes(
   router.delete('/workspace/:id/file', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const filePath = requestPath(req.query.path);
-    if (filePath === null) {
+    const requested = requestPath(req.query.path);
+    if (requested === null) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
+    const filePath = inRepo(res, requested);
+    if (filePath === null) return;
     const user = await requireUser(req, res);
     if (!user) return;
     try {
@@ -946,14 +993,12 @@ export function createWorkspaceRoutes(
       // emits are also coalesced into a single end-of-batch event so the
       // explorer doesn't refresh N times.
       const workspaceDir = await workspaceService.getWorkspacePath(id);
-      const absolute = path.resolve(workspaceDir, filePath);
-      // Boundary check before any `fs.*` call. The single-file path
-      // bottoms out in `workspaceService.deleteFile` (which asserts the
-      // boundary itself), but this fast-path resolves the absolute
-      // ourselves and then `fs.stat` / `fs.rm` / `enumerateFilesUnder`
-      // it. Without this guard, a `../escape` `filePath` would let the
-      // dir-delete branch operate on directories outside the workspace.
-      assertWithinDirectory(absolute, workspaceDir);
+      // Boundary check before any `fs.*` call — against the REPOSITORY root,
+      // which is where `absoluteInRepo` holds it. The single-file path bottoms
+      // out in `workspaceService.deleteFile` (which resolves inside the
+      // repository itself), but this fast-path needs the absolute for
+      // `fs.stat` / `fs.rm` / `enumerateFilesUnder`.
+      const absolute = await absoluteInRepo(id, filePath);
       let stat: { isDirectory: () => boolean } | null = null;
       try {
         stat = await fs.stat(absolute);
@@ -1042,12 +1087,18 @@ export function createWorkspaceRoutes(
     const id = authenticated(req, res);
     if (id === null) return;
     const body = (req.body ?? {}) as { oldPath?: unknown; newPath?: unknown };
-    const oldPath = requestPath(body.oldPath);
-    const newPath = requestPath(body.newPath);
-    if (oldPath === null || newPath === null) {
+    const requestedOld = requestPath(body.oldPath);
+    const requestedNew = requestPath(body.newPath);
+    if (requestedOld === null || requestedNew === null) {
       res.status(400).json({ error: 'oldPath and newPath are required in body' });
       return;
     }
+    // Both ends inside the repository before anything is judged: the platform-file
+    // rules, the locks and the rename all read the same two paths.
+    const oldPath = inRepo(res, requestedOld);
+    if (oldPath === null) return;
+    const newPath = inRepo(res, requestedNew);
+    if (newPath === null) return;
     // Two spellings of one file are now ONE path, so a move can arrive with
     // both ends equal. `withLock` below would survive it — the inner
     // acquisition sees the lock the outer just took, held by this same user,
@@ -1133,9 +1184,7 @@ export function createWorkspaceRoutes(
       // move does before renaming is look again, inside the window it holds.
       const move = async () => {
         if (platformRestore) {
-          const workspaceDir = await workspaceService.getWorkspacePath(id);
-          const absoluteNew = path.resolve(workspaceDir, newPath);
-          assertWithinDirectory(absoluteNew, workspaceDir);
+          const absoluteNew = await absoluteInRepo(id, newPath);
           const taken = await fs.stat(absoluteNew).then(
             () => true,
             // Genuine absence is the only "free": anything else is not an
@@ -1175,11 +1224,13 @@ export function createWorkspaceRoutes(
     // turn, the workflow lock row, and the bytes themselves. Two clients
     // spelling one file differently would otherwise take two different locks
     // and both pass their own precondition.
-    const filePath = requestPath(req.query.path);
-    if (filePath === null) {
+    const requested = requestPath(req.query.path);
+    if (requested === null) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
+    const filePath = inRepo(res, requested);
+    if (filePath === null) return;
     const { content, ifAbsent, ifMatch } = req.body as {
       content?: string;
       ifAbsent?: boolean;
@@ -1258,11 +1309,17 @@ export function createWorkspaceRoutes(
   router.post('/workspace/:id/directory', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const { path: dirPath, defer } = req.body as { path?: string; defer?: boolean };
-    if (!dirPath) {
+    const { path: requested, defer } = req.body as { path?: string; defer?: boolean };
+    const canonical = requestPath(requested);
+    if (canonical === null) {
       res.status(400).json({ error: 'path is required in body' });
       return;
     }
+    // The folder this call creates, as a repository path. `KnowledgeBase/Reports`
+    // is `<kbDirName>/KnowledgeBase/Reports` — the access plan below, the
+    // `.gitkeep` lock and the mkdir all use this one spelling.
+    const dirPath = inRepo(res, canonical);
+    if (dirPath === null) return;
     const user = await requireUser(req, res);
     if (!user) return;
     try {
@@ -1305,15 +1362,23 @@ export function createWorkspaceRoutes(
     const id = authenticated(req, res);
     if (id === null) return;
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const zipPath = body.path;
-    const destination = body.destination;
-    if (typeof zipPath !== 'string' || zipPath.length === 0) {
+    const requestedZip = body.path;
+    const requestedDest = body.destination;
+    if (typeof requestedZip !== 'string' || requestedZip.length === 0) {
       res.status(400).json({ error: 'path is required in body and must be a string' });
       return;
     }
-    if (destination !== undefined && (typeof destination !== 'string' || destination.length === 0)) {
+    if (requestedDest !== undefined && (typeof requestedDest !== 'string' || requestedDest.length === 0)) {
       res.status(400).json({ error: 'destination, if provided, must be a non-empty string' });
       return;
+    }
+    const zipPath = inRepo(res, requestedZip);
+    if (zipPath === null) return;
+    let destination: string | undefined;
+    if (requestedDest !== undefined) {
+      const normalizedDest = inRepo(res, requestedDest);
+      if (normalizedDest === null) return;
+      destination = normalizedDest;
     }
     const user = await requireUser(req, res);
     if (!user) return;
@@ -1330,8 +1395,9 @@ export function createWorkspaceRoutes(
       // every other creation route does: extraction would otherwise bring
       // the folder into existence itself, and the first file's lock would
       // then find an existing folder the caller cannot read.
-      const inferred = path.posix.dirname(zipPath.replace(/\\/g, '/'));
-      const destDir = destination ?? (inferred === '.' ? '' : inferred);
+      // Both spellings are already repository paths, so the inferred parent is
+      // one too — the same destination the service resolves.
+      const destDir = destination ?? path.posix.dirname(zipPath);
       const plan = await creatorAccess.planForCreate(id, user, destDir, 'dir');
       if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
       await changeGate?.assertMayChange(id, user.email, destDir, 'dir');
@@ -1364,11 +1430,16 @@ export function createWorkspaceRoutes(
   router.post('/workspace/:id/upload', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const filePath = req.query.path as string;
-    if (!filePath) {
+    const requested = requestPath(req.query.path);
+    if (requested === null) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
+    // An upload with no folder lands at the repository ROOT inside the
+    // checkout, not beside it — eight staging test documents sat beside it
+    // because this route took the path as written.
+    const filePath = inRepo(res, requested);
+    if (filePath === null) return;
     // `?defer=true` is the bulk-upload caller's signal to suppress the
     // per-file `fs-tree-changed` SSE — the caller emits one combined
     // refresh at end-of-burst via `POST /flush`. Pushing isn't deferred
@@ -1421,6 +1492,8 @@ export function createWorkspaceRoutes(
   // happens out of band in the worker, so this route's only remaining
   // responsibility is to emit the single combined `fs-tree-changed`
   // event the bulk caller suppressed per file.
+  // It takes NO path: there is nothing for the normaliser to place, which is
+  // why this route is the one on the surface that does not call it.
   router.post('/workspace/:id/flush', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;

@@ -169,6 +169,28 @@ describe('DeploymentSettingsService — KB layout', () => {
   });
 
   /**
+   * The checkout folder may not be named like a repository root: every path
+   * under that root would then read as the checkout itself. Setup applies a
+   * saved layout to the running process without a restart, so the collision
+   * has to be refused at save time, whichever side of it the operator typed.
+   */
+  it('refuses a layout root named like the checkout folder, and a checkout folder named like a root', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    // The knowledge root renamed onto the checkout's default name.
+    await expect(settings.save({ knowledgeBaseDir: 'knowledge-base' }, null)).rejects.toMatchObject({
+      problems: { knowledgeBaseDir: expect.stringContaining('knowledgeBaseDir ("knowledge-base")') },
+    });
+    // The checkout renamed onto the knowledge root's name, in another case.
+    await expect(settings.save({ kbDirName: 'knowledgebase' }, null)).rejects.toMatchObject({
+      problems: { kbDirName: expect.stringContaining('knowledgeBaseDir ("KnowledgeBase")') },
+    });
+    // Nothing was written by either refusal, and an unrelated rename still lands.
+    expect(settings.resolveKbLayout().knowledgeBaseDir).toBe('KnowledgeBase');
+    await expect(settings.save({ kbDirName: 'checkout' }, null)).resolves.toBeTruthy();
+  });
+
+  /**
    * The layout is entered in the app and nowhere else now. A variable still
    * sitting in the environment cannot outrank the saved answer, and cannot
    * lock the field the way an environment-backed setting does.
