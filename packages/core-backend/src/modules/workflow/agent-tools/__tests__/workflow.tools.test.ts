@@ -320,18 +320,30 @@ describe('registerWorkflowTools', () => {
 describe('save_file and the repository folder', () => {
   // `save_file` commits whatever is on disk at `path` through the lock
   // protocol, bypassing the locking filesystem's own guard. A path without the
-  // clone-folder prefix names a file git can never see, so it is refused here,
-  // before a lock is taken, with the same corrected-path message the write
-  // tools give.
-  it('refuses a repo-relative path before taking any lock', async () => {
+  // clone-folder prefix used to be refused here; the one normaliser PLACES it
+  // inside the clone now, so the lock is taken on the repository path — the
+  // file git can actually see — and the refusal is kept for the spellings no
+  // prefix can rescue.
+  it('places a repo-relative path inside the clone and locks THAT path', async () => {
     const base = await start();
     const res = await post(`${base}/api/agent/tools/save_file`, writeTok(), {
       path: 'KnowledgeBase/Reviews/PR-12.html',
       branch: WS,
     });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ saved: true });
+    expect(calls).toContainEqual(['acquireLock', WS, WS, 'knowledge-base/KnowledgeBase/Reviews/PR-12.html']);
+  });
+
+  it('still refuses a traversing path before taking any lock', async () => {
+    const base = await start();
+    const res = await post(`${base}/api/agent/tools/save_file`, writeTok(), {
+      path: 'KnowledgeBase/../../etc/passwd',
+      branch: WS,
+    });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain('"knowledge-base/KnowledgeBase/Reviews/PR-12.html"');
+    expect(body.error).toContain('outside the knowledge base repository');
     expect(calls.some((c) => c[0] === 'acquireLock')).toBe(false);
   });
 
