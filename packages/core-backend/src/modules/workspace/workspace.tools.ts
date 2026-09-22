@@ -782,7 +782,7 @@ export function registerWorkspaceTools(
    * not cloned yet (or that does not resolve) is left to the handler; the
    * filesystem refuses again underneath regardless.
    */
-  const assertToolPathsNotGitInternals = async (args: Record<string, unknown>, ctx: ToolContext): Promise<void> => {
+  const toolPathArgs = (args: Record<string, unknown>): string[] => {
     const paths: string[] = [];
     for (const key of ['path', 'src', 'dest', 'destination'] as const) {
       if (typeof args[key] === 'string') paths.push(args[key]);
@@ -793,6 +793,31 @@ export function registerWorkspaceTools(
         if (typeof fp === 'string') paths.push(fp);
       }
     }
+    return paths;
+  };
+
+  /**
+   * The lexical half of the rule, over the caller's RAW arguments — before
+   * `normalizePathArgs`.
+   *
+   * That normaliser refuses a `..` segment, a `.` segment, a backslash and an
+   * absolute path as PATHS: a 400 that quotes the spelling back and names a
+   * corrected one. For `knowledge-base/Notes/../.git/config` that answer
+   * arrived FIRST and the git rule never saw the path, so five families of
+   * spelling — parent-climb, dot-segment, backslash, climb-out, absolute —
+   * were answered by a message that says which path was meant instead of the
+   * one sanitized refusal. Nothing under the folder was ever served either
+   * way; the sentence was simply the wrong one. So the git rule reads the
+   * caller's spelling before anything may rewrite or refuse it: a path that
+   * names the folder is a git refusal first, whatever else is also wrong with
+   * how it is written.
+   */
+  const assertRawToolPathsNotGitInternals = (args: Record<string, unknown>): void => {
+    for (const p of toolPathArgs(args)) assertNoGitInternalsSegment(p);
+  };
+
+  const assertToolPathsNotGitInternals = async (args: Record<string, unknown>, ctx: ToolContext): Promise<void> => {
+    const paths = toolPathArgs(args);
     for (const p of paths) assertNoGitInternalsSegment(p);
     const onDisk = paths.filter((p) => !spillStore.isSpillRef(p));
     if (onDisk.length === 0 || typeof args.branch !== 'string' || args.branch === '') return;
@@ -1188,6 +1213,8 @@ export function registerWorkspaceTools(
       // never reached the repository — the whole bug, spelled with a prefix.
       toolHandler(
         async (args, ctx) => {
+          // BEFORE the normaliser: see `assertRawToolPathsNotGitInternals`.
+          if (spec.fileTool !== false) assertRawToolPathsNotGitInternals(args);
           const normalized = normalizePathArgs(
             args,
             kbDirName,

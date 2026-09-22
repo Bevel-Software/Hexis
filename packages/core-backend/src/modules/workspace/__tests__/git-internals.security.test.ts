@@ -59,6 +59,12 @@ function fileForms(name: string): Record<string, string> {
     'leading slash': `/${KB}/.git/${name}`,
     dotted: `${KB}/Notes/../.git/${name}`,
     'dot segments': `./${KB}/./.git/${name}`,
+    // The five families production measured answering the path rule's 400
+    // instead of this rule's 403 (parent-climb, dot-segment, backslash,
+    // climb-out, absolute). `dotted`, `dot segments` and `backslashed` above
+    // are three of them; these are the two the set was missing.
+    'climb-out': `../${KB}/.git/${name}`,
+    absolute: `/app/apps/server/workspaces/main/${KB}/.git/${name}`,
     encoded: `${KB}/%2egit/${name}`,
     'double-encoded': `${KB}/%252Egit/${name}`,
     'upper-case': `${KB}/.GIT/${name}`,
@@ -153,28 +159,22 @@ async function listen(app: express.Express): Promise<{ server: Server; baseUrl: 
 }
 
 /**
- * The spellings the PATH rule refuses before the git rule is ever consulted:
- * a `..` segment, a `.` segment below a leading `./`, a backslash. One
- * normaliser reads every accepted workspace path now, and it refuses these as
- * paths rather than as git paths — earlier, and with the 400 that says the path
- * could not be placed inside the repository. The git folder is unreachable
- * either way, which is what this file is about; only the sentence differs.
- */
-const UNSPELLABLE = new Set(['dotted', 'dot segments', 'backslashed']);
-
-/**
- * The refusal, whichever rule got there first. Pass the form's name and a
- * spelling the normaliser refuses is checked against ITS answer; leave it out
- * and only the git refusal will do.
+ * The ONE refusal, for every spelling.
+ *
+ * This used to make an exception: the path normaliser refuses a `..` segment,
+ * a `.` segment, a backslash and an absolute path as PATHS, and for a while
+ * that answer — a 400 quoting the spelling back — reached those spellings of a
+ * git path first. Production measured it on all thirteen file tools. The git
+ * rule now reads the caller's raw spelling before anything may rewrite or
+ * refuse it, so no form is answered by anything but the sanitized 403; the
+ * `form` argument is kept so a failure names the spelling that broke.
  */
 async function expectRefused(res: Response, form?: string): Promise<unknown> {
   const body = (await res.json()) as Record<string, unknown>;
-  if (form !== undefined && UNSPELLABLE.has(form)) {
-    expect({ status: res.status, outside: /is outside the knowledge base repository/.test(String(body.error)) }, form)
-      .toEqual({ status: 400, outside: true });
-    return body;
-  }
-  expect({ status: res.status, error: body.error }).toEqual({ status: 403, error: GIT_INTERNALS_MESSAGE });
+  expect({ status: res.status, error: body.error }, form).toEqual({ status: 403, error: GIT_INTERNALS_MESSAGE });
+  // The sanitized message stands alone: no spelling of the caller's path, and
+  // no "use this instead" correction, rides along beside it.
+  expect(JSON.stringify(body), form).not.toMatch(/\.git|corrected|outside the knowledge base/i);
   return body;
 }
 
@@ -537,15 +537,7 @@ describe('WorkspaceService refuses the git folder on its own', () => {
       `${name} — %s form`,
       async (form, p) => {
         const err = await run(p).catch((e: unknown) => e);
-        // `readFileAtRef` takes a REPO-relative path (it strips the prefix
-        // above), so it is not a workspace path and does not meet the
-        // normaliser; every other op does, and for the spellings the path rule
-        // refuses that refusal is the one that answers.
-        if (UNSPELLABLE.has(form) && name !== 'readFileAtRef') {
-          expect((err as Error).message, form).toMatch(/is outside the knowledge base repository/);
-          return;
-        }
-        expect(err).toBeInstanceOf(GitInternalsError);
+        expect(err, form).toBeInstanceOf(GitInternalsError);
       },
     );
   }
