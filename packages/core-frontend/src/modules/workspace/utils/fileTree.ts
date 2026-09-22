@@ -16,24 +16,30 @@ export const KB_ROOT_DIRS = {
 };
 
 /**
- * Descend past the workspace / KB-clone wrapper levels to the node that holds
- * the well-known KB root dirs (`KnowledgeBase/`, `Data/`, `Agents/`, …), or
- * null when the tree predates the split. Shared by the explorer's sectioning
- * and registry-contributed explorer items (e.g. the enterprise Graph view).
+ * The repository checkout inside the workspace tree: the direct child of the
+ * workspace root named by the deployment (`workspace.kbDirName`, which the
+ * bootstrap response already carries), or null when it is not there.
+ *
+ * A LOOKUP, not a search. This used to descend the tree until it met a node
+ * whose children included a well-known root name (`KnowledgeBase/`,
+ * `Plugins/`, …) — which is a guess, and on core-staging it guessed the
+ * WORKSPACE ROOT, because a stray `KnowledgeBase/` had been written beside
+ * the checkout. Every sidebar then read that directory: the stray became
+ * "Knowledge", the real checkout was folded in beneath it as ordinary
+ * content, and the Skills tree found no `Skills/` at all. The deployment
+ * NAMES the folder, so nothing has to be inferred from what happens to sit
+ * next to it.
+ *
+ * Null is an answer, not a cue to look elsewhere: the caller shows the
+ * empty-workspace state rather than rendering some other directory's
+ * contents (see `CHECKOUT_MISSING_MESSAGE`).
  */
-export function findKbRoot(node: FileTreeEntry | null): FileTreeEntry | null {
-  if (!node?.children) return null;
-  const holdsSplit = node.children.some(
-    (c) => c.type === 'directory' && KB_ROOT_DIRS.has(c.name),
-  );
-  if (holdsSplit) return node;
-  for (const child of node.children) {
-    if (child.type === 'directory') {
-      const found = findKbRoot(child);
-      if (found) return found;
-    }
-  }
-  return null;
+export function checkoutRoot(
+  tree: FileTreeEntry | null,
+  kbDirName: string | null,
+): FileTreeEntry | null {
+  if (!tree?.children || !kbDirName) return null;
+  return tree.children.find((c) => c.type === 'directory' && c.name === kbDirName) ?? null;
 }
 
 /**
@@ -44,15 +50,12 @@ export function findKbRoot(node: FileTreeEntry | null): FileTreeEntry | null {
  * knowledge base nobody has written to yet. Anything else — a file, or a
  * folder, at any depth — is an entry on screen.
  *
- * A tree that predates the split has no reserved roots: the KB clone's own
- * folder, when the tree wraps it, is where its content starts.
+ * Read from the checkout down, like every other surface. A workspace whose
+ * checkout is missing shows nothing, whatever else was written beside it.
  */
 export function treeHasVisibleEntries(tree: FileTreeEntry | null, kbDirName: string | null): boolean {
-  if (!tree) return false;
-  const kbRoot =
-    findKbRoot(tree) ??
-    tree.children?.find((c) => c.type === 'directory' && c.name === kbDirName) ??
-    tree;
+  const kbRoot = checkoutRoot(tree, kbDirName);
+  if (!kbRoot) return false;
   return (kbRoot.children ?? []).some((c) => {
     if (c.type === 'file') return c.name !== '.bevelignore';
     return !KB_ROOT_DIRS.has(c.name) || (c.children?.length ?? 0) > 0;
@@ -76,26 +79,34 @@ const isAccessRulesFile = (entry: FileTreeEntry): boolean => entry.name.toLowerC
  * the top of the knowledge tree, breadth-first, so the opening suggestion is a
  * section heading rather than the fifth file inside the first folder.
  *
- * Scoped to exactly what the explorer browses under "Knowledge" —
- * `KnowledgeBase/` plus any stray content folder. `Plugins/` is the Skills &
- * Tools app's storage and is not a browsing destination here, and the loose
- * files at the root (`access.md`, `roles.yaml`) are how the deployment is
- * configured, not something to read. A clone that predates the split has no
- * named roots to scope to, so its whole tree is the knowledge.
+ * Scoped to exactly what the explorer browses under "Knowledge", and scoped
+ * to the CHECKOUT: `KnowledgeBase/` plus any content folder beside it inside
+ * `<kbDirName>/`. `Plugins/` is the Skills & Tools app's storage and is not a
+ * browsing destination here, and the loose files at the checkout root
+ * (`access.md`, `roles.yaml`) are how the deployment is configured, not
+ * something to read. A clone that predates the split has no named roots at
+ * all, so its whole checkout is the knowledge — including the loose files at
+ * its root, which in that layout are pages rather than configuration. A
+ * workspace with no checkout in it has nothing to offer.
  *
  * Fewer than `limit` — including none at all — is a legitimate answer for a
  * knowledge base that is still empty; the caller says so rather than padding.
  */
-export function suggestedPages(tree: FileTreeEntry | null, limit: number): FileTreeEntry[] {
-  const kbRoot = findKbRoot(tree);
-  const roots = kbRoot?.children
-    ? [
-        ...kbRoot.children.filter((c) => c.type === 'directory' && c.name === KNOWLEDGE_BASE_DIR),
-        ...kbRoot.children.filter((c) => c.type === 'directory' && !KB_ROOT_DIRS.has(c.name)),
-      ]
-    : tree
-      ? [tree]
-      : [];
+export function suggestedPages(
+  tree: FileTreeEntry | null,
+  kbDirName: string | null,
+  limit: number,
+): FileTreeEntry[] {
+  const kbRoot = checkoutRoot(tree, kbDirName);
+  const split = kbRoot?.children?.some((c) => c.type === 'directory' && KB_ROOT_DIRS.has(c.name));
+  const roots = !kbRoot
+    ? []
+    : split
+      ? [
+          ...(kbRoot.children ?? []).filter((c) => c.type === 'directory' && c.name === KNOWLEDGE_BASE_DIR),
+          ...(kbRoot.children ?? []).filter((c) => c.type === 'directory' && !KB_ROOT_DIRS.has(c.name)),
+        ]
+      : [kbRoot];
 
   const pages: FileTreeEntry[] = [];
   let level = roots;

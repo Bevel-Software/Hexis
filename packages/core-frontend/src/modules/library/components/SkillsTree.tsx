@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { libraryUploadTarget, useWorkspace } from '../../workspace/state/workspace.context';
-import { findKbRoot } from '../../workspace/utils/fileTree';
+import { checkoutRoot } from '../../workspace/utils/fileTree';
 import { KB_ROUTE_PREFIX, kbFileUrl, safeDecode } from '../../workspace/routing/kb-routes';
 import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
 import { Puzzle } from 'lucide-react';
@@ -41,12 +41,14 @@ import {
  *  - The current row is the file the URL names, not the pane workspace's
  *    open tab, which the Library never sets.
  *
- * Renders nothing only while the tree is loading. Once it is here the
- * folder is always drawn — empty when the knowledge base has none yet, at
- * the path it will get — because the folder is where new things go, and a
- * person cannot put one there if the way there is not on screen. The
- * reserved root is forced visible by the tree filter even to a reader who
- * may open nothing beneath it, so the row is present for everyone.
+ * Renders nothing only while the tree is loading, or while the workspace has
+ * no repository checkout in it — there is no folder to draw a row for, and
+ * the empty state below says why. Once the checkout is here the folder is
+ * always drawn — empty when the knowledge base has none yet, at the path it
+ * will get — because the folder is where new things go, and a person cannot
+ * put one there if the way there is not on screen. The reserved root is
+ * forced visible by the tree filter even to a reader who may open nothing
+ * beneath it, so the row is present for everyone.
  */
 export function RootFolderTree({
   dir,
@@ -67,8 +69,13 @@ export function RootFolderTree({
   const location = useLocation();
   const navigate = useNavigate();
 
+  // `Skills/` and `Plugins/` are children of the CHECKOUT and of nothing
+  // else. A folder of either name sitting beside the checkout is somebody
+  // else's directory, and this tree has never had any business rendering it —
+  // it did, on core-staging, because the root used to be found by searching
+  // the workspace for a folder that looked like a knowledge base.
   const root = useMemo((): { entry: FileTreeEntry; absent: boolean } | null => {
-    const kbRoot = findKbRoot(tree);
+    const kbRoot = checkoutRoot(tree, kbDirName);
     if (!kbRoot) return null;
     const found = kbRoot.children?.find((c) => c.type === 'directory' && c.name === dir);
     if (found) return { entry: found, absent: false };
@@ -77,12 +84,14 @@ export function RootFolderTree({
     // path the folder will have. Every write creates its parents, so the
     // first drop, file or subfolder made here creates the folder itself;
     // what would READ the folder (download) is withheld until then.
-    const base = kbRoot.relativePath === '.' ? '' : `${kbRoot.relativePath}/`;
+    // MISSING FOLDER, not missing checkout: the two are different answers and
+    // only this one draws a row. A checkout that is not there gets the empty
+    // state, because there is no path a first write could even go to.
     return {
-      entry: { name: dir, relativePath: `${base}${dir}`, type: 'directory', children: [] },
+      entry: { name: dir, relativePath: `${kbRoot.relativePath}/${dir}`, type: 'directory', children: [] },
       absent: true,
     };
-  }, [tree, dir]);
+  }, [tree, kbDirName, dir]);
 
   const nav = useMemo<TreeNav>(
     () => ({
@@ -93,7 +102,17 @@ export function RootFolderTree({
     [location.pathname, kbDirName, navigate, menuItems],
   );
 
-  if (!root) return null;
+  // No checkout: no root row to draw, and `EmptyTreeNotice` says why — the
+  // same surface, and the same reason, as the Knowledge explorer beside it.
+  // Still nothing at all while the tree is loading, as before.
+  if (!root) {
+    if (!tree) return null;
+    return (
+      <div data-testid={testId}>
+        <EmptyTreeNotice rootPath={null} />
+      </div>
+    );
+  }
 
   return (
     // The two Library trees sit in ONE sidebar over ONE piece of upload

@@ -865,8 +865,8 @@ export function FileViewer() {
   // in the empty branch below because that branch is a `return` and this is a
   // hook — and it costs nothing while a file IS open, which is the common case.
   const suggestions = useMemo(
-    () => suggestedPages(fileTree, SUGGESTION_LIMIT),
-    [fileTree],
+    () => suggestedPages(fileTree, kbDirName, SUGGESTION_LIMIT),
+    [fileTree, kbDirName],
   );
   // Opening a suggestion is NAVIGATION, the same as clicking the file in the
   // explorer or a tab: the URL is the canonical record of what is open, and a
