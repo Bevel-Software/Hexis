@@ -128,8 +128,8 @@ describe('ManageAccessDialog row menu: download is its own axis', () => {
     expect(api.revokeAccess).not.toHaveBeenCalled();
     // And the row now says both, with both items checked.
     expect(await screen.findByRole('button', { name: /^can edit, can download$/i })).toBeInTheDocument();
-    expect(item(menu, /^can edit$/i)).toHaveClass('font-medium');
-    expect(item(menu, /^can download$/i)).toHaveClass('font-medium');
+    expect(item(menu, /^can edit$/i)).toHaveAttribute('aria-pressed', 'true');
+    expect(item(menu, /^can download$/i)).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('Can edit on a downloader grants edit and leaves download alone', async () => {
@@ -174,8 +174,8 @@ describe('ManageAccessDialog row menu: download is its own axis', () => {
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: /^can edit, can download$/i })).toBeNull(),
     );
-    expect(item(menu, /^can download$/i)).not.toHaveClass('font-medium');
-    expect(item(menu, /^can edit$/i)).toHaveClass('font-medium');
+    expect(item(menu, /^can download$/i)).toHaveAttribute('aria-pressed', 'false');
+    expect(item(menu, /^can edit$/i)).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('under Owner, Can download is conferred, not chosen: checked and disabled', async () => {
@@ -188,7 +188,7 @@ describe('ManageAccessDialog row menu: download is its own axis', () => {
     // the menu is where it reads as conferred rather than chosen.
     const menu = await openRowMenu(user, /^owner, can download$/i);
     const download = item(menu, /^can download$/i);
-    expect(download).toHaveClass('font-medium');
+    expect(download).toHaveAttribute('aria-pressed', 'true');
     expect(download).toBeDisabled();
     // The tiers below Owner stay live: each is a demotion, which is an action.
     expect(item(menu, /^can edit$/i)).not.toBeDisabled();
@@ -235,10 +235,34 @@ describe('ManageAccessDialog row menu: the tiers are one axis', () => {
     expect(api.grantAccess).not.toHaveBeenCalledWith('ws-1', expect.objectContaining({ verb: 'download' }));
     // The menu re-renders on the fresh view: Owner unchecked, Can edit checked,
     // and download — no longer conferred — unchecked and live again.
-    await waitFor(() => expect(item(menu, /^owner$/i)).not.toHaveClass('font-medium'));
-    expect(item(menu, /^can edit$/i)).toHaveClass('font-medium');
-    expect(item(menu, /^can download$/i)).not.toHaveClass('font-medium');
+    await waitFor(() => expect(item(menu, /^owner$/i)).toHaveAttribute('aria-pressed', 'false'));
+    expect(item(menu, /^can edit$/i)).toHaveAttribute('aria-pressed', 'true');
+    expect(item(menu, /^can download$/i)).toHaveAttribute('aria-pressed', 'false');
     expect(item(menu, /^can download$/i)).not.toBeDisabled();
+  });
+
+  it('an owner with a download line of their own keeps it through the step-down', async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue(aliceWith({ owner: true }));
+    // The view cannot tell an owner's folded download from a line of her own,
+    // so the step-down writes nothing for it: here the fresh view after the
+    // owner revoke still lists her as a downloader, and that stands.
+    api.revokeAccess.mockResolvedValue(aliceWith({ download: true }));
+    api.grantAccess.mockResolvedValue(aliceWith({ write: true, download: true }));
+    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
+    await screen.findByText('Alice');
+
+    const menu = await openRowMenu(user, /^owner, can download$/i);
+    await user.click(item(menu, /^owner$/i));
+
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalledTimes(1));
+    // Exactly one revoke (the owner line) and one grant (the tier landed on);
+    // download was neither revoked nor re-granted.
+    expect(api.revokeAccess).toHaveBeenCalledTimes(1);
+    expect(api.revokeAccess).toHaveBeenCalledWith('ws-1', expect.objectContaining({ verb: 'owner' }));
+    expect(api.grantAccess).toHaveBeenCalledWith('ws-1', expect.objectContaining({ verb: 'write' }));
+    expect(await screen.findByRole('button', { name: /^can edit, can download$/i })).toBeInTheDocument();
+    expect(item(menu, /^can download$/i)).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('Can read at the top of a row has nothing below it: checked and disabled', async () => {
@@ -249,7 +273,7 @@ describe('ManageAccessDialog row menu: the tiers are one axis', () => {
 
     const menu = await openRowMenu(user, /^can read, can download$/i);
     const read = item(menu, /^can read$/i);
-    expect(read).toHaveClass('font-medium');
+    expect(read).toHaveAttribute('aria-pressed', 'true');
     expect(read).toBeDisabled();
     // Taking read away is Remove or Deny's job; download stays a live toggle.
     expect(item(menu, /^can download$/i)).not.toBeDisabled();

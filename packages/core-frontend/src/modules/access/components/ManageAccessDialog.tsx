@@ -121,16 +121,16 @@ function tierOf(v: VerbSet): Tier | null {
  *     read at the top has nothing below it — taking read away is what Remove
  *     and Deny are for — so it is disabled there.
  *   - Can download toggles on its own. Under Owner it is conferred, not chosen,
- *     so it is disabled there; and leaving Owner leaves it behind too, since
- *     the demoted person never held it independently. Turning it on carries
- *     read, the resolver's own fold (a person trusted with a copy may open it).
+ *     so it is disabled there; and a step down from Owner writes nothing for
+ *     it either way (see the return). Turning it on carries read, the
+ *     resolver's own fold (a person trusted with a copy may open it).
  *
  * Each item used to apply a fixed whole set instead — Can edit meant "edit and
  * no download", Can download meant "download and no edit" — so raising one axis
  * silently wrote a revoke or a denial on the other. That is the bug this
  * function replaces.
  */
-function nextVerbSet(current: VerbSet, role: Role): VerbSet | null {
+function nextVerbSet(current: VerbSet, role: Role): VerbPick | null {
   if (role === 'Can download') {
     if (current.owner) return null;
     return { ...current, download: !current.download, read: true };
@@ -143,11 +143,22 @@ function nextVerbSet(current: VerbSet, role: Role): VerbSet | null {
     owner: target === 'Owner',
     write: target !== 'Can read',
     read: true,
-    // Owner confers download; below it the axis keeps what the row chose, and
-    // a row coming DOWN from Owner chose nothing.
-    download: target === 'Owner' ? true : current.owner ? false : current.download,
+    // Owner confers download; below it the axis keeps what the row chose. A
+    // row coming DOWN from Owner is left to the file: the download it shows
+    // may be the owner line's fold (gone with that line) or a line of its
+    // own (which stays), and the view cannot tell the two apart — so nothing
+    // is revoked or granted for it, and the fresh view says which it was.
+    download: target === 'Owner' ? true : current.owner ? undefined : current.download,
   };
 }
+
+/**
+ * A destination for one row, as `nextVerbSet` states it: the three tier verbs
+ * always, and `download` either stated or LEFT OUT — "write nothing for this
+ * verb; whatever the file says after the other writes stands". The apply loop
+ * neither drops nor grants an omitted verb.
+ */
+type VerbPick = Omit<VerbSet, 'download'> & { download?: boolean };
 
 /**
  * The verbs in the order a set has to be APPLIED: broadest first.
@@ -183,7 +194,7 @@ const VERB_TO_KEY: Record<GrantVerb, keyof VerbSet> = {
  * a response that has not caught up cannot make the loop write `read:` under an
  * `owner:` it just granted.
  */
-function minimalGrantVerbs(set: VerbSet): GrantVerb[] {
+function minimalGrantVerbs(set: VerbPick): GrantVerb[] {
   const verbs: GrantVerb[] = [];
   if (set.owner) verbs.push('owner');
   else if (set.write) verbs.push('write');
@@ -1342,7 +1353,7 @@ export function ManageAccessDialog({
    * actually landed, and the steps already applied stand.
    */
   const doApplyVerbSet = useCallback(
-    async (row: PrincipalRow, picked: VerbSet | null) => {
+    async (row: PrincipalRow, picked: VerbPick | null) => {
       if (!workspaceId || repoRelative === null) return;
       // The menu stays OPEN across the writes, as the per-verb checklist did:
       // its items freeze on `busy`, and when the fresh view lands they re-render
@@ -1369,8 +1380,10 @@ export function ManageAccessDialog({
         }
 
         // ---- lower: what the set drops -------------------------------------
+        // Only a verb the pick states as OFF is dropped; one it leaves out is
+        // left to the file (see `VerbPick`).
         for (const verb of VERBS_BROADEST_FIRST) {
-          if (picked[VERB_TO_KEY[verb]]) continue;
+          if (picked[VERB_TO_KEY[verb]] !== false) continue;
           const now = current();
           if (!now?.verbs[VERB_TO_KEY[verb]]) continue; // already gone
           const src = now.sources?.[verb] ?? [];
@@ -1676,6 +1689,7 @@ export function ManageAccessDialog({
                           <MenuItem
                             disabled={busy || next === null}
                             active={checked}
+                            aria-pressed={checked}
                             // The note is the row's own explanation, not part of
                             // what the item DOES: keep it out of the name ("Can
                             // read"), and give it to assistive tech as the
