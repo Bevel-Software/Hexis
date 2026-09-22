@@ -195,15 +195,18 @@ describe('download implies read', () => {
       expect(await svc.canRead(workspaceId, 'ana@x.io', 'Knowledge/Deal.md')).toBe(false);
     });
 
-    it('a closer `deny read` still beats a farther download grant', async () => {
+    it('a closer `deny read` beats a farther download grant, and takes download with it', async () => {
       const svc = await makeService({
         ...BASE,
         'access.md': '---\n---\ndownload:\n  - Ana <ana@x.io>\n',
         'Knowledge/Secret/access.md': '---\n---\nread:\n  - deny Ana <ana@x.io>\n',
       });
       expect(await svc.canRead(workspaceId, 'ana@x.io', 'Knowledge/Secret/Deal.md')).toBe(false);
-      // The download grant itself is untouched by a read denial.
-      expect(await svc.canDownload(workspaceId, 'ana@x.io', 'Knowledge/Secret/Deal.md')).toBe(true);
+      // Download presupposes read (`VERB_REQUIRES`): she may not save a copy
+      // of what she may not open. The grant is not dead upstream — it still
+      // holds where the read denial does not reach.
+      expect(await svc.canDownload(workspaceId, 'ana@x.io', 'Knowledge/Secret/Deal.md')).toBe(false);
+      expect(await svc.canDownload(workspaceId, 'ana@x.io', 'Knowledge/Deal.md')).toBe(true);
     });
 
     it('a same-scope download grant overrides a `deny read` beside it, as a write grant does', async () => {

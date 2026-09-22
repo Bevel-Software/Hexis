@@ -905,6 +905,8 @@ export function ManageAccessDialog({
   // time), so it always names the button whose menu is on screen.
   const openRowTriggerRef = useRef<HTMLButtonElement>(null);
   const verbTriggerRef = useRef<HTMLButtonElement>(null);
+  /** The add row's text field — where the caret goes back to after a pick. */
+  const queryInputRef = useRef<HTMLInputElement>(null);
   // The "What can I share with?" explainer beside the add field.
   const [kindHelpOpen, setKindHelpOpen] = useState(false);
   const kindHelpTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1201,7 +1203,35 @@ export function ManageAccessDialog({
     );
     setQuery('');
     setSuggest(null);
+    // A pick from the list moved focus onto the list's button, which is about
+    // to unmount; the next name is typed into the field, so put the caret
+    // back there rather than making the person click into the white space.
+    queryInputRef.current?.focus();
   }, []);
+
+  // What the list OFFERS: the server's suggestions minus what is already a
+  // chip. A group picked once has nothing to add a second time, and seeing it
+  // offered again reads as "did that not take?".
+  const offered = useMemo(() => {
+    if (!suggest) return null;
+    const picked = new Set(pickedChips.map(principalKey));
+    return {
+      groups: (suggest.groups ?? []).filter((g) => !picked.has(principalKey({ kind: 'group', group: g }))),
+      roles: (suggest.roles ?? []).filter((r) => !picked.has(principalKey({ kind: 'role', role: r }))),
+      plugins: (suggest.pluginPrincipals ?? [])
+        .flatMap((name) => PLUGIN_PRINCIPAL_VERBS.map((verb) => ({ name, verb })))
+        .filter(({ name, verb }) => !picked.has(principalKey({ kind: 'plugin', plugin: name, verb }))),
+      people: (suggest.people ?? []).filter(
+        (p) => !picked.has(principalKey({ kind: 'user', email: p.email, displayName: p.name })),
+      ),
+    };
+  }, [suggest, pickedChips]);
+  const offersAnything =
+    !!offered &&
+    (offered.groups.length > 0 ||
+      offered.roles.length > 0 ||
+      offered.plugins.length > 0 ||
+      offered.people.length > 0);
 
   const removeChip = useCallback((p: Principal) => {
     setPickedChips((chips) => chips.filter((c) => principalKey(c) !== principalKey(p)));
@@ -1829,6 +1859,7 @@ export function ManageAccessDialog({
                     );
                   })}
                   <input
+                    ref={queryInputRef}
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     onKeyDown={(e) => {
@@ -1845,9 +1876,9 @@ export function ManageAccessDialog({
                     `roles` or `groups` (version skew) must degrade to an empty
                     section, never a crash. Groups lead — they are the audience
                     concept grants are meant for; roles remain grantable below. */}
-                {query.trim() && suggest && ((suggest.groups?.length ?? 0) > 0 || (suggest.roles?.length ?? 0) > 0 || (suggest.pluginPrincipals?.length ?? 0) > 0 || (suggest.people?.length ?? 0) > 0) && (
+                {query.trim() && offered && offersAnything && (
                   <AnchoredMenu width="anchor" align="left" className="max-h-56 overflow-auto">
-                    {(suggest.groups ?? []).map((g) => (
+                    {offered.groups.map((g) => (
                       <MenuItem
                         key={`grp:${g}`}
                         onClick={() => addChip({ kind: 'group', group: g })}
@@ -1867,7 +1898,7 @@ export function ManageAccessDialog({
                         <span className="min-w-0 flex-1 truncate">{g}</span>
                       </MenuItem>
                     ))}
-                    {(suggest.roles ?? []).map((g) => (
+                    {offered.roles.map((g) => (
                       <MenuItem
                         key={`g:${g}`}
                         onClick={() => addChip({ kind: 'role', role: g })}
@@ -1889,8 +1920,7 @@ export function ManageAccessDialog({
                     ))}
                     {/* A plugin is three grantees — its readers, its writers, its
                         owners — each following the plugin's own roster live. */}
-                    {(suggest.pluginPrincipals ?? []).flatMap((name) =>
-                      PLUGIN_PRINCIPAL_VERBS.map((verb) => (
+                    {offered.plugins.map(({ name, verb }) => (
                         <MenuItem
                           key={`pl:${name}/${verb}`}
                           onClick={() => addChip({ kind: 'plugin', plugin: name, verb })}
@@ -1909,9 +1939,8 @@ export function ManageAccessDialog({
                           </span>
                           <span className="min-w-0 flex-1 truncate">{pluginPrincipalLabel(name, verb)}</span>
                         </MenuItem>
-                      )),
-                    )}
-                    {(suggest.people ?? []).map((p) => {
+                    ))}
+                    {offered.people.map((p) => {
                       const tone = avatarTone(p.name || p.email);
                       return (
                         <MenuItem
