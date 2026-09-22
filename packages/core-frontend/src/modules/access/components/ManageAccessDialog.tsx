@@ -691,12 +691,21 @@ function AnchoredMenu({
     const observer = new ResizeObserver(place);
     if (anchorEl) observer.observe(anchorEl);
     if (panel) observer.observe(panel);
+    // A content-sized panel is PINNED to a width, so the resize observer above
+    // cannot see its items change under it — and they do while a row menu
+    // stays open across writes: notes ("from Sales") and check marks come and
+    // go with each fresh view. Re-measure on any change to what the panel
+    // holds. Children and text only, not attributes: `place` writes the
+    // panel's own style, which must not re-trigger it.
+    const contents = new MutationObserver(place);
+    if (panel) contents.observe(panel, { childList: true, subtree: true, characterData: true });
     window.addEventListener('resize', place);
     // Capture phase: the dialog body is what scrolls, and scroll events don't
     // bubble to `window`.
     window.addEventListener('scroll', place, true);
     return () => {
       observer.disconnect();
+      contents.disconnect();
       window.removeEventListener('resize', place);
       window.removeEventListener('scroll', place, true);
     };
