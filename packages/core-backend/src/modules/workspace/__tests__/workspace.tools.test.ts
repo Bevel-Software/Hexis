@@ -877,10 +877,20 @@ describe('read-permission gating', () => {
     expect(paths).not.toContain(`${KB_DIR}/Knowledge/Secret.md`);
   });
 
-  it('non-KB workspace files are never gated', async () => {
-    // `a.md` lives at the workspace root, outside the KB dir → always readable.
+  it('gates on the repository path, not on the spelling the caller sent', async () => {
+    // `a.md` is seeded through the normaliser like every path in this file, so
+    // it sits INSIDE the checkout, at `<tempDir>/knowledge-base/a.md`. Nothing
+    // is outside the KB dir any more. The gate keys on the repo-relative path,
+    // so a rule written on the workspace-relative spelling names no file…
     const base = await start('read', denyReads(new Set([`${KB_DIR}/a.md`])));
     expect((await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` })).status).toBe(200);
+    // …and the same read, with the rule on the key the gate actually uses, is
+    // denied: what is checked is the path the read resolves, whichever of its
+    // spellings the caller sent.
+    const gated = await start('read', denyReads(new Set(['a.md'])));
+    for (const path of ['a.md', `${KB_DIR}/a.md`, `/${KB_DIR}/a.md`]) {
+      expect((await post(`${gated}/api/agent/tools/read_file`, { path })).status, path).toBe(403);
+    }
   });
 });
 
@@ -2165,6 +2175,31 @@ describe('the tools place an unprefixed path inside the repository', () => {
     const res = await tool(base, 'read_file', { path: '__tool_chain_spill__/nope.json' });
     // Absent, not refused as a path: the ref reached the spill store as written.
     expect(res.status).not.toBe(400);
+  });
+
+  it('gives that exception to read_file alone — for every other tool the ref is a path', async () => {
+    // `read_file` is the only tool that consumes a spill ref. Anywhere else,
+    // `__tool_chain_spill__/…` is an ordinary string, and leaving it unnormalised
+    // would be a workspace-relative path that never reached the repository —
+    // beside the checkout, which is the whole bug. So it is placed under the
+    // checkout like any other prefix-less path, and names a file that is not there.
+    const base = await start();
+    const ref = '__tool_chain_spill__/nope.json';
+    for (const [name, body] of [
+      ['file_stat', { path: ref }],
+      ['delete_file', { path: ref }],
+      ['copy_file', { src: ref, dest: `${KB_DIR}/copied.md` }],
+      ['list_files', { path: ref }],
+    ] as [string, Record<string, unknown>][]) {
+      const res = await tool(base, name, body);
+      const answer = JSON.stringify(await res.json());
+      // The answer names the path the tool actually looked at, and it is the
+      // one under the checkout — the ref was normalised, not exempted.
+      expect(answer, name).toContain(`${KB_DIR}/__tool_chain_spill__`);
+      expect(res.status, `${name}: ${answer}`).not.toBe(200);
+    }
+    // And nothing was written beside the checkout on the way.
+    expect(await besideCheckout()).toEqual([]);
   });
 });
 

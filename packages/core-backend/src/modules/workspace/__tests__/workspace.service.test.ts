@@ -1309,11 +1309,15 @@ describe('WorkspaceService — every operation resolves inside the repository', 
   });
 
   it('refuses a path that resolves outside the checkout after normalisation', async () => {
-    // The spelling is contained and normalises into the repository; only
-    // resolving it finds the way out. This is the post-normalisation root check.
+    // The spelling is contained and normalises into the repository, so the
+    // LEXICAL root check in `resolveInsideRepo` passes it — `knowledge-base/
+    // Escape/x.md` stays under the repository however `Escape` resolves. What
+    // refuses it is `assertNotThroughLink`, which follows the link. Both run
+    // after normalisation, and this pins the one that can actually fire on a
+    // spelling the normaliser accepts.
     const outside = path.join(workspaceDir, 'outside');
     await fs.mkdir(outside, { recursive: true });
-    await fs.symlink(outside, path.join(repoDir, 'Escape'));
+    await fs.symlink(outside, path.join(repoDir, 'Escape'), process.platform === 'win32' ? 'junction' : 'dir');
 
     await expect(svc.writeFile(workspaceId, 'Escape/x.md', 'x')).rejects.toThrow('Path traversal detected');
     await expect(svc.readFile(workspaceId, 'Escape/x.md')).rejects.toThrow('Path traversal detected');
@@ -1321,6 +1325,13 @@ describe('WorkspaceService — every operation resolves inside the repository', 
   });
 
   it('cannot be asked for the workspace directory itself, or anything beside the checkout', async () => {
+    // The workspace directory has no spelling left: every path names something
+    // under the checkout, and the ones that used to reach up are refused.
+    for (const dir of ['', '.', '..', '/', 'knowledge-base/..']) {
+      await expect(svc.readFile(workspaceId, dir)).rejects.toThrow(
+        'is outside the knowledge base repository',
+      );
+    }
     await fs.writeFile(path.join(workspaceDir, 'stray.md'), 'already there', 'utf-8');
     // `stray.md` names the REPOSITORY's `stray.md` now — the one beside the
     // checkout has no path that reaches it, which is the point.
@@ -1348,6 +1359,13 @@ describe('WorkspaceService — every operation resolves inside the repository', 
     await expect(svc.createDirectory(workspaceId, 'knowledge-base/knowledge-base')).rejects.toThrow(
       /it is the checkout folder's name/,
     );
+    // A case variant is the same folder wherever the repository is cloned onto
+    // a case-insensitive filesystem, so it is reserved in every spelling.
+    await expect(svc.createDirectory(workspaceId, 'Knowledge-Base')).rejects.toThrow(/"Knowledge-Base" is reserved/);
+    await expect(svc.writeFile(workspaceId, 'KNOWLEDGE-BASE/x.md', 'x')).rejects.toThrow(
+      /refused in every spelling/,
+    );
+
     // A namesake deeper in the tree is ordinary content.
     await svc.createDirectory(workspaceId, 'KnowledgeBase/knowledge-base');
     expect((await fs.stat(path.join(repoDir, 'KnowledgeBase', 'knowledge-base'))).isDirectory()).toBe(true);

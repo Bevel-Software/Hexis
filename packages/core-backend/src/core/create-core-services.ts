@@ -21,7 +21,6 @@ import { PluginDisplayNamesStep } from '../modules/workspace/startup/steps/plugi
 import { PluginManifestsStep } from '../modules/workspace/startup/steps/plugin-manifests.step.js';
 import { PersonalSpacesStep } from '../modules/workspace/startup/steps/personal-spaces.step.js';
 import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-files.step.js';
-import { BesideCheckoutStep } from '../modules/workspace/startup/steps/beside-checkout.step.js';
 import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.step.js';
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
 import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
@@ -388,10 +387,10 @@ export async function createCoreServices(
   // reshapes trees the template top-up would otherwise re-scaffold — then
   // whatever the distribution appends.
   const kbStartupSteps = [
-    // First, and reads only: whatever is already sitting beside a checkout is
-    // named before any step touches a tree, so the note is about the state the
-    // deployment booted with.
-    new BesideCheckoutStep(config.workspacesRoot, kbDirName),
+    // (The note about anything sitting BESIDE a checkout is not a step: it is
+    // read-only, needs no remote, and must be said even on a deployment whose
+    // setup never finished — so `noteBesideCheckout` runs once from the server
+    // builder, ahead of this gated phase.)
     new GroupsToPluginsStep(disk),
     new PluginManifestsStep(disk),
     // After the manifests step: a folder that only just got its manifest got

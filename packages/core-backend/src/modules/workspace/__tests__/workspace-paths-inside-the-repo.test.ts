@@ -126,6 +126,11 @@ async function makeHarness(): Promise<Harness> {
 let h: Harness | null = null;
 afterEach(async () => {
   if (h) {
+    // `close` waits for every connection to end, and global fetch parks each
+    // response socket in its keep-alive pool — so without this the teardown
+    // sits out the keep-alive timeout, once per test. Every fetch in a test
+    // has resolved by now, so the idle sockets are the only ones left.
+    h.server.closeIdleConnections();
     await new Promise<void>((resolve) => h!.server.close(() => resolve()));
     await fs.rm(h.root, { recursive: true, force: true });
   }
@@ -329,11 +334,15 @@ describe('the paths no spelling can rescue are refused, not written', () => {
   it('a path that resolves outside the repository is caught after normalisation, not written', async () => {
     h = await makeHarness();
     // A link inside the repository pointing beside it. The path normalises into
-    // the repository and its SPELLING is contained; only resolving it finds the
-    // way out — which is what the post-normalisation checks are for.
+    // the repository and its SPELLING is contained, so the lexical root check
+    // passes it: what refuses it is the link guard, which resolves the way out.
+    // Named precisely because the two checks are easy to confuse — the lexical
+    // one is pinned structurally, in the drift guard at the foot of this file.
     const outside = path.join(h.workspaceDir, 'outside');
     await fs.mkdir(outside, { recursive: true });
-    await fs.symlink(outside, path.join(h.repoDir, 'Escape'));
+    // A junction on Windows: an unprivileged `symlink` there raises EPERM, and
+    // the traversal this pins has nothing to do with which kind of link it is.
+    await fs.symlink(outside, path.join(h.repoDir, 'Escape'), process.platform === 'win32' ? 'junction' : 'dir');
 
     expect((await call('PUT', `/file?path=${q('Escape/x.md')}`, { content: 'x' })).status).toBe(403);
     expect((await call('GET', `/file?path=${q('Escape/x.md')}`)).status).toBe(403);
@@ -432,6 +441,15 @@ describe('no code path outside the normaliser resolves a workspace path', () => 
     const hit = hits[0].n - 1;
     expect(hit, `the resolution at line ${hits[0].n} is not inside ${helper}`).toBeGreaterThan(helperAt);
     expect(hit - helperAt).toBeLessThan(12);
+    // …and the resolved path is checked against the repository root right
+    // after it is resolved. This is where THAT check is pinned: normalisation
+    // refuses every spelling that could lexically climb out, so no request can
+    // reach the check with a path that fails it — deleting it would break no
+    // other test, which is exactly why the guard has to say so here.
+    expect(
+      lines.slice(hit + 1, hit + 4).some((line) => line.includes('assertWithinDirectory(')),
+      `the resolution at line ${hits[0].n} is not followed by the repository-root check`,
+    ).toBe(true);
   });
 
   it('every write route passes its path through the normaliser before anything else', async () => {

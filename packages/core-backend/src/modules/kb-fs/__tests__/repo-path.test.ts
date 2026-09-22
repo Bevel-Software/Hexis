@@ -156,6 +156,12 @@ describe('normalizeWorkspacePath — THE normaliser', () => {
       '/tmp/x',
       '/etc/passwd',
       '//knowledge-base/Foo.md',
+      // Drive-qualified, and drive-relative: absolute on Windows, where
+      // `path.resolve` reads the drive and the workspace dir loses. Neither
+      // carries a leading slash or a backslash, so both are named on their own.
+      'C:/Windows/System32/drivers/etc/hosts',
+      'c:/Windows',
+      'C:Windows',
       '',
     ]) {
       expect(() => normalizeWorkspacePath(p, KB), p).toThrow(/outside the knowledge base repository/);
@@ -197,6 +203,27 @@ describe('assertRepoRootNameFree', () => {
     );
     expect(() => assertRepoRootNameFree('knowledge-base/knowledge-base/Notes.md', KB)).toThrow(/is reserved/);
     expect(() => assertRepoRootNameFree('knowledge-base/knowledge-base/', KB)).toThrow(/is reserved/);
+  });
+
+  it('reserves it in every case, because one filesystem in three folds them together', () => {
+    // `Knowledge-Base/` and `knowledge-base/` are ONE folder on macOS and on
+    // Windows, so a case variant creates exactly the unreachable folder this
+    // refuses. Refused everywhere, so a repository stays clonable onto all three.
+    expect(() => assertRepoRootNameFree('knowledge-base/Knowledge-Base/x.md', KB)).toThrow(
+      /"Knowledge-Base" is reserved/,
+    );
+    expect(() => assertRepoRootNameFree('knowledge-base/KNOWLEDGE-BASE', KB)).toThrow(
+      /refused in every spelling/,
+    );
+    // The exact-case refusal keeps its one sentence, with no aside about case.
+    let message = '';
+    try {
+      assertRepoRootNameFree('knowledge-base/knowledge-base', KB);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain('"knowledge-base" is reserved');
+    expect(message).not.toContain('in every spelling');
   });
 
   it('leaves every other name alone, the namesakes deeper down included', () => {

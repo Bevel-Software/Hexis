@@ -244,7 +244,7 @@ export function registerWorkflowTools(
         path: {
           type: 'string',
           minLength: 1,
-          description: `Workspace-relative path, as write_file expects: starts with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash.`,
+          description: `Workspace-relative path, as write_file expects: under \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash — a path without that prefix is placed under \`${kbDirName}/\`, so it names the same file.`,
         },
       },
       required: ['path'],

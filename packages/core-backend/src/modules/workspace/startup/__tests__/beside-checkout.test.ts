@@ -2,11 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { BESIDE_CHECKOUT_NOTE, BesideCheckoutStep } from '../beside-checkout.step.js';
+import { BESIDE_CHECKOUT_NOTE, noteBesideCheckout } from '../beside-checkout.js';
 
 /**
  * Strays that already exist on a running deployment are NAMED at boot and
- * touched by nothing. The normaliser stops new ones being made; this step is
+ * touched by nothing. The normaliser stops new ones being made; this scan is
  * the only way anyone learns about the old ones, now that the explorer reads
  * its roots from the checkout and no longer shows them.
  */
@@ -16,7 +16,7 @@ const KB = 'knowledge-base';
 let root = '';
 let notes: string[] = [];
 
-const step = () => new BesideCheckoutStep(root, KB, (line) => notes.push(line));
+const scan = () => noteBesideCheckout(root, KB, (line) => notes.push(line));
 
 /** A workspace directory holding a checkout, plus whatever `strays` name. */
 async function workspace(id: string, strays: { dirs?: string[]; files?: string[] } = {}): Promise<string> {
@@ -36,7 +36,7 @@ afterEach(async () => {
   await fs.rm(root, { recursive: true, force: true });
 });
 
-describe('BesideCheckoutStep', () => {
+describe('noteBesideCheckout', () => {
   it('names every file and folder beside the checkout in one note, and deletes nothing', async () => {
     // Exactly what was found on core-staging on 2026-09-22.
     const dir = await workspace('main', {
@@ -44,7 +44,7 @@ describe('BesideCheckoutStep', () => {
       files: ['TestJpg.jpg'],
     });
 
-    expect(await step().run()).toEqual({ outcome: 'ok' });
+    await scan();
 
     expect(notes).toHaveLength(1);
     expect(notes[0]).toContain(`${BESIDE_CHECKOUT_NOTE} "KnowledgeBase/", "Plugins/", "TestJpg.jpg"`);
@@ -57,13 +57,13 @@ describe('BesideCheckoutStep', () => {
 
   it('says nothing when the checkout is all there is', async () => {
     await workspace('main');
-    expect(await step().run()).toEqual({ outcome: 'ok' });
+    await scan();
     expect(notes).toEqual([]);
   });
 
   it('marks the folders with a trailing slash so one line says which is which', async () => {
     await workspace('main', { dirs: ['Reports'], files: ['Reports.md'] });
-    await step().run();
+    await scan();
     expect(notes[0]).toContain(`${BESIDE_CHECKOUT_NOTE} "Reports.md", "Reports/"`);
   });
 
@@ -72,7 +72,7 @@ describe('BesideCheckoutStep', () => {
     await workspace('alice%2Fdraft');
     await workspace('bob%2Fdraft', { dirs: ['Uploads'] });
 
-    await step().run();
+    await scan();
 
     expect(notes).toHaveLength(2);
     expect(notes.some((n) => n.includes('"stray.md"') && n.includes('"main"'))).toBe(true);
@@ -86,22 +86,39 @@ describe('BesideCheckoutStep', () => {
 
     // With `kb` configured as the clone folder, a `knowledge-base/` directory
     // IS a stray — ordinary content nobody commits — and is named as one.
-    await new BesideCheckoutStep(root, 'kb', (line) => notes.push(line)).run();
+    await noteBesideCheckout(root, 'kb', (line) => notes.push(line));
 
     expect(notes).toHaveLength(1);
     expect(notes[0]).toContain(`${BESIDE_CHECKOUT_NOTE} "${KB}/"`);
   });
 
+  // A stray's name is disk-controlled text going into an operator's log, and
+  // the filesystem allows a newline or a raw CSI in it. Escaped, the note stays
+  // ONE line and cannot forge a second or paint the terminal — the reason every
+  // name goes through `printable`, asserted here rather than left to the
+  // incidental quoting the other cases see.
+  it.runIf(process.platform !== 'win32')('escapes a stray name that could forge a line or steer the terminal', async () => {
+    await workspace('main', { files: ['bad\nname.md'], dirs: ['CSI\u009Bdir'] });
+
+    await scan();
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain('"CSI\\u009bdir/"');
+    expect(notes[0]).toContain('"bad\\nname.md"');
+    // Nothing raw survived into the line, and the line is still one line.
+    expect(notes[0]).not.toContain('\u009B');
+    expect(notes[0].split('\n')).toHaveLength(1);
+  });
+
   it('is quiet on a cold start, with no workspaces root on disk yet', async () => {
-    const missing = new BesideCheckoutStep(path.join(root, 'not-yet'), KB, (line) => notes.push(line));
-    expect(await missing.run()).toEqual({ outcome: 'ok' });
+    await noteBesideCheckout(path.join(root, 'not-yet'), KB, (line) => notes.push(line));
     expect(notes).toEqual([]);
   });
 
   it('ignores a file sitting in the workspaces root itself — a workspace is a directory', async () => {
     await fs.writeFile(path.join(root, '.DS_Store'), '', 'utf-8');
     await workspace('main');
-    await step().run();
+    await scan();
     expect(notes).toEqual([]);
   });
 });

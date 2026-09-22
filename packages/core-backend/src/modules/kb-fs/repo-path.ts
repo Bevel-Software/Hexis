@@ -111,7 +111,11 @@ export function normalizeWorkspacePath(wsPath: string, kbDirName: string): strin
   // whole bug.
   const rooted =
     wsPath === `/${kbDirName}` || wsPath.startsWith(`/${kbDirName}/`) ? wsPath.slice(1) : wsPath;
-  if (rooted.startsWith('/')) refuse();
+  // `C:/Windows/System32` and the drive-relative `C:x` are absolute too, and
+  // carry neither a leading slash nor a backslash — so they are named here
+  // rather than left to the two checks above. On Windows `path.resolve` reads
+  // the drive and the workspace dir loses; refused, like every other absolute.
+  if (rooted.startsWith('/') || /^[A-Za-z]:/.test(rooted)) refuse();
   // A leading `./` and repeated slashes are SPELLINGS, not paths: `x/a.md`,
   // `./x/a.md` and `x//a.md` are one file, which is what `canonicalRelativePath`
   // has always said and what the write turns and the lock rows coordinate on.
@@ -134,13 +138,23 @@ export function normalizeWorkspacePath(wsPath: string, kbDirName: string): strin
  * called `knowledge-base` would therefore be unreachable — every path naming
  * it is read as the checkout itself — so the name is reserved at the root
  * rather than left ambiguous. Existing ones are named at boot, never deleted.
+ *
+ * Case-INSENSITIVELY, whatever this host's filesystem does. On macOS or
+ * Windows `Knowledge-Base/` and `knowledge-base/` are one folder, so a
+ * case variant would create exactly the unreachable folder this refuses; on
+ * Linux they are two, and refusing the variant costs a name nobody should
+ * want at the root of a repository that is cloned onto all three.
  */
 export function assertRepoRootNameFree(wsPath: string, kbDirName: string): void {
   const segments = String(wsPath).replace(/\/+$/, '').split('/');
-  if (segments[0] !== kbDirName || segments[1] !== kbDirName) return;
+  const reserved = kbDirName.toLowerCase();
+  if (segments[0] !== kbDirName || segments[1]?.toLowerCase() !== reserved) return;
   throw new WorkflowValidationError(
-    `"${kbDirName}" is reserved: it is the checkout folder's name. A folder of that name at the repository root ` +
-      `could never be reached — every workspace path starting with "${kbDirName}/" names the checkout itself — so it cannot be created, moved to or renamed to.`,
+    `"${segments[1]}" is reserved: it is the checkout folder's name. A folder of that name at the repository root ` +
+      `could never be reached — every workspace path starting with "${kbDirName}/" names the checkout itself — so it cannot be created, moved to or renamed to.` +
+      // Said only when the caller spelled it differently, so the ordinary
+      // refusal stays one sentence about one name.
+      (segments[1] === kbDirName ? '' : ` A different case is the same folder wherever the repository is cloned onto a case-insensitive filesystem, so "${kbDirName}" is refused in every spelling.`),
     { kind: 'reserved-root-name', path: wsPath, kbDirName },
   );
 }

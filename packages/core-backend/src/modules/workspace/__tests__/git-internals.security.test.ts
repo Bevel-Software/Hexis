@@ -282,14 +282,18 @@ describe('workspace tools refuse the git folder', () => {
 
       it('answers a missing path exactly as an existing one', async () => {
         for (const form of Object.keys(MISSING_FORMS)) {
-          // A spelling the path rule refuses is answered on the spelling alone,
-          // and its answer quotes the path the caller sent: nothing about the
-          // disk is in it, so there is nothing for it to give away.
-          if (UNSPELLABLE.has(form)) continue;
           const existing = await call(tool, args(fileForms('config')[form]));
           const missing = await call(tool, args(MISSING_FORMS[form]));
-          expect(missing.status).toBe(existing.status);
-          expect(await missing.json()).toEqual(await existing.json());
+          expect(missing.status, form).toBe(existing.status);
+          // Compared with the file name put back. A spelling the PATH rule
+          // refuses is answered on the spelling alone, and that answer QUOTES
+          // the caller's own path — so the two bodies differ by the name the
+          // caller sent and by nothing else, which is the oracle guarantee
+          // stated exactly. (For the git refusals the substitution is a no-op:
+          // that message names no path at all.) Anything disk-derived leaking
+          // into either answer still fails this.
+          const sameName = (text: string) => JSON.parse(text.split('no-such-file').join('config'));
+          expect(sameName(await missing.text()), form).toEqual(await existing.json());
         }
       });
     });

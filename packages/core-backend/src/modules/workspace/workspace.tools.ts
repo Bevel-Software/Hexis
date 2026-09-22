@@ -1162,11 +1162,21 @@ export function registerWorkspaceTools(
       // EVERY path input becomes a repository path here, once, before any
       // handler runs: the root-anchored `/<kbDirName>/…` form Copy path gives
       // names the same workspace path, and a path with no prefix at all is
-      // placed under `<kbDirName>/` instead of being refused. A spill ref
-      // belongs to no workspace and is left exactly as it came.
+      // placed under `<kbDirName>/` instead of being refused.
+      //
+      // The one exception is `read_file`'s `__tool_chain_spill__/…` ref, which
+      // belongs to no workspace and is left exactly as it came — and it is
+      // `read_file`'s ALONE. `read_file` is the only tool that consumes a
+      // spill ref; for any other, `__tool_chain_spill__/x` is an ordinary
+      // path, and exempting it there would be a workspace-relative path that
+      // never reached the repository — the whole bug, spelled with a prefix.
       toolHandler(
         async (args, ctx) => {
-          const normalized = normalizePathArgs(args, kbDirName, (v) => spillStore.isSpillRef(v));
+          const normalized = normalizePathArgs(
+            args,
+            kbDirName,
+            spec.name === 'read_file' ? (v) => spillStore.isSpillRef(v) : undefined,
+          );
           // The git folder is refused before the handler — and so before the
           // write-denial wrapper below, which would otherwise offer to propose
           // a change to it.
