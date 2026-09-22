@@ -1243,7 +1243,15 @@ describe('FileViewer: proposing a change without write access', () => {
  * away from the pages it holds. It offers those pages now.
  */
 describe('FileViewer: nothing open', () => {
-  const TREE: FileTreeEntry = {
+  /** The workspace root the API returns, wrapping whatever the checkout holds. */
+  const workspace = (checkout: FileTreeEntry): FileTreeEntry => ({
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [checkout],
+  });
+
+  const CHECKOUT: FileTreeEntry = {
     name: 'knowledge-base',
     relativePath: 'knowledge-base',
     type: 'directory',
@@ -1292,6 +1300,22 @@ describe('FileViewer: nothing open', () => {
       { name: 'access.md', relativePath: 'knowledge-base/access.md', type: 'file' },
     ],
   };
+
+  const TREE = workspace(CHECKOUT);
+
+  /**
+   * The strays that sat beside the checkout on core-staging. Nothing here is
+   * the repository, so nothing here is ever offered as a page.
+   */
+  const STRAYS: FileTreeEntry[] = [
+    {
+      name: 'KnowledgeBase',
+      relativePath: 'KnowledgeBase',
+      type: 'directory',
+      children: [{ name: 'Planted.md', relativePath: 'KnowledgeBase/Planted.md', type: 'file' }],
+    },
+    { name: 'Stray.md', relativePath: 'Stray.md', type: 'file' },
+  ];
 
   it('does not send the reader off to an assistant', async () => {
     render(<ViewerHarness filePath={null} fileTree={TREE} />);
@@ -1377,6 +1401,30 @@ describe('FileViewer: nothing open', () => {
     expect(await screen.findByRole('button', { name: /Handbook/ })).toBeEnabled();
   });
 
+  /**
+   * The strays on core-staging put a `KnowledgeBase/` beside the checkout.
+   * The offer is the checkout's, so they change nothing — and when the
+   * checkout itself is gone there is nothing to offer, rather than whatever
+   * was written next to it.
+   */
+  it('offers the same pages with strays beside the checkout, and none without one', async () => {
+    const { unmount } = render(
+      <ViewerHarness
+        filePath={null}
+        fileTree={{ ...TREE, children: [...STRAYS, CHECKOUT] }}
+      />,
+    );
+    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Planted/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Stray/ })).toBeNull();
+    unmount();
+
+    render(<ViewerHarness filePath={null} fileTree={{ ...TREE, children: STRAYS }} />);
+    await screen.findByRole('heading', { name: /Open a page/ });
+    expect(screen.queryByRole('button', { name: /Planted/ })).toBeNull();
+    expect(screen.getByText('Pick anything from the file tree.')).toBeInTheDocument();
+  });
+
   /** A knowledge base with nothing in it has nothing to suggest, and says so. */
   it('promises nothing when there is nothing to open', async () => {
     render(<ViewerHarness filePath={null} fileTree={null} />);
@@ -1393,14 +1441,14 @@ describe('FileViewer: nothing open', () => {
     render(
       <ViewerHarness
         filePath={null}
-        fileTree={{
+        fileTree={workspace({
           name: 'knowledge-base',
           relativePath: 'knowledge-base',
           type: 'directory',
           children: [
             { name: 'Charter.md', relativePath: 'knowledge-base/Charter.md', type: 'file' },
           ],
-        }}
+        })}
       />,
     );
     expect(await screen.findByRole('button', { name: /Charter/ })).toBeInTheDocument();
