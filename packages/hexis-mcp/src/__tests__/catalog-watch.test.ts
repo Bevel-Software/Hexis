@@ -341,6 +341,19 @@ describe('createCatalogCheck', () => {
    * five seconds while the criterion failed on staging six times out of six.
    * (An idle connection is outside this budget by design: it asks nothing
    * until its next use.)
+   *
+   * WHY FIVE IS GONE, and why that is a comment rather than an assertion: the
+   * two terms this package does not own already sum to 6_100ms, so the chain
+   * overruns five seconds with the throttle at ZERO. That is a fact about
+   * measurements taken off staging, not about anything in this repository — no
+   * edit to `CATALOG_CHECK_MIN_INTERVAL_MS` or to the watch can falsify it, so
+   * asserting it would only have compared two literals to each other and called
+   * the tautology a guard. Anyone tightening the criterion back to five has to
+   * argue with these measurements, not with a line of test code; re-measure
+   * first.
+   *
+   * The assertion below is the one that bites, because the throttle is the only
+   * term in the budget this package sets: raising it past 3_900 fails this test.
    */
   it('leaves room inside the ten seconds a connection in use is promised', () => {
     expect(CATALOG_CHECK_MIN_INTERVAL_MS).toBeGreaterThan(0);
@@ -349,9 +362,5 @@ describe('createCatalogCheck', () => {
     const worstCase = deploymentSide + CATALOG_CHECK_MIN_INTERVAL_MS + refreshCost;
 
     expect(worstCase).toBeLessThanOrEqual(10_000);
-    // And the reason the criterion moved, kept where it can be checked: this
-    // chain does not fit in five seconds even with the throttle at zero. A
-    // future tightening back to five has to argue with this line.
-    expect(deploymentSide + refreshCost).toBeGreaterThan(5_000);
   });
 });
