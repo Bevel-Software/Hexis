@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { AccountErasureService } from '../account-erasure.service.js';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { AccountErasureService, type IErasureParticipant } from '../account-erasure.service.js';
 import type { Database } from '../../database/connection.js';
 
 /**
@@ -26,6 +29,20 @@ function tableOf(target: unknown): string {
   return 'unknown';
 }
 
+/**
+ * A `where` clause as the SQL it renders to.
+ *
+ * The sweeps' guard is a `notExists` over `users`, and it is the whole reason
+ * they are safe to run at all: without it they would anonymize the approvals
+ * and change requests of whoever signed in again at that address since the
+ * commit. A stub that ignored its condition would pass just as happily with
+ * the guard deleted — so the marker below is recorded only for a clause whose
+ * SQL actually names `users`, and the assertions are on that.
+ */
+function whereSql(clause: unknown): string {
+  return new PgDialect().sqlToQuery(clause as SQL).sql;
+}
+
 function statementText(statement: { queryChunks?: unknown[] }): string {
   return (statement.queryChunks ?? [])
     .flatMap((c) => (c as { value?: unknown }).value ?? [])
@@ -33,7 +50,7 @@ function statementText(statement: { queryChunks?: unknown[] }): string {
     .join(' ');
 }
 
-function harness() {
+function harness(opts: { participants?: IErasureParticipant[] } = {}) {
   /** Everything the erasure did, in order, as `<verb>:<table>` / lock labels. */
   const order: string[] = [];
   const locked: unknown[][] = [];
@@ -67,25 +84,45 @@ function harness() {
       }),
     }),
   };
+  // A client-less drizzle instance, purely to BUILD queries. Two callers share
+  // this `select`: the read that finds the user, which awaits `.limit(1)`, and
+  // the sweeps' `notExists` subquery, which is handed to drizzle as a query and
+  // has to render as one — a hand-rolled stand-in renders as nothing, and the
+  // guard these tests are about would be invisible.
+  const builder = drizzle({} as never);
   const db = {
-    select: () => ({
-      from: () => ({
-        where: () => ({
-          limit: async () => [{ id: 'u1', email: 'Bob@Bevel.software', name: 'Bob' }],
-        }),
+    select: (fields?: unknown) => ({
+      from: (table: unknown) => ({
+        where: (condition: unknown) =>
+          Object.assign(
+            builder
+              .select(fields as never)
+              .from(table as never)
+              .where(condition as never),
+            { limit: async () => [{ id: 'u1', email: 'Bob@Bevel.software', name: 'Bob' }] },
+          ),
       }),
     }),
-    // Outside the transaction: the second passes, after the commit.
+    // Outside the transaction: the second passes, once it has committed. The
+    // marker is recorded ONLY for a clause guarded on `users` — a sweep that
+    // lost that guard is a sweep that rewrites a new account's rows, so it must
+    // not be able to satisfy these tests.
     update: (table: unknown) => ({
       set: () => ({
-        where: async () => {
-          order.push(`after-commit:${tableOf(table)}`);
+        where: async (clause: unknown) => {
+          const guarded = /not exists .*"users"/s.test(whereSql(clause));
+          order.push(`${guarded ? 'after-commit' : 'unguarded'}:${tableOf(table)}`);
         },
       }),
     }),
     transaction: async <T,>(fn: (t: typeof tx) => Promise<T>) => fn(tx),
   } as unknown as Database;
-  return { svc: new AccountErasureService(db), order, locked, lockSql };
+  return {
+    svc: new AccountErasureService(db, opts.participants ?? []),
+    order,
+    locked,
+    lockSql,
+  };
 }
 
 describe('AccountErasureService: approvals are rewritten under the approval lock', () => {
@@ -132,5 +169,32 @@ describe('AccountErasureService: approvals are rewritten under the approval lock
     expect(sweep).toBeGreaterThan(committed);
     // The change requests get the same treatment, and did before this.
     expect(h.order).toContain('after-commit:change_requests');
+    // Both guarded on `users`: the marker is only recorded for a clause that
+    // names it, so a sweep that dropped the `notExists` lands here instead.
+    expect(h.order.filter((step) => step.startsWith('unguarded:'))).toEqual([]);
+  });
+
+  it('sweeps before the post-commit callbacks, so one that rejects cannot skip them', async () => {
+    // The erasure is committed by now and `eraseUser` cannot be retried into
+    // it, so a pass sequenced behind a failing callback is one that may never
+    // run at all. Nothing in the sweeps depends on a callback having succeeded.
+    const h = harness({
+      participants: [
+        {
+          inTransaction: async () => async () => {
+            h.order.push('callback');
+            throw new Error('the external store is down');
+          },
+        },
+      ],
+    });
+
+    await expect(h.svc.eraseUser('u1')).rejects.toThrow(/external store/);
+
+    expect(h.order).toContain('after-commit:pr_file_approvals');
+    expect(h.order).toContain('after-commit:change_requests');
+    expect(h.order.indexOf('after-commit:pr_file_approvals')).toBeLessThan(
+      h.order.indexOf('callback'),
+    );
   });
 });

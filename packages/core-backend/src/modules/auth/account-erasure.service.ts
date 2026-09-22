@@ -225,11 +225,14 @@ export class AccountErasureService implements IAccountErasureService {
       await tx.delete(users).where(eq(users.id, userId));
     });
 
-    // Post-commit callbacks (e.g. Mastra memory cleanup for chat threads
-    // captured inside the transaction).
-    for (const cb of postCommit) await cb();
+    // The two second passes below run BEFORE the callbacks, not after them: a
+    // callback talks to an external store and can reject, and the erasure it
+    // would abandon is already committed — `eraseUser` cannot be retried into
+    // it, so a pass sequenced behind a failing callback is a pass that may
+    // never run at all. Nothing here depends on a callback having succeeded.
 
-    // The same second pass for the approvals, and for the same kind of reason.
+    // The second pass for the approvals, for the same kind of reason as the one
+    // the change requests already had.
     //
     // The lock above orders this erasure against every writer that takes it,
     // and `approveFile` re-reads the account under that lock before it writes
@@ -272,6 +275,10 @@ export class AccountErasureService implements IAccountErasureService {
           notExists(this.db.select({ id: users.id }).from(users).where(eq(users.email, target.email))),
         ),
       );
+
+    // Post-commit callbacks (e.g. Mastra memory cleanup for chat threads
+    // captured inside the transaction).
+    for (const cb of postCommit) await cb();
 
     log.info(`erased user id=${userId}`);
     return true;
