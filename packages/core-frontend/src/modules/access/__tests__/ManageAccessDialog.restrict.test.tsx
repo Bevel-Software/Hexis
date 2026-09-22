@@ -193,7 +193,7 @@ describe('ManageAccessDialog: lowering an inherited set by one verb', () => {
     expect(setItem(menu, /^can read$/i)).toHaveAttribute('aria-description', 'from Sales');
   });
 
-  it('a GROUP with download from the parent: picking Can read denies download for the group', async () => {
+  it('a GROUP with download from the parent: unticking Can download denies download for the group', async () => {
     const user = userEvent.setup();
     const GTM = { name: 'GTM Team', kind: 'group' as const };
     api.fetchFileAccess.mockResolvedValue({
@@ -219,7 +219,10 @@ describe('ManageAccessDialog: lowering an inherited set by one verb', () => {
     await screen.findByText("GTM Team");
 
     const menu = await openRowMenu(user, /^can read, can download$/i);
-    await user.click(setItem(menu, /^can read$/i));
+    // Download is its own axis: the checked item is the one that takes it
+    // away. Can read is the tier the group already sits at, with nothing
+    // below it, so it is not the instrument here.
+    await user.click(setItem(menu, /^can download$/i));
 
     await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
     expect(api.revokeAccess).toHaveBeenCalledWith(
