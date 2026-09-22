@@ -1968,3 +1968,26 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
     });
   });
 });
+
+/**
+ * The guide's rule in `.bevelignore` is a gitignore PATTERN, and the name rules
+ * admit characters gitignore reads as syntax: written bare, `#Guide.md` is a
+ * comment and hides nothing. Rendered escaped, the rule names exactly the file.
+ */
+describe('TemplateFilesStep: a guide named with gitignore syntax', () => {
+  it('escapes the name in the ignore rule it writes, and keeps it escaped on the next boot', async () => {
+    configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: '#Guide[1].md' });
+    await seedUpstream({ 'marker.txt': 'seeded' });
+    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    const dir = await checkout(DEFAULT_BRANCH);
+    const ignore = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
+    const escaped = String.raw`\#Guide\[1\].md`;
+    expect(ignore).toContain(escaped);
+    expect(ignore).not.toContain('#Guide[1].md');
+    expect(await exists(dir, '#Guide[1].md')).toBe(true);
+    // A second boot sees the escaped rule as present and adds no second line.
+    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    const again = norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), '.bevelignore'), 'utf8'));
+    expect(again.split('\n').filter((l) => l.trim() === escaped)).toHaveLength(1);
+  });
+});

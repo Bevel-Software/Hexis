@@ -98,6 +98,28 @@ function isLockTimeout(err: unknown): boolean {
   );
 }
 
+/** A statement the database did not answer in time: the connection is presumed wedged. */
+export class WireTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WireTimeoutError';
+  }
+}
+
+/** `work`, or a {@link WireTimeoutError} naming `what` once `ms` have passed without an answer. */
+async function bounded<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new WireTimeoutError(`Timed out after ${ms}ms ${what} — the database did not answer.`)), ms);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** The name of a lock, for an error message a human has to act on. */
 function lockName(lock: AdvisoryLockId): string {
   const entry = Object.entries(AdvisoryLock).find(([, value]) => value === lock);
@@ -120,13 +142,34 @@ export async function withAdvisoryLock<T>(
 ): Promise<T> {
   const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
   const client = await db.$client.connect();
+  // A statement that did not answer in time is STILL RUNNING on this
+  // connection — `bounded` gives up waiting, it cannot take the statement
+  // back — and every later statement on it, the rollback included, queues
+  // behind it. So a connection that wedged is remembered here and destroyed
+  // in the `finally` instead of being rolled back: ending its session is
+  // what releases whatever it held, and nothing waits on it again.
+  let wedged: Error | null = null;
+  const onWire = async <R>(work: Promise<R>, what: string): Promise<R> => {
+    try {
+      return await bounded(work, waitMs, what);
+    } catch (err) {
+      if (err instanceof WireTimeoutError) wedged = err;
+      throw err;
+    }
+  };
   try {
-    await client.query('begin');
+    // `lock_timeout` bounds the wait for the lock, once it is set. The two
+    // statements before it run on a connection that may be half-dead — the
+    // socket open, the server gone — and would otherwise wait forever, with
+    // the boot behind them. So they carry a deadline of their own, and a
+    // connection that cannot answer them fails the boot as loudly as one that
+    // cannot take the lock.
+    await onWire(client.query('begin'), 'beginning the lock transaction');
     try {
       // `set_config` rather than `SET LOCAL`, which cannot take a bind
       // parameter. `true` makes the setting transaction-local, so the
       // `rollback` below reverts it.
-      await client.query("select set_config('lock_timeout', $1, true)", [String(waitMs)]);
+      await onWire(client.query("select set_config('lock_timeout', $1, true)", [String(waitMs)]), 'setting lock_timeout');
       await client.query('select pg_advisory_xact_lock($1, $2)', [LOCK_NAMESPACE, lock]);
     } catch (err) {
       if (isLockTimeout(err)) {
@@ -141,17 +184,26 @@ export async function withAdvisoryLock<T>(
     }
     return await fn();
   } finally {
-    // Ends the transaction, which releases the lock and reverts `lock_timeout`.
-    // A connection that cannot be rolled back is destroyed rather than returned
-    // to the pool: ending its session is what releases the lock, and a
-    // connection in an unknown transaction state is no use to anyone else.
-    let rollbackError: Error | undefined;
-    try {
-      await client.query('rollback');
-    } catch (err) {
-      rollbackError = err instanceof Error ? err : new Error(String(err));
+    if (wedged) {
+      // Not rolled back: a rollback would queue behind the statement that
+      // never answered, and the boot would hang on it after all. Destroyed
+      // — `release(err)` ends the session — which is what lets go of
+      // whatever the connection held.
+      client.release(wedged);
+    } else {
+      // Ends the transaction, which releases the lock and reverts
+      // `lock_timeout`. A connection that cannot be rolled back is destroyed
+      // rather than returned to the pool: ending its session is what releases
+      // the lock, and a connection in an unknown transaction state is no use
+      // to anyone else.
+      let rollbackError: Error | undefined;
+      try {
+        await client.query('rollback');
+      } catch (err) {
+        rollbackError = err instanceof Error ? err : new Error(String(err));
+      }
+      client.release(rollbackError);
     }
-    client.release(rollbackError);
   }
 }
 

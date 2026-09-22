@@ -2609,7 +2609,7 @@ describe('FileExplorer: deleting a folder with proposed files', () => {
       },
     ],
   });
-  /** The branch after "Delete folder only": the folder is gone, the proposal is not. */
+  /** The branch after "Delete current content only": the folder is gone, the proposal is not. */
   // Derived from a checkout-rooted fixture, so it says so itself: the
   // declaration is per-object, and a spread is a new object.
   const TREE_WITHOUT_REPORTS: FileTreeEntry = rootedAtCheckout({
@@ -2686,18 +2686,18 @@ describe('FileExplorer: deleting a folder with proposed files', () => {
     expect(dialog).toHaveTextContent('Delete Reports and its 1 file?');
     expect(mockAuthFetch).toHaveBeenCalledWith('/api/workflow/change-requests/under-folder?path=Data%2FReports');
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Delete folder only' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Delete current content only' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Delete folder and its proposed changes' })).toBeEnabled();
   });
 
-  it('"Delete folder only" deletes the branch copy and leaves the requests alone', async () => {
+  it('"Delete current content only" deletes the branch copy and leaves the requests alone', async () => {
     answer([request()]);
     const retracted = vi.fn();
     window.addEventListener('bevel:suggestions-retracted', retracted);
     const { deleteEntry } = renderWithProposal();
     try {
       await chooseDelete('Reports');
-      const onlyFolder = await screen.findByRole('button', { name: 'Delete folder only' });
+      const onlyFolder = await screen.findByRole('button', { name: 'Delete current content only' });
       await act(async () => {
         fireEvent.click(onlyFolder);
       });
@@ -2815,7 +2815,7 @@ describe('FileExplorer: deleting a folder with proposed files', () => {
     expect(both).toBeDisabled();
     expect(screen.getByRole('note')).toHaveTextContent('#40 was proposed by Ana');
     expect(screen.getByRole('dialog')).toHaveTextContent('#40 “Colleague draft” by Ana (1 proposed file)');
-    expect(screen.getByRole('button', { name: 'Delete folder only' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Delete current content only' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
   });
 
@@ -2824,7 +2824,7 @@ describe('FileExplorer: deleting a folder with proposed files', () => {
     const { deleteEntry } = renderWithProposal(TREE_WITHOUT_REPORTS);
     // The proposal alone keeps the folder in the tree.
     await chooseDelete('Reports');
-    const onlyFolder = await screen.findByRole('button', { name: 'Delete folder only' });
+    const onlyFolder = await screen.findByRole('button', { name: 'Delete current content only' });
     expect(screen.getByRole('dialog')).toHaveTextContent('Delete Reports and its 0 files?');
     await act(async () => {
       fireEvent.click(onlyFolder);
@@ -2843,7 +2843,7 @@ describe('FileExplorer: deleting a folder with proposed files', () => {
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/workflow/change-requests/under-folder?path=Data%2FReports'),
     );
     expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
-    expect(screen.queryByRole('button', { name: 'Delete folder only' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete current content only' })).not.toBeInTheDocument();
   });
 
   it('still asks about proposals when the shared request list has not shown any (loading or failed)', async () => {

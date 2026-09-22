@@ -6,10 +6,10 @@ import {
 } from '../../change-requests/services/change-requests.api';
 import { useWorkspace } from './workspace.context';
 import {
-  PR_STALE_EVENT,
   PR_STALE_FALLBACK_MS,
   SUGGESTIONS_OPTIMISTIC_EVENT,
   SUGGESTIONS_RETRACTED_EVENT,
+  subscribePrStale,
 } from '../../../core/events';
 import {
   NO_CHANGE_REQUESTS,
@@ -161,8 +161,9 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     // the event fires because the sender KNOWS the list changed, and a cached
     // answer would hide exactly the change it is announcing (the suggestion
     // rows for a just-uploaded file would sit invisible until the TTL).
-    const onStale = () => load({ fresh: true });
-    window.addEventListener(PR_STALE_EVENT, onStale);
+    // Coalesced: one action can raise the event more than once (see
+    // `subscribePrStale`), and each used to be its own fresh request.
+    const offStale = subscribePrStale(() => load({ fresh: true }));
     // The fallback for a stale event that never came. Stale events now follow
     // the bus's merge / reject / apply-failed broadcasts, so a dropped bus
     // event would otherwise leave an applied request's markers in this tree
@@ -206,7 +207,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
       cancelled = true;
       clearInterval(reconcile);
       document.removeEventListener('visibilitychange', onVisible);
-      window.removeEventListener(PR_STALE_EVENT, onStale);
+      offStale();
       window.removeEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
       window.removeEventListener(SUGGESTIONS_RETRACTED_EVENT, onRetract);
     };

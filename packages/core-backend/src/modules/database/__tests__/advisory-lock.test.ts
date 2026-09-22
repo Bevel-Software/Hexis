@@ -14,7 +14,7 @@ interface RecordedClient {
   releasedWith: Error | undefined;
 }
 
-function fakePool(opts: { failOn?: (sql: string) => Error } = {}) {
+function fakePool(opts: { failOn?: (sql: string) => Error; hangOn?: (sql: string) => boolean } = {}) {
   const clients: RecordedClient[] = [];
   const pool = {
     async connect() {
@@ -23,6 +23,8 @@ function fakePool(opts: { failOn?: (sql: string) => Error } = {}) {
       return {
         async query(sql: string) {
           record.queries.push(sql);
+          // A statement the database never answers: the promise stays pending.
+          if (opts.hangOn?.(sql)) return new Promise<never>(() => undefined);
           const failure = opts.failOn?.(sql);
           if (failure) throw failure;
           return { rows: [] };
@@ -106,6 +108,27 @@ describe('withAdvisoryLock', () => {
     // otherwise, and the connection would carry it back into the pool.
     expect(clients[0].queries.at(-1)).toBe('rollback');
     expect(clients[0].released).toBe(true);
+  });
+
+  it('fails the boot, and destroys the connection without rolling back, when the database stops answering', async () => {
+    // The socket is up, the server is gone: `begin` never returns. Waiting on
+    // a rollback would queue behind it and hang the boot after all.
+    const { clients, db } = fakePool({ hangOn: (sql) => sql === 'begin' });
+    let ran = false;
+    await expect(
+      withAdvisoryLock(
+        db,
+        AdvisoryLock.Migrations,
+        async () => {
+          ran = true;
+        },
+        { waitMs: 20 },
+      ),
+    ).rejects.toThrow(/did not answer/);
+    expect(ran).toBe(false);
+    expect(clients[0].queries).not.toContain('rollback');
+    expect(clients[0].released).toBe(true);
+    expect(clients[0].releasedWith).toBeInstanceOf(Error);
   });
 
   it('destroys a connection it could not roll back instead of pooling it', async () => {

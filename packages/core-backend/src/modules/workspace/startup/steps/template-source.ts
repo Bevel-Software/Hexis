@@ -1,6 +1,6 @@
 import path from 'node:path';
-import { renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
-import { isAbsence, type EntryStat, type IFsProbe } from '../../../../shared/fs.contract.js';
+import { agentsFileOf, currentKbLayout, gitignoreLiteral, renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
+import { IGNORE_FILENAME, isAbsence, type EntryStat, type IFsProbe } from '../../../../shared/fs.contract.js';
 import { PREAMBLE_FILE } from '../../../agent-instructions/compose.js';
 import { defaultKbTemplateDir } from '../../../../assets.js';
 import { logger } from '../../../../shared/logging.js';
@@ -126,6 +126,16 @@ export class TemplateSource {
       // The packaged copy, read the same way — it renders its own
       // placeholders and cannot fall back again (its guard is this one).
       return new TemplateSource(this.disk, packaged).read(relPath);
+    }
+    // In the ignore file the guide's name is a PATTERN, and a name gitignore
+    // reads as syntax (`#Guide.md`, `!Guide.md`, brackets) would hide nothing
+    // written bare. Escaped there, and only there: everywhere else the
+    // placeholder is prose. ONE render, with the escaped name as the layout's
+    // — a second pass over the rendered text would read a name that happens
+    // to contain a placeholder as one.
+    if (relPath === IGNORE_FILENAME) {
+      const layout = currentKbLayout();
+      return renderKbLayoutPlaceholders(raw, { ...layout, agentsFile: gitignoreLiteral(agentsFileOf(layout)) });
     }
     return renderKbLayoutPlaceholders(raw);
   }

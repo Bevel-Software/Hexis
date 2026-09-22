@@ -23,6 +23,7 @@ import {
   WorkspaceContext,
   type WorkspaceContextValue,
 } from '../../state/workspace.context';
+import { PR_STALE_COALESCE_MS } from '../../../../core/events';
 
 function pr(over: Partial<PullRequestSummary> = {}): PullRequestSummary {
   return {
@@ -215,8 +216,10 @@ describe('useOpenChangeRequests', () => {
     // The server catches up: a FRESH fetch carries the path → the real entry
     // takes over, and the derived values stay identical.
     api.listMyChangeRequests.mockResolvedValue([announced]);
-    act(() => {
+    // Past the coalescing window, so the stale fetch has actually left.
+    await act(async () => {
       window.dispatchEvent(new Event('bevel:pr-stale'));
+      await new Promise<void>((resolve) => setTimeout(resolve, PR_STALE_COALESCE_MS * 3));
     });
     await waitFor(() =>
       expect(api.listMyChangeRequests).toHaveBeenCalledWith({ fresh: true }),
@@ -317,8 +320,10 @@ describe('useOpenChangeRequests', () => {
     let staleMine!: (v: PullRequestSummary[]) => void;
     api.listOpenChangeRequests.mockReturnValueOnce(new Promise((r) => { staleAll = r; }));
     api.listMyChangeRequests.mockReturnValueOnce(new Promise((r) => { staleMine = r; }));
-    act(() => {
+    // Past the coalescing window, so the stale fetch has actually left.
+    await act(async () => {
       window.dispatchEvent(new Event('bevel:pr-stale'));
+      await new Promise<void>((resolve) => setTimeout(resolve, PR_STALE_COALESCE_MS * 3));
     });
     // The retraction's own refetch never answers in this test.
     api.listOpenChangeRequests.mockReturnValue(new Promise(() => {}));
@@ -348,8 +353,10 @@ describe('useOpenChangeRequests', () => {
     let staleMine!: (v: PullRequestSummary[]) => void;
     api.listOpenChangeRequests.mockReturnValueOnce(new Promise((r) => { staleAll = r; }));
     api.listMyChangeRequests.mockReturnValueOnce(new Promise((r) => { staleMine = r; }));
-    act(() => {
+    // Past the coalescing window, so the stale fetch has actually left.
+    await act(async () => {
       window.dispatchEvent(new Event('bevel:pr-stale'));
+      await new Promise<void>((resolve) => setTimeout(resolve, PR_STALE_COALESCE_MS * 3));
     });
     // The retraction's refetch answers first: the files are gone.
     api.listOpenChangeRequests.mockResolvedValue([]);

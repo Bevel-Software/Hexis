@@ -37,6 +37,14 @@ describe('redactSecret', () => {
       'fetch https://git.example.com/kb.git?*** failed',
     );
     expect(redactSecret('https://alice:pw@example.com/kb.git?sig=zz')).toBe('https://***@example.com/kb.git?***');
+    // A credential with a quote of its own does not end the query early; the
+    // quote git closes the URL with is kept.
+    expect(redactSecret("unable to access 'https://git.example.com/kb.git?sig=ab'cd&more=x': 403")).toBe(
+      "unable to access 'https://git.example.com/kb.git?***': 403",
+    );
+    expect(redactSecret('unable to access "https://git.example.com/kb.git?sig=ab\'cd": 403')).toBe(
+      'unable to access "https://git.example.com/kb.git?***": 403',
+    );
   });
 
   /**
