@@ -44,20 +44,26 @@ const checker = new AllowedToolsChecker(
   KB_DIR,
 );
 
+/** What the tool handed the service on its last `getSkill` — the tool's one job is to pass it on. */
+let lastGetSkillArgs: unknown[] = [];
+
 const skillService: ISkillService = {
   listSkills: async () => [],
-  getSkill: async () => ({
-    ok: true,
-    kind: 'skill',
-    skill: {
-      name: 'rfi',
-      description: 'RFI.',
-      path: 'Plugins/Sales/rfi',
-      body: '# RFI',
-      files: [],
-      allowedTools: ['Bash', 'hubspot.search', 'hubspot.serch', 'legacy_crm'],
-    },
-  }),
+  getSkill: async (...args: unknown[]) => {
+    lastGetSkillArgs = args;
+    return {
+      ok: true,
+      kind: 'skill',
+      skill: {
+        name: 'rfi',
+        description: 'RFI.',
+        path: 'Plugins/Sales/rfi',
+        body: '# RFI',
+        files: [],
+        allowedTools: ['Bash', 'hubspot.search', 'hubspot.serch', 'legacy_crm'],
+      },
+    };
+  },
   invalidate: () => {},
 };
 
@@ -192,5 +198,13 @@ describe('allowed-tools warnings on the agent surfaces', () => {
     expect(body.ok).toBe(true);
     expect(body.skill.name).toBe('rfi');
     expect(body.warnings.map((w) => w.entry)).toEqual(['hubspot.serch', 'legacy_crm']);
+  });
+
+  it('get_skill passes `version` (and `file`) through to the service', async () => {
+    const base = await start();
+    await post(`${base}/api/agent/tools/get_skill`, { name: 'rfi', version: '1.2.0' });
+    expect(lastGetSkillArgs.slice(1)).toEqual(['rfi', undefined, { version: '1.2.0' }]);
+    await post(`${base}/api/agent/tools/get_skill`, { name: 'rfi', file: 'scripts/x.py' });
+    expect(lastGetSkillArgs.slice(1)).toEqual(['rfi', 'scripts/x.py', { version: undefined }]);
   });
 });

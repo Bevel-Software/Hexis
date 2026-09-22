@@ -12,13 +12,23 @@ import { extractFrontmatter, resolveDeclaredId, dedupeById } from '../../shared/
 import type { IgnoreRules, ITreeWalker } from '../../shared/fs.contract.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
 import type {
+  GetSkillOptions,
   ISkillService,
   GetSkillResult,
   Skill,
+  SkillHistorySource,
   SkillSummary,
 } from './skills.contract.js';
 
 const CACHE_TTL_MS = 60_000;
+
+/**
+ * How far back a `version` is looked for: commits of the skill's `SKILL.md`,
+ * newest first. Bounded because each commit costs one read of the file at
+ * that commit; a skill's own history is short, and a version older than two
+ * hundred edits of one file is one nobody is going to ask an agent for.
+ */
+const VERSION_HISTORY_LIMIT = 200;
 
 interface ParsedSkill {
   summary: SkillSummary;
@@ -34,6 +44,12 @@ interface ParsedSkill {
  */
 export class SkillService implements ISkillService {
   private readonly cache: TtlCache<ParsedSkill[]>;
+  /**
+   * Where a `version` is read from — git, attached by the composition root
+   * once the git service exists (it is built after this one). Without it a
+   * `version` cannot be answered and is reported as not found, listing none.
+   */
+  private history: SkillHistorySource | null = null;
 
   constructor(
     private readonly workspaceService: WorkspaceService,
@@ -43,6 +59,11 @@ export class SkillService implements ISkillService {
     now: () => number = Date.now,
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
+  }
+
+  /** Attach the history source a `version` is answered from. */
+  setHistory(history: SkillHistorySource): void {
+    this.history = history;
   }
 
   invalidate(): void {
@@ -61,7 +82,12 @@ export class SkillService implements ISkillService {
     return summaries.filter((s) => allowed.get(`${s.path}/SKILL.md`) === true);
   }
 
-  async getSkill(userEmail: string, name: string, file?: string): Promise<GetSkillResult> {
+  async getSkill(
+    userEmail: string,
+    name: string,
+    file?: string,
+    options: GetSkillOptions = {},
+  ): Promise<GetSkillResult> {
     if (!isSafeSkillName(name)) return { ok: false, error: 'not_found' };
     const found = (await this.scan()).find((s) => s.summary.name === name);
     if (!found) return { ok: false, error: 'not_found' };
@@ -84,6 +110,15 @@ export class SkillService implements ISkillService {
     const allowed = await this.readable(userEmail, [found.summary.path]);
     if (allowed.get(`${found.summary.path}/SKILL.md`) !== true) {
       return { ok: false, error: 'forbidden' };
+    }
+
+    // A version other than the one on disk now is read out of history —
+    // after the access check above, which is the caller's access to the skill
+    // as it is now. The version on disk IS the latest, whatever it is called,
+    // so asking for it by name answers from disk like asking for nothing.
+    const wanted = options.version?.trim();
+    if (wanted !== undefined && wanted.length > 0 && wanted !== found.summary.version) {
+      return this.getSkillAtVersion(wsId, found, name, wanted, file);
     }
 
     if (file !== undefined) {
@@ -110,6 +145,66 @@ export class SkillService implements ISkillService {
   }
 
   // --- internal ---------------------------------------------------------------
+
+  /**
+   * The skill as it was at the most recent default-branch commit whose
+   * `SKILL.md` declared `wanted` — walking that file's history newest first,
+   * so a version that was published, superseded and republished answers with
+   * its latest copy. Every version the walk met is collected on the way, so
+   * a miss can say what there is to ask for.
+   *
+   * The bundled files come from the tree at that commit, without the ignore
+   * rules the live listing applies (those are the rules in force NOW, about a
+   * tree that was different then); `SKILL.md` itself is left out as always.
+   */
+  private async getSkillAtVersion(
+    wsId: string,
+    found: ParsedSkill,
+    name: string,
+    wanted: string,
+    file: string | undefined,
+  ): Promise<GetSkillResult> {
+    if (file !== undefined && !isSafeRelFile(file)) return { ok: false, error: 'invalid_file' };
+    const history = this.history;
+    if (!history) return { ok: false, error: 'version_not_found', versions: [] };
+    const folder = found.summary.path;
+    const skillMd = `${folder}/SKILL.md`;
+    const versions: string[] = [];
+    const seen = new Set<string>();
+    const shas = await history.pathHistory(wsId, 'HEAD', skillMd, VERSION_HISTORY_LIMIT);
+    for (const sha of shas) {
+      const raw = await history.readFileAtRef(wsId, sha, skillMd);
+      if (raw === null) continue;
+      const fm = parseSkillFrontmatter(raw);
+      if (fm.version === undefined) continue;
+      if (!seen.has(fm.version)) {
+        seen.add(fm.version);
+        versions.push(fm.version);
+      }
+      if (fm.version !== wanted) continue;
+
+      const files = (await history.listFilesAtRef(wsId, sha, folder))
+        .filter((p) => p !== skillMd)
+        .sort();
+      if (file !== undefined) {
+        const repoPath = `${folder}/${file}`;
+        if (!files.includes(repoPath)) return { ok: false, error: 'not_found' };
+        const content = await history.readFileAtRef(wsId, sha, repoPath);
+        if (content === null) return { ok: false, error: 'not_found' };
+        return { ok: true, kind: 'file', file: { name, file, path: repoPath, content } };
+      }
+      const skill: Skill = {
+        ...found.summary,
+        description: fm.description,
+        version: fm.version,
+        body: fm.body,
+        allowedTools: fm.allowedTools,
+        files,
+      };
+      return { ok: true, kind: 'skill', skill };
+    }
+    return { ok: false, error: 'version_not_found', versions };
+  }
 
   /**
    * The ONE read gate both surfaces resolve through, keyed by each skill's
@@ -268,6 +363,12 @@ function scalarToString(value: unknown): string | undefined {
   return undefined;
 }
 
+/** The mapping under `key`, or an empty one when there is none (or it is not a mapping). */
+function nested(data: Record<string, unknown>, key: string): Record<string, unknown> {
+  const value = data[key];
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
 /**
  * Exported for the pending-skill surface, which parses a SKILL.md read at a
  * change request's ref rather than off disk. Same parser deliberately: a
@@ -299,8 +400,13 @@ export function parseSkillFrontmatter(raw: string): {
   }
 
   const description = typeof data.description === 'string' ? data.description.trim() : '';
-  const metadata = (data.metadata ?? {}) as Record<string, unknown>;
-  const version = scalarToString(data.version) ?? scalarToString(metadata.version);
+  // `metadata.version` is where the Agent Skills format keeps a version and
+  // what the platform writes; a top-level `version` and `lifecycle.version`
+  // (other conventions a skill may arrive with) are read when it is absent.
+  const version =
+    scalarToString(nested(data, 'metadata').version) ??
+    scalarToString(data.version) ??
+    scalarToString(nested(data, 'lifecycle').version);
 
   // `allowed-tools` is a space-separated string (agentskills) or a YAML list.
   const at = data['allowed-tools'];

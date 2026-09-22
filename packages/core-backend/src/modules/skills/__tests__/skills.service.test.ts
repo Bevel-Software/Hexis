@@ -9,6 +9,12 @@ import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { readFile as fsReadFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { GitService } from '../../workflow/git/git.service.js';
+
+const execFileAsync = promisify(execFile);
 
 const KB_DIR = 'knowledge-base';
 const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
@@ -66,7 +72,9 @@ describe('SkillService', () => {
     );
     await writeFile(join(skills, 'Development', 'access.md'), '---\nwrite:\n  - Developer\n---\n');
   });
-  afterEach(() => rm(root, { recursive: true, force: true }));
+  // Retried: the version tests put a real git repository under `root`, and a
+  // git child may still hold a `.git` handle for a moment on Windows.
+  afterEach(() => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   test('lists shared skills under the Skills root alongside plugin skills', async () => {
     const shared = join(root, wsId, KB_DIR, 'Skills', 'Engineering', 'deploy');
@@ -317,6 +325,155 @@ describe('SkillService', () => {
       const { access } = splitBrain(false);
       // Not `not_found`: the skill exists and the caller may not read it.
       expect(await svc(access).getSkill('user@x.eu', 'rfi', 'scripts/build_xlsx.py')).toEqual({
+        ok: false,
+        error: 'forbidden',
+      });
+    });
+  });
+
+  test('the version is `metadata.version` first, then `version`, then `lifecycle.version`', async () => {
+    const skills = join(root, wsId, KB_DIR, 'Plugins');
+    const put = async (name: string, frontmatter: string) => {
+      await mkdir(join(skills, name), { recursive: true });
+      await writeFile(join(skills, name, 'SKILL.md'), `---\n${frontmatter}\n---\n\n# ${name}\n`);
+    };
+    await put('meta-wins', 'version: 0.9.0\nmetadata:\n  version: "2.0.0"');
+    await put('lifecycle-only', 'lifecycle:\n  version: 3.1');
+    await put('bare-metadata', 'metadata: notes');
+    const list = await svc().listSkills();
+    const version = (name: string) => list.find((s) => s.name === name)?.version;
+    expect(version('meta-wins')).toBe('2.0.0');
+    expect(version('rfi')).toBe('1.4.0'); // top-level `version`, no metadata
+    expect(version('lifecycle-only')).toBe('3.1');
+    expect(version('bare-metadata')).toBeUndefined();
+  });
+
+  /**
+   * `getSkill` with a `version` reads the skill out of the default branch's
+   * git history — a real repository here, driven through the real GitService,
+   * because the walk (newest first, first declaring commit wins, files from
+   * that commit's tree) is exactly what these assert.
+   */
+  describe('getSkill with a version', () => {
+    let repo: string;
+
+    const runGit = (args: string[]) =>
+      execFileAsync('git', args, {
+        cwd: repo,
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: 'Test',
+          GIT_AUTHOR_EMAIL: 't@x.com',
+          GIT_COMMITTER_NAME: 'Test',
+          GIT_COMMITTER_EMAIL: 't@x.com',
+        },
+      });
+    const commit = async (message: string) => {
+      await runGit(['add', '-A']);
+      await runGit(['commit', '-q', '-m', message]);
+    };
+    const skillMd = (version: string, body: string, description = 'RFI.') =>
+      `---\nname: rfi\ndescription: ${description}\nmetadata:\n  version: "${version}"\n---\n\n${body}\n`;
+
+    const versioned = (access: IAccessControl = allowAll) => {
+      const service = svc(access);
+      service.setHistory(new GitService(workspaceService, new WorkflowHooks(), KB_DIR));
+      return service;
+    };
+
+    beforeEach(async () => {
+      repo = join(root, wsId, KB_DIR);
+      const rfi = join(repo, 'Plugins', 'rfi');
+      await runGit(['init', '-q', '-b', DEFAULT_BRANCH]);
+      await runGit(['config', 'core.autocrlf', 'false']);
+      // 1.0.0 — the body and one script; no build_xlsx.py yet.
+      await rm(join(rfi, 'scripts', 'build_xlsx.py'));
+      await writeFile(join(rfi, 'scripts', 'draft.py'), 'print("v1")\n');
+      // A non-ASCII name: git would C-quote it on a line-based listing.
+      await writeFile(join(rfi, 'scripts', 'übersicht.md'), 'v1\n');
+      await writeFile(join(rfi, 'SKILL.md'), skillMd('1.0.0', '# RFI v1', 'First cut.'));
+      await commit('rfi 1.0.0');
+      // 1.1.0 — the script changes, draft.py stays.
+      await writeFile(join(rfi, 'scripts', 'draft.py'), 'print("v1.1")\n');
+      await writeFile(join(rfi, 'SKILL.md'), skillMd('1.1.0', '# RFI v1.1'));
+      await commit('rfi 1.1.0');
+      // An edit that keeps 1.1.0: the version's latest copy is this one.
+      await writeFile(join(rfi, 'SKILL.md'), skillMd('1.1.0', '# RFI v1.1 (typo fixed)'));
+      await commit('rfi 1.1.0 typo');
+      // 1.4.0 — what is on disk now: the fixture body, build_xlsx.py, draft.py gone.
+      await rm(join(rfi, 'scripts', 'draft.py'));
+      await rm(join(rfi, 'scripts', 'übersicht.md'));
+      await writeFile(join(rfi, 'scripts', 'build_xlsx.py'), 'print("xlsx")\n');
+      await writeFile(join(rfi, 'SKILL.md'), RFI_SKILL);
+      await commit('rfi 1.4.0');
+    });
+
+    test('serves the body, description and bundled files as they were at that version', async () => {
+      const res = await versioned().getSkill('user@x.eu', 'rfi', undefined, { version: '1.0.0' });
+      expect(res.ok && res.kind === 'skill').toBe(true);
+      if (!res.ok || res.kind !== 'skill') return;
+      expect(res.skill.version).toBe('1.0.0');
+      expect(res.skill.description).toBe('First cut.');
+      expect(res.skill.body).toBe('# RFI v1\n');
+      expect(res.skill.files).toEqual(['Plugins/rfi/scripts/draft.py', 'Plugins/rfi/scripts/übersicht.md']);
+      expect(res.skill.path).toBe('Plugins/rfi');
+      const file = await versioned().getSkill('user@x.eu', 'rfi', 'scripts/übersicht.md', { version: '1.0.0' });
+      expect(file.ok && file.kind === 'file' && file.file.content).toBe('v1\n');
+    });
+
+    test('a version declared by several commits answers with its most recent copy', async () => {
+      const res = await versioned().getSkill('user@x.eu', 'rfi', undefined, { version: '1.1.0' });
+      expect(res.ok && res.kind === 'skill' && res.skill.body).toBe('# RFI v1.1 (typo fixed)\n');
+    });
+
+    test('the current version, or no version, is served from disk', async () => {
+      const now = await svc().getSkill('user@x.eu', 'rfi');
+      // No history attached: were 1.4.0 looked up in git, this could not answer.
+      expect(await svc().getSkill('user@x.eu', 'rfi', undefined, { version: '1.4.0' })).toEqual(now);
+      expect(await svc().getSkill('user@x.eu', 'rfi', undefined, { version: '  ' })).toEqual(now);
+    });
+
+    test('a bundled file is read at that version, and one not there then is not found', async () => {
+      const service = versioned();
+      const file = await service.getSkill('user@x.eu', 'rfi', 'scripts/draft.py', { version: '1.0.0' });
+      expect(file).toEqual({
+        ok: true,
+        kind: 'file',
+        file: { name: 'rfi', file: 'scripts/draft.py', path: 'Plugins/rfi/scripts/draft.py', content: 'print("v1")\n' },
+      });
+      expect(await service.getSkill('user@x.eu', 'rfi', 'scripts/build_xlsx.py', { version: '1.0.0' })).toEqual({
+        ok: false,
+        error: 'not_found',
+      });
+      expect(await service.getSkill('user@x.eu', 'rfi', '../etc/passwd', { version: '1.0.0' })).toEqual({
+        ok: false,
+        error: 'invalid_file',
+      });
+    });
+
+    test('a version never declared lists the ones that were, newest first', async () => {
+      expect(await versioned().getSkill('user@x.eu', 'rfi', undefined, { version: '9.9.9' })).toEqual({
+        ok: false,
+        error: 'version_not_found',
+        versions: ['1.4.0', '1.1.0', '1.0.0'],
+      });
+    });
+
+    test('without a history source a version cannot be answered and lists nothing', async () => {
+      expect(await svc().getSkill('user@x.eu', 'rfi', undefined, { version: '1.0.0' })).toEqual({
+        ok: false,
+        error: 'version_not_found',
+        versions: [],
+      });
+    });
+
+    test('history is gated on the caller reading the skill now', async () => {
+      const denyRfi: IAccessControl = {
+        canRead: async () => true,
+        canReadBatch: async (_w: string, _e: string, paths: string[]) =>
+          new Map(paths.map((p) => [p, !p.includes('/rfi/')])),
+      } as unknown as IAccessControl;
+      expect(await versioned(denyRfi).getSkill('user@x.eu', 'rfi', undefined, { version: '1.0.0' })).toEqual({
         ok: false,
         error: 'forbidden',
       });

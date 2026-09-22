@@ -528,6 +528,10 @@ export async function createCoreServices(
     accessControl,
     gitRunner,
   );
+  // `get_skill` with a `version` reads the skill out of the default branch's
+  // history; the skill service is built before git exists, so git is handed
+  // to it here.
+  skillService.setHistory(gitService);
   // A fresh clone has already fetched every ref — let the git layer skip the
   // redundant implicit `git fetch` on the first `listBranches` after bootstrap.
   workspaceService.setWorkspaceClonedListener((id) => gitService.noteWorkspaceFetched(id));

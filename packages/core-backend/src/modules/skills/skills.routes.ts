@@ -115,7 +115,10 @@ export function createSkillsRoutes(
       return;
     }
     const file = typeof req.query.file === 'string' ? req.query.file : undefined;
-    const result = await skillService.getSkill(email, req.params.name, file);
+    // `?version=` loads the skill as it was at the commit that declared that
+    // version — the same option the agent tool takes.
+    const version = typeof req.query.version === 'string' ? req.query.version : undefined;
+    const result = await skillService.getSkill(email, req.params.name, file, { version });
     if (!allowedTools || !result.ok || result.kind !== 'skill') {
       res.json(result);
       return;
