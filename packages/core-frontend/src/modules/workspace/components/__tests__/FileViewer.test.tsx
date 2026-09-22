@@ -1008,8 +1008,9 @@ describe('FileViewer', () => {
     };
     readBranchMock.mockImplementation((async (branch: string) =>
       branch.startsWith('suggestions/') ? 'proposed' : 'current') as never);
-    // A file with no proposal of its own: its only job is to be the file we
-    // switch AWAY from, leaving its owners behind in the hook.
+    // The outgoing file's only job is to be the file we switch AWAY from,
+    // leaving its owners behind in the hook. It renders a box of its own —
+    // nothing is asserted on that one.
     const { rerender } = render(
       <ViewerHarness
         initialContent="outgoing"
