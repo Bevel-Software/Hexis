@@ -109,8 +109,9 @@ export function RootFolderTree({
         <UploadNotices />
         <FileTreeNode entry={root.entry} depth={0} reserved absent={root.absent} collapseChildren />
         {/* The same listing as Knowledge's explorer, so the same answer when
-            it shows nothing — with this root as where a first one goes. */}
-        <EmptyTreeNotice rootPath={root.entry.relativePath} />
+            it shows nothing — judged on THIS root, with it as where a first
+            one goes: an empty Skills tree is empty however full Knowledge is. */}
+        <EmptyTreeNotice rootPath={root.entry.relativePath} scope="root" />
       </div>
     </TreeChrome>
   );

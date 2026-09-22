@@ -338,15 +338,23 @@ describe('SkillsTree: menu', () => {
   });
 });
 
-/** The Skills tree reads the same filtered listing as Knowledge's explorer, so it answers the same way. */
+/**
+ * The Skills tree reads the same filtered listing as Knowledge's explorer, so
+ * it answers the same way — for ITS root. The server counts what it withheld
+ * per folder, and the notice reads the Skills folder's own count: what was
+ * kept out of Knowledge says nothing about Skills.
+ */
 describe('SkillsTree: an empty tree says why', () => {
-  const EMPTY_KB = (extra: Partial<FileTreeEntry> = {}): FileTreeEntry => ({
-    ...dir('.', [dir(KB, [dir(`${KB}/KnowledgeBase`, []), dir(`${KB}/Plugins`, []), dir(`${KB}/Skills`, [])])]),
-    ...extra,
-  });
+  const EMPTY_KB = (withheld: { listing?: number; skills?: number } = {}): FileTreeEntry => {
+    const skills: FileTreeEntry = { ...dir(`${KB}/Skills`, []), ...(withheld.skills ? { withheld: withheld.skills } : {}) };
+    return {
+      ...dir('.', [dir(KB, [dir(`${KB}/KnowledgeBase`, []), dir(`${KB}/Plugins`, []), skills])]),
+      ...(withheld.listing ? { withheld: withheld.listing } : {}),
+    };
+  };
 
-  it('says nothing is shared when entries were withheld', () => {
-    renderTree('/skills-and-tools', { fileTree: EMPTY_KB({ withheld: 4 }) });
+  it('says nothing is shared when entries were withheld from the Skills folder', () => {
+    renderTree('/skills-and-tools', { fileTree: EMPTY_KB({ listing: 4, skills: 4 }) });
     expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(
       'Nothing here is shared with you yet. Ask an admin to grant you access.',
     );
@@ -356,6 +364,12 @@ describe('SkillsTree: an empty tree says why', () => {
     renderTree('/skills-and-tools', { fileTree: EMPTY_KB() });
     expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(/^This knowledge base is empty\./);
     expect(screen.getByTestId('tree-empty-create-hint')).toBeInTheDocument();
+  });
+
+  it('says empty, not "nothing shared", when what was withheld lies elsewhere in the listing', () => {
+    renderTree('/skills-and-tools', { fileTree: EMPTY_KB({ listing: 4 }) });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(/^This knowledge base is empty\./);
+    expect(screen.queryByText(/Nothing here is shared/)).not.toBeInTheDocument();
   });
 
   it('shows neither message once one entry is visible', () => {

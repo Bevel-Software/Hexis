@@ -21,14 +21,17 @@ packages/
 ```
 (Abridged — `packages/core-backend/src/modules/` holds one folder per domain.)
 
-A domain module **never** reaches into another module's internals. All cross-module communication goes through exported interfaces.
+A domain module **never** reaches into another module's internals. All cross-module communication goes through exported interfaces. (This is the rule new code is held to; the tree is not there yet everywhere — the access module still takes the concrete `WorkspaceService` from the workspace module, and moving it onto `IWorkspaceService` is an open migration, not a reason to add another such import.)
 
 ## 2. Contracts First — Interfaces Over Implementations
 
 All business logic is defined as **interfaces** before any implementation is written.
 
 ```ts
-// Define the contract (modules/workspace/file-readers/file-reader.ts)
+// Define the contract (modules/workspace/file-readers/file-reader.ts) —
+// an EXCERPT: the real interface also names the file kind, whether the
+// text is editable, and the edit and stat hooks. Read the file before
+// implementing it; `implements FileReader` on this excerpt does not compile.
 interface FileReader {
   readonly extensions: readonly string[];
   read(bytes: Buffer, path: string): Promise<ReadResult>;
@@ -72,10 +75,13 @@ class FixedWindowRateLimiter {
 All dependencies are **injected**, never instantiated inline.
 
 ```ts
-// Good — dependencies are injected (modules/access/access-control.service.ts)
+// Good — dependencies are injected (modules/access/access-control.service.ts).
+// Type them as the CONTRACT: `IWorkspaceService`, not the class. (The real
+// service still says `WorkspaceService` here — see the note under §1 — and
+// that is the exception to migrate, not the shape to copy.)
 class AccessControlService implements IAccessControl {
   constructor(
-    private readonly workspaceService: WorkspaceService,
+    private readonly workspaceService: IWorkspaceService,
     private readonly kbDirName: string,
     private readonly disk: ITreeWalker,
   ) {}

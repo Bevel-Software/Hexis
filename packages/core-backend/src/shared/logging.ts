@@ -1,7 +1,7 @@
 // This file IS the console sink; every other file logs through it. The lint
 // rule that forbids `console` elsewhere in the backend exempts exactly this
 // file (see eslint.config.js).
-import type { ILogger, LogFields } from './logger.contract.js';
+import { oneLine, oneLineError, type ILogger, type LogFields } from './logger.contract.js';
 
 /**
  * Where the backend's logging goes, and how a module gets a logger.
@@ -63,14 +63,20 @@ function lateBound(bindings: LogFields): ILogger {
  * When `err` is the only field it is passed bare: that is the shape a person
  * at a terminal wants, and the shape the suites that watch the console have
  * always asserted on.
+ *
+ * An error field is passed as a copy whose message is one line (see
+ * `oneLineError`): the stack the console prints is the process's own text,
+ * but the message at its head is very often not — it quotes git's stderr, a
+ * path, a request's branch name — and unescaped it would forge a line or
+ * paint the terminal exactly as a string field would. Every call site that
+ * logs `{ err }` is covered here, so none of them has to remember it.
  */
 export function createConsoleLogger(bindings: LogFields = {}): ILogger {
   const prefix = typeof bindings.module === 'string' ? `[${bindings.module}] ` : '';
   const rest = Object.fromEntries(Object.entries(bindings).filter(([k]) => k !== 'module'));
+  const safe = (v: unknown): unknown => (typeof v === 'string' ? oneLine(v) : v instanceof Error ? oneLineError(v) : v);
   const extra = (fields: LogFields | undefined): unknown[] => {
-    const merged = Object.fromEntries(
-      Object.entries({ ...rest, ...fields }).map(([k, v]) => [k, typeof v === 'string' ? oneLine(v) : v]),
-    );
+    const merged = Object.fromEntries(Object.entries({ ...rest, ...fields }).map(([k, v]) => [k, safe(v)]));
     const keys = Object.keys(merged);
     if (keys.length === 0) return [];
     if (keys.length === 1 && keys[0] === 'err') return [merged.err];
@@ -85,26 +91,3 @@ export function createConsoleLogger(bindings: LogFields = {}): ILogger {
   };
 }
 
-/**
- * C0 and C1 control characters (U+009B among them: the one-byte CSI that
- * starts an ANSI sequence by itself) and the JS line separators. The rule
- * against control characters in a regex guards against accidental ones; these
- * are the point.
- */
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS =/[\x00-\x1F\x7F-\x9F\u2028\u2029]/g;
-const NAMED: Record<string, string> = { '\n': '\\n', '\r': '\\r', '\t': '\\t' };
-
-/**
- * `text` as one terminal-safe line. A message often carries text the process
- * did not write — a branch name from a request, a path from a plugin, git's
- * stderr — and written raw, a newline in it starts a forged line and an
- * escape sequence paints the terminal. The sink is the one place every line
- * passes, so the rule "one event, one line" is kept here rather than by each
- * call site remembering `printable`. (pino's JSON escapes the same characters
- * by construction.) Error objects are left as they are: their stacks are the
- * console's to print, and they are the process's own text.
- */
-function oneLine(text: string): string {
-  return text.replace(CONTROL_CHARS, (c) => NAMED[c] ?? `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
-}

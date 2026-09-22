@@ -4,7 +4,7 @@ import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
 import type { VirtualTree } from '../plugins/compile/compile-marketplace.js';
-import { isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
+import { type IGitRunner } from '../../shared/git.contract.js';
 
 /** What the repo service asks the compiler for — the one seam it has. */
 export interface MarketplaceCompiler {
@@ -221,10 +221,13 @@ export class MarketplaceRepoService {
       const { stdout } = await this.git(['-C', this.repoDir, 'rev-parse', '--verify', '--quiet', this.refOf(namespace)]);
       return stdout.trim() || null;
     } catch (err) {
-      // "No such ref" is the answer this null stands for. A deadline is not
-      // an answer about the ref, and read as one it would have `ensureCompiled`
-      // start a namespace's history over on top of the one it has.
-      if (isGitTimeout(err)) throw err;
+      // "No such ref" is the answer this null stands for, and `rev-parse
+      // --verify --quiet` says it with exit code 1 and nothing else. Every
+      // other failure — a deadline, a repository git cannot open, a spawn that
+      // never ran — is not an answer about the ref, and read as one it would
+      // have `ensureCompiled` start a namespace's history over on top of the
+      // one it has.
+      if (exitCodeOf(err) !== 1) throw err;
       return null;
     }
   }

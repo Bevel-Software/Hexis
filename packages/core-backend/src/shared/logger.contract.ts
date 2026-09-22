@@ -31,3 +31,76 @@ export interface ILogger {
   /** A logger whose every line also carries `bindings`. */
   child(bindings: LogFields): ILogger;
 }
+
+/**
+ * C0 and C1 control characters (U+009B among them: the one-byte CSI that
+ * starts an ANSI sequence by itself) and the JS line separators. The rule
+ * against control characters in a regex guards against accidental ones; these
+ * are the point.
+ */
+const CONTROL_CHARS = new RegExp(`[\x00-\x1F\x7F-\x9F${String.fromCharCode(0x2028, 0x2029)}]`, 'g');
+const NAMED: Record<string, string> = { '\n': '\\n', '\r': '\\r', '\t': '\\t' };
+
+/**
+ * `text` as one terminal-safe line. A message often carries text the process
+ * did not write — a branch name from a request, a path from a plugin, git's
+ * stderr — and written raw, a newline in it starts a forged line and an
+ * escape sequence paints the terminal. Every sink applies this, so the rule
+ * "one event, one line" is kept in one place rather than by each call site
+ * remembering `printable`. Shared with the shell's sink through this contract
+ * module because pino's JSON escapes only the C0 range: a C1 control or a
+ * line separator would pass through it to the terminal that tails the log.
+ */
+export function oneLine(text: string): string {
+  return text.replace(CONTROL_CHARS, (c) => NAMED[c] ?? `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
+/**
+ * `err` with the text it carries made terminal-safe, its frames untouched.
+ *
+ * An error's message is very often not the process's own words: it quotes a
+ * path, a branch name, git's stderr, a file's contents. Its stack frames ARE
+ * the process's own and read best as the lines they are, so only the
+ * message — and the head of the stack, which repeats it — is escaped. A
+ * `cause` that is itself an error is treated the same way, since the console
+ * prints it too (a chain that loops back on itself is cut where it loops).
+ * The original is never mutated: an error is often rethrown or inspected
+ * after it was logged.
+ */
+export function oneLineError(err: Error): Error {
+  return escapedCopy(err, new Set());
+}
+
+function escapedCopy(err: Error, seen: Set<Error>): Error {
+  seen.add(err);
+  const message = oneLine(err.message);
+  const copy = Object.create(Object.getPrototypeOf(err) as object) as Error & { cause?: unknown };
+  Object.defineProperty(copy, 'message', { value: message, enumerable: false, writable: true, configurable: true });
+  Object.defineProperty(copy, 'name', { value: err.name, enumerable: false, writable: true, configurable: true });
+  if (typeof err.stack === 'string') {
+    // Node's stack is the error's own `toString()` — `<name>: <message>` —
+    // followed by `\n    at …` frames. The frames are looked for AFTER that
+    // header, not from the top: a message that itself holds a line shaped
+    // like a frame would otherwise move the boundary up and pass the rest of
+    // itself through raw. A stack that does not open with the header is not
+    // one this code knows the shape of, and is escaped whole.
+    const head = Error.prototype.toString.call(err);
+    const frames = err.stack.startsWith(head) ? err.stack.indexOf('\n    at ', head.length) : -1;
+    const stack = frames === -1 ? oneLine(err.stack) : `${oneLine(err.stack.slice(0, frames))}${err.stack.slice(frames)}`;
+    Object.defineProperty(copy, 'stack', { value: stack, enumerable: false, writable: true, configurable: true });
+  }
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause !== undefined) {
+    Object.defineProperty(copy, 'cause', {
+      value: cause instanceof Error ? (seen.has(cause) ? '[circular]' : escapedCopy(cause, seen)) : cause,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+  }
+  // Own enumerable fields (a `code`, a `status`) travel with the error.
+  for (const [key, value] of Object.entries(err)) {
+    if (!(key in copy)) (copy as unknown as Record<string, unknown>)[key] = typeof value === 'string' ? oneLine(value) : value;
+  }
+  return copy;
+}
