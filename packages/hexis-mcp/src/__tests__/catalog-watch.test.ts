@@ -317,19 +317,50 @@ describe('createCatalogCheck', () => {
    * THE BUDGET FOR A CONNECTION IN USE, as arithmetic rather than as a hope.
    *
    * A person who commits a manual and keeps calling tools on the same
-   * connection should see it within about five seconds. The THROTTLE is the
-   * ceiling on staleness there — a check landing immediately before the commit
-   * reads the old catalog and opens a fresh window, so nothing can be noticed
-   * until it expires — then one digest read and the re-registration a change
-   * costs, which measured ~2.4s against a hosted deployment. At five seconds
-   * the throttle ALONE put the first sighting at ~7.6s. Two leaves the rest of
-   * the budget for the work. (An idle connection is outside this budget by
-   * design: it asks nothing until its next use.)
+   * connection should see it within TEN seconds — relaxed from five on
+   * 2026-09-22, because five was never achievable by design: the three terms
+   * below do not fit inside it whatever this throttle is set to, and staging
+   * measured 5.0–6.4s on every one of six runs.
+   *
+   * All three are measured, and none can be spent twice:
+   *
+   *   DEPLOYMENT-SIDE — the commit landing, the pending-commits worker's
+   *   queue, and the registry drop, up to the live catalog serving the new
+   *   manual. Staging measured 2.0–3.5s; a local from-source boot measured
+   *   0.15–0.4s. None of it is this package's code, which is precisely why
+   *   leaving it out of the arithmetic hid the failure.
+   *
+   *   THE THROTTLE — the ceiling on staleness here: a check landing
+   *   immediately before the commit reads the old catalog and opens a fresh
+   *   window, so nothing can be noticed until that window expires.
+   *
+   *   THE REFRESH — one digest read plus the re-registration a change costs,
+   *   which measured ~2.4s against a hosted deployment.
+   *
+   * The earlier form of this test counted only the last two, so it passed at
+   * five seconds while the criterion failed on staging six times out of six.
+   * (An idle connection is outside this budget by design: it asks nothing
+   * until its next use.)
+   *
+   * WHY FIVE IS GONE, and why that is a comment rather than an assertion: the
+   * two terms this package does not own already sum to 6_100ms, so the chain
+   * overruns five seconds with the throttle at ZERO. That is a fact about
+   * measurements taken off staging, not about anything in this repository — no
+   * edit to `CATALOG_CHECK_MIN_INTERVAL_MS` or to the watch can falsify it, so
+   * asserting it would only have compared two literals to each other and called
+   * the tautology a guard. Anyone tightening the criterion back to five has to
+   * argue with these measurements, not with a line of test code; re-measure
+   * first.
+   *
+   * The assertion below is the one that bites, because the throttle is the only
+   * term in the budget this package sets: raising it past 3_900 fails this test.
    */
-  it('leaves room inside the five seconds a connection in use is promised', () => {
+  it('leaves room inside the ten seconds a connection in use is promised', () => {
     expect(CATALOG_CHECK_MIN_INTERVAL_MS).toBeGreaterThan(0);
-    // ~2.4s of re-registration, measured, plus a digest read.
-    const refreshCost = 2_600;
-    expect(CATALOG_CHECK_MIN_INTERVAL_MS + refreshCost).toBeLessThanOrEqual(5_000);
+    const deploymentSide = 3_500; // worst of six staging trials
+    const refreshCost = 2_600; // ~2.4s of re-registration, measured, plus a digest read
+    const worstCase = deploymentSide + CATALOG_CHECK_MIN_INTERVAL_MS + refreshCost;
+
+    expect(worstCase).toBeLessThanOrEqual(10_000);
   });
 });

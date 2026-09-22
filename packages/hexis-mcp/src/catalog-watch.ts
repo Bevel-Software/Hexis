@@ -58,6 +58,12 @@ import type { HexisMcpConfig } from './config.js';
  * manual in ~1s. Two seconds keeps a busy connection to one small read per
  * window while a person who commits a manual and keeps calling tools sees it
  * on the next call after the window.
+ *
+ * The promise this window has to fit inside is ten seconds from the commit,
+ * and it is not the only term spending it: the deployment needs its own
+ * 2-3.5s to land the commit and drop its registry before there is anything
+ * here to notice. `catalog-watch.test.ts` keeps that arithmetic, all three
+ * terms of it, so shrinking the budget is a conversation with a failing test.
  */
 export const CATALOG_CHECK_MIN_INTERVAL_MS = 2_000;
 
