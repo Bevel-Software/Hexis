@@ -18,7 +18,31 @@ open-source core of the Bevel platform.
 
 ## Why Hexis?
 
-Used by companies such as [Unite](https://unite.eu) (formerly Mercateo), [osapiens](https://osapiens.com), [BEO](https://beo.energy), [Workpath](https://www.workpath.com) and others.
+**Used by teams at**
+
+<p>
+  <a href="https://osapiens.com">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/logos/osapiens-dark.svg">
+      <img src="docs/logos/osapiens-light.svg" alt="osapiens" width="160" height="56">
+    </picture>
+  </a>
+  <a href="https://beo.energy">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/logos/beo-dark.svg">
+      <img src="docs/logos/beo-light.svg" alt="BEO" width="160" height="56">
+    </picture>
+  </a>
+  <a href="https://unite.eu">
+    <img src="docs/logos/unite.png" alt="Unite (formerly Mercateo)" width="160" height="56">
+  </a>
+  <a href="https://www.workpath.com">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/logos/workpath-dark.svg">
+      <img src="docs/logos/workpath-light.svg" alt="Workpath" width="160" height="56">
+    </picture>
+  </a>
+</p>
 
 Read more about the learnings that we made which led to Hexis here: [Our Medium Article](https://medium.com/@ali.raza_25708/how-do-you-distribute-and-collaborate-on-agent-skills-in-enterprise-settings-bdb7097dff60)
 
