@@ -225,9 +225,16 @@ export function AuditLogPage() {
                         const Icon = p.kind === 'agent' ? Bot : KeyRound;
                         return (
                           <li key={key}>
+                            {/* The WHOLE row opens the events, chevron at its far edge, the
+                                way a disclosure row reads. A button cannot nest the Revoke
+                                button, so the expand button is stretched over the row by
+                                its ::after pseudo-element instead (padding, chevron and all)
+                                and Revoke is raised above that overlay. `relative` stays on
+                                THIS row div, not the <li>: the overlay must never cover the
+                                events panel below. */}
                             <div
                               className={cn(
-                                'flex items-center gap-3 px-3 py-2 text-sm',
+                                'relative flex items-center gap-3 px-3 py-2 text-sm hover:bg-surface-hover',
                                 open && 'bg-surface-hover',
                               )}
                             >
@@ -237,8 +244,9 @@ export function AuditLogPage() {
                                 aria-expanded={open}
                                 aria-controls={panelId}
                                 className={cn(
-                                  'flex flex-1 min-w-0 items-center gap-3 text-left rounded-sm -mx-1 px-1 py-0.5',
-                                  'hover:bg-surface-hover focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
+                                  'flex flex-1 min-w-0 items-center gap-3 text-left',
+                                  "after:absolute after:inset-0 after:content-['']",
+                                  'focus-visible:outline-none focus-visible:after:outline-2 focus-visible:after:-outline-offset-2 focus-visible:after:outline-accent',
                                   revoked && 'opacity-60',
                                 )}
                               >
@@ -274,16 +282,12 @@ export function AuditLogPage() {
                                     {eventsLabel(p.eventCount)}
                                   </span>
                                 </span>
-                                <ChevronRight
-                                  aria-hidden
-                                  size={14}
-                                  className={cn('flex-none text-ink-faint transition-transform', open && 'rotate-90')}
-                                />
                               </button>
                               {!revoked && (
                                 <Button
                                   variant="danger"
                                   size="sm"
+                                  className="relative z-10"
                                   onClick={() => setPendingRevoke(p)}
                                   title={
                                     p.kind === 'agent'
@@ -295,6 +299,11 @@ export function AuditLogPage() {
                                   {revokeVerb(p)}
                                 </Button>
                               )}
+                              <ChevronRight
+                                aria-hidden
+                                size={14}
+                                className={cn('flex-none text-ink-faint transition-transform', open && 'rotate-90')}
+                              />
                             </div>
                             {opened[key] && (
                               <div
