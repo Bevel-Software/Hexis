@@ -178,6 +178,11 @@ const FIELDS: Record<
     help: 'Only people with an address at these domains can sign in this way. Separate several with commas. Leave blank to allow any address: safe with a provider that only serves your organisation, risky with one that does not.',
     placeholder: 'example.com',
   },
+  auditRetentionDays: {
+    label: 'Keep events for',
+    help: 'How many days an agent’s recorded calls stay in the Audit log before they are removed. Leave blank for 90 days. Applies without a restart.',
+    placeholder: '90',
+  },
 };
 
 /**
@@ -256,6 +261,12 @@ const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[]
     title: 'Single sign-on',
     blurb:
       'Optional, and you can add it later. Lets people sign in with the account they already have instead of a password.',
+  },
+  {
+    id: 'audit',
+    title: 'Audit log',
+    blurb:
+      'The Audit log records which tools, skills and capabilities each connected agent uses. Choose how long those records are kept.',
   },
 ];
 

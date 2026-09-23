@@ -39,7 +39,7 @@ export interface SettingDef {
    */
   envVar?: string;
   /** Which block of the setup screen it belongs to. */
-  section: 'knowledge-base' | 'sign-in';
+  section: 'knowledge-base' | 'sign-in' | 'audit';
   secret?: boolean;
   /** Applied on save; the message is shown against the field. */
   validate?(value: string): string | null;
@@ -284,6 +284,22 @@ export const CORE_SETTINGS: SettingDef[] = [
     envVar: 'ALLOWED_EMAIL_DOMAINS',
     section: 'sign-in',
     restartToApply: true,
+  },
+
+  {
+    /**
+     * How long the Audit log keeps an agent's events. Read at every prune, so
+     * it applies without a restart; unset means the default the audit
+     * service carries (90 days). A whole number of days, capped at ten years
+     * so a typo cannot turn pruning off for good.
+     */
+    key: 'auditRetentionDays',
+    envVar: 'AUDIT_RETENTION_DAYS',
+    section: 'audit',
+    validate: (v) => {
+      const n = Number(v);
+      return Number.isInteger(n) && n > 0 && n <= 3650 ? null : 'Enter a whole number of days, from 1 to 3650.';
+    },
   },
 ];
 

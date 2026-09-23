@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { logger } from '../../../shared/logging.js';
 
 const log = logger('mcp-oauth');
-import { and, eq, gt, isNull, lt, or } from 'drizzle-orm';
+import { and, eq, gt, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Response } from 'express';
 import type {
   AuthorizationParams,
@@ -21,7 +21,7 @@ import type {
   OAuthTokens,
 } from '@modelcontextprotocol/sdk/shared/auth.js';
 import type { Database } from '../../database/connection.js';
-import { oauthAuthCodes, oauthClients, oauthTokens, users } from '../../database/schema.js';
+import { agentConnections, oauthAuthCodes, oauthClients, oauthTokens, users } from '../../database/schema.js';
 import type { TokenCrypto } from '../../../shared/token-crypto.js';
 import { signAuthRequest, type McpAuthRequestState } from './oauth-state.js';
 
@@ -285,6 +285,7 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       .select({
         id: oauthTokens.id,
         clientId: oauthTokens.clientId,
+        connectionId: oauthTokens.connectionId,
         scope: oauthTokens.scope,
         resource: oauthTokens.resource,
         expiresAt: oauthTokens.expiresAt,
@@ -311,13 +312,28 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       .set({ lastUsedAt: now })
       .where(eq(oauthTokens.id, row.id))
       .then(undefined, (err) => log.warn('touch lastUsedAt failed:', { err }));
+    // The agent connection's own "last used" — what the Audit log shows for
+    // the agent, across every token it has held. Same fire-and-forget stance.
+    if (row.connectionId) {
+      this.deps.db
+        .update(agentConnections)
+        .set({ lastUsedAt: now })
+        .where(eq(agentConnections.id, row.connectionId))
+        .then(undefined, (err) => log.warn('touch connection lastUsedAt failed:', { err }));
+    }
     return {
       token,
       clientId: row.clientId,
       scopes: (row.scope ?? '').split(' ').filter(Boolean),
       expiresAt: Math.floor(row.expiresAt.getTime() / 1000),
       resource: row.resource ? new URL(row.resource) : undefined,
-      extra: { userId: row.userId, userEmail: row.userEmail },
+      extra: {
+        userId: row.userId,
+        userEmail: row.userEmail,
+        // Null on a token minted before connections existed; the auth
+        // middleware then binds no agent and the call goes unrecorded.
+        connectionId: row.connectionId,
+      },
     };
   }
 
@@ -382,11 +398,13 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     } catch (err) {
       log.warn('token-table prune failed (non-fatal):', { err });
     }
+    const connectionId = await this.ensureConnection(userId, clientId);
     await this.deps.db.insert(oauthTokens).values({
       accessTokenHash: hashToken(accessToken),
       refreshTokenHash: hashToken(refreshToken),
       clientId,
       userId,
+      connectionId,
       scope,
       resource,
       expiresAt: new Date(now + ACCESS_TTL_MS),
@@ -399,6 +417,53 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       refresh_token: refreshToken,
       ...(scope ? { scope } : {}),
     };
+  }
+
+  /**
+   * The live `agent_connections` row for (user, client) — found, or made on
+   * the first mint for the pair. A refresh finds the row the sign-in made, so
+   * one connection spans every token the agent ever holds; a mint after a
+   * revoke finds nothing live and makes a fresh row, which is what keeps the
+   * revoked one's history intact.
+   *
+   * Two concurrent first mints (a client racing its own token exchange) both
+   * miss the select; the partial unique index lets exactly one insert land,
+   * the other's `ON CONFLICT DO NOTHING` returns no row, and it re-reads the
+   * winner's. The client's display name is snapshotted from its registration
+   * at that moment.
+   */
+  private async ensureConnection(userId: string, clientId: string): Promise<string> {
+    const live = () =>
+      this.deps.db
+        .select({ id: agentConnections.id })
+        .from(agentConnections)
+        .where(
+          and(
+            eq(agentConnections.userId, userId),
+            eq(agentConnections.clientId, clientId),
+            isNull(agentConnections.revokedAt),
+          ),
+        )
+        .limit(1);
+    const [existing] = await live();
+    if (existing) return existing.id;
+    const [client] = await this.deps.db
+      .select({ clientName: oauthClients.clientName })
+      .from(oauthClients)
+      .where(eq(oauthClients.clientId, clientId))
+      .limit(1);
+    const [inserted] = await this.deps.db
+      .insert(agentConnections)
+      .values({ userId, clientId, clientName: client?.clientName ?? null })
+      .onConflictDoNothing({
+        target: [agentConnections.userId, agentConnections.clientId],
+        where: sql`${agentConnections.revokedAt} is null`,
+      })
+      .returning({ id: agentConnections.id });
+    if (inserted) return inserted.id;
+    const [winner] = await live();
+    if (!winner) throw new Error('agent connection vanished between insert and re-read');
+    return winner.id;
   }
 }
 

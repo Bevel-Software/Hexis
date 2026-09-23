@@ -10,7 +10,7 @@ export interface SettingStatus {
    * entered here and nowhere else.
    */
   envVar?: string;
-  section: 'knowledge-base' | 'sign-in';
+  section: 'knowledge-base' | 'sign-in' | 'audit';
   source: 'env' | 'stored' | 'unset';
   /** Absent for secrets — the server never sends a stored secret back. */
   value?: string;

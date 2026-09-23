@@ -111,6 +111,7 @@ describe('SettingsLayout', () => {
     const links = within(nav()).getAllByRole('link');
     expect(links.map((l) => l.textContent)).toEqual([
       'External agent access',
+      'Audit log',
       'Secrets',
       'Browse available tools',
       'Account',
@@ -242,7 +243,7 @@ describe('SettingsLayout', () => {
       renderAt('/secrets');
       expect(document.getElementById(SIDEBAR_DOM_ID)).toBeNull();
       expect(noNav()).not.toBeNull();
-      expect(within(nav()).getAllByRole('link')).toHaveLength(4);
+      expect(within(nav()).getAllByRole('link')).toHaveLength(5);
       vi.unstubAllGlobals();
     });
   });

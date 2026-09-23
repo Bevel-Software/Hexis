@@ -9,6 +9,7 @@ import type { InternalTokenService } from '../tool-auth/internal-token.service.j
 import { rejectConnectionKey } from '../tool-auth/connection-key-rejection.js';
 import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
 import '../tool-auth/external-api-key.interface.js'; // Express Request augmentation (req.externalApiKeyId)
+import '../audit/audit.contract.js'; // Express Request augmentation (req.agentConnectionId)
 
 /**
  * Auth middleware for the MCP endpoint. Accepts any of:
@@ -111,6 +112,12 @@ export function createMcpAuthMiddleware(
         const info = await oauthProvider.verifyAccessToken(token);
         req.userId = String(info.extra?.userId ?? '');
         req.userEmail = String(info.extra?.userEmail ?? '');
+        // The agent behind the grant, for the Audit log. A token minted
+        // before connections existed carries none; the call then runs
+        // unattributed rather than refused.
+        if (typeof info.extra?.connectionId === 'string') {
+          req.agentConnectionId = info.extra.connectionId;
+        }
         if (!req.userId) {
           unauthorized(res, 'Invalid access token');
           return;
@@ -176,6 +183,10 @@ export function createMcpAuthMiddleware(
       }
       req.userId = user.id;
       req.userEmail = user.email;
+      // The local server's exchanged grant names its agent connection (see
+      // InternalTokenClaim.connectionId); carry it so its calls are logged
+      // under that agent exactly as the grant's own would be.
+      if (claim.connectionId) req.agentConnectionId = claim.connectionId;
       next();
       return;
     }

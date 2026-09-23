@@ -52,6 +52,7 @@ import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.j
 import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
+import { createAuditRoutes } from '../modules/audit/audit.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
 import { oidcRedirectUri } from '../modules/auth/oidc-auth-provider.js';
 import { repositoryConnectionCheck } from '../modules/settings/connection-check.js';
@@ -728,6 +729,13 @@ export async function createCoreServer(
     '/api',
     core.authMiddleware,
     createConnectionKeysAdminRoutes(core.externalApiKeyService, core.adminAccess),
+  );
+  // The Audit log: a person's agents and keys with what they called (admins:
+  // everyone's), and the revoke of either — owner- or admin-gated inside.
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createAuditRoutes(core.agentAuditService, core.externalApiKeyService, core.adminAccess),
   );
   // First-run setup. Mounted with the other authed routes but touching NO
   // workspace — it has to work on a deployment that has no knowledge base yet,

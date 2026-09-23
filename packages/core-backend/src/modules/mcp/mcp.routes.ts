@@ -115,6 +115,10 @@ export function createMcpRoutes(
           // undefined for OAuth/JWT) — resolved per request, so per-key metering
           // never depends on anything remembered from an earlier request.
           tokenId: req.externalApiKeyId ?? null,
+          // Agent-connection id (set for OAuth bearers and the local server's
+          // exchanged grant; undefined for keys/JWTs) — the Audit log's other
+          // principal, resolved per request like the key id.
+          connectionId: req.agentConnectionId ?? null,
           // The proxy authenticates its loopback calls with the SAME bearer the
           // client used here, so it acts on the request exactly as the caller would.
           bearer: extractBearer(req),
@@ -355,7 +359,13 @@ export function createMcpRoutes(
         grantRemainingMs === undefined
           ? MCP_LOOPBACK_TOKEN_TTL_MS
           : Math.min(MCP_LOOPBACK_TOKEN_TTL_MS, grantRemainingMs);
-      const minted = internalTokens.mint({ userId, externalProxy: true }, ttlMs);
+      // The grant's agent connection rides along, so the local server's
+      // calls with this token stay attributed to the agent in the Audit log.
+      const connectionId = typeof info.extra?.connectionId === 'string' ? info.extra.connectionId : undefined;
+      const minted = internalTokens.mint(
+        { userId, externalProxy: true, ...(connectionId ? { connectionId } : {}) },
+        ttlMs,
+      );
       // The ACTUAL lifetime, not the constant — the caller schedules its
       // proactive renewal off this number.
       res.json({ token: minted, expiresInMs: ttlMs });

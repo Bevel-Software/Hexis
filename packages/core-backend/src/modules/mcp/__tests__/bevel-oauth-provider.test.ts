@@ -31,6 +31,7 @@ function makeFakeDb(queue: any[]) {
     chain.innerJoin = passthrough();
     chain.from = passthrough();
     chain.returning = passthrough();
+    chain.onConflictDoNothing = passthrough();
     chain.then = (onF: any, onR: any) => Promise.resolve(result).then(onF, onR);
     return chain;
   }
@@ -39,6 +40,8 @@ function makeFakeDb(queue: any[]) {
     insert: vi.fn(() => nextChain()),
     select: vi.fn(() => nextChain()),
     update: vi.fn(() => nextChain()),
+    // The mint-time prune of expired token rows; nothing here queues for it.
+    delete: vi.fn(() => nextChain()),
   } as unknown as Database;
 
   return { db, captured };
@@ -183,7 +186,15 @@ describe('BevelOAuthProvider', () => {
       clientId: 'client-1', userId: 'user-1', redirectUri: 'https://agent.example.com/callback',
       scope: 'mcp', resource: null,
     };
-    const { provider, captured } = makeProvider([[consumed] /* update.returning */, undefined /* insert */]);
+    const { provider, captured } = makeProvider([
+      [consumed] /* update.returning */,
+      undefined /* prune: expired tokens */,
+      undefined /* prune: expired codes */,
+      [] /* no live agent connection yet */,
+      [{ clientName: 'Claude' }] /* the client's registration */,
+      [{ id: 'conn-1' }] /* connection insert.returning */,
+      undefined /* token insert */,
+    ]);
 
     const tokens = await provider.exchangeAuthorizationCode(
       CLIENT, 'the-code', undefined, 'https://agent.example.com/callback',
@@ -194,13 +205,32 @@ describe('BevelOAuthProvider', () => {
     expect(tokens.refresh_token!.startsWith(`${PREFIX}r_`)).toBe(true);
     expect(tokens.expires_in).toBe(3600);
     expect(tokens.scope).toBe('mcp');
-    // The token row stores hashes of exactly what was returned.
-    expect(captured.values[0]).toMatchObject({
+    // A first mint for (user, client) makes the durable agent connection,
+    // snapshotting the client's display name…
+    expect(captured.values[0]).toEqual({ userId: 'user-1', clientId: 'client-1', clientName: 'Claude' });
+    // …and the token row stores hashes of exactly what was returned, bound to it.
+    expect(captured.values[1]).toMatchObject({
       accessTokenHash: sha256(tokens.access_token),
       refreshTokenHash: sha256(tokens.refresh_token!),
       clientId: 'client-1',
       userId: 'user-1',
+      connectionId: 'conn-1',
     });
+  });
+
+  it('a mint that loses the race for the first connection re-reads the winner instead of failing', async () => {
+    const consumed = { clientId: 'client-1', userId: 'user-1', redirectUri: 'https://agent.example.com/callback', scope: null, resource: null };
+    const { provider, captured } = makeProvider([
+      [consumed],
+      undefined, undefined, /* prunes */
+      [] /* no live connection at first look */,
+      [{ clientName: 'Claude' }],
+      [] /* insert: ON CONFLICT DO NOTHING returned no row */,
+      [{ id: 'conn-winner' }] /* the re-read finds the other mint's row */,
+      undefined /* token insert */,
+    ]);
+    await provider.exchangeAuthorizationCode(CLIENT, 'the-code', undefined, 'https://agent.example.com/callback');
+    expect(captured.values[1]).toMatchObject({ connectionId: 'conn-winner' });
   });
 
   it('exchangeAuthorizationCode rejects a spent/unknown code and a redirect_uri mismatch', async () => {
@@ -219,9 +249,18 @@ describe('BevelOAuthProvider', () => {
       clientId: 'client-1', userId: 'user-1', scope: 'mcp extra', resource: null,
       refreshExpiresAt: new Date(Date.now() + 60_000),
     };
-    const { provider } = makeProvider([[oldRow] /* revoke.returning */, undefined /* insert */]);
+    const { provider, captured } = makeProvider([
+      [oldRow] /* revoke.returning */,
+      undefined, undefined, /* prunes */
+      [{ id: 'conn-1' }] /* the live connection the sign-in made */,
+      undefined /* token insert */,
+    ]);
     const tokens = await provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old', ['mcp']);
     expect(tokens.scope).toBe('mcp');
+    // A refresh finds the connection the sign-in made — one connection spans
+    // every token the agent holds, and no second row is inserted for it.
+    expect(captured.values).toHaveLength(1);
+    expect(captured.values[0]).toMatchObject({ connectionId: 'conn-1' });
 
     // Widening is refused.
     await expect(
@@ -236,16 +275,24 @@ describe('BevelOAuthProvider', () => {
 
   it('verifyAccessToken resolves a live token to AuthInfo carrying the Bevel user', async () => {
     const row = {
-      id: 'tok-row-1', clientId: 'client-1', scope: 'mcp', resource: null,
+      id: 'tok-row-1', clientId: 'client-1', connectionId: 'conn-1', scope: 'mcp', resource: null,
       expiresAt: new Date(Date.now() + 60_000), userId: 'user-1', userEmail: 'alice@example.com',
     };
-    const { provider } = makeProvider([[row] /* select */, undefined /* lastUsedAt touch */]);
+    const { provider, captured } = makeProvider([
+      [row] /* select */,
+      undefined /* token lastUsedAt touch */,
+      undefined /* connection lastUsedAt touch */,
+    ]);
 
     const info = await provider.verifyAccessToken('bevel-mcp_live');
 
     expect(info.clientId).toBe('client-1');
     expect(info.scopes).toEqual(['mcp']);
-    expect(info.extra).toMatchObject({ userId: 'user-1', userEmail: 'alice@example.com' });
+    // The agent connection rides along, for the auth middleware to bind.
+    expect(info.extra).toMatchObject({ userId: 'user-1', userEmail: 'alice@example.com', connectionId: 'conn-1' });
+    // Both "last used" marks are touched: the token's and the agent's.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(captured.set).toHaveLength(2);
   });
 
   it('verifyAccessToken throws InvalidTokenError for unknown/revoked/expired tokens', async () => {

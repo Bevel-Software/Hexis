@@ -179,7 +179,7 @@ describe('createMcpAuthMiddleware', () => {
     const auth = makeAuthService();
     const externalApiKeys = makeExternalApiKeyService();
     const oauth = makeOAuthProvider(async () => ({
-      extra: { userId: 'user-5', userEmail: 'eve@example.com' },
+      extra: { userId: 'user-5', userEmail: 'eve@example.com', connectionId: 'conn-5' },
     }));
     const mw = makeMw({ auth, keys: externalApiKeys, oauth });
     const { req, res, next } = makeReqRes('Bearer bevel-mcp_token123');
@@ -188,12 +188,26 @@ describe('createMcpAuthMiddleware', () => {
 
     expect(req.userId).toBe('user-5');
     expect(req.userEmail).toBe('eve@example.com');
-    // OAuth sessions are unmetered like JWT sessions — no connection key id.
+    // OAuth sessions are unmetered like JWT sessions — no connection key id…
     expect(req.externalApiKeyId).toBeUndefined();
+    // …but they ARE attributed to the agent behind the grant, for the Audit log.
+    expect(req.agentConnectionId).toBe('conn-5');
     expect(next).toHaveBeenCalled();
     // Neither the connection-key nor the JWT path may see this token shape.
     expect((externalApiKeys as any).verifyAndLoadToken).not.toHaveBeenCalled();
     expect((auth as any).verifyToken).not.toHaveBeenCalled();
+  });
+
+  it('binds no agent for an OAuth token minted before connections existed, and still admits it', async () => {
+    const oauth = makeOAuthProvider(async () => ({
+      extra: { userId: 'user-5', userEmail: 'eve@example.com', connectionId: null },
+    }));
+    const mw = makeMw({ oauth });
+    const { req, res, next } = makeReqRes('Bearer bevel-mcp_token123');
+    await mw(req, res, next);
+    expect(req.userId).toBe('user-5');
+    expect(req.agentConnectionId).toBeUndefined();
+    expect(next).toHaveBeenCalled();
   });
 
   it('401s with the discovery challenge when the OAuth token is invalid/expired/revoked', async () => {
@@ -276,6 +290,22 @@ describe('createMcpAuthMiddleware', () => {
       expect(next).toHaveBeenCalled();
       expect(req.userId).toBe('user-7');
       expect(req.userEmail).toBe('seven@example.com');
+      // A plain loopback identity names no agent.
+      expect(req.agentConnectionId).toBeUndefined();
+    });
+
+    it('carries the agent connection of an exchanged grant, so the local server stays attributed', async () => {
+      const token = internal.mint({ userId: 'user-7', externalProxy: true, connectionId: 'conn-7' }, 60_000);
+      const auth = makeAuthService();
+      (auth.getUserById as ReturnType<typeof vi.fn>) = vi.fn(async () => ({
+        id: 'user-7',
+        email: 'seven@example.com',
+      }));
+      const mw = makeMw({ internal, auth });
+      const { req, res, next } = makeReqRes(`Bearer ${token}`);
+      await mw(req, res, next);
+      expect(next).toHaveBeenCalled();
+      expect(req.agentConnectionId).toBe('conn-7');
     });
 
     it('401s an expired internal token', async () => {
