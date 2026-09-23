@@ -80,18 +80,25 @@ export function skillReadPath(utcpName: string, args: Record<string, unknown>, k
 }
 
 /**
- * Forward slashes, one per boundary, no leading `./` or `/`, no trailing `/` —
- * so two spellings of one folder compare equal. Repeated slashes are
- * collapsed because the file tools accept `Plugins//Sales/rfi` as that same
- * folder, and the match here must agree with what they read.
+ * The path as segments, resolved: forward slashes, `.` dropped, `..` taken
+ * back a segment, no empty segments — so two spellings of one place compare
+ * equal, and a path that climbs OUT of a folder is never matched to it. A
+ * path that climbs above its own start has no place at all and resolves to
+ * the empty string, which matches nothing. (The file tools refuse `..`
+ * outright; the log must still not credit a refused read to a skill.)
  */
 function normalizePath(p: string): string {
-  return p
-    .replace(/\\/g, '/')
-    .replace(/\/{2,}/g, '/')
-    .replace(/^(\.\/)+/, '')
-    .replace(/^\/+/, '')
-    .replace(/\/+$/, '');
+  const out: string[] = [];
+  for (const segment of p.replace(/\\/g, '/').split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      if (out.length === 0) return '';
+      out.pop();
+      continue;
+    }
+    out.push(segment);
+  }
+  return out.join('/');
 }
 
 /**
@@ -103,7 +110,9 @@ function normalizePath(p: string): string {
  * mistaken for its parent.
  */
 export function skillContaining(path: string, skills: readonly SkillFolder[]): SkillFolder | null {
-  const haystack = `/${normalizePath(path)}/`;
+  const normalized = normalizePath(path);
+  if (!normalized) return null;
+  const haystack = `/${normalized}/`;
   let best: SkillFolder | null = null;
   for (const skill of skills) {
     const folder = normalizePath(skill.path);

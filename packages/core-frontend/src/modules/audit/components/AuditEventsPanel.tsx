@@ -122,7 +122,7 @@ export function AuditEventsPanel({
       .then((page) => {
         if (gen !== loadGen.current) return;
         setEvents(page.events);
-        setTotal(page.total);
+        setTotal(page.total ?? 0);
         setNextCursor(page.nextCursor);
         setError(null);
       })
@@ -146,7 +146,8 @@ export function AuditEventsPanel({
     try {
       const page = await listEvents(kind, id, { before: nextCursor, limit: PAGE_SIZE });
       setEvents((prev) => [...(prev ?? []), ...page.events]);
-      setTotal(page.total);
+      // A cursor page carries no total: the first page's stands.
+      if (page.total !== null) setTotal(page.total);
       setNextCursor(page.nextCursor);
       setError(null);
     } catch (err) {

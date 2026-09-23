@@ -88,8 +88,12 @@ export interface AgentEventView {
 
 export interface AgentEventPage {
   events: AgentEventView[];
-  /** Every event on record for the principal, not just this page. */
-  total: number;
+  /**
+   * Every event on record for the principal, not just this page — counted
+   * on the first page only; null on a page reached through a cursor, since
+   * the reader already holds the figure.
+   */
+  total: number | null;
   /** Pass back as `before` to load the next (older) page; null when this was the last. */
   nextCursor: string | null;
 }

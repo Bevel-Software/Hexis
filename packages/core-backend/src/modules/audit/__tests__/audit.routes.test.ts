@@ -15,6 +15,7 @@ const ALICE = { id: 'u-alice', email: 'alice@example.com', name: 'Alice' };
 const BOB = { id: 'u-bob', email: 'bob@example.com', name: 'Bob' };
 const KEY_ID = '0f1e2d3c-4b5a-4697-8877-665544332211';
 const AGENT_ID = '11111111-2222-4333-8444-555555555555';
+const ALICE_AGENT_ID = '22222222-3333-4444-8555-666666666666';
 
 const ALICE_KEY: AuditPrincipal = {
   kind: 'key',
@@ -30,7 +31,7 @@ const ALICE_KEY: AuditPrincipal = {
 };
 
 /** Who owns what, as the fake service answers `ownerOf`. */
-const OWNERS: Record<string, string> = { [KEY_ID]: ALICE.id, [AGENT_ID]: BOB.id };
+const OWNERS: Record<string, string> = { [KEY_ID]: ALICE.id, [AGENT_ID]: BOB.id, [ALICE_AGENT_ID]: ALICE.id };
 
 const audit = {
   listPrincipals: vi.fn(async () => [ALICE_KEY]),
@@ -138,18 +139,32 @@ describe('audit routes — revoke an agent', () => {
     expect(audit.revokeConnection).toHaveBeenCalledWith(AGENT_ID, 'owner', BOB.id);
   });
 
-  it("revokes anyone's connection for an admin, recorded as an admin's doing", async () => {
+  it("revokes anyone else's connection for an admin, recorded as an admin's doing", async () => {
     const base = await listen(makeApp({ admin: true }));
     const res = await fetch(`${base}/api/audit/agents/${AGENT_ID}`, { method: 'DELETE' });
     expect(res.status).toBe(200);
-    expect(audit.revokeConnection).toHaveBeenCalledWith(AGENT_ID, 'admin', undefined);
+    expect(audit.revokeConnection).toHaveBeenCalledWith(AGENT_ID, 'admin');
   });
 
-  it('404s a malformed id without touching the service, and an unknown/foreign one after it', async () => {
+  it("records an admin revoking their OWN agent as the owner's doing, like anyone else's", async () => {
+    const base = await listen(makeApp({ admin: true }));
+    const res = await fetch(`${base}/api/audit/agents/${ALICE_AGENT_ID}`, { method: 'DELETE' });
+    expect(res.status).toBe(200);
+    expect(audit.revokeConnection).toHaveBeenCalledWith(ALICE_AGENT_ID, 'owner', ALICE.id);
+  });
+
+  it("refuses another person's agent to a member, and 404s a malformed or unknown id, all without revoking", async () => {
     const base = await listen(makeApp({ admin: false }));
     expect((await fetch(`${base}/api/audit/agents/nope`, { method: 'DELETE' })).status).toBe(404);
+    expect((await fetch(`${base}/api/audit/agents/${AGENT_ID}`, { method: 'DELETE' })).status).toBe(403);
+    expect(
+      (await fetch(`${base}/api/audit/agents/00000000-0000-4000-8000-000000000000`, { method: 'DELETE' })).status,
+    ).toBe(404);
     expect(audit.revokeConnection).not.toHaveBeenCalled();
+  });
 
+  it('404s when the connection vanished between the ownership check and the revoke', async () => {
+    const base = await listen(makeApp({ admin: false, as: BOB }));
     audit.revokeConnection.mockRejectedValueOnce(new AuditPrincipalNotFoundError());
     expect((await fetch(`${base}/api/audit/agents/${AGENT_ID}`, { method: 'DELETE' })).status).toBe(404);
   });

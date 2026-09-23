@@ -283,7 +283,7 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     // mint an unrevoked pair — the revoke undone by a millisecond. A token
     // from before connections existed has none to stay on and is placed
     // under one as a first mint would be.
-    if (row.connectionId && !(await this.connectionIsLive(row.connectionId))) {
+    if (row.connectionId && !(await this.touchLiveConnection(row.connectionId))) {
       throw new InvalidGrantError('Access for this agent was revoked');
     }
     return this.mintTokens(row.userId, row.clientId, scope, row.resource, row.connectionId ?? undefined);
@@ -334,11 +334,9 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     // The agent connection's own "last used" — what the Audit log shows for
     // the agent, across every token it has held. Same fire-and-forget stance.
     if (row.connectionId) {
-      this.deps.db
-        .update(agentConnections)
-        .set({ lastUsedAt: now })
-        .where(eq(agentConnections.id, row.connectionId))
-        .then(undefined, (err) => log.warn('touch connection lastUsedAt failed:', { err }));
+      this.touchLiveConnection(row.connectionId).then(undefined, (err) =>
+        log.warn('touch connection lastUsedAt failed:', { err }),
+      );
     }
     return {
       token,
@@ -457,14 +455,22 @@ export class BevelOAuthProvider implements OAuthServerProvider {
    * winner's. The client's display name is snapshotted from its registration
    * at that moment.
    */
-  /** Whether an agent connection still admits tokens: it exists and nobody has revoked it. */
-  private async connectionIsLive(connectionId: string): Promise<boolean> {
-    const [row] = await this.deps.db
-      .select({ id: agentConnections.id })
-      .from(agentConnections)
+  /**
+   * Whether an agent connection still admits requests — it exists and nobody
+   * has revoked it — recorded as a use of it when it does. One statement for
+   * both: the update matches only a live row, so "did a row come back" IS the
+   * liveness answer, and a caller that asks is by definition using the
+   * connection. Called on every verify and refresh, and by the MCP auth
+   * middleware for the local server's exchanged grant — the one path where a
+   * token verifies statelessly and would otherwise outlive the revoke.
+   */
+  async touchLiveConnection(connectionId: string): Promise<boolean> {
+    const rows = await this.deps.db
+      .update(agentConnections)
+      .set({ lastUsedAt: new Date() })
       .where(and(eq(agentConnections.id, connectionId), isNull(agentConnections.revokedAt)))
-      .limit(1);
-    return row !== undefined;
+      .returning({ id: agentConnections.id });
+    return rows.length > 0;
   }
 
   private async ensureConnection(userId: string, clientId: string): Promise<string> {

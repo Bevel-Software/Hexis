@@ -44,8 +44,8 @@ export interface AgentEvent {
 
 export interface AgentEventPage {
   events: AgentEvent[];
-  /** Every event on record for the principal, not just this page. */
-  total: number;
+  /** Every event on record for the principal — on the first page only; null on a page reached through a cursor. */
+  total: number | null;
   /** Pass back as `before` for the next (older) page; null on the last. */
   nextCursor: string | null;
 }

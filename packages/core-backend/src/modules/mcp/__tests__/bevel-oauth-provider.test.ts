@@ -290,7 +290,11 @@ describe('BevelOAuthProvider', () => {
     // second row is inserted for it.
     expect(captured.values).toHaveLength(1);
     expect(captured.values[0]).toMatchObject({ connectionId: 'conn-1' });
-    expect((db as any).select).toHaveBeenCalledTimes(1);
+    expect((db as any).select).not.toHaveBeenCalled();
+    // The liveness check IS the use: one update that matches only a live
+    // row and stamps its last use.
+    expect(captured.updateTargets).toEqual([oauthTokens, agentConnections]);
+    expect(Object.keys(captured.set[1])).toEqual(['lastUsedAt']);
     expect(render(captured.where[1])).toMatchObject({ params: ['conn-1'] });
     expect(render(captured.where[1]).sql).toMatch(/"agent_connections"."revoked_at" is null/);
 
@@ -346,7 +350,7 @@ describe('BevelOAuthProvider', () => {
     const { provider, captured } = makeProvider([
       [row] /* select */,
       undefined /* token lastUsedAt touch */,
-      undefined /* connection lastUsedAt touch */,
+      [{ id: 'conn-1' }] /* connection touch: update.returning, the live row */,
     ]);
 
     const info = await provider.verifyAccessToken('bevel-mcp_live');

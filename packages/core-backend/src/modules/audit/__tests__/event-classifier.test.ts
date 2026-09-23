@@ -41,6 +41,13 @@ describe('skillContaining', () => {
     expect(skillContaining('Plugins/Sales/rfi/followup/SKILL.md', skills)?.name).toBe('rfi-followup');
     // The file tools accept a doubled separator as the same path; so does this.
     expect(skillContaining('Plugins//Sales/rfi/SKILL.md', skills)?.name).toBe('rfi');
+    // `.` and `..` are resolved before matching: a path that climbs out of a
+    // skill folder is not a read of that skill, and one that climbs above its
+    // own start is no place at all.
+    expect(skillContaining('Plugins/Sales/rfi/./SKILL.md', skills)?.name).toBe('rfi');
+    expect(skillContaining('Plugins/Sales/other/../rfi/SKILL.md', skills)?.name).toBe('rfi');
+    expect(skillContaining('Plugins/Sales/rfi/../../../KnowledgeBase/Secrets.md', skills)).toBeNull();
+    expect(skillContaining('../Plugins/Sales/rfi/SKILL.md', skills)).toBeNull();
     // A folder that merely shares a prefix is not the skill's folder.
     expect(skillContaining('Plugins/Sales/rfi-old/notes.md', skills)).toBeNull();
     expect(skillContaining('KnowledgeBase/Product/roadmap.md', skills)).toBeNull();

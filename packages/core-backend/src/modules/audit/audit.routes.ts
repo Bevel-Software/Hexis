@@ -108,11 +108,20 @@ export function createAuditRoutes(
       return;
     }
     try {
-      const admin = await isAdmin(req);
-      // An admin revokes deployment-wide and is recorded as such; anyone else
-      // is scoped to their own connections, and a foreign id reads as absent.
-      await audit.revokeConnection(id, admin ? 'admin' : 'owner', admin ? undefined : req.userId!);
-      log.info('revoke audit:', { action: admin ? 'admin-revoke-agent' : 'owner-revoke-agent', actorUserId: req.userId, connectionId: id });
+      // Own connection: the owner's revoke, recorded as theirs — an admin
+      // cutting off their OWN agent disconnected it, and the row must not
+      // tell them an admin took it. Anyone else's: only an admin may, and it
+      // is recorded as an admin's so the owner is told. Same order as keys.
+      const owner = await audit.ownerOf({ kind: 'agent', id });
+      if (owner === req.userId) {
+        await audit.revokeConnection(id, 'owner', req.userId!);
+      } else if (await isAdmin(req)) {
+        await audit.revokeConnection(id, 'admin');
+        log.info('revoke audit:', { action: 'admin-revoke-agent', actorUserId: req.userId, connectionId: id });
+      } else {
+        res.status(owner === null ? 404 : 403).json({ error: owner === null ? 'No such agent' : 'Not yours' });
+        return;
+      }
       res.json({ status: 'revoked' });
     } catch (err) {
       if (err instanceof AuditPrincipalNotFoundError) {

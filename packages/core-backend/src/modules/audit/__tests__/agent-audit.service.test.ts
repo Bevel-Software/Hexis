@@ -95,6 +95,7 @@ function makeService(queue: unknown[], keys: Partial<IExternalApiKeyService> = {
   const keyService = {
     listForUser: vi.fn(async () => []),
     listForDeployment: vi.fn(async () => []),
+    ownerOf: vi.fn(async () => null),
     ...keys,
   } as unknown as IExternalApiKeyService;
   const service = new AgentAuditService(fake.db, keyService, () => retention, () => NOW);
@@ -254,10 +255,13 @@ describe('AgentAuditService.listEvents', () => {
     expect(render(captured.where[0]).params).toEqual(['k-1']);
     expect(render(captured.where[1]).params).toEqual(['k-1']);
 
-    const last = makeService([[eventRow(3)], [{ total: 12 }]]);
+    // A cursor page counts nothing: the reader holds the first page's total.
+    const last = makeService([[eventRow(3)]]);
     const tail = await last.service.listEvents({ kind: 'key', id: 'k-1' }, { before: page.nextCursor!, limit: 2 });
     expect(tail.events.map((e) => e.id)).toEqual([eventId(3)]);
     expect(tail.nextCursor).toBeNull();
+    expect(tail.total).toBeNull();
+    expect(last.counts.select).toBe(1);
     // The cursor became the keyset predicate: strictly older, or the same
     // instant and a smaller id.
     const after = render(last.captured.where[0]);
@@ -278,6 +282,15 @@ describe('AgentAuditService.listEvents', () => {
       );
     }
     expect(counts.select).toBe(0);
+  });
+});
+
+describe('AgentAuditService.ownerOf', () => {
+  it('answers for a key through the key service, and for an agent from its connection row', async () => {
+    const { service, keyService } = makeService([[{ userId: BOB.id }]], { ownerOf: vi.fn(async () => ALICE.id) });
+    await expect(service.ownerOf({ kind: 'key', id: 'k-1' })).resolves.toBe(ALICE.id);
+    expect(keyService.ownerOf).toHaveBeenCalledWith('k-1');
+    await expect(service.ownerOf({ kind: 'agent', id: 'c-1' })).resolves.toBe(BOB.id);
   });
 });
 

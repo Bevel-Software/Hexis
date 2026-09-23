@@ -184,9 +184,28 @@ export function createMcpAuthMiddleware(
       req.userId = user.id;
       req.userEmail = user.email;
       // The local server's exchanged grant names its agent connection (see
-      // InternalTokenClaim.connectionId); carry it so its calls are logged
-      // under that agent exactly as the grant's own would be.
-      if (claim.connectionId) req.agentConnectionId = claim.connectionId;
+      // InternalTokenClaim.connectionId). The token itself is stateless and
+      // lives up to five hours, so the connection is asked on every request
+      // whether it still admits the agent — revoking the agent must reach
+      // this path as surely as it reaches the grant's own tokens — and the
+      // same statement records the use, so the Audit log's "last used"
+      // follows the local server's calls, not only its sign-ins. Carried on
+      // the request so those calls are logged under the agent.
+      if (claim.connectionId) {
+        let live: boolean;
+        try {
+          live = await oauthProvider.touchLiveConnection(claim.connectionId);
+        } catch (err) {
+          log.error('agent-connection check failed:', { err });
+          res.status(500).json({ error: 'Authentication backend unavailable' });
+          return;
+        }
+        if (!live) {
+          unauthorized(res, 'Access for this agent was revoked');
+          return;
+        }
+        req.agentConnectionId = claim.connectionId;
+      }
       next();
       return;
     }

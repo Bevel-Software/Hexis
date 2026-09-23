@@ -68,6 +68,10 @@ export class RequestAudit {
    * Run a UTCP call and record it: `error` when it throws or `isError` says
    * the result is one, `ok` otherwise. The result (or the throw) reaches the
    * caller unchanged — recording is a side effect, never a filter.
+   *
+   * The call starts FIRST and is classified alongside: naming a read may cost
+   * a loopback fetch of the skill catalog, and that is the log's business,
+   * not the tool's — a tool result never waits on its own bookkeeping.
    */
   async call<T>(
     utcpName: string,
@@ -75,14 +79,16 @@ export class RequestAudit {
     run: () => Promise<T>,
     isError: (result: T) => boolean,
   ): Promise<T> {
-    const classified = await this.classify(utcpName, args);
     const started = performance.now();
+    const classified = this.classify(utcpName, args);
     try {
       const result = await run();
-      this.emit(classified, isError(result) ? 'error' : 'ok', elapsed(started));
+      const duration = elapsed(started);
+      this.emit(await classified, isError(result) ? 'error' : 'ok', duration);
       return result;
     } catch (err) {
-      this.emit(classified, 'error', elapsed(started));
+      const duration = elapsed(started);
+      this.emit(await classified, 'error', duration);
       throw err;
     }
   }
@@ -104,7 +110,7 @@ export class RequestAudit {
   instrumentChainCalls(client: CodeModeUtcpClient): void {
     const callTool = client.callTool.bind(client);
     client.callTool = (toolName: string, toolArgs: Record<string, unknown>) =>
-      this.call(toolName, toolArgs, () => callTool(toolName, toolArgs), () => false);
+      this.call(toolName, toolArgs, () => callTool(toolName, toolArgs), isErrorShaped);
   }
 
   private skillCatalog(): Promise<readonly SkillFolder[] | null> {
@@ -121,4 +127,15 @@ export class RequestAudit {
 
 function elapsed(started: number): number {
   return Math.max(0, Math.round(performance.now() - started));
+}
+
+/**
+ * A chain-internal result that is the tool saying it failed. A downstream
+ * MCP server answers a failed call with `{ isError: true, content }` as a
+ * VALUE (the UTCP mcp protocol hands it through rather than throwing), and
+ * the direct path records that as an error — so must the chain path, or the
+ * same failure would read `ok` inside a chain and `error` outside one.
+ */
+function isErrorShaped(result: unknown): boolean {
+  return typeof result === 'object' && result !== null && (result as { isError?: unknown }).isError === true;
 }

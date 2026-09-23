@@ -1,7 +1,7 @@
 import { and, asc, count, desc, eq, isNull, lt, or, type SQL } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
 import type { Database } from '../database/connection.js';
-import { agentConnections, agentEvents, externalApiKeys, oauthTokens, users } from '../database/schema.js';
+import { agentConnections, agentEvents, oauthTokens, users } from '../database/schema.js';
 import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
 import {
   AuditPrincipalNotFoundError,
@@ -47,7 +47,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
 
   constructor(
     private readonly db: Database,
-    private readonly keys: Pick<IExternalApiKeyService, 'listForUser' | 'listForDeployment'>,
+    private readonly keys: Pick<IExternalApiKeyService, 'listForUser' | 'listForDeployment' | 'ownerOf'>,
     /** Read per sweep, so a changed setting applies without a restart. */
     private readonly retentionDays: () => number,
     private readonly now: () => number = Date.now,
@@ -179,15 +179,8 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         .limit(1);
       return row?.userId ?? null;
     }
-    // Keys are the key service's, but it exposes no owner lookup by id; the
-    // events table is not the answer either (a key with no events has an
-    // owner too), so read the one column straight off the row.
-    const [row] = await this.db
-      .select({ userId: externalApiKeys.userId })
-      .from(externalApiKeys)
-      .where(eq(externalApiKeys.id, principal.id))
-      .limit(1);
-    return row?.userId ?? null;
+    // A key is the key service's to answer for, like every other read of one.
+    return this.keys.ownerOf(principal.id);
   }
 
   async listEvents(
@@ -210,7 +203,10 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
           and(eq(agentEvents.at, cursor.at), lt(agentEvents.id, cursor.id)),
         )
       : undefined;
-    const [rows, [{ total }]] = await Promise.all([
+    // The total is counted on the FIRST page only: a reader paging back
+    // through a busy principal's history would otherwise pay a full count of
+    // the same number on every step, for a figure the page already holds.
+    const [rows, totals] = await Promise.all([
       this.db
         .select({
           id: agentEvents.id,
@@ -224,7 +220,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         .where(and(byPrincipal, after))
         .orderBy(desc(agentEvents.at), desc(agentEvents.id))
         .limit(limit + 1),
-      this.db.select({ total: count() }).from(agentEvents).where(byPrincipal),
+      cursor ? null : this.db.select({ total: count() }).from(agentEvents).where(byPrincipal),
     ]);
     const hasMore = rows.length > limit;
     const pageRows = hasMore ? rows.slice(0, limit) : rows;
@@ -239,7 +235,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
     const last = pageRows[pageRows.length - 1];
     return {
       events,
-      total: Number(total),
+      total: totals ? Number(totals[0]?.total ?? 0) : null,
       nextCursor: hasMore && last ? formatCursor(last.at, last.id) : null,
     };
   }
@@ -296,7 +292,24 @@ function parseCursor(raw: string): { at: Date; id: string } | null {
   return { at: new Date(Number(msText)), id };
 }
 
-/** The retention window the service runs on: the setting's days when it names a valid window, else the default. */
+/** The last invalid setting value warned about, so a standing misconfiguration is said once, not once per prune. */
+let warnedInvalidRetention: string | null = null;
+
+/**
+ * The retention window the service runs on: the setting's days when it
+ * names a valid window, else the default — said out loud when the setting
+ * is set to something that is not a window, because the Deployment page
+ * shows an environment value as the one in effect and would otherwise be
+ * the only place claiming a window nobody is keeping.
+ */
 export function retentionDaysFrom(raw: string): number {
-  return parseRetentionDays(raw) ?? DEFAULT_RETENTION_DAYS;
+  const days = parseRetentionDays(raw);
+  if (days !== null) return days;
+  if (raw.trim() && raw !== warnedInvalidRetention) {
+    warnedInvalidRetention = raw;
+    log.warn(
+      `auditRetentionDays is "${raw}", which is not a whole number of days from 1 to 3650 — keeping events for the default ${DEFAULT_RETENTION_DAYS} days instead.`,
+    );
+  }
+  return DEFAULT_RETENTION_DAYS;
 }
