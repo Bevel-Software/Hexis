@@ -14,6 +14,8 @@ import {
   urlForLibraryItem,
 } from '../routes/library-paths';
 import { pluginLabel, primaryFolderOf } from '../utils/plugin-summary';
+import { joinNames } from '../utils/names';
+import { repairPluginLinks, type LinkRepairReport, type UnrepairedLink } from '../services/plugins.api';
 import { RenamePluginDialog } from './RenamePluginDialog';
 import { PluginJoinRequests } from './PluginJoinRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
@@ -123,6 +125,19 @@ export function PluginPage() {
     return () => window.clearTimeout(timer);
   }, [refreshState]);
 
+  /**
+   * What the page-open repair did — null until it has answered, and left null
+   * for a viewer who never runs one (see the effect below). Once it is in, it
+   * is the truth about this plugin's links: the served `brokenLinks` was
+   * counted before the repair wrote anything.
+   */
+  const [repairReport, setRepairReport] = useState<LinkRepairReport | null>(null);
+  /**
+   * The repair could not even be asked for. Then — and only then — the page
+   * falls back to the banner it showed before this existed: the served count
+   * is all anyone knows.
+   */
+  const [repairFailed, setRepairFailed] = useState(false);
   /** The card being removed, while its confirm dialog is up. */
   const [removing, setRemoving] = useState<LibraryItem | null>(null);
   /** Whether the plugin's own delete confirmation is up. */
@@ -134,6 +149,49 @@ export function PluginPage() {
     () => data.pluginSummaries.find((g) => g.name === plugin) ?? null,
     [data.pluginSummaries, plugin],
   );
+
+  /**
+   * THE automatic repair: opening this page as someone who may write the
+   * plugin writes back the grants of every link that lost them and that this
+   * person may also write. Silent — a repaired link shows nothing at all; what
+   * could not be repaired becomes the banner below.
+   *
+   * Why the page and not the server's read path: the commit lands in the
+   * VIEWER's name, so it needs a person, and a page open is the one moment a
+   * person with both verbs is known to be here. Why once — `repairedFor` keys
+   * the run on the plugin, so a re-render, a reload of the catalog (which this
+   * effect itself causes) or a summary arriving late cannot run it twice; the
+   * backend's link locks serialise two people opening the page at the same
+   * moment, and the second finds the lines already there and writes nothing.
+   *
+   * A failure is not the reader's problem to act on: the report stays null and
+   * the page falls back to the banner it has always shown.
+   */
+  const { reload, reloadPlugins } = data;
+  const repairedFor = useRef<string | null>(null);
+  const canRepairLinks = summary?.canWrite === true && summary.linksAreManaged !== false;
+  useEffect(() => {
+    if (!canRepairLinks || repairedFor.current === plugin) return;
+    repairedFor.current = plugin;
+    let live = true;
+    void repairPluginLinks(plugin)
+      .then((report) => {
+        if (!live) return;
+        setRepairReport(report);
+        // Only a write is worth a refetch: the catalog and the summaries carry
+        // the link health this just changed.
+        if (report.repaired.length > 0) {
+          reload();
+          reloadPlugins();
+        }
+      })
+      .catch(() => {
+        if (live) setRepairFailed(true);
+      });
+    return () => {
+      live = false;
+    };
+  }, [canRepairLinks, plugin, reload, reloadPlugins]);
   // Inline AND linked: a shared skill linked from this plugin's manifest is
   // one of its skills. A link whose grant went missing carries the amber
   // "needs setup" foot note here — the one place the plugin's members look.
@@ -154,6 +212,16 @@ export function PluginPage() {
   // plugin's members out of a skill NOW, so it outranks an integration the
   // reader has not connected for themselves.
   const { total: attention, brokenLinks, warnings: warningCount } = attentionOf(data.items, plugin, data.pluginSummaries);
+  /** Links the page-open repair could not put back — the banner's own list. */
+  const unrepairedLinks = repairReport?.skipped ?? [];
+  /**
+   * Whether the served count is still the best thing this page can say. It is
+   * not, for a plugin writer who is having their links repaired: the count was
+   * taken before the repair wrote anything, so printing it would name links
+   * that are already fixed. They get the report's list instead, once it lands.
+   */
+  const showServedBrokenLinks =
+    brokenLinks > 0 && (!canRepairLinks || repairFailed) && unrepairedLinks.length === 0;
   const integrationsNeedingSetup = attention - brokenLinks - warningCount;
   const definitionWarnings = summary?.warnings ?? [];
   // What the Skills band actually renders. The filter is a VIEW over the band,
@@ -361,7 +429,27 @@ export function PluginPage() {
         />
       )}
 
-      {brokenLinks > 0 && (
+      {/* What the repair could not put back, one line per skill, naming the
+          people who can. A viewer whose repair is still in flight — or who
+          repaired everything — is shown nothing at all: the whole point of
+          repairing on open is that a link a writer can fix never becomes a
+          sentence somebody has to read. Everyone else (a reader, or a writer
+          whose repair could not even be asked for) gets the count that was
+          served, exactly as before. */}
+      {unrepairedLinks.length > 0 && (
+        <Banner role="status" tone="urgent" className="mt-4">
+          <ul className="grid gap-1">
+            {unrepairedLinks.flatMap((link) =>
+              link.skills.map((skill) => (
+                <li key={`${link.root}:${skill.path}`}>
+                  {`${skill.name} can't be read by ${label}'s members. ${editorsText(link)} can repair the link from the skill page.`}
+                </li>
+              )),
+            )}
+          </ul>
+        </Banner>
+      )}
+      {showServedBrokenLinks && (
         <Banner role="status" tone="urgent" className="mt-4">
           {`${brokenLinks} ${
             brokenLinks === 1
@@ -604,6 +692,15 @@ export function PluginPage() {
   );
 }
 
-
-
-
+/**
+ * Who the banner tells the reader to ask — the roles first, then the people,
+ * spoken the way a person lists them.
+ *
+ * "Its editors" is not a placeholder for a list that failed to load: a skill
+ * root whose access file names nobody is still writable by the platform's
+ * admins through the rescue on `access.md`, so the sentence stays true and
+ * stays actionable when the list comes back empty.
+ */
+function editorsText(link: UnrepairedLink): string {
+  return joinNames([...link.editors.roles, ...link.editors.users.map((u) => u.name)]) || 'Its editors';
+}

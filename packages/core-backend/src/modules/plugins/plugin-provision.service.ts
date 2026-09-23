@@ -65,7 +65,8 @@ export interface ProvisionCommitDriver {
     branch: string,
     targetPath: string,
     user: AuthUser,
-    opts?: { systemAuthorized?: boolean },
+    /** `summary` overrides the path-derived commit subject — see `GitService.commitFile`. */
+    opts?: { systemAuthorized?: boolean; summary?: string },
   ): Promise<void>;
 }
 

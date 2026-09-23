@@ -30,6 +30,7 @@ const pluginsMock = vi.hoisted(() => ({
   requestPluginAccess: vi.fn(),
   unlinkSkill: vi.fn(),
   renamePlugin: vi.fn(),
+  repairPluginLinks: vi.fn(),
 }));
 const libApiMock = vi.hoisted(() => ({ removeLibraryItem: vi.fn() }));
 vi.mock('../services/library.api', async (importOriginal) => ({
@@ -45,6 +46,7 @@ vi.mock('../services/plugins.api', () => ({
   requestPluginAccess: pluginsMock.requestPluginAccess,
   unlinkSkill: pluginsMock.unlinkSkill,
   renamePlugin: pluginsMock.renamePlugin,
+  repairPluginLinks: pluginsMock.repairPluginLinks,
   AlreadyReadableError: class AlreadyReadableError extends Error {},
 }));
 
@@ -234,6 +236,9 @@ describe('PluginPage', () => {
     pluginsMock.reconcileJoinRequest.mockResolvedValue(false);
     pluginsMock.requestPluginAccess.mockResolvedValue(undefined);
     pluginsMock.renamePlugin.mockReset();
+    // The page-open repair: nothing to do, unless a test says otherwise.
+    pluginsMock.repairPluginLinks.mockReset();
+    pluginsMock.repairPluginLinks.mockResolvedValue({ repaired: [], skipped: [] });
   });
 
   it('lets a plugin MANAGER remove a skill, behind a confirm that says who loses it', async () => {
@@ -554,16 +559,80 @@ describe('PluginPage', () => {
   });
 
   it("warns about a broken link even when the caller cannot read that skill — the server's count wins", async () => {
-    // The manager the missing grant locks out: the skill is NOT in their
+    // The member the missing grant locks out: the skill is NOT in their
     // catalog, so nothing in `items` could say a link is broken. The summary
-    // carries the index's own count.
+    // carries the index's own count. (A MANAGER never gets this far — their
+    // page repairs the links first; see the repair tests below.)
     dataMock.useLibraryData.mockReturnValue({ ...CATALOG, tools: [connectedTool()] });
-    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true, brokenLinks: 2 })]);
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: false, brokenLinks: 2 })]);
     renderPlugin('GTM');
     expect(
       await screen.findByText(/2 linked skills can't be read by GTM's members: their access rules no longer name them\. Repair the links from the skill pages\./),
     ).toBeInTheDocument();
+    expect(pluginsMock.repairPluginLinks).not.toHaveBeenCalled();
     expect(screen.queryByText(/integrations? needs? setup/)).not.toBeInTheDocument();
+  });
+
+  it('repairs the plugin\'s links on open for a MANAGER — once, silently, and then reloads', async () => {
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, tools: [connectedTool()] });
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true, brokenLinks: 1 })]);
+    pluginsMock.repairPluginLinks.mockResolvedValue({ repaired: ['Skills/Eng/deploy'], skipped: [] });
+    vi.mocked(CATALOG.reload).mockClear();
+    renderPlugin('GTM');
+
+    await waitFor(() => expect(pluginsMock.repairPluginLinks).toHaveBeenCalledWith('GTM'));
+    // Once per page open: the reload it asks for must not run it again.
+    await waitFor(() => expect(CATALOG.reload).toHaveBeenCalled());
+    expect(pluginsMock.repairPluginLinks).toHaveBeenCalledTimes(1);
+    // Nothing is said about a repaired link — not a banner, not a toast. The
+    // count the summary was serving was taken before the repair wrote.
+    expect(screen.queryByText(/can't be read by GTM's members/)).not.toBeInTheDocument();
+  });
+
+  it('names the skill and its editors for a link the manager cannot repair', async () => {
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, tools: [connectedTool()] });
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true, brokenLinks: 1 })]);
+    pluginsMock.repairPluginLinks.mockResolvedValue({
+      repaired: [],
+      skipped: [
+        {
+          root: 'Skills/Eng/deploy',
+          reason: 'needs-skill-write',
+          skills: [{ path: 'Skills/Eng/deploy', name: 'deploy' }],
+          editors: { roles: ['Eng'], users: [{ name: 'Eve', email: 'eve@x.io' }] },
+        },
+      ],
+    });
+    vi.mocked(CATALOG.reload).mockClear();
+    renderPlugin('GTM');
+
+    const banner = await screen.findByText(
+      "deploy can't be read by GTM's members. Eng and Eve can repair the link from the skill page.",
+    );
+    expect(banner.closest('[role="status"]')).toHaveClass('bg-urgent-soft');
+    // The count-shaped sentence is gone: this one names what is actually left.
+    expect(screen.queryByText(/access rules no longer name them/)).not.toBeInTheDocument();
+    // Nothing was written, so nothing is reloaded.
+    expect(CATALOG.reload).not.toHaveBeenCalled();
+  });
+
+  it('asks for no repair on a plugin whose links live in an external format', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([
+      gtm({ canWrite: true, linksAreManaged: false, brokenLinks: 0 }),
+    ]);
+    renderPlugin('GTM');
+    await screen.findByRole('heading', { name: 'GTM', level: 1 });
+    expect(pluginsMock.repairPluginLinks).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the served count when the repair itself could not be asked for', async () => {
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, tools: [connectedTool()] });
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true, brokenLinks: 1 })]);
+    pluginsMock.repairPluginLinks.mockRejectedValue(new Error('offline'));
+    renderPlugin('GTM');
+    expect(
+      await screen.findByText(/1 linked skill can't be read by GTM's members/),
+    ).toBeInTheDocument();
   });
 
   it('pluralises the attention banner', async () => {

@@ -1321,7 +1321,8 @@ export class WorkflowService implements IWorkflowService {
     branch: string,
     targetPath: string,
     user: AuthUser,
-    opts?: { systemAuthorized?: boolean; skipValidation?: boolean },
+    /** `summary` overrides the path-derived commit subject; see `commitFile`. */
+    opts?: { systemAuthorized?: boolean; skipValidation?: boolean; summary?: string },
   ): Promise<void> {
     // `skipValidation` is the worker telling us this commit is not the last of
     // a burst. The validator is advisory — it parses the whole KB to produce a
@@ -1332,7 +1333,7 @@ export class WorkflowService implements IWorkflowService {
       workspaceId,
       user,
       targetPath,
-      undefined,
+      opts?.summary,
       opts?.skipValidation,
     );
     if (!change) {
