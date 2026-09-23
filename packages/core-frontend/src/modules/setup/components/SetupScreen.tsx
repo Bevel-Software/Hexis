@@ -180,7 +180,7 @@ const FIELDS: Record<
   },
   auditRetentionDays: {
     label: 'Keep events for',
-    help: 'How many days an agent’s recorded calls stay in the Audit log before they are removed. Leave blank for 90 days. Applies without a restart.',
+    help: 'How many days an agent’s recorded calls stay in the Audit log before they are removed. Clear the field to go back to the default of 90 days. Applies without a restart.',
     placeholder: '90',
   },
 };

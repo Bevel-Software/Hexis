@@ -121,3 +121,37 @@ export class AuditPrincipalNotFoundError extends Error {
     this.name = 'AuditPrincipalNotFoundError';
   }
 }
+
+/** A `before` cursor that is not one this service issued — the caller's mistake, answered as such. */
+export class InvalidCursorError extends Error {
+  constructor() {
+    super('Invalid cursor');
+    this.name = 'InvalidCursorError';
+  }
+}
+
+/** Shape of the id columns (any uuid version; case-insensitive). */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
+}
+
+/**
+ * The retention window's one rule, shared by the setting's validator and the
+ * runtime reader: a whole number of days from one to ten years. A value
+ * outside it is not a window at all — the reader falls back to the default,
+ * the validator refuses the save — so a typo in `AUDIT_RETENTION_DAYS` can no
+ * more disable pruning than one typed on the Deployment page can.
+ */
+export const RETENTION_DAYS_MIN = 1;
+export const RETENTION_DAYS_MAX = 3650;
+export const DEFAULT_RETENTION_DAYS = 90;
+
+/** The days a retention setting names, or null when it names none this rule accepts. */
+export function parseRetentionDays(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const n = Number(trimmed);
+  return n >= RETENTION_DAYS_MIN && n <= RETENTION_DAYS_MAX ? n : null;
+}

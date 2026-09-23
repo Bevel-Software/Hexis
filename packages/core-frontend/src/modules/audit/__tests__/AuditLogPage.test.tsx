@@ -214,6 +214,28 @@ describe('AuditLogPage', () => {
     expect(listEvents).toHaveBeenCalledTimes(1);
   });
 
+  it('offers to try again when the first load fails, and names its panel only once it exists', async () => {
+    vi.mocked(listPrincipals).mockResolvedValue([ALICE_CLAUDE]);
+    vi.mocked(listEvents)
+      .mockRejectedValueOnce(new Error('Could not load events'))
+      .mockResolvedValueOnce({ events: EVENTS, total: 4, nextCursor: null });
+    renderPage();
+    const row = await screen.findByRole('button', { name: /Claude/, expanded: false });
+    // Nothing to control yet: the panel is mounted on the first open.
+    expect(row).not.toHaveAttribute('aria-controls');
+
+    await userEvent.click(row);
+    expect(row).toHaveAttribute('aria-controls', expect.stringContaining('c-claude'));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Could not load events'));
+
+    // A collapse keeps the panel, so the failure would otherwise be permanent.
+    await userEvent.click(row);
+    await userEvent.click(row);
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.getByText('grep')).toBeInTheDocument());
+    expect(listEvents).toHaveBeenCalledTimes(2);
+  });
+
   it('loads older events through the cursor', async () => {
     vi.mocked(listPrincipals).mockResolvedValue([ALICE_CLAUDE]);
     vi.mocked(listEvents)

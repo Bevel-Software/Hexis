@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import { createAuditRoutes } from '../audit.routes.js';
-import { AuditPrincipalNotFoundError, type AuditPrincipal, type IAgentAuditService } from '../audit.contract.js';
+import {
+  AuditPrincipalNotFoundError,
+  InvalidCursorError,
+  type AuditPrincipal,
+  type IAgentAuditService,
+} from '../audit.contract.js';
 import { TokenNotFoundError } from '../../tool-auth/external-api-key.errors.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 
@@ -95,6 +100,13 @@ describe('audit routes — events', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ events: [], total: 0, nextCursor: null });
     expect(audit.listEvents).toHaveBeenCalledWith({ kind: 'key', id: KEY_ID }, { before: '123.e-9', limit: 200 });
+  });
+
+  it('answers a cursor the service does not recognise with 400, not 500', async () => {
+    const base = await listen(makeApp({ admin: false }));
+    audit.listEvents.mockRejectedValueOnce(new InvalidCursorError());
+    const res = await fetch(`${base}/api/audit/principals/key/${KEY_ID}/events?before=123.bad`);
+    expect(res.status).toBe(400);
   });
 
   it("refuses another person's principal to a member, and serves it to an admin", async () => {

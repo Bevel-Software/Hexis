@@ -84,6 +84,38 @@ describe('DeploymentSettingsService — precedence', () => {
   });
 });
 
+describe('DeploymentSettingsService — a blank that means the default', () => {
+  /**
+   * The rule everywhere else: a blank field leaves a setting alone. The Audit
+   * log's retention window is the exception that declares itself — its
+   * readers already treat "unset" as the default, so clearing the field is
+   * the one way back to that default, and a blank saves as a clear.
+   */
+  it('clears a blank-means-default setting on a blank save and leaves every other blank alone', async () => {
+    const { db, rows } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.save({ auditRetentionDays: '30', kbRepoUrl: 'https://example.com/stored.git' }, null);
+    expect(settings.resolve('auditRetentionDays')).toBe('30');
+
+    await settings.save({ auditRetentionDays: '', kbRepoUrl: '' }, null);
+
+    expect(settings.resolve('auditRetentionDays')).toBe('');
+    expect(settings.sourceOf('auditRetentionDays')).toBe('unset');
+    // The repository address was blank too, and blank still means "leave it".
+    expect(settings.resolve('kbRepoUrl')).toBe('https://example.com/stored.git');
+    expect(rows.some((r) => r.key === 'kbRepoUrl')).toBe(true);
+  });
+
+  it('holds the retention window to the same range on save as the runtime reader does', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    for (const bad of ['0', '3651', '1.5', 'lots']) {
+      await expect(settings.save({ auditRetentionDays: bad }, null)).rejects.toBeInstanceOf(SettingsValidationError);
+    }
+    await expect(settings.save({ auditRetentionDays: '3650' }, null)).resolves.toBeDefined();
+  });
+});
+
 describe('DeploymentSettingsService — secrets', () => {
   it('stores the token as ciphertext and reads it back', async () => {
     const { db, rows } = makeDb();

@@ -5,6 +5,10 @@ import { agentConnections, agentEvents, externalApiKeys, oauthTokens, users } fr
 import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
 import {
   AuditPrincipalNotFoundError,
+  DEFAULT_RETENTION_DAYS,
+  InvalidCursorError,
+  isUuid,
+  parseRetentionDays,
   type AgentEventInput,
   type AgentEventPage,
   type AgentEventView,
@@ -23,8 +27,7 @@ export const MAX_EVENT_PAGE = 200;
 /** How often, at most, one process sweeps events past the retention window. */
 const PRUNE_INTERVAL_MS = 60 * 60_000;
 
-/** What the deployment keeps when the setting is unset or unreadable. */
-export const DEFAULT_RETENTION_DAYS = 90;
+export { DEFAULT_RETENTION_DAYS };
 
 /**
  * The Audit log: the write half the MCP proxy records through, and the read
@@ -200,6 +203,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
     // instant is still a boundary, and a row inserted while the reader pages
     // never shifts what the next page returns.
     const cursor = page.before ? parseCursor(page.before) : null;
+    if (page.before && !cursor) throw new InvalidCursorError();
     const after: SQL | undefined = cursor
       ? or(
           lt(agentEvents.at, cursor.at),
@@ -277,17 +281,22 @@ function formatCursor(at: Date, id: string): string {
   return `${at.getTime()}.${id}`;
 }
 
+/**
+ * The cursor back into its parts, or null for anything this service did not
+ * issue: the id must be a uuid (the column is one, and Postgres refuses to
+ * compare it with anything else) and the instant a whole number of epoch
+ * milliseconds a `timestamp` can hold.
+ */
 function parseCursor(raw: string): { at: Date; id: string } | null {
   const dot = raw.indexOf('.');
   if (dot < 0) return null;
-  const ms = Number(raw.slice(0, dot));
+  const msText = raw.slice(0, dot);
   const id = raw.slice(dot + 1);
-  if (!Number.isFinite(ms) || !id) return null;
-  return { at: new Date(ms), id };
+  if (!/^\d{1,15}$/.test(msText) || !isUuid(id)) return null;
+  return { at: new Date(Number(msText)), id };
 }
 
-/** Parse the retention setting as the service reads it: a positive whole number of days, else the default. */
+/** The retention window the service runs on: the setting's days when it names a valid window, else the default. */
 export function retentionDaysFrom(raw: string): number {
-  const n = Number(raw);
-  return Number.isInteger(n) && n > 0 ? n : DEFAULT_RETENTION_DAYS;
+  return parseRetentionDays(raw) ?? DEFAULT_RETENTION_DAYS;
 }

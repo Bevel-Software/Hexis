@@ -276,11 +276,28 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       }
       scope = scopes.join(' ');
     }
-    return this.mintTokens(row.userId, row.clientId, scope, row.resource);
+    // A refresh STAYS on its token's agent connection and is refused once
+    // that connection is revoked. The connection is the authority on whether
+    // the agent may hold tokens at all: were a refresh to look the connection
+    // up afresh, one racing a revoke would find none live, make a new one and
+    // mint an unrevoked pair — the revoke undone by a millisecond. A token
+    // from before connections existed has none to stay on and is placed
+    // under one as a first mint would be.
+    if (row.connectionId && !(await this.connectionIsLive(row.connectionId))) {
+      throw new InvalidGrantError('Access for this agent was revoked');
+    }
+    return this.mintTokens(row.userId, row.clientId, scope, row.resource, row.connectionId ?? undefined);
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const now = new Date();
+    // The agent connection is joined so a token of a REVOKED connection fails
+    // here whatever its own row says: revoking an agent marks its tokens too,
+    // but the connection is the authority, and a token minted a moment after
+    // the revoke (a refresh that raced it) is dead on arrival rather than
+    // live until its own expiry. A token from before connections existed
+    // (null `connection_id`) has no connection to be revoked and verifies on
+    // its own row alone.
     const [row] = await this.deps.db
       .select({
         id: oauthTokens.id,
@@ -294,11 +311,13 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       })
       .from(oauthTokens)
       .innerJoin(users, eq(oauthTokens.userId, users.id))
+      .leftJoin(agentConnections, eq(oauthTokens.connectionId, agentConnections.id))
       .where(
         and(
           eq(oauthTokens.accessTokenHash, hashToken(token)),
           isNull(oauthTokens.revokedAt),
           gt(oauthTokens.expiresAt, now),
+          or(isNull(oauthTokens.connectionId), isNull(agentConnections.revokedAt)),
         ),
       )
       .limit(1);
@@ -371,11 +390,17 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       );
   }
 
+  /**
+   * @param connectionId The agent connection the pair belongs to, when the
+   *   caller already holds one (a refresh: the consumed token's). Absent on a
+   *   first mint, which finds or makes the live connection for (user, client).
+   */
   private async mintTokens(
     userId: string,
     clientId: string,
     scope: string | null,
     resource: string | null,
+    connectionId?: string,
   ): Promise<OAuthTokens> {
     const accessToken = this.deps.tokenPrefix + randomBytes(TOKEN_BYTES).toString('base64url');
     const refreshToken = this.refreshPrefix + randomBytes(TOKEN_BYTES).toString('base64url');
@@ -398,13 +423,13 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     } catch (err) {
       log.warn('token-table prune failed (non-fatal):', { err });
     }
-    const connectionId = await this.ensureConnection(userId, clientId);
+    const boundTo = connectionId ?? (await this.ensureConnection(userId, clientId));
     await this.deps.db.insert(oauthTokens).values({
       accessTokenHash: hashToken(accessToken),
       refreshTokenHash: hashToken(refreshToken),
       clientId,
       userId,
-      connectionId,
+      connectionId: boundTo,
       scope,
       resource,
       expiresAt: new Date(now + ACCESS_TTL_MS),
@@ -432,6 +457,16 @@ export class BevelOAuthProvider implements OAuthServerProvider {
    * winner's. The client's display name is snapshotted from its registration
    * at that moment.
    */
+  /** Whether an agent connection still admits tokens: it exists and nobody has revoked it. */
+  private async connectionIsLive(connectionId: string): Promise<boolean> {
+    const [row] = await this.deps.db
+      .select({ id: agentConnections.id })
+      .from(agentConnections)
+      .where(and(eq(agentConnections.id, connectionId), isNull(agentConnections.revokedAt)))
+      .limit(1);
+    return row !== undefined;
+  }
+
   private async ensureConnection(userId: string, clientId: string): Promise<string> {
     const live = () =>
       this.deps.db

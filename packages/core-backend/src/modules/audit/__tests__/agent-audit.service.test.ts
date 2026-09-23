@@ -1,8 +1,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- the fake drizzle chain below is untyped by design, like its siblings */
 import { describe, expect, it, vi } from 'vitest';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { AgentAuditService, retentionDaysFrom } from '../agent-audit.service.js';
-import { AuditPrincipalNotFoundError } from '../audit.contract.js';
+import { AuditPrincipalNotFoundError, InvalidCursorError } from '../audit.contract.js';
 import type { Database } from '../../database/connection.js';
+import { agentConnections, oauthTokens } from '../../database/schema.js';
 import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
 
 /**
@@ -10,9 +13,16 @@ import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.in
  * returns the chain, the chain is thenable, and each `db.insert / select /
  * update / delete` pops the next queued result. `transaction` runs its
  * callback against the same fake, so queued results are consumed in order.
+ * Every `where` predicate and `update` target is captured, so a test can pin
+ * WHICH rows a statement addressed (see {@link render}), not just that it ran.
  */
 function makeFakeDb(queue: unknown[]) {
-  const captured: { values: any[]; set: any[] } = { values: [], set: [] };
+  const captured: { values: any[]; set: any[]; where: SQL[]; updateTargets: unknown[] } = {
+    values: [],
+    set: [],
+    where: [],
+    updateTargets: [],
+  };
   const counts = { insert: 0, select: 0, update: 0, delete: 0 };
 
   function nextChain() {
@@ -25,7 +35,7 @@ function makeFakeDb(queue: unknown[]) {
       });
     chain.values = passthrough((a) => captured.values.push(a[0]));
     chain.set = passthrough((a) => captured.set.push(a[0]));
-    chain.where = passthrough();
+    chain.where = passthrough((a) => captured.where.push(a[0]));
     chain.limit = passthrough();
     chain.innerJoin = passthrough();
     chain.from = passthrough();
@@ -39,11 +49,18 @@ function makeFakeDb(queue: unknown[]) {
   const db: any = {
     insert: vi.fn(() => (counts.insert++, nextChain())),
     select: vi.fn(() => (counts.select++, nextChain())),
-    update: vi.fn(() => (counts.update++, nextChain())),
+    update: vi.fn((table: unknown) => (counts.update++, captured.updateTargets.push(table), nextChain())),
     delete: vi.fn(() => (counts.delete++, nextChain())),
     transaction: vi.fn((fn: (tx: any) => Promise<unknown>) => fn(db)),
   };
   return { db: db as Database, captured, counts };
+}
+
+/** A captured predicate as the SQL it would send, with its parameters. */
+function render(fragment: SQL | undefined): { sql: string; params: unknown[] } {
+  if (!fragment) return { sql: '', params: [] };
+  const q = new PgDialect().sqlToQuery(fragment);
+  return { sql: q.sql, params: q.params };
 }
 
 const ALICE = { id: 'u-alice', email: 'alice@example.com', name: 'Alice' };
@@ -211,8 +228,9 @@ describe('AgentAuditService.listPrincipals', () => {
 });
 
 describe('AgentAuditService.listEvents', () => {
+  const eventId = (i: number) => `00000000-0000-4000-8000-00000000000${i}`;
   const eventRow = (i: number) => ({
-    id: `e-${i}`,
+    id: eventId(i),
     kind: 'capability',
     manual: null,
     name: `tool-${i}`,
@@ -221,44 +239,86 @@ describe('AgentAuditService.listEvents', () => {
   });
 
   it('pages newest first with a keyset cursor and reports the total', async () => {
-    const { service } = makeService([
+    const { service, captured } = makeService([
       [eventRow(1), eventRow(2), eventRow(3)] /* limit 2 → 3 rows means more */,
       [{ total: 12 }],
     ]);
 
     const page = await service.listEvents({ kind: 'key', id: 'k-1' }, { limit: 2 });
 
-    expect(page.events.map((e) => e.id)).toEqual(['e-1', 'e-2']);
+    expect(page.events.map((e) => e.id)).toEqual([eventId(1), eventId(2)]);
     expect(page.events[0]).toMatchObject({ kind: 'capability', name: 'tool-1', outcome: 'ok', at: NOW - 1000 });
     expect(page.total).toBe(12);
-    expect(page.nextCursor).toBe(`${NOW - 2000}.e-2`);
+    expect(page.nextCursor).toBe(`${NOW - 2000}.${eventId(2)}`);
+    // The page and the total both read THIS principal's rows and nobody else's.
+    expect(render(captured.where[0]).params).toEqual(['k-1']);
+    expect(render(captured.where[1]).params).toEqual(['k-1']);
 
     const last = makeService([[eventRow(3)], [{ total: 12 }]]);
     const tail = await last.service.listEvents({ kind: 'key', id: 'k-1' }, { before: page.nextCursor!, limit: 2 });
-    expect(tail.events.map((e) => e.id)).toEqual(['e-3']);
+    expect(tail.events.map((e) => e.id)).toEqual([eventId(3)]);
     expect(tail.nextCursor).toBeNull();
+    // The cursor became the keyset predicate: strictly older, or the same
+    // instant and a smaller id.
+    const after = render(last.captured.where[0]);
+    expect(after.sql).toMatch(/"at" < \$2 or \("agent_events"."at" = \$3 and "agent_events"."id" < \$4\)/);
+    // The instant rides twice (strictly-older, and same-instant) as whatever
+    // the driver spells a timestamp as; the id is the cursor's own.
+    expect(after.params[0]).toBe('k-1');
+    expect(after.params[1]).toEqual(after.params[2]);
+    expect(new Date(after.params[1] as string | Date).getTime()).toBe(NOW - 2000);
+    expect(after.params[3]).toBe(eventId(2));
+  });
+
+  it('refuses a cursor it did not issue instead of sending it to the database', async () => {
+    const { service, counts } = makeService([]);
+    for (const before of ['123.bad', 'notanumber.' + eventId(1), '1e5.' + eventId(1), eventId(1)]) {
+      await expect(service.listEvents({ kind: 'key', id: 'k-1' }, { before, limit: 2 })).rejects.toBeInstanceOf(
+        InvalidCursorError,
+      );
+    }
+    expect(counts.select).toBe(0);
   });
 });
 
 describe('AgentAuditService.revokeConnection', () => {
   it('marks the connection revoked by whom, and revokes every live token it holds', async () => {
-    const { service, captured, counts } = makeService([
+    const { service, captured } = makeService([
       [{ id: 'c-1' }] /* connection update.returning */,
       undefined /* tokens update */,
     ]);
 
     await service.revokeConnection('c-1', 'admin');
 
-    expect(counts.update).toBe(2);
+    expect(captured.updateTargets).toEqual([agentConnections, oauthTokens]);
     expect(captured.set[0]).toMatchObject({ revokedBy: 'admin' });
     expect(captured.set[0].revokedAt).toBeInstanceOf(Date);
     expect(captured.set[1].revokedAt).toBeInstanceOf(Date);
+    // An admin's revoke is unscoped by owner, and touches only a LIVE connection…
+    const connection = render(captured.where[0]);
+    expect(connection.sql).toMatch(/"agent_connections"."id" = \$1 and "agent_connections"."revoked_at" is null/);
+    expect(connection.params).toEqual(['c-1']);
+    // …and exactly its own live tokens, never another connection's.
+    const tokens = render(captured.where[1]);
+    expect(tokens.sql).toMatch(/"oauth_tokens"."connection_id" = \$1 and "oauth_tokens"."revoked_at" is null/);
+    expect(tokens.params).toEqual(['c-1']);
+  });
+
+  it("scopes an owner's revoke to their own connections", async () => {
+    const { service, captured } = makeService([[{ id: 'c-1' }], undefined]);
+    await service.revokeConnection('c-1', 'owner', ALICE.id);
+    const connection = render(captured.where[0]);
+    expect(connection.sql).toMatch(/"agent_connections"."user_id" = \$2/);
+    expect(connection.params).toEqual(['c-1', ALICE.id]);
+    expect(captured.set[0]).toMatchObject({ revokedBy: 'owner' });
   });
 
   it('is idempotent on an already-revoked connection and throws for one out of scope', async () => {
     const already = makeService([[] /* nothing live */, [{ id: 'c-1' }] /* but it exists */]);
     await expect(already.service.revokeConnection('c-1', 'owner', ALICE.id)).resolves.toBeUndefined();
     expect(already.counts.update).toBe(1); // no token revoke on a no-op
+    // The existence probe carries the SAME owner scope as the revoke itself.
+    expect(render(already.captured.where[1]).params).toEqual(['c-1', ALICE.id]);
 
     const foreign = makeService([[], []]);
     await expect(foreign.service.revokeConnection('c-1', 'owner', BOB.id)).rejects.toBeInstanceOf(
@@ -268,12 +328,17 @@ describe('AgentAuditService.revokeConnection', () => {
 });
 
 describe('retentionDaysFrom', () => {
-  it('reads a positive whole number of days and falls back to the default otherwise', () => {
+  it('reads a whole number of days within the window and falls back to the default otherwise', () => {
     expect(retentionDaysFrom('30')).toBe(30);
+    expect(retentionDaysFrom(' 3650 ')).toBe(3650);
     expect(retentionDaysFrom('')).toBe(90);
     expect(retentionDaysFrom('0')).toBe(90);
     expect(retentionDaysFrom('-5')).toBe(90);
     expect(retentionDaysFrom('1.5')).toBe(90);
     expect(retentionDaysFrom('lots')).toBe(90);
+    // The same ceiling the Deployment page enforces: a typo in the
+    // environment cannot stretch the window to forever.
+    expect(retentionDaysFrom('3651')).toBe(90);
+    expect(retentionDaysFrom('99999999')).toBe(90);
   });
 });

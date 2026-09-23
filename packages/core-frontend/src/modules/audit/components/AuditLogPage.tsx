@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, ChevronRight, KeyRound } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Dialog } from '../../../shared/components/Dialog';
-import { Badge, Button } from '../../../shared/components';
+import { Badge, Banner, Button } from '../../../shared/components';
 import { cn, formatRelativeTime } from '../../../lib/utils';
 import { GITHUB_LINK_KIND } from '../../../shared/marketplace-url';
 import { useAdmin } from '../../admin/state/admin.context';
@@ -152,12 +152,9 @@ export function AuditLogPage() {
           </p>
 
           {error && (
-            <div
-              className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-sm px-2 py-1.5"
-              role="alert"
-            >
+            <Banner tone="danger" role="alert" className="text-detail">
               {error}
-            </div>
+            </Banner>
           )}
 
           {principals !== null && (
@@ -242,7 +239,10 @@ export function AuditLogPage() {
                                 type="button"
                                 onClick={() => toggle(key)}
                                 aria-expanded={open}
-                                aria-controls={panelId}
+                                // Only once the panel exists: a reference to an id that is
+                                // not in the document is an invalid one, and the panel is
+                                // mounted on the row's first open.
+                                aria-controls={opened[key] ? panelId : undefined}
                                 className={cn(
                                   'flex flex-1 min-w-0 items-center gap-3 text-left',
                                   "after:absolute after:inset-0 after:content-['']",
@@ -334,20 +334,12 @@ export function AuditLogPage() {
         busy={revoking}
         footer={
           <>
-            <button
-              onClick={() => setPendingRevoke(null)}
-              disabled={revoking}
-              className="px-3 py-1.5 text-sm rounded-sm text-ink hover:bg-hover border border-line disabled:opacity-50"
-            >
+            <Button variant="outline" onClick={() => setPendingRevoke(null)} disabled={revoking}>
               Cancel
-            </button>
-            <button
-              onClick={confirmRevoke}
-              disabled={revoking}
-              className="px-3 py-1.5 text-sm rounded-sm bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 disabled:hover:bg-red-600"
-            >
+            </Button>
+            <Button variant="danger" onClick={confirmRevoke} disabled={revoking}>
               {revoking ? 'Revoking…' : pendingRevoke ? revokeVerb(pendingRevoke) : 'Revoke'}
-            </button>
+            </Button>
           </>
         }
       >

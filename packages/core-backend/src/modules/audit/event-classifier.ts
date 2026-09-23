@@ -79,9 +79,19 @@ export function skillReadPath(utcpName: string, args: Record<string, unknown>, k
   return pathArgument(args);
 }
 
-/** Forward slashes, no leading `./` or `/`, no trailing `/` — so two spellings of one folder compare equal. */
+/**
+ * Forward slashes, one per boundary, no leading `./` or `/`, no trailing `/` —
+ * so two spellings of one folder compare equal. Repeated slashes are
+ * collapsed because the file tools accept `Plugins//Sales/rfi` as that same
+ * folder, and the match here must agree with what they read.
+ */
 function normalizePath(p: string): string {
-  return p.replace(/\\/g, '/').replace(/^(\.\/)+/, '').replace(/^\/+/, '').replace(/\/+$/, '');
+  return p
+    .replace(/\\/g, '/')
+    .replace(/\/{2,}/g, '/')
+    .replace(/^(\.\/)+/, '')
+    .replace(/^\/+/, '')
+    .replace(/\/+$/, '');
 }
 
 /**

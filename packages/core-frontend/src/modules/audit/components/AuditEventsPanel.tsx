@@ -1,6 +1,6 @@
-import { Fragment, useCallback, useEffect, useId, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Badge, Button } from '../../../shared/components';
+import { Badge, Banner, Button } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { pathForSkill, pathForTool } from '../../library/routes/library-paths';
 import {
@@ -113,24 +113,32 @@ export function AuditEventsPanel({
   // read once, so a re-render never shifts a separator on its own.
   const [now] = useState(() => Date.now());
 
-  useEffect(() => {
-    let cancelled = false;
+  // Generation of the newest first-page load: a "Try again" pressed while an
+  // earlier attempt is still out must not let that attempt land afterwards.
+  const loadGen = useRef(0);
+  const loadFirstPage = useCallback(() => {
+    const gen = ++loadGen.current;
     listEvents(kind, id, { limit: PAGE_SIZE })
       .then((page) => {
-        if (cancelled) return;
+        if (gen !== loadGen.current) return;
         setEvents(page.events);
         setTotal(page.total);
         setNextCursor(page.nextCursor);
         setError(null);
       })
       .catch((err) => {
-        if (cancelled) return;
+        if (gen !== loadGen.current) return;
         setError(err instanceof Error ? err.message : "Couldn't load events.");
       });
-    return () => {
-      cancelled = true;
-    };
   }, [kind, id]);
+
+  useEffect(() => {
+    loadFirstPage();
+    return () => {
+      // Unmounting retires every attempt in flight.
+      loadGen.current += 1;
+    };
+  }, [loadFirstPage]);
 
   const loadOlder = useCallback(async () => {
     if (!nextCursor || loadingMore) return;
@@ -174,10 +182,15 @@ export function AuditEventsPanel({
   }
 
   if (error && events === null) {
+    // The panel stays mounted across a collapse, so without a way to re-ask
+    // a failed first load would be this row's permanent state.
     return (
-      <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-sm px-2 py-1.5" role="alert">
+      <Banner tone="danger" role="alert" className="text-detail">
         {error}
-      </div>
+        <Button variant="outline" size="sm" className="ml-3" onClick={loadFirstPage}>
+          Try again
+        </Button>
+      </Banner>
     );
   }
   if (events === null) return <div className="text-xs text-ink-muted">Loading…</div>;
@@ -229,9 +242,9 @@ export function AuditEventsPanel({
       </div>
 
       {error && (
-        <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-sm px-2 py-1.5" role="alert">
+        <Banner tone="danger" role="alert" className="text-detail">
           {error}
-        </div>
+        </Banner>
       )}
 
       <div className="bg-white border border-line rounded-sm overflow-hidden">

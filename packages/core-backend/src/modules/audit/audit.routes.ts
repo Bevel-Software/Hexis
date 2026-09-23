@@ -3,14 +3,17 @@ import { logger } from '../../shared/logging.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import { TokenNotFoundError } from '../tool-auth/external-api-key.errors.js';
 import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
-import { AuditPrincipalNotFoundError, type AuditPrincipalRef, type IAgentAuditService } from './audit.contract.js';
+import {
+  AuditPrincipalNotFoundError,
+  InvalidCursorError,
+  isUuid,
+  type AuditPrincipalRef,
+  type IAgentAuditService,
+} from './audit.contract.js';
 import { MAX_EVENT_PAGE } from './agent-audit.service.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
 
 const log = logger('audit');
-
-/** Shape of the id columns (any uuid version; case-insensitive). */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const DEFAULT_EVENT_PAGE = 50;
 
@@ -41,7 +44,7 @@ export function createAuditRoutes(
   const principalOf = (req: express.Request): AuditPrincipalRef | null => {
     const kind = String(req.params.kind);
     const id = String(req.params.id);
-    if ((kind !== 'key' && kind !== 'agent') || !UUID_RE.test(id)) return null;
+    if ((kind !== 'key' && kind !== 'agent') || !isUuid(id)) return null;
     return { kind, id };
   };
 
@@ -89,6 +92,10 @@ export function createAuditRoutes(
       const before = typeof req.query.before === 'string' && req.query.before ? req.query.before : undefined;
       res.json(await audit.listEvents(principal, { before, limit }));
     } catch (err) {
+      if (err instanceof InvalidCursorError) {
+        res.status(400).json({ error: 'Invalid cursor — reload the events from the start' });
+        return;
+      }
       log.error('list events failed:', { err });
       res.status(500).json({ error: 'Failed to load events' });
     }
@@ -96,7 +103,7 @@ export function createAuditRoutes(
 
   router.delete('/audit/agents/:id', async (req, res) => {
     const id = String(req.params.id);
-    if (!UUID_RE.test(id)) {
+    if (!isUuid(id)) {
       res.status(404).json({ error: 'No such agent' });
       return;
     }
@@ -119,7 +126,7 @@ export function createAuditRoutes(
 
   router.delete('/audit/keys/:id', async (req, res) => {
     const id = String(req.params.id);
-    if (!UUID_RE.test(id)) {
+    if (!isUuid(id)) {
       res.status(404).json({ error: 'Token not found' });
       return;
     }

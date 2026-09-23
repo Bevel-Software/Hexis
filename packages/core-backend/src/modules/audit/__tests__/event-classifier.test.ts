@@ -39,6 +39,8 @@ describe('skillContaining', () => {
     expect(skillContaining('knowledge-base/Plugins/Sales/rfi/scripts/build.py', skills)?.name).toBe('rfi');
     expect(skillContaining('./Skills\\Engineering\\deploy-checklist\\SKILL.md', skills)?.name).toBe('deploy-checklist');
     expect(skillContaining('Plugins/Sales/rfi/followup/SKILL.md', skills)?.name).toBe('rfi-followup');
+    // The file tools accept a doubled separator as the same path; so does this.
+    expect(skillContaining('Plugins//Sales/rfi/SKILL.md', skills)?.name).toBe('rfi');
     // A folder that merely shares a prefix is not the skill's folder.
     expect(skillContaining('Plugins/Sales/rfi-old/notes.md', skills)).toBeNull();
     expect(skillContaining('KnowledgeBase/Product/roadmap.md', skills)).toBeNull();
