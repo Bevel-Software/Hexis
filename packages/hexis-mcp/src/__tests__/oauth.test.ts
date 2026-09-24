@@ -368,6 +368,86 @@ describe('stored credentials', () => {
   it('a missing store is absent, not an error', async () => {
     expect(await readStoredCredentials('https://never-signed-in.example')).toBeNull();
   });
+
+  it('keeps one store per agent, beside the plain per-machine one', async () => {
+    const claude = { name: 'claude-code' };
+    const cursor = { name: 'cursor-vscode' };
+    await writeStoredCredentials(baseUrl, { clientId: 'c-plain', refreshToken: 'r-plain' });
+    await writeStoredCredentials(baseUrl, { clientId: 'c-claude', refreshToken: 'r-claude' }, claude);
+    expect(oauthStorePath(baseUrl, claude)).not.toBe(oauthStorePath(baseUrl));
+    expect(oauthStorePath(baseUrl, claude)).not.toBe(oauthStorePath(baseUrl, cursor));
+    expect(await readStoredCredentials(baseUrl)).toEqual({ clientId: 'c-plain', refreshToken: 'r-plain' });
+    expect(await readStoredCredentials(baseUrl, claude)).toEqual({ clientId: 'c-claude', refreshToken: 'r-claude' });
+    // An agent that never signed in has no store — the plain one is not its.
+    expect(await readStoredCredentials(baseUrl, cursor)).toBeNull();
+  });
+});
+
+describe('the agent behind the sign-in', () => {
+  it('registers under the agent\'s name on this machine, tells the person to return to it, and stores the sign-in as that agent\'s', async () => {
+    const browser = fakeBrowser();
+    const authority = await stubAuthority({
+      codeGrant: (params) => pkceCodeGrant(browser.seen, { access_token: 'a-flow', refresh_token: 'r-flow' })(params),
+      localToken: (bearer) => (bearer === 'a-flow' ? { status: 200, body: { token: 'int-1' } } : { status: 401 }),
+    });
+    try {
+      const agent = { name: 'claude-code', version: '2.0.1' };
+      await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: browser.open, print: quiet, agent });
+      expect(String(authority.record.dcr[0]!.client_name)).toMatch(/^Claude Code · local server on .+/);
+      expect(await readStoredCredentials(authority.base, agent)).toEqual({ clientId: 'dyn-client', refreshToken: 'r-flow' });
+      // Nothing landed in the plain store: the sign-in is the agent's.
+      expect(await readStoredCredentials(authority.base)).toBeNull();
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('never reuses the plain per-machine sign-in for an agent — each agent signs in once, as itself', async () => {
+    const browser = fakeBrowser();
+    const authority = await stubAuthority({
+      // A refresh WOULD succeed — if anyone presented the plain store's token.
+      refreshGrant: () => ({ status: 200, body: { access_token: 'a-refreshed' } }),
+      codeGrant: (params) => pkceCodeGrant(browser.seen, { access_token: 'a-flow', refresh_token: 'r-flow' })(params),
+      localToken: () => ({ status: 200, body: { token: 'int-1' } }),
+    });
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'old-machine-client', refreshToken: 'r-old' });
+      await establishOAuthConfig(authority.base, authority.mcpUrl, {
+        openBrowser: browser.open,
+        print: quiet,
+        agent: { name: 'cursor-vscode' },
+      });
+      // The browser flow ran (a registration happened) and no refresh was tried.
+      expect(authority.record.dcr).toHaveLength(1);
+      expect(authority.record.token.some((p) => p.get('grant_type') === 'refresh_token')).toBe(false);
+      // The plain store is untouched, for whatever still uses it.
+      expect(await readStoredCredentials(authority.base)).toEqual({ clientId: 'old-machine-client', refreshToken: 'r-old' });
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('a later run of the same agent refreshes its own stored sign-in, no browser', async () => {
+    const authority = await stubAuthority({
+      refreshGrant: (params) =>
+        params.get('refresh_token') === 'r-claude' && params.get('client_id') === 'c-claude'
+          ? { status: 200, body: { access_token: 'a-claude' } }
+          : { status: 400, body: { error: 'invalid_grant' } },
+      localToken: (bearer) => (bearer === 'a-claude' ? { status: 200, body: { token: 'int-claude' } } : { status: 401 }),
+    });
+    try {
+      const agent = { name: 'claude-code' };
+      await writeStoredCredentials(authority.base, { clientId: 'c-claude', refreshToken: 'r-claude' }, agent);
+      const openBrowser = (): void => {
+        throw new Error('the browser must not open for a stored sign-in');
+      };
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser, print: quiet, agent });
+      expect(config.connectionKey).toBe('int-claude');
+      expect(authority.record.dcr).toHaveLength(0);
+    } finally {
+      await authority.close();
+    }
+  });
 });
 
 describe('refresh path', () => {

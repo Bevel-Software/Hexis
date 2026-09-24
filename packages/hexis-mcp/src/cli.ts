@@ -3,8 +3,10 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { ConfigError, USAGE, resolveConfig, type HexisMcpConfig } from './config.js';
 import { DeploymentError, resolveMcpUrl } from './deployment.js';
+import { holdInitialize } from './handshake.js';
 import { OAuthError, establishOAuthConfig } from './oauth.js';
 import { preflight } from './preflight.js';
 import { beginOrderlyExit, makeExitAfterShutdown, type ShutdownHolder } from './teardown.js';
@@ -56,17 +58,6 @@ async function main(): Promise<void> {
   const { createHexisMcpServer } = await import('./server.js');
 
   const resolved = resolveConfig(argv, process.env);
-  let config: HexisMcpConfig;
-  if (resolved.connectionKey !== undefined) {
-    // Key mode: autonomous, exactly the pre-OAuth behavior.
-    config = { baseUrl: resolved.baseUrl, connectionKey: resolved.connectionKey };
-  } else {
-    // No key = browser sign-in. Discovery starts from the deployment's OWN
-    // MCP endpoint; `/api/config` is unauthenticated, so resolving it needs
-    // no credential — which is the point: none exists yet.
-    const mcpUrl = await resolveMcpUrl({ baseUrl: resolved.baseUrl, connectionKey: '' });
-    config = await establishOAuthConfig(resolved.baseUrl, mcpUrl, { noOpen: resolved.noOpen });
-  }
   // Deterministic teardown, on every way an MCP client lets go of us: stdin
   // EOF/close (the client hung up), SIGINT, SIGTERM. Killing this process
   // does NOT kill its grandchildren on Windows — only the transports' close()
@@ -75,8 +66,9 @@ async function main(): Promise<void> {
   // later instance. So the spawned servers must die WITH this process, not be
   // left to a stdin-pipe EOF cascade that observably leaks.
   //
-  // Installed BEFORE `createHexisMcpServer`, because the children spawn
-  // DURING it: a client that hangs up (or a Ctrl+C) mid-startup used to land
+  // Installed BEFORE anything that can take a while — the browser sign-in
+  // as much as `createHexisMcpServer` — because the children spawn DURING the
+  // create, and a client that hangs up (or a Ctrl+C) mid-startup used to land
   // in a window with no handler at all, leaving exactly the orphans the
   // teardown exists to prevent. Until the handle exists there is nothing
   // reachable to close — the UTCP client lives inside the create call — so an
@@ -91,6 +83,34 @@ async function main(): Promise<void> {
   process.on('SIGINT', exitAfterShutdown);
   process.on('SIGTERM', exitAfterShutdown);
 
+  let config: HexisMcpConfig;
+  let transport: Transport;
+  if (resolved.connectionKey !== undefined) {
+    // Key mode: autonomous, exactly the pre-OAuth behavior.
+    config = { baseUrl: resolved.baseUrl, connectionKey: resolved.connectionKey };
+    transport = new StdioServerTransport();
+  } else {
+    // No key = browser sign-in, AS THE AGENT THAT IS RUNNING US. The agent
+    // names itself in the `initialize` request — the client's first message
+    // — so the transport starts now and that request is held while the
+    // sign-in runs with the name in hand; the server built afterwards gets
+    // the held messages replayed (see handshake.ts). A client that hangs up
+    // before saying anything is a let-go like any other: nothing to sign
+    // in for.
+    const stdio = new StdioServerTransport();
+    const handshake = await holdInitialize(stdio);
+    if (holder.exitRequested) return;
+    transport = handshake.transport;
+    // Discovery starts from the deployment's OWN MCP endpoint; `/api/config`
+    // is unauthenticated, so resolving it needs no credential — which is
+    // the point: none exists yet.
+    const mcpUrl = await resolveMcpUrl({ baseUrl: resolved.baseUrl, connectionKey: '' });
+    config = await establishOAuthConfig(resolved.baseUrl, mcpUrl, {
+      noOpen: resolved.noOpen,
+      agent: handshake.agent,
+    });
+  }
+
   try {
     const { server, shutdown } = await createHexisMcpServer(config, packageVersion());
     holder.shutdown = shutdown;
@@ -102,7 +122,7 @@ async function main(): Promise<void> {
       beginOrderlyExit(holder);
       return;
     }
-    await server.connect(new StdioServerTransport());
+    await server.connect(transport);
   } catch (err) {
     // Startup failed with the let-go listeners already armed. They must not
     // stay that way: the signal handlers alone would hold this dead-on-arrival
