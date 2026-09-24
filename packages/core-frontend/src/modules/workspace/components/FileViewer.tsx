@@ -962,10 +962,15 @@ export function FileViewer() {
 
   // Which shape the document column takes. A history / comparison panel is a
   // fixed-height viewport with its own scroller (both roots are
-  // `flex-1 flex flex-col min-h-0`), so it gets the full-bleed contract for
-  // the same reason a PDF does — an auto-height column would collapse it.
+  // `flex-1 flex flex-col min-h-0`), so it needs the definite height a PDF
+  // needs — but NOT the full bleed. It is standing in for the document, in the
+  // document's place, and a panel that threw the column away took the title,
+  // the tab strip and the timeline with it: the heading ran into the pane's
+  // left edge and the commit list started flush against it, so going to
+  // history and coming back moved every row on the page. `panel` is the
+  // reading view's column with full-bleed's height — see `KbDocumentShell`.
   const shellVariant =
-    activeTab === 'content' ? getRendererLayout(openFilePath) : 'full-bleed';
+    activeTab === 'content' ? getRendererLayout(openFilePath) : 'panel';
 
   // No-preview routes (legacy Office, ODF) have no editing surface at all —
   // offering Edit/Propose there would acquire a lock for a mode the renderer

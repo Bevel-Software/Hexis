@@ -859,6 +859,55 @@ describe('FileViewer', () => {
     expect(screen.getByRole('button', { name: 'Version history' })).toBeInTheDocument();
   });
 
+  /**
+   * The log stands in for the document, in the document's PLACE.
+   *
+   * It used to take the full-bleed contract — right about the height it
+   * needs, wrong about everything else: the column went with it, so the title
+   * ran into the pane's left edge and the timeline started flush against it,
+   * and going to history and coming back moved every row on the page.
+   * `panel` is the reading view's column with full-bleed's height, so the
+   * frame is the SAME frame and the assertion can say so without naming a
+   * single measurement.
+   */
+  it('keeps the document column when the log takes the place of the document', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="historic" />);
+
+    const frameOf = () =>
+      [...(screen.getByTestId('kb-document-shell').firstElementChild as HTMLElement).classList]
+        // The measure, the side margins and the offset the band opens on —
+        // everything that decides WHERE the column is. What the two modes are
+        // allowed to differ on is how the box below is sized: a document
+        // scrolls and ends on the bottom rhythm, a panel fills the pane.
+        .filter((cls) => /^(mx-auto|w-full|max-w-|px-|pt-|max-\[900px\]:px-)/.test(cls))
+        .sort();
+
+    const reading = frameOf();
+    // Non-empty, or the filter has stopped matching anything and the two
+    // empty lists below would agree about nothing.
+    expect(reading).toContain('max-w-[880px]');
+    expect(reading).toContain('px-[40px]');
+
+    await user.click(screen.getByRole('button', { name: 'Version history' }));
+    await screen.findByRole('button', { name: /Back to the document/ });
+    expect(screen.getByTestId('kb-document-shell').getAttribute('data-variant')).toBe('panel');
+    expect(frameOf()).toEqual(reading);
+
+    // The title is in that column, not beside it — the clipping Juan saw was
+    // a heading with no margin to stand on.
+    const column = screen.getByTestId('kb-document-shell').firstElementChild as HTMLElement;
+    expect(column).toContainElement(screen.getByRole('heading', { level: 1 }));
+    // So are the tab strip and the log itself.
+    expect(column).toContainElement(screen.getByRole('tablist', { name: 'Open files' }));
+    expect(column).toContainElement(screen.getByText(/Timeline:/));
+
+    // …and back: nothing about the frame moved.
+    await user.click(screen.getByRole('button', { name: /Back to the document/ }));
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(frameOf()).toEqual(reading);
+  });
+
   it('closes Version history from the pressed clock in the header', async () => {
     const user = userEvent.setup();
     render(<ViewerHarness initialContent="historic" />);

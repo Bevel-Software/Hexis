@@ -201,29 +201,37 @@ export function ToolPage({
             name={tool.name}
             nameClassName="text-display font-semibold text-ink"
           />
+          {/* No `Manage access` here, deliberately. Access is decided at the
+              PLUGIN — a tool inherits its folder's `access.md`, so an editor
+              on this page would either duplicate the plugin's one or quietly
+              write a per-file override that nobody looking at the plugin
+              would see. The plugin's `Share` panel is the single place.
+
+              The `⋯` menu, though, is the same one the plugin page carries,
+              and now in the same PLACE: the end of the title row, in the same
+              `flex flex-none items-center gap-1` group `PluginPage` puts it
+              in, so the three item pages answer the same gesture at the same
+              point on the screen. It used to be the last child of this
+              `<header>`, below the description — a menu on its own line under
+              the way back, which is where nothing else on any page is.
+              `onAdd` is absent: there is nothing to add to a tool. */}
+          <div className="flex flex-none items-center gap-1">
+            <PageActions
+              onCopyLink={() => copyToClipboard(window.location.href)}
+              // The OWNER's verb, and the same verdict the DELETE route
+              // enforces (ownership of the plugin holding the tool) — so the
+              // item appears for exactly the people the backend will let
+              // through.
+              onDelete={canDelete ? () => setDeleteOpen(true) : undefined}
+              deleteLabel="Delete tool"
+            />
+          </div>
         </div>
         {page.detail?.description && (
           <p className="mt-1.5 max-w-[56ch] text-lede text-ink-muted">
             {page.detail.description}
           </p>
         )}
-        {/* No `Manage access` here, deliberately. Access is decided at the
-            PLUGIN — a tool inherits its folder's `access.md`, so an editor on
-            this page would either duplicate the plugin's one or quietly write a
-            per-file override that nobody looking at the plugin would see. The
-            plugin's `Share` panel is the single place.
-
-            The `⋯` menu, though, is the same one the plugin page carries, in
-            the same spot — Delete belongs where people already look for it.
-            `onAdd` is absent: there is nothing to add to a tool. */}
-        <PageActions
-          onCopyLink={() => copyToClipboard(window.location.href)}
-          // The OWNER's verb, and the same verdict the DELETE route enforces
-          // (ownership of the plugin holding the tool) — so the item appears
-          // for exactly the people the backend will let through.
-          onDelete={canDelete ? () => setDeleteOpen(true) : undefined}
-          deleteLabel="Delete tool"
-        />
       </header>
 
       {actionError && (

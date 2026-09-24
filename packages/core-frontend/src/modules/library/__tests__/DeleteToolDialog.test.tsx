@@ -80,6 +80,7 @@ vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolPage } from '../components/tool-page/ToolPage';
 import { DeleteToolDialog } from '../components/tool-page/DeleteToolDialog';
+import { expectMenuAtTheEndOfTheTitleRow } from './title-row-actions';
 
 const TOOL: ToolSecrets = {
   slug: 'heyreach',
@@ -196,6 +197,16 @@ beforeEach(() => {
 });
 
 describe('who is offered Delete', () => {
+  /**
+   * The menu's PLACE does not depend on what is in it. The same assertion
+   * `ToolPage.test.tsx` makes for a reader, here for the one caller that
+   * really owns the plugin — the spec's "with and without Delete".
+   */
+  it('keeps the ⋯ at the right end of the title row for the owner too', async () => {
+    expect(await openMenu()).toBeInTheDocument();
+    expectMenuAtTheEndOfTheTitleRow();
+  });
+
   it('offers it to an owner of the plugin holding the tool', async () => {
     expect(await openMenu()).toBeInTheDocument();
   });
