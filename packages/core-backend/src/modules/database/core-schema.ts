@@ -211,6 +211,16 @@ export const externalApiKeys = pgTable('api_tokens', {
    * reconnect a key that was taken from them.
    */
   revokedBy: text('revoked_by'),
+  /**
+   * When the owner deleted the key "for good" from their own pages. A
+   * DELETE in name only: the row stays, because the Audit log's events hang
+   * off it and a log its subject can erase is not one. Hidden from the
+   * owner's listings, shown to admins as deleted; gone for real only when
+   * the account is erased (the cascade) or its events have long been
+   * pruned. Always set on an already-revoked row — a live key is never
+   * deleted in one step.
+   */
+  deletedAt: timestamp('deleted_at'),
 }, (t) => ({
   byUser: index('api_tokens_by_user').on(t.userId),
 }));
@@ -455,11 +465,16 @@ export const oauthAuthCodes = pgTable('oauth_auth_codes', {
  * (each new token row points at it), and REVOKED rather than deleted when the
  * person or an admin cuts the agent off — its events stay readable under it.
  *
- * `client_name` is a snapshot of what the client registered as ("Claude"),
- * taken at connection time: a re-registration under another name is a new
- * client id, not a rename of this row.
+ * A connection is the AGENT, per person — not the OAuth client registration.
+ * Claude registers a fresh client on every re-authorisation (dynamic client
+ * registration mints a new id each time), so keying by registration gave one
+ * person five "Claude" rows for one agent. `agent_key` is what a connection is
+ * keyed by instead: the registered client name, folded (a name-less client
+ * falls back to its id), so every registration of "Claude" by one person
+ * lands on the same live row; `client_id` records the registration that
+ * first made it. `client_name` is that registration's name as shown.
  *
- * One LIVE connection per (user, client): the partial unique index below. A
+ * One LIVE connection per (user, agent): the partial unique index below. A
  * reconnect after a revoke is a new row, so the old one's history and its
  * "revoked by an admin" mark are never overwritten.
  */
@@ -468,6 +483,8 @@ export const agentConnections = pgTable('agent_connections', {
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   clientId: text('client_id').notNull().references(() => oauthClients.clientId),
   clientName: text('client_name'),
+  /** The folded client name, or the client id when the registration carried none. */
+  agentKey: text('agent_key').notNull(),
   connectedAt: timestamp('connected_at').defaultNow().notNull(),
   lastUsedAt: timestamp('last_used_at'),
   revokedAt: timestamp('revoked_at'),
@@ -476,7 +493,7 @@ export const agentConnections = pgTable('agent_connections', {
 }, (t) => ({
   byUser: index('agent_connections_by_user').on(t.userId),
   liveUnq: uniqueIndex('agent_connections_live_unq')
-    .on(t.userId, t.clientId)
+    .on(t.userId, t.agentKey)
     .where(sql`${t.revokedAt} is null`),
 }));
 

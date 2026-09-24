@@ -71,6 +71,8 @@ export interface AuditPrincipal {
   revokedAt: number | null;
   /** Who ended it, once revoked: the owner, or an admin. */
   revokedBy: 'owner' | 'admin' | null;
+  /** For a key: when its owner deleted it for good. Such rows reach admins only. */
+  deletedAt?: number | null;
   /** Events currently on record for it (within the retention window). */
   eventCount: number;
   user: { id: string; email: string; name: string };
@@ -143,19 +145,20 @@ export function isUuid(value: string): boolean {
 
 /**
  * The retention window's one rule, shared by the setting's validator and the
- * runtime reader: a whole number of days from one to ten years. A value
- * outside it is not a window at all — the reader falls back to the default,
- * the validator refuses the save — so a typo in `AUDIT_RETENTION_DAYS` can no
- * more disable pruning than one typed on the Deployment page can.
+ * runtime reader. A positive whole number of days is the window; blank,
+ * zero or a negative number is "keep forever" — the deployment's choice,
+ * made the same way whether typed on the Deployment page or set through
+ * `AUDIT_RETENTION_DAYS`. Anything else is not a window at all: the
+ * validator refuses the save, and the reader, which cannot refuse, keeps
+ * everything and says so.
  */
-export const RETENTION_DAYS_MIN = 1;
-export const RETENTION_DAYS_MAX = 3650;
-export const DEFAULT_RETENTION_DAYS = 90;
+export type RetentionWindow = { days: number } | 'forever';
 
-/** The days a retention setting names, or null when it names none this rule accepts. */
-export function parseRetentionDays(raw: string): number | null {
+/** The window a retention setting names, or null when it names none this rule accepts. */
+export function parseRetentionWindow(raw: string): RetentionWindow | null {
   const trimmed = raw.trim();
-  if (!/^\d+$/.test(trimmed)) return null;
+  if (trimmed === '') return 'forever';
+  if (!/^-?\d+$/.test(trimmed)) return null;
   const n = Number(trimmed);
-  return n >= RETENTION_DAYS_MIN && n <= RETENTION_DAYS_MAX ? n : null;
+  return n > 0 ? { days: n } : 'forever';
 }

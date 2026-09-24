@@ -144,10 +144,12 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
   }
 
   async listForUser(userId: string): Promise<ExternalApiKeySummary[]> {
+    // A key the owner deleted for good is gone from THEIR listings — that is
+    // what the deletion means to them; the row lives on for the Audit log.
     const rows = await this.db
       .select()
       .from(externalApiKeys)
-      .where(eq(externalApiKeys.userId, userId))
+      .where(and(eq(externalApiKeys.userId, userId), isNull(externalApiKeys.deletedAt)))
       .orderBy(desc(externalApiKeys.createdAt));
     return rows.map(toSummary);
   }
@@ -228,14 +230,16 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
   }
 
   async remove(id: string, userId: string): Promise<void> {
-    // Only revoked rows may be hard-deleted — deleting an active key would
+    // Only revoked rows may be deleted — deleting an active key would
     // silently cut off a live agent. Scope by userId so a user can only
     // delete their own tokens. Validate first (so we can return a precise
-    // not-found vs still-active error), then delete inside a transaction.
+    // not-found vs still-active error), then mark the row deleted.
     const [existing] = await this.db
       .select({ revokedAt: externalApiKeys.revokedAt })
       .from(externalApiKeys)
-      .where(and(eq(externalApiKeys.id, id), eq(externalApiKeys.userId, userId)))
+      .where(
+        and(eq(externalApiKeys.id, id), eq(externalApiKeys.userId, userId), isNull(externalApiKeys.deletedAt)),
+      )
       .limit(1);
     if (!existing) {
       throw new TokenNotFoundError();
@@ -245,16 +249,19 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
       throw new TokenStillActiveError();
     }
 
-    // Dependents (e.g. the enterprise LLM-usage metering rows) hang off this
-    // row via ON DELETE CASCADE foreign keys, so a bare delete takes any audit
-    // trail with it — this service doesn't have to know those tables exist.
+    // A deletion in name: the row stays, marked, because the Audit log's
+    // events hang off it and the trail must outlive the key's owner's wish
+    // to be rid of it. The key was revoked already, so nothing can use it;
+    // deleting hides it from the owner and tells an admin it was deleted.
     await this.db
-      .delete(externalApiKeys)
+      .update(externalApiKeys)
+      .set({ deletedAt: new Date() })
       .where(
         and(
           eq(externalApiKeys.id, id),
           eq(externalApiKeys.userId, userId),
           isNotNull(externalApiKeys.revokedAt),
+          isNull(externalApiKeys.deletedAt),
         ),
       );
   }
@@ -280,5 +287,6 @@ function toSummary(row: typeof externalApiKeys.$inferSelect): ExternalApiKeySumm
     lastUsedAt: row.lastUsedAt ? row.lastUsedAt.getTime() : null,
     revokedAt: row.revokedAt ? row.revokedAt.getTime() : null,
     revokedBy: (row.revokedBy as RevokedBy | null) ?? null,
+    deletedAt: row.deletedAt ? row.deletedAt.getTime() : null,
   };
 }

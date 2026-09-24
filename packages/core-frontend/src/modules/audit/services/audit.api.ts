@@ -23,6 +23,8 @@ export interface AuditPrincipal {
   revokedAt: number | null;
   /** Who ended it once revoked: the owner, or an admin. Null while live. */
   revokedBy: 'owner' | 'admin' | null;
+  /** For a key: when its owner deleted it for good. Only admins see such rows. */
+  deletedAt?: number | null;
   /** Events on record for it. */
   eventCount: number;
   user: { id: string; email: string; name: string };

@@ -141,6 +141,8 @@ export interface AuthServerEndpoints {
   authorizationEndpoint: string;
   tokenEndpoint: string;
   registrationEndpoint: string;
+  /** RFC 7009, when the server offers it: how a sign-in this process no longer needs is ended. */
+  revocationEndpoint?: string;
 }
 
 /**
@@ -196,7 +198,12 @@ export async function discoverAuthServer(mcpUrl: string): Promise<AuthServerEndp
     await reachOrExplain(asMetadataUrl, 'the authorization server metadata'),
     asMetadataUrl,
     'the authorization server metadata',
-  )) as { authorization_endpoint?: unknown; token_endpoint?: unknown; registration_endpoint?: unknown };
+  )) as {
+    authorization_endpoint?: unknown;
+    token_endpoint?: unknown;
+    registration_endpoint?: unknown;
+    revocation_endpoint?: unknown;
+  };
   const source = 'the authorization server metadata';
   return {
     authorizationEndpoint: httpUrlOrExplain(asMetadata?.authorization_endpoint, 'authorization endpoint', source),
@@ -204,6 +211,11 @@ export async function discoverAuthServer(mcpUrl: string): Promise<AuthServerEndp
     // Registration is not optional here: with no pre-provisioned client id,
     // dynamic registration is the only way this process gets one.
     registrationEndpoint: httpUrlOrExplain(asMetadata?.registration_endpoint, 'registration endpoint', source),
+    // Revocation is: a server without one simply keeps a retired sign-in
+    // until its refresh window closes.
+    ...(typeof asMetadata?.revocation_endpoint === 'string' && asMetadata.revocation_endpoint
+      ? { revocationEndpoint: httpUrlOrExplain(asMetadata.revocation_endpoint, 'revocation endpoint', source) }
+      : {}),
   };
 }
 
@@ -630,7 +642,42 @@ async function obtainAccessToken(
   if (flow.refreshToken) {
     await writeStoredCredentials(baseUrl, { clientId: flow.clientId, refreshToken: flow.refreshToken }, agent);
   }
+  if (agent) await retirePlainSignIn(baseUrl, endpoints, options.print);
   return flow.accessToken;
+}
+
+/**
+ * An agent's first sign-in supersedes the per-machine one the server used
+ * before it knew who was running it: that sign-in is ended at the workspace
+ * (RFC 7009 — the workspace then lists its "hexis-mcp on <host>" connection
+ * as disconnected rather than live forever) and its refresh token leaves the
+ * disk. Best effort, and said on stderr: the agent's own sign-in is already
+ * in hand, and nothing here may take it back.
+ */
+async function retirePlainSignIn(
+  baseUrl: string,
+  endpoints: AuthServerEndpoints,
+  print: (line: string) => void = (line) => process.stderr.write(`${line}\n`),
+): Promise<void> {
+  const plain = await readStoredCredentials(baseUrl);
+  if (!plain) return;
+  try {
+    if (endpoints.revocationEndpoint) {
+      const res = await postForm(endpoints.revocationEndpoint, 'the revocation endpoint', {
+        token: plain.refreshToken,
+        token_type_hint: 'refresh_token',
+        client_id: plain.clientId,
+      });
+      await res.body?.cancel().catch(() => {});
+    }
+    await fs.rm(oauthStorePath(baseUrl), { force: true });
+    print('[hexis-mcp] retired the previous per-machine sign-in; this agent now signs in as itself.');
+  } catch (err) {
+    print(
+      `[hexis-mcp] could not retire the previous per-machine sign-in (${err instanceof Error ? err.message : String(err)}); ` +
+        'it will expire on its own.',
+    );
+  }
 }
 
 /**

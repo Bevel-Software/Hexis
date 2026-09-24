@@ -14,6 +14,8 @@ export interface ExternalApiKeySummary {
    * live, and on keys revoked before this was recorded.
    */
   revokedBy: 'owner' | 'admin' | null;
+  /** Never set on a key the owner can see: a deleted key leaves their listings. */
+  deletedAt?: number | null;
   /** Model-proxy usage for this key today + the daily cap (in tokens). */
   llmUsage?: { usedTodayTokens: number; dailyTokenCap: number };
 }

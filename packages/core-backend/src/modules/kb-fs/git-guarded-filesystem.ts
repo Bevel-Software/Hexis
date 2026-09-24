@@ -34,9 +34,13 @@ export class GitGuardedFilesystem extends LocalFilesystem {
    * put the path is then judged too, when that is somewhere else again.
    */
   async assertNotGitInternals(inputPath: string): Promise<void> {
-    await assertNotGitInternals(this.basePath, inputPath);
-    const resolvedPath = this.resolveAbsolutePath(inputPath);
-    if (resolvedPath !== undefined) await assertNotGitInternals(this.basePath, inputPath, resolvedPath);
+    // ONE call. Given the place this filesystem would put the path, the rule
+    // judges every spelling of the caller's own string lexically and probes
+    // the disk once, for that place; calling it first WITHOUT the place made
+    // it probe every candidate spelling as well — two to four realpath walks
+    // per read on top of the one that matters. Only a path this filesystem
+    // cannot place at all is judged on its spellings alone.
+    await assertNotGitInternals(this.basePath, inputPath, this.resolveAbsolutePath(inputPath));
   }
 
   override async readFile(inputPath: string, options?: ReadOptions): Promise<string | Buffer> {

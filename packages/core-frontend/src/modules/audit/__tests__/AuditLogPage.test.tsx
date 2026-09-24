@@ -177,6 +177,16 @@ describe('AuditLogPage', () => {
     expect(screen.queryByRole('button', { name: /Revoke key for Old script/ })).not.toBeInTheDocument();
   });
 
+  it('shows an admin a key its owner deleted for good, marked as such, with its history intact', async () => {
+    vi.mocked(listPrincipals).mockResolvedValue([{ ...BOB_OLD, deletedAt: NOW - 10 * DAY, eventCount: 18 }]);
+    renderPage({ isAdmin: true });
+    await waitFor(() => expect(screen.getByText(/1 revoked/)).toBeInTheDocument());
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Show revoked' }));
+    expect(screen.getByText('Old script')).toBeInTheDocument();
+    expect(screen.getByText('Deleted by owner')).toBeInTheDocument();
+    expect(screen.getByText(/18 events/)).toBeInTheDocument();
+  });
+
   it('expands a row to its events once, keeps them across a collapse, and filters them', async () => {
     vi.mocked(listPrincipals).mockResolvedValue([ALICE_CLAUDE]);
     renderPage();

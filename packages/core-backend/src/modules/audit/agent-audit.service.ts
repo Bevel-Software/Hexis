@@ -5,10 +5,9 @@ import { agentConnections, agentEvents, oauthTokens, users } from '../database/s
 import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
 import {
   AuditPrincipalNotFoundError,
-  DEFAULT_RETENTION_DAYS,
   InvalidCursorError,
   isUuid,
-  parseRetentionDays,
+  parseRetentionWindow,
   type AgentEventInput,
   type AgentEventPage,
   type AgentEventView,
@@ -26,8 +25,6 @@ export const MAX_EVENT_PAGE = 200;
 
 /** How often, at most, one process sweeps events past the retention window. */
 const PRUNE_INTERVAL_MS = 60 * 60_000;
-
-export { DEFAULT_RETENTION_DAYS };
 
 /**
  * The Audit log: the write half the MCP proxy records through, and the read
@@ -48,8 +45,8 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
   constructor(
     private readonly db: Database,
     private readonly keys: Pick<IExternalApiKeyService, 'listForUser' | 'listForDeployment' | 'ownerOf'>,
-    /** Read per sweep, so a changed setting applies without a restart. */
-    private readonly retentionDays: () => number,
+    /** Read per sweep, so a changed setting applies without a restart; null = keep forever. */
+    private readonly retentionDays: () => number | null,
     private readonly now: () => number = Date.now,
   ) {}
 
@@ -75,13 +72,15 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
 
   /**
    * Sweep events older than the retention window — at most once per hour per
-   * process, best-effort, never awaited by a caller.
+   * process, best-effort, never awaited by a caller. A deployment that keeps
+   * events forever sweeps nothing.
    */
   private async maybePrune(): Promise<void> {
     const now = this.now();
     if (now - this.lastPruneAt < PRUNE_INTERVAL_MS) return;
     this.lastPruneAt = now;
     const days = this.retentionDays();
+    if (days === null) return;
     const cutoff = new Date(now - days * 24 * 60 * 60_000);
     try {
       await this.db.delete(agentEvents).where(lt(agentEvents.at, cutoff));
@@ -126,6 +125,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         lastUsedAt: k.lastUsedAt,
         revokedAt: k.revokedAt,
         revokedBy: k.revokedBy,
+        deletedAt: k.deletedAt,
         eventCount: counts.get(k.id) ?? 0,
         user: k.user,
       })),
@@ -296,20 +296,21 @@ function parseCursor(raw: string): { at: Date; id: string } | null {
 let warnedInvalidRetention: string | null = null;
 
 /**
- * The retention window the service runs on: the setting's days when it
- * names a valid window, else the default — said out loud when the setting
- * is set to something that is not a window, because the Deployment page
- * shows an environment value as the one in effect and would otherwise be
- * the only place claiming a window nobody is keeping.
+ * The retention window the service runs on, in days — or null to keep
+ * events forever, which is what a blank, zero or negative setting means. A
+ * value that is not a window at all is kept-forever too, said out loud once:
+ * the Deployment page shows an environment value as the one in effect and
+ * would otherwise be the only place claiming a window nobody is keeping.
  */
-export function retentionDaysFrom(raw: string): number {
-  const days = parseRetentionDays(raw);
-  if (days !== null) return days;
-  if (raw.trim() && raw !== warnedInvalidRetention) {
+export function retentionDaysFrom(raw: string): number | null {
+  const window = parseRetentionWindow(raw);
+  if (window === 'forever') return null;
+  if (window !== null) return window.days;
+  if (raw !== warnedInvalidRetention) {
     warnedInvalidRetention = raw;
     log.warn(
-      `auditRetentionDays is "${raw}", which is not a whole number of days from 1 to 3650 — keeping events for the default ${DEFAULT_RETENTION_DAYS} days instead.`,
+      `auditRetentionDays is "${raw}", which is not a whole number of days — keeping events forever until it is fixed.`,
     );
   }
-  return DEFAULT_RETENTION_DAYS;
+  return null;
 }

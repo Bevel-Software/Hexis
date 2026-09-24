@@ -49,7 +49,7 @@ function makeExternalApiKeyService(
 function makeOAuthProvider(
   verify?: (t: string) => Promise<{ extra?: Record<string, unknown> }>,
   /** Whether an agent connection still admits requests — true unless a test says otherwise. */
-  touch?: (connectionId: string) => Promise<boolean>,
+  live?: (connectionId: string) => Promise<boolean>,
 ) {
   return {
     looksLikeAccessToken: (t: string) => typeof t === 'string' && t.startsWith('bevel-mcp_'),
@@ -59,7 +59,8 @@ function makeOAuthProvider(
           throw new InvalidTokenError('unknown token');
         }),
     ),
-    touchLiveConnection: vi.fn(touch ?? (async () => true)),
+    isConnectionLive: vi.fn(live ?? (async () => true)),
+    noteConnectionUse: vi.fn(),
   } as unknown as BevelOAuthProvider;
 }
 
@@ -310,9 +311,10 @@ describe('createMcpAuthMiddleware', () => {
       await mw(req, res, next);
       expect(next).toHaveBeenCalled();
       expect(req.agentConnectionId).toBe('conn-7');
-      // Every request through the exchanged grant is a use of the connection
-      // — and the check that it still admits one.
-      expect((oauth as any).touchLiveConnection).toHaveBeenCalledWith('conn-7');
+      // Every request through the exchanged grant asks whether the
+      // connection still admits one, and counts as a use of it.
+      expect((oauth as any).isConnectionLive).toHaveBeenCalledWith('conn-7');
+      expect((oauth as any).noteConnectionUse).toHaveBeenCalledWith('conn-7');
     });
 
     it('401s an exchanged grant whose agent connection was revoked — the token is stateless, the connection is not', async () => {
@@ -330,6 +332,8 @@ describe('createMcpAuthMiddleware', () => {
       expect(status).toHaveBeenCalledWith(401);
       expect(setHeader).toHaveBeenCalledWith('WWW-Authenticate', expect.stringContaining('resource_metadata'));
       expect(req.agentConnectionId).toBeUndefined();
+      // A refused request is no use of the connection.
+      expect((oauth as any).noteConnectionUse).not.toHaveBeenCalled();
     });
 
     it('401s an expired internal token', async () => {

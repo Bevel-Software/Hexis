@@ -110,6 +110,17 @@ describe('holdInitialize', () => {
     expect((await pending).agent).toBeNull();
   });
 
+  it("resolves with no agent on the caller's hang-up signal — the stdio transport never reports EOF itself", async () => {
+    const { transport } = fakeTransport();
+    let stdinEnded: () => void = () => {};
+    const hangUp = new Promise<void>((resolve) => {
+      stdinEnded = resolve;
+    });
+    const pending = holdInitialize(transport, { hangUp });
+    stdinEnded();
+    expect((await pending).agent).toBeNull();
+  });
+
   it('completes a real handshake end to end: the client sees its initialize answered after the hold', async () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 'cursor-vscode', version: '1.4.0' }, { capabilities: {} });

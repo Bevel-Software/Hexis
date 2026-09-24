@@ -106,13 +106,16 @@ describe('DeploymentSettingsService — a blank that means the default', () => {
     expect(rows.some((r) => r.key === 'kbRepoUrl')).toBe(true);
   });
 
-  it('holds the retention window to the same range on save as the runtime reader does', async () => {
+  it('holds the retention window to the same rule on save as the runtime reader does', async () => {
     const { db } = makeDb();
     const settings = new DeploymentSettingsService(db, ENC_KEY);
-    for (const bad of ['0', '3651', '1.5', 'lots']) {
+    for (const bad of ['1.5', 'lots', 'ten days']) {
       await expect(settings.save({ auditRetentionDays: bad }, null)).rejects.toBeInstanceOf(SettingsValidationError);
     }
-    await expect(settings.save({ auditRetentionDays: '3650' }, null)).resolves.toBeDefined();
+    // A number of days, or zero / negative for "forever" — the reader's rule.
+    for (const ok of ['3650', '0', '-1', '99999']) {
+      await expect(settings.save({ auditRetentionDays: ok }, null)).resolves.toBeDefined();
+    }
   });
 });
 

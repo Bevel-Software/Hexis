@@ -98,17 +98,37 @@ async function main(): Promise<void> {
     // before saying anything is a let-go like any other: nothing to sign
     // in for.
     const stdio = new StdioServerTransport();
-    const handshake = await holdInitialize(stdio);
-    if (holder.exitRequested) return;
-    transport = handshake.transport;
-    // Discovery starts from the deployment's OWN MCP endpoint; `/api/config`
-    // is unauthenticated, so resolving it needs no credential — which is
-    // the point: none exists yet.
-    const mcpUrl = await resolveMcpUrl({ baseUrl: resolved.baseUrl, connectionKey: '' });
-    config = await establishOAuthConfig(resolved.baseUrl, mcpUrl, {
-      noOpen: resolved.noOpen,
-      agent: handshake.agent,
+    // The transport learns of a hang-up only through its own close(); stdin's
+    // EOF is what actually says the client is gone, so the hold listens for
+    // it too, or a client that dies before its first message would leave the
+    // hold waiting forever (and only the force-exit would end the process).
+    const hangUp = new Promise<void>((resolve) => {
+      process.stdin.once('end', () => resolve());
+      process.stdin.once('close', () => resolve());
     });
+    const handshake = await holdInitialize(stdio, { hangUp });
+    if (holder.exitRequested) {
+      await stdio.close().catch(() => {});
+      return;
+    }
+    transport = handshake.transport;
+    try {
+      // Discovery starts from the deployment's OWN MCP endpoint; `/api/config`
+      // is unauthenticated, so resolving it needs no credential — which is
+      // the point: none exists yet.
+      const mcpUrl = await resolveMcpUrl({ baseUrl: resolved.baseUrl, connectionKey: '' });
+      config = await establishOAuthConfig(resolved.baseUrl, mcpUrl, {
+        noOpen: resolved.noOpen,
+        agent: handshake.agent,
+      });
+    } catch (err) {
+      // The transport is already reading stdin, and a flowing stdin keeps the
+      // event loop — and so this dead-on-arrival process — alive after the
+      // failure is printed. Close it, so the failure exits as it did when the
+      // sign-in ran before any transport existed.
+      await stdio.close().catch(() => {});
+      throw err;
+    }
   }
 
   try {
@@ -136,6 +156,9 @@ async function main(): Promise<void> {
     process.off('SIGINT', exitAfterShutdown);
     process.off('SIGTERM', exitAfterShutdown);
     await holder.shutdown?.();
+    // In browser sign-in mode the transport was started before any of this;
+    // a stdin still flowing would hold the failed process open (see above).
+    await transport.close().catch(() => {});
     throw err;
   }
 }

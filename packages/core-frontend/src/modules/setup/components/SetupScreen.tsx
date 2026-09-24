@@ -180,8 +180,8 @@ const FIELDS: Record<
   },
   auditRetentionDays: {
     label: 'Keep events for',
-    help: 'How many days an agent’s recorded calls stay in the Audit log before they are removed. Clear the field to go back to the default of 90 days. Applies without a restart.',
-    placeholder: '90',
+    help: 'How many days an agent’s recorded calls stay in the Audit log before they are removed. Leave it blank, or enter 0, to keep them forever. Applies without a restart.',
+    placeholder: 'forever',
   },
 };
 
@@ -266,7 +266,7 @@ const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[]
     id: 'audit',
     title: 'Audit log',
     blurb:
-      'The Audit log records which tools, skills and capabilities each connected agent uses. Choose how long those records are kept.',
+      'The Audit log records which tools, skills and capabilities each connected agent uses. Choose how long those records are kept; unset, they are kept forever.',
   },
 ];
 

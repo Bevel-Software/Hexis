@@ -15,7 +15,7 @@ import {
 import { createHmac } from 'node:crypto';
 import { TokenCrypto } from '../../shared/token-crypto.js';
 import { assertKbDirNameFree } from '../kb-fs/repo-path.js';
-import { parseRetentionDays, RETENTION_DAYS_MAX, RETENTION_DAYS_MIN } from '../audit/audit.contract.js';
+import { parseRetentionWindow } from '../audit/audit.contract.js';
 import { normalizeIssuerUrl } from './oidc-check.js';
 
 /**
@@ -297,21 +297,19 @@ export const CORE_SETTINGS: SettingDef[] = [
 
   {
     /**
-     * How long the Audit log keeps an agent's events. Read at every prune, so
-     * it applies without a restart. The window's rule (a whole number of
-     * days, one to ten years) lives with the audit service and is applied
-     * here on save and there on every read, so the environment variable is
-     * held to exactly what the Deployment page is. A blanked field puts the
-     * default back: the only meaning "no value" has for a window.
+     * How long the Audit log keeps an agent's events: a number of days, or
+     * — blank, zero, negative — forever. Read at every prune, so it applies
+     * without a restart. The window's rule lives with the audit service and
+     * is applied here on save and there on every read, so the environment
+     * variable is held to exactly what the Deployment page is. A blanked
+     * field clears the stored value, which is how "forever" is chosen back.
      */
     key: 'auditRetentionDays',
     envVar: 'AUDIT_RETENTION_DAYS',
     section: 'audit',
     blankMeansDefault: true,
     validate: (v) =>
-      parseRetentionDays(v) === null
-        ? `Enter a whole number of days, from ${RETENTION_DAYS_MIN} to ${RETENTION_DAYS_MAX}.`
-        : null,
+      parseRetentionWindow(v) === null ? 'Enter a whole number of days, or 0 to keep events forever.' : null,
   },
 ];
 
