@@ -34,12 +34,12 @@ export class GitGuardedFilesystem extends LocalFilesystem {
    * put the path is then judged too, when that is somewhere else again.
    */
   async assertNotGitInternals(inputPath: string): Promise<void> {
-    // ONE call. Given the place this filesystem would put the path, the rule
-    // judges every spelling of the caller's own string lexically and probes
-    // the disk once, for that place; calling it first WITHOUT the place made
-    // it probe every candidate spelling as well — two to four realpath walks
-    // per read on top of the one that matters. Only a path this filesystem
-    // cannot place at all is judged on its spellings alone.
+    // ONE call carrying both the spelling and the place this filesystem
+    // would put it. Both are still judged — a link this resolver cannot
+    // place (a backslash-spelled one, a leading climb) is caught by the
+    // spelling's own readings, a link it follows by the place — but the rule
+    // walks the root once and probes a place both name once, where two calls
+    // walked the root twice and probed that place twice.
     await assertNotGitInternals(this.basePath, inputPath, this.resolveAbsolutePath(inputPath));
   }
 
