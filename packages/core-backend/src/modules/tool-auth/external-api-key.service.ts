@@ -152,6 +152,15 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     return rows.map(toSummary);
   }
 
+  async ownerOf(id: string): Promise<string | null> {
+    const [row] = await this.db
+      .select({ userId: externalApiKeys.userId })
+      .from(externalApiKeys)
+      .where(eq(externalApiKeys.id, id))
+      .limit(1);
+    return row?.userId ?? null;
+  }
+
   async listForDeployment(): Promise<AdminExternalApiKeySummary[]> {
     // Owner joined in so the admin overview is one round-trip; ordered by
     // owner email so per-account grouping is a linear pass, newest key

@@ -138,6 +138,13 @@ export interface IExternalApiKeyService {
   listForUser(userId: string): Promise<ExternalApiKeySummary[]>;
 
   /**
+   * The account a key belongs to, live or revoked, or null when no such key
+   * exists. The ownership check behind a per-key read or revoke that is
+   * offered to owners and admins alike (the Audit log's).
+   */
+  ownerOf(id: string): Promise<string | null>;
+
+  /**
    * Mark a token revoked. Idempotent — revoking an already-revoked token
    * is a no-op (the row's `revokedAt` is not overwritten). Throws
    * TokenNotFoundError if the token doesn't belong to the user.

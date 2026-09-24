@@ -9,6 +9,7 @@ import type { InternalTokenService } from '../tool-auth/internal-token.service.j
 import { rejectConnectionKey } from '../tool-auth/connection-key-rejection.js';
 import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
 import '../tool-auth/external-api-key.interface.js'; // Express Request augmentation (req.externalApiKeyId)
+import '../audit/audit.contract.js'; // Express Request augmentation (req.agentConnectionId)
 
 /**
  * Auth middleware for the MCP endpoint. Accepts any of:
@@ -111,6 +112,12 @@ export function createMcpAuthMiddleware(
         const info = await oauthProvider.verifyAccessToken(token);
         req.userId = String(info.extra?.userId ?? '');
         req.userEmail = String(info.extra?.userEmail ?? '');
+        // The agent behind the grant, for the Audit log. A token minted
+        // before connections existed carries none; the call then runs
+        // unattributed rather than refused.
+        if (typeof info.extra?.connectionId === 'string') {
+          req.agentConnectionId = info.extra.connectionId;
+        }
         if (!req.userId) {
           unauthorized(res, 'Invalid access token');
           return;
@@ -176,6 +183,29 @@ export function createMcpAuthMiddleware(
       }
       req.userId = user.id;
       req.userEmail = user.email;
+      // The local server's exchanged grant names its agent connection (see
+      // InternalTokenClaim.connectionId). The token itself is stateless and
+      // lives up to five hours, so the connection is asked on every request
+      // whether it still admits the agent — revoking the agent must reach
+      // this path as surely as it reaches the grant's own tokens — and the
+      // same statement records the use, so the Audit log's "last used"
+      // follows the local server's calls, not only its sign-ins. Carried on
+      // the request so those calls are logged under the agent.
+      if (claim.connectionId) {
+        let live: boolean;
+        try {
+          live = await oauthProvider.touchLiveConnection(claim.connectionId);
+        } catch (err) {
+          log.error('agent-connection check failed:', { err });
+          res.status(500).json({ error: 'Authentication backend unavailable' });
+          return;
+        }
+        if (!live) {
+          unauthorized(res, 'Access for this agent was revoked');
+          return;
+        }
+        req.agentConnectionId = claim.connectionId;
+      }
       next();
       return;
     }

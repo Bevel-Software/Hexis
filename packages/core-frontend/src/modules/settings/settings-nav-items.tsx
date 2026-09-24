@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { Boxes, CircleUserRound, KeyRound, Lock, SlidersHorizontal, Users, UsersRound } from 'lucide-react';
+import { Boxes, CircleUserRound, KeyRound, Lock, ScrollText, SlidersHorizontal, Users, UsersRound } from 'lucide-react';
 import { useAppRegistry, type AdminMenuItem } from '../../core/registry';
 
 /**
@@ -41,6 +41,16 @@ export const CORE_MENU_ITEMS: AdminMenuItem[] = [
     icon: <KeyRound size={15} />,
     label: 'External agent access',
     path: '/external-agent-access',
+  },
+  {
+    // Everyone's row, not an admin's: each person sees their own agents and
+    // keys and what those called; admins see every account on the same page.
+    // It replaced the admin-only Connection keys row.
+    id: 'audit-log',
+    order: 45,
+    icon: <ScrollText size={15} />,
+    label: 'Audit log',
+    path: '/audit-log',
   },
   {
     id: 'secrets',
@@ -94,14 +104,6 @@ export const CORE_MENU_ITEMS: AdminMenuItem[] = [
     icon: <CircleUserRound size={15} />,
     label: 'User accounts',
     path: '/user-accounts',
-  },
-  {
-    id: 'connection-keys',
-    section: 'admin',
-    order: 25,
-    icon: <KeyRound size={15} />,
-    label: 'Connection keys',
-    path: '/connection-keys',
   },
 ];
 

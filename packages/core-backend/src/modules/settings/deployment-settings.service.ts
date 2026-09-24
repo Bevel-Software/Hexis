@@ -15,6 +15,7 @@ import {
 import { createHmac } from 'node:crypto';
 import { TokenCrypto } from '../../shared/token-crypto.js';
 import { assertKbDirNameFree } from '../kb-fs/repo-path.js';
+import { parseRetentionDays, RETENTION_DAYS_MAX, RETENTION_DAYS_MIN } from '../audit/audit.contract.js';
 import { normalizeIssuerUrl } from './oidc-check.js';
 
 /**
@@ -39,7 +40,7 @@ export interface SettingDef {
    */
   envVar?: string;
   /** Which block of the setup screen it belongs to. */
-  section: 'knowledge-base' | 'sign-in';
+  section: 'knowledge-base' | 'sign-in' | 'audit';
   secret?: boolean;
   /** Applied on save; the message is shown against the field. */
   validate?(value: string): string | null;
@@ -49,6 +50,14 @@ export interface SettingDef {
    * was copied into a service at construction is not.
    */
   restartToApply?: boolean;
+  /**
+   * A blank field on save CLEARS the stored value, putting the default back.
+   * The rule everywhere else is that blank means "leave it alone" — a stray
+   * Enter must not unconfigure a repository — and that stays the rule; this
+   * is for a setting whose readers already treat "unset" as its default, so
+   * clearing it is the one way back to that default and never a loss.
+   */
+  blankMeansDefault?: boolean;
   /**
    * What an UNSET setting already means to the code that reads it — the
    * layout's defaults, the pointer consent's "on unless turned off".
@@ -284,6 +293,25 @@ export const CORE_SETTINGS: SettingDef[] = [
     envVar: 'ALLOWED_EMAIL_DOMAINS',
     section: 'sign-in',
     restartToApply: true,
+  },
+
+  {
+    /**
+     * How long the Audit log keeps an agent's events. Read at every prune, so
+     * it applies without a restart. The window's rule (a whole number of
+     * days, one to ten years) lives with the audit service and is applied
+     * here on save and there on every read, so the environment variable is
+     * held to exactly what the Deployment page is. A blanked field puts the
+     * default back: the only meaning "no value" has for a window.
+     */
+    key: 'auditRetentionDays',
+    envVar: 'AUDIT_RETENTION_DAYS',
+    section: 'audit',
+    blankMeansDefault: true,
+    validate: (v) =>
+      parseRetentionDays(v) === null
+        ? `Enter a whole number of days, from ${RETENTION_DAYS_MIN} to ${RETENTION_DAYS_MAX}.`
+        : null,
   },
 ];
 
@@ -577,10 +605,13 @@ export class DeploymentSettingsService {
     entries: Record<string, string>,
     updatedBy: string | null,
   ): Promise<{ restartRequired: boolean; restartKeys: string[] }> {
-    const toWrite = this.plan(entries);
+    const { toWrite, toClear } = this.plan(entries);
 
     /** The settings this save changed that a running server cannot pick up. */
     const restartKeys: string[] = [];
+    // A blanked blank-means-default setting: its row goes, and its readers
+    // are back on the default from the next read.
+    for (const key of toClear) await this.clear(key);
     for (const { key, value, def } of toWrite) {
       // Compared against the EFFECTIVE value: a setting that was unset was
       // already running on whatever its readers make of "unset" — the layout
@@ -615,14 +646,19 @@ export class DeploymentSettingsService {
    * before letting the save happen.
    */
   resolveAfter(entries: Record<string, string>): (key: string) => string {
-    const toWrite = this.plan(entries);
-    return (key) => toWrite.find((w) => w.key === key)?.value ?? this.resolve(key);
+    const { toWrite, toClear } = this.plan(entries);
+    return (key) =>
+      toClear.includes(key) ? '' : (toWrite.find((w) => w.key === key)?.value ?? this.resolve(key));
   }
 
-  /** Validate a batch and return the writes it amounts to; throws on any problem. */
-  private plan(entries: Record<string, string>): { key: string; value: string; def: SettingDef }[] {
+  /** Validate a batch and return the writes (and the clears) it amounts to; throws on any problem. */
+  private plan(entries: Record<string, string>): {
+    toWrite: { key: string; value: string; def: SettingDef }[];
+    toClear: string[];
+  } {
     const problems: Record<string, string> = {};
     const toWrite: { key: string; value: string; def: SettingDef }[] = [];
+    const toClear: string[] = [];
 
     for (const [key, raw] of Object.entries(entries)) {
       const def = this.defs.get(key);
@@ -638,7 +674,12 @@ export class DeploymentSettingsService {
       // An empty field means "leave it alone", not "erase it". Clearing a
       // setting is not something the setup screen offers, and treating a blank
       // input as a delete would let a stray Enter unconfigure a deployment.
-      if (!value) continue;
+      // The one exception is a setting that SAYS a blank is its default (see
+      // `SettingDef.blankMeansDefault`): for it a blank clears the stored row.
+      if (!value) {
+        if (def.blankMeansDefault) toClear.push(key);
+        continue;
+      }
       const problem = def.validate?.(value);
       if (problem) {
         problems[key] = problem;
@@ -722,7 +763,7 @@ export class DeploymentSettingsService {
     }
 
     if (Object.keys(problems).length > 0) throw new SettingsValidationError(problems);
-    return toWrite;
+    return { toWrite, toClear };
   }
 
   /** Drop stored rows for settings this build no longer defines. */

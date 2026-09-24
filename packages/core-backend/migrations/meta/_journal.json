@@ -85,6 +85,13 @@
       "when": 1789903776474,
       "tag": "0011_plugin_join_request_claim",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1790179003112,
+      "tag": "0012_agent_audit",
+      "breakpoints": true
     }
   ]
 }

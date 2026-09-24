@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { logger } from '../../../shared/logging.js';
 
 const log = logger('mcp-oauth');
-import { and, eq, gt, isNull, lt, or } from 'drizzle-orm';
+import { and, eq, gt, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Response } from 'express';
 import type {
   AuthorizationParams,
@@ -21,7 +21,7 @@ import type {
   OAuthTokens,
 } from '@modelcontextprotocol/sdk/shared/auth.js';
 import type { Database } from '../../database/connection.js';
-import { oauthAuthCodes, oauthClients, oauthTokens, users } from '../../database/schema.js';
+import { agentConnections, oauthAuthCodes, oauthClients, oauthTokens, users } from '../../database/schema.js';
 import type { TokenCrypto } from '../../../shared/token-crypto.js';
 import { signAuthRequest, type McpAuthRequestState } from './oauth-state.js';
 
@@ -276,15 +276,33 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       }
       scope = scopes.join(' ');
     }
-    return this.mintTokens(row.userId, row.clientId, scope, row.resource);
+    // A refresh STAYS on its token's agent connection and is refused once
+    // that connection is revoked. The connection is the authority on whether
+    // the agent may hold tokens at all: were a refresh to look the connection
+    // up afresh, one racing a revoke would find none live, make a new one and
+    // mint an unrevoked pair — the revoke undone by a millisecond. A token
+    // from before connections existed has none to stay on and is placed
+    // under one as a first mint would be.
+    if (row.connectionId && !(await this.touchLiveConnection(row.connectionId))) {
+      throw new InvalidGrantError('Access for this agent was revoked');
+    }
+    return this.mintTokens(row.userId, row.clientId, scope, row.resource, row.connectionId ?? undefined);
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const now = new Date();
+    // The agent connection is joined so a token of a REVOKED connection fails
+    // here whatever its own row says: revoking an agent marks its tokens too,
+    // but the connection is the authority, and a token minted a moment after
+    // the revoke (a refresh that raced it) is dead on arrival rather than
+    // live until its own expiry. A token from before connections existed
+    // (null `connection_id`) has no connection to be revoked and verifies on
+    // its own row alone.
     const [row] = await this.deps.db
       .select({
         id: oauthTokens.id,
         clientId: oauthTokens.clientId,
+        connectionId: oauthTokens.connectionId,
         scope: oauthTokens.scope,
         resource: oauthTokens.resource,
         expiresAt: oauthTokens.expiresAt,
@@ -293,11 +311,13 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       })
       .from(oauthTokens)
       .innerJoin(users, eq(oauthTokens.userId, users.id))
+      .leftJoin(agentConnections, eq(oauthTokens.connectionId, agentConnections.id))
       .where(
         and(
           eq(oauthTokens.accessTokenHash, hashToken(token)),
           isNull(oauthTokens.revokedAt),
           gt(oauthTokens.expiresAt, now),
+          or(isNull(oauthTokens.connectionId), isNull(agentConnections.revokedAt)),
         ),
       )
       .limit(1);
@@ -311,13 +331,26 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       .set({ lastUsedAt: now })
       .where(eq(oauthTokens.id, row.id))
       .then(undefined, (err) => log.warn('touch lastUsedAt failed:', { err }));
+    // The agent connection's own "last used" — what the Audit log shows for
+    // the agent, across every token it has held. Same fire-and-forget stance.
+    if (row.connectionId) {
+      this.touchLiveConnection(row.connectionId).then(undefined, (err) =>
+        log.warn('touch connection lastUsedAt failed:', { err }),
+      );
+    }
     return {
       token,
       clientId: row.clientId,
       scopes: (row.scope ?? '').split(' ').filter(Boolean),
       expiresAt: Math.floor(row.expiresAt.getTime() / 1000),
       resource: row.resource ? new URL(row.resource) : undefined,
-      extra: { userId: row.userId, userEmail: row.userEmail },
+      extra: {
+        userId: row.userId,
+        userEmail: row.userEmail,
+        // Null on a token minted before connections existed; the auth
+        // middleware then binds no agent and the call goes unrecorded.
+        connectionId: row.connectionId,
+      },
     };
   }
 
@@ -355,11 +388,17 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       );
   }
 
+  /**
+   * @param connectionId The agent connection the pair belongs to, when the
+   *   caller already holds one (a refresh: the consumed token's). Absent on a
+   *   first mint, which finds or makes the live connection for (user, client).
+   */
   private async mintTokens(
     userId: string,
     clientId: string,
     scope: string | null,
     resource: string | null,
+    connectionId?: string,
   ): Promise<OAuthTokens> {
     const accessToken = this.deps.tokenPrefix + randomBytes(TOKEN_BYTES).toString('base64url');
     const refreshToken = this.refreshPrefix + randomBytes(TOKEN_BYTES).toString('base64url');
@@ -382,11 +421,13 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     } catch (err) {
       log.warn('token-table prune failed (non-fatal):', { err });
     }
+    const boundTo = connectionId ?? (await this.ensureConnection(userId, clientId));
     await this.deps.db.insert(oauthTokens).values({
       accessTokenHash: hashToken(accessToken),
       refreshTokenHash: hashToken(refreshToken),
       clientId,
       userId,
+      connectionId: boundTo,
       scope,
       resource,
       expiresAt: new Date(now + ACCESS_TTL_MS),
@@ -399,6 +440,71 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       refresh_token: refreshToken,
       ...(scope ? { scope } : {}),
     };
+  }
+
+  /**
+   * The live `agent_connections` row for (user, client) — found, or made on
+   * the first mint for the pair. A refresh finds the row the sign-in made, so
+   * one connection spans every token the agent ever holds; a mint after a
+   * revoke finds nothing live and makes a fresh row, which is what keeps the
+   * revoked one's history intact.
+   *
+   * Two concurrent first mints (a client racing its own token exchange) both
+   * miss the select; the partial unique index lets exactly one insert land,
+   * the other's `ON CONFLICT DO NOTHING` returns no row, and it re-reads the
+   * winner's. The client's display name is snapshotted from its registration
+   * at that moment.
+   */
+  /**
+   * Whether an agent connection still admits requests — it exists and nobody
+   * has revoked it — recorded as a use of it when it does. One statement for
+   * both: the update matches only a live row, so "did a row come back" IS the
+   * liveness answer, and a caller that asks is by definition using the
+   * connection. Called on every verify and refresh, and by the MCP auth
+   * middleware for the local server's exchanged grant — the one path where a
+   * token verifies statelessly and would otherwise outlive the revoke.
+   */
+  async touchLiveConnection(connectionId: string): Promise<boolean> {
+    const rows = await this.deps.db
+      .update(agentConnections)
+      .set({ lastUsedAt: new Date() })
+      .where(and(eq(agentConnections.id, connectionId), isNull(agentConnections.revokedAt)))
+      .returning({ id: agentConnections.id });
+    return rows.length > 0;
+  }
+
+  private async ensureConnection(userId: string, clientId: string): Promise<string> {
+    const live = () =>
+      this.deps.db
+        .select({ id: agentConnections.id })
+        .from(agentConnections)
+        .where(
+          and(
+            eq(agentConnections.userId, userId),
+            eq(agentConnections.clientId, clientId),
+            isNull(agentConnections.revokedAt),
+          ),
+        )
+        .limit(1);
+    const [existing] = await live();
+    if (existing) return existing.id;
+    const [client] = await this.deps.db
+      .select({ clientName: oauthClients.clientName })
+      .from(oauthClients)
+      .where(eq(oauthClients.clientId, clientId))
+      .limit(1);
+    const [inserted] = await this.deps.db
+      .insert(agentConnections)
+      .values({ userId, clientId, clientName: client?.clientName ?? null })
+      .onConflictDoNothing({
+        target: [agentConnections.userId, agentConnections.clientId],
+        where: sql`${agentConnections.revokedAt} is null`,
+      })
+      .returning({ id: agentConnections.id });
+    if (inserted) return inserted.id;
+    const [winner] = await live();
+    if (!winner) throw new Error('agent connection vanished between insert and re-read');
+    return winner.id;
   }
 }
 

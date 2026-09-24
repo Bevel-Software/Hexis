@@ -46,7 +46,7 @@ import { ExternalAgentAccessPage } from '../modules/toolbar/components/ExternalA
 import { AdminRolesPage } from '../modules/admin/components/AdminRolesPage';
 import { UserAccountsPage } from '../modules/admin/components/UserAccountsPage';
 import { DirectoryGroupsPage } from '../modules/admin/components/DirectoryGroupsPage';
-import { ConnectionKeysPage } from '../modules/admin/components/ConnectionKeysPage';
+import { AuditLogPage } from '../modules/audit/components/AuditLogPage';
 import { ToolsExplorerPage } from '../modules/tools/ToolsExplorerPage';
 import { LibraryRoutes } from '../modules/library/routes/LibraryRoutes';
 import { RootLanding } from '../modules/onboarding/components/RootLanding';
@@ -421,7 +421,11 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
         <Route path="/deployment" element={<DeploymentPage />} />
         <Route path="/user-accounts" element={<UserAccountsPage />} />
         <Route path="/directory-groups" element={<DirectoryGroupsPage />} />
-        <Route path="/connection-keys" element={<ConnectionKeysPage />} />
+        <Route path="/audit-log" element={<AuditLogPage />} />
+        {/* The Audit log replaced the admin Connection keys overview; links
+            to the old address (bookmarks, the enterprise shell's older rows)
+            land on it. */}
+        <Route path="/connection-keys" element={<Navigate to="/audit-log" replace />} />
         <Route path="/tools" element={<ToolsExplorerPage />} />
       </Route>
       {/* `/` consults the onboarding: a brand-new account's FIRST visit lands
