@@ -523,10 +523,16 @@ describe('WorkspaceService.withPathTurn', () => {
         svc.writeFile(workspaceId, rel, 'From B.', { expectedContent: '' }),
       ]),
     );
+    const [a] = results;
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     const refused = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
     expect(refused.reason).toMatchObject({ status: 409 });
-    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('From A.');
+    // Which of the two goes first is not promised (each resolves its path
+    // before it chains onto the held turn's tail); what is, is that the file
+    // holds the winner's text whole and the loser was refused.
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe(
+      a.status === 'fulfilled' ? 'From A.' : 'From B.',
+    );
   });
 
   it('updates the diff baseline inside the turn, in the order the mutations landed', async () => {
