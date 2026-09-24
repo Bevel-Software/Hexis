@@ -56,12 +56,12 @@ interface AuthorityOptions {
 interface Authority {
   base: string;
   mcpUrl: string;
-  record: { dcr: Record<string, unknown>[]; token: URLSearchParams[] };
+  record: { dcr: Record<string, unknown>[]; token: URLSearchParams[]; revoke: URLSearchParams[] };
   close: () => Promise<void>;
 }
 
 async function stubAuthority(opts: AuthorityOptions = {}): Promise<Authority> {
-  const record: Authority['record'] = { dcr: [], token: [] };
+  const record: Authority['record'] = { dcr: [], token: [], revoke: [] };
   let base = '';
   const server = http.createServer((req, res) => {
     let body = '';
@@ -96,8 +96,14 @@ async function stubAuthority(opts: AuthorityOptions = {}): Promise<Authority> {
             authorization_endpoint: `${base}/authorize`,
             token_endpoint: `${base}/token`,
             registration_endpoint: `${base}/register`,
+            revocation_endpoint: `${base}/revoke`,
           },
         );
+        return;
+      }
+      if (req.method === 'POST' && pathname === '/revoke') {
+        record.revoke.push(new URLSearchParams(body));
+        send(200, {});
         return;
       }
       if (req.method === 'POST' && pathname === '/register') {
@@ -216,6 +222,7 @@ describe('discoverAuthServer', () => {
         authorizationEndpoint: `${authority.base}/authorize`,
         tokenEndpoint: `${authority.base}/token`,
         registrationEndpoint: `${authority.base}/register`,
+        revocationEndpoint: `${authority.base}/revoke`,
       });
     } finally {
       await authority.close();
@@ -402,7 +409,7 @@ describe('the agent behind the sign-in', () => {
     }
   });
 
-  it('never reuses the plain per-machine sign-in for an agent — each agent signs in once, as itself', async () => {
+  it('never reuses the plain per-machine sign-in for an agent, and retires it once the agent has its own', async () => {
     const browser = fakeBrowser();
     const authority = await stubAuthority({
       // A refresh WOULD succeed — if anyone presented the plain store's token.
@@ -420,8 +427,46 @@ describe('the agent behind the sign-in', () => {
       // The browser flow ran (a registration happened) and no refresh was tried.
       expect(authority.record.dcr).toHaveLength(1);
       expect(authority.record.token.some((p) => p.get('grant_type') === 'refresh_token')).toBe(false);
-      // The plain store is untouched, for whatever still uses it.
-      expect(await readStoredCredentials(authority.base)).toEqual({ clientId: 'old-machine-client', refreshToken: 'r-old' });
+      // The plain sign-in was ended at the workspace — the old refresh token,
+      // under the old client — and is gone from disk, so no unused sign-in
+      // stays live on the Audit log or in ~/.hexis.
+      expect(authority.record.revoke).toHaveLength(1);
+      expect(authority.record.revoke[0]!.get('token')).toBe('r-old');
+      expect(authority.record.revoke[0]!.get('client_id')).toBe('old-machine-client');
+      expect(await readStoredCredentials(authority.base)).toBeNull();
+      // The agent's own sign-in is what remains.
+      expect(await readStoredCredentials(authority.base, { name: 'cursor-vscode' })).toEqual({
+        clientId: 'dyn-client',
+        refreshToken: 'r-flow',
+      });
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('a failure to retire the plain sign-in never costs the agent its own', async () => {
+    const browser = fakeBrowser();
+    const authority = await stubAuthority({
+      codeGrant: (params) => pkceCodeGrant(browser.seen, { access_token: 'a-flow', refresh_token: 'r-flow' })(params),
+      localToken: () => ({ status: 200, body: { token: 'int-1' } }),
+      // No revocation endpoint at all: the old sign-in can only be dropped from disk.
+      asMetadata: (base) => ({
+        issuer: base,
+        authorization_endpoint: `${base}/authorize`,
+        token_endpoint: `${base}/token`,
+        registration_endpoint: `${base}/register`,
+      }),
+    });
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'old-machine-client', refreshToken: 'r-old' });
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, {
+        openBrowser: browser.open,
+        print: quiet,
+        agent: { name: 'claude-code' },
+      });
+      expect(config.connectionKey).toBe('int-1');
+      expect(authority.record.revoke).toHaveLength(0);
+      expect(await readStoredCredentials(authority.base)).toBeNull();
     } finally {
       await authority.close();
     }

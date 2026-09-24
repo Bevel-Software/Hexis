@@ -92,6 +92,13 @@
       "when": 1790179003112,
       "tag": "0012_agent_audit",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1790243482866,
+      "tag": "0013_agent_identity_and_key_soft_delete",
+      "breakpoints": true
     }
   ]
 }

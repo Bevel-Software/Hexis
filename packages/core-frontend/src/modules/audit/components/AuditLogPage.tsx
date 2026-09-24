@@ -265,6 +265,9 @@ export function AuditLogPage() {
                                         {p.revokedBy === 'admin' ? 'Revoked by an admin' : 'Disconnected by owner'}
                                       </Badge>
                                     )}
+                                    {/* The owner deleted it from their own pages; the row and its
+                                        events stay here, for admins, until retention prunes them. */}
+                                    {p.deletedAt != null && <Badge tone="outline">Deleted by owner</Badge>}
                                   </span>
                                   <span className="block text-meta text-ink-muted">
                                     <span title={formatAbsolute(p.createdAt)}>

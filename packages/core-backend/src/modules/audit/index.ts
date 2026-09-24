@@ -1,5 +1,6 @@
 export * from './audit.contract.js';
-export { AgentAuditService, DEFAULT_RETENTION_DAYS, MAX_EVENT_PAGE, retentionDaysFrom } from './agent-audit.service.js';
+export { AgentAuditService, MAX_EVENT_PAGE, retentionDaysFrom } from './agent-audit.service.js';
+export { createAgentRestAuditMiddleware } from './agent-rest-audit.middleware.js';
 export { createAuditRoutes } from './audit.routes.js';
 export { RequestAudit } from './request-audit.js';
 export {

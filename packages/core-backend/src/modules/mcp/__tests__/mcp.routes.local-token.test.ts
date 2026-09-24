@@ -102,9 +102,11 @@ describe('POST /mcp/local-token', () => {
       { looksLikeExternalApiKey: () => false } as unknown as IExternalApiKeyService,
       internalTokens,
     );
+    // …carrying the agent connection, which the REST recorder attributes
+    // the local server's direct tool calls to.
     await expect(verify(body.token)).resolves.toEqual({
       ok: true,
-      auth: { source: 'external', userId: 'user-5', scope: 'write' },
+      auth: { source: 'external', userId: 'user-5', connectionId: 'conn-9', scope: 'write' },
     });
     expect((oauth as any).verifyAccessToken).toHaveBeenCalledWith('bevel-mcp_valid123');
   });

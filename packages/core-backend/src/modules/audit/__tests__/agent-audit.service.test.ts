@@ -90,7 +90,7 @@ const connection = (over: object) => ({
   ...over,
 });
 
-function makeService(queue: unknown[], keys: Partial<IExternalApiKeyService> = {}, retention = 90) {
+function makeService(queue: unknown[], keys: Partial<IExternalApiKeyService> = {}, retention: number | null = 90) {
   const fake = makeFakeDb(queue);
   const keyService = {
     listForUser: vi.fn(async () => []),
@@ -160,6 +160,21 @@ describe('AgentAuditService.record', () => {
     service.record(event);
     await flush();
     expect(counts.delete).toBe(1); // the second, a moment later, does not
+  });
+
+  it('sweeps nothing on a deployment that keeps events forever', async () => {
+    const { service, counts } = makeService([undefined], {}, null);
+    service.record({
+      userId: ALICE.id,
+      principal: { kind: 'key', id: 'k-1' },
+      kind: 'capability',
+      manual: null,
+      name: 'read_file',
+      outcome: 'ok',
+      durationMs: 3,
+    });
+    await flush();
+    expect(counts.delete).toBe(0);
   });
 
   it('swallows an insert failure (logged), so a tool result never fails over its bookkeeping', async () => {
@@ -341,17 +356,15 @@ describe('AgentAuditService.revokeConnection', () => {
 });
 
 describe('retentionDaysFrom', () => {
-  it('reads a whole number of days within the window and falls back to the default otherwise', () => {
+  it('reads a positive whole number of days, and blank, zero or negative as forever', () => {
     expect(retentionDaysFrom('30')).toBe(30);
     expect(retentionDaysFrom(' 3650 ')).toBe(3650);
-    expect(retentionDaysFrom('')).toBe(90);
-    expect(retentionDaysFrom('0')).toBe(90);
-    expect(retentionDaysFrom('-5')).toBe(90);
-    expect(retentionDaysFrom('1.5')).toBe(90);
-    expect(retentionDaysFrom('lots')).toBe(90);
-    // The same ceiling the Deployment page enforces: a typo in the
-    // environment cannot stretch the window to forever.
-    expect(retentionDaysFrom('3651')).toBe(90);
-    expect(retentionDaysFrom('99999999')).toBe(90);
+    expect(retentionDaysFrom('99999')).toBe(99999);
+    expect(retentionDaysFrom('')).toBeNull();
+    expect(retentionDaysFrom('0')).toBeNull();
+    expect(retentionDaysFrom('-5')).toBeNull();
+    // Not a window at all: kept forever too, and said once on the log.
+    expect(retentionDaysFrom('1.5')).toBeNull();
+    expect(retentionDaysFrom('lots')).toBeNull();
   });
 });

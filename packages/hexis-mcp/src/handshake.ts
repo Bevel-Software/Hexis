@@ -103,6 +103,16 @@ export interface HeldHandshake {
   transport: Transport;
 }
 
+export interface HoldOptions {
+  /**
+   * Resolves when the client has let go — stdin's `end`/`close` for the
+   * stdio transport, which fires `onclose` only from its own `close()` and
+   * never on EOF. Without it a client that spawns the server and dies before
+   * saying anything would leave the hold waiting forever.
+   */
+  hangUp?: Promise<void>;
+}
+
 /**
  * Start `inner`, wait for the client's first message, and hand back a
  * transport the server can `connect()` as if nothing had happened.
@@ -113,7 +123,7 @@ export interface HeldHandshake {
  * void. A client that hangs up before saying anything resolves with no
  * agent; the caller's let-go handling sees the closed stdin and leaves.
  */
-export async function holdInitialize(inner: Transport): Promise<HeldHandshake> {
+export async function holdInitialize(inner: Transport, options: HoldOptions = {}): Promise<HeldHandshake> {
   const held: HeldMessage[] = [];
   let settled = false;
   let settle: (agent: AgentIdentity | null) => void = () => {};
@@ -127,6 +137,7 @@ export async function holdInitialize(inner: Transport): Promise<HeldHandshake> {
   const wrapper = new ReplayingTransport(inner, held, (message) => settle(agentFromInitialize(message)), () =>
     settle(null),
   );
+  options.hangUp?.then(() => settle(null), () => settle(null));
   await inner.start();
   return { agent: await first, transport: wrapper };
 }
