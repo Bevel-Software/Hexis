@@ -2341,6 +2341,66 @@ describe('FileExplorer: delete and move ask first', () => {
       }
     });
 
+    /**
+     * The one drag test that actually DRAGS.
+     *
+     * Every other drop here hands the handler a `dataTransfer` built by the
+     * test, with the source path and kind written in by hand. That skips the
+     * handshake: `handleDragStart` writing the payload, and `handleDrop`
+     * reading it back under the same two MIME keys. Stop setting the payload,
+     * rename a key, or leave the row undraggable, and all of those tests still
+     * pass while no real drag in the app does anything at all.
+     *
+     * This one grabs the row, lets the component's own `dragStart` fill a
+     * DataTransfer that behaves like the browser's (what `setData` stores is
+     * what `getData` returns), and drops THAT on the folder. So the refused
+     * drag is evidenced end to end in the one place it can be: the criterion
+     * has otherwise gone unevidenced through local, staging and production
+     * testing, each time for want of a safe live fixture to drag.
+     */
+    it('a real drag — payload written by dragStart, read by drop — is refused with the sentence', async () => {
+      const clash = 'A file named contract.pdf already exists in Sales.';
+      const moveEntry = vi.fn().mockRejectedValue(new Error(clash));
+      renderExplorer({ fileTree: TREE, moveEntry });
+      openLegal();
+
+      // A row you cannot pick up cannot be dragged onto anything.
+      const source = screen.getByText('contract.pdf').closest('[draggable]');
+      expect(source).toHaveAttribute('draggable', 'true');
+
+      // Stands in for the browser's DataTransfer: a store, not a script.
+      const store = new Map<string, string>();
+      const dataTransfer = {
+        setData: (type: string, value: string) => void store.set(type, value),
+        getData: (type: string) => store.get(type) ?? '',
+        files: [],
+        items: undefined,
+        effectAllowed: 'none',
+        dropEffect: 'none',
+      };
+
+      await act(async () => {
+        fireEvent.dragStart(source!, { dataTransfer });
+      });
+      // The component put the drag's subject where the drop handler looks.
+      expect(store.get(DRAG_MIME)).toBe(CONTRACT);
+      expect(store.get(DRAG_KIND_MIME)).toBe('file');
+
+      await act(async () => {
+        fireEvent.drop(screen.getByText('Sales'), { dataTransfer });
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+
+      // The destination was derived from the dragged row, not from the test.
+      expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Sales/contract.pdf`);
+      expect(screen.getByTestId('tree-move-error')).toHaveTextContent(clash);
+      // Both entries where they were: the tree still shows each row.
+      expect(screen.getByText('contract.pdf')).toBeInTheDocument();
+      expect(screen.getByText('Sales')).toBeInTheDocument();
+    });
+
     it('a drop that lands says nothing', async () => {
       renderExplorer({ fileTree: TREE });
       openLegal();

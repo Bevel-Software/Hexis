@@ -149,6 +149,7 @@ describe('ExternalApiKeyService', () => {
         lastUsedAt: null,
         revokedAt: null,
         revokedBy: null,
+        deletedAt: null,
       });
     });
 
@@ -303,6 +304,7 @@ describe('ExternalApiKeyService', () => {
         lastUsedAt: rows[0].lastUsedAt!.getTime(),
         revokedAt: null,
         revokedBy: null,
+        deletedAt: null,
       });
       expect(summaries[1].revokedAt).toBe(rows[1].revokedAt!.getTime());
       // sanity-check that ordering was requested (we can't introspect the
@@ -333,6 +335,7 @@ describe('ExternalApiKeyService', () => {
           lastUsedAt: aliceKey.lastUsedAt!.getTime(),
           revokedAt: null,
           revokedBy: null,
+          deletedAt: null,
           user: { id: 'u-alice', email: 'alice@example.com', name: 'Alice' },
         },
         {
@@ -343,6 +346,7 @@ describe('ExternalApiKeyService', () => {
           lastUsedAt: null,
           revokedAt: bobKey.revokedAt!.getTime(),
           revokedBy: null,
+          deletedAt: null,
           user: { id: 'u-bob', email: 'bob@example.com', name: 'Bob' },
         },
       ]);
@@ -439,9 +443,9 @@ describe('ExternalApiKeyService', () => {
   });
 
   describe('remove', () => {
-    it('validates then deletes the key (dependents cascade at the DB layer)', async () => {
-      // Queue: SELECT finds a revoked row; then the key delete consumes one.
-      const { db } = makeFakeDb([
+    it('validates then marks the key deleted — the row stays, for the Audit log', async () => {
+      // Queue: SELECT finds a revoked row; then the marking update consumes one.
+      const { db, calls } = makeFakeDb([
         [{ revokedAt: new Date('2026-02-01T00:00:00Z') }],
         undefined,
       ]);
@@ -449,12 +453,29 @@ describe('ExternalApiKeyService', () => {
 
       await service.remove('tok-1', 'user-1');
 
-      // Validation SELECT first, then ONE delete of the key row. Dependent
-      // rows (e.g. llm_usage metering) are removed by ON DELETE CASCADE —
-      // this service must not know those tables exist.
+      // Validation SELECT first, then ONE update of the key row and never a
+      // delete: the Audit log's events hang off this row, and a key's owner
+      // deleting it must not erase what it did. Only a revoked, not-yet-
+      // deleted row of the owner's is marked.
       expect((db as any).select).toHaveBeenCalledTimes(1);
-      expect((db as any).delete).toHaveBeenCalledTimes(1);
-      expect((db as any).delete).toHaveBeenCalledWith(externalApiKeys);
+      expect((db as any).delete).not.toHaveBeenCalled();
+      expect((db as any).update).toHaveBeenCalledTimes(1);
+      expect((db as any).update).toHaveBeenCalledWith(externalApiKeys);
+      expect(calls.set[0]![0].deletedAt).toBeInstanceOf(Date);
+      const mark = renderSql(calls.where[1]![0]).sql;
+      expect(mark).toMatch(/"api_tokens"."user_id" = \$2/);
+      expect(mark).toMatch(/"api_tokens"."revoked_at" is not null/);
+      expect(mark).toMatch(/"api_tokens"."deleted_at" is null/);
+    });
+
+    it('treats an already-deleted key as absent for its owner', async () => {
+      // The validation SELECT carries the not-deleted filter, so a deleted
+      // row answers nothing — and nothing is marked twice.
+      const { db, calls } = makeFakeDb([[]]);
+      const service = new ExternalApiKeyService(db, 'bevel_');
+      await expect(service.remove('tok-1', 'user-1')).rejects.toBeInstanceOf(TokenNotFoundError);
+      expect(renderSql(calls.where[0]![0]).sql).toMatch(/"api_tokens"."deleted_at" is null/);
+      expect((db as any).update).not.toHaveBeenCalled();
     });
 
     it('throws TokenStillActiveError when the token exists but was never disconnected', async () => {

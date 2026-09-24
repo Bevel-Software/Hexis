@@ -1,6 +1,6 @@
 {
   "name": "@bevel-software/hexis-mcp",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "Run a Hexis workspace as a local MCP server: every tool the hosted endpoint serves, plus the local-only tools it cannot reach.",
   "type": "module",
   "main": "./dist/index.js",
@@ -34,7 +34,7 @@
     "node": ">=22.13 <23 || >=24 <25"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },

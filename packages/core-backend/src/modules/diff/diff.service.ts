@@ -350,7 +350,12 @@ export class DiffService implements IDiffService {
     // reject, the ledger sync — so the git folder is refused for all of them
     // in one place, links into it included. FIRST, so a path into the folder
     // gets the one sanitized refusal rather than a containment error.
-    await assertNotGitInternals(workspaceDir, relativePath, fileAbs);
+    //
+    // The caller's SPELLING is what is judged, not `fileAbs`: `path.resolve`
+    // reads a backslash as an ordinary character and carries a leading climb
+    // out of the workspace, so a link reached either way resolved to nothing
+    // here and passed. The check reads every way the spelling could land.
+    await assertNotGitInternals(workspaceDir, relativePath);
     assertWithinDirectory(fileAbs, workspaceDir);
     assertWithinDirectory(backupAbs, backupDir);
     return { workspaceDir, backupDir, fileAbs, backupAbs };

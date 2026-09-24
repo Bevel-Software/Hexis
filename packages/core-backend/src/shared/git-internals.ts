@@ -107,7 +107,13 @@ async function resolvedRealPath(absolutePath: string): Promise<string | null> {
  * Refuse a path under `rootDir` that names the git folder or resolves into it.
  *
  * `inputPath` is the caller's own spelling (checked lexically, encoded forms
- * included); `absolutePath` is where it lands on disk. Only the part below
+ * included, and probed on disk every way it could land — see
+ * {@link candidateTargets}); `absolutePath`, when a layer has already
+ * decided where the path goes, is that place, judged AS WELL. Both in one
+ * call, because the two answer different questions — a link reached by a
+ * reading this layer does not use is caught only by the spelling, a link the
+ * layer's own resolution follows only by the place — and one call walks the
+ * root once and probes a place that both name once. Only the part below
  * `rootDir` is judged, so a workspaces root that itself sits under some
  * `.git` directory does not refuse everything. A link that leaves the root
  * is judged on its target's path relative to the root, so a link into
@@ -116,9 +122,58 @@ async function resolvedRealPath(absolutePath: string): Promise<string | null> {
  */
 export async function assertNotGitInternals(rootDir: string, inputPath: string, absolutePath?: string): Promise<void> {
   assertNoGitInternalsSegment(inputPath);
-  const target = absolutePath ?? path.resolve(rootDir, inputPath.replace(/^[\\/]+/, ''));
-  if (hasGitInternalsSegment(path.relative(path.resolve(rootDir), target))) throw new GitInternalsError();
-  const [realTarget, realRoot] = await Promise.all([resolvedRealPath(target), resolvedRealPath(path.resolve(rootDir))]);
-  if (realTarget === null || realRoot === null) return;
-  if (hasGitInternalsSegment(path.relative(realRoot, realTarget))) throw new GitInternalsError();
+  const root = path.resolve(rootDir);
+  const realRoot = await resolvedRealPath(root);
+  // Each place once, remembering whether a layer resolved it (probed as
+  // given) or only a spelling named it (probed only inside the root).
+  const targets = new Map<string, boolean>();
+  for (const target of candidateTargets(root, inputPath)) targets.set(target, false);
+  if (absolutePath !== undefined) targets.set(absolutePath, true);
+  for (const [target, resolved] of targets) {
+    const relative = path.relative(root, target);
+    if (hasGitInternalsSegment(relative)) throw new GitInternalsError();
+    if (realRoot === null) continue;
+    // A raw spelling fans out into candidates, and one of them can name a
+    // place outside the workspace entirely — `/etc/…`, a deep climb. Such a
+    // candidate is judged by the lexical reading above (a link into another
+    // checkout's `.git` is named there) but NOT probed on disk: probing it
+    // would let an unreadable external directory answer with its own
+    // `EACCES` instead of the path rule's typed refusal for a spelling that
+    // was never a workspace path. A path a layer already resolved is the one
+    // place it is, so it is probed as given.
+    // `..` and `../…` are the climbs; `..link` is an ordinary name that merely
+    // starts with those characters, and a link by that name can point into the
+    // folder — so it is probed like any other entry under the root.
+    const climbsOut = relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+    if (!resolved && (relative === '' || climbsOut)) continue;
+    const realTarget = await resolvedRealPath(target);
+    if (realTarget !== null && hasGitInternalsSegment(path.relative(realRoot, realTarget))) throw new GitInternalsError();
+  }
+}
+
+/**
+ * Every place one raw spelling could LAND, because a spelling is not yet a
+ * path until something decides how to read it.
+ *
+ * A backslash separates segments on Windows and is an ordinary character in a
+ * filename here, so `kb\\Notes\\..\\link` is read BOTH ways; an absolute path
+ * is both the path it names and — as every workspace caller reads it — that
+ * path with its leading slashes dropped, under the workspace; and a leading
+ * climb (`../kb/link`) is both the climb it spells and the path left when the
+ * climb is dropped, which is how a lenient reader takes it. The spelling is
+ * refused when ANY reading lands in the git folder: which reading a later
+ * layer picks is not something this rule should have to predict.
+ *
+ * This is what a CALLER's own spelling needs. A path some layer has already
+ * resolved arrives as `absolutePath` and is judged as the one place it is.
+ */
+function candidateTargets(root: string, inputPath: string): string[] {
+  const targets = new Set<string>();
+  for (const spelling of new Set([inputPath, inputPath.replace(/\\/g, '/')])) {
+    const anchored = spelling.replace(/^[\\/]+/, '');
+    targets.add(path.resolve(root, anchored));
+    targets.add(path.resolve(root, anchored.replace(/^(\.\.?[\\/])+/, '')));
+    if (/^[\\/]/.test(spelling)) targets.add(path.resolve(spelling));
+  }
+  return [...targets];
 }

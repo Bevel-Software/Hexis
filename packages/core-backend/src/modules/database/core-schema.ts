@@ -211,6 +211,16 @@ export const externalApiKeys = pgTable('api_tokens', {
    * reconnect a key that was taken from them.
    */
   revokedBy: text('revoked_by'),
+  /**
+   * When the owner deleted the key "for good" from their own pages. A
+   * DELETE in name only: the row stays, because the Audit log's events hang
+   * off it and a log its subject can erase is not one. Hidden from the
+   * owner's listings, shown to admins as deleted; gone for real only when
+   * the account is erased (the cascade) or its events have long been
+   * pruned. Always set on an already-revoked row — a live key is never
+   * deleted in one step.
+   */
+  deletedAt: timestamp('deleted_at'),
 }, (t) => ({
   byUser: index('api_tokens_by_user').on(t.userId),
 }));
@@ -447,11 +457,57 @@ export const oauthAuthCodes = pgTable('oauth_auth_codes', {
 }));
 
 /**
+ * "This person connected this agent" — the durable record behind the Audit
+ * log's agent rows. An OAuth grant cannot be that record: its token row is
+ * replaced on every refresh (hourly) and pruned once its refresh window
+ * closes, so nothing about it outlives a month. This row is made the first
+ * time a token is minted for a (user, client) pair, kept across every refresh
+ * (each new token row points at it), and REVOKED rather than deleted when the
+ * person or an admin cuts the agent off — its events stay readable under it.
+ *
+ * A connection is the AGENT, per person — not the OAuth client registration.
+ * Claude registers a fresh client on every re-authorisation (dynamic client
+ * registration mints a new id each time), so keying by registration gave one
+ * person five "Claude" rows for one agent. `agent_key` is what a connection is
+ * keyed by instead: the registered client name, folded (a name-less client
+ * falls back to its id), so every registration of "Claude" by one person
+ * lands on the same live row; `client_id` records the registration that
+ * first made it. `client_name` is that registration's name as shown.
+ *
+ * One LIVE connection per (user, agent): the partial unique index below. A
+ * reconnect after a revoke is a new row, so the old one's history and its
+ * "revoked by an admin" mark are never overwritten.
+ */
+export const agentConnections = pgTable('agent_connections', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  clientId: text('client_id').notNull().references(() => oauthClients.clientId),
+  clientName: text('client_name'),
+  /** The folded client name, or the client id when the registration carried none. */
+  agentKey: text('agent_key').notNull(),
+  connectedAt: timestamp('connected_at').defaultNow().notNull(),
+  lastUsedAt: timestamp('last_used_at'),
+  revokedAt: timestamp('revoked_at'),
+  /** `owner` | `admin` — who ended it; null while live. Same vocabulary as `api_tokens.revoked_by`. */
+  revokedBy: text('revoked_by'),
+}, (t) => ({
+  byUser: index('agent_connections_by_user').on(t.userId),
+  liveUnq: uniqueIndex('agent_connections_live_unq')
+    .on(t.userId, t.agentKey)
+    .where(sql`${t.revokedAt} is null`),
+}));
+
+/**
  * OAuth access/refresh token pairs minted by the token endpoint. Like
  * `api_tokens`: plaintext shown only in the token response, SHA-256 hashes
  * stored, revoked-not-deleted so `last_used_at` keeps its audit value and a
  * revoked token can't be re-issued. One row per pair; refresh rotation
  * revokes the old row and inserts a new one.
+ *
+ * `connection_id` names the {@link agentConnections} row the pair belongs to,
+ * so every call made with the token is attributed to that agent and revoking
+ * the agent can revoke exactly its tokens. Null only on rows minted before
+ * the column existed.
  */
 export const oauthTokens = pgTable('oauth_tokens', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -459,6 +515,7 @@ export const oauthTokens = pgTable('oauth_tokens', {
   refreshTokenHash: text('refresh_token_hash').unique(),
   clientId: text('client_id').notNull().references(() => oauthClients.clientId),
   userId: uuid('user_id').notNull().references(() => users.id),
+  connectionId: uuid('connection_id').references(() => agentConnections.id, { onDelete: 'cascade' }),
   scope: text('scope'),
   resource: text('resource'),
   expiresAt: timestamp('expires_at').notNull(),
@@ -469,6 +526,53 @@ export const oauthTokens = pgTable('oauth_tokens', {
 }, (t) => ({
   byUser: index('oauth_tokens_by_user').on(t.userId),
   byExpiry: index('oauth_tokens_by_expiry').on(t.expiresAt),
+  byConnection: index('oauth_tokens_by_connection').on(t.connectionId),
+}));
+
+/**
+ * The Audit log's events: one row per thing an external agent called through
+ * the platform — a hexis capability (the platform's own tools, `read_file`,
+ * `call_tool_chain`, …), a tool from a `.tool` manual or a connected MCP
+ * server, or a skill it read. Append-only; pruned past the deployment's
+ * retention window (the `auditRetentionDays` setting).
+ *
+ * Deliberately WITHOUT arguments or results: a call's inputs can carry
+ * secrets and personal data, and the log's question is "what was used, by
+ * which agent, when" — not "what was said".
+ *
+ * Exactly one principal per row (the CHECK): the connection key or the agent
+ * connection the call arrived through. Both cascade, so deleting a key for
+ * good, revoking-then-erasing a person, or dropping a connection takes its
+ * events along — the same contract the LLM-usage rows already keep.
+ */
+export const agentEvents = pgTable('agent_events', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  keyId: uuid('key_id').references(() => externalApiKeys.id, { onDelete: 'cascade' }),
+  connectionId: uuid('connection_id').references(() => agentConnections.id, { onDelete: 'cascade' }),
+  /** `capability` | `tool` | `skill`. */
+  kind: text('kind').notNull(),
+  /** The MCP server / `.tool` manual (catalog name) for a tool, the skill folder for a skill; null for a capability. */
+  manual: text('manual'),
+  /** The tool's bare name, or the skill's name. */
+  name: text('name').notNull(),
+  /** `ok` | `error` | `denied` (denied: the caller's sign-in for the tool was missing, so nothing ran). */
+  outcome: text('outcome').notNull(),
+  durationMs: integer('duration_ms'),
+  at: timestamp('at').defaultNow().notNull(),
+}, (t) => ({
+  // The two read paths: one principal's events, newest first.
+  byKey: index('agent_events_by_key').on(t.keyId, t.at),
+  byConnection: index('agent_events_by_connection').on(t.connectionId, t.at),
+  // The retention prune, and per-user counts.
+  byAt: index('agent_events_by_at').on(t.at),
+  byUser: index('agent_events_by_user').on(t.userId),
+  kindCheck: check('agent_events_kind', sql`${t.kind} IN ('capability', 'tool', 'skill')`),
+  outcomeCheck: check('agent_events_outcome', sql`${t.outcome} IN ('ok', 'error', 'denied')`),
+  principalCheck: check(
+    'agent_events_principal',
+    sql`(${t.keyId} IS NULL) <> (${t.connectionId} IS NULL)`,
+  ),
 }));
 
 export const sessionOntologyTouches = pgTable('session_ontology_touches', {

@@ -37,6 +37,16 @@ export interface InternalTokenClaim {
    * expected to carry `sessionId` on the tool body, not in the token.
    */
   externalProxy?: boolean;
+  /**
+   * The agent connection (`agent_connections.id`) an external-proxy token
+   * stands in for. The LOCAL MCP server swaps its OAuth grant for one of these
+   * at `/api/mcp/local-token` and presents it everywhere the grant would have
+   * gone, so without this claim every call it makes would arrive with a user
+   * and no agent — unattributable in the Audit log. Carried, never decided:
+   * the exchange copies it from the verified grant. Absent on every other
+   * internal token.
+   */
+  connectionId?: string;
 }
 
 interface SignedPayload extends InternalTokenClaim {
@@ -137,6 +147,7 @@ export class InternalTokenService {
       ...(typeof payload.sessionId === 'string' ? { sessionId: payload.sessionId } : {}),
       ...(typeof payload.focusedBranch === 'string' ? { focusedBranch: payload.focusedBranch } : {}),
       ...(payload.externalProxy === true ? { externalProxy: true } : {}),
+      ...(typeof payload.connectionId === 'string' ? { connectionId: payload.connectionId } : {}),
     };
   }
 

@@ -54,6 +54,8 @@ import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.j
 import type { SpillStore } from '../workspace/spill-store.js';
 import { seedBevelHostedManualVars } from '../../shared/utcp-namespace.js';
 import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
+import type { IAgentEventRecorder } from '../audit/audit.contract.js';
+import { RequestAudit } from '../audit/request-audit.js';
 import { ManualFailureMemo } from './manual-failure-memo.js';
 import { DownstreamPool, POOL_KEY_SEPARATOR, type DownstreamPoolOptions, type Lease } from './downstream-pool.js';
 import { SurfaceLogThrottle } from './surface-log-throttle.js';
@@ -98,6 +100,12 @@ export interface McpCaller {
   userId: string;
   /** The connection-key id (per-key metering rides on it), or null for an OAuth/JWT bearer. */
   tokenId: string | null;
+  /**
+   * The agent connection behind an OAuth bearer (or the local server's
+   * exchanged grant), or null. With `tokenId`, the two ways a call is
+   * attributed in the Audit log; a request with neither records nothing.
+   */
+  connectionId?: string | null;
   /** The raw bearer the request carried. */
   bearer: string;
 }
@@ -268,6 +276,10 @@ export class McpService {
     // authorization when one of its TOOL sign-ins breaks. Optional: without
     // it, broken sign-ins surface only as the /connect link in the result.
     private readonly revokeOAuthAccess?: (bearer: string) => Promise<void>,
+    // The Audit log's recorder: every tool call, skill read and meta-tool run
+    // of a request that arrived with a key or an agent connection goes
+    // through it. Optional like the others; without it nothing is recorded.
+    private readonly auditRecorder?: IAgentEventRecorder,
   ) {
     this.downstream = new DownstreamPool<PooledDownstream>({
       ...opts.downstreamPool,
@@ -332,6 +344,7 @@ export class McpService {
    */
   async createRequestServer(caller: McpCaller, messages: unknown): Promise<Server> {
     const { userId, tokenId, bearer } = caller;
+    const connectionId = caller.connectionId ?? null;
     // The loopback surface (`/api/agent/*`) accepts connection keys and
     // internal tokens only. A connection-key request passes the caller's own
     // key through (per-key metering rides on it); an OAuth/JWT request's
@@ -347,8 +360,30 @@ export class McpService {
 
     let instructions: Promise<ComposedAgentInstructions> | undefined;
     const agentInstructions = () => (instructions ??= this.composeAgentInstructions());
+    // The Audit log's view of this request — only when the request can be
+    // attributed to a key or an agent connection. The catalog names it
+    // classifies pooled tools by are the surface's, which is built lazily
+    // below, so it reads them through a holder the surface fills in.
+    const catalogNamesHolder: { current: ReadonlyMap<string, string> } = { current: new Map() };
+    const principal = tokenId != null ? { kind: 'key' as const, id: tokenId } : connectionId ? { kind: 'agent' as const, id: connectionId } : null;
+    const audit =
+      this.auditRecorder && principal
+        ? new RequestAudit(this.auditRecorder, userId, principal, {
+            kbManualName: EXTERNAL_KB_MANUAL_NAME,
+            catalogNames: () => catalogNamesHolder.current,
+            loadSkills: () =>
+              this.fetchSkillList(loopbackBearer).then((skills) =>
+                skills.flatMap((s) => (s.path ? [{ name: s.name, path: s.path }] : [])),
+              ),
+          })
+        : null;
     let surface: Promise<RequestSurface> | undefined;
-    const requestSurface = () => (surface ??= this.buildSurface(userId, tokenId, loopbackBearer));
+    const requestSurface = () =>
+      (surface ??= this.buildSurface(userId, tokenId, loopbackBearer).then((built) => {
+        catalogNamesHolder.current = built.catalogNames;
+        audit?.instrumentChainCalls(built.client);
+        return built;
+      }));
 
     const initializing = (Array.isArray(messages) ? messages : [messages]).some((m) => isInitializeRequest(m));
     const server = new Server(
@@ -432,8 +467,12 @@ export class McpService {
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const { client, tools, unavailable, catalogNames } = await requestSurface();
       const toolName = request.params.name;
+      const args = request.params.arguments ?? {};
       if (META_TOOL_NAMES.has(toolName)) {
-        return this.dispatchMetaTool(client, toolName, request.params.arguments ?? {});
+        // A meta-tool is the platform's own; its inner tool calls (a chain's)
+        // are recorded one by one through the instrumented client.
+        const run = () => this.dispatchMetaTool(client, toolName, args);
+        return audit ? audit.call(toolName, args, run, isErrorResult) : run();
       }
       /**
        * The needs-authorization answer, when the caller's sign-in for the
@@ -476,11 +515,18 @@ export class McpService {
           .filter((m) => toolName.startsWith(`${m.utcpName}_`))
           .sort((a, b) => b.utcpName.length - a.utcpName.length)[0];
         const answer = owner ? await needsAuthorization(owner.utcpName) : null;
+        if (answer && owner && audit) {
+          await audit.denied(`${owner.utcpName}.${toolName.slice(owner.utcpName.length + 1)}`, args);
+        }
         return answer ?? toolError(retiredToolMessage(toolName) ?? `Unknown tool "${toolName}".`);
       }
       const needsAuth = await needsAuthorization(proxied.manualName);
-      if (needsAuth) return needsAuth;
-      return this.dispatch(client, proxied, request, extra);
+      if (needsAuth) {
+        if (audit) await audit.denied(proxied.utcpName, args);
+        return needsAuth;
+      }
+      const run = () => this.dispatch(client, proxied, request, extra);
+      return audit ? audit.call(proxied.utcpName, args, run, isErrorResult) : run();
     });
 
     // Prompts = skills. Each skill becomes a user-callable prompt (slash command
@@ -499,7 +545,14 @@ export class McpService {
     });
 
     server.setRequestHandler(GetPromptRequestSchema, async (request): Promise<GetPromptResult> => {
+      const started = performance.now();
       const skill = await this.fetchSkill(loopbackBearer, request.params.name);
+      // A prompt IS a skill read — the same event `get_skill` produces.
+      audit?.emit(
+        { kind: 'skill', manual: skill?.path ?? null, name: request.params.name },
+        skill ? 'ok' : 'error',
+        Math.round(performance.now() - started),
+      );
       if (!skill) {
         throw new McpError(ErrorCode.InvalidParams, `Unknown skill "${request.params.name}".`);
       }
@@ -1174,6 +1227,11 @@ export class McpService {
   ): Promise<CallToolResult> {
     return dispatchMetaTool(client, name, args, this.opts.spillStore);
   }
+}
+
+/** Whether a tool result is the tool saying it failed — what the Audit log records as `error`. */
+function isErrorResult(result: CallToolResult): boolean {
+  return result.isError === true;
 }
 
 /**

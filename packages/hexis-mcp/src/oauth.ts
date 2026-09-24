@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import type { HexisMcpConfig, RenewedGrant } from './config.js';
+import { agentDisplayName, agentStoreKey, registrationName, type AgentIdentity } from './handshake.js';
 import { hexisHome, hostKey } from './materialize.js';
 import { scheduleProactiveRenewal } from './renewal.js';
 
@@ -140,6 +141,8 @@ export interface AuthServerEndpoints {
   authorizationEndpoint: string;
   tokenEndpoint: string;
   registrationEndpoint: string;
+  /** RFC 7009, when the server offers it: how a sign-in this process no longer needs is ended. */
+  revocationEndpoint?: string;
 }
 
 /**
@@ -195,7 +198,12 @@ export async function discoverAuthServer(mcpUrl: string): Promise<AuthServerEndp
     await reachOrExplain(asMetadataUrl, 'the authorization server metadata'),
     asMetadataUrl,
     'the authorization server metadata',
-  )) as { authorization_endpoint?: unknown; token_endpoint?: unknown; registration_endpoint?: unknown };
+  )) as {
+    authorization_endpoint?: unknown;
+    token_endpoint?: unknown;
+    registration_endpoint?: unknown;
+    revocation_endpoint?: unknown;
+  };
   const source = 'the authorization server metadata';
   return {
     authorizationEndpoint: httpUrlOrExplain(asMetadata?.authorization_endpoint, 'authorization endpoint', source),
@@ -203,6 +211,11 @@ export async function discoverAuthServer(mcpUrl: string): Promise<AuthServerEndp
     // Registration is not optional here: with no pre-provisioned client id,
     // dynamic registration is the only way this process gets one.
     registrationEndpoint: httpUrlOrExplain(asMetadata?.registration_endpoint, 'registration endpoint', source),
+    // Revocation is: a server without one simply keeps a retired sign-in
+    // until its refresh window closes.
+    ...(typeof asMetadata?.revocation_endpoint === 'string' && asMetadata.revocation_endpoint
+      ? { revocationEndpoint: httpUrlOrExplain(asMetadata.revocation_endpoint, 'revocation endpoint', source) }
+      : {}),
   };
 }
 
@@ -215,9 +228,16 @@ export interface StoredOAuthCredentials {
   refreshToken: string;
 }
 
-/** `~/.hexis/oauth/<host-key>.json` — same per-deployment keying the plugin trees use. */
-export function oauthStorePath(baseUrl: string): string {
-  return path.join(hexisHome(), 'oauth', `${hostKey(baseUrl)}.json`);
+/**
+ * `~/.hexis/oauth/<host-key>--<agent>.json` — per deployment (the same keying
+ * the plugin trees use) AND per agent: a sign-in IS the agent's, registered
+ * under its name and revocable on its own, so Claude Code and Cursor on one
+ * machine each keep their own. With no agent known, the plain `<host-key>`
+ * file the server used before it learned who was running it.
+ */
+export function oauthStorePath(baseUrl: string, agent: AgentIdentity | null = null): string {
+  const suffix = agent ? `--${agentStoreKey(agent)}` : '';
+  return path.join(hexisHome(), 'oauth', `${hostKey(baseUrl)}${suffix}.json`);
 }
 
 /**
@@ -225,9 +245,12 @@ export function oauthStorePath(baseUrl: string): string {
  * flow rebuilds it, and nothing a person can do to this file should wedge the
  * server behind an unreadable parse error.
  */
-export async function readStoredCredentials(baseUrl: string): Promise<StoredOAuthCredentials | null> {
+export async function readStoredCredentials(
+  baseUrl: string,
+  agent: AgentIdentity | null = null,
+): Promise<StoredOAuthCredentials | null> {
   try {
-    const raw = await fs.readFile(oauthStorePath(baseUrl), 'utf8');
+    const raw = await fs.readFile(oauthStorePath(baseUrl, agent), 'utf8');
     const parsed = JSON.parse(raw) as { clientId?: unknown; refreshToken?: unknown };
     if (
       typeof parsed?.clientId === 'string' &&
@@ -253,8 +276,9 @@ export async function readStoredCredentials(baseUrl: string): Promise<StoredOAut
 export async function writeStoredCredentials(
   baseUrl: string,
   credentials: StoredOAuthCredentials,
+  agent: AgentIdentity | null = null,
 ): Promise<void> {
-  const file = oauthStorePath(baseUrl);
+  const file = oauthStorePath(baseUrl, agent);
   await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   await fs.writeFile(file, `${JSON.stringify(credentials)}\n`, { mode: 0o600 });
   await fs.chmod(file, 0o600).catch((err: unknown) => {
@@ -347,6 +371,11 @@ export function openInBrowser(url: string): void {
   child.unref();
 }
 
+/** The agent's name reaches the page from `clientInfo`, which is the client's to choose — so it is text, never markup. */
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+}
+
 /** The tiny page the loopback answers with — a human is looking at it. */
 function callbackPage(title: string, detail: string): string {
   return `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:system-ui;margin:4rem auto;max-width:28rem"><h1 style="font-size:1.2rem">${title}</h1><p>${detail}</p></body>`;
@@ -358,7 +387,10 @@ export interface BrowserFlowOptions {
   /** Where the sign-in URL is ALWAYS written, browser or not. Defaults to stderr. */
   print?: (line: string) => void;
   timeoutMs?: number;
+  /** What the deployment registers this client as — the name its Audit log shows. */
   clientName?: string;
+  /** What the callback page tells the person to return to ("Claude Code"); defaults to their terminal. */
+  returnTo?: string;
 }
 
 export interface BrowserFlowResult {
@@ -477,7 +509,7 @@ export async function authorizeInBrowser(
           return;
         }
         res.writeHead(200, { 'Content-Type': 'text/html' }).end(
-          callbackPage('Signed in', 'You can close this tab and return to your terminal.'),
+          callbackPage('Signed in', `You can close this tab and return to ${escapeHtml(options.returnTo ?? 'your terminal')}.`),
         );
         settle(resolve)(returnedCode);
       });
@@ -567,6 +599,13 @@ export interface OAuthModeOptions {
   openBrowser?: (url: string) => void;
   print?: (line: string) => void;
   browserTimeoutMs?: number;
+  /**
+   * The agent running this server, from the MCP handshake (see handshake.ts).
+   * It decides which stored sign-in is this one, what the sign-in registers
+   * as, and what the callback page says to return to. Null (or absent) is a
+   * client that named itself to nobody: the plain per-machine sign-in.
+   */
+  agent?: AgentIdentity | null;
 }
 
 /** Refresh first — no browser for a machine that already signed in. Browser on a first run or a dead refresh. */
@@ -575,14 +614,19 @@ async function obtainAccessToken(
   endpoints: AuthServerEndpoints,
   options: OAuthModeOptions,
 ): Promise<string> {
-  const stored = await readStoredCredentials(baseUrl);
+  const agent = options.agent ?? null;
+  const stored = await readStoredCredentials(baseUrl, agent);
   if (stored) {
     const refreshed = await refreshAccessToken(endpoints.tokenEndpoint, stored.clientId, stored.refreshToken);
     if (refreshed) {
       // Rotation: an authorization server may retire the old refresh token
       // with every grant, so a new one must land on disk before it is needed.
       if (refreshed.refreshToken && refreshed.refreshToken !== stored.refreshToken) {
-        await writeStoredCredentials(baseUrl, { clientId: stored.clientId, refreshToken: refreshed.refreshToken });
+        await writeStoredCredentials(
+          baseUrl,
+          { clientId: stored.clientId, refreshToken: refreshed.refreshToken },
+          agent,
+        );
       }
       return refreshed.accessToken;
     }
@@ -592,11 +636,48 @@ async function obtainAccessToken(
     openBrowser: options.noOpen ? () => {} : options.openBrowser,
     print: options.print,
     timeoutMs: options.browserTimeoutMs,
+    clientName: registrationName(agent, os.hostname()),
+    returnTo: agent ? agentDisplayName(agent) : undefined,
   });
   if (flow.refreshToken) {
-    await writeStoredCredentials(baseUrl, { clientId: flow.clientId, refreshToken: flow.refreshToken });
+    await writeStoredCredentials(baseUrl, { clientId: flow.clientId, refreshToken: flow.refreshToken }, agent);
   }
+  if (agent) await retirePlainSignIn(baseUrl, endpoints, options.print);
   return flow.accessToken;
+}
+
+/**
+ * An agent's first sign-in supersedes the per-machine one the server used
+ * before it knew who was running it: that sign-in is ended at the workspace
+ * (RFC 7009 — the workspace then lists its "hexis-mcp on <host>" connection
+ * as disconnected rather than live forever) and its refresh token leaves the
+ * disk. Best effort, and said on stderr: the agent's own sign-in is already
+ * in hand, and nothing here may take it back.
+ */
+async function retirePlainSignIn(
+  baseUrl: string,
+  endpoints: AuthServerEndpoints,
+  print: (line: string) => void = (line) => process.stderr.write(`${line}\n`),
+): Promise<void> {
+  const plain = await readStoredCredentials(baseUrl);
+  if (!plain) return;
+  try {
+    if (endpoints.revocationEndpoint) {
+      const res = await postForm(endpoints.revocationEndpoint, 'the revocation endpoint', {
+        token: plain.refreshToken,
+        token_type_hint: 'refresh_token',
+        client_id: plain.clientId,
+      });
+      await res.body?.cancel().catch(() => {});
+    }
+    await fs.rm(oauthStorePath(baseUrl), { force: true });
+    print('[hexis-mcp] retired the previous per-machine sign-in; this agent now signs in as itself.');
+  } catch (err) {
+    print(
+      `[hexis-mcp] could not retire the previous per-machine sign-in (${err instanceof Error ? err.message : String(err)}); ` +
+        'it will expire on its own.',
+    );
+  }
 }
 
 /**
@@ -623,13 +704,14 @@ export async function establishOAuthConfig(
   options: OAuthModeOptions = {},
 ): Promise<HexisMcpConfig> {
   const endpoints = await discoverAuthServer(mcpUrl);
+  const agent = options.agent ?? null;
   const accessToken = await obtainAccessToken(baseUrl, endpoints, options);
   const grant = await exchangeForLocalToken(baseUrl, accessToken);
   const config: HexisMcpConfig = {
     baseUrl,
     connectionKey: grant.token,
     renewConnectionKey: async (): Promise<RenewedGrant> => {
-      const stored = await readStoredCredentials(baseUrl);
+      const stored = await readStoredCredentials(baseUrl, agent);
       if (!stored) {
         throw new OAuthError(
           'No stored sign-in to refresh — restart hexis-mcp to sign in through your browser again.',
@@ -643,7 +725,11 @@ export async function establishOAuthConfig(
         );
       }
       if (refreshed.refreshToken && refreshed.refreshToken !== stored.refreshToken) {
-        await writeStoredCredentials(baseUrl, { clientId: stored.clientId, refreshToken: refreshed.refreshToken });
+        await writeStoredCredentials(
+          baseUrl,
+          { clientId: stored.clientId, refreshToken: refreshed.refreshToken },
+          agent,
+        );
       }
       return exchangeForLocalToken(baseUrl, refreshed.accessToken);
     },

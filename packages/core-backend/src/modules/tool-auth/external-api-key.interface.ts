@@ -37,6 +37,12 @@ export interface ExternalApiKeySummary {
    * before this was recorded, which read as the owner's doing).
    */
   revokedBy: RevokedBy | null;
+  /**
+   * When the owner deleted the key for good from their own pages. Such a
+   * key is absent from the owner's listings and shown to admins as deleted;
+   * its row stays so the Audit log's events keep their principal.
+   */
+  deletedAt: number | null;
 }
 
 /** Who revoked a key: its owner, or an admin acting across the deployment. */
@@ -138,6 +144,13 @@ export interface IExternalApiKeyService {
   listForUser(userId: string): Promise<ExternalApiKeySummary[]>;
 
   /**
+   * The account a key belongs to, live or revoked, or null when no such key
+   * exists. The ownership check behind a per-key read or revoke that is
+   * offered to owners and admins alike (the Audit log's).
+   */
+  ownerOf(id: string): Promise<string | null>;
+
+  /**
    * Mark a token revoked. Idempotent — revoking an already-revoked token
    * is a no-op (the row's `revokedAt` is not overwritten). Throws
    * TokenNotFoundError if the token doesn't belong to the user.
@@ -161,11 +174,15 @@ export interface IExternalApiKeyService {
   revokeAny(id: string): Promise<void>;
 
   /**
-   * Permanently delete a token row, dropping its audit trail. Only permitted
-   * on an already-revoked token — an active key must be disconnected first,
-   * so a live agent's access is never yanked by a single click. Throws
-   * TokenNotFoundError if the token doesn't belong to the user, and
-   * TokenStillActiveError if it hasn't been revoked yet.
+   * Delete a token for good, from the owner's point of view: it leaves their
+   * listings and can never be used or reconnected. The row itself stays,
+   * marked deleted, so the Audit log keeps the key's events under their
+   * principal — a log its subject could erase would not be one. Only
+   * permitted on an already-revoked token — an active key must be
+   * disconnected first, so a live agent's access is never yanked by a single
+   * click. Throws TokenNotFoundError if the token doesn't belong to the user
+   * (or is already deleted), and TokenStillActiveError if it hasn't been
+   * revoked yet.
    */
   remove(id: string, userId: string): Promise<void>;
 }

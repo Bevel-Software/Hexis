@@ -6,7 +6,7 @@ vi.mock('../../../../lib/api', () => ({
   authFetch: vi.fn(),
 }));
 
-import { uploadFile, createDirectory, rawFileUrl, writeFile, WorkspaceApiError } from '../workspace.api';
+import { uploadFile, createDirectory, moveEntry, rawFileUrl, writeFile, WorkspaceApiError } from '../workspace.api';
 import { authFetch } from '../../../../lib/api';
 
 const mockedFetch = vi.mocked(authFetch);
@@ -124,5 +124,82 @@ describe('writeFile', () => {
       },
     } as unknown as Response);
     await expect(writeFile('ws', 'kb/notes.md', 'x')).resolves.toEqual({});
+  });
+});
+
+/**
+ * The refusal a rename or a drag shows is the SERVER's sentence, and this is
+ * the layer it has to survive to reach the sidebar intact.
+ *
+ * The explorer renders whatever `moveEntry` rejects with — the rename box puts
+ * it under the name you typed, a refused drop puts it under the row. Those
+ * components are tested against a stubbed `moveEntry`, so nothing there can
+ * tell whether a real 409 becomes that message or becomes "HTTP 409". This
+ * closes that half: the body the backend actually sends, through the real
+ * client, out as the message the UI renders.
+ */
+describe('moveEntry carries the destination-taken refusal through unchanged', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const SENTENCE = 'A file named Notes.md already exists in Sales.';
+
+  it('rejects with the sentence itself, not with the HTTP status', async () => {
+    mockedFetch.mockResolvedValueOnce(
+      // The WHOLE body `EntryExistsError` puts on the wire, not a convenient
+      // slice of it: the backend's `domainErrorBody` spreads the payload
+      // (`kind`, `entryKind`, `destination`) and then writes `error` last, so
+      // these four keys are what a client actually receives. The client here
+      // reads only `error`; the rest are present so this fixture cannot drift
+      // into testing a body the server never sends.
+      notOk(409, {
+        kind: 'entry-exists',
+        entryKind: 'file',
+        destination: 'kb/Sales/Notes.md',
+        error: SENTENCE,
+      }),
+    );
+
+    const err = await moveEntry('ws-1', 'kb/Sales/Report.docx', 'kb/Sales/Notes.md').catch((e) => e);
+
+    expect(err).toBeInstanceOf(WorkspaceApiError);
+    expect(err.status).toBe(409);
+    expect(err.message).toBe(SENTENCE);
+  });
+
+  it('says so for a folder in the way too, and sends the move as a PATCH of both paths', async () => {
+    const folder = 'A folder named Q4 already exists in Sales.';
+    mockedFetch.mockResolvedValueOnce(
+      notOk(409, {
+        kind: 'entry-exists',
+        entryKind: 'folder',
+        destination: 'kb/Sales/Q4',
+        error: folder,
+      }),
+    );
+
+    await expect(moveEntry('ws-1', 'kb/Archive/Q4', 'kb/Sales/Q4')).rejects.toMatchObject({
+      status: 409,
+      message: folder,
+    });
+
+    const [url, init] = mockedFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/workspace/ws-1/file');
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(String(init.body))).toEqual({
+      oldPath: 'kb/Archive/Q4',
+      newPath: 'kb/Sales/Q4',
+    });
+  });
+
+  it('resolves silently when the move lands, so the explorer closes its box', async () => {
+    mockedFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: 'moved' }),
+    } as unknown as Response);
+
+    await expect(moveEntry('ws-1', 'kb/a.md', 'kb/b.md')).resolves.toBeUndefined();
   });
 });

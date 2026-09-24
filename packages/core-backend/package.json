@@ -1,6 +1,6 @@
 {
   "name": "@bevel-software/platform-core-backend",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "Open-source core backend of the Bevel platform: git-backed knowledge workspace, workflow (branches/change requests/locks/SSE), skills, tools, secrets vault, access control and the remote MCP surface.",
   "type": "module",
   "main": "./dist/index.js",
@@ -29,7 +29,7 @@
     "node": ">=22.13 <23"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:live": "vitest run .live.test",

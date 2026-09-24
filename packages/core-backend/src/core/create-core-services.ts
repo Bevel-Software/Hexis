@@ -130,6 +130,7 @@ import {
 } from '../modules/tool-auth/tool-auth.middleware.js';
 import { unmeteredLlmUsage, type ILlmUsageMeter } from '../modules/tool-auth/llm-usage-meter.js';
 import { McpService } from '../modules/mcp/mcp.service.js';
+import { AgentAuditService, retentionDaysFrom } from '../modules/audit/agent-audit.service.js';
 import { readAgentPreamble, type AgentPreambleReader } from '../modules/agent-instructions/index.js';
 import { createMcpAuthMiddleware } from '../modules/mcp/mcp-auth.middleware.js';
 import { BevelOAuthProvider } from '../modules/mcp/oauth/bevel-oauth-provider.js';
@@ -284,6 +285,8 @@ export interface CoreServices {
    * advertise the same pointer the auth middleware does.
    */
   mcpResourceMetadataUrl: string;
+  /** The Audit log: what every connected agent and key called, and the revoke of an agent's grant. */
+  agentAuditService: AgentAuditService;
   toolRegistry: ToolRegistry;
   toolAuthMiddleware: ReturnType<typeof createToolAuthMiddleware>;
   manualAuthMiddleware: ReturnType<typeof createManualAuthMiddleware>;
@@ -915,6 +918,13 @@ export async function createCoreServices(
   // the proxy below composes in-process per request; the agent-facing route
   // serves the same composition to the local bridge and the frontend card.
   const readPreamble: AgentPreambleReader = () => readAgentPreamble(workspaceService, kbDirName, disk);
+  // The Audit log. Records through the proxy below (every call an external
+  // agent makes), reads keys through the key service so their shape is
+  // defined once, and prunes past the retention setting — read per sweep, so
+  // a change on the Deployment page applies without a restart.
+  const agentAuditService = new AgentAuditService(db, externalApiKeyService, () =>
+    retentionDaysFrom(settings.resolve('auditRetentionDays')),
+  );
   const mcpService = new McpService(
     {
       // Loopback to our own REST tool surface — 127.0.0.1 (not localhost) to pin
@@ -942,6 +952,8 @@ export async function createCoreServices(
     // provider is constructed just below (it needs nothing from McpService;
     // the binding is only dereferenced at call time, long after boot).
     (bearer) => mcpOAuthProvider.revokeByAccessToken(bearer),
+    // Every attributable call lands in the Audit log through this.
+    agentAuditService,
   );
   // A changed secret invalidates what the proxy built from the old value for
   // that user (null = shared secret → everyone): remembered manual failures,
@@ -1194,6 +1206,7 @@ export async function createCoreServices(
     mcpAuthMiddleware,
     mcpOAuthProvider,
     mcpResourceMetadataUrl,
+    agentAuditService,
     toolRegistry,
     toolAuthMiddleware,
     manualAuthMiddleware,

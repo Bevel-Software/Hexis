@@ -52,6 +52,9 @@ import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.j
 import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
+import { createAuditRoutes } from '../modules/audit/audit.routes.js';
+import { createAgentRestAuditMiddleware } from '../modules/audit/agent-rest-audit.middleware.js';
+import { EXTERNAL_KB_MANUAL_NAME } from '../modules/tool-manuals/tool-manuals.contract.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
 import { oidcRedirectUri } from '../modules/auth/oidc-auth-provider.js';
 import { repositoryConnectionCheck } from '../modules/settings/connection-check.js';
@@ -479,6 +482,24 @@ export async function createCoreServer(
   const toolsRouter = express.Router();
   const ta = core.toolAuthMiddleware;
   const th = core.toolHandlerFactory;
+  // The Audit log's recorder for the REST tool calls the LOCAL server makes
+  // directly (its skill reads, above all) — judged on `finish`, after each
+  // route's own auth has run, and only for the exchanged grant that names an
+  // agent connection, so nothing the hosted proxy already records is counted
+  // twice. Ahead of every tool route, on the same router.
+  toolsRouter.use(
+    '/agent/tools/:name',
+    createAgentRestAuditMiddleware({
+      recorder: core.agentAuditService,
+      kbManualName: EXTERNAL_KB_MANUAL_NAME,
+      skillFolders: async (userId) => {
+        const user = await core.authService.getUserById(userId);
+        if (!user) return [];
+        const skills = await core.skillService.listSkills(user.email);
+        return skills.map((s) => ({ name: s.name, path: s.path }));
+      },
+    }),
+  );
   // Shared ontology-session boundary gate config, consumed by every tool
   // surface that touches the KB (file tools + graph tools). The gate's
   // blocking decision runs through the workflow hooks: core registers none
@@ -728,6 +749,13 @@ export async function createCoreServer(
     '/api',
     core.authMiddleware,
     createConnectionKeysAdminRoutes(core.externalApiKeyService, core.adminAccess),
+  );
+  // The Audit log: a person's agents and keys with what they called (admins:
+  // everyone's), and the revoke of either — owner- or admin-gated inside.
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createAuditRoutes(core.agentAuditService, core.externalApiKeyService, core.adminAccess),
   );
   // First-run setup. Mounted with the other authed routes but touching NO
   // workspace — it has to work on a deployment that has no knowledge base yet,
