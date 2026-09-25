@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { NodeFs } from '../../../kb-fs/node-fs.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -9,7 +10,17 @@ import { KbStartupRunner } from '../kb-startup-runner.js';
 import { WorkspaceService } from '../../workspace.service.js';
 import { NodeGitRunner } from '../../../workflow/git/node-git-runner.js';
 import { ClassifiedFailure, classifyGitFailure, failureOf } from '../../../../shared/git-failure.js';
+import { gitCredentials } from '../../../../shared/git.contract.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
+
+/**
+ * The token in effect for the runners these suites build, changed by the
+ * cases that need one — the way the setup screen changes it on a running
+ * deployment: through the provider the runner reads on every call, never
+ * through this process's environment.
+ */
+let token: string | null = null;
+const credentials = gitCredentials('x-access-token', () => token);
 
 const execFileAsync = promisify(execFile);
 
@@ -65,9 +76,8 @@ function makeRunner(steps: OnServerStart[], overrides: Partial<Parameters<typeof
 
 function runnerOpts(steps: OnServerStart[], overrides: Record<string, unknown> = {}) {
   return {
-    gitRunner: new NodeGitRunner(),
+    gitRunner: new NodeGitRunner(undefined, credentials),
     kbRepoUrl: () => upstream,
-    gitUsername: () => 'x-access-token',
     workspacesRoot,
     kbDirName: 'knowledge-base',
     templateDir: path.join(root, 'template'),
@@ -486,7 +496,7 @@ describe('KbStartupRunner — what a failed phase throws', () => {
     try {
       const err = await makeRunner([step('noop', async () => ({ outcome: 'ok' }))], {
         kbRepoUrl: () => 'https://127.0.0.1:1/kb.git?X-Amz-Signature=SECRETSIG',
-        gitToken: () => 'access',
+        gitRunner: new NodeGitRunner(undefined, gitCredentials('x-access-token', 'access')),
       })
         .runAll()
         .then(
@@ -518,7 +528,7 @@ describe('KbStartupRunner redaction', () => {
             throw new Error('the host said ghp_settingsonly42 is not welcome');
           }),
         ],
-        { gitToken: () => 'ghp_settingsonly42' },
+        { gitRunner: new NodeGitRunner(undefined, gitCredentials('x-access-token', 'ghp_settingsonly42')) },
       );
       const err = await runner.runAll().then(
         () => null,
@@ -540,10 +550,8 @@ describe('KbStartupRunner credentials', () => {
   // the repo with nothing, so every later push prompts for a username, finds
   // no tty, and dies — commits pile up locally and reach the remote never.
   // Only real git tells the two spellings apart, so this drives real git.
-  const ORIGINAL = process.env.GITHUB_TOKEN;
   afterEach(() => {
-    if (ORIGINAL === undefined) delete process.env.GITHUB_TOKEN;
-    else process.env.GITHUB_TOKEN = ORIGINAL;
+    token = null;
   });
 
 
@@ -561,7 +569,7 @@ describe('KbStartupRunner credentials', () => {
   }
 
   it('leaves the boot clone able to authenticate a push of its own', async () => {
-    process.env.GITHUB_TOKEN = 'ghp_boot';
+    token = 'ghp_boot';
     await populatedUpstream();
     // The branch handle clones lazily, so a step has to actually reach for the
     // repo before there is anything on disk to inspect.
@@ -585,7 +593,7 @@ describe('KbStartupRunner credentials', () => {
     // path (`--replace-all`), so drift a second value in out of band and let
     // WorkspaceService adopt the clone — that is the code the guarantee is
     // about.
-    process.env.GITHUB_TOKEN = 'ghp_boot';
+    token = 'ghp_boot';
     await populatedUpstream();
     const repo = await materializeDefaultBranchClone();
     // App-shaped drift: a second stamp of OURS with a stale username — the
@@ -594,7 +602,7 @@ describe('KbStartupRunner credentials', () => {
     await git(repo, ['config', '--add', 'credential.helper',
       '!f() { echo "username=stale-user"; echo "password=$GITHUB_TOKEN"; }; f']);
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', new NodeFs(), () => 'x-access-token');
+    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
     await ws.getOrCreateForBranch(DEFAULT_BRANCH);
 
     const all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
@@ -607,19 +615,19 @@ describe('KbStartupRunner credentials', () => {
     // git chains every configured helper, so an operator's clone-local
     // `cache`/`store`/custom helper coexists with ours — and losing it on a
     // token change would break the very fallback auth they set up.
-    process.env.GITHUB_TOKEN = 'ghp_boot';
+    token = 'ghp_boot';
     await populatedUpstream();
     const repo = await materializeDefaultBranchClone();
     await git(repo, ['config', '--add', 'credential.helper', 'cache --timeout=300']);
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', new NodeFs(), () => 'x-access-token');
+    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
     await ws.getOrCreateForBranch(DEFAULT_BRANCH); // stamp with token
     let all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
     expect(all).toContain('cache --timeout=300');
     expect(all).toContain('password=$GITHUB_TOKEN');
 
-    delete process.env.GITHUB_TOKEN;
-    const ws2 = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', new NodeFs(), () => 'x-access-token');
+    token = null;
+    const ws2 =new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
     await ws2.getOrCreateForBranch(DEFAULT_BRANCH); // unset OUR helper only
     all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
     expect(all).toContain('cache --timeout=300');
@@ -630,12 +638,12 @@ describe('KbStartupRunner credentials', () => {
     // A deployment that lost its token must not keep a clone-local helper
     // answering with an empty password — it would shadow whatever fallback
     // auth the operator switched to.
-    process.env.GITHUB_TOKEN = 'ghp_boot';
+    token = 'ghp_boot';
     await populatedUpstream();
     const repo = await materializeDefaultBranchClone(); // stamped
-    delete process.env.GITHUB_TOKEN;
+    token = null;
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', new NodeFs(), () => 'x-access-token');
+    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
     await ws.getOrCreateForBranch(DEFAULT_BRANCH);
 
     await expect(git(repo, ['config', '--local', '--get', 'credential.helper']))
@@ -646,13 +654,13 @@ describe('KbStartupRunner credentials', () => {
     // The rotation gap: the setup screen can supply a token AFTER a branch
     // was first opened, and the cached fast path returns before the adoption
     // re-stamp. The fingerprint check must catch the change there.
-    delete process.env.GITHUB_TOKEN;
+    token = null;
     await populatedUpstream();
     const repo = await materializeDefaultBranchClone(); // no helper
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', new NodeFs(), () => 'x-access-token');
+    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
     await ws.getOrCreateForBranch(DEFAULT_BRANCH); // adopt, tokenless
-    process.env.GITHUB_TOKEN = 'ghp_late';
+    token = 'ghp_late';
     await ws.getOrCreateForBranch(DEFAULT_BRANCH); // cached fast path
 
     const helper = (await git(repo, ['config', '--local', '--get', 'credential.helper'])).trim();
@@ -661,7 +669,7 @@ describe('KbStartupRunner credentials', () => {
   });
 
   it('clones without a helper when the deployment has no token — an open remote still boots', async () => {
-    delete process.env.GITHUB_TOKEN;
+    token = null;
     await populatedUpstream();
     const repo = await materializeDefaultBranchClone();
     // `--get` exits 1 when the key is unset. Assert on that exit code rather

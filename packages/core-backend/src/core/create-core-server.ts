@@ -1,16 +1,11 @@
 import express from 'express';
-import { logger } from '../shared/logging.js';
-
-const startupLog = logger('kb-startup');
-const crLog = logger('cr');
 import cors from 'cors';
 import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
 import { createAuthRoutes } from '../modules/auth/auth.routes.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
 import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals.middleware.js';
-import { noteBesideCheckout } from '../modules/workspace/startup/beside-checkout.js';
-import { printable } from '../shared/printable.js';
+import { startCore } from './lifecycle.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
 import { createWorkflowRoutes } from '../modules/workflow/workflow.routes.js';
 import { createEventsRoutes } from '../modules/workflow/events.routes.js';
@@ -52,6 +47,9 @@ import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.j
 import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
+import { createAuditRoutes } from '../modules/audit/audit.routes.js';
+import { createAgentRestAuditMiddleware } from '../modules/audit/agent-rest-audit.middleware.js';
+import { EXTERNAL_KB_MANUAL_NAME } from '../modules/tool-manuals/tool-manuals.contract.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
 import { oidcRedirectUri } from '../modules/auth/oidc-auth-provider.js';
 import { repositoryConnectionCheck } from '../modules/settings/connection-check.js';
@@ -70,7 +68,6 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import { publicConfig } from './public-config.js';
 import { createReadiness } from './readiness.js';
-import { KbRemoteUnreachableError } from '../modules/workspace/startup/kb-startup-runner.js';
 import { createAgentInstructionsRoutes } from '../modules/agent-instructions/index.js';
 import type { CoreServices } from './create-core-services.js';
 
@@ -140,7 +137,11 @@ export interface ServerExtensions {
 export async function createCoreServer(
   core: CoreServices,
   ext: ServerExtensions = {},
-  opts: { staticDir?: string } = {},
+  opts: {
+    staticDir?: string;
+    /** Run {@link startCore} at the usual point of the mount order. Default true. */
+    boot?: boolean;
+  } = {},
 ): Promise<ExpressApp> {
   const app = express();
 
@@ -274,7 +275,7 @@ export async function createCoreServer(
    * on purpose; see `publicConfig` for what it discloses and why.
    */
   app.get('/api/config', (_req, res) => {
-    res.json(publicConfig({ marketplaceGitUrl: marketplaceGitUrl.toString(), mcpUrl: mcpResourceUrl.toString() }));
+    res.json(publicConfig(core.kb, { marketplaceGitUrl: marketplaceGitUrl.toString(), mcpUrl: mcpResourceUrl.toString() }));
   });
 
   // The per-user marketplace as a git remote. Outside `/api` and ahead of
@@ -307,93 +308,12 @@ export async function createCoreServer(
     }),
   );
 
-  // Overlay boot-time side effects (startup reconciles, periodic sweeps).
-  await ext.onBoot?.(core);
-
-  // What is already sitting beside a checkout, named once per boot and touched
-  // by nothing. Outside the KB startup phase below on purpose: that phase is
-  // gated on the branch model and the repository URL, and a deployment whose
-  // setup never finished — or whose remote is down — is exactly one whose
-  // strays would otherwise go unmentioned. A diagnostic never stops a boot, so
-  // an unreadable workspaces root is logged and the boot carries on.
-  try {
-    await noteBesideCheckout(core.config.workspacesRoot, core.kbDirName);
-  } catch (err) {
-    // `printable`, because the message quotes a path off the disk (an ENOENT
-    // or EACCES names the file it failed on) and a name carrying a control
-    // character would forge a second line of the operator's log.
-    startupLog.warn('could not look for content beside the checkouts:', {
-      detail: printable(err instanceof Error ? err.message : String(err)),
-    });
-  }
-
-  // The KB startup phase — AFTER the distribution's onBoot, because a FATAL
-  // template finding raised there must stop the boot before anything seeds
-  // from that template; the runner then brings every branch up to this build
-  // before any route can serve KB content. Throws to stop the boot (the
-  // container's restart policy is the retry) — see kb-startup-runner.ts.
-  //
-  // Runs in the booting process whether or not it holds the commit-worker
-  // lease, so on a redeploy it overlaps the outgoing holder's commits for the
-  // seconds it takes — the documented window at `holdCommitWorkerLease`.
-  try {
-    await core.kbStartupRunner.runAll();
-  } catch (err) {
-    // The one failure a boot survives: the remote cannot be reached. That
-    // says nothing about the knowledge base — what we would write is not
-    // known to be wrong, we cannot get there — so refusing to boot only took
-    // away the login and setup screens an operator needs to fix it (a
-    // rotated token, say). The deployment comes up GATED: the setup routes
-    // read the runner's standing failure and keep the app shut, the setup
-    // screen shows why, saving it retries, and the runner keeps trying on
-    // its own. Every other failure still stops the boot, because it means
-    // the template or a step would write something wrong.
-    if (!(err instanceof KbRemoteUnreachableError)) throw err;
-    startupLog.error('booting UNMAINTAINED and gated — the knowledge-base remote could not be reached:', {
-      detail: err.message,
-    });
-    core.kbStartupRunner.retryUntilMaintained();
-  }
-
-  // Close change requests whose source branch has been deleted. SEQUENCED
-  // AFTER the startup phase above, for two reasons: the sweep's fresh fetch
-  // lazily bootstraps and fetches the same default-branch clone the runner
-  // maintains (kicking it off earlier races the runner's clone/fetch of that
-  // very directory), and on a brand-new deployment it would run before the
-  // empty remote is seeded, fail its clone, swallow the error, and leave
-  // deleted-branch CRs open for the whole process. Still not awaited from
-  // here on: a slow or unreachable remote must not hold up the server —
-  // nothing downstream depends on the result, and the requests it closes
-  // have been unusable since the branch went away, so landing a few seconds
-  // into uptime is soon enough. Errors are swallowed inside the sweep, which
-  // fails safe by closing nothing.
-  void core.workflowService
-    .closeChangeRequestsWithDeletedBranches()
-    .then((n) => {
-      if (n > 0) {
-        crLog.info(`closed ${n} change request${n === 1 ? '' : 's'} with a deleted branch`);
-      }
-    })
-    .catch((err) => crLog.warn('deleted-branch sweep failed:', { err }));
-
-  // Recorded join requests that are still owed, resumed — now, and then on a
-  // timer. SEQUENCED AFTER the startup phase for the same reason as the sweep
-  // above: the work needs the default-branch clone the runner maintains and
-  // the plugin catalog read from it, and a sweep that ran first would refuse
-  // every row for a knowledge base that simply was not ready — telling people
-  // their request could not be sent when nothing had gone wrong with it.
-  //
-  // ON A TIMER rather than at boot alone, because boot cannot cover the
-  // redeploy: this process sweeps while the outgoing one still holds a
-  // record, skips it (correctly — two servers must not do git on one branch),
-  // and the outgoing process then exits mid-work. Nothing else would look at
-  // that row again. The requester cannot prompt it either: a pending record
-  // shows them the "Requested" card, not a button.
-  //
-  // Not awaited, and nothing to report here but the failure to read the table
-  // at all: a first request from a person is a full clone, nothing else at
-  // boot depends on it, and each row records its own outcome.
-  core.pluginJoinRequestJobs.startSweeping();
+  // The graph's boot side effects — the distribution's onBoot, the
+  // knowledge-base startup phase, the sweeps — live in `startCore` so a host
+  // that activates a graph on demand can run and later undo them. Here, at
+  // this point in the mount order, for a single-tenant deployment; a caller
+  // that has already started the graph (or will) passes `boot: false`.
+  if (opts.boot ?? true) await startCore(core, ext);
 
   // Auth routes (unprotected — login endpoint must be accessible)
   app.use(
@@ -465,6 +385,7 @@ export async function createCoreServer(
     stateSecret: core.config.jwtSecret,
     publicBackendUrl: core.config.publicBackendUrl,
     publicFrontendUrl: core.config.publicFrontendUrl,
+    kb: core.kb,
   };
   app.use('/api', createSecretsVaultPublicRoutes(secretsVaultRoutesDeps));
 
@@ -479,6 +400,24 @@ export async function createCoreServer(
   const toolsRouter = express.Router();
   const ta = core.toolAuthMiddleware;
   const th = core.toolHandlerFactory;
+  // The Audit log's recorder for the REST tool calls the LOCAL server makes
+  // directly (its skill reads, above all) — judged on `finish`, after each
+  // route's own auth has run, and only for the exchanged grant that names an
+  // agent connection, so nothing the hosted proxy already records is counted
+  // twice. Ahead of every tool route, on the same router.
+  toolsRouter.use(
+    '/agent/tools/:name',
+    createAgentRestAuditMiddleware({
+      recorder: core.agentAuditService,
+      kbManualName: EXTERNAL_KB_MANUAL_NAME,
+      skillFolders: async (userId) => {
+        const user = await core.authService.getUserById(userId);
+        if (!user) return [];
+        const skills = await core.skillService.listSkills(user.email);
+        return skills.map((s) => ({ name: s.name, path: s.path }));
+      },
+    }),
+  );
   // Shared ontology-session boundary gate config, consumed by every tool
   // surface that touches the KB (file tools + graph tools). The gate's
   // blocking decision runs through the workflow hooks: core registers none
@@ -487,16 +426,16 @@ export async function createCoreServer(
   const sessionOntologyGate = {
     service: core.sessionOntologyService,
     enabled: core.config.ontologySessionBlock,
-    kbDirName: core.kbDirName,
+    kb: core.kb,
     recoveryBotEmail: RECOVERY_BOT_EMAIL,
     hooks: core.workflowService.hooks,
   };
   // A skill's `allowed-tools`, checked against what the caller can see — on
   // every save surface (agent write tools, the app's PUT /file) and on
   // `get_skill`. Warnings only; it never refuses a save.
-  const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kbDirName);
-  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kbDirName);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate);
+  const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
+  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, sessionOntologyGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate);
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
@@ -506,6 +445,7 @@ export async function createCoreServer(
     // The vault satisfies the module's local VariableStatusPort — `list_tool_setup`
     // reports configuration booleans only; secret values never ride through tools.
     variableStatus: core.secretsVaultService,
+    kb: core.kb,
   });
   // Overlay tool registrations (defs + module-hosted endpoints).
   ext.tools?.({
@@ -531,7 +471,7 @@ export async function createCoreServer(
     {
       workspaceService: core.workspaceService,
       accessControl: core.accessControl,
-      kbDirName: core.kbDirName,
+      kb: core.kb,
       disk: core.disk,
       pluginIndex: core.pluginIndexService,
     },
@@ -610,7 +550,7 @@ export async function createCoreServer(
     core.workflowService,
     core.eventBus,
     core.accessControl,
-    core.kbDirName,
+    core.kb,
     core.creatorAccess,
     core.adminAccess,
     core.disk,
@@ -648,13 +588,13 @@ export async function createCoreServer(
     core.workflowService,
     core.eventBus,
     core.db,
-    core.kbDirName,
+    core.kb,
     [core.config.adminEmail],
   ));
   app.use(
     '/api',
     core.authMiddleware,
-    createSkillsRoutes(core.skillService, core.pendingSkillsService, core.pluginLinkIndex, core.accessControl, allowedToolsChecker),
+    createSkillsRoutes(core.skillService, core.kb, core.pendingSkillsService, core.pluginLinkIndex, core.accessControl, allowedToolsChecker),
   );
   // Asking for write on a shared skill — the join-request machinery pointed
   // at a skill folder. Same JWT gate, same fail-closed shape.
@@ -667,7 +607,7 @@ export async function createCoreServer(
       workflow: core.workflowService,
       workspaceService: core.workspaceService,
       joinRequests: core.joinRequestsService,
-      kbDirName: core.kbDirName,
+      kb: core.kb,
       resolveUser: async (req) =>
         req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null,
     }),
@@ -686,6 +626,7 @@ export async function createCoreServer(
     core.pluginJoinRequestJobs,
     core.pluginProvisionService,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
+    core.kb,
     core.pluginLinksService,
     core.pluginRenameService,
   ));
@@ -695,7 +636,7 @@ export async function createCoreServer(
   app.use(
     '/api',
     core.authMiddleware,
-    createTeamsRoutes(core.accessControl, core.pluginIndexService, core.skillService, core.toolManualService),
+    createTeamsRoutes(core.accessControl, core.pluginIndexService, core.skillService, core.toolManualService, core.kb),
   );
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
@@ -729,6 +670,13 @@ export async function createCoreServer(
     core.authMiddleware,
     createConnectionKeysAdminRoutes(core.externalApiKeyService, core.adminAccess),
   );
+  // The Audit log: a person's agents and keys with what they called (admins:
+  // everyone's), and the revoke of either — owner- or admin-gated inside.
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createAuditRoutes(core.agentAuditService, core.externalApiKeyService, core.adminAccess),
+  );
   // First-run setup. Mounted with the other authed routes but touching NO
   // workspace — it has to work on a deployment that has no knowledge base yet,
   // which is the whole reason it exists. The startup runner rides along for
@@ -740,6 +688,7 @@ export async function createCoreServer(
       core.settings,
       core.adminAccess,
       core.kbStartupRunner,
+      core.kb,
       {
         // Same address family as the MCP endpoint above, userinfo stripped for
         // the same reason: this string is handed to admins to paste elsewhere.

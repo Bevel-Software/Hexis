@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -81,7 +82,7 @@ describe('GitService.syncFromRemote', () => {
       await fs.writeFile(path.join(dir, 'b.md'), 'b\n');
       await fs.rename(path.join(dir, 'old name.md'), path.join(dir, 'new name.md'));
     });
-    const git = new GitService(stubWorkspaceService({ ws: workspaceDir }), stubWorkflowHooks(), 'knowledge-base');
+    const git = new GitService(stubWorkspaceService({ ws: workspaceDir }), stubWorkflowHooks(), testKbContext());
 
     const r = await git.syncFromRemote('ws');
     expect(r.before).toBe(before);
@@ -105,7 +106,7 @@ describe('GitService.syncFromRemote', () => {
     await runGit(repo, ['config', 'user.email', 'workspace@bevel.test']);
     await runGit(repo, ['config', 'user.name', 'bevel Workspace']);
     await runGit(repo, ['checkout', '-b', BRANCH]).catch(() => undefined);
-    const git = new GitService(stubWorkspaceService({ ws: workspaceDir }), stubWorkflowHooks(), 'knowledge-base');
+    const git = new GitService(stubWorkspaceService({ ws: workspaceDir }), stubWorkflowHooks(), testKbContext());
 
     // Still empty on both sides: nothing to sync, and NOT 'remote gone' — a
     // fresh deployment nobody has pushed to must never have its clone retired.
@@ -134,7 +135,7 @@ describe('GitService.syncFromRemote', () => {
     await runGit(upstream, ['branch', 'ali/x', BRANCH]);
     const { workspaceDir } = await cloneWorkspace(root, upstream, 'ali%2Fx', 'ali/x');
     await runGit(upstream, ['update-ref', '-d', 'refs/heads/ali/x']);
-    const git = new GitService(stubWorkspaceService({ 'ali%2Fx': workspaceDir }), stubWorkflowHooks(), 'knowledge-base');
+    const git = new GitService(stubWorkspaceService({ 'ali%2Fx': workspaceDir }), stubWorkflowHooks(), testKbContext());
     await expect(git.syncFromRemote('ali%2Fx')).rejects.toBeInstanceOf(RemoteBranchGoneError);
   });
 });
@@ -163,7 +164,7 @@ describe('GitService.syncFromRemote — the cases git exits 0 on but should not 
     await pushFromElsewhere(root, upstream, async (dir) => {
       await fs.writeFile(path.join(dir, 'a.md'), 'edited on the host\n');
     });
-    const git = new GitService(stubWorkspaceService({ ws: workspaceDir }), stubWorkflowHooks(), 'knowledge-base');
+    const git = new GitService(stubWorkspaceService({ ws: workspaceDir }), stubWorkflowHooks(), testKbContext());
 
     await expect(git.syncFromRemote('ws')).rejects.toMatchObject({
       name: 'PullRebaseConflictError',
@@ -186,7 +187,7 @@ describe('GitService.syncFromRemote — the cases git exits 0 on but should not 
     await runGit(repo, ['rm', '-rf', '--cached', '.']).catch(() => undefined);
     await fs.rm(path.join(repo, 'a.md'), { force: true });
     await fs.rm(path.join(repo, 'old name.md'), { force: true });
-    const git = new GitService(stubWorkspaceService({ ws: workspaceDir }), stubWorkflowHooks(), 'knowledge-base');
+    const git = new GitService(stubWorkspaceService({ ws: workspaceDir }), stubWorkflowHooks(), testKbContext());
     await expect(git.syncFromRemote('ws')).rejects.toBeInstanceOf(RemoteBranchGoneError);
   });
 
@@ -194,7 +195,7 @@ describe('GitService.syncFromRemote — the cases git exits 0 on but should not 
     const upstream = await bareUpstream(root, true);
     await runGit(upstream, ['branch', 'ali/x', BRANCH]);
     const { workspaceDir } = await cloneWorkspace(root, upstream, 'ws');
-    const git = new GitService(stubWorkspaceService({ ws: workspaceDir }), stubWorkflowHooks(), 'knowledge-base');
+    const git = new GitService(stubWorkspaceService({ ws: workspaceDir }), stubWorkflowHooks(), testKbContext());
     expect(await git.remoteBranchExists('ws', 'ali/x')).toBe(true);
     await runGit(upstream, ['update-ref', '-d', 'refs/heads/ali/x']);
     expect(await git.remoteBranchExists('ws', 'ali/x')).toBe(false);
@@ -241,7 +242,7 @@ describe('GitService.syncFromRemote — an unborn clone that already holds stage
     await runGit(seed, ['add', '.']);
     await runGit(seed, ['commit', '-m', 'first']);
     await runGit(seed, ['push', upstream, BRANCH]);
-    const git = new GitService(stubWorkspaceService({ ws: workspaceDir }), stubWorkflowHooks(), 'knowledge-base');
+    const git = new GitService(stubWorkspaceService({ ws: workspaceDir }), stubWorkflowHooks(), testKbContext());
 
     await expect(git.syncFromRemote('ws')).rejects.toMatchObject({
       name: 'PullRebaseConflictError',

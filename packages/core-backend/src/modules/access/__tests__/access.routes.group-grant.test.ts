@@ -10,6 +10,7 @@ import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * HTTP-level contract tests for GROUP and ROLE principals on the share
@@ -87,7 +88,7 @@ async function makeHarness(opts: {
     (req as unknown as { userId: string }).userId = USER.id;
     next();
   });
-  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, workflowService, eventBus, db, KB));
+  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB })));
 
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));

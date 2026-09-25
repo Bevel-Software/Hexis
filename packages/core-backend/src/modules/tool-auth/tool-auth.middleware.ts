@@ -34,6 +34,14 @@ export interface ToolAuth {
    * never carries it and must name the branch explicitly.
    */
   focusedBranch?: string;
+  /**
+   * The agent connection an `externalProxy` token stands in for — the local
+   * server's exchanged grant names one (see `InternalTokenClaim.connectionId`).
+   * Only that grant carries it: the hosted proxy's own loopback tokens do
+   * not, and a connection key has a `tokenId` instead. What the REST audit
+   * recorder attributes a direct tool call to.
+   */
+  connectionId?: string;
   /** Always `'write'` now (the middleware sets it for both internal + external — neither credential carries scope). The read path is dormant until consumer agents are removed. */
   scope: 'read' | 'write';
 }
@@ -129,7 +137,15 @@ export function createTokenVerifier(
       const claim = internalTokenService.verify(token);
       if (!claim) return { ok: false, status: 401, message: 'Invalid or expired internal token' };
       return claim.externalProxy
-        ? { ok: true, auth: { source: 'external', userId: claim.userId, scope: 'write' } }
+        ? {
+            ok: true,
+            auth: {
+              source: 'external',
+              userId: claim.userId,
+              ...(claim.connectionId ? { connectionId: claim.connectionId } : {}),
+              scope: 'write',
+            },
+          }
         : { ok: true, auth: { source: 'internal', userId: claim.userId, sessionId: claim.sessionId, focusedBranch: claim.focusedBranch, scope: 'write' } };
     }
 

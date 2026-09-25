@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -140,7 +141,7 @@ async function makeSvc(
   const svc = new GitService(
     stubWorkspaceService(workspaceId, workspaceDir),
     new WorkflowHooks(),
-    'knowledge-base',
+    testKbContext(),
     undefined,
     ac ?? null,
   );
@@ -262,7 +263,7 @@ describe('GitService — push gate uses origin/<branch> (not HEAD or working tre
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
       undefined,
       ac,
     );
@@ -306,7 +307,7 @@ describe('GitService — push gate uses origin/<branch> (not HEAD or working tre
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
       undefined,
       ac,
     );
@@ -337,7 +338,7 @@ describe('GitService — push gate uses origin/<branch> (not HEAD or working tre
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
       undefined,
       ac,
     );

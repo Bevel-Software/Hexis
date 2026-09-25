@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -127,7 +128,7 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     const git = new GitService(
       stubWorkspaceService(workspaceId, repo),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     const files = await git.changedFilesForPr(
@@ -174,7 +175,7 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     const git = new GitService(
       stubWorkspaceService(workspaceId, repo),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     // What the detail does first: resolve (and fetch) the two SHAs.
     const pinned = await git.resolvePrShas(workspaceId, 'current-company-state', 'alice/feature');
@@ -226,7 +227,7 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     const git = new GitService(
       stubWorkspaceService(workspaceId, repo),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     const files = await git.changedFilesForPr(
@@ -263,7 +264,7 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     await runGit(repo, ['commit', '-m', 'folders']);
     await runGit(repo, ['push', '-u', 'origin', 'alice/new-folders']);
 
-    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), 'knowledge-base');
+    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), testKbContext());
 
     const files = await git.changedFilesForPr(workspaceId, 'current-company-state', 'alice/new-folders');
     expect(files.map((f) => f.path)).toEqual(['Reports/q3.md']);
@@ -292,7 +293,7 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     await runGit(repo, ['commit', '-m', 'emptied']);
     await runGit(repo, ['push', '-u', 'origin', 'alice/emptied']);
 
-    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), 'knowledge-base');
+    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), testKbContext());
 
     const files = await git.changedFilesForPr(workspaceId, 'current-company-state', 'alice/emptied');
     expect(files.map((f) => ({ path: f.path, status: f.status, previousPath: f.previousPath }))).toEqual([
@@ -305,7 +306,7 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
 
   it('pathExistsAtRef answers for files and folders at a ref, and false for what is not there', async () => {
     const { repo } = await seedWorkspace(root, workspaceId);
-    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), 'knowledge-base');
+    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), testKbContext());
     await fs.mkdir(path.join(repo, 'Docs'));
     await fs.writeFile(path.join(repo, 'Docs/.gitkeep'), '');
     await runGit(repo, ['add', '-A']);
@@ -336,7 +337,7 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     const git = new GitService(
       stubWorkspaceService(workspaceId, repo),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     const mergeBase = await git.mergeBaseForPr(workspaceId, 'current-company-state', 'alice/feature');
@@ -417,7 +418,7 @@ describe('GitService.changedPathsForPr: who pays for the fetch', () => {
     const git = new GitService(
       stubWorkspaceService(workspaceId, repo),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     expect(
       await git.changedPathsForPr(workspaceId, 'current-company-state', 'biz/proposal'),
@@ -430,7 +431,7 @@ describe('GitService.changedPathsForPr: who pays for the fetch', () => {
     const git = new GitService(
       stubWorkspaceService(workspaceId, repo),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     // The clone now knows the branch — this stands in for the one fetch a
     // list does for the whole clone before asking about every request.
@@ -467,7 +468,7 @@ describe('GitService.changedPathsForPr: who pays for the fetch', () => {
     const git = new GitService(
       stubWorkspaceService(workspaceId, repo),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     // Nothing has refreshed this clone since the branch was pushed.
     expect(
@@ -505,7 +506,7 @@ describe('GitService.changedPathsForPr: who pays for the fetch', () => {
     const git = new GitService(
       stubWorkspaceService(workspaceId, repo),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
       new PrunedMidCall(),
     );
 

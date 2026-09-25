@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
@@ -109,7 +110,7 @@ describe('workspace tools — a branch that cannot be opened', () => {
     workspaces = new WorkspaceService(
       workspacesRoot,
       opts.repoUrl === 'unreachable' ? join(root, 'no-such-repo.git') : upstream,
-      KB_DIR,
+      testKbContext({ kbDirName: KB_DIR }),
       new NodeFs(),
     );
 
@@ -138,11 +139,11 @@ describe('workspace tools — a branch that cannot be opened', () => {
       new SpillStore(spillRoot),
       new DocExtractService(docCacheDir),
       allowAll,
-      KB_DIR,
+      testKbContext({ kbDirName: KB_DIR }),
       {
         service: {} as never,
         enabled: false,
-        kbDirName: KB_DIR,
+        kb: testKbContext({ kbDirName: KB_DIR }),
         recoveryBotEmail: 'recovery-bot@bevel.local',
         hooks: new WorkflowHooks(),
       },

@@ -1,7 +1,6 @@
-import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
 import type { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
 import type { WorkflowEventBus } from '../modules/workflow/event-bus.js';
-import { workspaceIdForBranch } from '../shared/workspace-id.js';
+import type { KbContext } from '../shared/kb-context.js';
 
 /**
  * A catalog that scans the DEFAULT branch's working tree and caches the result
@@ -26,8 +25,12 @@ export interface InvalidatableCatalog {
 export function registerCatalogCacheInvalidation(deps: {
   eventBus: WorkflowEventBus;
   fileChangeNotifier: FileChangeNotifier;
-  /** The KB folder inside the workspace — `paths` are workspace-relative. */
-  kbDirName: string;
+  /**
+   * The KB folder inside the workspace (`paths` are workspace-relative), the
+   * released branch, and the roots the catalogs read — read per event, never
+   * captured: a deployment may rename the roots from the setup screen.
+   */
+  kb: Pick<KbContext, 'kbDirName' | 'defaultBranch' | 'defaultWorkspaceId' | 'layout'>;
   catalogs: InvalidatableCatalog[];
   /**
    * The read gate every one of those catalogs is FILTERED through, dropped on
@@ -44,13 +47,13 @@ export function registerCatalogCacheInvalidation(deps: {
    */
   accessControl: { invalidate(workspaceId: string): void };
 }): () => void {
-  const { eventBus, fileChangeNotifier, kbDirName, catalogs, accessControl } = deps;
+  const { eventBus, fileChangeNotifier, kb, catalogs, accessControl } = deps;
   const invalidateAll = () => {
     for (const c of catalogs) c.invalidate();
     // Scoped to the branch the catalogs read, and no wider: a drop here costs
     // the next reader one model load, so it must not reach workspaces this
     // event says nothing about.
-    accessControl.invalidate(workspaceIdForBranch(DEFAULT_BRANCH));
+    accessControl.invalidate(kb.defaultWorkspaceId());
   };
 
   // Subscriber A — COMMIT-time freshness: a committed change drops the affected
@@ -61,17 +64,19 @@ export function registerCatalogCacheInvalidation(deps: {
   // service it belongs to — the caches are independent, so the split preserves
   // behavior.)
   const offFiles = fileChangeNotifier.onFilesChanged(({ branch, paths }) => {
-    if (branch !== DEFAULT_BRANCH) return;
+    if (branch !== kb.defaultBranch) return;
     // Skills, tools, the plugin index and the link index all read `Plugins/`
     // or `Skills/`, so one touch check drives every cache. An access grant
     // lands as a default-branch change to `Plugins/<plugin>/access.md` or a
     // skill folder's `access.md`, so this is also what makes a newly-granted
     // plugin or link unlock within one round-trip instead of one TTL. Both
-    // names are live bindings (a deployment may rename the roots), hence read
-    // per event rather than captured.
+    // names are read per event rather than captured: a deployment may rename
+    // the roots.
+    const { kbDirName, layout } = kb;
     if (
       paths.some(
-        (p) => p.startsWith(`${kbDirName}/${PLUGINS_DIR}/`) || p.startsWith(`${kbDirName}/${SKILLS_DIR}/`),
+        (p) =>
+          p.startsWith(`${kbDirName}/${layout.pluginsDir}/`) || p.startsWith(`${kbDirName}/${layout.skillsDir}/`),
       )
     ) {
       invalidateAll();
@@ -100,7 +105,7 @@ export function registerCatalogCacheInvalidation(deps: {
     if (event.kind !== 'fs-tree-changed' && event.kind !== 'git-sync-recovered') return;
     // Both events declare `branch`, so no `in` guard: the kind check above has
     // already narrowed the union to the two that carry one.
-    if (event.branch !== DEFAULT_BRANCH) return;
+    if (event.branch !== kb.defaultBranch) return;
     invalidateAll();
   });
 

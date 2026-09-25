@@ -4,7 +4,6 @@ import { logger } from '../../shared/logging.js';
 const log = logger('skills');
 import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
 import {
-  DEFAULT_BRANCH,
   joinBranchFor,
   type AuthUser,
   type IWorkflowService,
@@ -14,7 +13,7 @@ import { spliceGrant } from '../access-model/access-splice.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { isAbsence } from '../../shared/fs.contract.js';
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { JoinRequestsService } from '../plugins/join-requests.service.js';
 import type { ISkillService } from './skills.contract.js';
@@ -46,12 +45,13 @@ export function createSkillAccessRequestRoutes(deps: {
   workflow: IWorkflowService;
   workspaceService: WorkspaceService;
   joinRequests: JoinRequestsService;
-  kbDirName: string;
+  kb: KbContext;
   resolveUser: (req: express.Request) => Promise<AuthUser | null>;
 }): express.Router {
-  const { skillService, accessControl, workflow, workspaceService, joinRequests, kbDirName, resolveUser } = deps;
+  const { skillService, accessControl, workflow, workspaceService, joinRequests, kb, resolveUser } = deps;
+  const { kbDirName } = kb;
   const router = express.Router();
-  const wsId = () => workspaceIdForBranch(DEFAULT_BRANCH);
+  const wsId = () => kb.defaultWorkspaceId();
   const rulesOf = (folder: string) => `${folder}/access.md`;
 
   /** The skill the caller may read, by name — or null after answering 404. */
@@ -108,7 +108,7 @@ export function createSkillAccessRequestRoutes(deps: {
         );
       if (!(await branchExists())) {
         try {
-          await workflow.createBranch(wsId(), branch, DEFAULT_BRANCH);
+          await workflow.createBranch(wsId(), branch, kb.defaultBranch);
         } catch (err) {
           if (!(await branchExists())) throw err;
         }
@@ -133,7 +133,7 @@ export function createSkillAccessRequestRoutes(deps: {
       }
       const detail = await workflow.openChangeRequest(ws.id, user, {
         sourceBranch: branch,
-        targetBranch: DEFAULT_BRANCH,
+        targetBranch: kb.defaultBranch,
         title: `Access request: ${name}`,
         description:
           `${user.name} asked to edit the skill ${name}. An editor of the skill accepts by ` +

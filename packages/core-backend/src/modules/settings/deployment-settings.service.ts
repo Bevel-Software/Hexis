@@ -15,6 +15,7 @@ import {
 import { createHmac } from 'node:crypto';
 import { TokenCrypto } from '../../shared/token-crypto.js';
 import { assertKbDirNameFree } from '../kb-fs/repo-path.js';
+import { parseRetentionWindow } from '../audit/audit.contract.js';
 import { normalizeIssuerUrl } from './oidc-check.js';
 
 /**
@@ -39,7 +40,7 @@ export interface SettingDef {
    */
   envVar?: string;
   /** Which block of the setup screen it belongs to. */
-  section: 'knowledge-base' | 'sign-in';
+  section: 'knowledge-base' | 'sign-in' | 'audit';
   secret?: boolean;
   /** Applied on save; the message is shown against the field. */
   validate?(value: string): string | null;
@@ -49,6 +50,14 @@ export interface SettingDef {
    * was copied into a service at construction is not.
    */
   restartToApply?: boolean;
+  /**
+   * A blank field on save CLEARS the stored value, putting the default back.
+   * The rule everywhere else is that blank means "leave it alone" — a stray
+   * Enter must not unconfigure a repository — and that stays the rule; this
+   * is for a setting whose readers already treat "unset" as its default, so
+   * clearing it is the one way back to that default and never a loss.
+   */
+  blankMeansDefault?: boolean;
   /**
    * What an UNSET setting already means to the code that reads it — the
    * layout's defaults, the pointer consent's "on unless turned off".
@@ -172,7 +181,9 @@ export const CORE_SETTINGS: SettingDef[] = [
      */
     key: 'agentsFile',
     section: 'knowledge-base',
-    validate: (v) => validateAgentsFileName(v),
+    // Judged against the default roots here; the quartet check in `plan`
+    // judges it against the roots the same save puts in effect.
+    validate: (v) => validateAgentsFileName(v, DEFAULT_KB_LAYOUT),
     restartToApply: true,
     unsetMeans: DEFAULT_KB_LAYOUT.agentsFile,
   },
@@ -285,6 +296,23 @@ export const CORE_SETTINGS: SettingDef[] = [
     section: 'sign-in',
     restartToApply: true,
   },
+
+  {
+    /**
+     * How long the Audit log keeps an agent's events: a number of days, or
+     * — blank, zero, negative — forever. Read at every prune, so it applies
+     * without a restart. The window's rule lives with the audit service and
+     * is applied here on save and there on every read, so the environment
+     * variable is held to exactly what the Deployment page is. A blanked
+     * field clears the stored value, which is how "forever" is chosen back.
+     */
+    key: 'auditRetentionDays',
+    envVar: 'AUDIT_RETENTION_DAYS',
+    section: 'audit',
+    blankMeansDefault: true,
+    validate: (v) =>
+      parseRetentionWindow(v) === null ? 'Enter a whole number of days, or 0 to keep events forever.' : null,
+  },
 ];
 
 /**
@@ -396,11 +424,23 @@ export class DeploymentSettingsService {
   private stored = new Map<string, string>();
   private readonly crypto: TokenCrypto | null;
 
+  /**
+   * The environment the env-first layer reads. The process's own for a
+   * single-tenant deployment; a host serving several knowledge bases hands
+   * each graph one built from its tenant record, so a variable set on the
+   * host process can never leak into every tenant, and a record's values
+   * behave exactly as environment-pinned ones do (they win over the setup
+   * screen and the screen shows them as such).
+   */
+  private readonly env: NodeJS.ProcessEnv;
+
   constructor(
     private readonly db: Database,
     private readonly secretsEncKey: string,
     defs: SettingDef[] = CORE_SETTINGS,
+    options: { env?: NodeJS.ProcessEnv } = {},
   ) {
+    this.env = options.env ?? process.env;
     for (const def of defs) this.defs.set(def.key, def);
     // No key configured means secrets cannot be stored — surfaced when someone
     // tries, rather than pretended away by writing plaintext.
@@ -444,7 +484,7 @@ export class DeploymentSettingsService {
   resolve(key: string): string {
     const def = this.defs.get(key);
     if (!def) return '';
-    const fromEnv = def.envVar ? (process.env[def.envVar] ?? '').trim() : '';
+    const fromEnv = def.envVar ? (this.env[def.envVar] ?? '').trim() : '';
     if (fromEnv) return fromEnv;
     return (this.stored.get(key) ?? '').trim();
   }
@@ -495,7 +535,7 @@ export class DeploymentSettingsService {
    */
   async importLegacyLayoutEnv(): Promise<void> {
     for (const [key, envVar] of Object.entries(LEGACY_LAYOUT_ENV_VARS)) {
-      const fromEnv = (process.env[envVar] ?? '').trim();
+      const fromEnv = (this.env[envVar] ?? '').trim();
       if (!fromEnv) continue;
       const saved = (this.stored.get(key) ?? '').trim();
       if (saved) {
@@ -533,7 +573,7 @@ export class DeploymentSettingsService {
     // A setting with no variable can never read `env`, whatever the process
     // environment happens to hold — which is what makes the layout fields
     // editable in the app on a deployment that still sets the old variables.
-    if (def.envVar && (process.env[def.envVar] ?? '').trim()) return 'env';
+    if (def.envVar && (this.env[def.envVar] ?? '').trim()) return 'env';
     return (this.stored.get(key) ?? '').trim() ? 'stored' : 'unset';
   }
 
@@ -577,10 +617,13 @@ export class DeploymentSettingsService {
     entries: Record<string, string>,
     updatedBy: string | null,
   ): Promise<{ restartRequired: boolean; restartKeys: string[] }> {
-    const toWrite = this.plan(entries);
+    const { toWrite, toClear } = this.plan(entries);
 
     /** The settings this save changed that a running server cannot pick up. */
     const restartKeys: string[] = [];
+    // A blanked blank-means-default setting: its row goes, and its readers
+    // are back on the default from the next read.
+    for (const key of toClear) await this.clear(key);
     for (const { key, value, def } of toWrite) {
       // Compared against the EFFECTIVE value: a setting that was unset was
       // already running on whatever its readers make of "unset" — the layout
@@ -600,10 +643,9 @@ export class DeploymentSettingsService {
       this.stored.set(key, value);
     }
 
-    // The git token is consumed through the environment (the credential helper
-    // reads `$GITHUB_TOKEN` at call time, so it never appears in argv). Putting
-    // it there is what makes a token saved here work without a restart.
-    this.syncGitTokenEnv();
+    // A token saved here is in effect at once: the git runner's credentials
+    // read `resolve('gitToken')` on every call, so nothing is published to
+    // the process environment and no restart is needed.
     return { restartRequired: restartKeys.length > 0, restartKeys };
   }
 
@@ -615,14 +657,19 @@ export class DeploymentSettingsService {
    * before letting the save happen.
    */
   resolveAfter(entries: Record<string, string>): (key: string) => string {
-    const toWrite = this.plan(entries);
-    return (key) => toWrite.find((w) => w.key === key)?.value ?? this.resolve(key);
+    const { toWrite, toClear } = this.plan(entries);
+    return (key) =>
+      toClear.includes(key) ? '' : (toWrite.find((w) => w.key === key)?.value ?? this.resolve(key));
   }
 
-  /** Validate a batch and return the writes it amounts to; throws on any problem. */
-  private plan(entries: Record<string, string>): { key: string; value: string; def: SettingDef }[] {
+  /** Validate a batch and return the writes (and the clears) it amounts to; throws on any problem. */
+  private plan(entries: Record<string, string>): {
+    toWrite: { key: string; value: string; def: SettingDef }[];
+    toClear: string[];
+  } {
     const problems: Record<string, string> = {};
     const toWrite: { key: string; value: string; def: SettingDef }[] = [];
+    const toClear: string[] = [];
 
     for (const [key, raw] of Object.entries(entries)) {
       const def = this.defs.get(key);
@@ -638,7 +685,12 @@ export class DeploymentSettingsService {
       // An empty field means "leave it alone", not "erase it". Clearing a
       // setting is not something the setup screen offers, and treating a blank
       // input as a delete would let a stray Enter unconfigure a deployment.
-      if (!value) continue;
+      // The one exception is a setting that SAYS a blank is its default (see
+      // `SettingDef.blankMeansDefault`): for it a blank clears the stored row.
+      if (!value) {
+        if (def.blankMeansDefault) toClear.push(key);
+        continue;
+      }
       const problem = def.validate?.(value);
       if (problem) {
         problems[key] = problem;
@@ -722,7 +774,7 @@ export class DeploymentSettingsService {
     }
 
     if (Object.keys(problems).length > 0) throw new SettingsValidationError(problems);
-    return toWrite;
+    return { toWrite, toClear };
   }
 
   /** Drop stored rows for settings this build no longer defines. */
@@ -736,18 +788,6 @@ export class DeploymentSettingsService {
     if (orphans.length > 0) {
       await this.db.delete(deploymentSettings).where(inArray(deploymentSettings.key, orphans));
     }
-  }
-
-  /**
-   * Publish the resolved git token as `GITHUB_TOKEN`, the name the credential
-   * helper and every redaction path already read. Only when the environment did
-   * not supply one — otherwise this would overwrite the operator's value with
-   * a stored fallback, inverting the precedence everything else here obeys.
-   */
-  syncGitTokenEnv(): void {
-    if (this.sourceOf('gitToken') !== 'stored') return;
-    const token = this.resolve('gitToken');
-    if (token) process.env.GITHUB_TOKEN = token;
   }
 
   /** The single sign-on values in effect, issuer normalized the way the provider uses it. */

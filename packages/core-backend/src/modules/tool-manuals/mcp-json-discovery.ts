@@ -2,7 +2,7 @@ import {
   HEXIS_EXTENSION_NS,
   PLUGIN_MCP_FILE,
   PLUGIN_MANIFEST_FILE,
-  PLUGINS_DIR,
+  type KbLayout,
 } from '@bevel-software/platform-shared';
 import type { ToolManualDescriptor, ToolVariable } from './tool-manuals.contract.js';
 import { logger } from '../../shared/logging.js';
@@ -317,12 +317,14 @@ export function descriptorsFromMcpJson(
   pluginFolder: string,
   mcpJsonText: string,
   pluginJsonText: string | null,
+  layout: KbLayout,
 ): ToolManualDescriptor[] {
+  const { pluginsDir } = layout;
   let mcp: unknown;
   try {
     mcp = JSON.parse(mcpJsonText);
   } catch {
-    log.warn(`${PLUGINS_DIR}/${pluginFolder}/${PLUGIN_MCP_FILE} is not valid JSON — skipped.`);
+    log.warn(`${pluginsDir}/${pluginFolder}/${PLUGIN_MCP_FILE} is not valid JSON — skipped.`);
     return [];
   }
   if (!isRecord(mcp) || !isRecord(mcp.mcpServers)) return [];
@@ -336,13 +338,13 @@ export function descriptorsFromMcpJson(
       // servers themselves — they are still listed, as the spec's own
       // "invalid components are skipped, valid ones load" posture suggests.
       log.warn(
-        `${PLUGINS_DIR}/${pluginFolder}/${PLUGIN_MANIFEST_FILE} is not valid JSON — ` +
+        `${pluginsDir}/${pluginFolder}/${PLUGIN_MANIFEST_FILE} is not valid JSON — ` +
           'its mcp-server auth/variable declarations are ignored.',
       );
     }
   }
   const extensions = extensionServers(manifest);
-  const mcpJsonPath = `${PLUGINS_DIR}/${pluginFolder}/${PLUGIN_MCP_FILE}`;
+  const mcpJsonPath = `${pluginsDir}/${pluginFolder}/${PLUGIN_MCP_FILE}`;
 
   const out: ToolManualDescriptor[] = [];
   for (const [name, rawEntry] of Object.entries(mcp.mcpServers)) {

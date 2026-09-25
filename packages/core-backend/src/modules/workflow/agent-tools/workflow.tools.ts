@@ -1,10 +1,10 @@
 import type { Router, RequestHandler } from 'express';
-import { DEFAULT_BRANCH, PROTECTED_BRANCHES } from '@bevel-software/platform-shared';
 import type { IToolRegistry, JsonSchema } from '../../tool-registry/tool.contract.js';
 import { ToolError, type ToolContext, type ToolHandler } from '../../tool-helpers/tool.contract.js';
 import { toolDef, withBranchInput } from '../../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
+import type { KbContext } from '../../../shared/kb-context.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
 import { RETIRED_TOOL_MESSAGES } from '@bevel-software/platform-mcp-core';
@@ -14,9 +14,10 @@ function stripKbDir(path: string, kbDirName: string): string {
   return path.startsWith(`${kbDirName}/`) ? path.slice(kbDirName.length + 1) : path;
 }
 
-// A function, not a constant: the branch model is applied during boot, and a
-// module-scope capture would freeze this at the empty set that exists before it.
-const protectedInline = () => [...PROTECTED_BRANCHES].map((b) => `\`${b}\``).join(' / ');
+// Read at call time, not captured: the branch model is applied during boot,
+// and a value taken at registration would be the empty set that exists before it.
+const protectedInline = (kb: Pick<KbContext, 'protectedBranches'>) =>
+  [...kb.protectedBranches].map((b) => `\`${b}\``).join(' / ');
 
 // Output sub-schemas for the git-aliased workflow payloads (Branch, Change,
 // ChangeRequestComment, …). Defined once and referenced by the individual tool
@@ -131,9 +132,10 @@ export function registerWorkflowTools(
   router: Router,
   toolAuth: RequestHandler,
   toolHandler: ToolHandlerFactory,
-  /** The clone folder at the workspace root; `save_file` refuses a path outside it. */
-  kbDirName: string,
+  /** The clone folder at the workspace root (`save_file` refuses a path outside it) and the branch model. */
+  kb: Pick<KbContext, 'kbDirName' | 'defaultBranch' | 'defaultWorkspaceId' | 'protectedBranches'>,
 ): void {
+  const { kbDirName } = kb;
   const mount = (spec: {
     name: string;
     description: string;
@@ -180,7 +182,7 @@ export function registerWorkflowTools(
   // just to run a global op. Falls back to the default branch on a cold start
   // with no workspaces yet.
   const repoGlobalWorkspaceId = async (ctx: ToolContext): Promise<string> =>
-    (await ctx.workspaceService.findAnyWorkspaceId()) ?? workspaceIdForBranch(DEFAULT_BRANCH);
+    (await ctx.workspaceService.findAnyWorkspaceId()) ?? kb.defaultWorkspaceId();
 
   mount({
     name: 'list_branches',
@@ -303,7 +305,7 @@ export function registerWorkflowTools(
     name: 'create_branch',
     description:
       'Create a new unprotected draft named `name`, forked from the existing branch `branch`. The ' +
-      `backend rejects protected names (${protectedInline()}) and filesystem-invalid names — surface ` +
+      `backend rejects protected names (${protectedInline(kb)}) and filesystem-invalid names — surface ` +
       'those errors verbatim. Convention: `<email-localpart>/<kebab-slug>`. Does NOT switch the ' +
       'agent onto the new draft.',
     // `branch` here is the fork BASE — its own meaning — so skip the generic
@@ -356,7 +358,7 @@ export function registerWorkflowTools(
       type: 'object',
       properties: {
         sourceBranch: { type: 'string', minLength: 1, description: 'The draft branch carrying the changes.' },
-        targetBranch: { type: 'string', minLength: 1, description: `The branch to apply to (e.g. '${DEFAULT_BRANCH}').` },
+        targetBranch: { type: 'string', minLength: 1, description: `The branch to apply to (e.g. '${kb.defaultBranch}').` },
         title: { type: 'string', minLength: 1, maxLength: 256, description: 'Short imperative title (≤256 chars).' },
         description: { type: 'string', description: 'Optional markdown body shown verbatim to reviewers.' },
       },

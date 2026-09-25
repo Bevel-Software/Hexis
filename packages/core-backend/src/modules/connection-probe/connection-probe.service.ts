@@ -399,6 +399,12 @@ export class ConnectionProbeService implements IConnectionProbeService {
   constructor(
     private readonly toolManualService: IToolManualService,
     private readonly secretsVault: ISecretsVaultService,
+    /**
+     * The scope this knowledge base's vault was registered under with the
+     * UTCP variable loader, so a probe's client resolves the caller's secrets
+     * from it — see `secrets-variable-loader.ts`. Default: the single one.
+     */
+    private readonly secretsScope?: string,
   ) {}
 
   async probe(userId: string, userEmail: string, slug: string): Promise<ProbeVerdict | null> {
@@ -556,7 +562,7 @@ export class ConnectionProbeService implements IConnectionProbeService {
       // loader, which is exactly the credential under test.
       const config = new UtcpClientConfigSerializer().validateDict({
         variables: {},
-        load_variables_from: [bevelSecretsLoaderConfig(userId)],
+        load_variables_from: [bevelSecretsLoaderConfig(userId, this.secretsScope)],
       });
       // No late-settle owner: a client that arrives after the deadline has no
       // manual registered and therefore no session, and neither

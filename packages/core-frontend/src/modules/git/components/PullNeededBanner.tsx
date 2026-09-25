@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { GitMerge } from 'lucide-react';
-import { isProtectedBranch } from '@bevel-software/platform-shared';
+import { currentBranchModel, isProtectedBranch } from '@bevel-software/platform-shared';
 import { useGit } from '../state/git.context';
 import { useAutoUpdate } from '../state/auto-update.context';
 import { useCrCreationPort } from '../../../core/registry';
@@ -63,7 +63,7 @@ export function PullNeededBanner() {
   // Captured for the handlers below — TS control-flow narrowing on `status`
   // doesn't survive into nested function declarations.
   const branchName = status.branch;
-  const onProtectedBranch = isProtectedBranch(status.branch);
+  const onProtectedBranch = isProtectedBranch(currentBranchModel(), status.branch);
   const hasUnsavedEditorChanges = !!workspace.hasUnsavedFileChanges;
   // Under save=share the working tree is never dirty and there are no
   // mid-merge conflicts to gate on — the only thing that can still block

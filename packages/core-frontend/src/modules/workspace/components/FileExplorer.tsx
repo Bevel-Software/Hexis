@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
+  currentBranchModel,
   isProtectedBranch,
   validateFilename,
   KNOWLEDGE_BASE_DIR,
@@ -1822,7 +1823,7 @@ export function TreeChrome({
   const focusAfterConfirm = useRef<(() => HTMLElement | null) | null>(null);
   useEffect(() => {
     if (confirmRequest?.kind !== 'move' || !workspaceId || !kbDirName) return;
-    if (!isProtectedBranch(decodeURIComponent(workspaceId))) return;
+    if (!isProtectedBranch(currentBranchModel(), decodeURIComponent(workspaceId))) return;
     const prefix = `${kbDirName}/`;
     if (!confirmRequest.targetDir.startsWith(prefix)) return;
     let cancelled = false;
@@ -2106,7 +2107,8 @@ function useCanWriteFolder(workspacePath: string | null): boolean {
   const isKbRoot = workspacePath !== null && workspacePath === kbDirName;
   const shortCircuit =
     key !== null &&
-    ((!isKbRoot && !workspacePath!.startsWith(prefix!)) || !isProtectedBranch(decodeURIComponent(workspaceId!)));
+    ((!isKbRoot && !workspacePath!.startsWith(prefix!)) ||
+      !isProtectedBranch(currentBranchModel(), decodeURIComponent(workspaceId!)));
   useEffect(() => {
     if (key === null || shortCircuit) return;
     let cancelled = false;

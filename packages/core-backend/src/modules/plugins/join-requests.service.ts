@@ -1,5 +1,4 @@
 import {
-  DEFAULT_BRANCH,
   isJoinBranchFor,
   type AuthUser,
   type ChangeRequest,
@@ -9,7 +8,7 @@ import { type WorkspaceService } from '../workspace/workspace.service.js';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('plugins');
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import { pendingProposals, type JoinProposal } from './join-proposals.js';
 
 /** One open join change request, with what it still proposes. */
@@ -46,6 +45,7 @@ export class JoinRequestsService {
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly workflow: IWorkflowService,
+    private readonly kb: Pick<KbContext, 'defaultBranch' | 'defaultWorkspaceId'>,
   ) {}
 
   /**
@@ -64,7 +64,7 @@ export class JoinRequestsService {
   ): Promise<JoinRequest[]> {
     await this.refresh();
     const accessPath = `${folder}/access.md`;
-    const baseText = await this.readAt(DEFAULT_BRANCH, accessPath);
+    const baseText = await this.readAt(this.kb.defaultBranch, accessPath);
     const out: JoinRequest[] = [];
     for (const cr of crs) {
       if (cr.state !== 'open' || !isJoinBranchFor(cr.branch, plugin)) continue;
@@ -104,7 +104,7 @@ export class JoinRequestsService {
     const accessPath = `${folder}/access.md`;
     const proposals = pendingProposals(
       await this.readAt(cr.branch, accessPath),
-      await this.readAt(DEFAULT_BRANCH, accessPath),
+      await this.readAt(this.kb.defaultBranch, accessPath),
       accessPath,
     );
     if (proposals.length > 0) return false;
@@ -125,7 +125,7 @@ export class JoinRequestsService {
    * next pass tries again.
    */
   private async settle(cr: ChangeRequest, actor: AuthUser): Promise<void> {
-    const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
+    const wsId = this.kb.defaultWorkspaceId();
     try {
       await this.workflow.rejectChangeRequest(
         cr.number,
@@ -167,7 +167,7 @@ export class JoinRequestsService {
   private async readAt(branch: string, repoRelPath: string): Promise<string | null> {
     try {
       return await this.workspaceService.readFileAtRef(
-        workspaceIdForBranch(DEFAULT_BRANCH),
+        this.kb.defaultWorkspaceId(),
         `origin/${branch}`,
         repoRelPath,
       );
@@ -183,7 +183,7 @@ export class JoinRequestsService {
    */
   private async refresh(): Promise<void> {
     await this.workspaceService
-      .ensureRemotesFetched(workspaceIdForBranch(DEFAULT_BRANCH))
+      .ensureRemotesFetched(this.kb.defaultWorkspaceId())
       .catch(() => undefined);
   }
 }

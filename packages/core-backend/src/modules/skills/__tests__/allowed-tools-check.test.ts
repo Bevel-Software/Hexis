@@ -7,6 +7,7 @@ import {
 } from '../allowed-tools-check.js';
 import type { UtcpTool } from '../../tool-registry/tool.contract.js';
 import type { ToolManualDetail, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const visible: VisibleTools = {
   core: ['read_file', 'get_skill', 'list_skills'],
@@ -110,10 +111,10 @@ describe('checkAllowedTools', () => {
 
 describe('skillFileRepoPath', () => {
   test('recognises skill files under the plugin and skills roots only', () => {
-    expect(skillFileRepoPath('knowledge-base', 'knowledge-base/Plugins/Sales/rfi/SKILL.md')).toBe('Plugins/Sales/rfi/SKILL.md');
-    expect(skillFileRepoPath('knowledge-base', './knowledge-base/Skills/triage/SKILL.md')).toBe('Skills/triage/SKILL.md');
-    expect(skillFileRepoPath('knowledge-base', 'knowledge-base/Plugins/Sales/rfi/notes.md')).toBeNull();
-    expect(skillFileRepoPath('knowledge-base', 'knowledge-base/Data/SKILL.md')).toBeNull();
+    expect(skillFileRepoPath(testKbContext(),'knowledge-base/Plugins/Sales/rfi/SKILL.md')).toBe('Plugins/Sales/rfi/SKILL.md');
+    expect(skillFileRepoPath(testKbContext(),'./knowledge-base/Skills/triage/SKILL.md')).toBe('Skills/triage/SKILL.md');
+    expect(skillFileRepoPath(testKbContext(),'knowledge-base/Plugins/Sales/rfi/notes.md')).toBeNull();
+    expect(skillFileRepoPath(testKbContext(),'knowledge-base/Data/SKILL.md')).toBeNull();
   });
 });
 
@@ -138,7 +139,7 @@ describe('AllowedToolsChecker', () => {
           }
         : null,
   };
-  const checker = new AllowedToolsChecker(registry, manuals, 'knowledge-base');
+  const checker = new AllowedToolsChecker(registry, manuals, testKbContext());
 
   const skill = (tools: string) => `---\nname: rfi\ndescription: RFI.\nallowed-tools: ${tools}\n---\n\n# RFI\n`;
 
@@ -160,7 +161,7 @@ describe('AllowedToolsChecker', () => {
     const broken = new AllowedToolsChecker(
       { listExternal: async () => { throw new Error('down'); } },
       manuals,
-      'knowledge-base',
+      testKbContext(),
     );
     await expect(
       broken.checkSave('a@x.com', 'knowledge-base/Plugins/Sales/rfi/SKILL.md', skill('hubspot.serch')),
@@ -168,7 +169,7 @@ describe('AllowedToolsChecker', () => {
   });
 
   test('a capped capability list is treated as unknown, never as proof of absence', async () => {
-    const capped = new AllowedToolsChecker(registry, manuals, 'knowledge-base', 1);
+    const capped = new AllowedToolsChecker(registry, manuals, testKbContext(), 1);
     expect(await capped.check('a@x.com', ['hubspot.whatever'])).toEqual([]);
   });
 
@@ -179,7 +180,7 @@ describe('AllowedToolsChecker', () => {
     const listExternal = vi.fn(registry.listExternal);
     const listAccessible = vi.fn(manuals.listAccessible);
     const getDetail = vi.fn(manuals.getDetail);
-    const spying = new AllowedToolsChecker({ listExternal }, { listAccessible, getDetail }, 'knowledge-base');
+    const spying = new AllowedToolsChecker({ listExternal }, { listAccessible, getDetail }, testKbContext());
 
     expect(entries(await spying.check('alice@example.com', ['hubspot.serch']))).toEqual(['hubspot.serch']);
     expect(listExternal).toHaveBeenCalledWith({ userEmail: 'alice@example.com' });
@@ -193,7 +194,7 @@ describe('AllowedToolsChecker', () => {
     const listExternal = vi.fn(registry.listExternal);
     const listAccessible = vi.fn(manuals.listAccessible);
     const getDetail = vi.fn(manuals.getDetail);
-    const spying = new AllowedToolsChecker({ listExternal }, { listAccessible, getDetail }, 'knowledge-base');
+    const spying = new AllowedToolsChecker({ listExternal }, { listAccessible, getDetail }, testKbContext());
 
     const results = await spying.checkSaves('a@x.com', [
       { path: 'knowledge-base/Plugins/Sales/rfi/SKILL.md', content: skill('hubspot.serch') },
@@ -214,7 +215,7 @@ describe('AllowedToolsChecker', () => {
     const listExternal = vi.fn(registry.listExternal);
     const listAccessible = vi.fn(manuals.listAccessible);
     const getDetail = vi.fn(manuals.getDetail);
-    const spying = new AllowedToolsChecker({ listExternal }, { listAccessible, getDetail }, 'knowledge-base');
+    const spying = new AllowedToolsChecker({ listExternal }, { listAccessible, getDetail }, testKbContext());
 
     expect(await spying.check('a@x.com', ['Bash', 'Read', 'Bash(git:*)', 'mcp__github__create_issue', 'shell'])).toEqual([]);
     expect(listExternal).not.toHaveBeenCalled();

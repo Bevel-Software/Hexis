@@ -1,6 +1,7 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { ToolRegistry } from '../../../tool-registry/tool-registry.js';
 import { InternalTokenService } from '../../../tool-auth/internal-token.service.js';
 import { createToolAuthMiddleware } from '../../../tool-auth/tool-auth.middleware.js';
@@ -96,7 +97,7 @@ async function start(): Promise<string> {
   const toolHandler = createToolHandlerFactory(resolve);
 
   const router = express.Router();
-  registerWorkflowTools(registry, router, toolAuth, toolHandler, 'knowledge-base');
+  registerWorkflowTools(registry, router, toolAuth, toolHandler, testKbContext());
   router.use(createManualRoutes(registry, toolAuth));
 
   const app = express();

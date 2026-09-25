@@ -2,7 +2,6 @@ import {
   DEFAULT_KB_LAYOUT,
   FIXED_PLATFORM_FILE_NAMES,
   agentsFileOf,
-  currentKbLayout,
   reservedRootDirNames,
   type KbLayout,
 } from './kb-layout.js';
@@ -14,14 +13,15 @@ import {
  * the repository root only, so a nested file of either name is ordinary
  * content. Moving one changes what the platform enforces, so moves refuse them.
  *
- * A FUNCTION, not a constant, and that is the whole of the configurable-guide
- * change on this side: the guide's name is a deployment setting, so the fourth
- * platform file is `HEXIS.md` on one deployment and `AGENTS.md` on the next —
- * and on the first, a root `AGENTS.md` is the CUSTOMER'S own conventions file,
- * which has to move and delete like any page. Every gate asks this rather than
- * reading a list captured at module load.
+ * A FUNCTION OF THE LAYOUT, not a constant, and that is the whole of the
+ * configurable-guide change on this side: the guide's name is a deployment
+ * setting, so the fourth platform file is `HEXIS.md` on one deployment and
+ * `AGENTS.md` on the next — and on the first, a root `AGENTS.md` is the
+ * CUSTOMER'S own conventions file, which has to move and delete like any page.
+ * Every gate asks this with the layout it serves rather than reading a list
+ * captured at module load.
  */
-export function platformFileNames(layout: KbLayout = currentKbLayout()): readonly string[] {
+export function platformFileNames(layout: KbLayout): readonly string[] {
   return [...FIXED_PLATFORM_FILE_NAMES, agentsFileOf(layout)];
 }
 
@@ -38,8 +38,8 @@ export const PLATFORM_FILE_NAMES: readonly string[] = Object.freeze(
 /** The platform files that are read wherever they sit, not only at the root. */
 const PLATFORM_FILES_AT_ANY_DEPTH = new Set(['access.md', '.bevelignore']);
 
-/** The names in effect, as a set — rebuilt per call, because the guide's is configurable. */
-const platformFiles = (): ReadonlySet<string> => new Set(platformFileNames());
+/** The names under `layout`, as a set — rebuilt per call, because the guide's is configurable. */
+const platformFiles = (layout: KbLayout): ReadonlySet<string> => new Set(platformFileNames(layout));
 
 const normalize = (path: string): string => path.replace(/^\.?\/+/, '').replace(/\/+$/, '');
 
@@ -65,10 +65,10 @@ const hasTraversal = (path: string): boolean =>
  * Exact spelling, as the platform reads it: `Access.md` is content. A caller
  * on a case-insensitive disk passes the path's on-disk spelling.
  */
-export function isPlatformFile(repoRelativePath: string): boolean {
+export function isPlatformFile(repoRelativePath: string, layout: KbLayout): boolean {
   const norm = normalize(repoRelativePath);
   const name = baseName(norm);
-  if (!platformFiles().has(name)) return false;
+  if (!platformFiles(layout).has(name)) return false;
   return PLATFORM_FILES_AT_ANY_DEPTH.has(name) || norm === name;
 }
 
@@ -96,10 +96,10 @@ export function platformFileCreationRefusal(pathOrName: string): string {
  * one takes a whole section of the knowledge base with it. Exact spelling; a
  * caller on a case-insensitive disk passes the path's on-disk spelling.
  */
-export function isPlatformFolder(repoRelativeDir: string): boolean {
+export function isPlatformFolder(repoRelativeDir: string, layout: KbLayout): boolean {
   const norm = normalize(repoRelativeDir);
   if (norm === '') return true;
-  return !norm.includes('/') && reservedRootDirNames().has(norm);
+  return !norm.includes('/') && reservedRootDirNames(layout).has(norm);
 }
 
 /** The sentence a delete or move of a platform folder is refused with. */
@@ -118,8 +118,8 @@ export function platformFolderRefusal(repoRelativeDir: string): string {
  * of the root's rather than standing in for it, which is why moving the
  * ROOT's copy into a folder is a move out and not a restore.
  */
-export function isRootPlatformFile(repoRelativePath: string): boolean {
-  return platformFiles().has(normalize(repoRelativePath));
+export function isRootPlatformFile(repoRelativePath: string, layout: KbLayout): boolean {
+  return platformFiles(layout).has(normalize(repoRelativePath));
 }
 
 /**
@@ -143,11 +143,12 @@ export type PlatformRestoreDestination =
 
 export function platformRestoreDestination(
   repoRelativeDestination: string,
+  layout: KbLayout,
 ): PlatformRestoreDestination | null {
   const norm = normalize(repoRelativeDestination);
   if (hasTraversal(norm)) return null;
   const name = baseName(norm);
-  if (!platformFiles().has(name)) return null;
+  if (!platformFiles(layout).has(name)) return null;
   if (name === 'access.md') {
     const slash = norm.lastIndexOf('/');
     return { name, kind: 'folder-without-access-md', dir: slash === -1 ? '' : norm.slice(0, slash) };
@@ -178,11 +179,12 @@ export function platformRestoreDestination(
 export function isPlatformRestoreShape(
   repoRelativeSource: string,
   repoRelativeDestination: string,
+  layout: KbLayout,
 ): boolean {
   if (hasTraversal(repoRelativeSource)) return false;
   const name = baseName(repoRelativeSource);
-  if (!platformFiles().has(name)) return false;
-  if (isRootPlatformFile(repoRelativeSource)) return false;
-  const target = platformRestoreDestination(repoRelativeDestination);
+  if (!platformFiles(layout).has(name)) return false;
+  if (isRootPlatformFile(repoRelativeSource, layout)) return false;
+  const target = platformRestoreDestination(repoRelativeDestination, layout);
   return target !== null && target.name === name;
 }

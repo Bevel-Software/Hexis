@@ -9,7 +9,6 @@ import type { IAdminAccessService } from '../admin/admin.interface.js';
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import {
-  DEFAULT_BRANCH,
   KNOWLEDGE_DIR,
   canonicalRelativePath,
   folderPlaceholderPath,
@@ -21,6 +20,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import { EntryExistsError, type WorkspaceService } from './workspace.service.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -82,7 +82,7 @@ export function createWorkspaceRoutes(
   workflowService: IWorkflowService,
   eventBus: WorkflowEventBus,
   accessControl: IAccessControl,
-  kbDirName: string,
+  kb: KbContext,
   creatorAccess: ICreatorAccess,
   adminAccess: IAdminAccessService,
   disk: ITreeWalker,
@@ -97,6 +97,7 @@ export function createWorkspaceRoutes(
   changeGate?: IChangeReadGate,
 ): express.Router {
   const router = express.Router();
+  const { kbDirName } = kb;
   const gitInternalsRouteGuard = createGitInternalsRouteGuard(workspaceService);
 
   // The git folder is refused ahead of every route here by
@@ -463,7 +464,7 @@ export function createWorkspaceRoutes(
       }
       const branch = typeof req.query.branch === 'string' && req.query.branch.length > 0
         ? req.query.branch
-        : DEFAULT_BRANCH;
+        : kb.defaultBranch;
       const workspace = await workspaceService.getOrCreateForBranch(branch);
       // Bootstrap must use the same read-filtered tree as GET /workspace/:id/files.
       // Otherwise the first sidebar render can expose restricted nodes until the
@@ -663,7 +664,7 @@ export function createWorkspaceRoutes(
       // same treatment so legacy clones don't collapse. Only the folders
       // themselves are forced visible — their contents stay gated by the
       // verdict above.
-      const structuralRoots = new Set([...reservedRootDirNames(), KNOWLEDGE_DIR]);
+      const structuralRoots = new Set([...reservedRootDirNames(kb.layout), KNOWLEDGE_DIR]);
       for (const wp of wsRelPaths) {
         const rel = toKbRelative(wp, kbDirName);
         if (rel !== null && structuralRoots.has(rel)) verdict.set(wp, true);
@@ -1128,11 +1129,11 @@ export function createWorkspaceRoutes(
       const oldRel = toKbRelative(oldPath, kbDirName);
       const newRel = toKbRelative(newPath, kbDirName);
       let platformRestore = false;
-      if (oldRel !== null && newRel !== null && isPlatformRestoreShape(oldRel, newRel)) {
+      if (oldRel !== null && newRel !== null && isPlatformRestoreShape(oldRel, newRel, kb.layout)) {
         platformRestore = await accessControl.canRestorePlatformFile(id, user.email, newRel);
       }
       // A platform file stays where the platform reads it …
-      if (oldRel !== null && isPlatformFile(oldRel) && !platformRestore) {
+      if (oldRel !== null && isPlatformFile(oldRel, kb.layout) && !platformRestore) {
         res.status(409).json({ error: platformFileRefusal(oldRel) });
         return;
       }
@@ -1145,7 +1146,7 @@ export function createWorkspaceRoutes(
       // from the same place. Only the restore lands on a platform path, and
       // only where the file is missing (`canRestorePlatformFile` checked the
       // disk; the destination lock below checks it again, under the lock).
-      if (newRel !== null && isPlatformFile(newRel) && !platformRestore) {
+      if (newRel !== null && isPlatformFile(newRel, kb.layout) && !platformRestore) {
         res.status(409).json({ error: platformFileCreationRefusal(newRel) });
         return;
       }

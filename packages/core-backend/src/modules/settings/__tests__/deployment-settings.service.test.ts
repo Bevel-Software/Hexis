@@ -84,6 +84,41 @@ describe('DeploymentSettingsService — precedence', () => {
   });
 });
 
+describe('DeploymentSettingsService — a blank that means the default', () => {
+  /**
+   * The rule everywhere else: a blank field leaves a setting alone. The Audit
+   * log's retention window is the exception that declares itself — its
+   * readers already treat "unset" as the default, so clearing the field is
+   * the one way back to that default, and a blank saves as a clear.
+   */
+  it('clears a blank-means-default setting on a blank save and leaves every other blank alone', async () => {
+    const { db, rows } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.save({ auditRetentionDays: '30', kbRepoUrl: 'https://example.com/stored.git' }, null);
+    expect(settings.resolve('auditRetentionDays')).toBe('30');
+
+    await settings.save({ auditRetentionDays: '', kbRepoUrl: '' }, null);
+
+    expect(settings.resolve('auditRetentionDays')).toBe('');
+    expect(settings.sourceOf('auditRetentionDays')).toBe('unset');
+    // The repository address was blank too, and blank still means "leave it".
+    expect(settings.resolve('kbRepoUrl')).toBe('https://example.com/stored.git');
+    expect(rows.some((r) => r.key === 'kbRepoUrl')).toBe(true);
+  });
+
+  it('holds the retention window to the same rule on save as the runtime reader does', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    for (const bad of ['1.5', 'lots', 'ten days']) {
+      await expect(settings.save({ auditRetentionDays: bad }, null)).rejects.toBeInstanceOf(SettingsValidationError);
+    }
+    // A number of days, or zero / negative for "forever" — the reader's rule.
+    for (const ok of ['3650', '0', '-1', '99999']) {
+      await expect(settings.save({ auditRetentionDays: ok }, null)).resolves.toBeDefined();
+    }
+  });
+});
+
 describe('DeploymentSettingsService — secrets', () => {
   it('stores the token as ciphertext and reads it back', async () => {
     const { db, rows } = makeDb();
@@ -114,20 +149,12 @@ describe('DeploymentSettingsService — secrets', () => {
     expect(token).not.toHaveProperty('value');
   });
 
-  it('publishes a stored token as GITHUB_TOKEN, which is what git reads', async () => {
+  it('keeps a stored token out of the process environment: git reads it per call', async () => {
     const { db } = makeDb();
     const settings = new DeploymentSettingsService(db, ENC_KEY);
     await settings.save({ gitToken: 'ghp_fromsetup' }, null);
-    expect(process.env.GITHUB_TOKEN).toBe('ghp_fromsetup');
-  });
-
-  it('does not overwrite a git token the environment supplied', async () => {
-    process.env.GIT_TOKEN = 'ghp_fromenv';
-    process.env.GITHUB_TOKEN = 'ghp_fromenv';
-    const { db } = makeDb();
-    const settings = new DeploymentSettingsService(db, ENC_KEY);
-    settings.syncGitTokenEnv();
-    expect(process.env.GITHUB_TOKEN).toBe('ghp_fromenv');
+    expect(process.env.GITHUB_TOKEN).toBeUndefined();
+    expect(settings.resolve('gitToken')).toBe('ghp_fromsetup');
   });
 
   it('refuses to store a secret with no encryption key rather than writing plaintext', async () => {
@@ -491,5 +518,26 @@ describe('DeploymentSettingsService — validation', () => {
     expect(
       settings.describe().filter((s) => s.key.startsWith('oidc') && s.restartToApply),
     ).toEqual([]);
+  });
+});
+
+describe('DeploymentSettingsService — an environment of its own', () => {
+  it('resolves the env-first layer from the environment it was given, not the process\'s', async () => {
+    process.env.KB_REPO_URL = 'https://host.example/leaks-into-every-tenant.git';
+    const { db } = makeDb();
+    const own = new DeploymentSettingsService(db, ENC_KEY, undefined, {
+      env: { KB_REPO_URL: 'https://github.com/acme/kb.git', GIT_USERNAME: 'oauth2' },
+    });
+    await own.load();
+    expect(own.resolve('kbRepoUrl')).toBe('https://github.com/acme/kb.git');
+    expect(own.sourceOf('kbRepoUrl')).toBe('env');
+    expect(own.resolve('gitUsername')).toBe('oauth2');
+    // What the given environment leaves out is not taken from the process either.
+    expect(own.resolve('gitToken')).toBe('');
+    expect(own.sourceOf('gitToken')).toBe('unset');
+    // A service built without one keeps reading the process, as before.
+    const shared = new DeploymentSettingsService(db, ENC_KEY);
+    await shared.load();
+    expect(shared.resolve('kbRepoUrl')).toBe('https://host.example/leaks-into-every-tenant.git');
   });
 });

@@ -1,7 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
-  DEFAULT_BRANCH,
   PLUGIN_MANIFEST_FILE,
   linkedSkillRoots,
   normalizeSkillRoot,
@@ -21,7 +20,8 @@ import { WorkspaceMutex } from '../kb-fs/mutex.js';
 import type { ISkillService } from '../skills/skills.contract.js';
 import { logger } from '../../shared/logging.js';
 import type { ProvisionCommitDriver } from './plugin-provision.service.js';
-import { linksWorkspaceId, type PluginLinkIndex } from './plugin-links.js';
+import type { PluginLinkIndex } from './plugin-links.js';
+import type { KbContext } from '../../shared/kb-context.js';
 
 const log = logger('plugins');
 
@@ -127,19 +127,23 @@ export class PluginLinksService {
     private readonly accessControl: IAccessControl,
     private readonly skillService: ISkillService,
     private readonly links: PluginLinkIndex,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
     private readonly events?: {
       emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void;
     },
     private readonly onChanged?: () => void,
   ) {
-    this.mutation = new AccessMutationService(workspaceService, accessControl, kbDirName);
+    this.mutation = new AccessMutationService(workspaceService, accessControl, kb.kbDirName);
+  }
+
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
   }
 
   async link(user: AuthUser, plugin: string, rawRoot: string): Promise<{ root: string; skills: string[] }> {
     const folder = await this.pluginFolder(plugin);
     const root = this.rootOrThrow(rawRoot);
-    const wsId = linksWorkspaceId();
+    const wsId = this.kb.defaultWorkspaceId();
     await this.requirePluginWrite(wsId, user, folder);
     const skills = await this.resolvedSkills(root);
     if (skills.length === 0) {
@@ -175,7 +179,7 @@ export class PluginLinksService {
           manifestRel,
           `${JSON.stringify(withLinkedSkillRoots(manifest, [...roots, root]), null, 2)}\n`,
         );
-        await this.commits.runPendingCommit(wsId, DEFAULT_BRANCH, manifestRel, user);
+        await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, manifestRel, user);
       }
       await this.grantTokens(wsId, user, folder, root);
       this.changed(wsId);
@@ -186,7 +190,7 @@ export class PluginLinksService {
   async unlink(user: AuthUser, plugin: string, rawRoot: string): Promise<{ root: string; revoked: boolean }> {
     const folder = await this.pluginFolder(plugin);
     const root = this.rootOrThrow(rawRoot);
-    const wsId = linksWorkspaceId();
+    const wsId = this.kb.defaultWorkspaceId();
     await this.requirePluginWrite(wsId, user, folder);
     return this.locks.runAll(this.lockKeys(folder, root), async () => {
       const { manifest, manifestRel } = await this.readManifest(wsId, folder);
@@ -213,7 +217,7 @@ export class PluginLinksService {
         if (changed) {
           await this.commits.runPendingCommit(
             wsId,
-            DEFAULT_BRANCH,
+            this.kb.defaultBranch,
             `${this.kbDirName}/${accessMdPathForFolder(root)}`,
             user,
           );
@@ -225,7 +229,7 @@ export class PluginLinksService {
         manifestRel,
         `${JSON.stringify(withLinkedSkillRoots(manifest, roots.filter((r) => r !== root)), null, 2)}\n`,
       );
-      await this.commits.runPendingCommit(wsId, DEFAULT_BRANCH, manifestRel, user);
+      await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, manifestRel, user);
       this.changed(wsId);
       return { root, revoked };
     });
@@ -254,7 +258,7 @@ export class PluginLinksService {
   ): Promise<{ root: string; written: boolean }> {
     const folder = await this.pluginFolder(plugin);
     const root = this.rootOrThrow(rawRoot);
-    const wsId = linksWorkspaceId();
+    const wsId = this.kb.defaultWorkspaceId();
     // Everything under the lock, the manifest read included: a repair that
     // checked the link and then waited on an unlink would re-grant a root the
     // manifest no longer names.
@@ -301,7 +305,7 @@ export class PluginLinksService {
    */
   async repairAll(user: AuthUser, plugin: string): Promise<LinkRepairReport> {
     const folder = await this.pluginFolder(plugin);
-    const wsId = linksWorkspaceId();
+    const wsId = this.kb.defaultWorkspaceId();
     await this.requirePluginWrite(wsId, user, folder);
     // Read the work list ONCE, before the first write: `repair` invalidates
     // the index, and re-reading it per root would rebuild the whole membership
@@ -404,7 +408,7 @@ export class PluginLinksService {
     const a = await this.mutation.grant(wsId, 'folder', root, 'read', read);
     const b = await this.mutation.grant(wsId, 'folder', root, 'write', write);
     if (!(a.changed || b.changed)) return false;
-    await this.commits.runPendingCommit(wsId, DEFAULT_BRANCH, `${this.kbDirName}/${a.editPath}`, user, {
+    await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, `${this.kbDirName}/${a.editPath}`, user, {
       summary,
     });
     return true;
@@ -514,6 +518,6 @@ export class PluginLinksService {
     this.links.invalidate();
     this.accessControl.invalidate(wsId);
     this.onChanged?.();
-    this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: DEFAULT_BRANCH });
+    this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
   }
 }

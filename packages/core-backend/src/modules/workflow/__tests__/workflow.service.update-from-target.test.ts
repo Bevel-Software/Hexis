@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { AuthUser, PullRequestDetail } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
@@ -102,7 +103,7 @@ function harness(opts: {
     {} as unknown as IAccessControl,
     {} as unknown as FileLockService,
     pendingCommits as unknown as PendingCommitsService,
-    'knowledge-base',
+    testKbContext(),
     openChangeGate(),
   );
   return { svc, git, prs, pendingCommits, reviewWorkflow, refreshed };

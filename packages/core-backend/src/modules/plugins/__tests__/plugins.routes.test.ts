@@ -22,6 +22,7 @@ import { PluginJoinRequestJobs } from '../join-request-jobs.service.js';
 import { pluginFolderBelowRoot } from '../plugins.service.js';
 import { FakeJoinRequestStore } from './fake-join-request-store.js';
 import type { PluginSummary, IPluginIndexService } from '../plugins.contract.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * HTTP-level contract for the plugin routes: the auth gate, the three-tier
@@ -155,7 +156,14 @@ async function makeHarness(opts: HarnessOpts = {}) {
 
   const index =
     opts.index ??
-    new PluginIndexService(workspaceService, accessControl, skillService, toolService, KB, new KbPluginSource(new NodeFs()));
+    new PluginIndexService(
+      workspaceService,
+      accessControl,
+      skillService,
+      toolService,
+      testKbContext({ kbDirName: KB }),
+      new KbPluginSource(new NodeFs(), testKbContext({ kbDirName: KB })),
+    );
 
   const email = opts.email === undefined ? ALI : opts.email;
   const app = express();
@@ -185,7 +193,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
   const joinRequestJobs = new PluginJoinRequestJobs(joinRequestStore, {
     workflow,
     workspaceService,
-    kbDirName: KB,
+    kb: testKbContext({ kbDirName: KB }),
     target: async (pluginKey) => {
       const entry = (await index.catalog()).find(
         (g) => pluginFolderBelowRoot(g.folders[0]) === pluginKey,
@@ -221,6 +229,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
       joinRequestJobs,
       provision as never,
       async (req) => (req.userEmail ? { ...ALI_USER, email: req.userEmail } : null),
+      testKbContext({ kbDirName: KB }),
     ),
   );
 

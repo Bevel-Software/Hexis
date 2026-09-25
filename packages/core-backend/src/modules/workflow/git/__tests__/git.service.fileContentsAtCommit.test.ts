@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -86,7 +87,7 @@ describe('GitService.fileContentsAtCommit', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     const rootAdd = await commitFile(repo, 'Knowledge/Foo.md', '# one\n', 'add foo');
@@ -123,7 +124,7 @@ describe('GitService.fileContentsAtCommit', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     await expect(
       svc.fileContentsAtCommit(workspaceId, 'Knowledge/Foo.md', 'not-a-sha'),

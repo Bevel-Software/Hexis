@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import AdmZip from 'adm-zip';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import { GIT_INTERNALS_MESSAGE, GitInternalsError } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
@@ -241,7 +242,7 @@ describe('workspace tools refuse the git folder', () => {
 
   beforeEach(async () => {
     workflow = makeWorkflow();
-    const service = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs());
+    const service = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
     unzipSpy = vi.spyOn(service, 'unzipFile');
     bootstrappedSpy = vi.spyOn(service, 'hasBootstrappedWorkspace');
     const lockingFs = new LockingFilesystem(
@@ -275,8 +276,8 @@ describe('workspace tools refuse the git folder', () => {
       new SpillStore(join(root, 'spills')),
       new DocExtractService(join(root, 'doc-cache')),
       allowAll,
-      KB,
-      { service: {} as never, enabled: false, kbDirName: KB, recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+      testKbContext({ kbDirName: KB }),
+      { service: {} as never, enabled: false, kb: testKbContext({ kbDirName: KB }), recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
       new RoutineWritePolicyService(),
       {} as never,
     );
@@ -416,7 +417,7 @@ describe('workspace routes refuse the git folder', () => {
 
   beforeEach(async () => {
     workflow = makeWorkflow();
-    service = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs());
+    service = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
     const app = express();
     app.use(express.json());
     app.use('/api', (req, _res, next) => {
@@ -436,7 +437,7 @@ describe('workspace routes refuse the git folder', () => {
         workflow as unknown as IWorkflowService,
         { emit: vi.fn() } as unknown as WorkflowEventBus,
         allowAll,
-        KB,
+        testKbContext({ kbDirName: KB }),
         stubCreatorAccess,
         { isAdmin: async () => true } as unknown as IAdminAccessService,
         new NodeFs(),
@@ -563,7 +564,7 @@ describe('WorkspaceService refuses the git folder on its own', () => {
   let service: WorkspaceService;
 
   beforeEach(() => {
-    service = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs());
+    service = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
   });
 
   afterEach(async () => {
@@ -620,7 +621,7 @@ describe('WorkspaceService refuses the git folder on its own', () => {
         return { stdout: '.git\n', stderr: '', code: 0 };
       }),
     };
-    const refService = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs(), 'x-access-token', gitRunner as never);
+    const refService = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs(), gitRunner as never);
 
     for (const [form, raw] of Object.entries(fileForms('config'))) {
       if (!form.startsWith('symlinked')) continue;
@@ -674,7 +675,7 @@ describe('the route guard on its own', () => {
   beforeEach(async () => {
     reached = 0;
     userId = USER.id;
-    const service = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs());
+    const service = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
     const app = express();
     // The server's own order: the guard ahead of the body parser, then again
     // on the parsed body, then again once the caller is known.
@@ -774,7 +775,7 @@ describe('DiffService refuses the git folder on its own', () => {
   let diffService: DiffService;
 
   beforeEach(() => {
-    const service = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs());
+    const service = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
     diffService = new DiffService(service, new WorkspaceMutex(), root, join(root, 'backups'), KB, new NodeFs());
   });
 

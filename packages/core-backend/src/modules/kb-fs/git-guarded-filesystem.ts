@@ -34,9 +34,13 @@ export class GitGuardedFilesystem extends LocalFilesystem {
    * put the path is then judged too, when that is somewhere else again.
    */
   async assertNotGitInternals(inputPath: string): Promise<void> {
-    await assertNotGitInternals(this.basePath, inputPath);
-    const resolvedPath = this.resolveAbsolutePath(inputPath);
-    if (resolvedPath !== undefined) await assertNotGitInternals(this.basePath, inputPath, resolvedPath);
+    // ONE call carrying both the spelling and the place this filesystem
+    // would put it. Both are still judged — a link this resolver cannot
+    // place (a backslash-spelled one, a leading climb) is caught by the
+    // spelling's own readings, a link it follows by the place — but the rule
+    // walks the root once and probes a place both name once, where two calls
+    // walked the root twice and probed that place twice.
+    await assertNotGitInternals(this.basePath, inputPath, this.resolveAbsolutePath(inputPath));
   }
 
   override async readFile(inputPath: string, options?: ReadOptions): Promise<string | Buffer> {

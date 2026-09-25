@@ -3,13 +3,10 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('plugins');
 import path from 'node:path';
-import {
-  DEFAULT_BRANCH,
-} from '@bevel-software/platform-shared';
 import { isPrivateAccessMd } from '../access-model/access-grammar.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { ISkillService } from '../skills/skills.contract.js';
 import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
@@ -63,7 +60,7 @@ export class PluginIndexService implements IPluginIndexService {
     private readonly accessControl: IAccessControl,
     private readonly skillService: ISkillService,
     private readonly toolManualService: IToolManualService,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
     /** Where plugins come from — the one discovery every catalog shares. */
     private readonly source: PluginSource,
     now: () => number = Date.now,
@@ -75,6 +72,10 @@ export class PluginIndexService implements IPluginIndexService {
     private readonly links?: PluginLinkIndex,
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
+  }
+
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
   }
 
   invalidate(): void {
@@ -115,7 +116,7 @@ export class PluginIndexService implements IPluginIndexService {
    */
   private async build(): Promise<PluginCatalogEntry[] | null> {
     try {
-      const wsId = (await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH)).id;
+      const wsId = (await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch)).id;
       const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
 
       const scanned = await this.scanFolders(kbRoot);
@@ -299,11 +300,6 @@ function bucketByFolder(items: { path: string }[], folders: Map<string, string[]
     counts.set(owner.name, (counts.get(owner.name) ?? 0) + 1);
   }
   return counts;
-}
-
-/** The default-branch workspace id every plugin resolution runs against. */
-export function pluginsWorkspaceId(): string {
-  return workspaceIdForBranch(DEFAULT_BRANCH);
 }
 
 /**

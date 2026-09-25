@@ -12,6 +12,13 @@
 export interface SkillSummary {
   name: string;
   description: string;
+  /**
+   * The skill's repo-relative folder (`Plugins/Sales/rfi`), as the platform's
+   * `list_skills` answers it. Optional: a listing from an older deployment
+   * may omit it, and nothing that lists prompts needs it — the hosted proxy's
+   * Audit log reads it to tell a read inside a skill folder from a file read.
+   */
+  path?: string;
 }
 
 export interface LoadedSkill extends SkillSummary {

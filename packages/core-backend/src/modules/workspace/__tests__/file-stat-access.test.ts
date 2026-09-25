@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import express from 'express';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
@@ -86,8 +87,8 @@ beforeAll(async () => {
     new SpillStore(join(tmpdir(), 'bevel-test-spills')),
     new DocExtractService(docCache),
     service,
-    KB,
-    { service: {} as never, enabled: false, kbDirName: KB, recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+    testKbContext({ kbDirName: KB }),
+    { service: {} as never, enabled: false, kb: testKbContext({ kbDirName: KB }), recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
     new RoutineWritePolicyService(),
     {} as never,
   );

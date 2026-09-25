@@ -1,10 +1,15 @@
 import jwt from 'jsonwebtoken';
 import { eq } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
-import type { CoreConfig } from '../../core-config.js';
 import { users } from '../database/schema.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
+import {
+  AccountAdmissionRefusedError,
+  admitEveryone,
+  type AccountProvisionReason,
+  type IAccountAdmission,
+} from './account-admission.js';
 import {
   hashPassword,
   verifyPassword,
@@ -84,7 +89,30 @@ export class AuthService {
   constructor(
     private readonly db: Database,
     private readonly config: AuthConfig,
+    /**
+     * Whether a new account may be provisioned — see `account-admission.ts`.
+     * Core admits everyone; a host that sells seats answers from its plan.
+     */
+    private readonly admission: IAccountAdmission = admitEveryone,
   ) {}
+
+  /**
+   * Ask the admission port before an account is CREATED: an address that
+   * already has a row is never asked about, so a refusal cannot lock an
+   * existing user out. The default port is not asked at all, which also
+   * spares the lookup.
+   */
+  private async assertAdmitted(normalizedEmail: string, reason: AccountProvisionReason): Promise<void> {
+    if (this.admission === admitEveryone) return;
+    const [existing] = await this.db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, normalizedEmail))
+      .limit(1);
+    if (existing) return;
+    const verdict = await this.admission.canProvision(normalizedEmail, reason);
+    if (!verdict.ok) throw new AccountAdmissionRefusedError(verdict.message);
+  }
 
   /**
    * Password login. Two credential sources, in order:
@@ -155,6 +183,7 @@ export class AuthService {
         throw new Error('Invalid credentials');
       }
       const defaultName = normalizedEmail.split('@')[0] || normalizedEmail;
+      await this.assertAdmitted(normalizedEmail, 'bootstrap');
       const admin = await this.upsertUserByEmail(normalizedEmail, defaultName);
       return { token: this.signToken(admin.id, admin.email), user: this.toClientUser(admin) };
     }
@@ -187,6 +216,7 @@ export class AuthService {
       throw new Error('Sign-in returned an invalid email');
     }
     this.assertAllowedDomain(normalizedEmail);
+    await this.assertAdmitted(normalizedEmail, 'sso');
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
     const user = await this.upsertUserByEmail(normalizedEmail, displayName);
     return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
@@ -221,6 +251,7 @@ export class AuthService {
       throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
     }
     this.assertPasswordPolicy(password);
+    await this.assertAdmitted(normalizedEmail, 'admin-create');
     const suppliedName = (name ?? '').trim();
     const displayName = suppliedName || normalizedEmail.split('@')[0] || normalizedEmail;
     const passwordHash = await hashPassword(password);
@@ -382,6 +413,7 @@ export class AuthService {
   ): Promise<{ id: string; email: string; name: string } | null> {
     const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) return null;
+    await this.assertAdmitted(normalizedEmail, 'embed');
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
     const user = await this.upsertUserByEmail(normalizedEmail, displayName);
     return { id: user.id, email: user.email, name: user.name };

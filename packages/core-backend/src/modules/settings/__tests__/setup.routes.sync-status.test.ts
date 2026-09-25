@@ -7,6 +7,7 @@ import { createSetupRoutes, type LastSyncStatus } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import type { Database } from '../../database/connection.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * The remote-sync facts on `GET /setup/status`: the address a hook calls and
@@ -41,6 +42,7 @@ function listen(isAdmin: boolean, last: LastSyncStatus | null) {
       settings,
       { isAdmin: async () => isAdmin } as IAdminAccessService,
       { runAll: async () => {} },
+      testKbContext(),
       { url: 'https://hexis.example.test/api/sync', lastSync: () => last },
     ),
   );

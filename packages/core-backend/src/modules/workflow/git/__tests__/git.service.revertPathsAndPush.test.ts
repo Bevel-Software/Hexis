@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -58,7 +59,7 @@ async function seed(root: string, branches: string[]): Promise<Fixture> {
     await runGit(repo, ['config', 'core.autocrlf', 'false']);
     repos[b] = repo;
   }
-  const svc = new GitService(stubWorkspaceService(dirs), stubWorkflowHooks(), KB);
+  const svc = new GitService(stubWorkspaceService(dirs), stubWorkflowHooks(), testKbContext({ kbDirName: KB }));
   return { upstream, base, repos, svc };
 }
 

@@ -1,11 +1,10 @@
 import type { Router, RequestHandler } from 'express';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import type { IToolRegistry, UtcpTool } from '../tool-registry/tool.contract.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { ToolContext } from '../tool-helpers/tool.contract.js';
 import { toolDef } from '../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IToolManualService } from './tool-manuals.contract.js';
 
@@ -42,6 +41,8 @@ export function registerToolManualsTools(
   deps: {
     accessControl: IAccessControl;
     variableStatus: VariableStatusPort;
+    /** Which branch tools are served from, and its clone. */
+    kb: Pick<KbContext, 'defaultBranch' | 'defaultWorkspaceId'>;
   },
 ): void {
   registry.registerExternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
@@ -57,9 +58,9 @@ export function registerToolManualsTools(
 
   // A FUNCTION, not a constant — this factory runs at boot, and on a
   // setup-screen deployment the branch model is applied AFTER boot. Only a
-  // read inside a handler body sees the configured `DEFAULT_BRANCH`; a
+  // read inside a handler body sees the configured default branch; a
   // construction-time capture would hold the empty pre-setup id until restart.
-  const defaultWs = () => workspaceIdForBranch(DEFAULT_BRANCH);
+  const defaultWs = () => deps.kb.defaultWorkspaceId();
   const varKey = (manualName: string, varName: string) => utcpNamespacedKey(manualName, varName);
 
   const listSetupDef = toolDef({
@@ -235,9 +236,9 @@ export function registerToolManualsTools(
         onBranchOnly,
         note:
           `${onBranchOnly.map((p) => `\`${p.name}\``).join(', ')} ${onBranchOnly.length === 1 ? 'is' : 'are'} declared on ` +
-          `\`${branch}\` only. Tools are served from \`${DEFAULT_BRANCH}\`, so ${onBranchOnly.length === 1 ? 'it stays' : 'they stay'} ` +
+          `\`${branch}\` only. Tools are served from \`${deps.kb.defaultBranch}\`, so ${onBranchOnly.length === 1 ? 'it stays' : 'they stay'} ` +
           'unlisted, uncallable and without a sign-in until that branch is merged: open a change request with ' +
-          `\`open_change_request\` (target \`${DEFAULT_BRANCH}\`), then ask the user to review and merge it in the app.`,
+          `\`open_change_request\` (target \`${deps.kb.defaultBranch}\`), then ask the user to review and merge it in the app.`,
       };
     }),
   );

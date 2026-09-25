@@ -1,7 +1,12 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { descriptorsFromMcpJson, judgeMcpServerEntry } from '../mcp-json-discovery.js';
 
 afterEach(() => vi.restoreAllMocks());
+
+/** The reader under the default layout, which these cases are written against. */
+const fromMcpJson = (folder: string, mcpJson: string, manifest: string | null) =>
+  descriptorsFromMcpJson(folder, mcpJson, manifest, DEFAULT_KB_LAYOUT);
 
 describe('judgeMcpServerEntry', () => {
   it('keeps every accepted header and env key — one spelled __proto__ included', () => {
@@ -44,7 +49,7 @@ const MANIFEST = JSON.stringify({
 
 describe('descriptorsFromMcpJson', () => {
   it('synthesizes descriptors keyed by server name, path at mcp.json', () => {
-    const out = descriptorsFromMcpJson(
+    const out = fromMcpJson(
       'GTM',
       JSON.stringify({ mcpServers: { notion: { type: 'streamable-http', url: 'https://mcp.notion.com/mcp' } } }),
       null,
@@ -63,7 +68,7 @@ describe('descriptorsFromMcpJson', () => {
   it('refuses an sse server rather than rebuilding it as a transport it is not', () => {
     // The pinned MCP client has no sse transport; emitting `http` for an sse
     // server configures a handshake the server does not speak.
-    const out = descriptorsFromMcpJson(
+    const out = fromMcpJson(
       'GTM',
       JSON.stringify({ mcpServers: { legacy: { type: 'sse', url: 'https://mcp.legacy.example/sse' } } }),
       null,
@@ -72,7 +77,7 @@ describe('descriptorsFromMcpJson', () => {
   });
 
   it('merges extension auth over mcp.json literals and carries variables + description', () => {
-    const out = descriptorsFromMcpJson(
+    const out = fromMcpJson(
       'GTM',
       JSON.stringify({
         mcpServers: { vendor: { type: 'streamable-http', url: 'https://v.example/mcp', headers: { 'X-V': '2' } } },
@@ -87,7 +92,7 @@ describe('descriptorsFromMcpJson', () => {
   });
 
   it('marks extension-flagged servers and every stdio server local-only', () => {
-    const out = descriptorsFromMcpJson(
+    const out = fromMcpJson(
       'GTM',
       JSON.stringify({
         mcpServers: {
@@ -105,7 +110,7 @@ describe('descriptorsFromMcpJson', () => {
 
   it('skips a malformed entry without losing its siblings', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const out = descriptorsFromMcpJson(
+    const out = fromMcpJson(
       'GTM',
       JSON.stringify({
         mcpServers: {
@@ -123,7 +128,7 @@ describe('descriptorsFromMcpJson', () => {
   it('ignores malformed extension headers instead of spreading them into keys', () => {
     // A string spread into the merge would scatter its indices ('0', '1', …)
     // into header names; a malformed extension must cost its own data only.
-    const out = descriptorsFromMcpJson(
+    const out = fromMcpJson(
       'GTM',
       JSON.stringify({
         mcpServers: { vendor: { type: 'streamable-http', url: 'https://v.example/mcp', headers: { 'X-V': '2' } } },
@@ -142,7 +147,7 @@ describe('descriptorsFromMcpJson', () => {
     // A dropped declaration would silently re-scope a credential (undeclared
     // defaults to the shared admin row), so a bad entry takes the SERVER
     // offline — never just the entry, and never its siblings.
-    const out = descriptorsFromMcpJson(
+    const out = fromMcpJson(
       'GTM',
       JSON.stringify({
         mcpServers: {
@@ -165,7 +170,7 @@ describe('descriptorsFromMcpJson', () => {
   it('applies the .tool declaration rules: no reserved names, no duplicates, gated OAuth URLs, string authParams', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const declare = (variables: unknown) =>
-      descriptorsFromMcpJson(
+      fromMcpJson(
         'GTM',
         JSON.stringify({ mcpServers: { vendor: { type: 'streamable-http', url: 'https://v.example/mcp' } } }),
         JSON.stringify({
@@ -197,7 +202,7 @@ describe('descriptorsFromMcpJson', () => {
   });
 
   it('trims a padded oauth clientId like the .tool parser does', () => {
-    const out = descriptorsFromMcpJson(
+    const out = fromMcpJson(
       'GTM',
       JSON.stringify({ mcpServers: { vendor: { type: 'streamable-http', url: 'https://v.example/mcp' } } }),
       JSON.stringify({
@@ -225,7 +230,7 @@ describe('descriptorsFromMcpJson', () => {
   it('accepts a client-id-only sign-in (endpoints discovered later), refuses half a pair, carries pkce/resource', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const declare = (oauth: unknown) =>
-      descriptorsFromMcpJson(
+      fromMcpJson(
         'GTM',
         JSON.stringify({ mcpServers: { vendor: { type: 'streamable-http', url: 'https://v.example/mcp' } } }),
         JSON.stringify({
@@ -262,9 +267,9 @@ describe('descriptorsFromMcpJson', () => {
 
   it('yields nothing for an unparsable file, quietly for an absent extensions block', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    expect(descriptorsFromMcpJson('GTM', '{ not json', null)).toEqual([]);
+    expect(fromMcpJson('GTM', '{ not json', null)).toEqual([]);
     expect(
-      descriptorsFromMcpJson('GTM', JSON.stringify({ mcpServers: {} }), '{ also not json'),
+      fromMcpJson('GTM', JSON.stringify({ mcpServers: {} }), '{ also not json'),
     ).toEqual([]);
   });
 });

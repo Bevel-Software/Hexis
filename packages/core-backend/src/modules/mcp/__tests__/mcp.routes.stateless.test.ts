@@ -108,7 +108,7 @@ describe('POST /mcp (stateless)', () => {
     expect((await messagesOf(res))[0].result.serverInfo.name).toBe('stub');
     // The messages reach the service, so it can tell an initialize apart.
     expect(mcpService.createRequestServer).toHaveBeenCalledWith(
-      { userId: 'user-A', tokenId: null, bearer: '' },
+      { userId: 'user-A', tokenId: null, connectionId: null, bearer: '' },
       INITIALIZE,
     );
   });

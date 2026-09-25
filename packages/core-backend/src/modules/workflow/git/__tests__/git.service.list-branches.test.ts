@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -82,7 +83,7 @@ describe('GitService.listBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     const branches = await svc.listBranches(workspaceId);
@@ -101,7 +102,7 @@ describe('GitService.listBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     const branches = await svc.listBranches(workspaceId);
@@ -115,7 +116,7 @@ describe('GitService.listBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     // Prime the cache: first call fetches and populates lastImplicitFetchAt.
     await svc.listBranches(workspaceId);
@@ -131,7 +132,7 @@ describe('GitService.listBranches', () => {
     const freshSvc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     const branches = await freshSvc.listBranches(workspaceId);
     expect(branches.map((b) => b.name)).toContain('bob/draft-two');
@@ -145,7 +146,7 @@ describe('GitService.listBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     // Should not throw and should return the refs we already had on disk.
@@ -159,7 +160,7 @@ describe('GitService.listBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     // current-company-state is the workspace clone's checked-out branch (the
@@ -179,7 +180,7 @@ describe('GitService.listBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     // Simulate a just-completed clone — the workspace is freshly fetched.
     svc.noteWorkspaceFetched(workspaceId);
@@ -205,7 +206,7 @@ describe('GitService.listBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     const seen: string[][] = [];
     svc.setBranchesListedListener((names) => seen.push(names));
@@ -222,7 +223,7 @@ describe('GitService.listBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     svc.setBranchesListedListener(() => { throw new Error('listener blew up'); });
 

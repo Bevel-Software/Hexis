@@ -57,16 +57,16 @@ import type {
   RemoteSyncPullResult,
 } from '@bevel-software/platform-shared';
 import {
-  isProtectedBranch,
-  DEFAULT_BRANCH,
   isFolderPlaceholder,
   folderPlaceholderPath,
   isPlatformRestoreShape,
 } from '@bevel-software/platform-shared';
+import type { KbContext } from '../../shared/kb-context.js';
 import { and, eq, inArray, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
 import type { GitService } from './git/git.service.js';
+import { redactSecret } from '../../shared/redact-secret.js';
 import type { PullRequestService } from './git/pull-request.service.js';
 import type { IReviewWorkflowService } from './review-workflow/review-workflow.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
@@ -156,12 +156,13 @@ export function syncConflictMessage(branch: string, conflictedPaths: string[]): 
 /** How many conflicted files the sync-conflict sentence names before "and N more". */
 const SYNC_CONFLICT_FILES_NAMED = 3;
 
-/** Redact the shared GitHub token from any error string before surfacing it. */
-function redactTokens(msg: string): string {
-  const tokens = [process.env.GITHUB_TOKEN, process.env.GH_TOKEN].filter(
-    (t): t is string => !!t && t.length > 0,
-  );
-  return tokens.reduce((m, t) => m.replaceAll(t, '***'), msg);
+/**
+ * Redact a git token from an error string before surfacing it: the one the
+ * knowledge base's runner authenticates with, plus whatever the environment
+ * holds (`redactSecret` names those itself).
+ */
+function redactTokens(msg: string, token: string | null | undefined): string {
+  return redactSecret(msg, [token]);
 }
 
 /**
@@ -275,6 +276,10 @@ export class WorkflowService implements IWorkflowService {
    * implementation detail of the workflow auto-merge story; nothing outside
    * the facade should call it directly.
    */
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
+  }
+
   constructor(
     private readonly db: Database,
     private readonly git: GitService,
@@ -291,7 +296,7 @@ export class WorkflowService implements IWorkflowService {
      * See `lock-decoupling-plan.md` for the full design.
      */
     private readonly pendingCommits: PendingCommitsService,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
     /**
      * The read-before-write gate `acquireLock` asks on every branch (see
      * `access-model/change-gate.ts`). Required, and checked at construction:
@@ -419,7 +424,7 @@ export class WorkflowService implements IWorkflowService {
     fn: () => Promise<T>,
   ): Promise<T> {
     const keys = [`branch:${source}`];
-    if (!isProtectedBranch(target)) keys.push(`branch:${target}`);
+    if (!this.kb.isProtectedBranch(target)) keys.push(`branch:${target}`);
     return this.branchLifecycle.runAll(keys, fn);
   }
 
@@ -573,8 +578,9 @@ export class WorkflowService implements IWorkflowService {
    */
   private async pullWorkspace(workspaceId: string): Promise<boolean> {
     const { treeChanged } = await this.git.pull(workspaceId);
-    if (treeChanged && branchForWorkspaceId(workspaceId) === DEFAULT_BRANCH) {
-      this.events?.emit({ kind: 'fs-tree-changed', workspaceId, branch: DEFAULT_BRANCH });
+    const defaultBranch = this.kb.defaultBranch;
+    if (treeChanged && branchForWorkspaceId(workspaceId) === defaultBranch) {
+      this.events?.emit({ kind: 'fs-tree-changed', workspaceId, branch: defaultBranch });
       return true;
     }
     return false;
@@ -961,7 +967,7 @@ export class WorkflowService implements IWorkflowService {
     // future caller can make that claim by passing a flag.
     if (
       typeof platformRestore?.source === 'string' &&
-      isPlatformRestoreShape(toRepoRelative(platformRestore.source), repoRelative) &&
+      isPlatformRestoreShape(toRepoRelative(platformRestore.source), repoRelative, this.kb.layout) &&
       (await this.accessControl.canRestorePlatformFile(workspaceId, userEmail, repoRelative))
     ) {
       return 'restore';
@@ -1037,7 +1043,7 @@ export class WorkflowService implements IWorkflowService {
     // coordination hold as write possession (see those methods).
     if (!opts?.coordination) {
       let via: 'granted' | 'restore' = 'granted';
-      if (isProtectedBranch(branch)) {
+      if (this.kb.isProtectedBranch(branch)) {
         // `assertCanWriteAtPath` throws AccessDeniedError on denial, with the
         // eligible-writers payload so the frontend can render a useful refusal.
         via = await this.assertCanWriteAtPath(
@@ -1760,7 +1766,7 @@ export class WorkflowService implements IWorkflowService {
       throw new WorkflowValidationError('source and target branches must differ');
     }
     if (!input.title?.trim()) throw new WorkflowValidationError('title is required');
-    if (isProtectedBranch(input.sourceBranch)) {
+    if (this.kb.isProtectedBranch(input.sourceBranch)) {
       throw new WorkflowValidationError(
         `Cannot open a change request *from* a protected branch ("${input.sourceBranch}").`,
         { kind: 'source-is-protected', sourceBranch: input.sourceBranch },
@@ -1898,7 +1904,7 @@ export class WorkflowService implements IWorkflowService {
       // up-to-date) auto-merge, and inserts the row.
       const rawMsg = err instanceof Error ? err.message : String(err);
       throw new WorkflowValidationError(
-        `Failed to open change request: ${redactTokens(rawMsg)}`,
+        `Failed to open change request: ${redactTokens(rawMsg, this.git.credentials?.token())}`,
         { kind: 'open-change-request-failed' },
       );
     }
@@ -2852,7 +2858,7 @@ export class WorkflowService implements IWorkflowService {
 
     let live: Set<string>;
     try {
-      const branches = await this.git.listBranches(workspaceIdForBranch(DEFAULT_BRANCH), {
+      const branches = await this.git.listBranches(this.kb.defaultWorkspaceId(), {
         freshFetch: true,
         // The list is used to PROVE absence, and the listing's normal
         // degrade-to-stale behaviour would report every branch created since
@@ -3167,8 +3173,8 @@ export class WorkflowService implements IWorkflowService {
     // outright if it disagrees with the request's own base.) The failure the
     // pull reports is about OTHER people's commits not arriving, which leaves
     // the catalogs no staler than they were.
-    if (!announced && targetWorkspaceId && targetBranch === DEFAULT_BRANCH) {
-      this.events?.emit({ kind: 'fs-tree-changed', workspaceId: targetWorkspaceId, branch: DEFAULT_BRANCH });
+    if (!announced && targetWorkspaceId && targetBranch === this.kb.defaultBranch) {
+      this.events?.emit({ kind: 'fs-tree-changed', workspaceId: targetWorkspaceId, branch: targetBranch });
     }
   }
 
@@ -3235,7 +3241,7 @@ export class WorkflowService implements IWorkflowService {
           // change request's merge, nothing strips it here — so its presence
           // is what the hook refuses on) and both sides of a rename, since the
           // old name is a file this merge deletes.
-          authorize: isProtectedBranch(targetBranch)
+          authorize: this.kb.isProtectedBranch(targetBranch)
             ? async ({ sha, changedPaths }) => {
                 if (changedPaths.length === 0) return;
                 // roles.yaml never changes through a merge. A change request's
@@ -3446,7 +3452,7 @@ export class WorkflowService implements IWorkflowService {
         .where(eq(changeRequests.number, number))
         .limit(1);
       const sourceBranch = rows[0]?.sourceBranch;
-      if (!sourceBranch || isProtectedBranch(sourceBranch)) return;
+      if (!sourceBranch || this.kb.isProtectedBranch(sourceBranch)) return;
       // The open-check and the deletion hold the branch's lifecycle lock
       // TOGETHER — `openChangeRequest` holds the same lock across its own
       // check-then-insert, so a request being opened from this branch either
@@ -3621,7 +3627,7 @@ export class WorkflowService implements IWorkflowService {
       return stdout.split('\n').map((s) => s.trim()).filter(Boolean);
     } catch (err) {
       log.warn('listChangedPathsBetweenBranches failed:', {
-        detail: redactTokens(err instanceof Error ? err.message : String(err)),
+        detail: redactTokens(err instanceof Error ? err.message : String(err), this.git.credentials?.token()),
       });
       return [];
     }

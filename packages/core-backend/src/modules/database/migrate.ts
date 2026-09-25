@@ -2,7 +2,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('database');
-import type { Database } from './connection.js';
+import { DEFAULT_DB_SCHEMA, dbSchemaOf, type Database } from './connection.js';
 import { AdvisoryLock, withAdvisoryLock } from './advisory-lock.js';
 
 /*
@@ -38,13 +38,40 @@ import { AdvisoryLock, withAdvisoryLock } from './advisory-lock.js';
  * container takes to exit. See `advisory-lock.ts` for the mechanism.
  */
 
+/**
+ * Where a handle's migration ledger lives, and which lock guards its runs.
+ *
+ * The default schema keeps drizzle's own `drizzle` schema for the ledger,
+ * where every existing deployment already has one: naming `public` here
+ * would make the next boot read an empty ledger and re-apply plain DDL that
+ * is already applied. A knowledge base on a schema of its own keeps its
+ * ledger IN that schema, so the schema is the whole of the tenant: what
+ * `pg_dump -n` carries out includes what has been applied to it, and the
+ * dedicated deployment it is restored into resumes from there rather than
+ * from nothing. The lock is keyed the same way, so two tenants of one
+ * database migrate side by side while two processes of one tenant still
+ * take turns.
+ */
+function ledgerOptions(db: Database): { migrationsSchema?: string; tenantKey: string } {
+  const schema = dbSchemaOf(db);
+  return schema === DEFAULT_DB_SCHEMA
+    ? { tenantKey: '' }
+    : { migrationsSchema: schema, tenantKey: schema };
+}
+
 /** Apply the CORE migration history from `folder`, tracked in `__drizzle_migrations_core`. */
 export async function runCoreMigrations(db: Database, folder: string): Promise<void> {
-  await withAdvisoryLock(db, AdvisoryLock.Migrations, async () => {
-    log.info('Running core database migrations...');
-    await migrate(db, { migrationsFolder: folder, migrationsTable: '__drizzle_migrations_core' });
-    log.info('Core migrations complete.');
-  });
+  const { migrationsSchema, tenantKey } = ledgerOptions(db);
+  await withAdvisoryLock(
+    db,
+    AdvisoryLock.Migrations,
+    async () => {
+      log.info('Running core database migrations...');
+      await migrate(db, { migrationsFolder: folder, migrationsTable: '__drizzle_migrations_core', migrationsSchema });
+      log.info('Core migrations complete.');
+    },
+    { tenantKey },
+  );
 }
 
 /**
@@ -53,12 +80,19 @@ export async function runCoreMigrations(db: Database, folder: string): Promise<v
  * enterprise tables FK into core tables.
  */
 export async function runEnterpriseMigrations(db: Database, folder: string): Promise<void> {
-  await withAdvisoryLock(db, AdvisoryLock.Migrations, async () => {
-    log.info('Running enterprise database migrations...');
-    await migrate(db, {
-      migrationsFolder: folder,
-      migrationsTable: '__drizzle_migrations_enterprise',
-    });
-    log.info('Enterprise migrations complete.');
-  });
+  const { migrationsSchema, tenantKey } = ledgerOptions(db);
+  await withAdvisoryLock(
+    db,
+    AdvisoryLock.Migrations,
+    async () => {
+      log.info('Running enterprise database migrations...');
+      await migrate(db, {
+        migrationsFolder: folder,
+        migrationsTable: '__drizzle_migrations_enterprise',
+        migrationsSchema,
+      });
+      log.info('Enterprise migrations complete.');
+    },
+    { tenantKey },
+  );
 }

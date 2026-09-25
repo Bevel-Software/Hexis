@@ -1,5 +1,4 @@
 import {
-  DEFAULT_BRANCH,
   joinBranchFor,
   type AuthUser,
   type ChangeRequestState,
@@ -9,8 +8,8 @@ import { spliceGrant } from '../access-model/access-splice.js';
 import { sanitizeError } from '../workflow/sanitize-error.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { pluginsWorkspaceId } from './plugins.service.js';
 import type {
   ClaimedJoinRequest,
   JoinRequestRecord,
@@ -148,7 +147,8 @@ export interface JoinRequestJobsDeps {
     | 'listChangeRequestsAuthoredBy'
   >;
   workspaceService: Pick<WorkspaceService, 'getOrCreateForBranch' | 'readFile' | 'writeFile'>;
-  kbDirName: string;
+  /** The checkout folder, and which branch the request is cut from and aimed at. */
+  kb: Pick<KbContext, 'kbDirName' | 'defaultBranch' | 'defaultWorkspaceId'>;
   /**
    * The plugin a recorded key still names, or null when nothing does — it was
    * deleted, or its folder moved out from under the record.
@@ -508,7 +508,8 @@ export class PluginJoinRequestJobs {
     claim: ClaimedJoinRequest,
     stillOurs: () => Promise<void>,
   ): Promise<void> {
-    const { workflow, workspaceService, kbDirName } = this.deps;
+    const { workflow, workspaceService, kb } = this.deps;
+    const { kbDirName } = kb;
     const target = await this.deps.target(record.pluginKey);
     if (!target) throw new Error('the plugin is no longer available');
     const user = await this.deps.requester(record.requesterEmail);
@@ -607,7 +608,7 @@ export class PluginJoinRequestJobs {
     }
     const detail = await workflow.openChangeRequest(ws.id, user, {
       sourceBranch: branch,
-      targetBranch: DEFAULT_BRANCH,
+      targetBranch: kb.defaultBranch,
       // People read these: the display name, not the identifier.
       title: `Join request: ${target.displayName}`,
       description:
@@ -637,9 +638,9 @@ export class PluginJoinRequestJobs {
    * leaves the next click free to retry the same row.
    */
   private async ensureBranch(branch: string): Promise<void> {
-    const wsId = pluginsWorkspaceId();
+    const wsId = this.deps.kb.defaultWorkspaceId();
     try {
-      await this.deps.workflow.createBranch(wsId, branch, DEFAULT_BRANCH);
+      await this.deps.workflow.createBranch(wsId, branch, this.deps.kb.defaultBranch);
       return;
     } catch (err) {
       const branches = await this.deps.workflow.listBranches(wsId, {

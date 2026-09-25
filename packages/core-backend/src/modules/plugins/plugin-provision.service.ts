@@ -38,8 +38,6 @@ import type { IFsProbe } from '../../shared/fs.contract.js';
 import type { Discovery, PluginSource } from './discovery/plugin-source.js';
 
 import {
-  DEFAULT_BRANCH,
-  PLUGINS_DIR,
   PLUGIN_MANIFEST_FILE,
   PLUGIN_SKILLS_DIR,
   pluginDisplayNameOf,
@@ -52,6 +50,7 @@ import {
   validateFilename,
   type AuthUser,
 } from '@bevel-software/platform-shared';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { creatorPrincipal } from '../access-model/creator.js';
@@ -130,8 +129,14 @@ export class PluginProvisionError extends Error {
 }
 
 /** The one shape every provisioning answer has: the folder in both spellings, and where its skills go. */
-function provisioned(folder: string, name: string, displayName: string, created: boolean): ProvisionedPlugin {
-  const path = `${PLUGINS_DIR}/${folder}`;
+function provisioned(
+  pluginsDir: string,
+  folder: string,
+  name: string,
+  displayName: string,
+  created: boolean,
+): ProvisionedPlugin {
+  const path = `${pluginsDir}/${folder}`;
   return { folder, path, skillsDir: `${path}/${PLUGIN_SKILLS_DIR}`, name, displayName, created };
 }
 
@@ -150,12 +155,21 @@ export class PluginProvisionService {
     private readonly workspaceService: WorkspaceService,
     private readonly commits: ProvisionCommitDriver,
     private readonly accessControl: IAccessControl,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
     private readonly events: { emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void } | undefined,
     /** Which names are TAKEN is discovery's answer — the same one every catalog gets. */
     private readonly source: PluginSource,
     private readonly disk: IFsProbe,
   ) {}
+
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
+  }
+
+  /** The plugins root's name, read per use: a deployment may rename it from the setup screen. */
+  private get pluginsRoot(): string {
+    return this.kb.layout.pluginsDir;
+  }
 
   /**
    * Create `Plugins/<name>/` — or `Plugins/<parent>/<name>/` — for `user`.
@@ -227,7 +241,7 @@ export class PluginProvisionService {
       // `name` is the creator's own spelling, trimmed — the folder's leaf AND
       // the display name persisted for it, whether or not it equals either.
       await this.provision(user, folder, name, pluginAccessMd(user));
-      return provisioned(folder, pluginManifestName(name), name, true);
+      return provisioned(this.pluginsRoot, folder, pluginManifestName(name), name, true);
     });
   }
 
@@ -247,7 +261,7 @@ export class PluginProvisionService {
     if (segments.some((s) => validateFilename(s) !== null || s.startsWith('.'))) {
       throw new PluginProvisionError(`"${rawParent}" is not a folder name the knowledge base can carry.`, 422);
     }
-    const rel = `${PLUGINS_DIR}/${rawParent}`;
+    const rel = `${this.pluginsRoot}/${rawParent}`;
     // The personal namespace is the FIRST segment below the root — the same
     // structural rule as `isPersonalPluginDir`, applied to the parent and
     // everything under it. A `personal-*` folder there is a personal space
@@ -258,8 +272,8 @@ export class PluginProvisionService {
     }
     const wsId = await this.readyWorkspaceId();
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
-    if (!(await this.exactFolderExists(path.join(wsDir, this.kbDirName, PLUGINS_DIR), segments))) {
-      throw new PluginProvisionError(`There is no folder "${rawParent}" under ${PLUGINS_DIR}/.`, 404);
+    if (!(await this.exactFolderExists(path.join(wsDir, this.kbDirName, this.pluginsRoot), segments))) {
+      throw new PluginProvisionError(`There is no folder "${rawParent}" under ${this.pluginsRoot}/.`, 404);
     }
     // Judged against every folder discovery CLAIMS, not only the plugins it
     // lists: a twin skipped for its slug still owns its subtree, and a
@@ -288,7 +302,13 @@ export class PluginProvisionService {
     return this.creations.run(`plugin:${pluginManifestName(folder)}`, async () => {
       const existing = await this.existingFolder(folder);
       if (existing !== null) {
-        return provisioned(folder, pluginManifestName(folder), await this.persistedDisplayName(existing, folder), false);
+        return provisioned(
+          this.pluginsRoot,
+          folder,
+          pluginManifestName(folder),
+          await this.persistedDisplayName(existing, folder),
+          false,
+        );
       }
       try {
         await this.provision(user, folder, folder, personalAccessMd(user));
@@ -297,11 +317,17 @@ export class PluginProvisionService {
         // process, a checkout that appeared between check and write): the
         // folder existing is this method's success case, never its error.
         if (err instanceof PluginProvisionError && err.status === 409) {
-          return provisioned(folder, pluginManifestName(folder), await this.persistedDisplayName(folder, folder), false);
+          return provisioned(
+            this.pluginsRoot,
+            folder,
+            pluginManifestName(folder),
+            await this.persistedDisplayName(folder, folder),
+            false,
+          );
         }
         throw err;
       }
-      return provisioned(folder, pluginManifestName(folder), folder, true);
+      return provisioned(this.pluginsRoot, folder, pluginManifestName(folder), folder, true);
     });
   }
 
@@ -344,14 +370,14 @@ export class PluginProvisionService {
     if (!name || segments.some((s) => validateFilename(s) !== null || s.startsWith('.'))) {
       throw new PluginProvisionError('A plugin needs a name.', 422);
     }
-    if (isPersonalPluginDir(`${PLUGINS_DIR}/${name}`)) {
+    if (isPersonalPluginDir(`${this.pluginsRoot}/${name}`, this.kb.layout)) {
       // Personal folders are not plugins (the catalog never lists them), and
       // nobody deletes somebody's private shelf through the plugin door.
       throw new PluginProvisionError('Unknown plugin', 404);
     }
     const wsId = await this.readyWorkspaceId();
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
-    const pluginsDir = path.join(wsDir, this.kbDirName, PLUGINS_DIR);
+    const pluginsDir = path.join(wsDir, this.kbDirName, this.pluginsRoot);
     const folderDir = path.join(pluginsDir, ...segments);
     // Locked on the plugin's IDENTITY — the same key a creation of that name
     // takes — not on a slug of the folder path, which for a nested plugin is a
@@ -362,7 +388,7 @@ export class PluginProvisionService {
     // discovery refuses, as it does for creation. A folder discovery does not
     // list (no manifest at all) locks on its own slug — nothing else can
     // claim that identity either.
-    const identity = await this.discoveredIdentity(`${PLUGINS_DIR}/${name}`, segments[segments.length - 1]!);
+    const identity = await this.discoveredIdentity(`${this.pluginsRoot}/${name}`, segments[segments.length - 1]!);
     return this.creations.run(`plugin:${identity}`, async () => {
       // Exact spelling of EVERY component — the catalog hands the route the
       // on-disk spelling, so a mismatch means the plugin is gone (or was
@@ -393,8 +419,8 @@ export class PluginProvisionService {
         // deletion under it: one commit, one removed plugin.
         await this.commits.runPendingCommit(
           wsId,
-          DEFAULT_BRANCH,
-          `${this.kbDirName}/${PLUGINS_DIR}/${name}`,
+          this.kb.defaultBranch,
+          `${this.kbDirName}/${this.pluginsRoot}/${name}`,
           user,
           { systemAuthorized: true },
         );
@@ -412,7 +438,7 @@ export class PluginProvisionService {
       // The folder's rules left the access model — drop the resolver cache
       // so the very next check runs against a tree without them.
       this.accessControl.invalidate(wsId);
-      this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: DEFAULT_BRANCH });
+      this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
     });
   }
 
@@ -423,7 +449,7 @@ export class PluginProvisionService {
    */
   private async exactFolderExists(root: string, segments: string[]): Promise<boolean> {
     let dir = root;
-    let rel = PLUGINS_DIR;
+    let rel = this.pluginsRoot;
     for (const segment of segments) {
       const entries = await listDirOrIncomplete(this.disk, dir, rel);
       if (!entries?.some((e) => e.isDirectory() && e.name === segment)) return false;
@@ -440,7 +466,7 @@ export class PluginProvisionService {
   private async existingFolder(name: string, parent = ''): Promise<string | null> {
     const wsId = await this.readyWorkspaceId();
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
-    const rel = parent ? `${PLUGINS_DIR}/${parent}` : PLUGINS_DIR;
+    const rel = parent ? `${this.pluginsRoot}/${parent}` : this.pluginsRoot;
     // No Plugins/ root yet — nothing can collide.
     const children = await listDirOrIncomplete(this.disk, path.join(wsDir, this.kbDirName, rel), rel);
     if (!children) return null;
@@ -462,7 +488,7 @@ export class PluginProvisionService {
     const wsId = await this.readyWorkspaceId();
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
     const manifest = await this.disk.readJsonObject(
-      path.join(wsDir, this.kbDirName, PLUGINS_DIR, ...folder.split('/'), PLUGIN_MANIFEST_FILE),
+      path.join(wsDir, this.kbDirName, this.pluginsRoot, ...folder.split('/'), PLUGIN_MANIFEST_FILE),
     );
     return pluginDisplayNameOf(manifest) || fallback;
   }
@@ -519,7 +545,7 @@ export class PluginProvisionService {
    */
   private async provision(user: AuthUser, folder: string, leaf: string, accessMd: string): Promise<void> {
     const wsId = await this.readyWorkspaceId();
-    const folderPath = `${this.kbDirName}/${PLUGINS_DIR}/${folder}`;
+    const folderPath = `${this.kbDirName}/${this.pluginsRoot}/${folder}`;
     const wsRelPath = `${folderPath}/access.md`;
     try {
       // Exclusive create — the fs is the arbiter of a same-name race, not
@@ -558,7 +584,7 @@ export class PluginProvisionService {
       // rule this endpoint exists to carve through. The endpoint has already
       // authorized the write (any signed-in user, unused name, exclusive
       // create), so the per-user gate is skipped for exactly this commit.
-      await this.commits.runPendingCommit(wsId, DEFAULT_BRANCH, folderPath, user, {
+      await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, folderPath, user, {
         systemAuthorized: true,
       });
     } catch (err) {
@@ -569,7 +595,7 @@ export class PluginProvisionService {
       // so a concurrent writer's bytes can't be collateral.
       try {
         const wsDir = await this.workspaceService.getWorkspacePath(wsId);
-        const folderDir = path.join(wsDir, this.kbDirName, PLUGINS_DIR, folder);
+        const folderDir = path.join(wsDir, this.kbDirName, this.pluginsRoot, folder);
         await fs.rm(path.join(folderDir, 'access.md'), { force: true });
         await fs.rm(path.join(folderDir, PLUGIN_MANIFEST_FILE), { force: true });
         await fs.rmdir(folderDir).catch(() => {});
@@ -581,11 +607,11 @@ export class PluginProvisionService {
     // The folder's rules changed the access model — drop the resolver cache
     // so the very next check (the creator's first skill write) sees them.
     this.accessControl.invalidate(wsId);
-    this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: DEFAULT_BRANCH });
+    this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
   }
 
   private async readyWorkspaceId(): Promise<string> {
-    const ws = await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
+    const ws = await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch);
     return ws.id;
   }
 }

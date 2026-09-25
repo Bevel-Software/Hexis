@@ -13,6 +13,7 @@ import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { PluginLinkIndex } from '../plugin-links.js';
 import { PluginLinksService, PluginLinkError } from '../plugin-links.service.js';
 import type { ProvisionCommitDriver } from '../plugin-provision.service.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * Linking end to end over a real tree: the real resolver decides who may
@@ -94,9 +95,10 @@ describe('PluginLinksService', () => {
 
     const disk = new NodeFs();
     access = new AccessControlService(workspaceService, KB_DIR, disk);
-    skills = new SkillService(workspaceService, access, KB_DIR, disk);
-    index = new PluginLinkIndex(workspaceService, skills, access, KB_DIR, new KbPluginSource(disk));
-    svc = new PluginLinksService(workspaceService, driver, access, skills, index, KB_DIR);
+    const kb = testKbContext({ kbDirName: KB_DIR });
+    skills = new SkillService(workspaceService, access, kb, disk);
+    index = new PluginLinkIndex(workspaceService, skills, access, kb, new KbPluginSource(disk, kb));
+    svc = new PluginLinksService(workspaceService, driver, access, skills, index, kb);
   });
   afterEach(() => fs.rm(root, { recursive: true, force: true }));
 

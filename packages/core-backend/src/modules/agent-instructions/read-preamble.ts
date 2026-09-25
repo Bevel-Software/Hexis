@@ -1,7 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import { isAbsence, type IFsProbe } from '../../shared/fs.contract.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { PREAMBLE_FILE } from './compose.js';
@@ -43,11 +42,17 @@ export type PreambleWorkspace = Pick<WorkspaceService, 'getOrCreateForBranch' | 
  */
 export async function readAgentPreamble(
   workspace: PreambleWorkspace,
-  kbDirName: string,
+  kb: Pick<KbContext, 'kbDirName' | 'defaultBranch' | 'defaultWorkspaceId'>,
   disk: IFsProbe,
 ): Promise<string | null> {
-  await workspace.getOrCreateForBranch(DEFAULT_BRANCH);
-  const wsDir = await workspace.getWorkspacePath(workspaceIdForBranch(DEFAULT_BRANCH));
+  const { kbDirName, defaultBranch } = kb;
+  const notRegular = (kind: string): Error =>
+    new Error(
+      `${PREAMBLE_FILE} on branch "${defaultBranch}" is a ${kind}, not a regular file at its own place; ` +
+        'refusing to read it. Replace it with a plain markdown file in the repository folder.',
+    );
+  await workspace.getOrCreateForBranch(defaultBranch);
+  const wsDir = await workspace.getWorkspacePath(kb.defaultWorkspaceId());
   const abs = path.join(wsDir, kbDirName, PREAMBLE_FILE);
 
   const found = await disk.lstatOrNull(abs);
@@ -78,11 +83,4 @@ export async function readAgentPreamble(
   } finally {
     await handle.close();
   }
-}
-
-function notRegular(kind: string): Error {
-  return new Error(
-    `${PREAMBLE_FILE} on branch "${DEFAULT_BRANCH}" is a ${kind}, not a regular file at its own place; ` +
-      'refusing to read it. Replace it with a plain markdown file in the repository folder.',
-  );
 }

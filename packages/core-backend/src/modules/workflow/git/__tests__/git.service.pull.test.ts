@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -85,7 +86,7 @@ describe('GitService.pull', () => {
     const svc = new GitService(
       stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }),
       stubWorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await expect(svc.pull(workspaceId)).resolves.toEqual({ treeChanged: true });
@@ -128,7 +129,7 @@ describe('GitService.pull', () => {
     const svc = new GitService(
       stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }),
       stubWorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await expect(svc.pull(workspaceId)).resolves.toEqual({ treeChanged: true });
@@ -174,7 +175,7 @@ describe('GitService.pull', () => {
     const svc = new GitService(
       stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }),
       stubWorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await expect(svc.pull(workspaceId)).resolves.toEqual({ treeChanged: true });
@@ -219,7 +220,7 @@ describe('GitService.pull', () => {
     const svc = new GitService(
       stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }),
       stubWorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await expect(svc.pull(workspaceId)).resolves.toEqual({ treeChanged: true });
@@ -247,7 +248,7 @@ describe('GitService.pull', () => {
     const svc = new GitService(
       stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }),
       stubWorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await expect(svc.pull(workspaceId)).resolves.toEqual({ treeChanged: false });
@@ -269,7 +270,7 @@ describe('GitService.pull', () => {
     const svc = new GitService(
       stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }),
       stubWorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await expect(svc.pull(workspaceId)).resolves.toEqual({ treeChanged: false });
@@ -311,7 +312,7 @@ describe('GitService.pull', () => {
     const svc = new GitService(
       stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }),
       stubWorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     const err = await svc.pull(workspaceId).then(() => null).catch((e: unknown) => e);
@@ -338,7 +339,7 @@ describe('GitService.pull', () => {
     const svc = new GitService(
       stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }),
       stubWorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await expect(svc.hasUnpushedCommits(workspaceId)).resolves.toBe(false);

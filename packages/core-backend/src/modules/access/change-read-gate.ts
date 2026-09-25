@@ -15,8 +15,9 @@
  */
 
 import path from 'node:path';
-import { creatableRootDirNames } from '@bevel-software/platform-shared';
+import { creatableRootDirNames, type KbLayout } from '@bevel-software/platform-shared';
 import type { IFsProbe } from '../../shared/fs.contract.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from './access-control.interface.js';
 import { AccessConfigError, AccessDeniedError } from '../access-model/access-errors.js';
@@ -39,10 +40,11 @@ export async function isNewTopLevelFolderPath(
   kbRel: string,
   kind: ChangeTargetKind,
   exists: (kbRel: string) => Promise<boolean>,
+  layout: KbLayout,
 ): Promise<boolean> {
   const segments = kbRel.split('/');
   const root = segments[0];
-  if (root === undefined || !creatableRootDirNames().has(root)) return false;
+  if (root === undefined || !creatableRootDirNames(layout).has(root)) return false;
   if (segments.length < (kind === 'dir' ? 2 : 3)) return false;
   return !(await exists(`${root}/${segments[1]}`));
 }
@@ -51,9 +53,13 @@ export class ChangeReadGate implements IChangeReadGate {
   constructor(
     private readonly workspaceService: Pick<WorkspaceService, 'getWorkspacePath'>,
     private readonly accessControl: Pick<IAccessControl, 'canRead' | 'holdsAdminRootWrite'>,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
     private readonly disk: IFsProbe,
   ) {}
+
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
+  }
 
   async judge(
     workspaceId: string,
@@ -88,7 +94,7 @@ export class ChangeReadGate implements IChangeReadGate {
           return { allowed: true, via: 'admin-rescue' };
         }
       }
-      if (await isNewTopLevelFolderPath(rel, kind, exists)) {
+      if (await isNewTopLevelFolderPath(rel, kind, exists, this.kb.layout)) {
         return { allowed: true, via: 'new-top-level-folder' };
       }
       if (await this.accessControl.canRead(workspaceId, userEmail, rel)) {

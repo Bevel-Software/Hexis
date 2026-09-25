@@ -13,6 +13,7 @@ import { ToolManualService } from '../tool-manuals.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * THE TWO HTTP SURFACES, over a real catalog.
@@ -80,9 +81,9 @@ async function baseUrlAs(email: string | undefined): Promise<{ base: string; ser
   const service = new ToolManualService(
     workspaceService,
     accessControl,
-    KB_DIR,
+    testKbContext({ kbDirName: KB_DIR }),
     disk,
-    new KbPluginSource(disk),
+    new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
     () => clock,
   );
   const app = express();
@@ -98,6 +99,7 @@ async function baseUrlAs(email: string | undefined): Promise<{ base: string; ser
   app.use(
     '/api',
     createSecretsVaultRoutes({
+      kb: testKbContext({ kbDirName: KB_DIR }),
       secretsVault: { statusFor: async () => [] } as unknown as Parameters<
         typeof createSecretsVaultRoutes
       >[0]['secretsVault'],

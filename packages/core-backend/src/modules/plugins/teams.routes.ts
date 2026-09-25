@@ -2,12 +2,17 @@ import express from 'express';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('teams');
-import { isPersonalPluginDir, isPersonalPluginFolder, pluginOfPath } from '@bevel-software/platform-shared';
+import {
+  isPersonalPluginDir,
+  isPersonalPluginFolder,
+  pluginOfPath,
+  type KbLayout,
+} from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../access/access-control.interface.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { ISkillService } from '../skills/skills.contract.js';
 import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
 import type { IPluginIndexService, PluginCatalogEntry } from './plugins.contract.js';
-import { pluginsWorkspaceId } from './plugins.service.js';
 
 /**
  * What one team can use, by id — the Library's "Your teams" lens.
@@ -51,6 +56,8 @@ export function createTeamsRoutes(
   pluginIndex: IPluginIndexService,
   skillService: Pick<ISkillService, 'listSkills'>,
   toolManuals: Pick<IToolManualService, 'listAllSummaries'>,
+  /** The released branch's clone the verdicts are read from, and the layout that names the plugins root. */
+  kb: Pick<KbContext, 'defaultWorkspaceId' | 'layout'>,
 ): express.Router {
   const router = express.Router();
 
@@ -61,7 +68,7 @@ export function createTeamsRoutes(
       return;
     }
     try {
-      const wsId = pluginsWorkspaceId();
+      const wsId = kb.defaultWorkspaceId();
       const [{ groups }, catalog, allSkills, allTools] = await Promise.all([
         accessControl.kbPrincipals(wsId),
         pluginIndex.catalog(),
@@ -73,9 +80,10 @@ export function createTeamsRoutes(
       // be a team's to read — whatever a hand-written grant in there says.
       // One rule for the plugin and for its contents, so the two cannot
       // disagree.
-      const plugins = catalog.filter((g) => !g.folders.every(isPersonalPluginDir));
-      const skills = allSkills.filter((s) => !inPersonalPlugin(s.path));
-      const tools = allTools.filter((t) => !inPersonalPlugin(t.path));
+      const layout = kb.layout;
+      const plugins = catalog.filter((g) => !g.folders.every((f) => isPersonalPluginDir(f, layout)));
+      const skills = allSkills.filter((s) => !inPersonalPlugin(s.path, layout));
+      const tools = allTools.filter((t) => !inPersonalPlugin(t.path, layout));
       const folderProbes = plugins.flatMap((g) => g.folders);
       const discoverProbes = folderProbes.map(accessMdOf);
       const skillProbes = skills.map((s) => skillMdOf(s.path));
@@ -123,7 +131,7 @@ export function createTeamsRoutes(
 const accessMdOf = (folder: string) => `${folder}/access.md`;
 const skillMdOf = (skillPath: string) => `${skillPath}/SKILL.md`;
 /** Under `Plugins/personal-<id>/…` — one person's space, whatever it grants. */
-const inPersonalPlugin = (repoPath: string) => {
-  const folder = pluginOfPath(repoPath);
+const inPersonalPlugin = (repoPath: string, layout: KbLayout) => {
+  const folder = pluginOfPath(repoPath, layout);
   return folder !== null && isPersonalPluginFolder(folder);
 };

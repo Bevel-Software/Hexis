@@ -3,7 +3,8 @@ import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_BRANCH, DEFAULT_KB_LAYOUT, configureKbLayout } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../../access/access-control.service.js';
@@ -46,7 +47,8 @@ describe('bundle dialect, end to end', () => {
   };
 
   beforeEach(async () => {
-    configureKbLayout({ knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' });
+    // The customer's root names, read by every consumer through one context.
+    const kb = testKbContext({ kbDirName: KB_DIR, layout: { knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' } });
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-dialect-'));
     repo = path.join(root, wsId, KB_DIR);
     const workspaceService = {
@@ -94,17 +96,16 @@ describe('bundle dialect, end to end', () => {
     );
 
     const disk = new NodeFs();
-    const source = new KbPluginSource(disk);
-    access = new AccessControlService(workspaceService, KB_DIR, disk);
-    skills = new SkillService(workspaceService, access, KB_DIR, disk);
-    tools = new ToolManualService(workspaceService, access, KB_DIR, disk, source);
-    links = new PluginLinkIndex(workspaceService, skills, access, KB_DIR, source);
-    index = new PluginIndexService(workspaceService, access, skills, tools, KB_DIR, source, Date.now, links);
-    compiler = new MarketplaceCompilerService(workspaceService, access, skills, links, KB_DIR, { name: 'acme', owner: 'Acme' }, source, disk, new NodeGitRunner());
-    linkService = new PluginLinksService(workspaceService, { runPendingCommit: async () => undefined }, access, skills, links, KB_DIR);
+    const source = new KbPluginSource(disk, kb);
+    access = new AccessControlService(workspaceService, KB_DIR, disk, [], new NodeGitRunner(), kb);
+    skills = new SkillService(workspaceService, access, kb, disk);
+    tools = new ToolManualService(workspaceService, access, kb, disk, source);
+    links = new PluginLinkIndex(workspaceService, skills, access, kb, source);
+    index = new PluginIndexService(workspaceService, access, skills, tools, kb, source, Date.now, links);
+    compiler = new MarketplaceCompilerService(workspaceService, access, skills, links, kb, { name: 'acme', owner: 'Acme' }, source, disk, new NodeGitRunner());
+    linkService = new PluginLinksService(workspaceService, { runPendingCommit: async () => undefined }, access, skills, links, kb);
   });
   afterEach(async () => {
-    configureKbLayout({ ...DEFAULT_KB_LAYOUT });
     await fs.rm(root, { recursive: true, force: true });
   });
 

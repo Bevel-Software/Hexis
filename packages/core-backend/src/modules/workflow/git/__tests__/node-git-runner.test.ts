@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { NodeGitRunner } from '../node-git-runner.js';
-import { GitRunError, isGitTimeout } from '../../../../shared/git.contract.js';
+import { GitRunError, gitCredentials, isGitTimeout } from '../../../../shared/git.contract.js';
 
 /**
  * These run REAL git, like the rest of this module's suites: the behaviours
@@ -94,10 +94,48 @@ describe('NodeGitRunner', () => {
     expect(true).toBe(true);
   });
 
-  it('keeps the configured git token out of failures', async () => {
-    const runner = new NodeGitRunner();
+  /**
+   * The helper the runner's callers stamp into a clone, reduced to the one
+   * thing under test here: what `$GITHUB_TOKEN` is in the child. `credential
+   * fill` runs it through git's own shell and prints what it answered, which
+   * is the same path a push takes to its password.
+   */
+  const ECHO_TOKEN_HELPER = `!f() { printf '%s\\n' "username=u" "password=\${GITHUB_TOKEN-none}"; }; f`;
+  const fill = (runner: NodeGitRunner, env?: NodeJS.ProcessEnv) =>
+    runner.run(dir, ['-c', `credential.helper=${ECHO_TOKEN_HELPER}`, 'credential', 'fill'], {
+      input: 'protocol=https\nhost=example.test\n\n',
+      env,
+    });
+
+  it('hands its token to the child, where the helper reads it, and never puts it in argv', async () => {
+    const runner = new NodeGitRunner(undefined, gitCredentials('x-access-token', 'ghp_child_secret'));
+    const { stdout } = await fill(runner);
+    expect(stdout).toContain('password=ghp_child_secret');
+  });
+
+  it('drops a token this process inherited: only the credentials in effect reach git', async () => {
     const previous = process.env.GITHUB_TOKEN;
-    process.env.GITHUB_TOKEN = 'ghp_secret_value_here';
+    process.env.GITHUB_TOKEN = 'ghp_stale_in_process_env';
+    try {
+      const { stdout } = await fill(new NodeGitRunner());
+      expect(stdout).toContain('password=none');
+      expect(stdout).not.toContain('ghp_stale_in_process_env');
+    } finally {
+      if (previous === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previous;
+    }
+  });
+
+  it('lets a per-call environment entry win over its own token: the setup probe checks the token it was given', async () => {
+    const runner = new NodeGitRunner(undefined, gitCredentials('x-access-token', 'ghp_in_effect'));
+    const { stdout } = await fill(runner, { GITHUB_TOKEN: 'ghp_being_checked' });
+    expect(stdout).toContain('password=ghp_being_checked');
+  });
+
+  it('keeps the configured git token out of failures', async () => {
+    const runner = new NodeGitRunner(undefined, gitCredentials('x-access-token', 'ghp_secret_value_here'));
+    const previous = process.env.GITHUB_TOKEN;
+    delete process.env.GITHUB_TOKEN;
     try {
       const err = await runner
         .run(dir, ['ls-remote', 'https://x-access-token:ghp_secret_value_here@127.0.0.1:1/r.git'], {

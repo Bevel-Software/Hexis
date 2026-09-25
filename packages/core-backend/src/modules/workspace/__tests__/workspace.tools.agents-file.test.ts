@@ -2,7 +2,8 @@ import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { DEFAULT_KB_LAYOUT, configureKbLayout } from '@bevel-software/platform-shared';
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
@@ -24,6 +25,8 @@ import { registerWorkspaceTools } from '../workspace.tools.js';
  * for it.
  */
 const KB_DIR = 'knowledge-base';
+/** The context the tools read; a case applies a deployment's own names to it. */
+const kb = testKbContext({ kbDirName: KB_DIR });
 
 /** Every workspace tool's description, keyed by name, under the layout in effect. */
 async function descriptions(registry: ToolRegistry = new ToolRegistry()): Promise<Map<string, string>> {
@@ -37,11 +40,11 @@ async function descriptions(registry: ToolRegistry = new ToolRegistry()): Promis
     new SpillStore(join(tmpdir(), 'bevel-test-spills')),
     new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')),
     {} as unknown as IAccessControl,
-    KB_DIR,
+    kb,
     {
       service: {} as never,
       enabled: false,
-      kbDirName: KB_DIR,
+      kb,
       recoveryBotEmail: 'recovery-bot@bevel.local',
       hooks: new WorkflowHooks(),
     },
@@ -57,7 +60,7 @@ async function listed(registry: ToolRegistry): Promise<Map<string, string>> {
   return new Map(tools.map((t) => [t.name, t.description ?? '']));
 }
 
-afterEach(() => configureKbLayout({ ...DEFAULT_KB_LAYOUT }));
+afterEach(() => kb.applyLayout({ ...DEFAULT_KB_LAYOUT }));
 
 describe('the conventions note every workspace tool carries', () => {
   it('names AGENTS.md, and CLAUDE.md beside it, under the default name', async () => {
@@ -71,7 +74,7 @@ describe('the conventions note every workspace tool carries', () => {
   });
 
   it('names the configured file first and the organisation\'s own AGENTS.md second', async () => {
-    configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+    kb.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
     const byName = await descriptions();
     const note = byName.get('grep') ?? '';
     expect(note).toContain('read `HEXIS.md` at the KB root, then `AGENTS.md` if it also exists');
@@ -83,7 +86,7 @@ describe('the conventions note every workspace tool carries', () => {
   });
 
   it('describes the platform files under the configured name, and no longer under AGENTS.md', async () => {
-    configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+    kb.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
     const byName = await descriptions();
     const stat = byName.get('file_stat') ?? '';
     expect(stat).toContain('`access.md`, `roles.yaml`, `.bevelignore`, `HEXIS.md`');
@@ -117,7 +120,7 @@ describe('the conventions note every workspace tool carries', () => {
     const atMount = await descriptions(registry);
     expect(atMount.get('grep')).toContain('read `AGENTS.md` at the KB root');
 
-    configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+    kb.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
 
     const now = await listed(registry);
     expect(now.get('grep')).toContain('read `HEXIS.md` at the KB root, then `AGENTS.md` if it also exists');

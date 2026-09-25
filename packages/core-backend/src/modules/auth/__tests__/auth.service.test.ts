@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '../../database/connection.js';
 import type { CoreConfig } from '../../../core-config.js';
 import { AuthService } from '../auth.service.js';
+import { AccountAdmissionRefusedError, type IAccountAdmission } from '../account-admission.js';
 import { hashPassword, verifyPassword } from '../password-hash.js';
 
 /**
@@ -603,5 +604,64 @@ describe('AuthService — the SSO domain allow-list', () => {
       'sup3r-secret',
     );
     expect(out.user.email).toBe('root@gmail.com');
+  });
+});
+
+describe('AuthService — the account admission port', () => {
+  const refusing: IAccountAdmission = {
+    canProvision: async () => ({ ok: false, message: 'No seat left on this plan' }),
+  };
+  const asked: Array<[string, string]> = [];
+  const recording: IAccountAdmission = {
+    canProvision: async (email, reason) => {
+      asked.push([email, reason]);
+      return { ok: true };
+    },
+  };
+
+  it('refuses a first SSO sign-in the port turns down, and inserts nothing', async () => {
+    // The lookup for an existing row answers empty: this is a new address (once per attempt).
+    const { db } = makeFakeDb([[], []]);
+    const svc = new AuthService(db, makeConfig(), refusing);
+    await expect(svc.loginWithSso('new@example.com', 'New')).rejects.toBeInstanceOf(AccountAdmissionRefusedError);
+    await expect(svc.loginWithSso('new@example.com', 'New')).rejects.toThrow('No seat left on this plan');
+    expect(vi.mocked(db.insert)).not.toHaveBeenCalled();
+  });
+
+  it('refuses an admin creating an account the port turns down, before any hash is stored', async () => {
+    const { db } = makeFakeDb([[]]);
+    const svc = new AuthService(db, makeConfig(), refusing);
+    await expect(svc.createAccount('new@example.com', 'New', 'a-long-enough-password')).rejects.toThrow(
+      'No seat left on this plan',
+    );
+    expect(vi.mocked(db.insert)).not.toHaveBeenCalled();
+  });
+
+  it('never asks about an address that already has an account, so a refusal cannot lock anyone out', async () => {
+    asked.length = 0;
+    const { db } = makeFakeDb([[{ id: ROW.id }], [ROW]]);
+    const svc = new AuthService(db, makeConfig(), refusing);
+    const { user } = await svc.loginWithSso('alice@example.com', 'Alice');
+    expect(user.email).toBe('alice@example.com');
+  });
+
+  it('names the path a new account arrives by, and admits when the port says so', async () => {
+    asked.length = 0;
+    const { db } = makeFakeDb([[], [ROW], [], [ROW]]);
+    const svc = new AuthService(db, makeConfig(), recording);
+    await svc.loginWithSso('alice@example.com', 'Alice');
+    await svc.createAccount('alice@example.com', 'Alice', 'a-long-enough-password');
+    expect(asked).toEqual([
+      ['alice@example.com', 'sso'],
+      ['alice@example.com', 'admin-create'],
+    ]);
+  });
+
+  it('admits everyone by default, without a lookup', async () => {
+    const { db } = makeFakeDb([[ROW]]);
+    const svc = new AuthService(db, makeConfig());
+    const { user } = await svc.loginWithSso('alice@example.com', 'Alice');
+    expect(user.email).toBe('alice@example.com');
+    expect(vi.mocked(db.select)).not.toHaveBeenCalled();
   });
 });

@@ -107,7 +107,13 @@ async function resolvedRealPath(absolutePath: string): Promise<string | null> {
  * Refuse a path under `rootDir` that names the git folder or resolves into it.
  *
  * `inputPath` is the caller's own spelling (checked lexically, encoded forms
- * included); `absolutePath` is where it lands on disk. Only the part below
+ * included, and probed on disk every way it could land — see
+ * {@link candidateTargets}); `absolutePath`, when a layer has already
+ * decided where the path goes, is that place, judged AS WELL. Both in one
+ * call, because the two answer different questions — a link reached by a
+ * reading this layer does not use is caught only by the spelling, a link the
+ * layer's own resolution follows only by the place — and one call walks the
+ * root once and probes a place that both name once. Only the part below
  * `rootDir` is judged, so a workspaces root that itself sits under some
  * `.git` directory does not refuse everything. A link that leaves the root
  * is judged on its target's path relative to the root, so a link into
@@ -118,8 +124,12 @@ export async function assertNotGitInternals(rootDir: string, inputPath: string, 
   assertNoGitInternalsSegment(inputPath);
   const root = path.resolve(rootDir);
   const realRoot = await resolvedRealPath(root);
-  const resolved = absolutePath !== undefined;
-  for (const target of resolved ? [absolutePath] : candidateTargets(root, inputPath)) {
+  // Each place once, remembering whether a layer resolved it (probed as
+  // given) or only a spelling named it (probed only inside the root).
+  const targets = new Map<string, boolean>();
+  for (const target of candidateTargets(root, inputPath)) targets.set(target, false);
+  if (absolutePath !== undefined) targets.set(absolutePath, true);
+  for (const [target, resolved] of targets) {
     const relative = path.relative(root, target);
     if (hasGitInternalsSegment(relative)) throw new GitInternalsError();
     if (realRoot === null) continue;

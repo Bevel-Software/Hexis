@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -59,7 +60,7 @@ describe('GitService.readFileAtRef', () => {
     return new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      PROCESS_MAP_DIR,
+      testKbContext({ kbDirName: PROCESS_MAP_DIR }),
     );
   }
 

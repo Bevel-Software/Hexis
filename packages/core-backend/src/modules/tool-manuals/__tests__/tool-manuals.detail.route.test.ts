@@ -16,6 +16,7 @@ import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { IToolManualService, ToolManualDetail } from '../tool-manuals.contract.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * `GET /api/tools/:slug` — the browser tool page's detail read. Two halves:
@@ -165,7 +166,7 @@ describe('ToolManualService.getDetail — capabilities + access', () => {
     canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, false])),
   } as unknown as IAccessControl;
 
-  const svc = (access: IAccessControl = allowAll) => new ToolManualService(workspaceService, access, KB_DIR, disk, new KbPluginSource(disk));
+  const svc = (access: IAccessControl = allowAll) => new ToolManualService(workspaceService, access, testKbContext({ kbDirName: KB_DIR }), disk, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })));
 
   /** Write one `.tool` into a fresh temp KB and return the service over it. */
   async function withTool(file: string, content: string): Promise<void> {

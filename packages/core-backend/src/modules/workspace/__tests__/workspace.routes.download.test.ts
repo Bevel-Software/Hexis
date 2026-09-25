@@ -2,6 +2,7 @@ import { get as httpGet, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { PathTraversalError } from '../../../shared/domain-errors.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
@@ -129,7 +130,7 @@ async function makeHarness(opts: {
     workflowService,
     eventBus,
     accessControl,
-    KB,
+    testKbContext({ kbDirName: KB }),
     stubCreatorAccess,
     // Not exercised here — only `.bevelignore`'s tree visibility consults it.
     { isAdmin: async () => false } as unknown as IAdminAccessService,

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
@@ -53,7 +54,7 @@ function makeService(canRestorePlatformFile: IAccessControl['canRestorePlatformF
     accessControl,
     { acquire, get: vi.fn(async () => null) } as unknown as FileLockService,
     {} as PendingCommitsService,
-    KB,
+    testKbContext({ kbDirName: KB }),
     openChangeGate(),
     new WorkflowEventBus(),
   );

@@ -12,6 +12,7 @@ import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
 import { PLATFORM_HEADER, TOOL_PREFIX_LINE } from '../../agent-instructions/index.js';
+import type { AgentEventInput, IAgentEventRecorder } from '../../audit/audit.contract.js';
 
 /**
  * End-to-end proxy test: a real express app serving the registry-driven tool
@@ -43,6 +44,10 @@ async function setup(deps?: {
   readAgentPreamble?: () => Promise<string | null>;
   /** Extra echo tools to register under these names (the four KB tools, in the prefix tests). */
   extraTools?: string[];
+  /** The Audit log's recorder, when a test watches what gets recorded. */
+  auditRecorder?: IAgentEventRecorder;
+  /** The agent connection an OAuth caller arrived through (with `tokenId: null`). */
+  connectionId?: string | null;
 }) {
   const registry = new ToolRegistry();
   registry.registerExternalTool(
@@ -91,6 +96,16 @@ async function setup(deps?: {
     res.json({ text: `echo: ${b.prompt}`, sessionId: typeof b.sessionId === 'string' ? b.sessionId : 'new-sess' });
   });
   app.post('/api/agent/tools/boom', (_req, res) => res.status(500).json({ error: 'kaboom' }));
+  // The two the Audit log's skill classification reads through: a catalog of
+  // one skill, and a file read that answers for any path (registered as
+  // tools only by the tests that need them, via `extraTools`).
+  app.post('/api/agent/tools/list_skills', (_req, res) =>
+    res.json({ skills: [{ name: 'rfi', description: 'RFI answers', path: 'Plugins/Sales/rfi' }] }),
+  );
+  app.post('/api/agent/tools/read_file', (req, res) => {
+    const b = (req.body ?? {}) as { path?: string };
+    res.json({ content: `contents of ${b.path}` });
+  });
   // A live UTCP manual a catalog entry can point at — one tool, dispatched back
   // to the echo above. Mounted always (it costs one route) so a test can add a
   // MANUAL to the served catalog, not merely a tool to the registry: what a
@@ -149,10 +164,11 @@ async function setup(deps?: {
     deps?.toolManuals as any,
     undefined, // internalTokens — the fake loopback here accepts any bearer
     deps?.revokeOAuthAccess,
+    deps?.auditRecorder,
   );
   lastService = mcp;
   const tokenId = deps?.tokenId === undefined ? 'tok-1' : deps.tokenId;
-  return connectClient(mcp, tokenId);
+  return connectClient(mcp, tokenId, deps?.connectionId ?? null);
 }
 
 /** The service `setup` built last — for a test that needs a SECOND request against the same service. */
@@ -165,9 +181,9 @@ let lastService: McpService | undefined;
  * The initialize message is passed so the server carries instructions,
  * exactly as the route's initialize request would.
  */
-async function connectClient(mcp: McpService, tokenId: string | null): Promise<Client> {
+async function connectClient(mcp: McpService, tokenId: string | null, connectionId: string | null = null): Promise<Client> {
   const server = await mcp.createRequestServer(
-    { userId: 'user-A', tokenId, bearer: 'bevel_testkey' },
+    { userId: 'user-A', tokenId, connectionId, bearer: 'bevel_testkey' },
     { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test-client', version: '0.0.0' } } },
   );
 
@@ -678,5 +694,106 @@ describe('McpService — a collision ends when its sibling is renamed away', () 
     expect(survivor.some((m) => m.includes('recent failure, not retried'))).toBe(false);
     expect(survivor.some((m) => m.includes('rewrites to'))).toBe(false);
     expect(survivor.some((m) => m.startsWith('[mcp] skipping manual "notion-eu": ') && !m.includes('rewrites to'))).toBe(true);
+  });
+});
+
+describe('McpService — the Audit log records what an agent calls', () => {
+  /** A recorder that keeps every event, and the same thing as the proxy's collaborator type. */
+  function spyRecorder(): IAgentEventRecorder & { events: AgentEventInput[] } {
+    const events: AgentEventInput[] = [];
+    return { events, record: (e) => void events.push(e) };
+  }
+  const text = (res: Awaited<ReturnType<Client['callTool']>>) => (res.content as Array<{ text: string }>)[0].text;
+  // Recording is fire-and-forget behind the call; give the microtasks a turn.
+  const settle = () => new Promise((r) => setTimeout(r, 10));
+
+  it('records a direct platform tool call as a hexis capability under the connection key, with its outcome', async () => {
+    const recorder = spyRecorder();
+    const client = await setup({ auditRecorder: recorder });
+
+    await client.callTool({ name: 'ask', arguments: { body: { prompt: 'hello' } } });
+    await client.callTool({ name: 'boom', arguments: {} });
+    await settle();
+
+    expect(recorder.events).toHaveLength(2);
+    expect(recorder.events[0]).toMatchObject({
+      userId: 'user-A',
+      principal: { kind: 'key', id: 'tok-1' },
+      kind: 'capability',
+      manual: null,
+      name: 'ask',
+      outcome: 'ok',
+    });
+    expect(typeof recorder.events[0].durationMs).toBe('number');
+    // The tool answered with an error result — recorded as such, not as ok.
+    expect(recorder.events[1]).toMatchObject({ kind: 'capability', name: 'boom', outcome: 'error' });
+  });
+
+  it('records a chain as a capability AND each call made inside it', async () => {
+    const recorder = spyRecorder();
+    const client = await setup({ auditRecorder: recorder });
+
+    await client.callTool({
+      name: 'call_tool_chain',
+      arguments: { code: "KNOWLEDGE_BASE.ask({ body: { prompt: 'one' } }); return KNOWLEDGE_BASE.ask({ body: { prompt: 'two' } });" },
+    });
+    await settle();
+
+    const names = recorder.events.map((e) => `${e.kind}:${e.name}:${e.outcome}`);
+    // The two inner calls finish (and are recorded) before the chain itself.
+    expect(names).toEqual(['capability:ask:ok', 'capability:ask:ok', 'capability:call_tool_chain:ok']);
+  });
+
+  it('attributes an OAuth caller to its agent connection, and records nothing for a caller with neither', async () => {
+    const asAgent = spyRecorder();
+    const agent = await setup({ auditRecorder: asAgent, tokenId: null, connectionId: 'conn-1' });
+    await agent.callTool({ name: 'ask', arguments: { body: { prompt: 'hi' } } });
+    await settle();
+    expect(asAgent.events[0]).toMatchObject({ principal: { kind: 'agent', id: 'conn-1' }, name: 'ask' });
+
+    const nobody = spyRecorder();
+    const jwt = await setup({ auditRecorder: nobody, tokenId: null, connectionId: null });
+    await jwt.callTool({ name: 'ask', arguments: { body: { prompt: 'hi' } } });
+    await settle();
+    expect(nobody.events).toEqual([]);
+  });
+
+  it('records a read inside a skill folder as that skill, and a read elsewhere as the read', async () => {
+    const recorder = spyRecorder();
+    const client = await setup({ auditRecorder: recorder, extraTools: ['read_file', 'list_skills'] });
+
+    await client.callTool({ name: 'read_file', arguments: { body: { path: 'Plugins/Sales/rfi/SKILL.md' } } });
+    await client.callTool({ name: 'read_file', arguments: { body: { path: 'KnowledgeBase/Product/roadmap.md' } } });
+    await settle();
+
+    expect(recorder.events[0]).toMatchObject({ kind: 'skill', manual: 'Plugins/Sales/rfi', name: 'rfi', outcome: 'ok' });
+    expect(recorder.events[1]).toMatchObject({ kind: 'capability', manual: null, name: 'read_file', outcome: 'ok' });
+  });
+
+  it('records a prompt read as a skill, with an error outcome when the skill is unknown', async () => {
+    const recorder = spyRecorder();
+    const client = await setup({ auditRecorder: recorder });
+    // The harness serves no get_skill endpoint, so every prompt is unknown here.
+    await expect(client.getPrompt({ name: 'rfi' })).rejects.toThrow(/Unknown skill/);
+    await settle();
+    expect(recorder.events[0]).toMatchObject({ kind: 'skill', name: 'rfi', outcome: 'error' });
+  });
+
+  it('records a call refused for a missing sign-in as denied, without running the tool', async () => {
+    const recorder = spyRecorder();
+    const vault = { statusFor: async (_u: string, keys: string[]) => keys.map((key) => ({ key, adminConfigured: false, userConfigured: false })) };
+    const manuals = {
+      userScopedKeysForManual: async (manual: string) =>
+        manual === 'KNOWLEDGE_BASE' ? [{ key: 'KNOWLEDGE_BASE_API_KEY', name: 'API_KEY', label: 'Your API key', oauth: false }] : [],
+    };
+    const client = await setup({ auditRecorder: recorder, secretsVault: vault, toolManuals: manuals });
+
+    const res = await client.callTool({ name: 'ask', arguments: { body: { prompt: 'hello' } } });
+    await settle();
+
+    expect(text(res)).not.toMatch(/echo:/);
+    expect(recorder.events).toEqual([
+      expect.objectContaining({ kind: 'capability', name: 'ask', outcome: 'denied', durationMs: null }),
+    ]);
   });
 });

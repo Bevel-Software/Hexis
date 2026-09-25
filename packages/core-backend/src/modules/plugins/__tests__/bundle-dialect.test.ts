@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -147,7 +148,7 @@ describe('bundle: what it says about itself survives', () => {
         }),
       );
       const warnings: string[] = [];
-      const plugin = await readBundlePlugin(dir, 'plugins/ado', 'ado', null, warnings, []);
+      const plugin = await readBundlePlugin(dir, 'plugins/ado', 'ado', null, warnings, [], DEFAULT_KB_LAYOUT);
       expect(plugin?.manifest).toEqual({
         name: 'ado',
         version: '1.3.5',

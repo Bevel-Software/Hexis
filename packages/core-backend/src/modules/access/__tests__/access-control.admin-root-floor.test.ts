@@ -21,6 +21,7 @@ import {
 import { createAccessRoutes } from '../access.routes.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * The Admin write floor at the repository root, and the eligible lists that
@@ -287,7 +288,7 @@ describe('Admin write floor at the repository root', () => {
           } as unknown as WorkflowService,
           { emit: () => {} } as unknown as WorkflowEventBus,
           usersDbDouble(),
-          KB,
+          testKbContext({ kbDirName: KB }),
         ),
       );
       server = await new Promise<Server>((resolve) => {
