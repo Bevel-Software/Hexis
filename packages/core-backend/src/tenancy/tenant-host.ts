@@ -177,8 +177,23 @@ export function createTenantHost(opts: TenantHostOptions): TenantHost {
     // Counted from here, before the graph is even asked for, until the
     // response closes however it ends — a 503 below included. An open
     // response is what keeps a tenant from being evicted from under it.
+    // Left exactly once: a client that dropped during the tenant lookup
+    // above has had its `close` already, and that event will not come
+    // again, so the socket is asked directly; a socket destroyed but not
+    // yet closed would otherwise be left twice, once here and once by the
+    // listener, taking another request's count with it.
     runtime.enter();
-    res.on('close', () => runtime.leave());
+    let left = false;
+    const leave = () => {
+      if (left) return;
+      left = true;
+      runtime.leave();
+    };
+    res.on('close', leave);
+    if (req.socket.destroyed) {
+      leave();
+      return;
+    }
     let graph: Awaited<ReturnType<TenantRuntime['handle']>> | null;
     try {
       graph = await within(runtime.handle(), activationWaitMs);

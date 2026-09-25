@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import express from 'express';
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
+import net, { type AddressInfo } from 'node:net';
 import type { TenantConfig } from '../../core-config.js';
 import { createTenantHost, isLoopbackAddress, selectTenant, type TenantHost } from '../tenant-host.js';
 import type { TenantGraph } from '../tenant-runtime.js';
@@ -209,6 +209,38 @@ describe('createTenantHost', () => {
     // The same path through a same-machine reverse proxy: decided by host.
     const proxied = await request(port, '/_tenant/globex/api/whoami', 'acme.test', { 'x-forwarded-for': '203.0.113.9' });
     expect(JSON.parse(proxied.body)).toEqual({ tenant: 'acme', path: '/_tenant/globex/api/whoami', unhandled: true });
+  });
+
+  it('does not count a client that dropped while its tenant was being looked up', async () => {
+    // A registry-backed source: the lookup is a real round trip, and the
+    // client is gone before it answers.
+    const slowSource: TenantSource = {
+      resolveByHost: async (host) => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return source.resolveByHost(host);
+      },
+      describe: (slug) => source.describe(slug),
+    };
+    const port = await listen(
+      createTenantHost({
+        source: slowSource,
+        process: { port: 0, nodeEnv: 'test', trustProxy: '' },
+        runtime: { activate: async (d) => ({ core: {}, app: tenantApp(d.slug) }) as unknown as TenantGraph, stop: async () => undefined },
+      }),
+    );
+    const socket = net.connect(port, '127.0.0.1');
+    await new Promise<void>((resolve) => socket.on('connect', resolve));
+    socket.write('GET /api/whoami HTTP/1.1\r\nHost: acme.test\r\n\r\n');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    socket.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const runtime = host!.runtimes().get('acme');
+    expect(runtime?.open).toBe(0);
+    // ...and a client that stays is still counted, and left once it goes.
+    const served = await request(port, '/api/whoami', 'acme.test');
+    expect(served.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runtime?.open).toBe(0);
   });
 
   it('keeps a tenant with an open response alive through the sweep, and lets it go once that response closes', async () => {
