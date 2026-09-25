@@ -51,14 +51,19 @@
 
 ## 8. Tenancy module, host, apps/server, docs (packages/core-backend, apps/server) — phase 5
 
-- [ ] 8.1 `src/tenancy/tenant-source.contract.ts`, `static-tenant-source.ts`, `tenant-secrets.ts` (HKDF-SHA256), `tenant-runtime.ts`, `tenant-host.ts`; exported from `index.ts`
-- [ ] 8.2 `modules/mcp/mcp.service.ts`: `loopbackHeaders` with `X-Hexis-Tenant`; the host honours it from loopback peers only
-- [ ] 8.3 `apps/server/src/main.ts` and `shell.ts`: multi-tenant mode behind `TENANTS_FILE`; shutdown evicts every active tenant
-- [ ] 8.4 Tests: runtime (activate once under concurrency, eviction stops everything, activation failure is 503 then retried), host (host to tenant, unknown host 404, loopback header only from 127.0.0.1); opt-in integration on `TEST_DATABASE_URL` with two tenants in one database
-- [ ] 8.5 `docs/multi-tenant.md`, rows in `docs/configuration.md`, `.env.example`, changeset
+- [x] 8.1 `src/tenancy/tenant-source.contract.ts`, `static-tenant-source.ts` (records, `tenantConfigFrom`, `tenantHostEnv`), `tenant-secrets.ts` (HKDF-SHA256), `tenant-runtime.ts`, `tenant-host.ts`; exported from `index.ts`
+- [x] 8.2 Loopback by PATH PREFIX rather than a header: `TenantConfig.loopbackBaseUrl` names the tenant as `http://127.0.0.1:<port>/_tenant/<slug>`, which the MCP proxy dials and seeds into its UTCP manuals (a header cannot ride a UTCP call, and the proxy reshapes nothing); the host honours the prefix from loopback peers only
+- [x] 8.3 `apps/server/src/main.ts` runs a host when `TENANTS_FILE` is set; `shell.ts` stops a host (`ShellHost`) where it stops a single graph's worker
+- [x] 8.4 Tests: `tenancy/__tests__/` — secrets derivation, the static source and env, the runtime (activate once under a burst, failed activation retried, eviction mid-activation, idle and busy), the host over real sockets (host to tenant, unknown host 404, process health, loopback prefix from 127.0.0.1 and only a slug-shaped one, 503 while starting and after a failed start, idle sweep and reactivation); `apps/server` shell host-mode shutdown. The two-tenants-in-one-database integration run is manual (see 10.2)
+- [x] 8.5 `docs/multi-tenant.md`, rows in `docs/configuration.md`, `.env.example` section 7, README reference, changeset
 
 ## 9. Seat admission port (packages/core-backend) — phase 6
 
-- [ ] 9.1 `src/core/core-ports.ts`: `accountAdmission?.canProvision(email, reason)`
-- [ ] 9.2 `modules/auth/auth.service.ts`: consult it before the insert in `loginWithSso` and `createAccount`
-- [ ] 9.3 Tests: refusal on SSO and on admin create; default admits
+- [x] 9.1 `modules/auth/account-admission.ts` (`IAccountAdmission`, `admitEveryone`, `AccountAdmissionRefusedError`); `src/core/core-ports.ts`: `accountAdmission`
+- [x] 9.2 `modules/auth/auth.service.ts`: asked before the insert on every path that creates a row (`sso`, `admin-create`, `bootstrap`, `embed`), never for an address that already has one; `account.routes.ts` answers 403 with the port's words, the OIDC callback redirects with `#error=admission` and the login screen names it
+- [x] 9.3 Tests: `auth.service.test.ts` (refusal on SSO and on admin create with nothing inserted, an existing address never asked about, the reasons named, the default admits without a lookup), `account.routes.test.ts` (403)
+
+## 10. Verification
+
+- [x] 10.1 `pnpm typecheck` green for every package; backend, frontend and server suites green except the Windows-only cases noted at 4.4
+- [ ] 10.2 Manual: `TENANTS_FILE` with two entries on `a.localhost` / `b.localhost` against one Postgres; sign in on both; a change request on A is absent from B; each `/api/config` reports its own branch model and layout; connect `hexis-mcp` with `--url http://a.localhost:3001` and confirm tools and skills are tenant A's; `pg_dump -n t_a` restores into a fresh single-tenant deployment and boots

@@ -12,6 +12,7 @@ const OAUTH_ERROR_MESSAGES: Record<string, string> = {
   auth: 'Sign-in failed. Please try again.',
   start: 'Could not start sign-in. Please try again.',
   not_configured: 'Single sign-on is not configured on this deployment.',
+  admission: 'This workspace has no seat available for your account. Ask its admin.',
 };
 
 export function LoginScreen() {

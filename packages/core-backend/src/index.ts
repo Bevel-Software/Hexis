@@ -102,6 +102,13 @@ export type { ILlmUsageMeter } from './modules/tool-auth/llm-usage-meter.js';
 export type { AuthProviderPlugin } from './modules/auth/auth.routes.js';
 export type { IErasureParticipant } from './modules/auth/account-erasure.service.js';
 export {
+  AccountAdmissionRefusedError,
+  admitEveryone,
+  type AccountAdmissionVerdict,
+  type AccountProvisionReason,
+  type IAccountAdmission,
+} from './modules/auth/account-admission.js';
+export {
   WorkflowHooks,
   type CommitValidationHook,
   type CommitValidationContext,

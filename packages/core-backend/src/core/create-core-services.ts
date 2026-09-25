@@ -562,13 +562,17 @@ export async function createCoreServices(
   // PullRequestService no longer depends on it for attribution.)
   // The allow-list is resolved, not read off the environment: it is settable
   // from the setup screen alongside the SSO configuration it guards.
-  const authService = new AuthService(db, {
-    jwtSecret: config.jwtSecret,
-    adminEmail: config.adminEmail,
-    adminPassword: config.adminPassword,
-    allowedEmailDomains: parseDomainList(settings.resolve('allowedEmailDomains')),
-    loginPasswordEnabled: config.loginPasswordEnabled,
-  });
+  const authService = new AuthService(
+    db,
+    {
+      jwtSecret: config.jwtSecret,
+      adminEmail: config.adminEmail,
+      adminPassword: config.adminPassword,
+      allowedEmailDomains: parseDomainList(settings.resolve('allowedEmailDomains')),
+      loginPasswordEnabled: config.loginPasswordEnabled,
+    },
+    ports.accountAdmission,
+  );
   const authMiddleware = createAuthMiddleware(authService);
 
   // Shared mutex so git and diff operations on the same workspace serialize

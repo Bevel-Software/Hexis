@@ -42,12 +42,16 @@ The tenant host SHALL resolve each request's host name to a tenant, activate tha
 - **THEN** tenant B keeps answering and A activates again on its next request
 
 ### Requirement: Loopback carries the tenant
-Requests the server makes to itself over loopback SHALL name the tenant in `X-Hexis-Tenant`, and the host SHALL honour that header only when the peer address is loopback.
+Requests a graph makes to itself over loopback SHALL name the tenant on the path, under `/_tenant/<slug>/`, and the host SHALL honour that prefix only when the peer address is loopback, stripping it before the tenant's app sees the request.
 
 #### Scenario: MCP proxy calls its own tenant
-- **WHEN** the MCP proxy fetches a tenant's tool listing over loopback
-- **THEN** the listing is that tenant's
+- **WHEN** the MCP proxy fetches a tenant's tool listing over loopback, or a UTCP manual it seeded calls the tenant's REST surface
+- **THEN** the listing and the call are that tenant's, and the tenant's routes see the path without the prefix
 
-#### Scenario: Header from outside
-- **WHEN** a request from a non-loopback peer carries `X-Hexis-Tenant`
-- **THEN** the header is ignored and the host name decides
+#### Scenario: Prefix from outside
+- **WHEN** a request from a non-loopback peer carries the `/_tenant/<slug>/` prefix
+- **THEN** the prefix is ignored, the host name decides, and the path is served as spelled
+
+#### Scenario: Prefix naming no tenant
+- **WHEN** a loopback request names a slug no tenant has
+- **THEN** it is answered 404
