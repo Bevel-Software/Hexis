@@ -92,6 +92,14 @@ The static source derives `jwtSecret`, `secretsEncKey` and `internalTokenSecret`
 
 Six PRs to `dev`, single-tenant green after each: (1) OpenSpec change, shared pure API, `KbContext` through the server, ESLint rule; (2) git credentials provider; (3) database per schema, config split, secrets loader; (4) lifecycle split; (5) tenancy module, host, `apps/server` multi mode, docs, e2e; (6) seat admission port. No data migration: existing installs stay on `public` with today's lock ids; the init migration's `public.` qualifiers are dropped only for fresh schemas.
 
+## The layers above this change
+
+Agreed with Razvan on 2026-09-25, so the next repositories start from it:
+
+- **Cloud** imports core and is a distribution over it, as enterprise is today: a `TenantSource` over its own registry database (its own database on the same Postgres server, owned and migrated by the cloud app, never inside a tenant schema; a tenant export therefore never carries registry rows), `accountAdmission` from plans and seats, its own routes and extensions, and core's host in multi-tenant mode. The registry holds slug, hosts, status (`provisioning`, `active`, `suspended`), verified email domains, plan and seat limit, billing ids and the record fields the host reads. The root-domain login looks an email's domain up there and redirects to `<slug>.<cloud domain>`, or offers to create the workspace; free-mail domains need an invite or a workspace name instead. The file source stays the development and test source.
+- **Cloud is a package plus an app**, the way core is: `@bevel-software/platform-cloud` with the product features as ports and extensions and the tenancy pieces behind their own entry point, and an app (root-domain login, provisioning, billing webhooks, operator UI, the host process) that nobody imports.
+- **Enterprise** imports cloud and core, runs single-tenant (no host, one graph, `DB_SCHEMA` optional) and gets cloud's product features for free. Its own single-valued ports override cloud's, which override core's defaults; array ports compose. The upgrade path is this change's export: the tenant's schema and workspaces folder, booted with `DB_SCHEMA=t_<slug>` and the derived secrets, with no cloud code involved.
+
 ## Open Questions
 
 - Whether a completing setup save in multi-tenant mode re-activates the tenant (evict + activate) or applies to the live context as single-tenant does. Leaning re-activate: it is the mechanism that already exists, and a tenant that just answered its setup screen has no traffic to interrupt.
