@@ -33,9 +33,14 @@ export type { ILogger, LogFields } from './shared/logger.contract.js';
 // handle type `CoreServices.commitWorker` carries.
 export {
   createShutdown,
+  startCore,
+  stopCore,
   withStartupTask,
+  type BootableCore,
+  type CoreStopDeps,
   type ShutdownDeps,
   type ShutdownOptions,
+  type StopCoreOptions,
   type LeaseLoopHandle,
   type LeasedWorker,
 } from './core/lifecycle.js';

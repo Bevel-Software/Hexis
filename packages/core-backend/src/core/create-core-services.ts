@@ -186,6 +186,20 @@ export interface CoreServices {
    * first-time setup completion — and never again while the process serves.
    */
   kbStartupRunner: KbStartupRunner;
+  /**
+   * The startup phase's retry when the boot survived an unreachable remote
+   * — set by `startCore`, stopped by `stopCore` (see `core/lifecycle.ts`);
+   * null while nothing is asking.
+   */
+  startupRetry: { stop(): void } | null;
+  /**
+   * What tells this graph's locks, migration ledger and secrets scope apart
+   * from another graph's in the same process and database: the schema name,
+   * or `''` for the default schema (the single-tenant ids).
+   */
+  tenantKey: string;
+  /** The scope this graph's vault is registered under with the UTCP variable loader. */
+  secretsScope: string;
   spillStore: SpillStore;
   docExtractService: DocExtractService;
   accessControl: AccessControlService;
@@ -1198,6 +1212,9 @@ export async function createCoreServices(
     db,
     gitRunner,
     commitWorker,
+    startupRetry: null,
+    tenantKey,
+    secretsScope,
     disk,
     mcpServerEditService,
     toolDeleteService,

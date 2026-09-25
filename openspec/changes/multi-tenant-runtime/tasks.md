@@ -35,12 +35,12 @@
 
 ## 6. Database per schema, config split, secrets loader (packages/core-backend) — phase 3
 
-- [ ] 6.1 `modules/database/connection.ts`: `createDb(url, { schema })` with `search_path`, cache keyed by url and schema, `close()`; `getDb(url)` stays as the single-tenant wrapper; schema name validated
-- [ ] 6.2 `modules/database/migrate.ts`: `migrationsSchema` per schema for core and enterprise migrations
-- [ ] 6.3 `migrations/0000_core_init.sql`: `to_regclass('<table>')` for the 7 guards; a test that greps `migrations/*.sql` for `public.`
-- [ ] 6.4 `modules/database/advisory-lock.ts`: `{ tenantKey }` on `withAdvisoryLock` and `AdvisoryLease`, second int `lock ^ crc32(tenantKey)`; test that the empty key equals today's ids
-- [ ] 6.5 `src/core-config.ts`: `TenantConfig` and `ProcessConfig`; `CoreConfig implements TenantConfig`; `createCoreServices(config: TenantConfig, ports)`
-- [ ] 6.6 `modules/secrets-vault/secrets-variable-loader.ts` and its callers (`create-core-services.ts`, `mcp/mcp.service.ts`, `secrets-vault/connection-probe.service.ts`): loader map keyed by tenant
+- [x] 6.1 `modules/database/connection.ts`: `createDb(url, { schema, max, idleTimeoutMillis })` with `search_path` as a startup parameter, `getDb` cached per (url, schema), `closeDb`, `dbSchemaOf`, `assertSchemaName`; tests in `__tests__/connection.test.ts`
+- [x] 6.2 `modules/database/migrate.ts`: the ledger lives in the tenant's schema (`migrationsSchema`) and the lock is keyed by it; the default schema keeps drizzle's ledger
+- [x] 6.3 `migrations/0000_core_init.sql`: `to_regclass('<table>')` for the 7 guards; `__tests__/migrations-unqualified.test.ts` reads every packaged migration for `public.`
+- [x] 6.4 `modules/database/advisory-lock.ts`: `advisoryLockKey(lock, tenantKey)` = `lock ^ crc32(tenantKey)`, empty key unchanged; `{ tenantKey }` on `withAdvisoryLock` and `AdvisoryLease`; tests
+- [x] 6.5 `src/core-config.ts`: `TenantConfig` and `ProcessConfig`; `CoreConfig implements` both and reads `DB_SCHEMA`; `createCoreServices(config: TenantConfig, ports)` creates the schema on first use
+- [x] 6.6 `modules/secrets-vault/secrets-variable-loader.ts`: vaults by scope, descriptor carries `scope`, `unregisterBevelSecretsVariableLoader`; `McpProxyOptions.secretsScope`, `ConnectionProbeService`'s third argument; the composition root scopes a non-default schema as `<tenantId>/<schema>`
 
 ## 7. Lifecycle split (packages/core-backend) — phase 4
 

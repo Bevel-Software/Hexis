@@ -8,6 +8,8 @@ export interface ShellCore {
   commitWorker: ShutdownDeps['commitWorker'];
   db: ShutdownDeps['db'];
   pluginJoinRequestJobs?: ShutdownDeps['backgroundJobs'];
+  /** The startup phase's retry, when the boot left one asking. */
+  startupRetry?: ShutdownDeps['startupRetry'];
 }
 
 /** The process, as the shell touches it — a seam so a test can stand in for it. */
@@ -70,6 +72,7 @@ export async function runShell<Core extends ShellCore>(io: ShellIo<Core>): Promi
       server: server ?? notListening,
       commitWorker: core?.commitWorker ?? { stop: async () => undefined },
       backgroundJobs: core?.pluginJoinRequestJobs,
+      startupRetry: core?.startupRetry,
       db: core?.db ?? noPool,
     });
     shutdown(reason)

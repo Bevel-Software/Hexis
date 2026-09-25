@@ -1,7 +1,16 @@
 import type { Server } from 'node:http';
-import type { Database } from '../modules/database/connection.js';
+import { closeDb, type Database } from '../modules/database/connection.js';
 import type { AdvisoryLease } from '../modules/database/advisory-lock.js';
+import { KbRemoteUnreachableError, type KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
+import { noteBesideCheckout } from '../modules/workspace/startup/beside-checkout.js';
+import { unregisterBevelSecretsVariableLoader } from '../modules/secrets-vault/secrets-variable-loader.js';
+import type { WorkflowService } from '../modules/workflow/workflow.service.js';
+import type { PluginJoinRequestJobs } from '../modules/plugins/join-request-jobs.service.js';
+import { printable } from '../shared/printable.js';
 import { logger } from '../shared/logging.js';
+
+const startupLog = logger('kb-startup');
+const crLog = logger('cr');
 
 /**
  * The process lifecycle: who may drain the commit queue, and how the process
@@ -193,23 +202,164 @@ export function withStartupTask(
   };
 }
 
-export interface ShutdownDeps {
-  /** The listening server — stops accepting, then drops what is connected. */
-  server: Pick<Server, 'close' | 'closeAllConnections'>;
+/**
+ * What one knowledge base's graph needs of itself to be STARTED: the boot
+ * side effects that used to run inside `createCoreServer`, named so a host
+ * can run them for a graph it builds on demand, and stop them again.
+ */
+export interface BootableCore {
+  config: { workspacesRoot: string };
+  kbDirName: string;
+  kbStartupRunner: Pick<KbStartupRunner, 'runAll' | 'retryUntilMaintained'>;
+  workflowService: Pick<WorkflowService, 'closeChangeRequestsWithDeletedBranches'>;
+  pluginJoinRequestJobs: Pick<PluginJoinRequestJobs, 'startSweeping'>;
+  /**
+   * The startup phase's retry, when the boot survived an unreachable remote
+   * and is asking again on a timer; null otherwise. Set by {@link startCore},
+   * stopped by {@link stopCore}.
+   */
+  startupRetry: { stop(): void } | null;
+}
+
+/**
+ * Bring a built graph up: the distribution's boot hook, the note about what
+ * sits beside a checkout, the knowledge-base startup phase with its
+ * unreachable-remote fallback, the deleted-branch sweep and the join-request
+ * jobs. `createCoreServer` runs this for a single-tenant deployment; a host
+ * serving several knowledge bases runs it when a tenant is activated.
+ *
+ * Throws to stop the boot on every failure but an unreachable remote — the
+ * container's restart policy is the retry — see `kb-startup-runner.ts`.
+ */
+export async function startCore<C extends BootableCore>(
+  core: C,
+  ext: { onBoot?(core: C): Promise<void> | void } = {},
+): Promise<void> {
+  // Overlay boot-time side effects (startup reconciles, periodic sweeps).
+  await ext.onBoot?.(core);
+
+  // What is already sitting beside a checkout, named once per boot and touched
+  // by nothing. Outside the KB startup phase below on purpose: that phase is
+  // gated on the branch model and the repository URL, and a deployment whose
+  // setup never finished — or whose remote is down — is exactly one whose
+  // strays would otherwise go unmentioned. A diagnostic never stops a boot, so
+  // an unreadable workspaces root is logged and the boot carries on.
+  try {
+    await noteBesideCheckout(core.config.workspacesRoot, core.kbDirName);
+  } catch (err) {
+    // `printable`, because the message quotes a path off the disk (an ENOENT
+    // or EACCES names the file it failed on) and a name carrying a control
+    // character would forge a second line of the operator's log.
+    startupLog.warn('could not look for content beside the checkouts:', {
+      detail: printable(err instanceof Error ? err.message : String(err)),
+    });
+  }
+
+  // The KB startup phase — AFTER the distribution's onBoot, because a FATAL
+  // template finding raised there must stop the boot before anything seeds
+  // from that template; the runner then brings every branch up to this build
+  // before any route can serve KB content. Throws to stop the boot (the
+  // container's restart policy is the retry) — see kb-startup-runner.ts.
+  //
+  // Runs in the booting process whether or not it holds the commit-worker
+  // lease, so on a redeploy it overlaps the outgoing holder's commits for the
+  // seconds it takes — the documented window at `holdCommitWorkerLease`.
+  try {
+    await core.kbStartupRunner.runAll();
+  } catch (err) {
+    // The one failure a boot survives: the remote cannot be reached. That
+    // says nothing about the knowledge base — what we would write is not
+    // known to be wrong, we cannot get there — so refusing to boot only took
+    // away the login and setup screens an operator needs to fix it (a
+    // rotated token, say). The deployment comes up GATED: the setup routes
+    // read the runner's standing failure and keep the app shut, the setup
+    // screen shows why, saving it retries, and the runner keeps trying on
+    // its own. Every other failure still stops the boot, because it means
+    // the template or a step would write something wrong.
+    if (!(err instanceof KbRemoteUnreachableError)) throw err;
+    startupLog.error('booting UNMAINTAINED and gated — the knowledge-base remote could not be reached:', {
+      detail: err.message,
+    });
+    // Kept on the graph so that stopping the graph stops the asking: a
+    // retry that outlived its graph would clone into a workspaces folder
+    // nobody serves any more.
+    core.startupRetry = core.kbStartupRunner.retryUntilMaintained();
+  }
+
+  // Close change requests whose source branch has been deleted. SEQUENCED
+  // AFTER the startup phase above, for two reasons: the sweep's fresh fetch
+  // lazily bootstraps and fetches the same default-branch clone the runner
+  // maintains (kicking it off earlier races the runner's clone/fetch of that
+  // very directory), and on a brand-new deployment it would run before the
+  // empty remote is seeded, fail its clone, swallow the error, and leave
+  // deleted-branch CRs open for the whole process. Still not awaited from
+  // here on: a slow or unreachable remote must not hold up the server —
+  // nothing downstream depends on the result, and the requests it closes
+  // have been unusable since the branch went away, so landing a few seconds
+  // into uptime is soon enough. Errors are swallowed inside the sweep, which
+  // fails safe by closing nothing.
+  void core.workflowService
+    .closeChangeRequestsWithDeletedBranches()
+    .then((n) => {
+      if (n > 0) {
+        crLog.info(`closed ${n} change request${n === 1 ? '' : 's'} with a deleted branch`);
+      }
+    })
+    .catch((err) => crLog.warn('deleted-branch sweep failed:', { err }));
+
+  // Recorded join requests that are still owed, resumed — now, and then on a
+  // timer. SEQUENCED AFTER the startup phase for the same reason as the sweep
+  // above: the work needs the default-branch clone the runner maintains and
+  // the plugin catalog read from it, and a sweep that ran first would refuse
+  // every row for a knowledge base that simply was not ready — telling people
+  // their request could not be sent when nothing had gone wrong with it.
+  //
+  // ON A TIMER rather than at boot alone, because boot cannot cover the
+  // redeploy: this process sweeps while the outgoing one still holds a
+  // record, skips it (correctly — two servers must not do git on one branch),
+  // and the outgoing process then exits mid-work. Nothing else would look at
+  // that row again. The requester cannot prompt it either: a pending record
+  // shows them the "Requested" card, not a button.
+  //
+  // Not awaited, and nothing to report here but the failure to read the table
+  // at all: a first request from a person is a full clone, nothing else at
+  // boot depends on it, and each row records its own outcome.
+  core.pluginJoinRequestJobs.startSweeping();
+}
+
+/**
+ * What one knowledge base's graph holds that must be let go of when it
+ * stops: the pieces {@link stopCore} winds down, in the order it winds
+ * them down. `createShutdown` takes the same, plus the listening server.
+ */
+export interface CoreStopDeps {
   /** The lease loop from {@link holdCommitWorkerLease}: its stop finishes the in-flight commit and releases the lease. */
   commitWorker: Pick<LeaseLoopHandle, 'stop'>;
   /**
    * Background work to wind down before the pool goes — the join-request
-   * sweep and its jobs, today. The timer is stopped after the server so
-   * nothing new is scheduled, then the jobs already running are awaited
-   * (within the budget) so the pool is not ended under a clone or a push
-   * that is still writing to it. Optional: a caller that has not built them
-   * yet passes nothing.
+   * sweep and its jobs, today. The timer is stopped first so nothing new is
+   * scheduled, then the jobs already running are awaited (within the budget)
+   * so the pool is not ended under a clone or a push that is still writing
+   * to it. Optional: a caller that has not built them yet passes nothing.
    */
   backgroundJobs?: { stopSweeping(): void; drain(): Promise<void> };
+  /** The startup phase's retry, if the boot left one asking — see {@link BootableCore.startupRetry}. */
+  startupRetry?: { stop(): void } | null;
   /** The database — its pool is ended last, once nothing above can still need it. */
   db: Pick<Database, '$client'>;
+  /**
+   * The scope this graph's secrets vault was registered under with the UTCP
+   * variable loader (see `secrets-variable-loader.ts`); forgotten on stop so
+   * a descriptor that outlives the graph resolves nothing. Optional: a
+   * single-tenant process exits right after, and has nothing to forget.
+   */
+  secretsScope?: string;
   log?: (message: string) => void;
+}
+
+export interface ShutdownDeps extends CoreStopDeps {
+  /** The listening server — stops accepting, then drops what is connected. */
+  server: Pick<Server, 'close' | 'closeAllConnections'>;
 }
 
 export interface ShutdownOptions {
@@ -261,6 +411,60 @@ async function bounded(promise: Promise<unknown>, ms: number, label: string, log
  *      died mid-commit, now the exception rather than the rule.
  *   3. End the pool.
  */
+/**
+ * Let go of everything a graph holds, in order, within `remaining()`.
+ * The order is the point — see {@link createShutdown} for why each step
+ * sits where it does.
+ */
+async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m: string) => void): Promise<void> {
+  // First, and BEFORE the commit worker is stopped. Stopping that worker
+  // awaits an in-flight commit and can spend most of the remaining budget
+  // doing it; a sweep tick firing inside that window reads the still-open
+  // pool and starts fresh clone/commit/push work that the end of the
+  // sequence then kills mid-git. Nothing new can be recorded once the
+  // server is closed (or the tenant is no longer routed to), so this is the
+  // earliest point the interval is dead weight. Synchronous and unfailing
+  // — it just clears an interval — so it needs no budget of its own.
+  deps.backgroundJobs?.stopSweeping();
+  // A startup phase still asking for an unreachable remote stops asking:
+  // synchronous, and nothing after it must be able to clone into a
+  // workspaces folder that is about to belong to nobody.
+  deps.startupRetry?.stop();
+  // Clearing the interval stops future ticks; it does nothing to a job a
+  // tick already started, which holds a claim it heartbeats through the
+  // pool and is mid-clone or mid-push. Awaited here, in the budget: a job
+  // that finishes releases or marks its row; one that cannot in time is
+  // killed with the process and its claim goes stale for the next sweep
+  // — which is the recovery every crash already gets.
+  if (deps.backgroundJobs) {
+    await bounded(deps.backgroundJobs.drain(), remaining(), 'finishing the background jobs', log);
+  }
+  await bounded(deps.commitWorker.stop(), remaining(), 'stopping the commit worker', log);
+  if (deps.secretsScope !== undefined) unregisterBevelSecretsVariableLoader(deps.secretsScope);
+  await bounded(closeDb(deps.db), remaining(), 'ending the database pool', log);
+}
+
+export interface StopCoreOptions {
+  /** Total time the stop may take. Default: the shutdown's 8s. */
+  deadlineMs?: number;
+}
+
+/**
+ * Stop one knowledge base's graph without stopping the process: the
+ * shutdown sequence minus closing the server. What a host runs when it
+ * evicts a tenant, and what {@link createShutdown} runs after the server
+ * has closed. Bounded like the shutdown, so a step that hangs cannot hold
+ * the host's event loop hostage.
+ */
+export async function stopCore(core: CoreStopDeps, opts: StopCoreOptions = {}): Promise<void> {
+  const log = core.log ?? ((message: string) => logger('lifecycle').info(message));
+  const deadlineMs = opts.deadlineMs ?? DEFAULT_SHUTDOWN_DEADLINE_MS;
+  const startedAt = Date.now();
+  const remaining = () => Math.max(0, deadlineMs - (Date.now() - startedAt));
+  await releaseCore(core, remaining, log);
+  log(`graph stopped in ${Date.now() - startedAt}ms`);
+}
+
 export function createShutdown(
   deps: ShutdownDeps,
   opts: ShutdownOptions = {},
@@ -284,26 +488,7 @@ export function createShutdown(
         'closing the server',
         log,
       );
-      // Immediately after the server, and BEFORE the commit worker is stopped.
-      // Stopping that worker awaits an in-flight commit and can spend most of
-      // the remaining budget doing it; a sweep tick firing inside that window
-      // reads the still-open pool and starts fresh clone/commit/push work that
-      // the `process.exit()` at the end of the sequence then kills mid-git.
-      // Nothing new can be recorded once the server is closed, so this is the
-      // earliest point the interval is dead weight. Synchronous and unfailing
-      // — it just clears an interval — so it needs no budget of its own.
-      deps.backgroundJobs?.stopSweeping();
-      // Clearing the interval stops future ticks; it does nothing to a job a
-      // tick already started, which holds a claim it heartbeats through the
-      // pool and is mid-clone or mid-push. Awaited here, in the budget: a job
-      // that finishes releases or marks its row; one that cannot in time is
-      // killed with the process and its claim goes stale for the next sweep
-      // — which is the recovery every crash already gets.
-      if (deps.backgroundJobs) {
-        await bounded(deps.backgroundJobs.drain(), remaining(), 'finishing the background jobs', log);
-      }
-      await bounded(deps.commitWorker.stop(), remaining(), 'stopping the commit worker', log);
-      await bounded(deps.db.$client.end(), remaining(), 'ending the database pool', log);
+      await releaseCore(deps, remaining, log);
 
       log(`shutdown complete in ${Date.now() - startedAt}ms`);
     })();

@@ -114,7 +114,7 @@ export function getDb(databaseUrl: string, opts: DbOptions = {}): Database {
  * schema opens a fresh one rather than handing out a pool that was ended.
  * The last step of stopping a knowledge base's graph.
  */
-export async function closeDb(db: Database): Promise<void> {
+export async function closeDb(db: Pick<Database, '$client'>): Promise<void> {
   for (const [key, cached] of cache) {
     if (cached === db) cache.delete(key);
   }
