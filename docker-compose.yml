@@ -38,6 +38,13 @@ services:
     # `deployment/docker-compose.build.yml` is for — a standalone file an
     # orchestrator can be pointed at directly.
     image: ghcr.io/bevel-software/hexis:${HEXIS_VERSION:-latest}
+    # Always pull. Without this, `docker compose up` reuses whatever image the
+    # host already holds under that tag, so a redeploy of `:latest` can start
+    # a build from months ago: on 2026-09-25 a production host came up on
+    # 0.13.6 (August) with 0.20.0 published, because the host had last pulled
+    # `latest` in August. A pull of an unchanged image is a cheap manifest
+    # check, so this costs nothing when the tag has not moved.
+    pull_policy: always
     # Run node under a real init, so PID 1 reaps orphans.
     init: true
     # Cap the container's task count so a pid/thread leak degrades the app
