@@ -9,7 +9,6 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   validateRelativePath,
   validateFilename,
-  DEFAULT_BRANCH,
   FOLDER_PLACEHOLDER,
   isFolderPlaceholder,
   entryExistsMessage,
@@ -22,6 +21,7 @@ import {
   renameNoReplace,
 } from '../../shared/rename-no-replace.js';
 import type { IGitRunner } from '../../shared/git.contract.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { assertRepoRootNameFree, normalizeWorkspacePath } from '../kb-fs/repo-path.js';
@@ -297,7 +297,8 @@ export class WorkspaceService implements IWorkspaceService {
      * buy an inconsistency rather than a feature.
      */
     kbRepoUrl: string | (() => string),
-    private readonly kbDirName: string,
+    /** The checkout folder's name, and which branch a caller lands on when naming none. */
+    private readonly kb: Pick<KbContext, 'kbDirName' | 'defaultBranch'>,
     private readonly disk: ITreeWalker,
     gitUsername: string | (() => string) = 'x-access-token',
     /**
@@ -310,6 +311,10 @@ export class WorkspaceService implements IWorkspaceService {
   ) {
     this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
     this.gitUsername = typeof gitUsername === 'function' ? gitUsername : () => gitUsername;
+  }
+
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
   }
 
   private readonly kbRepoUrl: () => string;
@@ -675,7 +680,7 @@ export class WorkspaceService implements IWorkspaceService {
    * `branch` is passed.
    */
   async getOrCreateForUser(_user: AuthUser, branch?: string): Promise<WorkspaceInfo> {
-    return this.getOrCreateForBranch(branch ?? DEFAULT_BRANCH);
+    return this.getOrCreateForBranch(branch ?? this.kb.defaultBranch);
   }
 
   private buildWorkspaceInfo(branch: string, workspaceDir: string): WorkspaceInfo {

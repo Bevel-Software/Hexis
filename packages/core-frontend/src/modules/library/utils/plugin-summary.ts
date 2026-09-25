@@ -1,4 +1,9 @@
-import { isPersonalPluginFolder, pluginOfPath, skillUnderRoot } from '@bevel-software/platform-shared';
+import {
+  currentKbLayout,
+  isPersonalPluginFolder,
+  pluginOfPath,
+  skillUnderRoot,
+} from '@bevel-software/platform-shared';
 import type { PluginMembership } from '../services/library.api';
 import type { PluginPrincipals, PluginSummary } from '../services/plugins.api';
 
@@ -14,7 +19,7 @@ export function pluginNameForPath(
   repoPath: string,
   summaries: readonly Pick<PluginSummary, 'name' | 'folders'>[],
 ): string | null {
-  const folder = pluginOfPath(repoPath);
+  const folder = pluginOfPath(repoPath, currentKbLayout());
   if (folder === null) return null;
   // The catalog is the authority: whatever folder it lists as holding the
   // path names the plugin. Only a path no listed folder holds falls back to

@@ -8,6 +8,7 @@ import {
   linkedSkillRoots,
   pluginDisplayNameOf,
   pluginIdentityOf,
+  type KbLayout,
 } from '@bevel-software/platform-shared';
 import { isAbsence, type IFsProbe } from '../../../shared/fs.contract.js';
 import type { DiscoveredPlugin } from './plugin-source.js';
@@ -31,6 +32,8 @@ export async function readNativePlugin(
   relFolder: string,
   warnings: string[],
   unreadable: string[],
+  /** Names the plugins root a personal folder sits directly under. */
+  layout: KbLayout,
 ): Promise<DiscoveredPlugin | null> {
   const folderName = path.posix.basename(relFolder);
   const manifestRead = await readText(path.join(dir, PLUGIN_MANIFEST_FILE), folder, warnings);
@@ -97,7 +100,7 @@ export async function readNativePlugin(
     folder,
     relFolder,
     // The one structural rule: a direct child of the root with the prefix.
-    personal: isPersonalPluginDir(folder),
+    personal: isPersonalPluginDir(folder, layout),
     exists,
     manifest,
     manifestText,

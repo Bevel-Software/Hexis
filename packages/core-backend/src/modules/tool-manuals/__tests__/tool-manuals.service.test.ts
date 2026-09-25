@@ -12,6 +12,7 @@ import { ToolManualService } from '../tool-manuals.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const KB_DIR = 'knowledge-base';
 const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
@@ -69,7 +70,7 @@ describe('ToolManualService', () => {
       new Map(paths.map((p) => [p, !p.includes('weather')])),
   } as unknown as IAccessControl;
 
-  const svc = (access: IAccessControl = allowAll) => new ToolManualService(workspaceService, access, KB_DIR, disk, new KbPluginSource(disk));
+  const svc = (access: IAccessControl = allowAll) => new ToolManualService(workspaceService, access, testKbContext({ kbDirName: KB_DIR }), disk, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })));
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'tools-'));
@@ -760,7 +761,7 @@ describe('ToolManualService.listDeclaredOnlyOnBranch', () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  const svc = () => new ToolManualService(workspaceService, readGate, KB_DIR, disk, new KbPluginSource(disk));
+  const svc = () => new ToolManualService(workspaceService, readGate, testKbContext({ kbDirName: KB_DIR }), disk, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })));
 
   test('names only the readable declarations the default branch does not serve', async () => {
     expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DRAFT)).toEqual([

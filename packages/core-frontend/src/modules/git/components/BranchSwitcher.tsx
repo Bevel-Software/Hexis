@@ -2,7 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ChevronDown, GitBranch, Plus, Lock, Check, GitPullRequest, Trash2, Loader2 } from 'lucide-react';
-import { protectedBranchDisplayName, branchAuthorLocalpart, isBranchAuthoredBy, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import {
+  protectedBranchDisplayName,
+  currentBranchModel,
+  branchAuthorLocalpart,
+  isBranchAuthoredBy,
+  DEFAULT_BRANCH,
+} from '@bevel-software/platform-shared';
 import { useGit } from '../state/git.context';
 import { parseGitError, type GitErrorInfo } from '../services/error-messages';
 import { useAuth } from '../../auth/state/auth.context';
@@ -192,7 +198,7 @@ export function BranchSwitcher() {
   // shared draft" is wrong, it's the official version everyone sees.
   const branchLabel = (() => {
     if (switchingTo) return `Switching to ${switchingTo}…`;
-    const protectedName = protectedBranchDisplayName(git.status?.branch);
+    const protectedName = protectedBranchDisplayName(currentBranchModel(), git.status?.branch);
     if (protectedName) return `${protectedName} (official version)`;
     return 'Your active shared draft';
   })();
@@ -403,7 +409,7 @@ export function BranchSwitcher() {
                   </div>
                 )}
                 {targetBranches.map((b) => {
-                  const displayName = protectedBranchDisplayName(b.name);
+                  const displayName = protectedBranchDisplayName(currentBranchModel(), b.name);
                   // Default destination for shared drafts: visually distinguish
                   // the default branch so users see the recommended path without
                   // having to read the slug. Others stay available, just quieter.

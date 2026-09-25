@@ -23,13 +23,11 @@ import {
   type RepositoryConnection,
 } from './connection-check.js';
 import {
-  configureBranchModel,
-  configureKbLayout,
-  isBranchModelConfigured,
   isDefaultKbLayout,
   validateBranchModel,
   validateKbLayout,
 } from '@bevel-software/platform-shared';
+import type { KbContext } from '../../shared/kb-context.js';
 import { failureOf, type GitFailure } from '../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { listRootFolders, pickListingBranch } from './git-root-folders.js';
@@ -106,6 +104,12 @@ export function createSetupRoutes(
     lastFailureKind?(): GitFailure | null;
   },
   /**
+   * The knowledge base's context as the running graph holds it: the save
+   * that completes setup applies the branch model and the layout to it, so
+   * every service reads the admin's answer without a restart.
+   */
+  kb: KbContext,
+  /**
    * The remote-sync facts the Deployment page shows beside the sync secret:
    * the address a webhook or pipeline must call, and what the last call did.
    * Optional so a minimal mount (tests, a distribution without the module)
@@ -180,7 +184,7 @@ export function createSetupRoutes(
   };
   /** The app-gate answer: settings complete AND the KB phase settled clean, whoever ran it. */
   const kbReady = () =>
-    isComplete(settings) && kbInit === null && kbInitInFlight === null && bootFailure() === null;
+    isComplete(settings, kb) && kbInit === null && kbInitInFlight === null && bootFailure() === null;
 
   const requireAdmin: express.RequestHandler = async (req, res, next) => {
     if (!(await adminAccess.isAdmin(req.userEmail))) {
@@ -215,7 +219,7 @@ export function createSetupRoutes(
     }
     res.json({
       complete: kbReady(),
-      awaitingRestart: awaitingRestart(settings),
+      awaitingRestart: awaitingRestart(settings, kb),
       isAdmin: true,
       settings: settings.describe(),
       oidcVerification: await settings.oidcVerification(),
@@ -261,7 +265,7 @@ export function createSetupRoutes(
       // save that flips it false→true — whichever field arrives last — is the
       // one that must run the KB startup phase, regardless of which save
       // configured the branch model.
-      const wasComplete = isComplete(settings);
+      const wasComplete = isComplete(settings, kb);
       if (!(await connectionHoldsFor(entries, wasComplete, res))) return;
       const oidc = await signInHoldsFor(entries, res);
       if (!oidc) return;
@@ -292,13 +296,13 @@ export function createSetupRoutes(
        * capturing it at construction, which is what makes applying it here
        * enough.
        */
-      if (!isBranchModelConfigured()) {
+      if (!kb.isBranchModelConfigured()) {
         const model = {
           defaultBranch: settings.resolve('defaultBranch'),
           protectedBranches: settings.resolve('protectedBranches'),
         };
         if (!validateBranchModel(model)) {
-          configureBranchModel(model);
+          kb.applyBranchModel(model);
           branchModelApplied = true;
         }
       }
@@ -316,7 +320,7 @@ export function createSetupRoutes(
        * on a re-save of a complete, healthy setup: with the gate open,
        * sessions may be live and that is no longer a quiet moment.
        */
-      if ((!wasComplete || kbInit !== null || bootFailure() !== null) && isComplete(settings)) {
+      if ((!wasComplete || kbInit !== null || bootFailure() !== null) && isComplete(settings, kb)) {
         /**
          * The folder names, applied BEFORE the phase for the same reason as
          * the branch model above: they are otherwise applied once at boot, so
@@ -327,10 +331,10 @@ export function createSetupRoutes(
          * the names an earlier setup save applied before a run that failed:
          * the gate never opened, so the retry initializes what is saved now.
          */
-        if (isDefaultKbLayout() || (kbInit !== null && layoutAppliedBySetup)) {
+        if (isDefaultKbLayout(kb.layout) || (kbInit !== null && layoutAppliedBySetup)) {
           const layout = settings.resolveKbLayout();
           if (!validateKbLayout(layout)) {
-            configureKbLayout(layout);
+            kb.applyLayout(layout);
             layoutApplied = true;
             layoutAppliedBySetup = true;
           }
@@ -382,7 +386,7 @@ export function createSetupRoutes(
               )
             : restartRequired,
         complete: kbReady(),
-        awaitingRestart: awaitingRestart(settings),
+        awaitingRestart: awaitingRestart(settings, kb),
         settings: settings.describe(),
         oidcVerification: await settings.oidcVerification(),
       });
@@ -784,11 +788,17 @@ export function settingsAnswered(settings: DeploymentSettingsService): boolean {
  * that puts it there. {@link awaitingRestart} is what tells the screen to ask
  * for one rather than claim a field is missing.
  */
-export function isComplete(settings: DeploymentSettingsService): boolean {
-  return settingsAnswered(settings) && isBranchModelConfigured();
+export function isComplete(
+  settings: DeploymentSettingsService,
+  kb: Pick<KbContext, 'isBranchModelConfigured'>,
+): boolean {
+  return settingsAnswered(settings) && kb.isBranchModelConfigured();
 }
 
 /** Answered, but not yet in effect: everything is stored, the process is stale. */
-export function awaitingRestart(settings: DeploymentSettingsService): boolean {
-  return settingsAnswered(settings) && !isBranchModelConfigured();
+export function awaitingRestart(
+  settings: DeploymentSettingsService,
+  kb: Pick<KbContext, 'isBranchModelConfigured'>,
+): boolean {
+  return settingsAnswered(settings) && !kb.isBranchModelConfigured();
 }

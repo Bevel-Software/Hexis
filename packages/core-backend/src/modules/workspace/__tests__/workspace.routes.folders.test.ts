@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { FileTreeEntry, IWorkflowService } from '@bevel-software/platform-shared';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -55,7 +56,7 @@ async function makeHarness(): Promise<Harness> {
   const workspaceDir = path.join(root, workspaceId);
   // The inner `.git` lets the service accept the workspace without cloning.
   await fs.mkdir(path.join(workspaceDir, KB, '.git'), { recursive: true });
-  const workspaceService = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs());
+  const workspaceService = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
   await workspaceService.getWorkspacePath(workspaceId);
 
   const releaseLock = vi.fn<(...args: unknown[]) => Promise<never>>(async () => undefined as never);
@@ -85,7 +86,7 @@ async function makeHarness(): Promise<Harness> {
       workflowService,
       { emit } as unknown as WorkflowEventBus,
       allowAll,
-      KB,
+      testKbContext({ kbDirName: KB }),
       stubCreatorAccess,
       { isAdmin: async () => false } as unknown as IAdminAccessService,
       new NodeFs(),
@@ -334,7 +335,7 @@ describe('WorkspaceService.writeFolderPlaceholder', () => {
     const workspaceId = workspaceIdForBranch('placeholders');
     const kbDir = path.join(root, workspaceId, KB);
     await fs.mkdir(path.join(kbDir, '.git'), { recursive: true });
-    return { svc: new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs()), workspaceId, kbDir };
+    return { svc: new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs()), workspaceId, kbDir };
   }
 
   it('writes into an empty folder, and leaves a full or a vanished one alone', async () => {
@@ -377,7 +378,7 @@ describe('WorkspaceService.withFolderTurn', () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'folder-turn-'));
     const workspaceId = workspaceIdForBranch('turns');
     await fs.mkdir(path.join(root, workspaceId, KB, '.git'), { recursive: true });
-    const svc = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs());
+    const svc = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
 
     const events: string[] = [];
     let open!: () => void;

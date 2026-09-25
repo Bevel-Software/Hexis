@@ -16,13 +16,10 @@ import {
   DefaultVariableSubstitutor,
   type CallTemplate,
 } from '@utcp/sdk';
-import {
-  DEFAULT_BRANCH,
-  PLUGINS_DIR,
-} from '@bevel-software/platform-shared';
 import { descriptorsFromMcpJson } from './mcp-json-discovery.js';
 import type { PluginSource } from '../plugins/discovery/plugin-source.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
@@ -265,13 +262,17 @@ export class ToolManualService implements IToolManualService {
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly accessControl: IAccessControl,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
     private readonly disk: ITreeWalker,
     /** Where plugins (and their MCP servers) come from — the one discovery every catalog shares. */
     private readonly source: PluginSource,
     now: () => number = Date.now,
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
+  }
+
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
   }
 
   /**
@@ -329,7 +330,7 @@ export class ToolManualService implements IToolManualService {
     userEmail: string,
     branch: string,
   ): Promise<{ name: string; path: string; type: ToolManualType }[]> {
-    if (!branch || branch === DEFAULT_BRANCH) return [];
+    if (!branch || branch === this.kb.defaultBranch) return [];
     // Only a draft this process already holds a clone of — the one the caller
     // wrote the declaration on. `scanDisk` would otherwise BOOTSTRAP any branch
     // name a caller sends, before the read gate below has had a say: a clone
@@ -456,7 +457,7 @@ export class ToolManualService implements IToolManualService {
   async resolveInlineManual(userEmail: string, slug: string): Promise<UtcpManualDict | null> {
     const found = (await this.scan()).manuals.find((m) => m.slug === slug);
     if (!found || found.type !== 'inline') return null;
-    const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
+    const wsId = this.kb.defaultWorkspaceId();
     if (!(await this.accessControl.canRead(wsId, userEmail, found.path))) return null;
     try {
       return manualSerializer.validateDict({
@@ -582,7 +583,7 @@ export class ToolManualService implements IToolManualService {
   private async accessibleScan(userEmail: string): Promise<ScanResult> {
     const { manuals, invalid } = await this.scan();
     if (manuals.length === 0 && invalid.length === 0) return emptyScan();
-    const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
+    const wsId = this.kb.defaultWorkspaceId();
     const allowed = await this.accessControl.canReadBatch(wsId, userEmail, [
       ...new Set([...manuals.map((m) => m.path), ...invalid.map((i) => i.path)]),
     ]);
@@ -859,7 +860,7 @@ export class ToolManualService implements IToolManualService {
    * calls: a refusal lives only in the scan it came from, so a fixed file is a
    * valid manual on the very next scan.
    */
-  private async scanDisk(branch: string = DEFAULT_BRANCH): Promise<ScanResult> {
+  private async scanDisk(branch: string = this.kb.defaultBranch): Promise<ScanResult> {
     let wsId: string;
     try {
       wsId = (await this.workspaceService.getOrCreateForBranch(branch)).id;
@@ -870,9 +871,10 @@ export class ToolManualService implements IToolManualService {
 
     // A `.tool` sits under `Plugins/`, beside the skills that use it.
     const files: { abs: string; rel: string }[] = [];
-    const root = path.join(kbRoot, PLUGINS_DIR);
+    const layout = this.kb.layout;
+    const root = path.join(kbRoot, layout.pluginsDir);
     for (const rel of await this.disk.walkFiles(root, (n) => n.toLowerCase().endsWith('.tool'))) {
-      files.push({ abs: path.join(root, rel), rel: `${PLUGINS_DIR}/${rel}` });
+      files.push({ abs: path.join(root, rel), rel: `${layout.pluginsDir}/${rel}` });
     }
 
     // MCP servers come from each plugin's mcp.json — the AUTHORITATIVE source
@@ -891,7 +893,7 @@ export class ToolManualService implements IToolManualService {
       // (a URL, a header, an added or dropped server, a `local: true` flip)
       // moves every server's digest — which is correct, if slightly generous.
       const from = sourceDigest(plugin.mcpJsonText + '\u0000' + (plugin.manifestText ?? ''));
-      for (const d of descriptorsFromMcpJson(plugin.relFolder, plugin.mcpJsonText, plugin.manifestText)) {
+      for (const d of descriptorsFromMcpJson(plugin.relFolder, plugin.mcpJsonText, plugin.manifestText, layout)) {
         d.sourceRevision = from;
         parsed.push(d);
       }
@@ -974,7 +976,7 @@ export class ToolManualService implements IToolManualService {
     // Only the CATALOG's scan talks. `listDeclaredOnlyOnBranch` re-scans a
     // draft workspace, and a draft's half-written `.tool` is not news about the
     // served catalog — it would also flap the log every time an agent saves.
-    if (branch === DEFAULT_BRANCH) this.logInvalidOnChange(invalid);
+    if (branch === this.kb.defaultBranch) this.logInvalidOnChange(invalid);
     return { manuals, invalid };
   }
 }

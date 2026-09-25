@@ -9,7 +9,7 @@ import {
   stripJunkBeforeKbDir,
 } from '../../workspace/routing/kb-routes';
 import { useWorkspaceImageResolver } from '../../workspace/hooks/useWorkspaceImageResolver';
-import { pluginOfPath, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { pluginOfPath, currentKbLayout, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { ReviewFileRow } from './ReviewFileRow';
@@ -43,7 +43,7 @@ export function isPluginItemPath(path: string, kbDirName: string | null): boolea
     kbDirName && withoutJunk.startsWith(`${kbDirName}/`)
       ? withoutJunk.slice(kbDirName.length + 1)
       : withoutJunk;
-  return pluginOfPath(repoRelative) !== null;
+  return pluginOfPath(repoRelative, currentKbLayout()) !== null;
 }
 
 /**

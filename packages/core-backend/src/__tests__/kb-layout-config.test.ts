@@ -20,6 +20,7 @@ import {
   validateKbLayout,
   validateKbRootName,
   normalizeSkillRoot,
+  type KbLayout,
 } from '@bevel-software/platform-shared';
 
 /**
@@ -28,6 +29,10 @@ import {
  * that names nothing runs with.
  */
 afterEach(() => configureKbLayout({ ...DEFAULT_KB_LAYOUT }));
+
+/** The helpers under the browser's configured layout — the shape these cases were written against. */
+const validateGuideName = (name: string, roots: KbLayout = DEFAULT_KB_LAYOUT) => validateAgentsFileName(name, roots);
+const platformFile = (path: string) => isPlatformFile(path, currentKbLayout());
 
 describe('KB layout — validation', () => {
   test('accepts the defaults and any three distinct plain folder names', () => {
@@ -100,12 +105,12 @@ describe('KB layout — configuration', () => {
 
   test('the derived sets follow the configured names rather than snapshotting the defaults', () => {
     configureKbLayout({ knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' });
-    expect(ontologyRoots()).toEqual(['docs', 'Data']);
-    expect(reservedRootDirNames().has('plugins')).toBe(true);
-    expect(reservedRootDirNames().has('Plugins')).toBe(false);
-    // Path rules read the live name too.
-    expect(pluginOfPath('plugins/GTM/skills/x/SKILL.md')).toBe('GTM');
-    expect(pluginOfPath('Plugins/GTM/skills/x/SKILL.md')).toBeNull();
+    expect(ontologyRoots(currentKbLayout())).toEqual(['docs', 'Data']);
+    expect(reservedRootDirNames(currentKbLayout()).has('plugins')).toBe(true);
+    expect(reservedRootDirNames(currentKbLayout()).has('Plugins')).toBe(false);
+    // Path rules read the configured name too.
+    expect(pluginOfPath('plugins/GTM/skills/x/SKILL.md', currentKbLayout())).toBe('GTM');
+    expect(pluginOfPath('Plugins/GTM/skills/x/SKILL.md', currentKbLayout())).toBeNull();
   });
 
   test('throws on an invalid layout and leaves the current one untouched', () => {
@@ -137,7 +142,7 @@ describe('KB layout — the agent guide\'s file name', () => {
   });
 
   test('accepts a plain markdown name and applies it to the live binding', () => {
-    expect(validateAgentsFileName('HEXIS.md')).toBeNull();
+    expect(validateGuideName('HEXIS.md')).toBeNull();
     configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
     expect(AGENTS_FILE).toBe('HEXIS.md');
     expect(currentKbLayout().agentsFile).toBe('HEXIS.md');
@@ -145,30 +150,30 @@ describe('KB layout — the agent guide\'s file name', () => {
 
   test('refuses every shape that is not one markdown file name of its own', () => {
     // A folder path: the guide is read from the repository root and nowhere else.
-    expect(validateAgentsFileName('guides/HEXIS.md')).toMatch(/single file name/);
-    expect(validateAgentsFileName('guides\\HEXIS.md')).toMatch(/single file name/);
+    expect(validateGuideName('guides/HEXIS.md')).toMatch(/single file name/);
+    expect(validateGuideName('guides\\HEXIS.md')).toMatch(/single file name/);
     // Not markdown: the per-file access rules apply to `.md` alone.
-    expect(validateAgentsFileName('HEXIS.txt')).toMatch(/end in \.md/);
+    expect(validateGuideName('HEXIS.txt')).toMatch(/end in \.md/);
     // Nothing at all.
-    expect(validateAgentsFileName('')).toMatch(/required/);
-    expect(validateAgentsFileName('   ')).toMatch(/required/);
+    expect(validateGuideName('')).toMatch(/required/);
+    expect(validateGuideName('   ')).toMatch(/required/);
     // A dot-file every scanner skips — including the one that draws the tree.
-    expect(validateAgentsFileName('.hidden.md')).toMatch(/start with a dot/);
+    expect(validateGuideName('.hidden.md')).toMatch(/start with a dot/);
     // The guide's own pre-rename name stays legacy content.
-    expect(validateAgentsFileName('CLAUDE.md')).toMatch(/pre-rename name/);
-    expect(validateAgentsFileName('claude.md')).toMatch(/pre-rename name/);
+    expect(validateGuideName('CLAUDE.md')).toMatch(/pre-rename name/);
+    expect(validateGuideName('claude.md')).toMatch(/pre-rename name/);
     // The other platform files: two platform roles on one path.
-    expect(validateAgentsFileName('access.md')).toMatch(/platform file name/);
-    expect(validateAgentsFileName('roles.yaml')).toMatch(/platform file name/);
-    expect(validateAgentsFileName('.bevelignore')).toMatch(/platform file name/);
-    expect(validateAgentsFileName('mcp-description.md')).toMatch(/platform file name/);
+    expect(validateGuideName('access.md')).toMatch(/platform file name/);
+    expect(validateGuideName('roles.yaml')).toMatch(/platform file name/);
+    expect(validateGuideName('.bevelignore')).toMatch(/platform file name/);
+    expect(validateGuideName('mcp-description.md')).toMatch(/platform file name/);
     // The rule every path component passes.
-    expect(validateAgentsFileName('CON.md')).not.toBeNull();
-    expect(validateAgentsFileName('a:b.md')).not.toBeNull();
+    expect(validateGuideName('CON.md')).not.toBeNull();
+    expect(validateGuideName('a:b.md')).not.toBeNull();
   });
 
   test('refuses the name of a root folder, whichever of the two the save names', () => {
-    expect(validateAgentsFileName('Plugins.md', { ...DEFAULT_KB_LAYOUT, pluginsDir: 'Plugins.md' }))
+    expect(validateGuideName('Plugins.md', { ...DEFAULT_KB_LAYOUT, pluginsDir: 'Plugins.md' }))
       .toMatch(/already the plugins folder/);
     // Case-insensitively, like the folders are to each other: one entry on a
     // case-insensitive disk.
@@ -197,16 +202,16 @@ describe('KB layout — the agent guide\'s file name', () => {
       '.bevelignore',
       'AGENTS.md',
     ]);
-    expect(isPlatformFile('AGENTS.md')).toBe(true);
+    expect(platformFile('AGENTS.md')).toBe(true);
 
     configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
-    expect(platformFileNames()).toEqual(['access.md', 'roles.yaml', '.bevelignore', 'HEXIS.md']);
+    expect(platformFileNames(currentKbLayout())).toEqual(['access.md', 'roles.yaml', '.bevelignore', 'HEXIS.md']);
     // The guide the platform writes is immovable and undeletable…
-    expect(isPlatformFile('HEXIS.md')).toBe(true);
+    expect(platformFile('HEXIS.md')).toBe(true);
     // …and the customer's own AGENTS.md is a page like any other.
-    expect(isPlatformFile('AGENTS.md')).toBe(false);
+    expect(platformFile('AGENTS.md')).toBe(false);
     // Still root-only, as `roles.yaml` is: a nested copy is content.
-    expect(isPlatformFile('KnowledgeBase/HEXIS.md')).toBe(false);
+    expect(platformFile('KnowledgeBase/HEXIS.md')).toBe(false);
   });
 
   test('the pointer sentence is one sentence, naming the guide twice, from one place', () => {
@@ -215,7 +220,7 @@ describe('KB layout — the agent guide\'s file name', () => {
         "it is the platform's guide to its layout, files and rules.",
     );
     configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
-    expect(agentsFilePointerSentence()).toContain('HEXIS.md');
+    expect(agentsFilePointerSentence(currentKbLayout().agentsFile)).toContain('HEXIS.md');
   });
 
   /**
@@ -226,7 +231,7 @@ describe('KB layout — the agent guide\'s file name', () => {
    */
   test('the pointer sentence links correctly for a name full of markdown punctuation', () => {
     const name = 'Our [Agent] Guide (v2).md';
-    expect(validateAgentsFileName(name)).toBeNull();
+    expect(validateGuideName(name)).toBeNull();
     const sentence = agentsFilePointerSentence(name);
     // The label cannot end early: the brackets in it are escaped…
     expect(sentence).toContain('[Our \\[Agent\\] Guide (v2).md]');
@@ -240,7 +245,7 @@ describe('KB layout — the agent guide\'s file name', () => {
   test('the pointer sentence encodes a name that would otherwise open a URL fragment', () => {
     // `#` is legal in a filename and opens a fragment in a URL: `./#2 Guide.md`
     // links to the customer's OWN file with a fragment, not to the guide.
-    expect(validateAgentsFileName('#2 Guide.md')).toBeNull();
+    expect(validateGuideName('#2 Guide.md')).toBeNull();
     expect(agentsFilePointerSentence('#2 Guide.md')).toContain('(./%232%20Guide.md)');
     // `%` is legal too, and an unencoded one is a malformed escape.
     expect(agentsFilePointerSentence('100%.md')).toContain('(./100%25.md)');

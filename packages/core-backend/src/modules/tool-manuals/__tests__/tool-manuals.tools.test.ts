@@ -8,6 +8,7 @@ import { createToolContextResolver } from '../../tool-helpers/tool-context.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { registerToolManualsTools } from '../tool-manuals.tools.js';
 import type { IToolManualService } from '../tool-manuals.contract.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * `list_tool_setup` MUST respect the same access controls as every other tool
@@ -114,6 +115,7 @@ async function start(): Promise<string> {
   registerToolManualsTools(registry, router, toolAuth, toolHandler, toolManualService, {
     accessControl,
     variableStatus: { statusFor },
+    kb: testKbContext(),
   });
   app.use('/api', router);
 

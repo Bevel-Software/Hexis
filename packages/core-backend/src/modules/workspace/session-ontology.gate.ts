@@ -22,6 +22,7 @@
  */
 
 import { ontologyOf } from '../../shared/kb-layout.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { JsonSchema } from '../tool-registry/tool.contract.js';
 import { ToolError, type ToolContext } from '../tool-helpers/tool.contract.js';
 import type { ISessionOntologyService } from '../workflow/session-ontology.service.js';
@@ -75,7 +76,8 @@ export class MissingSessionError extends ToolError {
 export interface SessionOntologyGate {
   service: ISessionOntologyService;
   enabled: boolean;
-  kbDirName: string;
+  /** The checkout folder and the layout a path is classified under. */
+  kb: Pick<KbContext, 'kbDirName' | 'layout'>;
   /** Lowercased email of the recovery/merge bot, which is exempt. */
   recoveryBotEmail: string;
   /**
@@ -103,7 +105,7 @@ function isAgentSource(ctx: ToolContext): boolean {
 function resolveGatedSession(gate: SessionOntologyGate, ctx: ToolContext, wsPath: string): string | 'skip' {
   if (!gate.enabled) return 'skip';
   // Neutral paths never pin/record/block — skip before any identity work.
-  if (ontologyOf(wsPath, gate.kbDirName) === null) return 'skip';
+  if (ontologyOf(wsPath, gate.kb.layout, gate.kb.kbDirName) === null) return 'skip';
   // Humans (UI routes) and browser-JWT callers never hit these tools; only
   // agent tool calls are gated.
   if (!isAgentSource(ctx)) return 'skip';
@@ -125,7 +127,7 @@ export async function recordOntologyRead(gate: SessionOntologyGate, ctx: ToolCon
   const sessionId = resolveGatedSession(gate, ctx, wsPath);
   if (sessionId === 'skip') return;
   // checkOperation(isWrite=false) records the touch and always allows.
-  await gate.service.checkOperation(sessionId, wsPath, false, gate.kbDirName);
+  await gate.service.checkOperation(sessionId, wsPath, false, gate.kb.kbDirName);
 }
 
 /**
@@ -155,7 +157,7 @@ export async function assertOntologyWriteAllowed(
   // Tracking stays core: record the (now-allowed) write's ontology touch.
   // A blocked write never reaches this line, so it records nothing — same as
   // before the hook split.
-  await gate.service.checkOperation(sessionId, wsPath, false, gate.kbDirName);
+  await gate.service.checkOperation(sessionId, wsPath, false, gate.kb.kbDirName);
 }
 
 /**

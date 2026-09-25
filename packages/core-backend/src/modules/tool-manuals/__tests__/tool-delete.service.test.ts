@@ -12,6 +12,7 @@ import type { IPluginIndexService, PluginCatalogEntry } from '../../plugins/plug
 import type { PluginSource, Discovery } from '../../plugins/discovery/plugin-source.js';
 import type { IToolManualService, ToolManualSummary } from '../tool-manuals.contract.js';
 import { ToolDeleteError, ToolDeleteService } from '../tool-delete.service.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * Deleting one tool, over a real temp KB: the two shapes a tool comes in (a
@@ -147,7 +148,7 @@ function build(
     pluginIndex,
     opts.source ?? discovery([]),
     vault as never,
-    KB,
+    testKbContext({ kbDirName: KB }),
     new NodeFs(),
   );
 }

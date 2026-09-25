@@ -12,9 +12,11 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ISkillService, SkillSummary } from '../../skills/skills.contract.js';
 import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const KB_DIR = 'knowledge-base';
 const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
+const kbContext = testKbContext({ kbDirName: KB_DIR });
 
 const OLGA = { name: 'Olga Ivanova', email: 'olga@bevel.software' };
 
@@ -70,8 +72,8 @@ describe('PluginIndexService', () => {
       opts.access ?? principals,
       skillService(opts.skills),
       toolService(opts.tools),
-      KB_DIR,
-      new KbPluginSource(new NodeFs()),
+      kbContext,
+      new KbPluginSource(new NodeFs(), kbContext),
       Date.now,
       opts.links,
     );
@@ -261,8 +263,8 @@ describe('PluginIndexService', () => {
       principals,
       skillService(skills('Skills/Eng/deploy', 'Skills/Eng/rollback', 'Plugins/Product/roadmap')),
       toolService(),
-      KB_DIR,
-      new KbPluginSource(new NodeFs()),
+      kbContext,
+      new KbPluginSource(new NodeFs(), kbContext),
       Date.now,
       links,
     ).catalog();

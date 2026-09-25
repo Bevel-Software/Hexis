@@ -1,15 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
-  DEFAULT_BRANCH,
   HEXIS_EXTENSION_NS,
-  PLUGINS_DIR,
   PLUGIN_MANIFEST_FILE,
   PLUGIN_MCP_FILE,
   type AuthUser,
 } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import { validatedVariables } from './mcp-json-discovery.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { containsVariableReference, findReservedVariableRef } from '../../shared/variable-refs.js';
@@ -127,9 +125,13 @@ export class McpServerEditService {
     private readonly commits: CommitDriver,
     private readonly accessControl: IAccessControl,
     private readonly toolManuals: IToolManualService,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
     private readonly disk: IFsProbe,
   ) {}
+
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
+  }
 
   /**
    * The merged view of one server, or null when unknown — including when
@@ -385,9 +387,9 @@ export class McpServerEditService {
     // One folder-scoped commit, ungated beyond the caller's own write access —
     // both files or neither. The catalog cache is stale the moment it lands.
     await this.commits.runPendingCommit(
-      workspaceIdForBranch(DEFAULT_BRANCH),
-      DEFAULT_BRANCH,
-      `${this.kbDirName}/${PLUGINS_DIR}/${folder}`,
+      this.kb.defaultWorkspaceId(),
+      this.kb.defaultBranch,
+      `${this.kbDirName}/${this.kb.layout.pluginsDir}/${folder}`,
       user,
     );
     this.toolManuals.invalidate();
@@ -408,7 +410,7 @@ export class McpServerEditService {
     return {
       folder,
       name: found.name,
-      wsId: workspaceIdForBranch(DEFAULT_BRANCH),
+      wsId: this.kb.defaultWorkspaceId(),
       mcpJsonPath: found.path,
     };
   }
@@ -419,10 +421,10 @@ export class McpServerEditService {
     mcpAbs: string;
     manifestAbs: string;
   }> {
-    const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
-    await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
+    const wsId = this.kb.defaultWorkspaceId();
+    await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch);
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
-    const pluginDir = path.join(wsDir, this.kbDirName, PLUGINS_DIR, folder);
+    const pluginDir = path.join(wsDir, this.kbDirName, this.kb.layout.pluginsDir, folder);
     const mcpAbs = path.join(pluginDir, PLUGIN_MCP_FILE);
     const manifestAbs = path.join(pluginDir, PLUGIN_MANIFEST_FILE);
     return {

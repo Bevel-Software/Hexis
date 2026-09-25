@@ -7,7 +7,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { DEFAULT_KB_LAYOUT, configureKbLayout } from '@bevel-software/platform-shared';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import { KbStartupRunner } from '../../workspace/startup/kb-startup-runner.js';
@@ -71,7 +71,6 @@ beforeEach(async () => {
 afterEach(async () => {
   server?.close();
   server = null;
-  configureKbLayout({ ...DEFAULT_KB_LAYOUT });
   for (const k of KB_ENV) {
     const original = savedEnv[k];
     if (original === undefined) delete process.env[k];
@@ -102,6 +101,10 @@ function boot() {
     delete: () => ({ where: () => Promise.resolve() }),
   } as unknown as Database;
   const settings = new DeploymentSettingsService(db, ENC_KEY);
+  // ONE context for the step and the routes, as the composition root builds
+  // it: the completing save applies the admin's names to it, and the step
+  // reads them from it when the phase runs.
+  const kb = testKbContext();
   const runner = new KbStartupRunner({
     gitRunner: new NodeGitRunner(),
     kbRepoUrl: () => upstream,
@@ -112,7 +115,7 @@ function boot() {
     defaultBranch: () => BRANCH,
     protectedBranches: () => [BRANCH],
     seedAdminEmails: ['admin@example.com'],
-    steps: [new TemplateFilesStep(new NodeFs())],
+    steps: [new TemplateFilesStep(new NodeFs(), kb)],
     buildSeedTree: async () => [],
   });
   const app = express();
@@ -128,6 +131,7 @@ function boot() {
       settings,
       { isAdmin: async () => true } as IAdminAccessService,
       runner,
+      kb,
       undefined,
       // The save now proves the connection first; the remote here is local, so
       // the stand-in answers for the host the stored address names.

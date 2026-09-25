@@ -98,6 +98,15 @@ export interface CorePorts {
    * contract each step signs up to). Core default: `[]`.
    */
   kbStartupSteps?: readonly OnServerStart[];
+  /**
+   * Mirror this composition's branch model and knowledge-base layout onto the
+   * shared package's PROCESS-WIDE live bindings (`DEFAULT_BRANCH`,
+   * `PLUGINS_DIR`, …), for an overlay that still reads them. Core itself
+   * reads only `CoreServices.kb`. Default true, so an overlay behaves as it
+   * did; a host that serves several knowledge bases in one process passes
+   * false, since there is no single value to put there.
+   */
+  mirrorSharedBindings?: boolean;
 }
 
 /**

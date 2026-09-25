@@ -2,6 +2,7 @@ import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createSecretsVaultRoutes } from '../secrets-vault.routes.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * The aggregated `/connect/pending` surface: everything standing between the
@@ -85,6 +86,7 @@ async function baseUrlWith(auth: { userId?: string; email?: string }): Promise<s
   app.use(
     '/api',
     createSecretsVaultRoutes({
+      kb: testKbContext(),
       secretsVault,
       toolManualService,
       accessControl,
@@ -170,6 +172,7 @@ describe('GET /api/connect/pending — the workspace tier', () => {
     app.use(
       '/api',
       createSecretsVaultRoutes({
+      kb: testKbContext(),
         secretsVault: {
           statusFor: async (_u: string, keys: string[]) =>
             keys.map((key) => ({
@@ -258,6 +261,7 @@ describe('GET /api/connect/pending — readability', () => {
     app.use(
       '/api',
       createSecretsVaultRoutes({
+      kb: testKbContext(),
         secretsVault: {
           statusFor: async (_u: string, keys: string[]) =>
             keys.map((key) => ({
@@ -384,6 +388,7 @@ describe('GET /api/connect/pending — OAuth scope coverage', () => {
     app.use(
       '/api',
       createSecretsVaultRoutes({
+      kb: testKbContext(),
         secretsVault: vaultWithGranted(grantedScopes),
         toolManualService: oauthTool,
         accessControl,
@@ -478,6 +483,7 @@ describe('GET /api/connect/pending — tool sign-ins are not double-listed as st
     app.use(
       '/api',
       createSecretsVaultRoutes({
+      kb: testKbContext(),
         secretsVault: vault,
         toolManualService: oauthTool,
         accessControl,
@@ -538,6 +544,7 @@ describe('GET /api/connect/pending — a row of the wrong KIND is not "set up"',
     app.use(
       '/api',
       createSecretsVaultRoutes({
+      kb: testKbContext(),
         secretsVault: {
           statusFor: async (_u: string, keys: string[]) => keys.map(opts.status),
           list: async () => [],

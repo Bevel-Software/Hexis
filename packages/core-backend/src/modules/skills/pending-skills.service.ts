@@ -1,9 +1,7 @@
-import {
-  PLUGINS_DIR,
-  SKILLS_DIR,
-} from '@bevel-software/platform-shared';
+import type { KbLayout } from '@bevel-software/platform-shared';
 import { type WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import { resolveDeclaredId } from '../../shared/frontmatter-id.js';
 import { visibleProposedFiles } from '../../shared/pending-proposals.js';
 import { isSafeSkillName, parseSkillFrontmatter } from './skills.service.js';
@@ -40,6 +38,7 @@ export class PendingSkillsService implements IPendingSkillService {
     private readonly accessControl: IAccessControl,
     private readonly skillService: ISkillService,
     private readonly workflow: IWorkflowService,
+    private readonly kb: KbContext,
   ) {}
 
   async listPendingSkills(userEmail: string): Promise<PendingSkill[]> {
@@ -54,14 +53,16 @@ export class PendingSkillsService implements IPendingSkillService {
       return [];
     }
 
+    const layout = this.kb.layout;
     const proposed = await visibleProposedFiles(
       {
         workspaceService: this.workspaceService,
         accessControl: this.accessControl,
         workflow: this.workflow,
+        kb: this.kb,
       },
       userEmail,
-      (p) => isSkillDoc(p) && !released.has(folderOf(p)),
+      (p) => isSkillDoc(p, layout) && !released.has(folderOf(p)),
     );
 
     const out: PendingSkill[] = proposed.map(({ cr, path, content, isAuthor }) => {
@@ -96,12 +97,12 @@ export class PendingSkillsService implements IPendingSkillService {
  * catalog already supports. `Plugins/<plugin>/SKILL.md` is NOT a skill — a plugin
  * folder is not itself one.
  */
-function isSkillDoc(repoRelPath: string): boolean {
+function isSkillDoc(repoRelPath: string, layout: KbLayout): boolean {
   const segments = repoRelPath.split('/');
   if (segments[segments.length - 1] !== SKILL_DOC) return false;
   // Under `Skills/` a skill may sit directly below the root: `Skills/<skill>/SKILL.md`.
-  if (segments[0] === SKILLS_DIR) return segments.length >= 3;
-  return segments.length >= 4 && segments[0] === PLUGINS_DIR;
+  if (segments[0] === layout.skillsDir) return segments.length >= 3;
+  return segments.length >= 4 && segments[0] === layout.pluginsDir;
 }
 
 /** The skill folder holding a SKILL.md. */

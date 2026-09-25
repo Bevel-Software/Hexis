@@ -2,14 +2,13 @@ import path from 'node:path';
 import { logger } from '../shared/logging.js';
 import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import {
-  DEFAULT_BRANCH,
-  configureBranchModel,
-  validateBranchModel,
-  PROTECTED_BRANCHES,
-  configureKbLayout,
-} from '@bevel-software/platform-shared';
+// The browser-side live bindings, imported here and nowhere else in this
+// package: `mirrorSharedBindings` below keeps them in step with `kb` for an
+// overlay that still reads them. Core's own modules read only `KbContext`.
+// eslint-disable-next-line no-restricted-imports
+import { configureBranchModel, configureKbLayout } from '@bevel-software/platform-shared';
 import { CoreConfig } from '../core-config.js';
+import { KbContext } from '../shared/kb-context.js';
 import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
@@ -265,11 +264,19 @@ export interface CoreServices {
   /** Deployment settings, env-first — the KB remote resolves through these. */
   settings: DeploymentSettingsService;
   /**
+   * The knowledge base as this composition names it: the checkout folder,
+   * the branch model and the layout — the one object every core service reads
+   * those from (see `shared/kb-context.ts`). The setup-completing save applies
+   * the branch model and the layout to it, so an overlay reads the answer in
+   * effect here rather than from the shared package's live bindings.
+   */
+  kb: KbContext;
+  /**
    * The knowledge-base directory name IN EFFECT — environment first, then the
    * stored setting, then the default. Published here because `config.kbDirName`
    * is only the environment's half of that answer: reading it directly gives
    * the empty string on any deployment configured through the setup screen, and
-   * every path built from it would be wrong.
+   * every path built from it would be wrong. The same value as `kb.kbDirName`.
    */
   kbDirName: string;
   secretsVaultService: DbSecretsVaultService;
@@ -328,34 +335,10 @@ export async function createCoreServices(
   const settings = new DeploymentSettingsService(db, config.secretsEncKey);
   await settings.load();
 
-  /**
-   * The branch model, before anything reads it. It used to be applied at import
-   * time from the environment, which is what forced the frontend to bake it
-   * into its bundle; it now comes through the settings store like the rest of
-   * the deployment's configuration (environment first, as always).
-   *
-   * UNCONFIGURED IS ALLOWED, and that is the point: a fresh deployment has no
-   * branch model, and refusing to boot would take away the setup screen where
-   * one gets entered. What reads it before then is the setup path itself, which
-   * does not need it — the bootstrap admin is recognised without a workspace.
-   * `isComplete` keeps the rest of the app behind the gate until it is set, and
-   * the setting is restart-to-apply because services take the value at
-   * construction.
-   */
-  const branchModel = {
-    defaultBranch: settings.resolve('defaultBranch'),
-    protectedBranches: settings.resolve('protectedBranches'),
-  };
-  if (!validateBranchModel(branchModel)) configureBranchModel(branchModel);
   // The layout variables that were retired this release, folded into their
   // saved settings before anything reads the layout — so the boot that imports
   // them also RUNS on the imported names rather than on the defaults.
   await settings.importLegacyLayoutEnv();
-  // The KB layout — the three renameable roots and the agent guide's file name
-  // — applied the same way and at the same moment, before any service captures
-  // one of them. Unlike the branch model it always resolves (every name has a
-  // default), so an invalid value is a real misconfiguration and stops the boot.
-  configureKbLayout(settings.resolveKbLayout());
   // A token supplied through the setup screen has to reach the credential
   // helper, which reads `$GITHUB_TOKEN` at call time.
   settings.syncGitTokenEnv();
@@ -370,6 +353,50 @@ export async function createCoreServices(
   // unnameable. Both are operator settings, so the collision is refused here,
   // by name, before any service captures either.
   assertKbDirNameFree(kbDirName, settings.resolveKbLayout());
+  /**
+   * The knowledge base's context — the checkout folder, the branch model and
+   * the layout — built before any service, and handed to each one that reads
+   * a name from it (see `shared/kb-context.ts`). The values come through the
+   * settings store like the rest of the deployment's configuration
+   * (environment first, as always).
+   *
+   * The branch model: UNCONFIGURED IS ALLOWED, and that is the point. A fresh
+   * deployment has no branch model, and refusing to boot would take away the
+   * setup screen where one gets entered. What reads it before then is the
+   * setup path itself, which does not need it — the bootstrap admin is
+   * recognised without a workspace. `isComplete` keeps the rest of the app
+   * behind the gate until it is set, and the save that completes setup applies
+   * it to this very object, which every service reads at use rather than
+   * capturing at construction.
+   *
+   * The layout — the three renameable roots and the agent guide's file name —
+   * always resolves (every name has a default), so an invalid value is a real
+   * misconfiguration and stops the boot.
+   */
+  const kb = new KbContext(
+    kbDirName,
+    KbContext.branchModelOrUnconfigured({
+      defaultBranch: settings.resolve('defaultBranch'),
+      protectedBranches: settings.resolve('protectedBranches'),
+    }),
+    settings.resolveKbLayout(),
+  );
+  // The shared package's process-wide live bindings, kept in step with `kb`
+  // for an overlay that still reads them — now, and again when the setup-
+  // completing save applies a model or a layout. Nothing in this package
+  // reads them; a host serving several knowledge bases turns this off.
+  if (ports.mirrorSharedBindings !== false) {
+    const mirrorBranchModel = () => {
+      if (kb.isBranchModelConfigured()) {
+        configureBranchModel({ defaultBranch: kb.defaultBranch, protectedBranches: [...kb.protectedBranches] });
+      }
+    };
+    const mirrorLayout = () => configureKbLayout(kb.layout);
+    mirrorBranchModel();
+    mirrorLayout();
+    kb.onBranchModelApplied(mirrorBranchModel);
+    kb.onLayoutApplied(mirrorLayout);
+  }
   // The disk: one walk, one probe, for every reader below.
   const disk = new NodeFs();
   // How git is run, for every module that runs it: one environment, one buffer
@@ -380,7 +407,7 @@ export async function createCoreServices(
   const workspaceService = new WorkspaceService(
     config.workspacesRoot,
     () => settings.resolve('kbRepoUrl'),
-    kbDirName,
+    kb,
     disk,
     () => settings.resolve('gitUsername') || 'x-access-token',
     gitRunner,
@@ -400,18 +427,18 @@ export async function createCoreServices(
     // read-only, needs no remote, and must be said even on a deployment whose
     // setup never finished — so `noteBesideCheckout` runs once from the server
     // builder, ahead of this gated phase.)
-    new GroupsToPluginsStep(disk),
-    new PluginManifestsStep(disk),
+    new GroupsToPluginsStep(disk, kb),
+    new PluginManifestsStep(disk, kb),
     // After the manifests step: a folder that only just got its manifest got
     // one the renderer wrote, which already carries the display name — the
     // backfill then has nothing to do for it. Ordered the other way, the
     // backfill would walk a tree still missing those manifests.
-    new PluginDisplayNamesStep(disk),
-    new PersonalSpacesStep(disk),
+    new PluginDisplayNamesStep(disk, kb),
+    new PersonalSpacesStep(disk, kb),
     // A getter, not a value: the step is built here, while the process may
     // still hold the defaults, and the save that completes first-run setup
     // applies the admin's answer afterwards.
-    new TemplateFilesStep(disk, extraDirs, () => settings.resolveAgentsFileLink()),
+    new TemplateFilesStep(disk, kb, extraDirs, () => settings.resolveAgentsFileLink()),
     new RolesYamlStep(disk, [config.adminEmail]),
     ...(ports.kbStartupSteps ?? []),
   ];
@@ -425,13 +452,13 @@ export async function createCoreServices(
     workspacesRoot: config.workspacesRoot,
     kbDirName,
     templateDir: config.kbTemplateDir,
-    defaultBranch: () => DEFAULT_BRANCH,
-    protectedBranches: () => [...PROTECTED_BRANCHES],
+    defaultBranch: () => kb.defaultBranch,
+    protectedBranches: () => [...kb.protectedBranches],
     // The deployment owner is the initial Admin of a freshly seeded KB — the
     // same answer `SEED_ADMIN_EMAILS` used to ask for a second time.
     seedAdminEmails: [config.adminEmail],
     steps: kbStartupSteps,
-    buildSeedTree: buildSeedTree(disk, config.kbTemplateDir, extraDirs, [config.adminEmail]),
+    buildSeedTree: buildSeedTree(disk, config.kbTemplateDir, extraDirs, [config.adminEmail], kb),
     gitRunner,
   });
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
@@ -452,49 +479,50 @@ export async function createCoreServices(
     disk,
     [config.adminEmail],
     gitRunner,
+    kb,
   );
   // Creator read-grant on creation: read is default-deny and the roots grant
   // it to nobody, so every surface that starts a new folder at a root (human
   // routes, agent tools, upload apply) consults this planner to keep the new
   // folder visible to its creator.
-  const creatorAccess = new CreatorAccessService(workspaceService, accessControl, kbDirName, disk);
+  const creatorAccess = new CreatorAccessService(workspaceService, accessControl, kb, disk);
   // Read-before-write: the gate every lock acquire asks, on every branch —
   // nothing is created, changed or removed where its author cannot read,
   // except that new folder at a root (see `access-model/change-gate.ts`).
-  const changeGate = new ChangeReadGate(workspaceService, accessControl, kbDirName, disk);
+  const changeGate = new ChangeReadGate(workspaceService, accessControl, kb, disk);
 
   // Ontology-session boundary: records each agent run's touched ontologies and
   // blocks writes once a run has crossed ontologies. Postgres-backed so the
   // boundary survives a restart.
-  const sessionOntologyService = new SessionOntologyService(db);
+  const sessionOntologyService = new SessionOntologyService(db, kb);
   // Per-run write restriction (by file extension). Shared by the workspace tool
   // surface (which enforces it) and the routine runner (which sets it for
   // dashboard-only `watchlist_check` runs). In-memory: a restriction lives only for
   // one run, unlike the Postgres-backed ontology touched-set above.
   const routineWritePolicy = new RoutineWritePolicyService();
   // Skills: discovered from the default-branch workspace only (global catalog).
-  const skillService = new SkillService(workspaceService, accessControl, kbDirName, disk);
+  const skillService = new SkillService(workspaceService, accessControl, kb, disk);
   // Tool manuals: user-authored `*.tool` files under `Plugins/` in the default
   // branch — access-controlled like Skills, served to external agents via
   // `GET /api/agent/all-tools` and registered on the MCP proxy's UTCP client.
   // Where plugins come from: one walk of the plugins root that reads every
   // plugin folder in whichever file shape it carries (see
   // modules/plugins/discovery). Nothing to configure, nothing to document.
-  const pluginSource = new KbPluginSource(disk);
-  const toolManualService = new ToolManualService(workspaceService, accessControl, kbDirName, disk, pluginSource);
+  const pluginSource = new KbPluginSource(disk, kb);
+  const toolManualService = new ToolManualService(workspaceService, accessControl, kb, disk, pluginSource);
   // Plugins: the folders under `Plugins/` that carry a
   // team's skills AND the tools they need. Enumerated for EVERY authenticated
   // caller — a plugin they cannot read still exists for them, as a locked one —
   // with the counts read off the two catalogs above rather than a second scan.
   // The link index resolves manifests against the released catalog, and the
   // plugin index counts through it (inline + linked), so it comes first.
-  const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kbDirName, pluginSource);
+  const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kb, pluginSource);
   const pluginIndexService = new PluginIndexService(
     workspaceService,
     accessControl,
     skillService,
     toolManualService,
-    kbDirName,
+    kb,
     pluginSource,
     Date.now,
     pluginLinkIndex,
@@ -526,7 +554,7 @@ export async function createCoreServices(
   const gitService = new GitService(
     workspaceService,
     workflowHooks,
-    kbDirName,
+    kb,
     workspaceMutex,
     accessControl,
     gitRunner,
@@ -611,7 +639,7 @@ export async function createCoreServices(
     accessControl,
     fileLockService,
     pendingCommitsService,
-    kbDirName,
+    kb,
     changeGate,
     eventBus,
     fileChangeNotifier,
@@ -625,7 +653,7 @@ export async function createCoreServices(
   // (the request's branch vs the default branch), so it holds no state — it
   // only needs to read files at refs and to close a request whose proposals
   // have all landed.
-  const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
+  const joinRequestsService = new JoinRequestsService(workspaceService, workflowService, kb);
   // The OTHER half of a join request: the row the subscribe endpoint writes
   // before it answers, and the branch/clone/commit/push/change-request work
   // that runs against it afterwards. The row is what lets the click be
@@ -634,7 +662,7 @@ export async function createCoreServices(
   const pluginJoinRequestJobs = new PluginJoinRequestJobs(new DbJoinRequestStore(db), {
     workflow: workflowService,
     workspaceService,
-    kbDirName,
+    kb,
     // A record keys on the plugin's primary FOLDER below the root, which the
     // catalog is the only thing that can turn back into a path and a name
     // people read. Null once nothing answers to the key — a deleted plugin,
@@ -666,7 +694,7 @@ export async function createCoreServices(
     accessControl,
     skillService,
     pluginLinkIndex,
-    kbDirName,
+    kb,
     eventBus,
     () => pluginIndexService.invalidate(),
   );
@@ -678,7 +706,7 @@ export async function createCoreServices(
     accessControl,
     pluginSource,
     disk,
-    kbDirName,
+    kb,
     eventBus,
     () => {
       pluginIndexService.invalidate();
@@ -692,7 +720,7 @@ export async function createCoreServices(
     accessControl,
     skillService,
     pluginLinkIndex,
-    kbDirName,
+    kb,
     {
       name: 'hexis',
       owner: 'Hexis',
@@ -727,7 +755,7 @@ export async function createCoreServices(
     workflowService,
     accessControl,
     toolManualService,
-    kbDirName,
+    kb,
     disk,
   );
 
@@ -739,7 +767,7 @@ export async function createCoreServices(
     workspaceService,
     workflowService,
     accessControl,
-    kbDirName,
+    kb,
     eventBus,
     pluginSource,
     disk,
@@ -755,6 +783,7 @@ export async function createCoreServices(
     accessControl,
     skillService,
     workflowService,
+    kb,
   );
 
   // The same missing half, for tools: a `.tool` manual or an `mcp.json` server
@@ -766,6 +795,7 @@ export async function createCoreServices(
     accessControl,
     toolManualService,
     workflowService,
+    kb,
   );
 
   // Catalog freshness: the skill / tool-manual / plugin-index caches all scan
@@ -777,7 +807,7 @@ export async function createCoreServices(
   registerCatalogCacheInvalidation({
     eventBus,
     fileChangeNotifier,
-    kbDirName,
+    kb,
     catalogs: [toolManualService, skillService, pluginIndexService, pluginLinkIndex],
     accessControl,
   });
@@ -787,7 +817,7 @@ export async function createCoreServices(
   const adminAccess = new AdminAccessService(
     accessControl,
     workspaceService,
-    () => DEFAULT_BRANCH,
+    () => kb.defaultBranch,
     // The deployment owner administers accounts/roles even before the KB's
     // roles.yaml lists them, and whatever the sign-in method — this list is
     // consulted before any roles.yaml lookup, so it holds for SSO too.
@@ -835,7 +865,7 @@ export async function createCoreServices(
     pluginIndexService,
     pluginSource,
     secretsVaultService,
-    kbDirName,
+    kb,
     disk,
   );
 
@@ -917,7 +947,7 @@ export async function createCoreServices(
   // for readers, and the preamble is a broadcast). One reader, two consumers:
   // the proxy below composes in-process per request; the agent-facing route
   // serves the same composition to the local bridge and the frontend card.
-  const readPreamble: AgentPreambleReader = () => readAgentPreamble(workspaceService, kbDirName, disk);
+  const readPreamble: AgentPreambleReader = () => readAgentPreamble(workspaceService, kb, disk);
   // The Audit log. Records through the proxy below (every call an external
   // agent makes), reads keys through the key service so their shape is
   // defined once, and prunes past the retention setting — read per sweep, so
@@ -1112,7 +1142,7 @@ export async function createCoreServices(
         eventBus,
         kbDirName,
         bot,
-        defaultBranchOf: () => DEFAULT_BRANCH,
+        defaultBranchOf: () => kb.defaultBranch,
       }),
       debounceMs: opts?.debounceMs,
       log: opts?.log ?? ((message) => logger('directory-sync').warn(message)),
@@ -1126,7 +1156,7 @@ export async function createCoreServices(
     workflowService,
     accessControl,
     kbDirName,
-    () => DEFAULT_BRANCH,
+    () => kb.defaultBranch,
     eventBus,
   );
   // Account deletion's optional half: the erased address out of roles.yaml,
@@ -1138,7 +1168,7 @@ export async function createCoreServices(
     accessControl,
     disk,
     kbDirName,
-    () => DEFAULT_BRANCH,
+    () => kb.defaultBranch,
     eventBus,
     [config.adminEmail],
   );
@@ -1154,6 +1184,7 @@ export async function createCoreServices(
     workspaceService,
     kbStartupRunner,
     settings,
+    kb,
     kbDirName,
     spillStore,
     docExtractService,

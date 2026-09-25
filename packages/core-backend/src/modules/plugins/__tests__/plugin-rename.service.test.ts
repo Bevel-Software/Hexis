@@ -12,6 +12,7 @@ import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js'
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { PluginRenameError, PluginRenameService, renamePluginPrincipalInText } from '../plugin-rename.service.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 // The one walk of the checkout, with a switch that makes it report a hole —
 // the way a folder it cannot list would — to every listener on it. The
@@ -115,7 +116,7 @@ describe('PluginRenameService', () => {
 
     access = new AccessControlService(workspaceService, KB_DIR, new NodeFs());
     const disk = new HoledFs();
-    svc = new PluginRenameService(workspaceService, driver, access, new KbPluginSource(disk), disk, KB_DIR, undefined, () => {
+    svc = new PluginRenameService(workspaceService, driver, access, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })), disk, testKbContext({ kbDirName: KB_DIR }), undefined, () => {
       invalidated += 1;
     });
   });
@@ -124,7 +125,7 @@ describe('PluginRenameService', () => {
   it('refuses to claim a name against a listing with a hole in it — an unreadable folder may hold that very plugin', async () => {
     // Discovery as the walker reports it when a folder exists but could not
     // be read: the plugins it did see, plus the hole.
-    const real = new KbPluginSource(new NodeFs());
+    const real = new KbPluginSource(new NodeFs(), testKbContext({ kbDirName: KB_DIR }));
     const holed = {
       dialect: 'kb',
       discover: async (root: string) => ({ ...(await real.discover(root)), unreadable: ['Plugins/Hidden'] }),
@@ -135,7 +136,7 @@ describe('PluginRenameService', () => {
       access,
       holed,
       new NodeFs(),
-      KB_DIR,
+      testKbContext({ kbDirName: KB_DIR }),
     );
     await expect(svcOverHole.rename(manager, 'gtm', { name: 'go-to-market' })).rejects.toMatchObject({
       status: 503,
@@ -155,7 +156,7 @@ describe('PluginRenameService', () => {
   });
 
   it('tells a NON-manager nothing about the tree — a holed discovery is still just "unknown plugin" to them', async () => {
-    const real = new KbPluginSource(new NodeFs());
+    const real = new KbPluginSource(new NodeFs(), testKbContext({ kbDirName: KB_DIR }));
     const holed = {
       dialect: 'kb',
       discover: async (root: string) => ({ ...(await real.discover(root)), unreadable: ['Plugins/Hidden'] }),
@@ -166,7 +167,7 @@ describe('PluginRenameService', () => {
       access,
       holed,
       new NodeFs(),
-      KB_DIR,
+      testKbContext({ kbDirName: KB_DIR }),
     );
     const refusal = await svcOverHole.rename(member, 'gtm', { name: 'go-to-market' }).catch((e: unknown) => e);
     expect(refusal).toMatchObject({ status: 404, payload: { kind: 'unknown-plugin' } });
@@ -269,7 +270,7 @@ describe('PluginRenameService', () => {
       expect(await read('Skills/Eng/deploy/access.md')).toBe(DEPLOY_RULES);
       // The three answers that must never diverge: the rename's, the
       // discovery source's, and the shared reader's over the file itself.
-      const { plugins } = await new KbPluginSource(new NodeFs()).discover(repo);
+      const { plugins } = await new KbPluginSource(new NodeFs(), testKbContext({ kbDirName: KB_DIR })).discover(repo);
       const found = plugins.find((p) => p.folder === 'Plugins/GTM')!;
       expect([found.name, found.displayName]).toEqual([result.name, result.displayName]);
       expect(pluginDisplayNameOf(JSON.parse(await read('Plugins/GTM/plugin.json')))).toBe(result.displayName);

@@ -13,7 +13,8 @@ import {
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
-import { pluginsWorkspaceId, pluginFolderBelowRoot } from './plugins.service.js';
+import { pluginFolderBelowRoot } from './plugins.service.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import { PluginProvisionError, type PluginProvisionService } from './plugin-provision.service.js';
 import { PluginLinkError, type PluginLinksService } from './plugin-links.service.js';
 import { PluginRenameError, type PluginRenameService } from './plugin-rename.service.js';
@@ -159,6 +160,8 @@ export function createPluginsRoutes(
   joinRequestJobs: PluginJoinRequestJobs,
   provision: PluginProvisionService,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
+  /** The released branch's clone — every verdict here is read from it. */
+  kb: Pick<KbContext, 'defaultWorkspaceId'>,
   /** Optional: a host without the link machinery simply has no link routes. */
   links?: PluginLinksService,
   /** Optional: a host without it has no rename route. */
@@ -296,7 +299,7 @@ export function createPluginsRoutes(
         res.json({ plugins: [] });
         return;
       }
-      const wsId = pluginsWorkspaceId();
+      const wsId = kb.defaultWorkspaceId();
       const probes = probesFor(catalog);
       const [readable, writable, owned] = await Promise.all([
         accessControl.canReadBatch(wsId, email, probes),
@@ -453,7 +456,7 @@ export function createPluginsRoutes(
       }
       // By identity — the manifest name the catalog keys on.
       const plugin = (await pluginIndex.catalog()).find((g) => g.name === req.params.name);
-      const wsId = pluginsWorkspaceId();
+      const wsId = kb.defaultWorkspaceId();
       const ownerVerdicts = plugin
         ? await Promise.all(
             plugin.folders.map((f) => accessControl.canOwner(wsId, email, memberProbe(f))),
@@ -494,7 +497,7 @@ export function createPluginsRoutes(
       const catalog = await pluginIndex.catalog();
       // By identity — the manifest name the catalog keys on.
       const plugin = catalog.find((g) => g.name === req.params.name);
-      const wsId = pluginsWorkspaceId();
+      const wsId = kb.defaultWorkspaceId();
       // Same ANY-folder shape `GET /plugins` resolves with, so a plugin can
       // never be listed as discoverable there and rejected as unknown here.
       const verdicts = plugin
@@ -567,7 +570,7 @@ export function createPluginsRoutes(
       return null;
     }
     const writable = await accessControl.canWriteBatch(
-      pluginsWorkspaceId(),
+      kb.defaultWorkspaceId(),
       email,
       plugin.folders.map(accessMdOf),
     );

@@ -1,4 +1,5 @@
 import {
+  currentKbLayout,
   isPlatformFile,
   isPlatformRestoreShape,
   isRootPlatformFile,
@@ -41,7 +42,7 @@ export function platformFileMoveRefusal(
 ): string | null {
   const rel = repoRelative(wsRelativePath, kbDirName);
   if (rel === null) return null;
-  return isPlatformFile(rel) ? platformFileRefusal(rel) : null;
+  return isPlatformFile(rel, currentKbLayout()) ? platformFileRefusal(rel) : null;
 }
 
 /**
@@ -71,7 +72,7 @@ export function platformFileDragRefusal(
   const refusal = platformFileMoveRefusal(wsRelativePath, kbDirName);
   if (refusal === null || !isAdmin) return refusal;
   const rel = repoRelative(wsRelativePath, kbDirName);
-  return rel === null || isRootPlatformFile(rel) ? refusal : null;
+  return rel === null || isRootPlatformFile(rel, currentKbLayout()) ? refusal : null;
 }
 
 /**
@@ -303,7 +304,10 @@ export function moveWarnings(opts: {
     const from = repoRelative(opts.sourcePath, opts.kbDirName);
     const to = repoRelative(destination, opts.kbDirName);
     const restore =
-      opts.isAdmin === true && from !== null && to !== null && isPlatformRestoreShape(from, to);
+      opts.isAdmin === true &&
+      from !== null &&
+      to !== null &&
+      isPlatformRestoreShape(from, to, currentKbLayout());
     warnings.push(
       restore
         ? `You can't write to ${opts.destinationLabel}, but putting ${name} back where the platform reads it is allowed for an Admin.`

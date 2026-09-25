@@ -1,6 +1,5 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { isBranchModelConfigured } from '@bevel-software/platform-shared';
 import { logger } from '../../../shared/logging.js';
 
 // `startupLog` rather than `log`: `retryUntilMaintained` takes a `log`
@@ -260,7 +259,8 @@ export class KbStartupRunner {
   }
 
   private async runAllOnce(): Promise<void> {
-    if (!isBranchModelConfigured()) {
+    // An empty default branch IS the unconfigured model (see `KbContext`).
+    if (!this.opts.defaultBranch()) {
       startupLog.info('branch model not configured yet — phase skipped until setup completes.');
       return;
     }

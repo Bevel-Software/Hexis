@@ -12,6 +12,7 @@ import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { PluginProvisionService } from '../plugin-provision.service.js';
 import { createPluginCreationRoutes } from '../plugins.routes.js';
 import { CREATE_PLUGIN } from '../plugins.tools.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * Both doors into plugin creation, through the code each one really runs.
@@ -72,9 +73,9 @@ async function makeHarness(): Promise<Harness> {
     workspaceService,
     { runPendingCommit: vi.fn(async () => undefined) },
     { invalidate: vi.fn() } as unknown as IAccessControl,
-    KB,
+    testKbContext({ kbDirName: KB }),
     undefined,
-    new KbPluginSource(new NodeFs()),
+    new KbPluginSource(new NodeFs(), testKbContext({ kbDirName: KB })),
     new NodeFs(),
   );
 
@@ -185,7 +186,7 @@ describe('creation derives and stores the display name the same way through ever
     await h.byTool('design');
     // `access.md` is what makes a folder exist to discovery; provisioning
     // wrote it, so the catalog sees both plugins.
-    const { plugins } = await new KbPluginSource(new NodeFs()).discover(path.join(h.dir, KB));
+    const { plugins } = await new KbPluginSource(new NodeFs(), testKbContext({ kbDirName: KB })).discover(path.join(h.dir, KB));
     // Walk order, which is the folders' — `design` before `Sales Team`.
     expect(plugins.map((p) => [p.name, p.displayName])).toEqual([
       ['design', 'design'],

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { PLUGINS_DIR, isPersonalPluginFolder } from '@bevel-software/platform-shared';
+import { isPersonalPluginFolder } from '@bevel-software/platform-shared';
+import type { KbContext } from '../../../../shared/kb-context.js';
 import {
   EVERYONE_CANONICAL,
   KNOWN_VERBS,
@@ -41,7 +42,15 @@ import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '..
 export class PersonalSpacesStep implements OnServerStart {
   readonly name = 'personal-spaces';
 
-  constructor(private readonly disk: IFsProbe) {}
+  constructor(
+    private readonly disk: IFsProbe,
+    /** Read per run, never captured: the setup-completing save may rename the plugins root first. */
+    private readonly kb: Pick<KbContext, 'layout'>,
+  ) {}
+
+  private get pluginsDir(): string {
+    return this.kb.layout.pluginsDir;
+  }
 
   async run(ctx: ServerStartContext): Promise<StepResult> {
     for (const branch of await ctx.allBranches()) {
@@ -52,12 +61,12 @@ export class PersonalSpacesStep implements OnServerStart {
 
   private async closePersonalSpaces(branch: KbBranch): Promise<void> {
     const repoDir = await branch.repoDir();
-    const entries = await this.disk.listDir(path.join(repoDir, PLUGINS_DIR));
+    const entries = await this.disk.listDir(path.join(repoDir, this.pluginsDir));
     if (entries === null) return;
     const closed: string[] = [];
     for (const entry of entries) {
       if (!entry.isDirectory() || !isPersonalPluginFolder(entry.name)) continue;
-      const rel = `${PLUGINS_DIR}/${entry.name}/access.md`;
+      const rel = `${this.pluginsDir}/${entry.name}/access.md`;
       let text: string;
       try {
         text = await fs.readFile(path.join(repoDir, rel), 'utf8');
@@ -72,7 +81,7 @@ export class PersonalSpacesStep implements OnServerStart {
     }
     if (closed.length === 0) return;
     branch.note(`Keep ${closed.length === 1 ? 'a personal space' : `${closed.length} personal spaces`} private`);
-    for (const name of closed) branch.note(`${PLUGINS_DIR}/${name}/access.md: read denies everyone`);
+    for (const name of closed) branch.note(`${this.pluginsDir}/${name}/access.md: read denies everyone`);
   }
 }
 

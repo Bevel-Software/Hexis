@@ -277,7 +277,7 @@ export async function createCoreServer(
    * on purpose; see `publicConfig` for what it discloses and why.
    */
   app.get('/api/config', (_req, res) => {
-    res.json(publicConfig({ marketplaceGitUrl: marketplaceGitUrl.toString(), mcpUrl: mcpResourceUrl.toString() }));
+    res.json(publicConfig(core.kb, { marketplaceGitUrl: marketplaceGitUrl.toString(), mcpUrl: mcpResourceUrl.toString() }));
   });
 
   // The per-user marketplace as a git remote. Outside `/api` and ahead of
@@ -468,6 +468,7 @@ export async function createCoreServer(
     stateSecret: core.config.jwtSecret,
     publicBackendUrl: core.config.publicBackendUrl,
     publicFrontendUrl: core.config.publicFrontendUrl,
+    kb: core.kb,
   };
   app.use('/api', createSecretsVaultPublicRoutes(secretsVaultRoutesDeps));
 
@@ -508,16 +509,16 @@ export async function createCoreServer(
   const sessionOntologyGate = {
     service: core.sessionOntologyService,
     enabled: core.config.ontologySessionBlock,
-    kbDirName: core.kbDirName,
+    kb: core.kb,
     recoveryBotEmail: RECOVERY_BOT_EMAIL,
     hooks: core.workflowService.hooks,
   };
   // A skill's `allowed-tools`, checked against what the caller can see — on
   // every save surface (agent write tools, the app's PUT /file) and on
   // `get_skill`. Warnings only; it never refuses a save.
-  const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kbDirName);
-  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kbDirName);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate);
+  const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
+  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, sessionOntologyGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate);
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
@@ -527,6 +528,7 @@ export async function createCoreServer(
     // The vault satisfies the module's local VariableStatusPort — `list_tool_setup`
     // reports configuration booleans only; secret values never ride through tools.
     variableStatus: core.secretsVaultService,
+    kb: core.kb,
   });
   // Overlay tool registrations (defs + module-hosted endpoints).
   ext.tools?.({
@@ -552,7 +554,7 @@ export async function createCoreServer(
     {
       workspaceService: core.workspaceService,
       accessControl: core.accessControl,
-      kbDirName: core.kbDirName,
+      kb: core.kb,
       disk: core.disk,
       pluginIndex: core.pluginIndexService,
     },
@@ -631,7 +633,7 @@ export async function createCoreServer(
     core.workflowService,
     core.eventBus,
     core.accessControl,
-    core.kbDirName,
+    core.kb,
     core.creatorAccess,
     core.adminAccess,
     core.disk,
@@ -669,13 +671,13 @@ export async function createCoreServer(
     core.workflowService,
     core.eventBus,
     core.db,
-    core.kbDirName,
+    core.kb,
     [core.config.adminEmail],
   ));
   app.use(
     '/api',
     core.authMiddleware,
-    createSkillsRoutes(core.skillService, core.pendingSkillsService, core.pluginLinkIndex, core.accessControl, allowedToolsChecker),
+    createSkillsRoutes(core.skillService, core.kb, core.pendingSkillsService, core.pluginLinkIndex, core.accessControl, allowedToolsChecker),
   );
   // Asking for write on a shared skill — the join-request machinery pointed
   // at a skill folder. Same JWT gate, same fail-closed shape.
@@ -688,7 +690,7 @@ export async function createCoreServer(
       workflow: core.workflowService,
       workspaceService: core.workspaceService,
       joinRequests: core.joinRequestsService,
-      kbDirName: core.kbDirName,
+      kb: core.kb,
       resolveUser: async (req) =>
         req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null,
     }),
@@ -707,6 +709,7 @@ export async function createCoreServer(
     core.pluginJoinRequestJobs,
     core.pluginProvisionService,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
+    core.kb,
     core.pluginLinksService,
     core.pluginRenameService,
   ));
@@ -716,7 +719,7 @@ export async function createCoreServer(
   app.use(
     '/api',
     core.authMiddleware,
-    createTeamsRoutes(core.accessControl, core.pluginIndexService, core.skillService, core.toolManualService),
+    createTeamsRoutes(core.accessControl, core.pluginIndexService, core.skillService, core.toolManualService, core.kb),
   );
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
@@ -768,6 +771,7 @@ export async function createCoreServer(
       core.settings,
       core.adminAccess,
       core.kbStartupRunner,
+      core.kb,
       {
         // Same address family as the MCP endpoint above, userinfo stripped for
         // the same reason: this string is handed to admins to paste elsewhere.

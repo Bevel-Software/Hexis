@@ -11,6 +11,7 @@ import { setLogger } from '../../../shared/logging.js';
 import type { ILogger } from '../../../shared/logger.contract.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * ONE BAD `.tool` COSTS ONE TOOL.
@@ -92,7 +93,14 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
   } as unknown as IAccessControl;
 
   const svc = (access: IAccessControl = allowAll) =>
-    new ToolManualService(workspaceService, access, KB_DIR, disk, new KbPluginSource(disk), () => clock);
+    new ToolManualService(
+      workspaceService,
+      access,
+      testKbContext({ kbDirName: KB_DIR }),
+      disk,
+      new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
+      () => clock,
+    );
 
   /**
    * The refused half of the catalog. There is no way to ask for it alone: both
@@ -512,9 +520,9 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
     const service = new ToolManualService(
       workspaceService,
       countingAccess,
-      KB_DIR,
+      testKbContext({ kbDirName: KB_DIR }),
       countingDisk,
-      new KbPluginSource(countingDisk),
+      new KbPluginSource(countingDisk, testKbContext({ kbDirName: KB_DIR })),
       () => clock,
     );
 
@@ -546,9 +554,9 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
     const service = new ToolManualService(
       workspaceService,
       allowAll,
-      KB_DIR,
+      testKbContext({ kbDirName: KB_DIR }),
       countingDisk,
-      new KbPluginSource(countingDisk),
+      new KbPluginSource(countingDisk, testKbContext({ kbDirName: KB_DIR })),
       () => clock,
     );
 

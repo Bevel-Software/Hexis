@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -108,7 +109,7 @@ describe('GitService.diffFileAtCommit', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await commitFile(repo, 'Knowledge/Foo.md', 'line one\n', 'A');
@@ -125,7 +126,7 @@ describe('GitService.diffFileAtCommit', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await commitFile(repo, 'Knowledge/Foo.md', 'root line\n', 'root');
@@ -141,7 +142,7 @@ describe('GitService.diffFileAtCommit', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await commitFile(repo, 'Knowledge/file2.md', 'base\n', 'add file2');
@@ -157,7 +158,7 @@ describe('GitService.diffFileAtCommit', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await expect(
@@ -170,7 +171,7 @@ describe('GitService.diffFileAtCommit', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await expect(
@@ -187,7 +188,7 @@ describe('GitService.diffFileAtCommit', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     await runGit(repo, ['commit', '--allow-empty', '-m', 'init']);
     const user = { id: 'u', name: 'Test', email: 't@x.com' };

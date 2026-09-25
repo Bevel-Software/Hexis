@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { AuthUser, FileApprovalState, IWorkflowService, WorkflowEvent } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { AuthService } from '../../auth/auth.service.js';
@@ -382,7 +383,7 @@ function service(
     {} as IAccessControl,
     {} as FileLockService,
     {} as PendingCommitsService,
-    'knowledge-base',
+    testKbContext(),
     openChangeGate(),
     { emit } as unknown as WorkflowEventBus,
   );

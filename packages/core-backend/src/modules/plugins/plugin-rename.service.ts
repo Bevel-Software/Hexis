@@ -18,8 +18,8 @@ import {
   parsePluginPrincipalKey,
 } from '../access-model/access-grammar.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { PluginSource } from './discovery/plugin-source.js';
-import { linksWorkspaceId } from './plugin-links.js';
 
 export class PluginRenameError extends Error {
   constructor(
@@ -70,15 +70,19 @@ export class PluginRenameService {
     private readonly accessControl: IAccessControl,
     private readonly source: PluginSource,
     private readonly disk: ITreeWalker,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
     private readonly events?: {
       emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void;
     },
     private readonly onChanged?: () => void,
   ) {}
 
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
+  }
+
   private noteChanged(wsId: string): void {
-    noteChangedFor(this.accessControl, this.events, this.onChanged, wsId);
+    noteChangedFor(this.accessControl, this.events, this.onChanged, wsId, this.kb.defaultBranch);
   }
 
   /** The READ phase must have seen everything it needed; a hole refuses the rename before any write. */
@@ -96,7 +100,7 @@ export class PluginRenameService {
     current: string,
     patch: { name?: unknown; displayName?: unknown },
   ): Promise<RenameResult> {
-    const wsId = linksWorkspaceId();
+    const wsId = this.kb.defaultWorkspaceId();
     const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
     // ONE walk of the checkout for everything the rename needs to know:
     // the plugins (discovery's listener) and every file that can carry a
@@ -277,9 +281,10 @@ function noteChangedFor(
   events: PluginRenameService['events'],
   onChanged: (() => void) | undefined,
   wsId: string,
+  branch: string,
 ): void {
   accessControl.invalidate(wsId);
-  events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: linksWorkspaceIdBranch() });
+  events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch });
   onChanged?.();
 }
 
@@ -302,9 +307,4 @@ export function renamePluginPrincipalInText(text: string, oldName: string, nextN
       return `${m[1]}${PLUGIN_TOKEN_PREFIX}${nextName}/${parsed.verb}${m[3]}`;
     })
     .join('\n');
-}
-
-function linksWorkspaceIdBranch(): string {
-  // The default branch's workspace id IS its encoded branch name.
-  return decodeURIComponent(linksWorkspaceId());
 }

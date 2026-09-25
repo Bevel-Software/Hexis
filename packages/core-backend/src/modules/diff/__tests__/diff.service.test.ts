@@ -7,6 +7,7 @@ import { WorkspaceService } from '../../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { WorkspaceMutex } from '../../kb-fs/mutex.js';
 import { DiffService } from '../diff.service.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 async function mkTmpRoot(prefix: string): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -41,7 +42,7 @@ async function setup(): Promise<Fixture> {
   const workspaceService = new WorkspaceService(
     workspacesRoot,
     'https://github.com/Bevel-Software/knowledge-base.git',
-    'knowledge-base',
+    testKbContext(),
     new NodeFs(),
   );
   const mutex = new WorkspaceMutex();

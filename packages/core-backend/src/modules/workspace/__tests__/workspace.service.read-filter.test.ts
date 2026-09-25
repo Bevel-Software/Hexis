@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -47,7 +48,7 @@ describe('WorkspaceService.listFiles — read filter', () => {
     // readers, say), and its files are readable.
     await mkFile(workspaceDir, 'Scopes/Deploy/SKILL.md');
     await mkFile(workspaceDir, 'Scopes/other.md');
-    svc = new WorkspaceService(root, 'https://example.invalid/repo.git', KB, new NodeFs());
+    svc = new WorkspaceService(root, 'https://example.invalid/repo.git', testKbContext({ kbDirName: KB }), new NodeFs());
     await svc.getWorkspacePath(workspaceId);
   });
 

@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
@@ -103,7 +104,7 @@ describe('GET /file/raw on a download-only path (real resolver)', () => {
         {} as unknown as IWorkflowService,
         {} as unknown as WorkflowEventBus,
         accessControl,
-        KB,
+        testKbContext({ kbDirName: KB }),
         stubCreatorAccess,
         { isAdmin: async () => false } as unknown as IAdminAccessService,
         new NodeFs(),

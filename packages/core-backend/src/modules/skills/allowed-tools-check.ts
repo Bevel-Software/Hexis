@@ -1,5 +1,5 @@
-import { PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { IToolRegistry } from '../tool-registry/tool.contract.js';
 import {
   EXTERNAL_KB_MANUAL_NAME,
@@ -236,11 +236,12 @@ function editDistance(a: string, b: string): number {
  * Accepts the workspace spelling (`<kbDirName>/Plugins/…`) the save
  * surfaces receive.
  */
-export function skillFileRepoPath(kbDirName: string, workspacePath: string): string | null {
+export function skillFileRepoPath(kb: Pick<KbContext, 'kbDirName' | 'layout'>, workspacePath: string): string | null {
   const parts = workspacePath.split('/').filter((p) => p && p !== '.');
-  if (parts[0] === kbDirName) parts.shift();
+  if (parts[0] === kb.kbDirName) parts.shift();
   if (parts.length < 3 || parts[parts.length - 1] !== 'SKILL.md') return null;
-  return parts[0] === PLUGINS_DIR || parts[0] === SKILLS_DIR ? parts.join('/') : null;
+  const { pluginsDir, skillsDir } = kb.layout;
+  return parts[0] === pluginsDir || parts[0] === skillsDir ? parts.join('/') : null;
 }
 
 /** What the save surfaces and `get_skill` depend on. */
@@ -267,7 +268,7 @@ export class AllowedToolsChecker implements IAllowedToolsChecker {
   constructor(
     private readonly registry: Pick<IToolRegistry, 'listExternal'>,
     private readonly manuals: Pick<IToolManualService, 'listAccessible' | 'getDetail'>,
-    private readonly kbDirName: string,
+    private readonly kb: Pick<KbContext, 'kbDirName' | 'layout'>,
     /**
      * The cap `getDetail` applies to a manual's capabilities. Taken from the
      * projection itself: a copy of the number here would silently start
@@ -300,7 +301,7 @@ export class AllowedToolsChecker implements IAllowedToolsChecker {
    * fail because a check could not run).
    */
   private declaredTools(workspacePath: string, content: string): readonly string[] | undefined {
-    if (skillFileRepoPath(this.kbDirName, workspacePath) === null) return undefined;
+    if (skillFileRepoPath(this.kb, workspacePath) === null) return undefined;
     try {
       return parseSkillFrontmatter(content).allowedTools;
     } catch (err) {

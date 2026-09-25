@@ -3,7 +3,6 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('secrets');
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import {
   InvalidSecretError,
   SecretNotFoundError,
@@ -17,11 +16,13 @@ import type { IToolManualService, ToolManualSummary, ToolVariable } from '../too
 import type { IConnectionProbeService } from '../connection-probe/connection-probe.contract.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
 
 export interface SecretsVaultRoutesDeps {
   secretsVault: ISecretsVaultService;
+  /** The released branch's clone — where the `.tool` files the access verdicts are read from live. */
+  kb: Pick<KbContext, 'defaultWorkspaceId'>;
   /** Source of `.tool` manuals + their declared variable scopes (default-branch catalog). */
   toolManualService: IToolManualService;
   /** Gates who may set a tool's ADMIN (shared) secrets — writers of the `.tool` file. */
@@ -79,16 +80,16 @@ export function isSafeReturnPath(returnTo: unknown): returnTo is string {
  * `req.userId` — secrets are private per user. Mounted behind the JWT middleware.
  */
 export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.Router {
-  const { secretsVault, toolManualService, accessControl, connectionProbe } = deps;
+  const { secretsVault, toolManualService, accessControl, connectionProbe, kb } = deps;
   const router = express.Router();
   // A FUNCTION, not a constant. Routers are constructed at boot, and on a
   // deployment configured through the setup screen the branch model does not
-  // exist yet at that moment — `DEFAULT_BRANCH` is still ''. The live binding
-  // updates when setup applies the model, but only reads INSIDE a function
+  // exist yet at that moment — the default branch is still ''. The context
+  // learns it when setup applies the model, but only reads INSIDE a function
   // body see it; a construction-time capture would keep handing an empty
   // workspace id to the access resolver until the next restart ("Invalid
   // workspace ID" on every /secrets/tools call).
-  const defaultWs = () => workspaceIdForBranch(DEFAULT_BRANCH);
+  const defaultWs = () => kb.defaultWorkspaceId();
 
   // The vault key = the exact key UTCP looks the var up under (doubles underscores
   // in the manual namespace), so storage and resolution agree for snake_case ids.

@@ -1,9 +1,8 @@
 import path from 'node:path';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ISkillService } from '../../skills/skills.contract.js';
-import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import type { KbContext } from '../../../shared/kb-context.js';
 import type { PluginLinkIndex } from '../plugin-links.js';
 import type { PluginSource } from '../discovery/plugin-source.js';
 import type { ITreeWalker } from '../../../shared/fs.contract.js';
@@ -31,7 +30,7 @@ export class MarketplaceCompilerService {
     private readonly accessControl: IAccessControl,
     private readonly skillService: ISkillService,
     private readonly links: PluginLinkIndex,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
     private readonly marketplace: {
       name: string;
       owner: string;
@@ -44,6 +43,10 @@ export class MarketplaceCompilerService {
     /** How git is run — see `shared/git.contract.ts`. */
     private readonly gitRunner: IGitRunner,
   ) {}
+
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
+  }
 
   /**
    * The default-branch commit the next compile would read. Throws when git
@@ -108,7 +111,7 @@ export class MarketplaceCompilerService {
   // --- internal --------------------------------------------------------------
 
   private async checkout(): Promise<{ wsId: string; kbRoot: string }> {
-    const wsId = (await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH)).id;
+    const wsId = (await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch)).id;
     return { wsId, kbRoot: path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName) };
   }
 
@@ -143,9 +146,4 @@ export class MarketplaceCompilerService {
       return verdict;
     };
   }
-}
-
-/** The default-branch workspace id compiles run against. */
-export function compileWorkspaceId(): string {
-  return workspaceIdForBranch(DEFAULT_BRANCH);
 }

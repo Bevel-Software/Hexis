@@ -36,12 +36,19 @@ import { validateFilename } from './filename.js';
  * Don't hard-code these strings elsewhere — import them from here.
  *
  * CONFIGURABLE, WITH DEFAULTS. The three roots a deployment may rename
- * (`KnowledgeBase/`, `Skills/`, `Plugins/`) are `let` bindings applied by
- * {@link configureKbLayout} — the backend from its deployment settings, the
- * browser from `GET /api/config` — the same live-binding pattern as the branch
- * model in `git/protected.ts`. Unlike the branch model they carry defaults, so
- * nothing has to wait for configuration; but the same rule applies: read them
- * inside a function body, never capture one at module scope.
+ * (`KnowledgeBase/`, `Skills/`, `Plugins/`) and the guide's file name travel
+ * as a {@link KbLayout} VALUE: every helper below that depends on a name takes
+ * the layout it judges against, and the backend hands each knowledge base's
+ * layout to its services at construction — a server hosting several knowledge
+ * bases in one process holds one per knowledge base, never a process-wide one.
+ *
+ * The `let` bindings (`KNOWLEDGE_BASE_DIR`, …) are the BROWSER'S copy, applied
+ * once by {@link configureKbLayout} from `GET /api/config`, the same shape as
+ * the branch model in `git/protected.ts`: a page shows one deployment, so one
+ * process-wide value is right there. The backend package forbids importing
+ * them (an ESLint rule names each one). They carry defaults, so nothing waits
+ * for configuration; but read them inside a function body, never capture one
+ * at module scope.
  */
 
 /** Folder under the repo root that contains all team ontologies. */
@@ -218,7 +225,7 @@ export function gitignoreLiteral(name: string): string {
  * whether this sentence is present by searching for the RAW name — see
  * {@link mentionsAgentsFile}, which is how the startup step asks.
  */
-export function agentsFilePointerSentence(agentsFile: string = AGENTS_FILE): string {
+export function agentsFilePointerSentence(agentsFile: string): string {
   return `Read [${markdownLinkLabel(agentsFile)}](${agentsFileLinkPath(agentsFile)})${POINTER_SENTENCE_TAIL}`;
 }
 
@@ -266,7 +273,7 @@ function escapeRegExp(text: string): string {
  * answers, and only the caller knows that the second one means "consider
  * appending".
  */
-export function retargetAgentsFilePointer(text: string, agentsFile: string = AGENTS_FILE): string | null {
+export function retargetAgentsFilePointer(text: string, agentsFile: string): string | null {
   let found = false;
   const wanted = agentsFilePointerSentence(agentsFile);
   const updated = text.replace(POINTER_SENTENCE_PATTERN, () => {
@@ -315,7 +322,7 @@ function agentsFileLinkPath(agentsFile: string): string {
  * that one would append a second copy on the next boot, and a third on the
  * one after — the exact failure this feature exists to prevent.
  */
-export function mentionsAgentsFile(text: string, agentsFile: string = AGENTS_FILE): boolean {
+export function mentionsAgentsFile(text: string, agentsFile: string): boolean {
   return (
     text.includes(agentsFile) ||
     text.includes(markdownLinkLabel(agentsFile)) ||
@@ -369,7 +376,7 @@ export function validateKbRootName(name: string): string | null {
  */
 export function validateAgentsFileName(
   name: string,
-  roots: Pick<KbLayout, 'knowledgeBaseDir' | 'skillsDir' | 'pluginsDir'> = currentKbLayout(),
+  roots: Pick<KbLayout, 'knowledgeBaseDir' | 'skillsDir' | 'pluginsDir'>,
 ): string | null {
   const v = name.trim();
   if (!v) return 'A file name is required.';
@@ -466,21 +473,37 @@ export function onKbLayoutApplied(listener: () => void): void {
 }
 
 /**
- * Apply the layout. Called once during boot on each side; throws on an invalid
- * one so a bad deployment setting fails beside the rest of the wiring rather
- * than scattering a half-renamed tree. Applying the defaults is a no-op.
+ * A layout as the helpers hold it: validated, every name trimmed, the guide's
+ * name filled in from the default when absent. Throws on an invalid one so a
+ * bad deployment setting fails beside the rest of the wiring rather than
+ * scattering a half-renamed tree.
  */
-export function configureKbLayout(layout: KbLayout): void {
+export function resolveKbLayout(layout: KbLayout): Required<KbLayout> {
   const problem = validateKbLayout(layout);
   if (problem) throw new Error(problem);
-  KNOWLEDGE_BASE_DIR = layout.knowledgeBaseDir.trim();
-  SKILLS_DIR = layout.skillsDir.trim();
-  PLUGINS_DIR = layout.pluginsDir.trim();
-  AGENTS_FILE = agentsFileOf(layout);
+  return Object.freeze({
+    knowledgeBaseDir: layout.knowledgeBaseDir.trim(),
+    skillsDir: layout.skillsDir.trim(),
+    pluginsDir: layout.pluginsDir.trim(),
+    agentsFile: agentsFileOf(layout),
+  });
+}
+
+/**
+ * Apply the layout to the BROWSER'S live bindings. Called once during boot
+ * from `GET /api/config`; validated by {@link resolveKbLayout}. Applying the
+ * defaults is a no-op.
+ */
+export function configureKbLayout(layout: KbLayout): void {
+  const resolved = resolveKbLayout(layout);
+  KNOWLEDGE_BASE_DIR = resolved.knowledgeBaseDir;
+  SKILLS_DIR = resolved.skillsDir;
+  PLUGINS_DIR = resolved.pluginsDir;
+  AGENTS_FILE = resolved.agentsFile;
   for (const listener of layoutListeners) listener();
 }
 
-/** The layout currently in effect. */
+/** The browser's layout as a value — what the live bindings currently hold. */
 export function currentKbLayout(): Required<KbLayout> {
   return {
     knowledgeBaseDir: KNOWLEDGE_BASE_DIR,
@@ -491,14 +514,14 @@ export function currentKbLayout(): Required<KbLayout> {
 }
 
 /**
- * Whether a layout — the one in effect, unless one is given — is the default
- * one. The setup-completing save applies the stored names while this holds,
- * the same "only from none to some" rule the branch model follows — and also
- * on a retry after its own failed initialization run, when the process holds
- * names setup applied but the app never opened (see `setup.routes.ts`). A
- * layout the process booted with is never replaced here.
+ * Whether a layout is the default one. The setup-completing save applies the
+ * stored names while this holds of the one in effect, the same "only from
+ * none to some" rule the branch model follows — and also on a retry after its
+ * own failed initialization run, when the process holds names setup applied
+ * but the app never opened (see `setup.routes.ts`). A layout the process
+ * booted with is never replaced there.
  */
-export function isDefaultKbLayout(layout: KbLayout = currentKbLayout()): boolean {
+export function isDefaultKbLayout(layout: KbLayout): boolean {
   return (
     layout.knowledgeBaseDir === DEFAULT_KB_LAYOUT.knowledgeBaseDir &&
     layout.skillsDir === DEFAULT_KB_LAYOUT.skillsDir &&
@@ -516,7 +539,7 @@ export function isDefaultKbLayout(layout: KbLayout = currentKbLayout()): boolean
  * renamed the guide gets a guide naming the file it lives in. Text without
  * placeholders passes through unchanged.
  */
-export function renderKbLayoutPlaceholders(text: string, layout: KbLayout = currentKbLayout()): string {
+export function renderKbLayoutPlaceholders(text: string, layout: KbLayout): string {
   // Replacer FUNCTIONS: a string replacement would interpret `$&`, `$$` and
   // friends inside a folder name, and `$` is a legal character in one.
   return text
@@ -790,9 +813,9 @@ export function isPersonalPluginFolder(folderName: string): boolean {
  * to start with the prefix is a plugin — discovery, the principal picker and
  * the item pages all ask this one question of the FOLDER.
  */
-export function isPersonalPluginDir(repoRelDir: string): boolean {
+export function isPersonalPluginDir(repoRelDir: string, layout: KbLayout): boolean {
   const segments = repoRelDir.split('/').filter(Boolean);
-  return segments.length === 2 && segments[0] === PLUGINS_DIR && isPersonalPluginFolder(segments[1]!);
+  return segments.length === 2 && segments[0] === layout.pluginsDir && isPersonalPluginFolder(segments[1]!);
 }
 
 /**
@@ -808,9 +831,9 @@ export function isPersonalPluginDir(repoRelDir: string): boolean {
  * have. Callers bucket by it; nothing requires it. A plugin-less skill is a
  * real, supported state — the prototype calls those "yours alone".
  */
-export function pluginOfPath(repoRelativePath: string): string | null {
+export function pluginOfPath(repoRelativePath: string, layout: KbLayout): string | null {
   const segments = repoRelativePath.split('/').filter(Boolean);
-  if (segments[0] !== PLUGINS_DIR) return null;
+  if (segments[0] !== layout.pluginsDir) return null;
   // Needs a segment for the plugin AND at least one below it, otherwise
   // `Plugins/GTM` (the folder itself) would report itself as being in a plugin,
   // and a loose `Plugins/slack.tool` would report a plugin named "slack.tool".
@@ -833,19 +856,19 @@ export const PIPELINES_DIR = 'Pipelines';
 /**
  * The roots whose subfolders are discovered as ontologies by the graph parser
  * (each subfolder with both `NodeTypes/` and `Knowledge/` is an ontology).
- * A function, not a constant: `KNOWLEDGE_BASE_DIR` is configurable, and a
- * module-scope array would snapshot the default before configuration.
+ * A function of the layout, not a constant: the knowledge-base root is
+ * configurable per deployment.
  */
-export function ontologyRoots(): readonly string[] {
-  return [KNOWLEDGE_BASE_DIR, DATA_DIR];
+export function ontologyRoots(layout: KbLayout): readonly string[] {
+  return [layout.knowledgeBaseDir, DATA_DIR];
 }
 
 /**
- * Every reserved root name, as currently configured — the set the file tree
- * renders as its own sections rather than folding into Knowledge.
+ * Every reserved root name under `layout` — the set the file tree renders as
+ * its own sections rather than folding into Knowledge.
  */
-export function reservedRootDirNames(): ReadonlySet<string> {
-  return new Set([KNOWLEDGE_BASE_DIR, SKILLS_DIR, PLUGINS_DIR, DATA_DIR, AGENTS_DIR, PIPELINES_DIR]);
+export function reservedRootDirNames(layout: KbLayout): ReadonlySet<string> {
+  return new Set([layout.knowledgeBaseDir, layout.skillsDir, layout.pluginsDir, DATA_DIR, AGENTS_DIR, PIPELINES_DIR]);
 }
 
 /**
@@ -854,11 +877,11 @@ export function reservedRootDirNames(): ReadonlySet<string> {
  * needs read access to where it lands (the "read before write" rule); a new
  * folder directly under one of these three is the one place that rule does
  * not apply, because the new folder carries its creator's own grant. A
- * function, like {@link reservedRootDirNames}, because the names are
- * configurable.
+ * function of the layout, like {@link reservedRootDirNames}, because the
+ * names are configurable.
  */
-export function creatableRootDirNames(): ReadonlySet<string> {
-  return new Set([KNOWLEDGE_BASE_DIR, SKILLS_DIR, PLUGINS_DIR]);
+export function creatableRootDirNames(layout: KbLayout): ReadonlySet<string> {
+  return new Set([layout.knowledgeBaseDir, layout.skillsDir, layout.pluginsDir]);
 }
 
 /** The `Knowledge/` marker subfolder of an ontology (holds the graph nodes). */

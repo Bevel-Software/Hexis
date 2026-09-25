@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -80,7 +81,7 @@ describe('GitService.status — hasUpstream', () => {
 
   it('reports hasUpstream=true on a tracked branch (cloned from origin)', async () => {
     const { workspaceDir } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), 'knowledge-base');
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), testKbContext());
 
     const status = await svc.status(workspaceId);
     expect(status.branch).toBe('current-company-state');
@@ -96,7 +97,7 @@ describe('GitService.status — hasUpstream', () => {
     await runGit(repo, ['checkout', '-b', 'alice/unpublished-draft']);
     await runGit(repo, ['commit', '--allow-empty', '-m', 'local-only edit']);
 
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), 'knowledge-base');
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), testKbContext());
     const status = await svc.status(workspaceId);
 
     expect(status.branch).toBe('alice/unpublished-draft');
@@ -114,7 +115,7 @@ describe('GitService.status — hasUpstream', () => {
     await runGit(repo, ['commit', '--allow-empty', '-m', 'two']);
     await runGit(repo, ['push', '-u', 'origin', 'alice/published-draft']);
 
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), 'knowledge-base');
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), testKbContext());
     const status = await svc.status(workspaceId);
 
     expect(status.branch).toBe('alice/published-draft');

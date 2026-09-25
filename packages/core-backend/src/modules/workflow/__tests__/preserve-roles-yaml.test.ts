@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -120,7 +121,7 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
       {} as unknown as Database,
       git, prs, reviewWorkflow, workspaceService, ac,
       fileLocks, {} as unknown as PendingCommitsService,
-      KB_DIR,
+      testKbContext({ kbDirName: KB_DIR }),
       openChangeGate(),
     );
     // Conflicts are now surfaced by the local merge inside `reviewWorkflow.mergePr`

@@ -1,6 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { isPersonalPluginDir, normalizeSkillRoot, pluginManifestName } from '@bevel-software/platform-shared';
+import {
+  isPersonalPluginDir,
+  normalizeSkillRoot,
+  pluginManifestName,
+  type KbLayout,
+} from '@bevel-software/platform-shared';
 import { isAbsence } from '../../../../shared/fs.contract.js';
 import type { DiscoveredPlugin } from '../plugin-source.js';
 import { expandProfile, parseRegistry, type McpRegistry } from './registry.js';
@@ -67,6 +72,8 @@ export async function readBundlePlugin(
   registry: McpRegistry | null,
   warnings: string[],
   unreadable: string[],
+  /** Names the plugins root a personal folder sits directly under. */
+  layout: KbLayout,
 ): Promise<DiscoveredPlugin | null> {
   // Reading and parsing are two failures with two meanings: a file that
   // cannot be read is a plugin nobody could see (counted, so a writer can
@@ -149,7 +156,7 @@ export async function readBundlePlugin(
     relFolder,
     // The same rule as the native reader: a reserved personal folder directly
     // under the root is a place, not a plugin, whatever file it carries.
-    personal: isPersonalPluginDir(folder),
+    personal: isPersonalPluginDir(folder, layout),
     exists: true,
     manifest,
     manifestText: null,

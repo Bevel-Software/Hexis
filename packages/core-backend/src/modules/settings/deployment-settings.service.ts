@@ -181,7 +181,9 @@ export const CORE_SETTINGS: SettingDef[] = [
      */
     key: 'agentsFile',
     section: 'knowledge-base',
-    validate: (v) => validateAgentsFileName(v),
+    // Judged against the default roots here; the quartet check in `plan`
+    // judges it against the roots the same save puts in effect.
+    validate: (v) => validateAgentsFileName(v, DEFAULT_KB_LAYOUT),
     restartToApply: true,
     unsetMeans: DEFAULT_KB_LAYOUT.agentsFile,
   },

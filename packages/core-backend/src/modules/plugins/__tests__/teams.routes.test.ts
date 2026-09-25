@@ -8,6 +8,7 @@ import type { ISkillService, SkillSummary } from '../../skills/skills.contract.j
 import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
 import type { IPluginIndexService, PluginCatalogEntry } from '../plugins.contract.js';
 import { createTeamsRoutes } from '../teams.routes.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * `GET /api/teams` — what each group can use, by id, sliced to what the
@@ -92,7 +93,7 @@ async function harness(opts: HarnessOpts = {}) {
     if (email) req.userEmail = email;
     next();
   });
-  app.use('/api', createTeamsRoutes(accessControl, index, skills, tools));
+  app.use('/api', createTeamsRoutes(accessControl, index, skills, tools, testKbContext()));
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

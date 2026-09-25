@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { NodeFs } from '../../../kb-fs/node-fs.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -594,7 +595,7 @@ describe('KbStartupRunner credentials', () => {
     await git(repo, ['config', '--add', 'credential.helper',
       '!f() { echo "username=stale-user"; echo "password=$GITHUB_TOKEN"; }; f']);
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', new NodeFs(), () => 'x-access-token');
+    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), () => 'x-access-token');
     await ws.getOrCreateForBranch(DEFAULT_BRANCH);
 
     const all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
@@ -612,14 +613,14 @@ describe('KbStartupRunner credentials', () => {
     const repo = await materializeDefaultBranchClone();
     await git(repo, ['config', '--add', 'credential.helper', 'cache --timeout=300']);
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', new NodeFs(), () => 'x-access-token');
+    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), () => 'x-access-token');
     await ws.getOrCreateForBranch(DEFAULT_BRANCH); // stamp with token
     let all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
     expect(all).toContain('cache --timeout=300');
     expect(all).toContain('password=$GITHUB_TOKEN');
 
     delete process.env.GITHUB_TOKEN;
-    const ws2 = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', new NodeFs(), () => 'x-access-token');
+    const ws2 = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), () => 'x-access-token');
     await ws2.getOrCreateForBranch(DEFAULT_BRANCH); // unset OUR helper only
     all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
     expect(all).toContain('cache --timeout=300');
@@ -635,7 +636,7 @@ describe('KbStartupRunner credentials', () => {
     const repo = await materializeDefaultBranchClone(); // stamped
     delete process.env.GITHUB_TOKEN;
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', new NodeFs(), () => 'x-access-token');
+    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), () => 'x-access-token');
     await ws.getOrCreateForBranch(DEFAULT_BRANCH);
 
     await expect(git(repo, ['config', '--local', '--get', 'credential.helper']))
@@ -650,7 +651,7 @@ describe('KbStartupRunner credentials', () => {
     await populatedUpstream();
     const repo = await materializeDefaultBranchClone(); // no helper
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', new NodeFs(), () => 'x-access-token');
+    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), () => 'x-access-token');
     await ws.getOrCreateForBranch(DEFAULT_BRANCH); // adopt, tokenless
     process.env.GITHUB_TOKEN = 'ghp_late';
     await ws.getOrCreateForBranch(DEFAULT_BRANCH); // cached fast path

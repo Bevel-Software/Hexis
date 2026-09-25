@@ -2,6 +2,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -99,7 +100,7 @@ async function makeHarness(opts: { extracted?: string[]; changeGate?: IChangeRea
       workflowService,
       eventBus,
       {} as unknown as IAccessControl,
-      KB,
+      testKbContext({ kbDirName: KB }),
         creatorAccess as unknown as ICreatorAccess,
       // Not exercised here — only `.bevelignore`'s tree visibility consults it.
       { isAdmin: async () => false } as unknown as IAdminAccessService,

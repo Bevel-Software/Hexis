@@ -1,18 +1,16 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
-  AGENTS_FILE,
-  KNOWLEDGE_BASE_DIR,
   LEGACY_AGENTS_FILE,
-  PLUGINS_DIR,
-  SKILLS_DIR,
   agentsFilePointerSentence,
   gitignoreLiteral,
   mentionsAgentsFile,
   retargetAgentsFilePointer,
   validateKbRootName,
+  type KbLayout,
 } from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME, isAbsence, type IFsProbe } from '../../../../shared/fs.contract.js';
+import type { KbContext } from '../../../../shared/kb-context.js';
 import { PREAMBLE_FILE } from '../../../agent-instructions/compose.js';
 import { TemplateSource } from './template-source.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
@@ -38,14 +36,14 @@ const PREAMBLE_IGNORE_PATTERN = `/${PREAMBLE_FILE}`;
  * generated from `ADMIN_EMAIL` (see roles-yaml.step.ts), so a repo can't be
  * seeded with a stale hard-coded Admin list.
  */
-export function requiredFiles(): readonly string[] {
+export function requiredFiles(layout: Required<KbLayout>): readonly string[] {
   return [
     'access.md',
     // The managed agent guide, under whatever this deployment calls it. The
     // PACKAGED template still carries it as `AGENTS.md` — one file, one
     // spelling in the tarball — so the write target and the template source
     // part company here and nowhere else (see {@link templateNameOf}).
-    AGENTS_FILE,
+    layout.agentsFile,
     '.bevelignore',
     '.gitignore',
     // The deployment preamble every connected agent is told at session start
@@ -61,8 +59,8 @@ export function requiredFiles(): readonly string[] {
  * name on disk is a deployment's choice while its name in the template is
  * fixed; everything else is spelled the same on both sides.
  */
-function templateNameOf(repoRel: string): string {
-  return repoRel === AGENTS_FILE ? LEGACY_AGENTS_FILE : repoRel;
+function templateNameOf(repoRel: string, agentsFile: string): string {
+  return repoRel === agentsFile ? LEGACY_AGENTS_FILE : repoRel;
 }
 
 /**
@@ -105,11 +103,11 @@ export const GENERATED_FILES: readonly string[] = ['roles.yaml'];
  * that has them still renders them as roots rather than folding them into
  * Knowledge.
  *
- * A function: the three names are deployment-configurable live bindings, and
+ * A function of the layout: the three names are deployment-configurable, and
  * a module-scope array would snapshot the defaults before configuration.
  */
-function coreRequiredDirs(): readonly string[] {
-  return [KNOWLEDGE_BASE_DIR, SKILLS_DIR, PLUGINS_DIR];
+function coreRequiredDirs(layout: Required<KbLayout>): readonly string[] {
+  return [layout.knowledgeBaseDir, layout.skillsDir, layout.pluginsDir];
 }
 
 /**
@@ -145,20 +143,20 @@ function assertRootSegment(dir: string): void {
  * base. Shared with the empty-remote seed builder (seed-tree.ts) so the two
  * paths can never disagree about what a deployment guarantees.
  */
-export function reservedRootDirs(extraRootDirs: readonly string[]): readonly string[] {
+export function reservedRootDirs(extraRootDirs: readonly string[], layout: Required<KbLayout>): readonly string[] {
   for (const dir of extraRootDirs) {
     assertRootSegment(dir);
     // A root named after a required OR generated FILE is a typo with a silent
     // outcome: the file is laid down first, so the dir check finds the path
     // taken and skips it, and the directory the caller asked for never appears
     // with nothing said about why.
-    if (requiredFiles().includes(dir) || GENERATED_FILES.includes(dir)) {
+    if (requiredFiles(layout).includes(dir) || GENERATED_FILES.includes(dir)) {
       throw new Error(
         `Reserved KB root "${dir}" collides with a required or generated file of the same name`,
       );
     }
   }
-  return [...coreRequiredDirs(), ...extraRootDirs];
+  return [...coreRequiredDirs(layout), ...extraRootDirs];
 }
 
 /**
@@ -195,15 +193,18 @@ export class TemplateFilesStep implements OnServerStart {
    */
   constructor(
     private readonly disk: IFsProbe,
+    /**
+     * Read per run, never captured: the save that completes first-run setup
+     * applies the admin's names after this step was built. A snapshot taken
+     * here scaffolded `Skills/` beside the `skills/` they had just chosen.
+     */
+    private readonly kb: Pick<KbContext, 'layout'>,
     private readonly extraRootDirs: readonly string[] = [],
     private readonly agentsFileLink: () => boolean = () => true,
   ) {
     // Validated NOW, so a bad extra fails at boot beside the rest of the
-    // wiring — but the list itself is NOT kept: the core roots are live
-    // bindings, and the save that completes first-run setup applies the
-    // admin's names after this step was built. A snapshot taken here
-    // scaffolded `Skills/` beside the `skills/` they had just chosen.
-    reservedRootDirs(extraRootDirs);
+    // wiring — but the list itself is NOT kept, for the reason `kb` says.
+    reservedRootDirs(extraRootDirs, kb.layout);
   }
 
   async run(ctx: ServerStartContext): Promise<StepResult> {
@@ -217,15 +218,16 @@ export class TemplateFilesStep implements OnServerStart {
     // The template directory is runtime data (the start context's), the disk
     // port is the injected dependency — bound together once here so nothing
     // below has to carry either as an argument.
-    const templates = new TemplateSource(this.disk, templateDir);
+    const templates = new TemplateSource(this.disk, templateDir, this.kb);
     const repoDir = await branch.repoDir();
     const added: string[] = [];
-    // Read ONCE per branch: the name is a live binding, and a value re-read
-    // between the write and the ignore rule could disagree with itself.
-    const agentsFile = AGENTS_FILE;
+    // Read ONCE per branch: a value re-read between the write and the ignore
+    // rule could disagree with itself.
+    const layout = this.kb.layout;
+    const agentsFile = layout.agentsFile;
     const renamed = agentsFile !== LEGACY_AGENTS_FILE;
 
-    for (const rel of requiredFiles()) {
+    for (const rel of requiredFiles(layout)) {
       // `lstat`, not `exists`: a DIRECTORY or SYMLINK squatting a required
       // file's name would read as "present", and a skip-if-present check
       // would then report success over a knowledge base whose root access
@@ -240,7 +242,7 @@ export class TemplateFilesStep implements OnServerStart {
             'Remove or rename it — the platform requires this name to be a readable file.',
         );
       }
-      let content = await templates.read(templateNameOf(rel));
+      let content = await templates.read(templateNameOf(rel, agentsFile));
       // The on-disk merge below only runs against an EXISTING ignore file; a
       // freshly-declared one was merely assumed to carry the guide's rule —
       // true of the packaged template, not necessarily of a distribution's
@@ -259,10 +261,14 @@ export class TemplateFilesStep implements OnServerStart {
         content = withPlatformIgnorePatternRespelled(content, PREAMBLE_FILE, PREAMBLE_IGNORE_PATTERN);
         content = withoutIgnoreLine(
           withoutPlatformIgnorePattern(
-            withIgnorePattern(withIgnorePattern(content, gitignoreLiteral(agentsFile)), PREAMBLE_IGNORE_PATTERN),
-            `${SKILLS_DIR}/`,
+            withIgnorePattern(
+              withIgnorePattern(content, gitignoreLiteral(agentsFile), agentsFile),
+              PREAMBLE_IGNORE_PATTERN,
+              agentsFile,
+            ),
+            `${layout.skillsDir}/`,
           ),
-          `${PLUGINS_DIR}/`,
+          `${layout.pluginsDir}/`,
         );
         // …and a template (a distribution's, a stale packaged one) still
         // hiding `AGENTS.md` while this deployment's guide is called something
@@ -316,8 +322,8 @@ export class TemplateFilesStep implements OnServerStart {
         // As a gitignore PATTERN: a guide name that reads as syntax there is
         // escaped, or the rule would hide nothing.
         add: [gitignoreLiteral(agentsFile), PREAMBLE_IGNORE_PATTERN],
-        drop: [`${SKILLS_DIR}/`],
-        dropEvery: [`${PLUGINS_DIR}/`],
+        drop: [`${this.kb.layout.skillsDir}/`],
+        dropEvery: [`${this.kb.layout.pluginsDir}/`],
         // The guide's rule FOLLOWS its name. Once the guide is `HEXIS.md`, the
         // root's `AGENTS.md` is the customer's own conventions file and they
         // must be able to see and edit it in the app — so the platform's own
@@ -472,7 +478,7 @@ export class TemplateFilesStep implements OnServerStart {
    */
   private async missingDirs(repoDir: string): Promise<string[]> {
     const missing: string[] = [];
-    for (const rootDir of reservedRootDirs(this.extraRootDirs)) {
+    for (const rootDir of reservedRootDirs(this.extraRootDirs, this.kb.layout)) {
       const found = await this.disk.lstatOrNull(path.join(repoDir, rootDir));
       if (found) {
         if (found.isDirectory()) continue;
@@ -547,7 +553,10 @@ export class TemplateFilesStep implements OnServerStart {
       (text, [from, to]) => withPlatformIgnorePatternRespelled(text, from, to),
       current,
     );
-    const added = rules.add.reduce((text, pattern) => withIgnorePattern(text, pattern), respelled);
+    const added = rules.add.reduce(
+      (text, pattern) => withIgnorePattern(text, pattern, this.kb.layout.agentsFile),
+      respelled,
+    );
     const dropped = (rules.dropEvery ?? []).reduce(
       (text, pattern) => withoutIgnoreLine(text, pattern),
       rules.drop.reduce((text, pattern) => withoutPlatformIgnorePattern(text, pattern), added),
@@ -796,7 +805,7 @@ function withPlatformIgnorePatternRespelled(text: string, from: string, to: stri
  * still standing here is the operator's: it already hides the file, and
  * appending the anchored rule beside it would say nothing they have not.
  */
-function withIgnorePattern(text: string, pattern: string): string {
+function withIgnorePattern(text: string, pattern: string, agentsFile: string): string {
   const lines = text.split('\n').map((l) => l.trim());
   const operatorPreambleRule =
     pattern === PREAMBLE_IGNORE_PATTERN &&
@@ -808,7 +817,7 @@ function withIgnorePattern(text: string, pattern: string): string {
   const comment =
     pattern === PREAMBLE_IGNORE_PATTERN
       ? PREAMBLE_RULE_COMMENT
-      : pattern === gitignoreLiteral(AGENTS_FILE)
+      : pattern === gitignoreLiteral(agentsFile)
         ? AGENTS_RULE_COMMENT
         : PLATFORM_RULE_COMMENT;
   return `${text}${separator}\n${comment}\n${pattern}\n`;

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
@@ -61,7 +62,7 @@ function makeService(opts: {
     accessControl,
     { acquire, get: vi.fn(async () => null) } as unknown as FileLockService,
     {} as PendingCommitsService,
-    KB,
+    testKbContext({ kbDirName: KB }),
     opts.gate ?? gateThat({ allowed: true, via: 'readable' }).gate,
     new WorkflowEventBus(),
   );
@@ -81,7 +82,7 @@ describe('WorkflowService cannot exist without the gate', () => {
           {} as IAccessControl,
           {} as FileLockService,
           {} as PendingCommitsService,
-          KB,
+          testKbContext({ kbDirName: KB }),
           undefined as unknown as IChangeReadGate,
         ),
     ).toThrow(/requires a read-before-write gate/);

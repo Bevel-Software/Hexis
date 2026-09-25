@@ -15,6 +15,7 @@ import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * HTTP-level contract tests for the /api/access/roles routes: the admin gate
@@ -137,7 +138,7 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
     (req as unknown as { userId: string }).userId = ADMIN.id;
     next();
   });
-  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, workflowService, eventBus, db, KB));
+  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB })));
 
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));

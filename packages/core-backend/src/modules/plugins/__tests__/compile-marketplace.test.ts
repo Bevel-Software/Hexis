@@ -16,6 +16,7 @@ import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 import express from 'express';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { registerSkillsTools } from '../../skills/skills.tools.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * Source in, distribution out — for one caller. The real resolver decides
@@ -90,17 +91,18 @@ describe('compileMarketplace', () => {
     await write('Skills/Sales/pitch/SKILL.md', '---\ndescription: Pitch.\n---\n');
 
     const disk = new NodeFs();
-    const source = new KbPluginSource(disk);
+    const kb = testKbContext({ kbDirName: KB_DIR });
+    const source = new KbPluginSource(disk, kb);
     const access = new AccessControlService(workspaceService, KB_DIR, disk);
-    const skills = new SkillService(workspaceService, access, KB_DIR, disk);
+    const skills = new SkillService(workspaceService, access, kb, disk);
     catalog = skills;
-    const links = new PluginLinkIndex(workspaceService, skills, access, KB_DIR, source);
+    const links = new PluginLinkIndex(workspaceService, skills, access, kb, source);
     compiler = new MarketplaceCompilerService(
       workspaceService,
       access,
       skills,
       links,
-      KB_DIR,
+      kb,
       {
         name: 'acme-hexis',
         owner: 'Acme',
