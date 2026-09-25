@@ -420,51 +420,68 @@ describe('WorkspaceService.withPathTurn', () => {
     await Promise.resolve();
   };
 
-  it('runs one turn at a time, so two bodies never interleave', async () => {
-    const order: string[] = [];
+  /**
+   * A turn whose body records when it runs — and, for the FIRST one, tells
+   * the test when it HOLDS the turn, so the next can be issued behind it.
+   *
+   * What the queue guarantees is one body at a time per file. It does NOT
+   * guarantee that turns issued together chain in the order they were
+   * issued: before a turn joins the queue its spelling is resolved and judged
+   * against the git folder on disk, and those probes finish in whatever order
+   * the disk answers, so a later call can join first. Asserting on names in a
+   * fixed order therefore needs the earlier turn to be HELD before the later
+   * one is issued; interleaving is then the only thing that could reorder.
+   */
+  const recorder = (order: string[]) => {
+    let holding: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => { holding = resolve; });
     const body = (name: string) => async (): Promise<void> => {
       order.push(`${name}:enter`);
+      holding?.();
       await yieldTwice();
       order.push(`${name}:exit`);
     };
+    return { body, held };
+  };
 
-    // Warm the workspace lookup first, for the reason the next test gives:
-    // a COLD lookup resolves its callers in disk order rather than call
-    // order, so `b` can reach the queue first and this assertion — which
-    // names `a` as the one that goes first — fails for a scheduling reason
-    // rather than an interleaving one.
-    await svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', async () => undefined);
+  /** Each name's exit follows its own enter at once: no body ran inside another. */
+  const expectNoInterleaving = (order: string[], names: string[]): void => {
+    for (const name of names) {
+      const enter = order.indexOf(`${name}:enter`);
+      expect(enter).toBeGreaterThanOrEqual(0);
+      expect(order[enter + 1]).toBe(`${name}:exit`);
+    }
+  };
 
-    await Promise.all([
-      svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', body('a')),
-      svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', body('b')),
-    ]);
+  it('runs one turn at a time, so two bodies never interleave', async () => {
+    const order: string[] = [];
+    const { body, held } = recorder(order);
+
+    const a = svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', body('a'));
+    await held;
+    const b = svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', body('b'));
+    await Promise.all([a, b]);
 
     expect(order).toEqual(['a:enter', 'a:exit', 'b:enter', 'b:exit']);
   });
 
   it('treats two spellings of one file as one queue', async () => {
     const order: string[] = [];
-    const body = (name: string) => async (): Promise<void> => {
-      order.push(`${name}:enter`);
-      await yieldTwice();
-      order.push(`${name}:exit`);
-    };
+    const { body, held } = recorder(order);
 
-    // Warm the workspace lookup first: a turn chains onto the queue only after
-    // it, and a COLD lookup resolves its three callers in disk order rather
-    // than call order — the queue is one either way, but this asserts FIFO.
-    await svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', async () => undefined);
-
+    const plain = svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', body('plain'));
+    await held;
+    // Issued together: they may join in either order, but each waits for
+    // `plain` and for each other, because all three name one file.
     await Promise.all([
-      svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', body('plain')),
+      plain,
       svc.withPathTurn(workspaceId, './knowledge-base/mcp-description.md', body('dotted')),
       svc.withPathTurn(workspaceId, 'knowledge-base//mcp-description.md', body('doubled')),
     ]);
 
-    expect(order).toEqual([
-      'plain:enter', 'plain:exit', 'dotted:enter', 'dotted:exit', 'doubled:enter', 'doubled:exit',
-    ]);
+    expect(order.slice(0, 2)).toEqual(['plain:enter', 'plain:exit']);
+    expect(order).toHaveLength(6);
+    expectNoInterleaving(order, ['plain', 'dotted', 'doubled']);
   });
 
   it('lets another file run while one path is held: a turn is per file', async () => {
@@ -506,10 +523,16 @@ describe('WorkspaceService.withPathTurn', () => {
         svc.writeFile(workspaceId, rel, 'From B.', { expectedContent: '' }),
       ]),
     );
+    const [a] = results;
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     const refused = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
     expect(refused.reason).toMatchObject({ status: 409 });
-    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('From A.');
+    // Which of the two goes first is not promised (each resolves its path
+    // before it chains onto the held turn's tail); what is, is that the file
+    // holds the winner's text whole and the loser was refused.
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe(
+      a.status === 'fulfilled' ? 'From A.' : 'From B.',
+    );
   });
 
   it('updates the diff baseline inside the turn, in the order the mutations landed', async () => {
@@ -1294,11 +1317,21 @@ describe('WorkspaceService — every operation resolves inside the repository', 
   });
 
   it('takes its path and folder turns on the repository path, so two spellings are one queue', async () => {
+    // The second spelling is issued only once the first HOLDS its turn. What
+    // is asserted is the queue — the second waits for the first to finish —
+    // not the order two calls enter it: before the queue each spelling is
+    // judged against the git folder on disk, and those probes take as long as
+    // the spelling makes them, so two calls issued together can chain in
+    // either order (the FIFO case is pinned above, on warmed equal spellings).
     const order: string[] = [];
+    let holding!: () => void;
+    const held = new Promise<void>((r) => { holding = r; });
     const slow = svc.withPathTurn(workspaceId, 'contended.md', async () => {
+      holding();
       await new Promise((r) => setTimeout(r, 20));
       order.push('first');
     });
+    await held;
     const fast = svc.withPathTurn(workspaceId, 'knowledge-base/contended.md', async () => {
       order.push('second');
     });
