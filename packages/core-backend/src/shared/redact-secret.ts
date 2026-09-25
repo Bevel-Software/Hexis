@@ -6,11 +6,11 @@
  * presigned remote keeps its credential.
  *
  * "The token in effect" is every place one can come from: each environment
- * spelling `CoreConfig` accepts (it normalises them onto `GITHUB_TOKEN` at
- * boot, but a later write to one of them is not normalised), plus whatever the
- * caller knows about — the settings-stored token, a token a request brought
- * along, or a remote's query values ({@link urlQuerySecrets}). Longest first,
- * so a secret that contains another is not half-scrubbed.
+ * spelling `CoreConfig` accepts (the operator's, process-wide), plus whatever
+ * the caller knows about — the knowledge base's own token as its git runner
+ * carries it, a token a request brought along, or a remote's query values
+ * ({@link urlQuerySecrets}). Longest first, so a secret that contains another
+ * is not half-scrubbed.
  *
  * Shared, not a module's own: the KB startup phase and the setup routes both
  * log git's words, and one scrub is the only way they cannot disagree about

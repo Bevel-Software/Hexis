@@ -156,6 +156,13 @@ export class CoreConfig {
    */
   readonly gitUsername: string;
   /**
+   * The git token the environment supplied (`GIT_TOKEN`, or the legacy
+   * `GITHUB_TOKEN` / `GH_TOKEN`), or `''`. The setup screen's stored token is
+   * read through the settings service instead; the composition root folds
+   * the two into the runner's credentials, environment first.
+   */
+  readonly gitToken: string;
+  /**
    * Filesystem path to the KB seed template (the `kb-template/` folder shipped
    * inside this package — see `defaultKbTemplateDir()`). The seeder reads this
    * to initialise an empty KB remote, and to top-up missing scaffolding on an
@@ -352,13 +359,14 @@ export class CoreConfig {
     this.kbRepoUrl = (process.env.KB_REPO_URL || '').trim();
     this.kbDirName = (process.env.KB_DIR_NAME || '').trim();
     // Provider-neutral git token: operators can set GIT_TOKEN (or the legacy
-    // GITHUB_TOKEN / GH_TOKEN). Normalize onto GITHUB_TOKEN — the name the
-    // credential helper and every `$GITHUB_TOKEN` read + redaction use — so all
-    // three work unchanged. GIT_TOKEN takes PRECEDENCE: it's the provider-neutral
-    // name, so setting it must override a stale legacy GITHUB_TOKEN (e.g. when
-    // switching the KB from GitHub to GitLab), not be shadowed by it.
-    const gitToken = process.env.GIT_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
-    if (gitToken) process.env.GITHUB_TOKEN = gitToken;
+    // GITHUB_TOKEN / GH_TOKEN). Read here, never written back: the git runner
+    // hands the token in effect to each child it spawns, so the process
+    // environment does not need to carry it, and a server hosting several
+    // knowledge bases could not carry all of theirs. GIT_TOKEN takes
+    // PRECEDENCE: it's the provider-neutral name, so setting it must override
+    // a stale legacy GITHUB_TOKEN (e.g. when switching the KB from GitHub to
+    // GitLab), not be shadowed by it.
+    this.gitToken = (process.env.GIT_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '').trim();
     this.gitUsername = (process.env.GIT_USERNAME || 'x-access-token').trim();
     // Interpolated into the credential-helper shell snippet, so reject anything
     // that isn't a plain token — no quotes, spaces, or shell metacharacters.

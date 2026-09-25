@@ -41,6 +41,7 @@ import {
   GitRunError,
   isGitTimeout,
   redactGitToken,
+  type GitCredentials,
   type GitRunOptions,
   type GitRunResult,
   type IGitRunner,
@@ -310,6 +311,14 @@ export class GitService implements IGitService {
 
   private get kbDirName(): string {
     return this.kb.kbDirName;
+  }
+
+  /**
+   * The credentials the runner authenticates with — for the services above
+   * this one that scrub a message git or the host echoed a token into.
+   */
+  get credentials(): GitCredentials {
+    return this.gitRunner.credentials;
   }
 
   /**
@@ -1545,6 +1554,7 @@ export class GitService implements IGitService {
           throw new Error(
             `git merge failed without detectable conflicts: ${redactGitToken(
               err instanceof Error ? err.message : String(err),
+              this.credentials.token(),
             )}`,
           );
         }

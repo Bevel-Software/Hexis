@@ -109,7 +109,6 @@ function makeRunner(steps: OnServerStart[], templateDir: string = TEMPLATE_DIR) 
   return new KbStartupRunner({
     gitRunner: new NodeGitRunner(),
     kbRepoUrl: () => upstream,
-    gitUsername: () => 'x-access-token',
     workspacesRoot,
     kbDirName: 'knowledge-base',
     templateDir,

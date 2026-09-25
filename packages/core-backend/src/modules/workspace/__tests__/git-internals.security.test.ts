@@ -621,7 +621,7 @@ describe('WorkspaceService refuses the git folder on its own', () => {
         return { stdout: '.git\n', stderr: '', code: 0 };
       }),
     };
-    const refService = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs(), 'x-access-token', gitRunner as never);
+    const refService = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs(), gitRunner as never);
 
     for (const [form, raw] of Object.entries(fileForms('config'))) {
       if (!form.startsWith('symlinked')) continue;

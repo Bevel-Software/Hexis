@@ -149,20 +149,12 @@ describe('DeploymentSettingsService — secrets', () => {
     expect(token).not.toHaveProperty('value');
   });
 
-  it('publishes a stored token as GITHUB_TOKEN, which is what git reads', async () => {
+  it('keeps a stored token out of the process environment: git reads it per call', async () => {
     const { db } = makeDb();
     const settings = new DeploymentSettingsService(db, ENC_KEY);
     await settings.save({ gitToken: 'ghp_fromsetup' }, null);
-    expect(process.env.GITHUB_TOKEN).toBe('ghp_fromsetup');
-  });
-
-  it('does not overwrite a git token the environment supplied', async () => {
-    process.env.GIT_TOKEN = 'ghp_fromenv';
-    process.env.GITHUB_TOKEN = 'ghp_fromenv';
-    const { db } = makeDb();
-    const settings = new DeploymentSettingsService(db, ENC_KEY);
-    settings.syncGitTokenEnv();
-    expect(process.env.GITHUB_TOKEN).toBe('ghp_fromenv');
+    expect(process.env.GITHUB_TOKEN).toBeUndefined();
+    expect(settings.resolve('gitToken')).toBe('ghp_fromsetup');
   });
 
   it('refuses to store a secret with no encryption key rather than writing plaintext', async () => {

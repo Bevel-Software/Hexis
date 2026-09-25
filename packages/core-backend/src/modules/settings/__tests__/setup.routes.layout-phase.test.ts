@@ -108,7 +108,6 @@ function boot() {
   const runner = new KbStartupRunner({
     gitRunner: new NodeGitRunner(),
     kbRepoUrl: () => upstream,
-    gitUsername: () => 'x-access-token',
     workspacesRoot: path.join(root, 'workspaces'),
     kbDirName: 'knowledge-base',
     templateDir: defaultKbTemplateDir(),

@@ -66,6 +66,7 @@ import { and, eq, inArray, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
 import type { GitService } from './git/git.service.js';
+import { redactSecret } from '../../shared/redact-secret.js';
 import type { PullRequestService } from './git/pull-request.service.js';
 import type { IReviewWorkflowService } from './review-workflow/review-workflow.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
@@ -155,12 +156,13 @@ export function syncConflictMessage(branch: string, conflictedPaths: string[]): 
 /** How many conflicted files the sync-conflict sentence names before "and N more". */
 const SYNC_CONFLICT_FILES_NAMED = 3;
 
-/** Redact the shared GitHub token from any error string before surfacing it. */
-function redactTokens(msg: string): string {
-  const tokens = [process.env.GITHUB_TOKEN, process.env.GH_TOKEN].filter(
-    (t): t is string => !!t && t.length > 0,
-  );
-  return tokens.reduce((m, t) => m.replaceAll(t, '***'), msg);
+/**
+ * Redact a git token from an error string before surfacing it: the one the
+ * knowledge base's runner authenticates with, plus whatever the environment
+ * holds (`redactSecret` names those itself).
+ */
+function redactTokens(msg: string, token: string | null | undefined): string {
+  return redactSecret(msg, [token]);
 }
 
 /**
@@ -1901,7 +1903,7 @@ export class WorkflowService implements IWorkflowService {
       // up-to-date) auto-merge, and inserts the row.
       const rawMsg = err instanceof Error ? err.message : String(err);
       throw new WorkflowValidationError(
-        `Failed to open change request: ${redactTokens(rawMsg)}`,
+        `Failed to open change request: ${redactTokens(rawMsg, this.git.credentials?.token())}`,
         { kind: 'open-change-request-failed' },
       );
     }
@@ -3624,7 +3626,7 @@ export class WorkflowService implements IWorkflowService {
       return stdout.split('\n').map((s) => s.trim()).filter(Boolean);
     } catch (err) {
       log.warn('listChangedPathsBetweenBranches failed:', {
-        detail: redactTokens(err instanceof Error ? err.message : String(err)),
+        detail: redactTokens(err instanceof Error ? err.message : String(err), this.git.credentials?.token()),
       });
       return [];
     }

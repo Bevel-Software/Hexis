@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { KbRemoteUnreachableError, KbStartupRunner } from '../kb-startup-runner.js';
 import { NodeGitRunner } from '../../../workflow/git/node-git-runner.js';
-import { GitRunError, type IGitRunner } from '../../../../shared/git.contract.js';
+import { GitRunError, NO_GIT_CREDENTIALS, type IGitRunner } from '../../../../shared/git.contract.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 /**
@@ -69,7 +69,6 @@ function makeRunner(steps: OnServerStart[], url: () => string, gitRunner: IGitRu
   return new KbStartupRunner({
     gitRunner,
     kbRepoUrl: url,
-    gitUsername: () => 'x-access-token',
     workspacesRoot,
     kbDirName: 'knowledge-base',
     templateDir: path.join(root, 'template'),
@@ -101,6 +100,7 @@ describe('KbStartupRunner with an unreachable remote', () => {
   it('a git that never ran is not "unreachable" either: that failure is this host, and it stops the boot', async () => {
     const noGit: IGitRunner = {
       defaultTimeoutMs: 1000,
+      credentials: NO_GIT_CREDENTIALS,
       run: (async () => {
         throw new GitRunError('git ls-remote failed: spawn git ENOENT');
       }) as IGitRunner['run'],
@@ -251,6 +251,7 @@ describe('KbStartupRunner with a remote that rejects the credentials', () => {
     // re-dial a host that will never accept the token.
     const rejecting: IGitRunner = {
       defaultTimeoutMs: 1000,
+      credentials: NO_GIT_CREDENTIALS,
       run: (async () => {
         // The shape `NodeGitRunner` throws: git's words in the message (that
         // is what the boot classifies) and again in `stderr`.
@@ -275,6 +276,7 @@ describe('KbStartupRunner retry after a boot that survived a rejected token', ()
     let dials = 0;
     const rejecting: IGitRunner = {
       defaultTimeoutMs: 1000,
+      credentials: NO_GIT_CREDENTIALS,
       run: (async () => {
         dials += 1;
         const said = "fatal: Authentication failed for 'https://example.com/acme/kb.git/'";
@@ -319,6 +321,7 @@ describe('KbStartupRunner retry when the token is rejected while it sleeps', () 
     let dials = 0;
     const rejecting: IGitRunner = {
       defaultTimeoutMs: 1000,
+      credentials: NO_GIT_CREDENTIALS,
       run: (async () => {
         dials += 1;
         const said = "fatal: Authentication failed for 'https://example.com/acme/kb.git/'";
@@ -331,6 +334,7 @@ describe('KbStartupRunner retry when the token is rejected while it sleeps', () 
     let current: IGitRunner = new NodeGitRunner();
     const switching: IGitRunner = {
       defaultTimeoutMs: 1000,
+      credentials: NO_GIT_CREDENTIALS,
       run: ((...args: Parameters<IGitRunner['run']>) => current.run(...args)) as IGitRunner['run'],
     };
     let url = path.join(root, 'nowhere.git');

@@ -149,9 +149,8 @@ const CLONE_TIMEOUT_MS = 600_000;
 const BOT_NAME = 'Bevel Workflow';
 const BOT_EMAIL = 'bevel-workflow@bevel.software';
 
-/** Redact any token that might leak into an error message. */
-function redactError(err: unknown): string {
-  const token = process.env.GITHUB_TOKEN;
+/** Redact the token the runner authenticates with from an error message. */
+function redactError(err: unknown, token: string | null): string {
   const msg = err instanceof Error ? err.message : String(err);
   return token ? msg.replaceAll(token, '***') : msg;
 }
@@ -300,17 +299,16 @@ export class WorkspaceService implements IWorkspaceService {
     /** The checkout folder's name, and which branch a caller lands on when naming none. */
     private readonly kb: Pick<KbContext, 'kbDirName' | 'defaultBranch'>,
     private readonly disk: ITreeWalker,
-    gitUsername: string | (() => string) = 'x-access-token',
     /**
      * How git is run — see `shared/git.contract.ts`. The composition root
-     * passes the one runner carrying the deployment's deadline; the default
-     * is the same runner on its default deadline, for a directly constructed
-     * service.
+     * passes the one runner carrying the deployment's deadline and the
+     * credentials every clone authenticates with; the default is the same
+     * runner on its default deadline and no token, for a directly
+     * constructed service.
      */
     private readonly gitRunner: IGitRunner = new NodeGitRunner(),
   ) {
     this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
-    this.gitUsername = typeof gitUsername === 'function' ? gitUsername : () => gitUsername;
   }
 
   private get kbDirName(): string {
@@ -318,7 +316,6 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   private readonly kbRepoUrl: () => string;
-  private readonly gitUsername: () => string;
 
   setDiffService(diffService: IDiffService): void {
     this.diffService = diffService;
@@ -422,7 +419,7 @@ export class WorkspaceService implements IWorkspaceService {
     // Persisted into the new repo's config (`clone --config`), not just applied
     // to this invocation — every later push from this clone depends on finding
     // the helper there. See `cloneCredentialArgs`.
-    args.push(...cloneCredentialArgs(this.gitUsername()));
+    args.push(...cloneCredentialArgs(this.gitRunner.credentials));
     args.push(this.kbRepoUrl(), targetDir);
     return args;
   }
@@ -536,7 +533,7 @@ export class WorkspaceService implements IWorkspaceService {
         cloned.push({
           id: entry.name,
           branch,
-          unreadable: `Could not read this branch's clone: ${redactError(err)}`,
+          unreadable: `Could not read this branch's clone: ${redactError(err, this.gitRunner.credentials.token())}`,
         });
         continue;
       }
@@ -571,7 +568,7 @@ export class WorkspaceService implements IWorkspaceService {
         return;
       } catch (err) {
         log.warn(`referenced clone for "${branch}" failed, retrying without reference:`, {
-          detail: redactError(err),
+          detail: redactError(err, this.gitRunner.credentials.token()),
         });
         // Clear any partial output so the retry clones into a clean dir.
         await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
@@ -746,7 +743,7 @@ export class WorkspaceService implements IWorkspaceService {
     } catch (err) {
       // One line per branch, not per key: every key writes to the same
       // `.git/config`, so what fails for one fails for all.
-      log.warn(`could not normalize the config of the "${branch}" clone:`, { detail: redactError(err) });
+      log.warn(`could not normalize the config of the "${branch}" clone:`, { detail: redactError(err, this.gitRunner.credentials.token()) });
     }
     await this.stampCredentialHelper(repoDir, branch);
   }
@@ -755,12 +752,13 @@ export class WorkspaceService implements IWorkspaceService {
    * Fingerprint of the credential state a clone's helper is derived from: the
    * username (baked into the helper literal) and whether a token exists at all
    * (the helper is present-or-absent on that). The token VALUE is deliberately
-   * excluded — the helper reads `$GITHUB_TOKEN` at call time, so rotating the
-   * token needs no re-stamp; only a username change or a token appearing /
-   * disappearing does.
+   * excluded — the helper reads `$GITHUB_TOKEN` from the environment the
+   * runner hands each git call, so rotating the token needs no re-stamp; only
+   * a username change or a token appearing / disappearing does.
    */
   private credentialFingerprint(): string {
-    return `${this.gitUsername()}::${process.env.GITHUB_TOKEN ? '1' : '0'}`;
+    const { credentials } = this.gitRunner;
+    return `${credentials.username()}::${credentials.token() ? '1' : '0'}`;
   }
 
   /** Last credential fingerprint stamped into each branch's clone, this process. */
@@ -777,7 +775,7 @@ export class WorkspaceService implements IWorkspaceService {
   private async stampCredentialHelper(repoDir: string, branch: string): Promise<void> {
     let argLists: string[][];
     try {
-      argLists = cloneCredentialConfigArgs(this.gitUsername());
+      argLists = cloneCredentialConfigArgs(this.gitRunner.credentials);
     } catch (err) {
       // `credentialHelperValue` fails closed on a username outside its safe
       // charset. Normally unreachable (CoreConfig and the settings service
@@ -787,7 +785,7 @@ export class WorkspaceService implements IWorkspaceService {
       // re-clone that fails on the same validation — masking the real cause.
       // Contain it as a loud non-stamp instead; `normalizeCloneConfig`'s
       // never-throws contract stays true.
-      log.warn(`refusing to stamp the credential helper of the "${branch}" clone:`, { detail: redactError(err) });
+      log.warn(`refusing to stamp the credential helper of the "${branch}" clone:`, { detail: redactError(err, this.gitRunner.credentials.token()) });
       this.stampedCredentialFingerprint.delete(branch);
       return;
     }
@@ -803,7 +801,7 @@ export class WorkspaceService implements IWorkspaceService {
         if (!(args.includes('--unset-all') && code === 5)) {
           stamped = false;
           log.warn(`could not stamp the credential helper of the "${branch}" clone:`, {
-            detail: redactError(err),
+            detail: redactError(err, this.gitRunner.credentials.token()),
           });
         }
       }
@@ -919,11 +917,11 @@ export class WorkspaceService implements IWorkspaceService {
         this.onWorkspaceCloned?.(workspaceIdForBranch(branch));
       } catch (listenerErr) {
         log.error(`onWorkspaceCloned listener failed for branch "${branch}":`, {
-          detail: redactError(listenerErr),
+          detail: redactError(listenerErr, this.gitRunner.credentials.token()),
         });
       }
     } catch (err) {
-      const redacted = redactError(err);
+      const redacted = redactError(err, this.gitRunner.credentials.token());
       // Roll back partial state so the next bootstrap retries cleanly.
       await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
       // A branch origin does not have is a fact about the branch, not a
@@ -941,7 +939,7 @@ export class WorkspaceService implements IWorkspaceService {
           // two stories this is — and guessing either one states something
           // about the branch that we do not know. Our failure, so: 500.
           log.error(`Could not tell whether branch "${branch}" was ever known here:`, {
-            detail: redactError(probeErr),
+            detail: redactError(probeErr, this.gitRunner.credentials.token()),
           });
           throw new Error(`Failed to clone process map: ${redacted}`);
         }
@@ -1260,7 +1258,7 @@ export class WorkspaceService implements IWorkspaceService {
       })
       .catch((err) => {
         this.lastFetchOk.set(repoDir, false);
-        log.warn('git fetch origin failed:', { detail: redactError(err) });
+        log.warn('git fetch origin failed:', { detail: redactError(err, this.gitRunner.credentials.token()) });
       })
       .finally(() => {
         if (this.inFlightFetches.get(repoDir) === promise) {

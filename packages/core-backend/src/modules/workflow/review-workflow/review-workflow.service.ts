@@ -18,6 +18,7 @@ import { changeRequests, prComments, prFileApprovals, prMergeLog, users } from '
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { GitService } from '../git/git.service.js';
+import { redactSecret } from '../../../shared/redact-secret.js';
 import {
   ChangeRequestConflictsError,
   WorkflowDomainError,
@@ -45,11 +46,13 @@ import {
 const MERGE_METHOD = 'merge' as const;
 const EVERYONE_CANONICAL = 'everyone';
 
-function redactTokens(msg: string): string {
-  const tokens = [process.env.GITHUB_TOKEN, process.env.GH_TOKEN].filter(
-    (t): t is string => !!t && t.length > 0,
-  );
-  return tokens.reduce((m, t) => m.replaceAll(t, '***'), msg);
+/**
+ * Redact a git token from an error string before it is stored: the one the
+ * knowledge base's runner authenticates with, plus whatever the environment
+ * holds (`redactSecret` names those itself).
+ */
+function redactTokens(msg: string, token: string | null | undefined): string {
+  return redactSecret(msg, [token]);
 }
 
 class CommentAuthError extends WorkflowDomainError {
@@ -743,7 +746,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
         user,
       );
     } catch (err) {
-      const redacted = redactTokens(err instanceof Error ? err.message : String(err));
+      const redacted = redactTokens(err instanceof Error ? err.message : String(err), this.git.credentials?.token());
       await this.db
         .update(prMergeLog)
         .set({ succeeded: false, completedAt: new Date(), error: redacted })

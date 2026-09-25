@@ -27,7 +27,7 @@ import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
 import { NodeFs } from '../modules/kb-fs/node-fs.js';
 import { assertKbDirNameFree } from '../modules/kb-fs/repo-path.js';
 import type { IFsProbe, ITreeWalker } from '../shared/fs.contract.js';
-import type { IGitRunner } from '../shared/git.contract.js';
+import { gitCredentials, type IGitRunner } from '../shared/git.contract.js';
 import { AdvisoryLease, AdvisoryLock } from '../modules/database/advisory-lock.js';
 import { holdCommitWorkerLease, withStartupTask, type LeaseLoopHandle } from './lifecycle.js';
 
@@ -339,9 +339,6 @@ export async function createCoreServices(
   // saved settings before anything reads the layout — so the boot that imports
   // them also RUNS on the imported names rather than on the defaults.
   await settings.importLegacyLayoutEnv();
-  // A token supplied through the setup screen has to reach the credential
-  // helper, which reads `$GITHUB_TOKEN` at call time.
-  settings.syncGitTokenEnv();
 
   // `kbDirName` is read ONCE and threaded into a dozen services as a plain
   // string, which is why changing it needs a restart (the setting says so).
@@ -399,17 +396,27 @@ export async function createCoreServices(
   }
   // The disk: one walk, one probe, for every reader below.
   const disk = new NodeFs();
+  // What git authenticates with, read on every call: the username and token
+  // the setup screen stored, or the environment's. Environment first for the
+  // token, as for every setting (`resolve` is env-first); the legacy
+  // `GITHUB_TOKEN` / `GH_TOKEN` spellings only through `config`, since the
+  // settings catalogue knows `GIT_TOKEN` alone. Handed to the runner, which
+  // puts the token into each child's environment — never into this
+  // process's, which several knowledge bases may share.
+  const gitCredentialsInEffect = gitCredentials(
+    () => settings.resolve('gitUsername') || config.gitUsername,
+    () => settings.resolve('gitToken') || config.gitToken || null,
+  );
   // How git is run, for every module that runs it: one environment, one buffer
   // ceiling, one error shape, and — the reason it exists — one deadline, so a
   // git that never returns cannot hold a workspace (and with it the commit
   // queue) open indefinitely. See `shared/git.contract.ts`.
-  const gitRunner = new NodeGitRunner(config.gitTimeoutMs);
+  const gitRunner = new NodeGitRunner(config.gitTimeoutMs, gitCredentialsInEffect);
   const workspaceService = new WorkspaceService(
     config.workspacesRoot,
     () => settings.resolve('kbRepoUrl'),
     kb,
     disk,
-    () => settings.resolve('gitUsername') || 'x-access-token',
     gitRunner,
   );
   // The KB startup phase: every seeding, scaffolding and migration concern,
@@ -447,8 +454,6 @@ export async function createCoreServices(
     // setup screen after this object exists, and the setup-completion run is
     // the first thing that needs them.
     kbRepoUrl: () => settings.resolve('kbRepoUrl'),
-    gitUsername: () => settings.resolve('gitUsername') || 'x-access-token',
-    gitToken: () => settings.resolve('gitToken'),
     workspacesRoot: config.workspacesRoot,
     kbDirName,
     templateDir: config.kbTemplateDir,

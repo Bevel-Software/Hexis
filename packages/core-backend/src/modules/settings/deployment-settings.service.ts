@@ -631,10 +631,9 @@ export class DeploymentSettingsService {
       this.stored.set(key, value);
     }
 
-    // The git token is consumed through the environment (the credential helper
-    // reads `$GITHUB_TOKEN` at call time, so it never appears in argv). Putting
-    // it there is what makes a token saved here work without a restart.
-    this.syncGitTokenEnv();
+    // A token saved here is in effect at once: the git runner's credentials
+    // read `resolve('gitToken')` on every call, so nothing is published to
+    // the process environment and no restart is needed.
     return { restartRequired: restartKeys.length > 0, restartKeys };
   }
 
@@ -777,18 +776,6 @@ export class DeploymentSettingsService {
     if (orphans.length > 0) {
       await this.db.delete(deploymentSettings).where(inArray(deploymentSettings.key, orphans));
     }
-  }
-
-  /**
-   * Publish the resolved git token as `GITHUB_TOKEN`, the name the credential
-   * helper and every redaction path already read. Only when the environment did
-   * not supply one — otherwise this would overwrite the operator's value with
-   * a stored fallback, inverting the precedence everything else here obeys.
-   */
-  syncGitTokenEnv(): void {
-    if (this.sourceOf('gitToken') !== 'stored') return;
-    const token = this.resolve('gitToken');
-    if (token) process.env.GITHUB_TOKEN = token;
   }
 
   /** The single sign-on values in effect, issuer normalized the way the provider uses it. */

@@ -47,7 +47,6 @@ describe('WorkspaceService.ensureRemotesFetched', () => {
       'https://example.test/kb.git',
       testKbContext(),
       new NodeFs(),
-      'x-access-token',
       runner,
     );
 
