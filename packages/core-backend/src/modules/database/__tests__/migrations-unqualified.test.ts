@@ -20,7 +20,11 @@ describe('core migrations', () => {
     for (const name of files) {
       const text = await fs.readFile(path.join(dir, name), 'utf8');
       text.split('\n').forEach((line, i) => {
-        if (/\bpublic\./.test(line)) offenders.push(`${name}:${i + 1}: ${line.trim()}`);
+        // Bare (`public.users`) and quoted (`"public"."users"`) alike: the
+        // quoted spelling is what drizzle generates, and it is what a live
+        // two-tenant run found still pointing every tenant's foreign keys at
+        // a `public.users` that does not exist there.
+        if (/\bpublic"?\./.test(line)) offenders.push(`${name}:${i + 1}: ${line.trim()}`);
       });
     }
     expect(offenders).toEqual([]);
