@@ -20,6 +20,8 @@ open-source core of the Bevel platform.
 
 Used by companies such as [Unite](https://unite.eu) (formerly Mercateo), [osapiens](https://osapiens.com), [BEO](https://beo.energy), [Workpath](https://www.workpath.com) and others.
 
+Read more about the learnings that we made which led to Hexis here: [Our Medium Article](https://medium.com/@ali.raza_25708/how-do-you-distribute-and-collaborate-on-agent-skills-in-enterprise-settings-bdb7097dff60)
+
 ### For teams
 
 One place where engineers and non-technical people alike can browse and load
