@@ -38,9 +38,12 @@ export interface UnrepairedLink {
   /**
    * `needs-skill-write` — the viewer may not write the root's access file, so
    * nothing was attempted; `failed` — the write was attempted and did not
-   * land. Both leave the link broken and both keep the banner.
+   * land; `denied` — both lines are already in the file and the link is still
+   * not granted, which is a `deny` of the plugin at that root: nothing to
+   * write, and only an editor removing the deny would change it. All three
+   * leave the link broken and all three keep the banner.
    */
-  reason: 'needs-skill-write' | 'failed';
+  reason: 'needs-skill-write' | 'failed' | 'denied';
   /** The skills the plugin's members still cannot read through the root. */
   skills: { path: string; name: string }[];
   /** Who can repair it from the skill page. */
@@ -236,13 +239,19 @@ export class PluginLinksService {
    * `summary` is the commit subject when the caller has a better one than the
    * path-derived default; the automatic repair passes one that says it was
    * automatic, because the commit is the only trace it leaves.
+   *
+   * `written` says whether the file changed. A root that already carried
+   * both lines is left alone and reports false — which, for a root the index
+   * called ungranted, means the lines are not what is missing (a `deny`
+   * beside them is): the automatic repair reads it as "still broken", not as
+   * repaired.
    */
   async repair(
     user: AuthUser,
     plugin: string,
     rawRoot: string,
     opts?: { summary?: string },
-  ): Promise<{ root: string }> {
+  ): Promise<{ root: string; written: boolean }> {
     const folder = await this.pluginFolder(plugin);
     const root = this.rootOrThrow(rawRoot);
     const wsId = linksWorkspaceId();
@@ -260,9 +269,9 @@ export class PluginLinksService {
           root,
         });
       }
-      await this.grantTokens(wsId, user, folder, root, opts?.summary);
+      const written = await this.grantTokens(wsId, user, folder, root, opts?.summary);
       this.changed(wsId);
-      return { root };
+      return { root, written };
     });
   }
 
@@ -283,6 +292,12 @@ export class PluginLinksService {
    * the skill page can never write different things. Each root's failure is
    * caught into `skipped`: one unwritable file must not cost the others their
    * repair, nor the page its render.
+   *
+   * A root the repair did not have to write is NOT repaired. The work list
+   * holds only roots the index called ungranted, so a root whose two lines
+   * were already there is broken by something the lines cannot fix — a `deny`
+   * of the plugin in that same file — and reporting it repaired would hide
+   * the one link the writer opening this page could not see anywhere else.
    */
   async repairAll(user: AuthUser, plugin: string): Promise<LinkRepairReport> {
     const folder = await this.pluginFolder(plugin);
@@ -296,19 +311,23 @@ export class PluginLinksService {
     const named = new Map((await this.skillService.listSkills(undefined)).map((s) => [s.path, s.name]));
     const repaired: string[] = [];
     const skipped: UnrepairedLink[] = [];
+    const leftBroken = async (item: (typeof work)[number], reason: UnrepairedLink['reason']) => {
+      skipped.push({
+        root: item.root,
+        reason,
+        skills: item.skills.map((path) => ({ path, name: named.get(path) ?? path.split('/').pop() ?? path })),
+        editors: await this.editorsOf(wsId, item.root),
+      });
+    };
     for (const item of work) {
       try {
-        await this.repair(user, folder, item.root, { summary: repairSummary(folder, item.root) });
-        repaired.push(item.root);
+        const { written } = await this.repair(user, folder, item.root, { summary: repairSummary(folder, item.root) });
+        if (written) repaired.push(item.root);
+        else await leftBroken(item, 'denied');
       } catch (err) {
         const needsWrite = err instanceof PluginLinkError && err.payload.kind === 'needs-skill-write';
         if (!needsWrite) log.warn('automatic link repair failed:', { plugin: folder, root: item.root, err });
-        skipped.push({
-          root: item.root,
-          reason: needsWrite ? 'needs-skill-write' : 'failed',
-          skills: item.skills.map((path) => ({ path, name: named.get(path) ?? path.split('/').pop() ?? path })),
-          editors: await this.editorsOf(wsId, item.root),
-        });
+        await leftBroken(item, needsWrite ? 'needs-skill-write' : 'failed');
       }
     }
     return { repaired, skipped };
@@ -370,7 +389,9 @@ export class PluginLinksService {
   /**
    * The two lines, and a commit only if they were not already there — the
    * `changed` check is what makes re-linking, Repair and the page-open repair
-   * idempotent rather than a stream of empty commits.
+   * idempotent rather than a stream of empty commits. Returns whether the
+   * file changed, so a caller can tell a repair that wrote from one that had
+   * nothing to write.
    */
   private async grantTokens(
     wsId: string,
@@ -378,15 +399,15 @@ export class PluginLinksService {
     folder: string,
     root: string,
     summary?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const [read, write] = this.tokens(folder);
     const a = await this.mutation.grant(wsId, 'folder', root, 'read', read);
     const b = await this.mutation.grant(wsId, 'folder', root, 'write', write);
-    if (a.changed || b.changed) {
-      await this.commits.runPendingCommit(wsId, DEFAULT_BRANCH, `${this.kbDirName}/${a.editPath}`, user, {
-        summary,
-      });
-    }
+    if (!(a.changed || b.changed)) return false;
+    await this.commits.runPendingCommit(wsId, DEFAULT_BRANCH, `${this.kbDirName}/${a.editPath}`, user, {
+      summary,
+    });
+    return true;
   }
 
   private rootOrThrow(raw: string): string {

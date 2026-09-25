@@ -362,6 +362,30 @@ describe('PluginLinksService', () => {
   });
 
   describe('repairAll — what opening the plugin page runs', () => {
+    it('does not call a link denied at its root repaired: nothing to write, and the banner keeps it', async () => {
+      // The lines are there; a `deny` beside them is what breaks the link.
+      // The repair has nothing to write, and a root it did not write is not
+      // one it fixed — reporting it repaired would hide it from the one
+      // person who could act, and reload the page for nothing.
+      await write(
+        'Skills/Eng/deploy/access.md',
+        '---\n---\nread:\n  - plugin/gtm/read\n  - deny plugin/gtm/read\nwrite:\n  - Mia <mia@x.io>\n  - plugin/gtm/write\n',
+      );
+      await linkByHand('Skills/Eng/deploy');
+      commits.length = 0;
+
+      const report = await svc.repairAll(manager, 'gtm');
+      expect(report.repaired).toEqual([]);
+      expect(report.skipped).toMatchObject([
+        { root: 'Skills/Eng/deploy', reason: 'denied', skills: [{ path: 'Skills/Eng/deploy', name: 'deploy' }] },
+      ]);
+      // Eve edits Skills/Eng (the fixture's own rule) and Mia the root itself:
+      // both can remove the deny, so both are named.
+      expect(report.skipped[0].editors.users.map((u) => u.email).sort()).toEqual(['eve@x.io', 'mia@x.io']);
+      expect(commits).toEqual([]);
+      expect(await grantedOf('Skills/Eng/deploy')).toBe(false);
+    });
+
     it('repairs every link the writer may write, silently, and says nothing about them', async () => {
       await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Eve <eve@x.io>\n  - Mia <mia@x.io>\n');
       await linkByHand('Skills/Eng/deploy', 'Skills/Eng/rollback');

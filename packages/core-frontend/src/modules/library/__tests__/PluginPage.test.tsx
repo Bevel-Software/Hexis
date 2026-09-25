@@ -616,6 +616,30 @@ describe('PluginPage', () => {
     expect(CATALOG.reload).not.toHaveBeenCalled();
   });
 
+  it('says a denied link is denied, not merely unrepaired — Repair would write nothing', async () => {
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, tools: [connectedTool()] });
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true, brokenLinks: 1 })]);
+    pluginsMock.repairPluginLinks.mockResolvedValue({
+      repaired: [],
+      skipped: [
+        {
+          root: 'Skills/Eng/deploy',
+          reason: 'denied',
+          skills: [{ path: 'Skills/Eng/deploy', name: 'deploy' }],
+          editors: { roles: [], users: [{ name: 'Mia', email: 'mia@x.io' }] },
+        },
+      ],
+    });
+    vi.mocked(CATALOG.reload).mockClear();
+    renderPlugin('GTM');
+
+    const banner = await screen.findByText(
+      "deploy is denied to GTM's members in its access rules. Mia can change that from the skill page.",
+    );
+    expect(banner.closest('[role="status"]')).toHaveClass('bg-urgent-soft');
+    expect(CATALOG.reload).not.toHaveBeenCalled();
+  });
+
   it('asks for no repair on a plugin whose links live in an external format', async () => {
     pluginsMock.listPlugins.mockResolvedValue([
       gtm({ canWrite: true, linksAreManaged: false, brokenLinks: 0 }),

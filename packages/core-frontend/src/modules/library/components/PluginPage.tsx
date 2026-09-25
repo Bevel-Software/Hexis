@@ -442,7 +442,7 @@ export function PluginPage() {
             {unrepairedLinks.flatMap((link) =>
               link.skills.map((skill) => (
                 <li key={`${link.root}:${skill.path}`}>
-                  {`${skill.name} can't be read by ${label}'s members. ${editorsText(link)} can repair the link from the skill page.`}
+                  {unrepairedText(link, skill.name, label)}
                 </li>
               )),
             )}
@@ -703,4 +703,19 @@ export function PluginPage() {
  */
 function editorsText(link: UnrepairedLink): string {
   return joinNames([...link.editors.roles, ...link.editors.users.map((u) => u.name)]) || 'Its editors';
+}
+
+/**
+ * The one line the banner says about a link the repair left broken. Two
+ * sentences, by what is actually wrong: a link whose grant lines are missing
+ * is repaired from the skill page; a link whose lines are there and denied
+ * beside them is not — Repair would write nothing, and the person who can
+ * act has to remove the deny.
+ */
+function unrepairedText(link: UnrepairedLink, skill: string, plugin: string): string {
+  const who = editorsText(link);
+  if (link.reason === 'denied') {
+    return `${skill} is denied to ${plugin}'s members in its access rules. ${who} can change that from the skill page.`;
+  }
+  return `${skill} can't be read by ${plugin}'s members. ${who} can repair the link from the skill page.`;
 }

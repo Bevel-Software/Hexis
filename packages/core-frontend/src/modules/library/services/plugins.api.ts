@@ -257,8 +257,13 @@ export interface LinkEditors {
 export interface UnrepairedLink {
   /** Repo-relative root, as the plugin's manifest declares it. */
   root: string;
-  /** `needs-skill-write` — the viewer may not write its access file; `failed` — the write did not land. */
-  reason: 'needs-skill-write' | 'failed';
+  /**
+   * `needs-skill-write` — the viewer may not write its access file; `failed`
+   * — the write did not land; `denied` — the lines are there and a `deny` of
+   * the plugin beside them keeps the link broken, so there is nothing to
+   * write and only an editor removing the deny would change it.
+   */
+  reason: 'needs-skill-write' | 'failed' | 'denied';
   /** The skills the plugin's members still cannot read through it. */
   skills: { path: string; name: string }[];
   /** Who the banner names as able to repair it. */
