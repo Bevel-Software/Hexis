@@ -1,7 +1,6 @@
 import jwt from 'jsonwebtoken';
 import { eq } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
-import type { CoreConfig } from '../../core-config.js';
 import { users } from '../database/schema.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
