@@ -17,7 +17,7 @@
  * Finer-grained internals are available via the `./modules/*` subpath exports.
  */
 
-export { CoreConfig } from './core-config.js';
+export { CoreConfig, type TenantConfig, type ProcessConfig } from './core-config.js';
 export { createCoreServices, type CoreServices } from './core/create-core-services.js';
 export {
   createCoreServer,
@@ -46,7 +46,16 @@ export {
   runCoreMigrations,
   runEnterpriseMigrations,
 } from './modules/database/migrate.js';
-export { getDb, type Database } from './modules/database/connection.js';
+export {
+  getDb,
+  createDb,
+  closeDb,
+  dbSchemaOf,
+  assertSchemaName,
+  DEFAULT_DB_SCHEMA,
+  type Database,
+  type DbOptions,
+} from './modules/database/connection.js';
 
 // Build identity surfaced by GET /api/health.
 export { GIT_SHA, resolveGitSha } from './version.js';

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { AdvisoryLock, withAdvisoryLock } from '../advisory-lock.js';
+import { AdvisoryLock, advisoryLockKey, withAdvisoryLock } from '../advisory-lock.js';
 import type { Database } from '../connection.js';
 
 /**
@@ -143,5 +143,27 @@ describe('withAdvisoryLock', () => {
     // be holding, so this path is the fallback for the rollback itself failing.
     expect(clients[0].released).toBe(true);
     expect(clients[0].releasedWith).toBeInstanceOf(Error);
+  });
+});
+
+describe('advisoryLockKey', () => {
+  it('keeps the ids a single-tenant deployment always used when no tenant is named', () => {
+    expect(advisoryLockKey(AdvisoryLock.Migrations)).toBe(AdvisoryLock.Migrations);
+    expect(advisoryLockKey(AdvisoryLock.CommitWorker, '')).toBe(AdvisoryLock.CommitWorker);
+  });
+
+  it('gives each tenant its own key for each lock, stable across calls and inside int4', () => {
+    const a = advisoryLockKey(AdvisoryLock.CommitWorker, 't_acme');
+    const b = advisoryLockKey(AdvisoryLock.CommitWorker, 't_globex');
+    expect(a).toBe(advisoryLockKey(AdvisoryLock.CommitWorker, 't_acme'));
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(AdvisoryLock.CommitWorker);
+    // The two locks of one tenant stay two locks.
+    expect(advisoryLockKey(AdvisoryLock.Migrations, 't_acme')).not.toBe(a);
+    for (const key of [a, b]) {
+      expect(Number.isInteger(key)).toBe(true);
+      expect(key).toBeGreaterThanOrEqual(-(2 ** 31));
+      expect(key).toBeLessThanOrEqual(2 ** 31 - 1);
+    }
   });
 });

@@ -26,12 +26,12 @@
 
 ## 5. Git credentials provider (packages/core-backend) — phase 2
 
-- [ ] 5.1 `src/shared/git.contract.ts`: `GitCredentials { username(); token() }`; `redactGitToken` takes the tokens
-- [ ] 5.2 `modules/workflow/git/node-git-runner.ts`: take the provider, set `GITHUB_TOKEN` in the child env only; test that the token never reaches argv
-- [ ] 5.3 `modules/settings/deployment-settings.service.ts`: drop `syncGitTokenEnv`; the provider reads `resolve('gitToken')`
-- [ ] 5.4 `src/core-config.ts`: stop normalising `GIT_TOKEN` onto `process.env.GITHUB_TOKEN`
-- [ ] 5.5 `modules/kb-fs/clone-config.ts`, `modules/workspace/workspace.service.ts` (`credentialHelperValue`, `credentialFingerprint`), `modules/workflow/workflow.service.ts`, `modules/workflow/review-workflow/review-workflow.service.ts`, `src/shared/redact-secret.ts`: read the provider
-- [ ] 5.6 Tests through `NodeGitRunner` and the setup save: env injection, no restart after a saved token, redaction
+- [x] 5.1 `src/shared/git.contract.ts`: `GitCredentials { username(); token() }`, `gitCredentials()`, `NO_GIT_CREDENTIALS`, `GIT_TOKEN_ENV`; `redactGitToken(text, token)`; `IGitRunner.credentials`
+- [x] 5.2 `modules/workflow/git/node-git-runner.ts`: take the provider, set `GITHUB_TOKEN` in the child env only and drop an inherited one; a per-call env entry still wins (the setup probe); tests through `git credential fill`
+- [x] 5.3 `modules/settings/deployment-settings.service.ts`: drop `syncGitTokenEnv`; the composition root's provider reads `resolve('gitToken')`
+- [x] 5.4 `src/core-config.ts`: `gitToken` read from `GIT_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN`, never written back
+- [x] 5.5 `modules/kb-fs/clone-config.ts` (helpers take the credentials), `modules/workspace/startup/kb-git.ts` and `kb-startup-runner.ts` (the runner's credentials; `gitUsername`/`gitToken` options gone), `modules/workspace/workspace.service.ts` (the `gitUsername` parameter gone; runner credentials), `modules/workflow/git/git.service.ts` (`credentials` getter), `workflow.service.ts`, `review-workflow.service.ts`: read the provider
+- [x] 5.6 Tests: `node-git-runner.test.ts` (token reaches the child, stale env token dropped, per-call override, failures scrubbed), `clone-config.test.ts`, `kb-startup-runner.test.ts` (token by provider, rotation without restart), `deployment-settings.service.test.ts` (a saved token stays out of `process.env`)
 
 ## 6. Database per schema, config split, secrets loader (packages/core-backend) — phase 3
 

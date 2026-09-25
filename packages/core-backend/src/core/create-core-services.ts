@@ -7,7 +7,10 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 // overlay that still reads them. Core's own modules read only `KbContext`.
 // eslint-disable-next-line no-restricted-imports
 import { configureBranchModel, configureKbLayout } from '@bevel-software/platform-shared';
-import { CoreConfig } from '../core-config.js';
+import type { TenantConfig } from '../core-config.js';
+import { sql } from 'drizzle-orm';
+import { DEFAULT_DB_SCHEMA } from '../modules/database/connection.js';
+import { DEFAULT_SECRETS_SCOPE } from '../modules/secrets-vault/secrets-variable-loader.js';
 import { KbContext } from '../shared/kb-context.js';
 import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
@@ -154,7 +157,7 @@ import { registerCatalogCacheInvalidation } from './catalog-cache-invalidation.j
  * core services to construct). See {@link CorePorts} for the pattern.
  */
 export interface CoreServices {
-  config: CoreConfig;
+  config: TenantConfig;
   db: Database;
   /**
    * Reading the disk without locks — the one tree walk and the one path
@@ -308,14 +311,22 @@ export interface CoreServices {
 }
 
 export async function createCoreServices(
-  config: CoreConfig,
+  config: TenantConfig,
   ports: CorePorts = {},
 ): Promise<CoreServices> {
   // Fail fast on a runtime whose git is too old for `--no-write-fetch-head`
   // (see `git-version.ts`): every clone, fetch and refresh below depends on it,
   // so an unsupported binary is better surfaced here than at the first merge.
   await assertGitVersion();
-  const db = getDb(config.databaseUrl);
+  // What tells this knowledge base's locks, migration ledger and secrets
+  // loader apart from another's in the same process and database. Empty for
+  // the default schema, so a single-tenant deployment keeps the lock ids and
+  // the ledger it always had.
+  const tenantKey = config.dbSchema === DEFAULT_DB_SCHEMA ? '' : config.dbSchema;
+  const db = getDb(config.databaseUrl, { schema: config.dbSchema });
+  // A schema of its own is created on first use, so a tenant's first
+  // activation needs nothing done by hand; `public` always exists.
+  if (tenantKey) await db.execute(sql.raw(`create schema if not exists "${config.dbSchema}"`));
   // Migrations must run BEFORE any service that reads or writes a managed
   // table. `PendingCommitsService.startupReconcile` (called later in this
   // function) hits `pending_commits` — on a fresh DB, deferring migrations to
@@ -853,8 +864,11 @@ export async function createCoreServices(
     (key) => toolManualService.scopeOfVariable(key),
   );
   // Register the `bevel-secrets` UTCP variable loader against this vault so any
-  // UTCP client can resolve `${VAR}` from the caller's secrets at tool-call time.
-  registerBevelSecretsVariableLoader(secretsVaultService);
+  // UTCP client can resolve `${VAR}` from the caller's secrets at tool-call
+  // time — under this knowledge base's scope, since the loader registry is
+  // UTCP's and process-wide while the vault is this graph's.
+  const secretsScope = tenantKey ? `${config.tenantId}/${config.dbSchema}` : DEFAULT_SECRETS_SCOPE;
+  registerBevelSecretsVariableLoader(secretsVaultService, secretsScope);
 
   // Deleting ONE tool from its page — the owner's verb, the other end of the
   // promise that made them the owner. Built here because it is the one service
@@ -880,7 +894,7 @@ export async function createCoreServices(
   // call, the vault to resolve the credential to call it with. Holds no state
   // and takes no `db`: a verdict is returned to the caller that asked for it and
   // never outlives their page (see `ProbeVerdict`).
-  const connectionProbeService = new ConnectionProbeService(toolManualService, secretsVaultService);
+  const connectionProbeService = new ConnectionProbeService(toolManualService, secretsVaultService, secretsScope);
 
   // Zero-config OAuth for bare `type: mcp` `.tool`s: when the remote server
   // demands OAuth (MCP authorization spec), discover its authorization server,
@@ -974,6 +988,7 @@ export async function createCoreServices(
       // For the needs-authorization setup link surfaced to external agents.
       publicFrontendUrl: config.publicFrontendUrl,
       readAgentPreamble: readPreamble,
+      secretsScope,
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
     // set it?" and the manual catalog answers "which user-scoped vars does this
@@ -1100,7 +1115,7 @@ export async function createCoreServices(
   // so this one serves requests and declines to drain until that one exits;
   // then it takes the lease and starts. Two processes draining one shared
   // clone volume is the failure this prevents — see `core/lifecycle.ts`.
-  const commitWorker = holdCommitWorkerLease(new AdvisoryLease(db, AdvisoryLock.CommitWorker), leased);
+  const commitWorker = holdCommitWorkerLease(new AdvisoryLease(db, AdvisoryLock.CommitWorker, { tenantKey }), leased);
 
   // SSO providers. The array REFERENCE is shared with the caller's port — an
   // overlay pushes its own plugins into it after construction (they mount when

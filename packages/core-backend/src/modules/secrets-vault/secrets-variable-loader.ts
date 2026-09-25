@@ -18,29 +18,43 @@ const log = logger('secrets-vault');
  * The `UtcpClient.create` path re-validates the whole config through the
  * serializer registry, so a loader can't be handed in as a bare live object — it
  * must round-trip through a registered serializer. We therefore put a plain
- * descriptor `{ variable_loader_type, user_id }` in `load_variables_from` (via
- * {@link bevelSecretsLoaderConfig}) and let the registered serializer rebuild a
- * live loader bound to the process-wide vault. Swapping the vault backend (e.g.
- * to a client's external secret manager) is just a different
- * `ISecretsVaultService` passed to {@link registerBevelSecretsVariableLoader}.
+ * descriptor `{ variable_loader_type, user_id, scope }` in `load_variables_from`
+ * (via {@link bevelSecretsLoaderConfig}) and let the registered serializer
+ * rebuild a live loader bound to the vault registered under that scope.
+ *
+ * ONE VAULT PER SCOPE, NOT PER PROCESS. The serializer registry is UTCP's and
+ * process-wide, but a process can host several knowledge bases, each with a
+ * vault of its own, and a user id is only unique within one of them. So the
+ * descriptor names the scope its vault was registered under, and a loader
+ * reads through that vault alone: two knowledge bases whose users both stored
+ * `weather_WEATHER_KEY` never see each other's value. A single-tenant
+ * deployment registers under {@link DEFAULT_SECRETS_SCOPE} and names nothing.
+ * Swapping the vault backend (e.g. to a client's external secret manager) is
+ * just a different `ISecretsVaultService` passed to
+ * {@link registerBevelSecretsVariableLoader}.
  */
 export const BEVEL_SECRETS_LOADER_TYPE = 'bevel_secrets';
 
+/** The scope a deployment that hosts one knowledge base registers under. */
+export const DEFAULT_SECRETS_SCOPE = 'default';
+
 /**
- * Process-wide vault the reconstructed loaders read through. Set once at
- * composition time (before any client is built) so the serializer — which only
- * receives a plain dict — can bind live loaders to it.
+ * The vaults the reconstructed loaders read through, by scope. A composition
+ * root registers its vault before any client is built; a graph that is torn
+ * down unregisters it so a stale descriptor resolves nothing.
  */
-let sharedSecretsVault: ISecretsVaultService | null = null;
+const vaults = new Map<string, ISecretsVaultService>();
 
 export class BevelSecretsVariableLoader implements VariableLoader {
   readonly variable_loader_type = BEVEL_SECRETS_LOADER_TYPE;
   readonly user_id: string;
+  readonly scope: string;
   // VariableLoader is an open shape; allow arbitrary extra props.
   [key: string]: unknown;
 
-  constructor(userId: string) {
+  constructor(userId: string, scope: string = DEFAULT_SECRETS_SCOPE) {
     this.user_id = userId;
+    this.scope = scope;
   }
 
   /**
@@ -52,9 +66,10 @@ export class BevelSecretsVariableLoader implements VariableLoader {
    * harvest a secret the user configured for a different manual.
    */
   async get(effectiveKey: string): Promise<string | null> {
-    if (!sharedSecretsVault || !this.user_id) return null;
+    const vault = vaults.get(this.scope);
+    if (!vault || !this.user_id) return null;
     try {
-      return await sharedSecretsVault.resolve(this.user_id, effectiveKey);
+      return await vault.resolve(this.user_id, effectiveKey);
     } catch (err) {
       // Log the fault so a backend failure is distinguishable from a merely
       // unset secret (resolve returning null) when troubleshooting.
@@ -66,15 +81,18 @@ export class BevelSecretsVariableLoader implements VariableLoader {
 
 class BevelSecretsVariableLoaderSerializer extends Serializer<VariableLoader> {
   toDict(obj: VariableLoader): Record<string, unknown> {
+    const loader = obj as BevelSecretsVariableLoader;
     return {
       variable_loader_type: BEVEL_SECRETS_LOADER_TYPE,
-      user_id: (obj as BevelSecretsVariableLoader).user_id ?? '',
+      user_id: loader.user_id ?? '',
+      scope: loader.scope ?? DEFAULT_SECRETS_SCOPE,
     };
   }
 
   validateDict(obj: Record<string, unknown>): VariableLoader {
     const userId = typeof obj.user_id === 'string' ? obj.user_id : '';
-    return new BevelSecretsVariableLoader(userId);
+    const scope = typeof obj.scope === 'string' && obj.scope ? obj.scope : DEFAULT_SECRETS_SCOPE;
+    return new BevelSecretsVariableLoader(userId, scope);
   }
 }
 
@@ -91,14 +109,26 @@ VariableLoaderSerializer.registerVariableLoader(
 );
 
 /**
- * Bind the process-wide vault the reconstructed loaders read through. Called
- * once at composition time; before it runs, loaders resolve to null.
+ * Bind the vault the loaders of `scope` read through. Called once per
+ * knowledge base at composition time; before it runs, loaders of that scope
+ * resolve to null.
  */
-export function registerBevelSecretsVariableLoader(secretsVault: ISecretsVaultService): void {
-  sharedSecretsVault = secretsVault;
+export function registerBevelSecretsVariableLoader(
+  secretsVault: ISecretsVaultService,
+  scope: string = DEFAULT_SECRETS_SCOPE,
+): void {
+  vaults.set(scope, secretsVault);
 }
 
-/** The plain descriptor to place in a `UtcpClientConfig.load_variables_from` for a given user. */
-export function bevelSecretsLoaderConfig(userId: string): Record<string, unknown> {
-  return { variable_loader_type: BEVEL_SECRETS_LOADER_TYPE, user_id: userId };
+/** Forget a scope's vault — the last step of tearing a knowledge base's graph down. */
+export function unregisterBevelSecretsVariableLoader(scope: string = DEFAULT_SECRETS_SCOPE): void {
+  vaults.delete(scope);
+}
+
+/**
+ * The plain descriptor to place in a `UtcpClientConfig.load_variables_from`
+ * for a given user of the knowledge base registered under `scope`.
+ */
+export function bevelSecretsLoaderConfig(userId: string, scope: string = DEFAULT_SECRETS_SCOPE): Record<string, unknown> {
+  return { variable_loader_type: BEVEL_SECRETS_LOADER_TYPE, user_id: userId, scope };
 }
