@@ -17,7 +17,9 @@
  * Finer-grained internals are available via the `./modules/*` subpath exports.
  */
 
-export { CoreConfig } from './core-config.js';
+export { CoreConfig, resolveDatabaseUrl, type TenantConfig, type ProcessConfig } from './core-config.js';
+// Serving several knowledge bases from one process — see docs/multi-tenant.md.
+export * from './tenancy/index.js';
 export { createCoreServices, type CoreServices } from './core/create-core-services.js';
 export {
   createCoreServer,
@@ -33,9 +35,14 @@ export type { ILogger, LogFields } from './shared/logger.contract.js';
 // handle type `CoreServices.commitWorker` carries.
 export {
   createShutdown,
+  startCore,
+  stopCore,
   withStartupTask,
+  type BootableCore,
+  type CoreStopDeps,
   type ShutdownDeps,
   type ShutdownOptions,
+  type StopCoreOptions,
   type LeaseLoopHandle,
   type LeasedWorker,
 } from './core/lifecycle.js';
@@ -46,7 +53,16 @@ export {
   runCoreMigrations,
   runEnterpriseMigrations,
 } from './modules/database/migrate.js';
-export { getDb, type Database } from './modules/database/connection.js';
+export {
+  getDb,
+  createDb,
+  closeDb,
+  dbSchemaOf,
+  assertSchemaName,
+  DEFAULT_DB_SCHEMA,
+  type Database,
+  type DbOptions,
+} from './modules/database/connection.js';
 
 // Build identity surfaced by GET /api/health.
 export { GIT_SHA, resolveGitSha } from './version.js';
@@ -85,6 +101,13 @@ export type {
 export type { ILlmUsageMeter } from './modules/tool-auth/llm-usage-meter.js';
 export type { AuthProviderPlugin } from './modules/auth/auth.routes.js';
 export type { IErasureParticipant } from './modules/auth/account-erasure.service.js';
+export {
+  AccountAdmissionRefusedError,
+  admitEveryone,
+  type AccountAdmissionVerdict,
+  type AccountProvisionReason,
+  type IAccountAdmission,
+} from './modules/auth/account-admission.js';
 export {
   WorkflowHooks,
   type CommitValidationHook,

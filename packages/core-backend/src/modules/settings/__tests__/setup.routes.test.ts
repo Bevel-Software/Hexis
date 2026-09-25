@@ -1,34 +1,10 @@
 import type { Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  DEFAULT_KB_LAYOUT,
-  branchModelFromEnv,
-  configureBranchModel,
-  configureKbLayout,
-  currentKbLayout,
-  type KbLayout,
-} from '@bevel-software/platform-shared';
-
-/**
- * test-setup configures the branch model from the environment, and nothing
- * unconfigures it; a test that needs the first-run "no branch model yet" state
- * says so here. Everything else is the real module.
- */
-const branchModel = vi.hoisted(() => ({ pretendUnconfigured: false }));
-vi.mock('@bevel-software/platform-shared', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@bevel-software/platform-shared')>();
-  return {
-    ...actual,
-    isBranchModelConfigured: () => !branchModel.pretendUnconfigured && actual.isBranchModelConfigured(),
-    // Applying a model configures it, as the real module does.
-    configureBranchModel: (model: Parameters<typeof actual.configureBranchModel>[0]) => {
-      actual.configureBranchModel(model);
-      branchModel.pretendUnconfigured = false;
-    },
-  };
-});
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { KbLayout } from '@bevel-software/platform-shared';
+import { testKbContext } from '../../../__tests__/kb-context.js';
+import type { KbContext } from '../../../shared/kb-context.js';
 import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
@@ -98,6 +74,12 @@ function listen(
   runAll: () => Promise<void> = async () => {},
   checkConnection?: (connection: RepositoryConnection) => Promise<ConnectionCheck>,
   listFolders?: (listing: RootFolderListing) => Promise<string[] | null>,
+  /**
+   * The running graph's knowledge-base context, which the completing save
+   * applies the admin's names to. The default is a configured deployment; a
+   * suite that needs the first-run "no branch model yet" state passes its own.
+   */
+  kb: KbContext = testKbContext(),
 ) {
   const db = {
     select: () => ({ from: () => Promise.resolve([]) }),
@@ -122,6 +104,7 @@ function listen(
       // Default no-op: most suites never complete setup, so the runner is
       // never reached. The completion-transition suite passes its own spy.
       { runAll },
+      kb,
       undefined,
       checkConnection,
       listFolders,
@@ -129,7 +112,7 @@ function listen(
   );
   server = app.listen(0);
   const { port } = server.address() as AddressInfo;
-  return { base: `http://127.0.0.1:${port}`, settings };
+  return { base: `http://127.0.0.1:${port}`, settings, kb };
 }
 
 const post = (base: string, path: string, body: unknown) =>
@@ -576,13 +559,13 @@ describe('POST /setup/settings — the completion transition and the KB startup 
  */
 describe('POST /setup/settings — the folder names on the completing save', () => {
   const completing = { kbRepoUrl: 'https://example.com/acme/kb.git', gitToken: 'ghp_x' };
-  afterEach(() => configureKbLayout({ ...DEFAULT_KB_LAYOUT }));
 
   it('applies them before the phase runs, and asks for no restart over them', async () => {
     const seenByPhase: KbLayout[] = [];
+    const kb = testKbContext();
     const { base } = listen(true, async () => {
-      seenByPhase.push(currentKbLayout());
-    }, connectedCheck().check);
+      seenByPhase.push(kb.layout);
+    }, connectedCheck().check, undefined, kb);
     const res = await post(base, '/api/setup/settings', {
       settings: { ...completing, knowledgeBaseDir: 'Docs', skillsDir: 'skills' },
     });
@@ -592,35 +575,36 @@ describe('POST /setup/settings — the folder names on the completing save', () 
     expect(body.restartRequired).toBe(false);
     const applied = { knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins', agentsFile: 'AGENTS.md' };
     expect(seenByPhase).toEqual([applied]);
-    expect(currentKbLayout()).toEqual(applied);
+    expect(kb.layout).toEqual(applied);
   });
 
   it('applies names stored by an earlier, incomplete save', async () => {
     const seenByPhase: KbLayout[] = [];
+    const kb = testKbContext();
     const { base } = listen(true, async () => {
-      seenByPhase.push(currentKbLayout());
-    }, connectedCheck().check);
+      seenByPhase.push(kb.layout);
+    }, connectedCheck().check, undefined, kb);
     await post(base, '/api/setup/settings', { settings: { pluginsDir: 'plugins' } });
-    expect(currentKbLayout().pluginsDir).toBe('Plugins');
+    expect(kb.layout.pluginsDir).toBe('Plugins');
     await post(base, '/api/setup/settings', { settings: completing });
     expect(seenByPhase[0]?.pluginsDir).toBe('plugins');
   });
 
   it('leaves them restart-to-apply once setup is complete', async () => {
-    const { base } = listen(true, undefined, connectedCheck().check);
+    const { base, kb } = listen(true, undefined, connectedCheck().check);
     await post(base, '/api/setup/settings', { settings: completing });
     const res = await post(base, '/api/setup/settings', { settings: { pluginsDir: 'plugins' } });
     expect(res.status).toBe(200);
     expect((await res.json()).restartRequired).toBe(true);
-    expect(currentKbLayout().pluginsDir).toBe('Plugins');
+    expect(kb.layout.pluginsDir).toBe('Plugins');
   });
 
   it('does not replace a layout the process already runs', async () => {
-    configureKbLayout({ knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' });
+    const kb = testKbContext({ layout: { knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' } });
     const seenByPhase: KbLayout[] = [];
     const { base } = listen(true, async () => {
-      seenByPhase.push(currentKbLayout());
-    }, connectedCheck().check);
+      seenByPhase.push(kb.layout);
+    }, connectedCheck().check, undefined, kb);
     const res = await post(base, '/api/setup/settings', {
       settings: { ...completing, skillsDir: 'capabilities' },
     });
@@ -634,10 +618,11 @@ describe('POST /setup/settings — the folder names on the completing save', () 
     try {
       const seenByPhase: KbLayout[] = [];
       let fail = true;
+      const kb = testKbContext();
       const { base } = listen(true, async () => {
-        seenByPhase.push(currentKbLayout());
+        seenByPhase.push(kb.layout);
         if (fail) throw new Error('remote said no');
-      }, connectedCheck().check);
+      }, connectedCheck().check, undefined, kb);
       const first = await post(base, '/api/setup/settings', {
         settings: { ...completing, skillsDir: 'skills' },
       });
@@ -650,7 +635,7 @@ describe('POST /setup/settings — the folder names on the completing save', () 
       expect(body.complete).toBe(true);
       expect(body.restartRequired).toBe(false);
       expect(seenByPhase.map((l) => l.skillsDir)).toEqual(['skills', 'capabilities']);
-      expect(currentKbLayout().skillsDir).toBe('capabilities');
+      expect(kb.layout.skillsDir).toBe('capabilities');
     } finally {
       console.error = consoleError;
     }
@@ -671,16 +656,14 @@ describe('POST /setup/settings — the folder names on the completing save', () 
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
-      // Whatever the test applied, the rest of the worker runs on the pinned model.
-      configureBranchModel(branchModelFromEnv());
     }
   }
 
   it('asks for no restart over a branch model the completing save also applied', () =>
     withoutBranchEnv(async () => {
-    branchModel.pretendUnconfigured = true;
-    try {
-      const { base } = listen(true, undefined, connectedCheck().check);
+      // A fresh deployment: no branch model yet, so the save applies the one it carries.
+      const fresh = testKbContext({ branchModel: null });
+      const { base, kb } = listen(true, undefined, connectedCheck().check, undefined, fresh);
       const res = await post(base, '/api/setup/settings', {
         settings: {
           ...completing,
@@ -693,9 +676,7 @@ describe('POST /setup/settings — the folder names on the completing save', () 
       const body = await res.json();
       expect(body.complete).toBe(true);
       expect(body.restartRequired).toBe(false);
-    } finally {
-      branchModel.pretendUnconfigured = false;
-    }
+      expect(kb.defaultBranch).toBe('production');
     }));
 
   it('still asks for a restart over a branch change once a branch model is in effect', () =>

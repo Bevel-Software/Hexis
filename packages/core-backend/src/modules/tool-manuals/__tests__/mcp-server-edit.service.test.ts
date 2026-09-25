@@ -9,6 +9,7 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { IToolManualService, ToolManualSummary } from '../tool-manuals.contract.js';
 import { McpServerEditService } from '../mcp-server-edit.service.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const KB = 'knowledge-base';
 const USER: AuthUser = { id: 'u-1', email: 'ali@example.com', name: 'Ali' } as AuthUser;
@@ -77,7 +78,7 @@ beforeEach(async () => {
     }),
   } as unknown as IToolManualService;
 
-  svc = new McpServerEditService(workspaceService, commits, accessControl, toolManuals, KB, new NodeFs());
+  svc = new McpServerEditService(workspaceService, commits, accessControl, toolManuals, testKbContext({ kbDirName: KB }), new NodeFs());
 });
 
 afterEach(async () => {

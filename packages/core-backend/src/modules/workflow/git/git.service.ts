@@ -26,9 +26,8 @@ import {
   assertValidRelativePath,
   isBranchAuthoredBy,
   isOwnSuggestionsBranch,
-  isProtectedBranch,
-  PROTECTED_BRANCHES,
 } from '../../kb-fs/branch-name.js';
+import type { KbContext } from '../../../shared/kb-context.js';
 import {
   BranchAuthorshipError,
   WorkflowDomainError,
@@ -42,6 +41,7 @@ import {
   GitRunError,
   isGitTimeout,
   redactGitToken,
+  type GitCredentials,
   type GitRunOptions,
   type GitRunResult,
   type IGitRunner,
@@ -296,7 +296,7 @@ export class GitService implements IGitService {
      * safe because validation is advisory and never blocks a commit.
      */
     private readonly hooks: WorkflowHooks,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
     private readonly mutex: WorkspaceMutex = new WorkspaceMutex(),
     private readonly accessControl: IAccessControl | null = null,
     /**
@@ -308,6 +308,18 @@ export class GitService implements IGitService {
      */
     private readonly gitRunner: IGitRunner = new NodeGitRunner(),
   ) {}
+
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
+  }
+
+  /**
+   * The credentials the runner authenticates with — for the services above
+   * this one that scrub a message git or the host echoed a token into.
+   */
+  get credentials(): GitCredentials {
+    return this.gitRunner.credentials;
+  }
 
   /**
    * "Does the pending-commits queue hold rows for this workspace?" — used by
@@ -552,7 +564,7 @@ export class GitService implements IGitService {
             );
             infos[i] = {
               name: row.shortName,
-              isProtected: isProtectedBranch(row.shortName),
+              isProtected: this.kb.isProtectedBranch(row.shortName),
               ahead,
               behind,
               hasRemote: row.hasRemote,
@@ -655,7 +667,7 @@ export class GitService implements IGitService {
     fromBase?: string,
   ): Promise<BranchInfo> {
     assertValidBranchName(name);
-    if (isProtectedBranch(name)) {
+    if (this.kb.isProtectedBranch(name)) {
       throw new ProtectedBranchError(name, 'creating a protected branch');
     }
     if (fromBase) assertValidBranchName(fromBase);
@@ -731,7 +743,7 @@ export class GitService implements IGitService {
     opts: { onlyIfNoRemote?: boolean; systemCleanup?: boolean } = {},
   ): Promise<void> {
     assertValidBranchName(name);
-    if (isProtectedBranch(name)) {
+    if (this.kb.isProtectedBranch(name)) {
       throw new ProtectedBranchError(name, 'deleting a protected branch');
     }
     return this.mutex.run(workspaceId, async () => {
@@ -895,7 +907,7 @@ export class GitService implements IGitService {
       // boundary. Without this guard, the standard "fork to draft then
       // propose" workflow would 403 for non-admins — they can't write
       // protected, can't write the draft they forked from it either.
-      if (isProtectedBranch(branch)) {
+      if (this.kb.isProtectedBranch(branch)) {
         // Gate against the access tree as it exists at HEAD — the pre-commit
         // state. Reading from the working tree would let the user broaden
         // their own access by editing access.md alongside the change they're
@@ -1172,7 +1184,7 @@ export class GitService implements IGitService {
       // Protected-branch access gate (defence in depth — callers already gate at
       // lock-acquire / upload-mint, but this primitive is generic). Gate every
       // touched path against the access tree at HEAD, like `commit()`.
-      if (isProtectedBranch(branch)) {
+      if (this.kb.isProtectedBranch(branch)) {
         await this.assertCanWriteAtRef(workspaceId, 'HEAD', user.email, touched);
       }
 
@@ -1292,7 +1304,7 @@ export class GitService implements IGitService {
       // decided the write is legitimate (unused name, exclusive create);
       // gating it here again just refuses every non-admin the product
       // promised a plugin to.
-      if (isProtectedBranch(branch) && !opts?.systemAuthorized) {
+      if (this.kb.isProtectedBranch(branch) && !opts?.systemAuthorized) {
         const touched = await this.unpushedTouchedPaths(cwd);
         await this.assertCanWriteAtRef(
           workspaceId,
@@ -1542,6 +1554,7 @@ export class GitService implements IGitService {
           throw new Error(
             `git merge failed without detectable conflicts: ${redactGitToken(
               err instanceof Error ? err.message : String(err),
+              this.credentials.token(),
             )}`,
           );
         }
@@ -2109,7 +2122,7 @@ export class GitService implements IGitService {
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
       let best: { base: string; ahead: number } | null = null;
-      for (const p of PROTECTED_BRANCHES) {
+      for (const p of this.kb.protectedBranches) {
         if (p === branch) continue;
         const res = await this.tryAheadBehind(cwd, branch, `origin/${p}`);
         if (res && (best === null || res.ahead < best.ahead)) {
@@ -3133,7 +3146,7 @@ export class GitService implements IGitService {
     }
 
     let best: { ahead: number; behind: number } | null = null;
-    for (const p of PROTECTED_BRANCHES) {
+    for (const p of this.kb.protectedBranches) {
       if (p === shortName) continue;
       const res = await this.tryAheadBehind(cwd, ref, `refs/remotes/origin/${p}`);
       if (res && (best === null || res.ahead < best.ahead)) best = res;
@@ -3447,5 +3460,3 @@ export function parseNumstatZ(out: string): NumstatEntry[] {
   }
   return entries;
 }
-
-export { PROTECTED_BRANCHES };

@@ -1,10 +1,10 @@
 import path from 'node:path';
 import {
-  PLUGINS_DIR,
   PLUGIN_MANIFEST_FILE,
   pluginDisplayNameOf,
 } from '@bevel-software/platform-shared';
 import type { IFsProbe, ITreeWalker } from '../../../../shared/fs.contract.js';
+import type { KbContext } from '../../../../shared/kb-context.js';
 import { hasManifestEntry } from './plugin-layout.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
@@ -52,7 +52,15 @@ import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '..
 export class PluginDisplayNamesStep implements OnServerStart {
   readonly name = 'plugin-display-names';
 
-  constructor(private readonly disk: IFsProbe & ITreeWalker) {}
+  constructor(
+    private readonly disk: IFsProbe & ITreeWalker,
+    /** Read per run, never captured: the setup-completing save may rename the plugins root first. */
+    private readonly kb: Pick<KbContext, 'layout'>,
+  ) {}
+
+  private get pluginsDir(): string {
+    return this.kb.layout.pluginsDir;
+  }
 
   async run(ctx: ServerStartContext): Promise<StepResult> {
     for (const branch of await ctx.allBranches()) {
@@ -63,7 +71,7 @@ export class PluginDisplayNamesStep implements OnServerStart {
 
   private async backfill(branch: KbBranch): Promise<void> {
     const repoDir = await branch.repoDir();
-    const root = path.join(repoDir, PLUGINS_DIR);
+    const root = path.join(repoDir, this.pluginsDir);
 
     // Plugin folders by the judgement discovery makes, entry for entry: a
     // manifest as a REGULAR file, and nothing beneath a plugin is a plugin.
@@ -119,7 +127,7 @@ export class PluginDisplayNamesStep implements OnServerStart {
       // the file for no change anyone can see.
       if (folderName === pluginDisplayNameOf(manifest)) continue;
       branch.write(
-        `${PLUGINS_DIR}/${rel}/${PLUGIN_MANIFEST_FILE}`,
+        `${this.pluginsDir}/${rel}/${PLUGIN_MANIFEST_FILE}`,
         `${JSON.stringify(withDisplayName(manifest, folderName), null, 2)}\n`,
       );
       filled.push(rel);
@@ -131,7 +139,7 @@ export class PluginDisplayNamesStep implements OnServerStart {
         ? "Record a plugin's display name in its manifest"
         : `Record the display names of ${filled.length} plugins in their manifests`,
     );
-    for (const rel of filled) branch.note(`${PLUGINS_DIR}/${rel}: displayName "${path.posix.basename(rel)}"`);
+    for (const rel of filled) branch.note(`${this.pluginsDir}/${rel}: displayName "${path.posix.basename(rel)}"`);
   }
 }
 

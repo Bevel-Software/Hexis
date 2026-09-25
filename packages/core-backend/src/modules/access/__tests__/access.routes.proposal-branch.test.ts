@@ -16,6 +16,7 @@ import { usersDbDouble } from './users-db-double.js';
 import { AccessControlService } from '../access-control.service.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { branchForWorkspaceId, workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * Manage access on a file that exists ONLY on a change request's branch.
@@ -136,7 +137,7 @@ describe('access routes on a proposal branch (real git)', () => {
         workflowService,
         { emit: () => {} } as unknown as WorkflowEventBus,
         usersDbDouble(),
-        KB,
+        testKbContext({ kbDirName: KB }),
       ),
     );
     server = await new Promise<Server>((resolve) => {

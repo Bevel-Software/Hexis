@@ -1,6 +1,5 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { isBranchModelConfigured } from '@bevel-software/platform-shared';
 import { logger } from '../../../shared/logging.js';
 
 // `startupLog` rather than `log`: `retryUntilMaintained` takes a `log`
@@ -44,16 +43,13 @@ import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js'
  */
 
 export interface KbStartupRunnerOptions {
-  /** How git is run — see `shared/git.contract.ts`. */
+  /**
+   * How git is run — see `shared/git.contract.ts`. It carries the credentials
+   * every command of the phase authenticates with, and the token the phase
+   * scrubs from every message it throws or logs.
+   */
   gitRunner: IGitRunner;
   kbRepoUrl: () => string;
-  gitUsername: () => string;
-  /**
-   * The git token in effect (settings-stored or environment), scrubbed from
-   * every message the phase throws or logs. Optional: `GITHUB_TOKEN` and its
-   * aliases are scrubbed regardless.
-   */
-  gitToken?: () => string;
   workspacesRoot: string;
   kbDirName: string;
   templateDir: string;
@@ -131,7 +127,7 @@ export class KbStartupRunner {
    * them without the URL around them.
    */
   private redact(text: string): string {
-    return redactSecret(text, [this.opts.gitToken?.(), ...urlQuerySecrets(this.opts.kbRepoUrl())]);
+    return redactSecret(text, [this.opts.gitRunner.credentials.token(), ...urlQuerySecrets(this.opts.kbRepoUrl())]);
   }
 
   /**
@@ -260,7 +256,8 @@ export class KbStartupRunner {
   }
 
   private async runAllOnce(): Promise<void> {
-    if (!isBranchModelConfigured()) {
+    // An empty default branch IS the unconfigured model (see `KbContext`).
+    if (!this.opts.defaultBranch()) {
       startupLog.info('branch model not configured yet — phase skipped until setup completes.');
       return;
     }
@@ -389,13 +386,12 @@ export class KbStartupRunner {
    */
   private async ensureRemote(): Promise<Set<string>> {
     const url = this.opts.kbRepoUrl();
-    const user = this.opts.gitUsername();
     // The first question asked of the remote, and the one that answers
     // "can we get there at all". Everything after it — seeding, pushing —
     // fails for reasons of ours; this fails for reasons of the host's.
     let heads: Set<string>;
     try {
-      heads = await lsRemoteHeads(this.opts.gitRunner, url, user);
+      heads = await lsRemoteHeads(this.opts.gitRunner, url);
       this.remoteContact = { at: Date.now(), ok: true };
     } catch (err) {
       // Git that never ran — no executable, a spawn refused — is a fact about
@@ -423,23 +419,23 @@ export class KbStartupRunner {
         );
       }
       const seededByOther = await withTempDir(async (dir) => {
-        await git(this.opts.gitRunner, dir, user,['init', '-b', defaultBranch]);
-        await stampIdentity(this.opts.gitRunner, dir, user);
+        await git(this.opts.gitRunner, dir, ['init', '-b', defaultBranch]);
+        await stampIdentity(this.opts.gitRunner, dir);
         const generated = await this.opts.buildSeedTree(dir);
-        await git(this.opts.gitRunner, dir, user,['add', '-A']);
+        await git(this.opts.gitRunner, dir, ['add', '-A']);
         // The template may ship a `.gitignore` whose rules happen to match a
         // GENERATED seed file (roles.yaml, a reserved root's .gitkeep) —
         // `add -A` would silently drop it from the seed commit. Force-add
         // exactly what the builder generated; `-f` on an already-staged path
         // is a no-op.
-        if (generated.length > 0) await git(this.opts.gitRunner, dir, user,['add', '-f', '--', ...generated]);
-        await git(this.opts.gitRunner, dir, user,['commit', '-m', 'Seed knowledge base from Bevel template']);
+        if (generated.length > 0) await git(this.opts.gitRunner, dir, ['add', '-f', '--', ...generated]);
+        await git(this.opts.gitRunner, dir, ['commit', '-m', 'Seed knowledge base from Bevel template']);
         for (const b of protectedBranches) {
-          if (b !== defaultBranch) await git(this.opts.gitRunner, dir, user,['branch', b]);
+          if (b !== defaultBranch) await git(this.opts.gitRunner, dir, ['branch', b]);
         }
-        await git(this.opts.gitRunner, dir, user,['remote', 'add', 'origin', url]);
+        await git(this.opts.gitRunner, dir, ['remote', 'add', 'origin', url]);
         try {
-          await git(this.opts.gitRunner, dir, user,['push', '-u', 'origin', ...protectedBranches]);
+          await git(this.opts.gitRunner, dir, ['push', '-u', 'origin', ...protectedBranches]);
           return null;
         } catch (err) {
           // Two replicas racing to seed the same empty remote: both saw it
@@ -452,7 +448,7 @@ export class KbStartupRunner {
           // who seeded. A foreign seed is just an "existing remote"
           // discovered late, the same contract as a repo populated before
           // boot.
-          const reread = await lsRemoteHeads(this.opts.gitRunner, url, user);
+          const reread = await lsRemoteHeads(this.opts.gitRunner, url);
           if (protectedBranches.every((b) => reread.has(b))) return reread;
           throw err;
         }
@@ -473,8 +469,8 @@ export class KbStartupRunner {
     for (const b of protectedBranches) {
       if (heads.has(b)) continue;
       await withTempDir(async (dir) => {
-        await git(this.opts.gitRunner, dir, user,['clone', '--depth', '1', '-b', base, url, 'seed']);
-        await git(this.opts.gitRunner, path.join(dir, 'seed'), user,['push', 'origin', `HEAD:refs/heads/${b}`]);
+        await git(this.opts.gitRunner, dir, ['clone', '--depth', '1', '-b', base, url, 'seed']);
+        await git(this.opts.gitRunner, path.join(dir, 'seed'), ['push', 'origin', `HEAD:refs/heads/${b}`]);
       });
       heads.add(b);
       startupLog.info(`created missing protected branch "${b}" from "${base}"`);
@@ -515,25 +511,24 @@ export class KbStartupRunner {
    * commit recovery owns that work, not this phase.
    */
   private async ensureClone(branch: string): Promise<string> {
-    const user = this.opts.gitUsername();
     const workspaceDir = path.join(this.opts.workspacesRoot, workspaceIdForBranch(branch));
     const repoDir = path.join(workspaceDir, this.opts.kbDirName);
     const hasGit = await fs.access(path.join(repoDir, '.git')).then(() => true, () => false);
     if (!hasGit) {
       await fs.mkdir(workspaceDir, { recursive: true });
       await fs.rm(repoDir, { recursive: true, force: true });
-      await git(this.opts.gitRunner, workspaceDir, user,['clone', '-b', branch, this.opts.kbRepoUrl(), repoDir]);
-      await git(this.opts.gitRunner, repoDir, user,['config', 'core.longpaths', 'true']);
-      await stampIdentity(this.opts.gitRunner, repoDir, user);
+      await git(this.opts.gitRunner, workspaceDir, ['clone', '-b', branch, this.opts.kbRepoUrl(), repoDir]);
+      await git(this.opts.gitRunner, repoDir, ['config', 'core.longpaths', 'true']);
+      await stampIdentity(this.opts.gitRunner, repoDir);
       return repoDir;
     }
-    await git(this.opts.gitRunner, repoDir, user,['fetch', 'origin', branch]);
-    const local = (await git(this.opts.gitRunner, repoDir, user,['rev-parse', 'HEAD'])).trim();
-    const remote = (await git(this.opts.gitRunner, repoDir, user,['rev-parse', `origin/${branch}`])).trim();
+    await git(this.opts.gitRunner, repoDir, ['fetch', 'origin', branch]);
+    const local = (await git(this.opts.gitRunner, repoDir, ['rev-parse', 'HEAD'])).trim();
+    const remote = (await git(this.opts.gitRunner, repoDir, ['rev-parse', `origin/${branch}`])).trim();
     if (local !== remote) {
-      const mergeBase = (await git(this.opts.gitRunner, repoDir, user,['merge-base', 'HEAD', `origin/${branch}`])).trim();
+      const mergeBase = (await git(this.opts.gitRunner, repoDir, ['merge-base', 'HEAD', `origin/${branch}`])).trim();
       if (mergeBase === local) {
-        await git(this.opts.gitRunner, repoDir, user,['reset', '--hard', `origin/${branch}`]);
+        await git(this.opts.gitRunner, repoDir, ['reset', '--hard', `origin/${branch}`]);
       }
       // Ahead or diverged: committed-but-unpushed work lives here; not ours to discard.
     }
@@ -544,13 +539,12 @@ export class KbStartupRunner {
   private async finalize(h: BranchHandle): Promise<void> {
     if (!h.dirty) return;
     const repoDir = await h.repoDir();
-    const user = this.opts.gitUsername();
-    await stampIdentity(this.opts.gitRunner, repoDir, user);
+    await stampIdentity(this.opts.gitRunner, repoDir);
     // Drop any PRE-EXISTING index state first (a crashed tool may have left
     // edits staged): `git commit` publishes the whole index, and the phase
     // must commit exactly its own staged set. The edits stay in the working
     // tree, unstaged and unpublished — preserved, not adopted.
-    await git(this.opts.gitRunner, repoDir, user,['reset', '-q']);
+    await git(this.opts.gitRunner, repoDir, ['reset', '-q']);
     // Stage ONLY the paths the phase's ops touched — sources and targets both
     // (a move's `from` and a remove's path stage as deletions; `add -A -- <path>`
     // handles a deleted path, `-f` handles one a branch `.gitignore` matches).
@@ -566,7 +560,7 @@ export class KbStartupRunner {
     for (const rel of h.appliedPaths()) {
       const onDisk = await fs.access(path.join(repoDir, rel)).then(() => true, () => false);
       if (!onDisk) {
-        const known = (await git(this.opts.gitRunner, repoDir, user,['ls-files', '--', `:(literal)${rel}`])).trim();
+        const known = (await git(this.opts.gitRunner, repoDir, ['ls-files', '--', `:(literal)${rel}`])).trim();
         if (known === '') continue;
       }
       touched.push(rel);
@@ -574,7 +568,7 @@ export class KbStartupRunner {
     // `:(literal)` — these are file paths, not pathspecs; chunked so a large
     // migration cannot overflow the platform's argv limit.
     for (let i = 0; i < touched.length; i += 100) {
-      await git(this.opts.gitRunner, repoDir, user,[
+      await git(this.opts.gitRunner, repoDir, [
         'add',
         '-A',
         '-f',
@@ -585,7 +579,7 @@ export class KbStartupRunner {
     // Exit 0 = nothing staged: the ops converged to no byte changes. (An
     // errored diff reads as "something staged"; a genuinely broken repo then
     // fails loudly at commit rather than being silently skipped here.)
-    const nothingStaged = await git(this.opts.gitRunner, repoDir, user,['diff', '--cached', '--quiet']).then(
+    const nothingStaged = await git(this.opts.gitRunner, repoDir, ['diff', '--cached', '--quiet']).then(
       () => true,
       () => false,
     );
@@ -594,10 +588,10 @@ export class KbStartupRunner {
     // can undo exactly it — and ONLY it. Resetting to origin/<name> instead
     // would also nuke a pre-existing committed-but-unpushed (AHEAD) commit
     // that ensureClone deliberately preserved.
-    const preCommit = (await git(this.opts.gitRunner, repoDir, user,['rev-parse', 'HEAD'])).trim();
-    await git(this.opts.gitRunner, repoDir, user,['commit', '-m', h.commitMessage()]);
+    const preCommit = (await git(this.opts.gitRunner, repoDir, ['rev-parse', 'HEAD'])).trim();
+    await git(this.opts.gitRunner, repoDir, ['commit', '-m', h.commitMessage()]);
     try {
-      await git(this.opts.gitRunner, repoDir, user,['push', 'origin', `HEAD:refs/heads/${h.name}`]);
+      await git(this.opts.gitRunner, repoDir, ['push', 'origin', `HEAD:refs/heads/${h.name}`]);
       startupLog.info(`${h.name}: ${h.commitSubject()}`);
       // Committed AND pushed: nothing of the phase remains uncommitted here,
       // so a LATER branch's failure under KB_SAFE_BOOT must not rewind this
@@ -621,7 +615,7 @@ export class KbStartupRunner {
       startupLog.warn(`${h.name}: push rejected (concurrent replica?) — rolling back local commit.`, {
         detail: this.redact(msg),
       });
-      await git(this.opts.gitRunner, repoDir, user, ['reset', '--hard', preCommit]).catch(() => {});
+      await git(this.opts.gitRunner, repoDir, ['reset', '--hard', preCommit]).catch(() => {});
     }
   }
 }
@@ -655,7 +649,7 @@ class BranchHandle implements KbBranch {
       // resetUncommitted resets to THIS sha rather than HEAD, so a finalize
       // commit that was created but failed to push rolls back too instead of
       // surviving as a stranded local commit no later boot would ever push.
-      this.prePhaseSha = (await git(this.gitRunner, dir, 'x-access-token',['rev-parse', 'HEAD'])).trim();
+      this.prePhaseSha = (await git(this.gitRunner, dir, ['rev-parse', 'HEAD'])).trim();
       return dir;
     });
   }
@@ -777,12 +771,12 @@ class BranchHandle implements KbBranch {
   async resetUncommitted(): Promise<void> {
     if (!this.dirty) return;
     const repoDir = await this.repoDir();
-    await git(this.gitRunner, repoDir, 'x-access-token',['reset', '--hard', this.prePhaseSha ?? 'HEAD']).catch(() => {});
+    await git(this.gitRunner, repoDir, ['reset', '--hard', this.prePhaseSha ?? 'HEAD']).catch(() => {});
     if (this.applied.size > 0) {
       // `:(literal)` — these are file paths, not pathspecs: a name that
       // happens to contain glob or magic characters must match itself only,
       // never broaden the cleanup.
-      await git(this.gitRunner, repoDir, 'x-access-token',[
+      await git(this.gitRunner, repoDir, [
         'clean',
         '-fdx',
         '--',

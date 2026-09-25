@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -52,7 +53,7 @@ describe('GitService — fork point, behind, and Update', () => {
     git = new GitService(
       stubWorkspaceService({ [WS]: path.dirname(repo) }),
       stubWorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
   });
 

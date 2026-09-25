@@ -2,6 +2,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { AuthUser, Change, IWorkflowService } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -79,7 +80,7 @@ async function makeHarness(): Promise<Harness> {
     {} as IAccessControl,
     new FileLockService(fake.db),
     pending,
-    KB,
+    testKbContext({ kbDirName: KB }),
     openChangeGate(),
     events,
   );

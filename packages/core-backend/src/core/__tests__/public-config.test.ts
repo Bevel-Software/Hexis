@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { publicConfig } from '../public-config.js';
+import { testKbContext } from '../../__tests__/kb-context.js';
 
 describe('GET /api/config payload', () => {
-  const body = publicConfig({ marketplaceGitUrl: 'https://kb.acme.com/git/marketplace.git', mcpUrl: 'https://kb.acme.com/api/mcp' });
+  const body = publicConfig(testKbContext(), {
+    marketplaceGitUrl: 'https://kb.acme.com/git/marketplace.git',
+    mcpUrl: 'https://kb.acme.com/api/mcp',
+  });
 
   it('advertises the agent-instructions capability, which the local bridge keys on', () => {
     expect(body.agentInstructions).toBe(true);

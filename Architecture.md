@@ -96,6 +96,7 @@ class AccessControlService {
 - Use constructor injection as the default.
 - A composition root wires everything together at app startup: `createCoreServices()` in `packages/core-backend/src/core/create-core-services.ts` constructs every service once and hands each its collaborators.
 - This makes every component testable in isolation — swap real services for test doubles via the same interface.
+- What one knowledge base is called (its checkout folder, branch model and folder layout) is a value too: the `KbContext` in `packages/core-backend/src/shared/kb-context.ts`, built once by the composition root and injected wherever a `kbDirName` string used to go. The shared package's live bindings (`DEFAULT_BRANCH`, `PLUGINS_DIR`, `currentKbLayout()`, …) are the browser's copy of those facts; an ESLint rule keeps the server packages off them, because a process that hosts several knowledge bases has no single value to put there. Read the context's getters inside method bodies, never copy them into fields: a fresh deployment gets its branch model from the setup screen after the graph is built.
 
 ## 5. Summary of Non-Negotiables
 

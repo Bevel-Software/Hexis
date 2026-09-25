@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -95,7 +96,7 @@ describe('GitService.commitFile — skipValidator', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       hooks,
-      'knowledge-base',
+      testKbContext(),
     );
 
     await fs.writeFile(path.join(repo, 'Foo.md'), 'reverted content\n');
@@ -112,7 +113,7 @@ describe('GitService.commitFile — skipValidator', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       hooks,
-      'knowledge-base',
+      testKbContext(),
     );
 
     await fs.writeFile(path.join(repo, 'Bar.md'), 'new content\n');
@@ -136,7 +137,7 @@ describe('GitService.commitFile — skipValidator', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       hooks,
-      'knowledge-base',
+      testKbContext(),
     );
 
     // Shape mirrors the reported filename (bracketed status prefix carrying a
@@ -167,7 +168,7 @@ describe('GitService.commitFile — skipValidator', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       hooks,
-      'knowledge-base',
+      testKbContext(),
     );
 
     // Synthetic segments matching the SHAPE of real deep-KB naming (numbered
@@ -206,7 +207,7 @@ describe('GitService.commitFile — skipValidator', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       hooks,
-      'knowledge-base',
+      testKbContext(),
     );
 
     const relPath = '[Approved] config.md';

@@ -1,4 +1,5 @@
-import { branchAuthorLocalpart, isProtectedBranch, suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
+import { branchAuthorLocalpart, suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
+import type { KbContext } from '../../shared/kb-context.js';
 import { ToolError } from '../tool-helpers/tool.contract.js';
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import type { IChangeReadGate } from '../access-model/change-gate.js';
@@ -111,9 +112,10 @@ export async function writeDenial(
   err: AccessDeniedError,
   input: { tool: string; branch: string; userEmail: string; userId: string },
   accessControl: IAccessControl,
-  kbDirName: string,
+  kb: Pick<KbContext, 'kbDirName' | 'isProtectedBranch'>,
   changeGate?: IChangeReadGate,
 ): Promise<ToolError> {
+  const { kbDirName } = kb;
   const path = err.access.path;
   const base = { kind: 'write-denied' as const, path, reason: reasonOf(err) };
   const refuse = (cannotProposeReason: string): ToolError => {
@@ -121,7 +123,7 @@ export async function writeDenial(
     return new ToolError(`${err.message} ${cannotProposeReason}`, 403, { ...details });
   };
 
-  if (!isProtectedBranch(input.branch)) {
+  if (!kb.isProtectedBranch(input.branch)) {
     return refuse(`Proposing is not available: "${input.branch}" is not a branch that accepts change requests.`);
   }
   // The lock gate reports workspace paths, the git gates repo-relative ones.
@@ -179,11 +181,11 @@ export async function rethrowAsWriteDenial(
   err: unknown,
   input: { tool: string; branch: unknown; userEmail: string; userId: string },
   accessControl: IAccessControl,
-  kbDirName: string,
+  kb: Pick<KbContext, 'kbDirName' | 'isProtectedBranch'>,
   changeGate?: IChangeReadGate,
 ): Promise<never> {
   if (err instanceof AccessDeniedError && typeof input.branch === 'string') {
-    throw await writeDenial(err, { ...input, branch: input.branch }, accessControl, kbDirName, changeGate);
+    throw await writeDenial(err, { ...input, branch: input.branch }, accessControl, kb, changeGate);
   }
   throw err;
 }

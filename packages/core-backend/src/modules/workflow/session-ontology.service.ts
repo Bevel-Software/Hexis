@@ -33,6 +33,7 @@
 
 import { eq, lt } from 'drizzle-orm';
 import { ontologyOf } from '../../shared/kb-layout.js';
+import type { KbContext } from '../../shared/kb-context.js';
 
 import type { Database } from '../database/connection.js';
 import { sessionOntologyTouches } from '../database/schema.js';
@@ -77,7 +78,11 @@ export class SessionOntologyService implements ISessionOntologyService {
    */
   private readonly locks = new WorkspaceMutex();
 
-  constructor(private readonly db: Database) {}
+  constructor(
+    private readonly db: Database,
+    /** Names the knowledge-base root a path is classified under; read per call. */
+    private readonly kb: Pick<KbContext, 'layout'>,
+  ) {}
 
   /**
    * Resolve `wsPath` to its ontology and evaluate/record the operation. Thin
@@ -89,7 +94,7 @@ export class SessionOntologyService implements ISessionOntologyService {
     isWrite: boolean,
     kbDirName?: string,
   ): Promise<OperationDecision> {
-    return this.checkOntology(sessionId, ontologyOf(wsPath, kbDirName), isWrite);
+    return this.checkOntology(sessionId, ontologyOf(wsPath, this.kb.layout, kbDirName), isWrite);
   }
 
   /**

@@ -29,12 +29,13 @@ const STARTUP_GIT_TIMEOUT_MS = 600_000;
 
 /**
  * Per-invocation `-c` config. Long paths always (Windows checkouts of deep
- * KB trees); when a token is present, an inline credential helper that reads
- * it from the environment at call time — the secret never appears in argv.
+ * KB trees); when the runner carries a token, an inline credential helper
+ * that reads it from the child's environment at call time — the secret never
+ * appears in argv.
  */
-function credArgs(gitUsername: string): string[] {
+function credArgs(runner: IGitRunner): string[] {
   const args = ['-c', 'core.longpaths=true'];
-  const helper = credentialHelperValue(gitUsername);
+  const helper = credentialHelperValue(runner.credentials);
   if (helper) args.push('-c', `credential.helper=${helper}`);
   return args;
 }
@@ -49,18 +50,14 @@ function credArgs(gitUsername: string): string[] {
  * clone to carry its own credentials. Persist them with `clone --config` (which
  * only means "write into the new repo" after the subcommand) so it does.
  */
-function withPersistedCloneConfig(gitUsername: string, args: string[]): string[] {
+function withPersistedCloneConfig(runner: IGitRunner, args: string[]): string[] {
   if (args[0] !== 'clone') return args;
-  return [args[0], ...cloneCredentialArgs(gitUsername), ...args.slice(1)];
+  return [args[0], ...cloneCredentialArgs(runner.credentials), ...args.slice(1)];
 }
 
-export async function git(
-  runner: IGitRunner,
-  cwd: string,
-  gitUsername: string,
-  args: string[],
-): Promise<string> {
-  const argv = [...credArgs(gitUsername), ...withPersistedCloneConfig(gitUsername, args)];
+/** Run one git command of the phase, authenticated with the runner's own credentials. */
+export async function git(runner: IGitRunner, cwd: string, args: string[]): Promise<string> {
+  const argv = [...credArgs(runner), ...withPersistedCloneConfig(runner, args)];
   try {
     // A floor under the configured ceiling, not a replacement for it: an
     // operator who raised GIT_TIMEOUT_MS past ten minutes gets that here too.
@@ -83,18 +80,14 @@ export async function git(
   }
 }
 
-export async function stampIdentity(runner: IGitRunner, repo: string, gitUsername: string): Promise<void> {
-  await git(runner, repo, gitUsername, ['config', 'user.name', BOT_NAME]);
-  await git(runner, repo, gitUsername, ['config', 'user.email', BOT_EMAIL]);
+export async function stampIdentity(runner: IGitRunner, repo: string): Promise<void> {
+  await git(runner, repo, ['config', 'user.name', BOT_NAME]);
+  await git(runner, repo, ['config', 'user.email', BOT_EMAIL]);
 }
 
 /** Branch names present on the remote, from `ls-remote --heads`. */
-export async function lsRemoteHeads(
-  runner: IGitRunner,
-  repoUrl: string,
-  gitUsername: string,
-): Promise<Set<string>> {
-  const out = await git(runner, os.tmpdir(), gitUsername, ['ls-remote', '--heads', repoUrl]);
+export async function lsRemoteHeads(runner: IGitRunner, repoUrl: string): Promise<Set<string>> {
+  const out = await git(runner, os.tmpdir(), ['ls-remote', '--heads', repoUrl]);
   const heads = new Set<string>();
   for (const line of out.split('\n')) {
     const m = /\srefs\/heads\/(.+)$/.exec(line.trim());

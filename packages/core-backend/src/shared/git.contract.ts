@@ -39,21 +39,76 @@
  */
 
 /**
- * Strip the configured git token out of text on its way into an error, a log
- * line or a response.
+ * The credential git authenticates a knowledge base's remote with: the
+ * Basic-auth username the host expects and the token that is its password.
+ *
+ * A PROVIDER, read at every call, not a value captured at boot: the setup
+ * screen can supply a token after the graph is built, and a token rotated in
+ * the settings has to be the one the next push carries. The runner puts the
+ * token into the child's environment under {@link GIT_TOKEN_ENV}, which is
+ * the only place git reads it from (the inline credential helper spells
+ * `password=$GITHUB_TOKEN`), so the value never enters argv, a clone's
+ * config, or a message that quotes either. Nothing writes it into THIS
+ * process's environment: a server hosting several knowledge bases has one
+ * environment and several tokens.
+ */
+export interface GitCredentials {
+  /**
+   * The username sent in the Basic credential: GitHub `x-access-token`,
+   * GitLab `oauth2`, Bitbucket `x-token-auth`. Interpolated into the helper
+   * snippet, so callers validate it against `[A-Za-z0-9._-]+` before it
+   * gets here.
+   */
+  username(): string;
+  /** The token in effect, or null when the deployment has none configured. */
+  token(): string | null;
+}
+
+/** The username git is given when a deployment names none. */
+export const DEFAULT_GIT_USERNAME = 'x-access-token';
+
+/**
+ * The environment variable the child git process reads the token from. The
+ * name is historical (the first supported host), and it is the literal every
+ * app-stamped credential helper carries, which is what lets a re-stamp find
+ * its own helpers in a clone's config and leave an operator's alone.
+ */
+export const GIT_TOKEN_ENV = 'GITHUB_TOKEN';
+
+/** No token, the default username: an unauthenticated runner. */
+export const NO_GIT_CREDENTIALS: GitCredentials = Object.freeze({
+  username: () => DEFAULT_GIT_USERNAME,
+  token: () => null,
+});
+
+/** A provider from values or thunks, for a composition root or a test. */
+export function gitCredentials(
+  username: string | (() => string) = DEFAULT_GIT_USERNAME,
+  token: string | null | (() => string | null) = null,
+): GitCredentials {
+  const user = typeof username === 'function' ? username : () => username;
+  const secret = typeof token === 'function' ? token : () => token;
+  return {
+    username: () => user() || DEFAULT_GIT_USERNAME,
+    token: () => secret() || null,
+  };
+}
+
+/**
+ * Strip a git token out of text on its way into an error, a log line or a
+ * response.
  *
  * git puts the remote URL into a great many of its messages, and on a
  * token-authenticated remote that URL carries the credential. Without this, a
  * push failure writes the deployment's token into the container log, the API
  * response, and any change request the recovery agent opens about it.
  *
- * Read from the environment at call time rather than captured: the setup screen
- * can supply a token after boot, and `DeploymentSettingsService.syncGitTokenEnv`
- * puts it here — a value captured at module load would be the empty string for
- * exactly the deployments that configure their token that way.
+ * The token is the caller's to name (the runner names its own), never read
+ * from this process's environment: the environment holds no per-knowledge-
+ * base token any more, and a scrub that silently found none there would look
+ * like one that worked.
  */
-export function redactGitToken(text: string): string {
-  const token = process.env.GITHUB_TOKEN;
+export function redactGitToken(text: string, token: string | null | undefined): string {
   const scrubbed = token ? text.replaceAll(token, '***') : text;
   // URL userinfo as well: a remote spelled `https://user:pass@host` would
   // otherwise leak `pass` verbatim through every git failure that quotes the
@@ -165,6 +220,13 @@ export interface IGitRunner {
    * constant.
    */
   readonly defaultTimeoutMs: number;
+  /**
+   * The credential every call through this runner authenticates with — see
+   * {@link GitCredentials}. Exposed so the code that stamps a clone's helper
+   * or scrubs a message can ask the same runner it runs git through whether
+   * a token is in effect, rather than a second source that could disagree.
+   */
+  readonly credentials: GitCredentials;
   run(cwd: string, args: string[], opts: GitRunOptions & { encoding: 'buffer' }): Promise<GitRunResult<Buffer>>;
   run(cwd: string, args: string[], opts?: GitRunOptions & { encoding?: 'utf8' }): Promise<GitRunResult>;
 }

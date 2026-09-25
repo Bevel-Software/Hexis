@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
+import { currentBranchModel, isProtectedBranch } from '@bevel-software/platform-shared';
 import {
   assertValidBranchName,
   assertValidRelativePath,
-  isProtectedBranch,
 } from '../branch-name.js';
 import { BranchNameError, WorkflowValidationError } from '../../../shared/domain-errors.js';
 
@@ -75,12 +75,12 @@ describe('assertValidRelativePath', () => {
 
 describe('isProtectedBranch', () => {
   it('protects current-company-state and target-company-state', () => {
-    expect(isProtectedBranch('current-company-state')).toBe(true);
-    expect(isProtectedBranch('target-company-state')).toBe(true);
+    expect(isProtectedBranch(currentBranchModel(), 'current-company-state')).toBe(true);
+    expect(isProtectedBranch(currentBranchModel(), 'target-company-state')).toBe(true);
   });
   it('does not protect user branches', () => {
-    expect(isProtectedBranch('ali-raza/add-owner')).toBe(false);
-    expect(isProtectedBranch('main')).toBe(false);
-    expect(isProtectedBranch('develop')).toBe(false);
+    expect(isProtectedBranch(currentBranchModel(), 'ali-raza/add-owner')).toBe(false);
+    expect(isProtectedBranch(currentBranchModel(), 'main')).toBe(false);
+    expect(isProtectedBranch(currentBranchModel(), 'develop')).toBe(false);
   });
 });

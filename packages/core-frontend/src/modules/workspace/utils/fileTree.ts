@@ -1,5 +1,6 @@
 import {
   KNOWLEDGE_BASE_DIR,
+  currentKbLayout,
   reservedRootDirNames,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
@@ -12,7 +13,7 @@ import type { PendingEntry } from '../state/workspace.context';
 // folded into Knowledge as stray content. A function, not a module-scope set:
 // three of the names are configurable and arrive after this module loads.
 export const KB_ROOT_DIRS = {
-  has: (name: string): boolean => reservedRootDirNames().has(name),
+  has: (name: string): boolean => reservedRootDirNames(currentKbLayout()).has(name),
 };
 
 /**

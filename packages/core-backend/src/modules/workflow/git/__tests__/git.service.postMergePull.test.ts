@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -109,7 +110,7 @@ describe('post-merge refresh of the target branch workspace', () => {
         [baseWsId]: path.dirname(baseRepo),
       }),
       stubWorkflowHooks(),
-      KB_DIR,
+      testKbContext({ kbDirName: KB_DIR }),
     );
 
     // 1. The merge lands on origin/BASE (run from the caller's workspace).
@@ -163,7 +164,7 @@ describe('post-merge refresh of the target branch workspace', () => {
         [baseWsId]: path.dirname(baseRepo),
       }),
       stubWorkflowHooks(),
-      KB_DIR,
+      testKbContext({ kbDirName: KB_DIR }),
     );
 
     const merged = await git.mergeChangeRequest(
@@ -254,7 +255,7 @@ describe('post-merge refresh of the target branch workspace', () => {
         [baseWsId]: path.dirname(baseRepo),
       }),
       stubWorkflowHooks(),
-      KB_DIR,
+      testKbContext({ kbDirName: KB_DIR }),
     );
 
     const merged = await git.mergeChangeRequest(

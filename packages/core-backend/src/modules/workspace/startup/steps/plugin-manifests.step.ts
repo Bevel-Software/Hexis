@@ -1,6 +1,7 @@
 import path from 'node:path';
-import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, renderPluginManifest } from '@bevel-software/platform-shared';
+import { PLUGIN_MANIFEST_FILE, renderPluginManifest } from '@bevel-software/platform-shared';
 import type { ITreeWalker, WalkedEntry } from '../../../../shared/fs.contract.js';
+import type { KbContext } from '../../../../shared/kb-context.js';
 import { PluginLayout, hasManifestEntry } from './plugin-layout.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
@@ -39,8 +40,16 @@ export class PluginManifestsStep implements OnServerStart {
 
   private readonly layout: PluginLayout;
 
-  constructor(private readonly disk: ITreeWalker) {
+  constructor(
+    private readonly disk: ITreeWalker,
+    /** Read per run, never captured: the setup-completing save may rename the plugins root first. */
+    private readonly kb: Pick<KbContext, 'layout'>,
+  ) {
     this.layout = new PluginLayout(disk);
+  }
+
+  private get pluginsDir(): string {
+    return this.kb.layout.pluginsDir;
   }
 
   async run(ctx: ServerStartContext): Promise<StepResult> {
@@ -52,7 +61,7 @@ export class PluginManifestsStep implements OnServerStart {
 
   private async addManifests(branch: KbBranch): Promise<void> {
     const repoDir = await branch.repoDir();
-    const root = path.join(repoDir, PLUGINS_DIR);
+    const root = path.join(repoDir, this.pluginsDir);
     const added: string[] = [];
 
     // A plugin is a folder whose OWN listing holds a manifest as a regular
@@ -78,13 +87,13 @@ export class PluginManifestsStep implements OnServerStart {
       // A grouping folder — plugins beneath it — is never a plugin itself.
       if (plugins.some((p) => p.startsWith(`${rel}/`))) continue;
       if (!(await this.layout.looksLikeLegacyPlugin(path.join(root, rel), entries))) continue;
-      branch.write(`${PLUGINS_DIR}/${rel}/${PLUGIN_MANIFEST_FILE}`, renderPluginManifest(rel));
+      branch.write(`${this.pluginsDir}/${rel}/${PLUGIN_MANIFEST_FILE}`, renderPluginManifest(rel));
       added.push(rel);
     }
     if (added.length === 0) return;
     branch.note(
       `Add plugin manifests to ${added.length === 1 ? 'a legacy plugin folder' : `${added.length} legacy plugin folders`}`,
     );
-    for (const rel of added) branch.note(`${PLUGINS_DIR}/${rel}: ${PLUGIN_MANIFEST_FILE} written`);
+    for (const rel of added) branch.note(`${this.pluginsDir}/${rel}: ${PLUGIN_MANIFEST_FILE} written`);
   }
 }

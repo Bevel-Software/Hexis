@@ -13,6 +13,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { GitService } from '../../workflow/git/git.service.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -53,7 +54,7 @@ describe('SkillService', () => {
   } as unknown as IAccessControl;
 
   const svc = (access: IAccessControl = allowAll) =>
-    new SkillService(workspaceService, access, KB_DIR, new NodeFs());
+    new SkillService(workspaceService, access, testKbContext({ kbDirName: KB_DIR }), new NodeFs());
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'skills-'));
@@ -377,7 +378,7 @@ describe('SkillService', () => {
 
     const versioned = (access: IAccessControl = allowAll) => {
       const service = svc(access);
-      service.setHistory(new GitService(workspaceService, new WorkflowHooks(), KB_DIR));
+      service.setHistory(new GitService(workspaceService, new WorkflowHooks(), testKbContext({ kbDirName: KB_DIR })));
       return service;
     };
 

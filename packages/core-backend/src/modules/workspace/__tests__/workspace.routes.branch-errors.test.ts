@@ -2,6 +2,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { FileTreeEntry, IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -55,7 +56,7 @@ async function makeHarness(
     {} as unknown as IWorkflowService,
     { emit: vi.fn() } as unknown as WorkflowEventBus,
     accessControl,
-    'knowledge-base',
+    testKbContext(),
     stubCreatorAccess,
     { isAdmin: async () => false } as unknown as IAdminAccessService,
     new NodeFs(),

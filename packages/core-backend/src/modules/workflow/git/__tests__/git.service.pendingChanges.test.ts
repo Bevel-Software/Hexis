@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -72,7 +73,7 @@ async function makeSvc(root: string, workspaceId: string) {
   const svc = new GitService(
     stubWorkspaceService(workspaceId, workspaceDir),
     new WorkflowHooks(),
-    'knowledge-base',
+    testKbContext(),
   );
   return { svc, repo };
 }

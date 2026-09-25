@@ -20,6 +20,7 @@ import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.j
 import { createToolContextResolver } from '../../tool-helpers/tool-context.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { registerToolManualsTools } from '../tool-manuals.tools.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * A server restart must not cost a tool or a sign-in. Everything a registered
@@ -188,7 +189,13 @@ describe('external tools and their sign-ins across a restart', () => {
         ),
     } as unknown as WorkspaceService;
     const vault = vaultOver(rows);
-    const catalog = new ToolManualService(workspaceService, allowAll, KB_DIR, disk, new KbPluginSource(disk));
+    const catalog = new ToolManualService(
+      workspaceService,
+      allowAll,
+      testKbContext({ kbDirName: KB_DIR }),
+      disk,
+      new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
+    );
     catalog.setMcpAuthDiscovery(new McpOAuthDiscoveryService({ secretsVault: vault, redirectUri: REDIRECT_URI, fetchFn }));
 
     const internalToken = new InternalTokenService({ secret: 'test-secret' });
@@ -212,6 +219,7 @@ describe('external tools and their sign-ins across a restart', () => {
     registerToolManualsTools(new ToolRegistry(), router, createToolAuthMiddleware(apiKeys, internalToken), toolHandler, catalog, {
       accessControl: allowAll,
       variableStatus: vault,
+      kb: testKbContext({ kbDirName: KB_DIR }),
     });
     app.use('/api', router);
     const server = await new Promise<HttpServer>((r) => {

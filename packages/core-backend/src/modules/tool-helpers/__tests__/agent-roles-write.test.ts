@@ -16,6 +16,7 @@ import { SpillStore } from '../../workspace/spill-store.js';
 import { DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
 import { NEW_ROLE_GUIDANCE } from '../../access-model/roles-yaml-guard.js';
 import { loadActiveGroups } from '../../access/access-control.service.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * The agent's file tools over the production context resolver and a real
@@ -68,10 +69,10 @@ async function start(): Promise<string> {
     canWriteBatchAtRef: async () => null,
     canReadBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
   } as never;
-  registerWorkspaceTools(registry, router, toolAuth, createToolHandlerFactory(resolve), new SpillStore(path.join(os.tmpdir(), 'bevel-test-spills')), new DocExtractService(docCache), allowAll, KB, {
+  registerWorkspaceTools(registry, router, toolAuth, createToolHandlerFactory(resolve), new SpillStore(path.join(os.tmpdir(), 'bevel-test-spills')), new DocExtractService(docCache), allowAll, testKbContext({ kbDirName: KB }), {
     service: {} as never,
     enabled: false, // ontology boundary not under test here
-    kbDirName: KB,
+    kb: testKbContext({ kbDirName: KB }),
     recoveryBotEmail: 'recovery-bot@bevel.local',
     hooks: new WorkflowHooks(),
   }, new RoutineWritePolicyService(), {} as never);

@@ -8,6 +8,7 @@ import {
 } from '../join-request-jobs.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { FakeJoinRequestStore } from './fake-join-request-store.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * The git half of a join request, on its own: what it does to the row it was
@@ -40,7 +41,7 @@ function harness(over: Partial<JoinRequestJobsDeps> = {}, sharedStore?: FakeJoin
   const jobs = new PluginJoinRequestJobs(store, {
     workflow: workflow as never,
     workspaceService: workspaceService as never,
-    kbDirName: KB,
+    kb: testKbContext({ kbDirName: KB }),
     target: async () => ({ folder: 'Plugins/Finance', displayName: 'Finance' }),
     requester: async (mail) => ({ ...ALI_USER, email: mail }),
     ...over,

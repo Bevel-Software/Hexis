@@ -5,6 +5,7 @@ import { hashEmail } from '../../../shared/email-identity.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { IToolManualService, ToolManualSummary } from '../tool-manuals.contract.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * The half of the tool catalog that is NOT on the default branch.
@@ -93,7 +94,7 @@ function harness(opts: {
     listChangeRequests: async () => opts.crs,
   } as unknown as IWorkflowService;
 
-  return new PendingToolsService(workspaceService, accessControl, toolManuals, workflow);
+  return new PendingToolsService(workspaceService, accessControl, toolManuals, workflow, testKbContext());
 }
 
 const ADMIN_WRITES = { [TOOL_PATH]: [ADMIN] };
@@ -370,6 +371,7 @@ describe('PendingToolsService', () => {
       {} as unknown as IAccessControl,
       { listAllSummaries: async () => [] } as unknown as IToolManualService,
       workflow,
+      testKbContext(),
     );
     await expect(svc.listPendingTools(AUTHOR)).resolves.toEqual([]);
   });
@@ -384,6 +386,7 @@ describe('PendingToolsService', () => {
         },
       } as unknown as IToolManualService,
       { listChangeRequests: async () => [cr()] } as unknown as IWorkflowService,
+      testKbContext(),
     );
     await expect(svc.listPendingTools(AUTHOR)).resolves.toEqual([]);
   });

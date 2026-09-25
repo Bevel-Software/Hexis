@@ -1,3 +1,4 @@
+import { crc32 } from 'node:zlib';
 import pg from 'pg';
 import type { Database } from './connection.js';
 
@@ -84,6 +85,23 @@ export const AdvisoryLock = {
 
 export type AdvisoryLockId = (typeof AdvisoryLock)[keyof typeof AdvisoryLock];
 
+/**
+ * The second integer of a lock: the lock id, folded with the knowledge base
+ * it belongs to. A process serving several knowledge bases from one database
+ * runs several commit workers and several migration runs, and each must
+ * exclude only its own kind: the migrations lock of tenant A has nothing to
+ * say to tenant B's. An empty `tenantKey` is the single-tenant deployment
+ * and keeps the ids that were always used, so a redeploy's outgoing process
+ * on the older build still contends for the same lock.
+ *
+ * `crc32` for a stable 32-bit spread of the key; XOR keeps every value
+ * inside `int4`. Two tenants whose keys collide serialise against each other
+ * and nothing worse: an over-locking, never an under-locking.
+ */
+export function advisoryLockKey(lock: AdvisoryLockId, tenantKey = ''): number {
+  return tenantKey ? lock ^ crc32(tenantKey) : lock;
+}
+
 /** How long to wait for the lock before giving up and failing the boot. */
 const DEFAULT_WAIT_MS = 60_000;
 
@@ -138,9 +156,10 @@ export async function withAdvisoryLock<T>(
   db: Database,
   lock: AdvisoryLockId,
   fn: () => Promise<T>,
-  opts: { waitMs?: number } = {},
+  opts: { waitMs?: number; tenantKey?: string } = {},
 ): Promise<T> {
   const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
+  const key = advisoryLockKey(lock, opts.tenantKey);
   const client = await db.$client.connect();
   // A statement that did not answer in time is STILL RUNNING on this
   // connection — `bounded` gives up waiting, it cannot take the statement
@@ -170,7 +189,7 @@ export async function withAdvisoryLock<T>(
       // parameter. `true` makes the setting transaction-local, so the
       // `rollback` below reverts it.
       await onWire(client.query("select set_config('lock_timeout', $1, true)", [String(waitMs)]), 'setting lock_timeout');
-      await client.query('select pg_advisory_xact_lock($1, $2)', [LOCK_NAMESPACE, lock]);
+      await client.query('select pg_advisory_xact_lock($1, $2)', [LOCK_NAMESPACE, key]);
     } catch (err) {
       if (isLockTimeout(err)) {
         throw new Error(
@@ -215,6 +234,8 @@ export interface LeaseClient {
 }
 
 export interface AdvisoryLeaseOptions {
+  /** The knowledge base this lease belongs to — see {@link advisoryLockKey}. Empty: the single-tenant ids. */
+  tenantKey?: string;
   /** How the lease opens its connection. Default: a `pg.Client` on the pool's connection string. */
   connect?: () => Promise<LeaseClient>;
   /** Bound on the connect and on each query, so an unreachable or half-dead database fails rather than waits. Default 10s. */
@@ -290,7 +311,7 @@ export class AdvisoryLease {
     try {
       const { rows } = await client.query('select pg_try_advisory_lock($1, $2) as held', [
         LOCK_NAMESPACE,
-        this.lock,
+        advisoryLockKey(this.lock, this.opts.tenantKey),
       ]);
       if (rows[0]?.held !== true) {
         await client.end().catch(() => undefined);
@@ -315,7 +336,10 @@ export class AdvisoryLease {
     this.heldFlag = false;
     if (!client) return;
     try {
-      await client.query('select pg_advisory_unlock($1, $2)', [LOCK_NAMESPACE, this.lock]);
+      await client.query('select pg_advisory_unlock($1, $2)', [
+        LOCK_NAMESPACE,
+        advisoryLockKey(this.lock, this.opts.tenantKey),
+      ]);
     } catch {
       // Ending the session below releases the lock regardless.
     } finally {

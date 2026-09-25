@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   DEFAULT_BRANCH,
+  currentBranchModel,
   protectedBranchDisplayName,
 } from '@bevel-software/platform-shared';
 import { Dialog } from '../../../shared/components/Dialog';
@@ -170,12 +171,12 @@ export function OpenChangeRequestDialog({
           >
             {targets.length === 0 && (
               <option value={targetBranch}>
-                {protectedBranchDisplayName(targetBranch) ?? targetBranch}
+                {protectedBranchDisplayName(currentBranchModel(), targetBranch) ?? targetBranch}
               </option>
             )}
             {targets.map((b) => (
               <option key={b.name} value={b.name}>
-                {protectedBranchDisplayName(b.name) ?? b.name}
+                {protectedBranchDisplayName(currentBranchModel(), b.name) ?? b.name}
                 {b.name === DEFAULT_BRANCH ? ' (default)' : ''}
               </option>
             ))}

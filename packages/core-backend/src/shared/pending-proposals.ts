@@ -1,6 +1,6 @@
-import { DEFAULT_BRANCH, type ChangeRequest, type IWorkflowService } from '@bevel-software/platform-shared';
+import type { ChangeRequest, IWorkflowService } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../modules/workspace/workspace.service.js';
-import { workspaceIdForBranch } from './workspace-id.js';
+import type { KbContext } from './kb-context.js';
 import type { IAccessControl } from '../modules/access/access-control.interface.js';
 import { canonicalEmail, hashEmail } from './email-identity.js';
 import { printable } from './printable.js';
@@ -34,6 +34,8 @@ export interface ProposalSources {
   workspaceService: Pick<WorkspaceService, 'ensureRemotesFetched' | 'readFileAtRef'>;
   accessControl: Pick<IAccessControl, 'canWriteBatch'>;
   workflow: Pick<IWorkflowService, 'listChangeRequests'>;
+  /** Which branch is the released one, and its clone. */
+  kb: Pick<KbContext, 'defaultBranch' | 'defaultWorkspaceId'>;
 }
 
 /** One file an open change request proposes, already read at that request's branch. */
@@ -78,8 +80,9 @@ export async function visibleProposedFiles(
     // access tree that decides who may review — so a request targeting some
     // other branch is not a proposal these surfaces can speak about: merging it
     // puts nothing in the catalog, and the card would never resolve.
+    const defaultBranch = sources.kb.defaultBranch;
     crs = (await sources.workflow.listChangeRequests()).filter(
-      (c) => c.state === 'open' && c.base === DEFAULT_BRANCH,
+      (c) => c.state === 'open' && c.base === defaultBranch,
     );
   } catch {
     return [];
@@ -91,7 +94,7 @@ export async function visibleProposedFiles(
   );
   if (candidates.length === 0) return [];
 
-  const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
+  const wsId = sources.kb.defaultWorkspaceId();
   const authorHash = hashEmail(email);
 
   // One access load for every candidate, resolved on the DEFAULT branch — see

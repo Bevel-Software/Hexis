@@ -1,4 +1,4 @@
-import { protectedBranchDisplayName } from '@bevel-software/platform-shared';
+import { currentBranchModel, protectedBranchDisplayName } from '@bevel-software/platform-shared';
 import { GitApiError } from './git.api';
 
 /**
@@ -74,7 +74,7 @@ export function parseGitError(err: unknown): GitErrorInfo {
  * "Target company state" instead of `target-company-state`.
  */
 function friendlyNoSharedHistoryMessage(base: string): string {
-  const baseName = protectedBranchDisplayName(base) ?? base;
+  const baseName = protectedBranchDisplayName(currentBranchModel(), base) ?? base;
   return (
     `This draft doesn't share history with the ${baseName}. It was likely started ` +
     `from an unrelated point or outside the app. The assistant can investigate and ` +

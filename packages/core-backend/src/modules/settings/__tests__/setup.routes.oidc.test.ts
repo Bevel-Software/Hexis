@@ -9,6 +9,7 @@ import { OidcAuthProvider, oidcSettingsFrom } from '../../auth/oidc-auth-provide
 import type { AuthService } from '../../auth/auth.service.js';
 import type { Database } from '../../database/connection.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const ENC_KEY = 'kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=';
 const ISSUER = 'https://login.example.com/tenant/v2.0';
@@ -118,6 +119,7 @@ function listen(opts: {
       settings,
       { isAdmin: async () => opts.isAdmin ?? true } as IAdminAccessService,
       { runAll: async () => {} },
+      testKbContext(),
       undefined,
       // No repository in these suites, so the connection check is never reached.
       async () => {

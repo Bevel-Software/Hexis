@@ -1,10 +1,6 @@
-import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest';
-import {
-  DEFAULT_BRANCH,
-  branchModelFromEnv,
-  configureBranchModel,
-  type WorkflowEvent,
-} from '@bevel-software/platform-shared';
+import { describe, it, expect, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
+import type { WorkflowEvent } from '@bevel-software/platform-shared';
 
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
@@ -47,24 +43,16 @@ const USER = { id: 'u1', email: 'someone@x.com', name: 'Someone' };
 /**
  * A default branch this deployment chose, pinned for the whole file.
  *
- * `DEFAULT_BRANCH` is a binding a deployment configures at boot (the suite's
- * `test-setup.ts` applies the environment's), so reading it here would make
- * these assertions agree with whatever that environment happens to say — and a
+ * The environment's pair (which `test-setup.ts` mirrors onto the shared
+ * bindings) is what most fixtures run under, so a service that read THAT
+ * would make these assertions agree with whatever it happens to say — and a
  * regression that hardcoded a branch name would still pass wherever the two
  * coincided. Deliberately NOT `main`, so `main` written into the emit would
- * fail here rather than slip through.
+ * fail here rather than slip through. The service is handed this model by
+ * constructor, so nothing process-wide changes for the files after this one.
  */
 const TRUNK = 'trunk';
-
-beforeAll(() => {
-  configureBranchModel({ defaultBranch: TRUNK, protectedBranches: [TRUNK] });
-});
-afterAll(() => {
-  // Back to what the suite booted with: the binding is process-wide, and a
-  // file that leaves its own branch model behind changes the meaning of
-  // anything that runs after it in the same worker.
-  configureBranchModel(branchModelFromEnv());
-});
+const kb = testKbContext({ kbDirName: KB_DIR, branchModel: { defaultBranch: TRUNK, protectedBranches: [TRUNK] } });
 
 function noopAccessControl(): IAccessControl {
   return { invalidate: vi.fn() } as unknown as IAccessControl;
@@ -120,7 +108,7 @@ function makeSvc(
     noopAccessControl(),
     { acquire: vi.fn(), release: vi.fn() } as unknown as FileLockService,
     {} as unknown as PendingCommitsService,
-    KB_DIR,
+    kb,
     openChangeGate(),
     bus,
   );
@@ -145,10 +133,10 @@ describe('applying a change request announces the tree it rewrote', () => {
     expect(treeEvents()).toEqual([
       { kind: 'fs-tree-changed', workspaceId: encodeURIComponent(TRUNK), branch: TRUNK },
     ]);
-    // The deployment's own default branch, read from the binding rather than
-    // written into the emit: these two are the same thing, and a hardcoded
-    // branch name would make them differ.
-    expect(DEFAULT_BRANCH).toBe(TRUNK);
+    // The deployment's own default branch, read from the context the service
+    // was handed rather than written into the emit: these two are the same
+    // thing, and a hardcoded branch name would make them differ.
+    expect(kb.defaultBranch).toBe(TRUNK);
   });
 
   /**

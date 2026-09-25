@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -36,7 +37,7 @@ describe('WorkspaceService.listClonedWorkspaces', () => {
     // A stray file at the root is ignored.
     await fs.writeFile(path.join(root, 'notes.txt'), 'x');
 
-    const svc = new WorkspaceService(root, 'https://example.test/kb.git', 'knowledge-base', new NodeFs());
+    const svc = new WorkspaceService(root, 'https://example.test/kb.git', testKbContext(), new NodeFs());
     const found = await svc.listClonedWorkspaces();
     expect(found.sort((a, b) => a.branch.localeCompare(b.branch))).toEqual([
       { id: 'ali%2Fnew-skill', branch: 'ali/new-skill' },
@@ -45,7 +46,7 @@ describe('WorkspaceService.listClonedWorkspaces', () => {
   });
 
   it('is empty when the workspaces root does not exist yet', async () => {
-    const svc = new WorkspaceService(path.join(root, 'missing'), 'https://example.test/kb.git', 'knowledge-base', new NodeFs());
+    const svc = new WorkspaceService(path.join(root, 'missing'), 'https://example.test/kb.git', testKbContext(), new NodeFs());
     expect(await svc.listClonedWorkspaces()).toEqual([]);
   });
 });
@@ -66,14 +67,14 @@ describe('WorkspaceService.listClonedWorkspaces — what is not a clone', () => 
     for (const name of ['main', 'foo!', '-leading-dash', 'a..b', 'has space']) {
       await fs.mkdir(path.join(root, name, 'knowledge-base', '.git'), { recursive: true });
     }
-    const svc = new WorkspaceService(root, 'https://example.test/kb.git', 'knowledge-base', new NodeFs());
+    const svc = new WorkspaceService(root, 'https://example.test/kb.git', testKbContext(), new NodeFs());
     expect(await svc.listClonedWorkspaces()).toEqual([{ id: 'main', branch: 'main' }]);
   });
 
   it('a branch whose bootstrap is in flight right now', async () => {
     await fs.mkdir(path.join(root, 'main', 'knowledge-base', '.git'), { recursive: true });
     await fs.mkdir(path.join(root, 'ali%2Fx', 'knowledge-base', '.git'), { recursive: true });
-    const svc = new WorkspaceService(root, 'https://example.test/kb.git', 'knowledge-base', new NodeFs());
+    const svc = new WorkspaceService(root, 'https://example.test/kb.git', testKbContext(), new NodeFs());
     // While a clone runs, `.git` exists but the tree is not checked out yet.
     // The listing asks the public predicate, which is stubbed here rather than
     // the tracker behind it — no public seam can hold a real clone open.
@@ -88,7 +89,7 @@ describe('WorkspaceService.listClonedWorkspaces — what is not a clone', () => 
     // to stage one in a temp dir; the code path is the same `throw err`.
     const file = path.join(root, 'not-a-dir');
     await fs.writeFile(file, 'x');
-    const svc = new WorkspaceService(file, 'https://example.test/kb.git', 'knowledge-base', new NodeFs());
+    const svc = new WorkspaceService(file, 'https://example.test/kb.git', testKbContext(), new NodeFs());
     expect(await svc.listClonedWorkspaces()).toEqual([]);
   });
 });

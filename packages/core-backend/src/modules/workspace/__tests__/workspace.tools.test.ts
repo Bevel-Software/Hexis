@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import AdmZip from 'adm-zip';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
@@ -218,10 +219,10 @@ async function start(
   const app = express();
   app.use(express.json());
   const router = express.Router();
-  registerWorkspaceTools(registry, router, fakeAuth, toolHandler, new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(docCacheDir), access, KB_DIR, {
+  registerWorkspaceTools(registry, router, fakeAuth, toolHandler, new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(docCacheDir), access, testKbContext({ kbDirName: KB_DIR }), {
     service: {} as never,
     enabled: false, // these tests predate and don't exercise the ontology boundary
-    kbDirName: KB_DIR,
+    kb: testKbContext({ kbDirName: KB_DIR }),
     recoveryBotEmail: 'recovery-bot@bevel.local',
     hooks: new WorkflowHooks(),
   }, writePolicy, {} as never /* sessionSink — start_session not exercised here */);
@@ -1831,8 +1832,8 @@ describe('start_session', () => {
     const router = express.Router();
     registerWorkspaceTools(
       registry, router, auth, toolHandler,
-      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, KB_DIR,
-      { service: {} as never, enabled: false, kbDirName: KB_DIR, recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, testKbContext({ kbDirName: KB_DIR }),
+      { service: {} as never, enabled: false, kb: testKbContext({ kbDirName: KB_DIR }), recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
       new RoutineWritePolicyService(),
       sink ?? fakeSessionSink,
     );
@@ -1956,8 +1957,8 @@ describe('start_session', () => {
     const noopAuth: express.RequestHandler = (_req, _res, next) => next();
     registerWorkspaceTools(
       registry, router, noopAuth, (() => () => {}) as never,
-      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, KB_DIR,
-      { service: {} as never, enabled: false, kbDirName: KB_DIR, recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, testKbContext({ kbDirName: KB_DIR }),
+      { service: {} as never, enabled: false, kb: testKbContext({ kbDirName: KB_DIR }), recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
       new RoutineWritePolicyService(),
       {} as never,
     );
@@ -1998,8 +1999,8 @@ describe('branch is a required parameter in the tool contract', () => {
       new SpillStore(join(tmpdir(), 'bevel-test-spills')),
       new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')),
       allowAll,
-      KB_DIR,
-      { service: {} as never, enabled: false, kbDirName: KB_DIR, recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+      testKbContext({ kbDirName: KB_DIR }),
+      { service: {} as never, enabled: false, kb: testKbContext({ kbDirName: KB_DIR }), recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
       new RoutineWritePolicyService(),
       {} as never,
     );

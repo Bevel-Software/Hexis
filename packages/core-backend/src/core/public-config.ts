@@ -1,4 +1,4 @@
-import { DEFAULT_BRANCH, PROTECTED_BRANCHES, currentKbLayout } from '@bevel-software/platform-shared';
+import type { KbContext } from '../shared/kb-context.js';
 
 /** The two addresses the server derives once and hands to {@link publicConfig}. */
 export interface PublicConfigAddresses {
@@ -24,19 +24,22 @@ export interface PublicConfigAddresses {
  * means a rebuild.
  *
  * A pure function of its inputs, so the payload is testable without a server.
+ * `kb` is read at call time, not captured: the branch model arrives from the
+ * setup screen on a fresh deployment, and the next `/api/config` after that
+ * save has to carry it.
  */
-export function publicConfig({ marketplaceGitUrl, mcpUrl }: PublicConfigAddresses) {
+export function publicConfig(kb: KbContext, { marketplaceGitUrl, mcpUrl }: PublicConfigAddresses) {
   return {
     branchModel: {
-      defaultBranch: DEFAULT_BRANCH,
-      protectedBranches: [...PROTECTED_BRANCHES],
+      defaultBranch: kb.defaultBranch,
+      protectedBranches: [...kb.protectedBranches],
     },
     /**
      * The three renameable KB roots, for the same reason as the branch
      * model: the file tree, the library router and every path rule read
      * them, and they used to be compile-time constants.
      */
-    kbLayout: currentKbLayout(),
+    kbLayout: kb.layout,
     /**
      * The per-user marketplace git remote (see modules/marketplace). Same
      * derivation as `mcpUrl`: our address, userinfo stripped; the caller

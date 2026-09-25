@@ -1,4 +1,4 @@
-import { KNOWLEDGE_BASE_DIR, ONTOLOGY_MARKERS, type Ontology } from '@bevel-software/platform-shared';
+import { ONTOLOGY_MARKERS, type KbLayout, type Ontology } from '@bevel-software/platform-shared';
 
 /**
  * Resolve which named ontology a KB path belongs to — the backend-side
@@ -81,13 +81,14 @@ function toSegments(path: string, kbDirName?: string): string[] {
  * `Knowledge-notes.md` are never treated as markers; space-safe; pure (no IO).
  *
  * @param path       repo-root-relative POSIX path (may carry a `kbDirName` prefix)
+ * @param layout     the knowledge base's layout — names its `KnowledgeBase/` root
  * @param kbDirName  optional on-disk clone folder prefix to strip first
  */
-export function ontologyOf(path: string, kbDirName?: string): Ontology {
+export function ontologyOf(path: string, layout: KbLayout, kbDirName?: string): Ontology {
   const segs = toSegments(path, kbDirName);
   // Must live under the dedicated KnowledgeBase/ container, with at least one
   // ontology-name segment and a marker after it (so length >= 3).
-  if (segs.length < 3 || segs[0] !== KNOWLEDGE_BASE_DIR) return null;
+  if (segs.length < 3 || segs[0] !== layout.knowledgeBaseDir) return null;
   // The ontology id is the prefix before the first marker segment. Require at
   // least one name segment between `KnowledgeBase/` and the marker, so a marker
   // sitting directly under `KnowledgeBase/` (`KnowledgeBase/Knowledge/...`) is

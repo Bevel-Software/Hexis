@@ -21,10 +21,10 @@ import { defaultKbTemplateDir } from '../../../../../assets.js';
 import {
   DEFAULT_KB_LAYOUT,
   agentsFilePointerSentence,
-  configureKbLayout,
   renderKbLayoutPlaceholders,
 } from '@bevel-software/platform-shared';
 import { PLATFORM_HEADER, TOOL_PREFIX_LINE, composeAgentInstructions } from '../../../../agent-instructions/index.js';
+import { testKbContext } from '../../../../../__tests__/kb-context.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -37,6 +37,13 @@ const execFileAsync = promisify(execFile);
 
 /** The real seed template shipped inside this package (see assets.ts). */
 const TEMPLATE_DIR = defaultKbTemplateDir();
+
+/**
+ * The context every step under test reads its layout from. A case that needs
+ * other names applies them to it — as the completing setup save does on a
+ * fresh deployment — and `afterEach` puts the defaults back.
+ */
+const kbContext = testKbContext();
 
 const PROTECTED = ['current-company-state', 'target-company-state'];
 const DEFAULT_BRANCH = 'current-company-state';
@@ -67,7 +74,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks();
-  configureKbLayout({ ...DEFAULT_KB_LAYOUT });
+  kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT });
   await fs.rm(root, { recursive: true, force: true });
 });
 
@@ -102,7 +109,6 @@ function makeRunner(steps: OnServerStart[], templateDir: string = TEMPLATE_DIR) 
   return new KbStartupRunner({
     gitRunner: new NodeGitRunner(),
     kbRepoUrl: () => upstream,
-    gitUsername: () => 'x-access-token',
     workspacesRoot,
     kbDirName: 'knowledge-base',
     templateDir,
@@ -162,7 +168,7 @@ async function fullScaffold(): Promise<Record<string, string>> {
 describe('TemplateFilesStep', () => {
   it('adds the missing scaffolding — .gitignore arriving from its packable template spelling', async () => {
     await seedUpstream({ 'marker.txt': 'seeded' });
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     for (const b of PROTECTED) {
       const dir = await checkout(b);
@@ -188,9 +194,9 @@ describe('TemplateFilesStep', () => {
   it('renders the managed files with the deployment\'s own root names', async () => {
     // A deployment that renamed its roots must hand the agent a guide naming
     // the folders it will find, and an ignore file hiding the real ones.
-    configureKbLayout({ knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' });
+    kbContext.applyLayout({ knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' });
     await seedUpstream({ 'marker.txt': 'seeded' });
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     const agents = norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'));
@@ -208,7 +214,7 @@ describe('TemplateFilesStep', () => {
     expect(await exists(dir, 'docs/.gitkeep')).toBe(true);
 
     // And a second boot sees the rendered guide as current: no churn commit.
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
     const again = await checkout(DEFAULT_BRANCH);
     expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + scaffolding
   });
@@ -223,9 +229,9 @@ describe('TemplateFilesStep', () => {
    * deployment's own root names rather than the placeholders.
    */
   it('writes the "Where a new file goes" placement rule, named for the deployment\'s roots', async () => {
-    configureKbLayout({ knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' });
+    kbContext.applyLayout({ knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' });
     await seedUpstream({ 'marker.txt': 'seeded' });
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     const agents = norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'));
@@ -261,9 +267,9 @@ describe('TemplateFilesStep', () => {
    * `skills/` they had just chosen — the very bug the names exist to avoid.
    */
   it('scaffolds the layout in effect when it RUNS, not the one it was built under', async () => {
-    const builtAtBoot = new TemplateFilesStep(new NodeFs());
+    const builtAtBoot = new TemplateFilesStep(new NodeFs(), kbContext);
     await seedUpstream({ 'skills/deploy/SKILL.md': '# deploy\n' });
-    configureKbLayout({ knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins' });
+    kbContext.applyLayout({ knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins' });
     await makeRunner([builtAtBoot]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
@@ -283,7 +289,7 @@ describe('TemplateFilesStep', () => {
 
   it('replaces a drifted AGENTS.md, and says so when that is the only change', async () => {
     await seedUpstream({ ...(await fullScaffold()), 'AGENTS.md': 'stale conventions\n' });
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'))).toBe(norm(await template('AGENTS.md')));
@@ -305,7 +311,7 @@ describe('TemplateFilesStep', () => {
 
     // An existing deployment's AGENTS.md from before the guide existed.
     await seedUpstream({ ...(await fullScaffold()), 'AGENTS.md': guide.replace(section, '') });
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'))).toContain('**Agents never create roles.**');
@@ -351,7 +357,7 @@ describe('TemplateFilesStep', () => {
 
     // What the step writes — the file agents read through the MCP server — carries it.
     await seedUpstream({ ...(await fullScaffold()), 'AGENTS.md': guide.replace(section, '') });
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
     const written = norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), 'AGENTS.md'), 'utf8'));
     expect(written).toContain('### Giving a role to a group');
     expect(written).toContain(example);
@@ -359,7 +365,7 @@ describe('TemplateFilesStep', () => {
 
   it('rejects the git folder — in any spelling — as a reserved root name', async () => {
     for (const bad of ['.git', '.GIT', '.Git', '.git.', '%2egit']) {
-      expect(() => new TemplateFilesStep(new NodeFs(), [bad]), bad).toThrow(/must not name the git folder/);
+      expect(() => new TemplateFilesStep(new NodeFs(), kbContext, [bad]), bad).toThrow(/must not name the git folder/);
     }
   });
 
@@ -375,7 +381,7 @@ describe('TemplateFilesStep', () => {
     delete scaffold['.bevelignore']; // the one file the step will declare from the template
     await seedUpstream(scaffold);
 
-    await makeRunner([new TemplateFilesStep(new NodeFs())], customTemplate).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)], customTemplate).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
@@ -395,14 +401,14 @@ describe('TemplateFilesStep', () => {
       '# mine\n.git/\nAGENTS.md\nPlugins/\n\n# Added by the platform: the conventions doc is not node content.\nSkills/\n';
     await seedUpstream(scaffold);
 
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     const text = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
     // The plugins-root rule goes with it — the same sidebar draws that root now.
     expect(text).toBe('# mine\n.git/\nAGENTS.md\n' + PREAMBLE_IGNORE_BLOCK);
     // Idempotent: a second boot has nothing to change.
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
     const again = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(again, '.bevelignore'), 'utf8'))).toBe(text);
   });
@@ -416,7 +422,7 @@ describe('TemplateFilesStep', () => {
       'AGENTS.md\nPlugins/\n# The shared-skills root is rendered by the Skills & Tools app, like Groups/.\nSkills/\n';
     await seedUpstream(scaffold);
 
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
@@ -433,7 +439,7 @@ describe('TemplateFilesStep', () => {
       'AGENTS.md\nPlugins/\n# The shared-skills root is rendered by the Skills & Tools app, like My Plugins/.\nSkills/\n';
     await seedUpstream(scaffold);
 
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
@@ -450,7 +456,7 @@ describe('TemplateFilesStep', () => {
     scaffold['.bevelignore'] = text;
     await seedUpstream(scaffold);
 
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
@@ -463,7 +469,7 @@ describe('TemplateFilesStep', () => {
     scaffold['.bevelignore'] = 'AGENTS.md\n# I hide skills on purpose\nSkills/\n';
     await seedUpstream(scaffold);
 
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
@@ -482,13 +488,13 @@ describe('TemplateFilesStep', () => {
       '# mine\nAGENTS.md\nPlugins/\nMy-Own-Rule/\n# Added by the platform: the conventions doc is not node content.\nPlugins/\n!Plugins/\n';
     await seedUpstream(scaffold);
 
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     const text = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
     expect(text).toBe('# mine\nAGENTS.md\nMy-Own-Rule/\n!Plugins/\n' + PREAMBLE_IGNORE_BLOCK);
     // Idempotent: a second boot has nothing to change.
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
     const again = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(again, '.bevelignore'), 'utf8'))).toBe(text);
   });
@@ -501,7 +507,7 @@ describe('TemplateFilesStep', () => {
     await fs.writeFile(path.join(customTemplate, '.bevelignore'), '.git/\nAGENTS.md\n\nPlugins/\n');
     await seedUpstream({ 'marker.txt': 'seeded' });
 
-    await makeRunner([new TemplateFilesStep(new NodeFs())], customTemplate).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)], customTemplate).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
@@ -520,7 +526,7 @@ describe('TemplateFilesStep', () => {
 
     const dir = path.join(root, 'seeded-gitlink');
     await fs.mkdir(dir, { recursive: true });
-    await buildSeedTree(new NodeFs(), customTemplate, [], ['admin@example.com'])(dir);
+    await buildSeedTree(new NodeFs(), customTemplate, [], ['admin@example.com'], kbContext)(dir);
 
     await expect(fs.readFile(path.join(dir, 'notes.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(fs.readdir(path.join(dir, '.git'))).rejects.toMatchObject({ code: 'ENOENT' });
@@ -542,7 +548,7 @@ describe('TemplateFilesStep', () => {
     // The empty-remote seed is the one path that copies a whole template.
     const dir = path.join(root, 'seeded-bytes');
     await fs.mkdir(dir, { recursive: true });
-    await buildSeedTree(new NodeFs(),customTemplate, [], ['admin@example.com'])(dir);
+    await buildSeedTree(new NodeFs(), customTemplate, [], ['admin@example.com'], kbContext)(dir);
 
     expect(await fs.readFile(path.join(dir, 'assets', '.logo.bin'))).toEqual(binary);
     expect(norm(await fs.readFile(path.join(dir, 'scripts', 'run.sh'), 'utf8'))).toBe('#!/bin/sh\necho Skills\n');
@@ -568,7 +574,7 @@ describe('TemplateFilesStep', () => {
     delete scaffold['.bevelignore'];
     await seedUpstream(scaffold);
 
-    await makeRunner([new TemplateFilesStep(new NodeFs())], customTemplate).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)], customTemplate).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     const text = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
@@ -582,7 +588,7 @@ describe('TemplateFilesStep', () => {
     scaffold['.bevelignore'] = 'AGENTS.md\n!Skills/\n';
     await seedUpstream(scaffold);
 
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
@@ -597,7 +603,7 @@ describe('TemplateFilesStep', () => {
     scaffold['.bevelignore'] = '# operator wants the doc visible\n!AGENTS.md\nMyStuff/\n';
     await seedUpstream(scaffold);
 
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
@@ -610,7 +616,7 @@ describe('TemplateFilesStep', () => {
     scaffold['.bevelignore'] = 'AGENTS.md\n!mcp-description.md\n';
     await seedUpstream(scaffold);
 
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
@@ -627,14 +633,14 @@ describe('TemplateFilesStep', () => {
       'AGENTS.md\n# Added by the platform: agent instructions are edited from External agent access.\nmcp-description.md\n';
     await seedUpstream(scaffold);
 
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
       'AGENTS.md\n# Added by the platform: agent instructions are edited from External agent access.\n/mcp-description.md\n',
     );
     // Idempotent: a second boot has nothing to change.
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
     const again = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(again, '.bevelignore'), 'utf8'))).toBe(
       'AGENTS.md\n# Added by the platform: agent instructions are edited from External agent access.\n/mcp-description.md\n',
@@ -646,7 +652,7 @@ describe('TemplateFilesStep', () => {
     scaffold['.bevelignore'] = 'AGENTS.md\n# I hide it everywhere on purpose\nmcp-description.md\n';
     await seedUpstream(scaffold);
 
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
@@ -658,7 +664,7 @@ describe('TemplateFilesStep', () => {
     const scaffold = await fullScaffold();
     delete scaffold['mcp-description.md'];
     await seedUpstream(scaffold);
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     for (const b of PROTECTED) {
       const dir = await checkout(b);
@@ -673,7 +679,7 @@ describe('TemplateFilesStep', () => {
   it('leaves an existing mcp-description.md untouched: seeded once, never refreshed', async () => {
     const mine = 'Acme builds solar farms.\n\n## What is where\n\n- Projects/\n';
     await seedUpstream({ ...(await fullScaffold()), 'mcp-description.md': mine });
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, 'mcp-description.md'), 'utf8'))).toBe(mine);
@@ -682,7 +688,7 @@ describe('TemplateFilesStep', () => {
 
   it('keeps a deliberately emptied mcp-description.md empty: the top-up restores only a MISSING file', async () => {
     await seedUpstream({ ...(await fullScaffold()), 'mcp-description.md': '' });
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(await fs.readFile(path.join(dir, 'mcp-description.md'), 'utf8')).toBe('');
@@ -718,7 +724,7 @@ describe('TemplateFilesStep', () => {
     await seedUpstream(scaffold);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    await makeRunner([new TemplateFilesStep(new NodeFs())], customTemplate).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)], customTemplate).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, 'mcp-description.md'), 'utf8'))).toBe(
@@ -734,7 +740,7 @@ describe('TemplateFilesStep', () => {
     const scaffold = await fullScaffold();
     delete scaffold['access.md'];
     await seedUpstream(scaffold);
-    await expect(makeRunner([new TemplateFilesStep(new NodeFs())], stricter).runAll()).rejects.toThrow(/ENOENT/);
+    await expect(makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)], stricter).runAll()).rejects.toThrow(/ENOENT/);
   });
 
   it('points a clone at mcp-description.md from the managed AGENTS.md, before the platform mechanics', async () => {
@@ -749,7 +755,7 @@ describe('TemplateFilesStep', () => {
     const scaffold = await fullScaffold();
     scaffold['AGENTS.md'] = norm(scaffold['AGENTS.md']!).replace(/\n/g, '\r\n');
     await seedUpstream(scaffold);
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect((await git(dir, ['rev-list', '--count', 'HEAD'])).trim()).toBe('1'); // init only
@@ -770,9 +776,9 @@ describe('TemplateFilesStep', () => {
     const CUSTOMER_GUIDE = '# Acme conventions\n\nWrite tickets in the present tense.\n';
 
     it('writes and refreshes the guide under the configured name, on every protected branch', async () => {
-      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
       await seedUpstream({ 'marker.txt': 'seeded' });
-      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+      await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
       for (const branch of PROTECTED) {
         const dir = await checkout(branch);
@@ -784,7 +790,7 @@ describe('TemplateFilesStep', () => {
       }
 
       // A second boot sees the rendered guide as current: no churn commit…
-      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+      await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
       expect((await git(await checkout(DEFAULT_BRANCH), ['rev-list', '--count', 'HEAD'])).trim()).toBe('2');
 
       // …and a drifted copy is replaced, exactly as `AGENTS.md` is by default.
@@ -792,7 +798,7 @@ describe('TemplateFilesStep', () => {
       await fs.writeFile(path.join(dir, 'HEXIS.md'), 'stale conventions\n', 'utf8');
       await git(dir, ['commit', '-am', 'drift']);
       await git(dir, ['push', 'origin', DEFAULT_BRANCH]);
-      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+      await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
       const after = await checkout(DEFAULT_BRANCH);
       expect(norm(await fs.readFile(path.join(after, 'HEXIS.md'), 'utf8'))).toContain('# Knowledge base');
       expect((await git(after, ['log', '--format=%s', '-1'])).trim()).toBe(
@@ -801,12 +807,12 @@ describe('TemplateFilesStep', () => {
     });
 
     it('leaves a customer AGENTS.md byte for byte alone, and shows it in the tree', async () => {
-      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
       // Their file already names the guide, so the pointer has nothing to add
       // — this test is about the bytes and the ignore rules alone.
       const theirs = `${CUSTOMER_GUIDE}\nSee HEXIS.md for the platform.\n`;
       await seedUpstream({ ...(await scaffoldWithoutGuide()), 'AGENTS.md': theirs });
-      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+      await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
       const dir = await checkout(DEFAULT_BRANCH);
       expect(norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'))).toBe(theirs);
@@ -822,11 +828,11 @@ describe('TemplateFilesStep', () => {
     it('removes the platform-written AGENTS.md — only its own header proves it ours', async () => {
       // A knowledge base the platform seeded, whose admin then renames the guide.
       await seedUpstream({ 'marker.txt': 'seeded' });
-      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+      await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
       expect(await exists(await checkout(DEFAULT_BRANCH), 'AGENTS.md')).toBe(true);
 
-      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
-      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+      kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
       // On EVERY protected branch: the step tops up each one, and a rename
       // that only reached the default branch would leave the others carrying a
@@ -843,11 +849,11 @@ describe('TemplateFilesStep', () => {
     });
 
     it('keeps an AGENTS.md it cannot prove it wrote, and says so', async () => {
-      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
       // Edited by the customer: the managed header is gone, so it is theirs.
       const edited = `${CUSTOMER_GUIDE}\nMentions HEXIS.md already.\n`;
       await seedUpstream({ ...(await scaffoldWithoutGuide()), 'AGENTS.md': edited });
-      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+      await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
       for (const branch of PROTECTED) {
         const dir = await checkout(branch);
@@ -860,7 +866,7 @@ describe('TemplateFilesStep', () => {
       // Following the link would read the managed header at the other end and
       // delete the customer's entry — or, with the pointer on, write our
       // sentence into a file nobody asked us to edit.
-      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
       await seedUpstream({ ...(await scaffoldWithoutGuide()), 'conventions/ours.md': await template('AGENTS.md') });
       // Committed as a link, so every checkout the step makes carries one.
       const seeding = await checkout(DEFAULT_BRANCH);
@@ -869,7 +875,7 @@ describe('TemplateFilesStep', () => {
       await git(seeding, ['commit', '-m', 'link AGENTS.md at our own file']);
       await git(seeding, ['push', 'origin', DEFAULT_BRANCH]);
 
-      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+      await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
       const dir = await checkout(DEFAULT_BRANCH);
       expect((await fs.lstat(path.join(dir, 'AGENTS.md'))).isSymbolicLink()).toBe(true);
@@ -881,13 +887,13 @@ describe('TemplateFilesStep', () => {
     });
 
     it("keeps an operator's own AGENTS.md ignore rule while dropping the platform's", async () => {
-      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
       const scaffold = await scaffoldWithoutGuide();
       // Their own rule, written by hand, nowhere near the template's slot.
       scaffold['.bevelignore'] = '# mine\nAGENTS.md\nMyStuff/\n';
       scaffold['AGENTS.md'] = `${CUSTOMER_GUIDE}\nSee HEXIS.md.\n`;
       await seedUpstream(scaffold);
-      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+      await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
       const text = norm(
         await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), '.bevelignore'), 'utf8'),
@@ -897,7 +903,7 @@ describe('TemplateFilesStep', () => {
     });
 
     it("keeps an operator's rule that merely happens to sit under .gitattributes", async () => {
-      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
       const scaffold = await scaffoldWithoutGuide();
       // Hand-written, and by coincidence in the position the template's own
       // rule used to occupy. One matching line above is not provenance — the
@@ -905,7 +911,7 @@ describe('TemplateFilesStep', () => {
       scaffold['.bevelignore'] = '# ours\n.gitattributes\nAGENTS.md\nMyStuff/\n';
       scaffold['AGENTS.md'] = `${CUSTOMER_GUIDE}\nSee HEXIS.md.\n`;
       await seedUpstream(scaffold);
-      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+      await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
       const text = norm(
         await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), '.bevelignore'), 'utf8'),
@@ -915,7 +921,7 @@ describe('TemplateFilesStep', () => {
     });
 
     it("drops the bare rule an earlier release seeded in the template's hygiene block", async () => {
-      configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+      kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
       const scaffold = await scaffoldWithoutGuide();
       // The `.bevelignore` of a knowledge base seeded before the rule had a
       // comment above it: bare, at the end of the template's own block.
@@ -924,7 +930,7 @@ describe('TemplateFilesStep', () => {
         '.gitignore\n.gitattributes\nAGENTS.md\nroles.yaml\n';
       scaffold['AGENTS.md'] = `${CUSTOMER_GUIDE}\nSee HEXIS.md.\n`;
       await seedUpstream(scaffold);
-      await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+      await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
       const lines = norm(
         await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), '.bevelignore'), 'utf8'),
@@ -941,11 +947,11 @@ describe('TemplateFilesStep', () => {
     describe('the pointer in the customer\'s own AGENTS.md', () => {
       /** Boot once with the guide renamed, against a root `AGENTS.md` holding `theirs`. */
       async function bootWith(theirs: string | null, link = true): Promise<string> {
-        configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+        kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
         const scaffold = await scaffoldWithoutGuide();
         if (theirs !== null) scaffold['AGENTS.md'] = theirs;
         await seedUpstream(scaffold);
-        await makeRunner([new TemplateFilesStep(new NodeFs(), [], () => link)]).runAll();
+        await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext, [], () => link)]).runAll();
         return checkout(DEFAULT_BRANCH);
       }
 
@@ -969,9 +975,9 @@ describe('TemplateFilesStep', () => {
        */
       it('appends once and only once, even when the name is nothing but punctuation', async () => {
         const guide = 'Our [Agent] Guide (v2).md';
-        configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: guide });
+        kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: guide });
         await seedUpstream({ ...(await scaffoldWithoutGuide()), 'AGENTS.md': CUSTOMER_GUIDE });
-        const boot = () => makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+        const boot = () => makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
         await boot();
         const once = norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), 'AGENTS.md'), 'utf8'));
@@ -994,16 +1000,16 @@ describe('TemplateFilesStep', () => {
        * says no and an unaimed sentence would be joined by a second one.
        */
       it('aims the sentence it already wrote at the new guide, rather than adding another', async () => {
-        configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+        kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
         await seedUpstream({ ...(await scaffoldWithoutGuide()), 'AGENTS.md': CUSTOMER_GUIDE });
-        await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+        await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
         expect(norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), 'AGENTS.md'), 'utf8'))).toContain(
           agentsFilePointerSentence('HEXIS.md'),
         );
 
         // The admin renames the guide a second time.
-        configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'GUIDE.md' });
-        await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+        kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'GUIDE.md' });
+        await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
 
         const dir = await checkout(DEFAULT_BRANCH);
         const text = norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'));
@@ -1044,7 +1050,7 @@ describe('TemplateFilesStep', () => {
         // The default guide IS AGENTS.md, so the platform owns that file and
         // the pointer question never arises: the drifted copy is replaced.
         await seedUpstream({ ...(await fullScaffold()), 'AGENTS.md': theirs });
-        await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+        await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
         const dir = await checkout(DEFAULT_BRANCH);
         const text = norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'));
         expect(text).toBe(norm(await template('AGENTS.md')));
@@ -1057,7 +1063,7 @@ describe('TemplateFilesStep', () => {
 describe('RolesYamlStep', () => {
   it('generates roles.yaml with the configured admins on every protected branch', async () => {
     await seedUpstream({ 'marker.txt': 'seeded' });
-    await makeRunner([new RolesYamlStep(new NodeFs(), ['admin@example.com'])]).runAll();
+    await makeRunner([new RolesYamlStep(new NodeFs(), ['admin@example.com'], kbContext)]).runAll();
 
     for (const b of PROTECTED) {
       const dir = await checkout(b);
@@ -1075,7 +1081,7 @@ describe('RolesYamlStep', () => {
     // skip-if-present check, reporting success over a KB whose access roster
     // cannot be read. Fail closed instead.
     await seedUpstream({ 'roles.yaml/placeholder.txt': 'squatter' });
-    await expect(makeRunner([new RolesYamlStep(new NodeFs(), ['admin@example.com'])]).runAll()).rejects.toThrow(
+    await expect(makeRunner([new RolesYamlStep(new NodeFs(), ['admin@example.com'], kbContext)]).runAll()).rejects.toThrow(
       /"roles\.yaml" on branch "current-company-state" exists but is not a regular file \(directory\)/,
     );
   });
@@ -1129,7 +1135,7 @@ describe('buildSeedTree', () => {
 
     const dest = path.join(root, 'seed-dest');
     await fs.mkdir(dest, { recursive: true });
-    const generated = await buildSeedTree(new NodeFs(),templateDir, [], ['admin@example.com'])(dest);
+    const generated = await buildSeedTree(new NodeFs(),templateDir, [], ['admin@example.com'], kbContext)(dest);
 
     expect(await exists(dest, '.git')).toBe(false);
     expect(await exists(dest, 'docs/.git')).toBe(false);
@@ -1145,9 +1151,9 @@ describe('buildSeedTree', () => {
     await fs.mkdir(templateDir, { recursive: true });
     await fs.writeFile(path.join(templateDir, 'access.md'), 'policy', 'utf8');
     // Composed at boot, under the defaults…
-    const seed = buildSeedTree(new NodeFs(), templateDir, [], ['admin@example.com']);
+    const seed = buildSeedTree(new NodeFs(), templateDir, [], ['admin@example.com'], kbContext);
     // …and run after the completing save applied the admin's names.
-    configureKbLayout({ knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins' });
+    kbContext.applyLayout({ knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins' });
     const dest = path.join(root, 'seed-dest-layout');
     await fs.mkdir(dest, { recursive: true });
     const generated = await seed(dest);
@@ -1161,10 +1167,10 @@ describe('buildSeedTree', () => {
    * things about a knowledge base nobody has used yet.
    */
   it('seeds the packaged guide under the configured name, and no AGENTS.md beside it', async () => {
-    configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+    kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
     const dest = path.join(root, 'seed-dest-guide');
     await fs.mkdir(dest, { recursive: true });
-    await buildSeedTree(new NodeFs(), TEMPLATE_DIR, [], ['admin@example.com'])(dest);
+    await buildSeedTree(new NodeFs(), TEMPLATE_DIR, [], ['admin@example.com'], kbContext)(dest);
     expect(await exists(dest, 'AGENTS.md')).toBe(false);
     const guide = norm(await fs.readFile(path.join(dest, 'HEXIS.md'), 'utf8'));
     expect(guide).toContain('`HEXIS.md`');
@@ -1186,10 +1192,10 @@ describe('buildSeedTree', () => {
     await fs.cp(TEMPLATE_DIR, customTemplate, { recursive: true });
     await fs.writeFile(path.join(customTemplate, 'HEXIS.md'), '# Not the platform guide\n', 'utf8');
 
-    configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+    kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
     const dest = path.join(root, 'seed-dest-guide-clash');
     await fs.mkdir(dest, { recursive: true });
-    await buildSeedTree(new NodeFs(), customTemplate, [], ['admin@example.com'])(dest);
+    await buildSeedTree(new NodeFs(), customTemplate, [], ['admin@example.com'], kbContext)(dest);
 
     const guide = norm(await fs.readFile(path.join(dest, 'HEXIS.md'), 'utf8'));
     expect(guide).toContain('`HEXIS.md`');
@@ -1200,7 +1206,7 @@ describe('buildSeedTree', () => {
   it('names a template that is not there — a missing directory is a broken build, not an empty seed', async () => {
     const dest = path.join(root, 'seed-dest-missing');
     await fs.mkdir(dest, { recursive: true });
-    await expect(buildSeedTree(new NodeFs(),path.join(root, 'no-such-template'), [], ['admin@example.com'])(dest)).rejects.toThrow(
+    await expect(buildSeedTree(new NodeFs(),path.join(root, 'no-such-template'), [], ['admin@example.com'], kbContext)(dest)).rejects.toThrow(
       /KB template ".*no-such-template" is not a directory/,
     );
   });
@@ -1216,7 +1222,7 @@ describe('buildSeedTree', () => {
 
     const dest = path.join(root, 'seed-dest-links');
     await fs.mkdir(dest, { recursive: true });
-    await buildSeedTree(new NodeFs(),templateDir, [], ['admin@example.com'])(dest);
+    await buildSeedTree(new NodeFs(),templateDir, [], ['admin@example.com'], kbContext)(dest);
     // The link's CONTENT, under the link's own name, as a real file.
     expect(await fs.readFile(path.join(dest, 'docs/linked.md'), 'utf8')).toBe('shared');
     expect((await fs.lstat(path.join(dest, 'docs/linked.md'))).isSymbolicLink()).toBe(false);
@@ -1225,7 +1231,7 @@ describe('buildSeedTree', () => {
     await fs.symlink(path.join(root, 'nowhere.md'), path.join(templateDir, 'dangling.md'), 'file');
     const dest2 = path.join(root, 'seed-dest-links-2');
     await fs.mkdir(dest2, { recursive: true });
-    await expect(buildSeedTree(new NodeFs(),templateDir, [], ['admin@example.com'])(dest2)).rejects.toThrow(
+    await expect(buildSeedTree(new NodeFs(),templateDir, [], ['admin@example.com'], kbContext)(dest2)).rejects.toThrow(
       /KB template entry "dangling.md" links to nothing/,
     );
     // …and so is a link to a folder, named for what it is.
@@ -1233,7 +1239,7 @@ describe('buildSeedTree', () => {
     await fs.symlink(elsewhere, path.join(templateDir, 'dirlink'), process.platform === 'win32' ? 'junction' : 'dir');
     const dest3 = path.join(root, 'seed-dest-links-3');
     await fs.mkdir(dest3, { recursive: true });
-    await expect(buildSeedTree(new NodeFs(),templateDir, [], ['admin@example.com'])(dest3)).rejects.toThrow(
+    await expect(buildSeedTree(new NodeFs(),templateDir, [], ['admin@example.com'], kbContext)(dest3)).rejects.toThrow(
       /KB template entry "dirlink" links to a directory/,
     );
   });
@@ -1251,7 +1257,7 @@ describe('buildSeedTree', () => {
 
     const dest = path.join(root, 'proto-dest');
     await fs.mkdir(dest, { recursive: true });
-    await buildSeedTree(new NodeFs(), templateDir, [], ['admin@example.com'])(dest);
+    await buildSeedTree(new NodeFs(), templateDir, [], ['admin@example.com'], kbContext)(dest);
     expect(await fs.readFile(path.join(dest, 'constructor'), 'utf8')).toBe('not a function');
     expect(await fs.readFile(path.join(dest, 'toString'), 'utf8')).toBe('nor this');
   });
@@ -1283,7 +1289,7 @@ describe('PluginManifestsStep', () => {
       'Plugins/deps/node_modules/some-pkg/SKILL.md': '---\ndescription: z\n---\n',
     });
 
-    await makeRunner([new PluginManifestsStep(new NodeFs())]).runAll();
+    await makeRunner([new PluginManifestsStep(new NodeFs(), kbContext)]).runAll();
 
     for (const branch of PROTECTED) {
       const dir = await checkout(branch);
@@ -1302,7 +1308,7 @@ describe('PluginManifestsStep', () => {
     expect(log).toContain('Plugins/GTM: plugin.json written');
 
     // Idempotent: nothing left to write on the next boot.
-    await makeRunner([new PluginManifestsStep(new NodeFs())]).runAll();
+    await makeRunner([new PluginManifestsStep(new NodeFs(), kbContext)]).runAll();
     const again = await checkout(DEFAULT_BRANCH);
     expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + one migration commit
   });
@@ -1337,7 +1343,7 @@ describe('PluginDisplayNamesStep', () => {
       'Plugins/functional/cluster/example/plugin.bundle.json': '{"name":"example"}',
     });
 
-    await makeRunner([new PluginDisplayNamesStep(new NodeFs())]).runAll();
+    await makeRunner([new PluginDisplayNamesStep(new NodeFs(), kbContext)]).runAll();
 
     for (const branch of PROTECTED) {
       const dir = await checkout(branch);
@@ -1369,7 +1375,7 @@ describe('PluginDisplayNamesStep', () => {
     expect(log).toContain('Plugins/Sales Team: displayName "Sales Team"');
 
     // Idempotent: every manifest it would touch now carries the field.
-    await makeRunner([new PluginDisplayNamesStep(new NodeFs())]).runAll();
+    await makeRunner([new PluginDisplayNamesStep(new NodeFs(), kbContext)]).runAll();
     const again = await checkout(DEFAULT_BRANCH);
     expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + one backfill commit
   });
@@ -1406,7 +1412,7 @@ describe('PluginDisplayNamesStep', () => {
       { 'Plugins/Kit Pro/plugin.json': '../../vendor-manifest.json' },
     );
 
-    await makeRunner([new PluginDisplayNamesStep(new NodeFs())]).runAll();
+    await makeRunner([new PluginDisplayNamesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(await readJson(dir, 'Plugins/Growth Team/plugin.json')).toEqual({
@@ -1428,7 +1434,7 @@ describe('PluginDisplayNamesStep', () => {
     expect(log).not.toContain('Kit Pro');
 
     // Idempotent over all of it: the next boot finds nothing to write.
-    await makeRunner([new PluginDisplayNamesStep(new NodeFs())]).runAll();
+    await makeRunner([new PluginDisplayNamesStep(new NodeFs(), kbContext)]).runAll();
     const again = await checkout(DEFAULT_BRANCH);
     expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + one backfill commit
   });
@@ -1442,7 +1448,7 @@ describe('PluginDisplayNamesStep', () => {
       'Plugins/Sales Team/access.md': '---\n---\nread:\n  - everyone\n',
     });
 
-    await makeRunner([new PluginManifestsStep(new NodeFs()), new PluginDisplayNamesStep(new NodeFs())]).runAll();
+    await makeRunner([new PluginManifestsStep(new NodeFs(), kbContext), new PluginDisplayNamesStep(new NodeFs(), kbContext)]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(await readJson(dir, 'Plugins/Sales Team/plugin.json')).toEqual({
@@ -1500,7 +1506,7 @@ describe('PersonalSpacesStep', () => {
     await git(seed, ['checkout', '-b', 'ali/draft']);
     await git(seed, ['push', 'origin', 'ali/draft']);
 
-    await makeRunner([new PersonalSpacesStep(new NodeFs())]).runAll();
+    await makeRunner([new PersonalSpacesStep(new NodeFs(), kbContext)]).runAll();
 
     for (const branch of [...PROTECTED, 'ali/draft']) {
       const dir = await checkout(branch);
@@ -1556,7 +1562,7 @@ describe('PersonalSpacesStep', () => {
     expect(log).toContain('Plugins/personal-u5/access.md: read denies everyone');
 
     // Idempotent: the next boot finds every space already closed.
-    await makeRunner([new PersonalSpacesStep(new NodeFs())]).runAll();
+    await makeRunner([new PersonalSpacesStep(new NodeFs(), kbContext)]).runAll();
     const again = await checkout(DEFAULT_BRANCH);
     expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2');
   });
@@ -1585,7 +1591,7 @@ describe('GroupsToPluginsStep', () => {
     await git(seed, ['checkout', '-b', 'alice/draft']);
     await git(seed, ['push', 'origin', 'alice/draft']);
 
-    await makeRunner([new GroupsToPluginsStep(new NodeFs())]).runAll();
+    await makeRunner([new GroupsToPluginsStep(new NodeFs(), kbContext)]).runAll();
 
     for (const b of [DEFAULT_BRANCH, 'alice/draft']) {
       const dir = await checkout(b);
@@ -1620,7 +1626,7 @@ describe('GroupsToPluginsStep', () => {
     // silently skipping a branch whose reserved root cannot be a plugin tree
     // (and on a draft nothing later would ever report it).
     await seedUpstream({ Plugins: 'i am a file, not a folder' });
-    await expect(makeRunner([new GroupsToPluginsStep(new NodeFs())]).runAll()).rejects.toThrow(
+    await expect(makeRunner([new GroupsToPluginsStep(new NodeFs(), kbContext)]).runAll()).rejects.toThrow(
       /"Plugins" exists but is not a directory/,
     );
   });
@@ -1632,7 +1638,7 @@ describe('GroupsToPluginsStep', () => {
       'Plugins/B/y.md': 'new',
     });
     await makeRunner([
-      new GroupsToPluginsStep(new NodeFs()),
+      new GroupsToPluginsStep(new NodeFs(), kbContext),
       // A later step dirties the branch so the refusal note surfaces in the commit.
       step('dirty', async (ctx) => {
         for (const b of await ctx.protectedBranches()) {
@@ -1662,7 +1668,7 @@ describe('GroupsToPluginsStep', () => {
  */
 describe('GroupsToPluginsStep — migration edge cases', () => {
   async function migrate(): Promise<void> {
-    await makeRunner([new GroupsToPluginsStep(new NodeFs())]).runAll();
+    await makeRunner([new GroupsToPluginsStep(new NodeFs(), kbContext)]).runAll();
   }
 
   /** What the runner's `partial` warning carried — the named refusals. */
@@ -1976,9 +1982,9 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
  */
 describe('TemplateFilesStep: a guide named with gitignore syntax', () => {
   it('escapes the name in the ignore rule it writes, and keeps it escaped on the next boot', async () => {
-    configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: '#Guide[1].md' });
+    kbContext.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: '#Guide[1].md' });
     await seedUpstream({ 'marker.txt': 'seeded' });
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
     const dir = await checkout(DEFAULT_BRANCH);
     const ignore = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
     const escaped = String.raw`\#Guide\[1\].md`;
@@ -1986,7 +1992,7 @@ describe('TemplateFilesStep: a guide named with gitignore syntax', () => {
     expect(ignore).not.toContain('#Guide[1].md');
     expect(await exists(dir, '#Guide[1].md')).toBe(true);
     // A second boot sees the escaped rule as present and adds no second line.
-    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
     const again = norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), '.bevelignore'), 'utf8'));
     expect(again.split('\n').filter((l) => l.trim() === escaped)).toHaveLength(1);
   });

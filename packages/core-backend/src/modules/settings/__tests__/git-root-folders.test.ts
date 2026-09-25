@@ -10,7 +10,7 @@ import {
   rootFolderListerFor,
   type GitRunner,
 } from '../git-root-folders.js';
-import type { IGitRunner } from '../../../shared/git.contract.js';
+import { NO_GIT_CREDENTIALS, type IGitRunner } from '../../../shared/git.contract.js';
 
 const LISTING = {
   url: 'https://example.com/acme/kb.git',
@@ -226,6 +226,7 @@ describe('rootFolderListerFor — the listing runs through the deployment git po
     const outcomes = ['', 'KnowledgeBase\0Plugins\0'];
     const port: IGitRunner = {
       defaultTimeoutMs: 1000,
+      credentials: NO_GIT_CREDENTIALS,
       run: (async (cwd: string, args: string[], opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}) => {
         calls.push({ cwd, args, opts });
         return { stdout: outcomes.shift() ?? '', stderr: '' };

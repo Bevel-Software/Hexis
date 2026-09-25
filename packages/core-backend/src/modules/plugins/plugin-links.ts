@@ -2,9 +2,9 @@ import path from 'node:path';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('plugins');
-import { DEFAULT_BRANCH, pluginManifestName, skillUnderRoot } from '@bevel-software/platform-shared';
+import { pluginManifestName, skillUnderRoot } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { ISkillService } from '../skills/skills.contract.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
@@ -65,12 +65,16 @@ export class PluginLinkIndex {
     private readonly workspaceService: WorkspaceService,
     private readonly skillService: ISkillService,
     private readonly accessControl: IAccessControl,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
     /** Where plugins come from — the one discovery every catalog shares. */
     private readonly source: PluginSource,
     now: () => number = Date.now,
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
+  }
+
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
   }
 
   invalidate(): void {
@@ -104,7 +108,7 @@ export class PluginLinkIndex {
     let wsId: string;
     let kbRoot: string;
     try {
-      wsId = (await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH)).id;
+      wsId = (await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch)).id;
       kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
     } catch {
       return null;
@@ -179,9 +183,4 @@ export class PluginLinkIndex {
       return false; // fail closed: an unreadable tree reports the link as needing repair
     }
   }
-}
-
-/** The default-branch workspace id every link resolution runs against. */
-export function linksWorkspaceId(): string {
-  return workspaceIdForBranch(DEFAULT_BRANCH);
 }

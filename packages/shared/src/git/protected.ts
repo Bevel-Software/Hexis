@@ -3,20 +3,29 @@
  * their user-visible display names. Single source of truth for BOTH sides of
  * the app, so backend enforcement and frontend affordances can never drift.
  *
- * CONFIGURED, NOT IMPORTED. This module used to read `process.env` at import
- * time and throw when it found nothing — which made the branch model something
- * a deployment had to know before any code could load. On the frontend that
- * meant baking it into the bundle at build time (Vite `define`), so the same
- * artifact could not serve two deployments and changing a branch name meant a
- * rebuild. Both sides now CALL {@link configureBranchModel} during boot:
- * the backend from its environment, the browser from `GET /api/config`.
+ * TWO SHAPES, ONE RULE SET.
  *
- * The exported bindings stay bindings — `DEFAULT_BRANCH` is still imported and
- * read exactly as before at every call site. ES module live bindings mean a
- * reader inside a function body sees whatever configuration has been applied by
- * the time it runs. What does NOT work is capturing one at module scope
- * (`const X = DEFAULT_BRANCH` in a file's top level), which snapshots the value
- * at import — before configuration. Use a function there instead.
+ * A VALUE ({@link BranchModelValue}), resolved by {@link resolveBranchModel}
+ * from the shape `/api/config` serves and the setup screen collects. The pure
+ * helpers below (`isProtectedBranch`, `protectedBranchDisplayName`) take the
+ * value they judge against, so a caller holding two deployments' models — a
+ * server hosting several knowledge bases in one process — asks about each by
+ * name. The backend uses ONLY this shape: every service is handed its
+ * knowledge base's model at construction and never reads a process-wide one.
+ *
+ * The BROWSER'S live bindings (`DEFAULT_BRANCH`, `PROTECTED_BRANCHES`, …),
+ * applied once by {@link configureBranchModel} from `GET /api/config` before
+ * React renders. A page shows one deployment, so one process-wide value is
+ * the right shape there, and the bindings let a component read the model
+ * without threading it through props. They are for the browser: the backend
+ * package forbids importing them (an ESLint rule names each one), and a
+ * server that configured them would be setting a value for every knowledge
+ * base it serves at once.
+ *
+ * Reading a live binding works inside a function body, which sees whatever
+ * configuration has been applied by the time it runs. What does NOT work is
+ * capturing one at module scope (`const X = DEFAULT_BRANCH` in a file's top
+ * level), which snapshots the value at import — before configuration.
  */
 
 declare const process: { env: Record<string, string | undefined> };
@@ -39,25 +48,65 @@ function deriveDisplayName(slug: string): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
-/**
- * The branch a logged-in user lands on when they don't explicitly pick one, and
- * the default destination for shared drafts.
- *
- * Empty until {@link configureBranchModel} runs. Read it inside a function, not
- * at module scope — see this file's header.
- */
-export let DEFAULT_BRANCH: string = '';
-
-export let PROTECTED_BRANCH_DISPLAY_NAMES: Readonly<Record<string, string>> = Object.freeze({});
-
-export let PROTECTED_BRANCHES: ReadonlySet<string> = new Set<string>();
-
 /** The shape both sides configure from, and the shape `/api/config` serves. */
 export interface BranchModel {
   defaultBranch: string;
   /** Slugs; a comma/space-separated string is accepted for env convenience. */
   protectedBranches: string[] | string;
 }
+
+/**
+ * A branch model as a VALUE: the resolved, validated form of {@link BranchModel}
+ * that everything judging a branch is handed.
+ *
+ * `defaultBranch` is the branch a logged-in user lands on when they don't
+ * explicitly pick one, and the default destination for shared drafts. It is
+ * the empty string on the one model that is not configured yet
+ * ({@link UNCONFIGURED_BRANCH_MODEL}): a fresh deployment has no branch model
+ * until its setup screen is answered, and everything behind that gate reads
+ * the model only once it is.
+ */
+export interface BranchModelValue {
+  readonly defaultBranch: string;
+  readonly protectedBranches: ReadonlySet<string>;
+  /** Slug → human-readable name, for every protected branch. */
+  readonly displayNames: Readonly<Record<string, string>>;
+}
+
+/**
+ * The model a deployment has before setup has answered for one: no default
+ * branch, nothing protected. {@link isBranchModelConfigured} is false for
+ * exactly this value.
+ */
+export const UNCONFIGURED_BRANCH_MODEL: BranchModelValue = Object.freeze({
+  defaultBranch: '',
+  protectedBranches: new Set<string>(),
+  displayNames: Object.freeze({}),
+});
+
+/**
+ * Whether a model has been configured — the frontend gates render on this, and
+ * the backend's setup gate keeps the app shut until it holds.
+ */
+export function isBranchModelConfigured(model: BranchModelValue): boolean {
+  return model.defaultBranch !== '';
+}
+
+/**
+ * The branch a logged-in user lands on when they don't explicitly pick one, and
+ * the default destination for shared drafts. BROWSER-SIDE live binding — see
+ * this file's header; the backend reads its `BranchModelValue` instead.
+ *
+ * Empty until {@link configureBranchModel} runs. Read it inside a function, not
+ * at module scope.
+ */
+export let DEFAULT_BRANCH: string = '';
+
+/** Browser-side live binding — see this file's header. */
+export let PROTECTED_BRANCH_DISPLAY_NAMES: Readonly<Record<string, string>> = Object.freeze({});
+
+/** Browser-side live binding — see this file's header. */
+export let PROTECTED_BRANCHES: ReadonlySet<string> = new Set<string>();
 
 /**
  * Apply the branch model. Called once during boot on each side, and validated
@@ -96,22 +145,46 @@ export function validateBranchModel(model: BranchModel): string | null {
   return null;
 }
 
-export function configureBranchModel(model: BranchModel): void {
+/**
+ * Resolve a model into the value everything judges against. Throws on an
+ * invalid pair — the same rule {@link validateBranchModel} states — so a
+ * value, once held, is known to be a usable one.
+ */
+export function resolveBranchModel(model: BranchModel): BranchModelValue {
   const problem = validateBranchModel(model);
   if (problem) throw new Error(problem);
-  const defaultBranch = model.defaultBranch.trim();
   const list = branchListOf(model);
-
-  DEFAULT_BRANCH = defaultBranch;
-  PROTECTED_BRANCH_DISPLAY_NAMES = Object.freeze(
-    Object.fromEntries(list.map((slug) => [slug, deriveDisplayName(slug)])),
-  );
-  PROTECTED_BRANCHES = new Set(list);
+  return Object.freeze({
+    defaultBranch: model.defaultBranch.trim(),
+    protectedBranches: new Set(list),
+    displayNames: Object.freeze(Object.fromEntries(list.map((slug) => [slug, deriveDisplayName(slug)]))),
+  });
 }
 
-/** Whether {@link configureBranchModel} has run — the frontend gates render on this. */
-export function isBranchModelConfigured(): boolean {
-  return DEFAULT_BRANCH !== '';
+/**
+ * Apply the model to the BROWSER'S live bindings. Called once during boot,
+ * from `GET /api/config`, before anything reads them. Validated by
+ * {@link resolveBranchModel}, so the bindings and a value resolved from the
+ * same model can never disagree.
+ */
+export function configureBranchModel(model: BranchModel): void {
+  const value = resolveBranchModel(model);
+  DEFAULT_BRANCH = value.defaultBranch;
+  PROTECTED_BRANCH_DISPLAY_NAMES = value.displayNames;
+  PROTECTED_BRANCHES = value.protectedBranches;
+}
+
+/**
+ * The browser's model as a value — for the code paths that take a
+ * {@link BranchModelValue} and run in the browser, where the one model in
+ * effect is the configured one.
+ */
+export function currentBranchModel(): BranchModelValue {
+  return {
+    defaultBranch: DEFAULT_BRANCH,
+    protectedBranches: PROTECTED_BRANCHES,
+    displayNames: PROTECTED_BRANCH_DISPLAY_NAMES,
+  };
 }
 
 /**
@@ -125,11 +198,9 @@ export function branchModelFromEnv(): BranchModel {
   };
 }
 
-export function isProtectedBranch(name: string | null | undefined): boolean {
-  return !!name && Object.prototype.hasOwnProperty.call(
-    PROTECTED_BRANCH_DISPLAY_NAMES,
-    name,
-  );
+/** Whether `name` is one of `model`'s protected branches. */
+export function isProtectedBranch(model: BranchModelValue, name: string | null | undefined): boolean {
+  return !!name && model.protectedBranches.has(name);
 }
 
 /**
@@ -145,8 +216,11 @@ export function isProtectedBranch(name: string | null | undefined): boolean {
  * whether to fall back to the raw string or hide the affordance.
  */
 export function protectedBranchDisplayName(
+  model: BranchModelValue,
   name: string | null | undefined,
 ): string | null {
   if (!name) return null;
-  return PROTECTED_BRANCH_DISPLAY_NAMES[name] ?? null;
+  return Object.prototype.hasOwnProperty.call(model.displayNames, name)
+    ? model.displayNames[name]!
+    : null;
 }

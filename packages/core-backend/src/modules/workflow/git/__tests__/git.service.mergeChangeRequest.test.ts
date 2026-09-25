@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -94,7 +95,7 @@ describe('GitService.mergeChangeRequest', () => {
       await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
     });
 
-    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
     const result = await git.mergeChangeRequest(
       baseWsId, 'alice/add', BASE, { subject: 'Add feature (#1)', body: 'Merged via Bevel' }, USER,
     );
@@ -129,7 +130,7 @@ describe('GitService.mergeChangeRequest', () => {
     await runGit(root, ['clone', '-b', 'tmp-base-advance', upstream, advancer]);
     await runGit(advancer, ['push', 'origin', 'tmp-base-advance:' + BASE]);
 
-    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
     const result = await git.mergeChangeRequest(
       baseWsId, 'alice/edit', BASE, { subject: 'Edit (#2)', body: 'x' }, USER,
     );
@@ -163,7 +164,7 @@ describe('GitService.mergeChangeRequest', () => {
       // A save that has not been shared yet, exactly as a file tool leaves it.
       await fs.writeFile(path.join(baseRepo, 'base.md'), 'edited but not shared\n');
 
-      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
       await expect(
         git.mergeChangeRequest(
           baseWsId, 'alice/add', BASE, { subject: 'Add (#1)', body: 'x' }, USER,
@@ -188,7 +189,7 @@ describe('GitService.mergeChangeRequest', () => {
       await runGit(baseRepo, ['add', '-A']);
       await runGit(baseRepo, ['commit', '-m', 'local only']);
 
-      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
       await expect(
         git.mergeChangeRequest(
           baseWsId, 'alice/add', BASE, { subject: 'Add (#1)', body: 'x' }, USER,
@@ -203,7 +204,7 @@ describe('GitService.mergeChangeRequest', () => {
       await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
         await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
       });
-      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
       const result = await git.mergeChangeRequest(
         baseWsId, 'alice/add', BASE, { subject: 'Add (#1)', body: 'x' }, USER,
         { requireCleanTarget: true },
@@ -236,7 +237,7 @@ describe('GitService.mergeChangeRequest', () => {
       const publishedTip = (await gitOut(advancer, ['rev-parse', 'HEAD'])).trim();
       expect(staleHead).not.toBe(publishedTip);
 
-      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
       const seen: { sha: string; changedPaths: string[] }[] = [];
       const result = await git.mergeChangeRequest(
         baseWsId, 'alice/add', BASE, { subject: 'Add (#1)', body: 'x' }, USER,
@@ -254,7 +255,7 @@ describe('GitService.mergeChangeRequest', () => {
       await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
         await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
       });
-      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
       await expect(
         git.mergeChangeRequest(
           baseWsId, 'alice/add', BASE, { subject: 'Add (#1)', body: 'x' }, USER,
@@ -279,7 +280,7 @@ describe('GitService.mergeChangeRequest', () => {
         await runGit(dir, ['mv', 'roles.yaml', 'people.yaml']);
       });
 
-      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
       const seen: string[][] = [];
       const result = await git.mergeChangeRequest(
         baseWsId, 'alice/rename', BASE, { subject: 'Rename (#1)', body: 'x' }, USER,

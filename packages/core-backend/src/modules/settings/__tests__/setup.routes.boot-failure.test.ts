@@ -6,6 +6,7 @@ import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * A boot that survived an unreachable remote leaves the RUNNER standing on a
@@ -68,7 +69,7 @@ function listen(runner: { runAll(): Promise<void>; lastFailure(): string | null 
   });
   app.use(
     '/api',
-    createSetupRoutes(settings, { isAdmin: async () => true } as IAdminAccessService, runner),
+    createSetupRoutes(settings, { isAdmin: async () => true } as IAdminAccessService, runner, testKbContext()),
   );
   server = app.listen(0);
   const { port } = server.address() as AddressInfo;

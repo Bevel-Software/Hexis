@@ -1,4 +1,11 @@
-import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, pluginOfPath, isPersonalPluginFolder } from '@bevel-software/platform-shared';
+import {
+  DEFAULT_BRANCH,
+  PLUGINS_DIR,
+  SKILLS_DIR,
+  currentKbLayout,
+  pluginOfPath,
+  isPersonalPluginFolder,
+} from '@bevel-software/platform-shared';
 import { matchPath } from 'react-router-dom';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import type { LibraryFilter } from '../utils/status';
@@ -218,7 +225,7 @@ export function libraryHomeForItemPath(
   label: string;
   path: string;
 } {
-  const folder = pluginOfPath(repoRelativePath);
+  const folder = pluginOfPath(repoRelativePath, currentKbLayout());
   // A personal shelf is decided by the FOLDER, whatever identity the caller
   // resolved (a personal item's identity is null: a shelf is not a plugin).
   if (folder !== null && isPersonalPluginFolder(folder)) {

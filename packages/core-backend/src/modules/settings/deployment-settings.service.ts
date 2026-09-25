@@ -181,7 +181,9 @@ export const CORE_SETTINGS: SettingDef[] = [
      */
     key: 'agentsFile',
     section: 'knowledge-base',
-    validate: (v) => validateAgentsFileName(v),
+    // Judged against the default roots here; the quartet check in `plan`
+    // judges it against the roots the same save puts in effect.
+    validate: (v) => validateAgentsFileName(v, DEFAULT_KB_LAYOUT),
     restartToApply: true,
     unsetMeans: DEFAULT_KB_LAYOUT.agentsFile,
   },
@@ -422,11 +424,23 @@ export class DeploymentSettingsService {
   private stored = new Map<string, string>();
   private readonly crypto: TokenCrypto | null;
 
+  /**
+   * The environment the env-first layer reads. The process's own for a
+   * single-tenant deployment; a host serving several knowledge bases hands
+   * each graph one built from its tenant record, so a variable set on the
+   * host process can never leak into every tenant, and a record's values
+   * behave exactly as environment-pinned ones do (they win over the setup
+   * screen and the screen shows them as such).
+   */
+  private readonly env: NodeJS.ProcessEnv;
+
   constructor(
     private readonly db: Database,
     private readonly secretsEncKey: string,
     defs: SettingDef[] = CORE_SETTINGS,
+    options: { env?: NodeJS.ProcessEnv } = {},
   ) {
+    this.env = options.env ?? process.env;
     for (const def of defs) this.defs.set(def.key, def);
     // No key configured means secrets cannot be stored — surfaced when someone
     // tries, rather than pretended away by writing plaintext.
@@ -470,7 +484,7 @@ export class DeploymentSettingsService {
   resolve(key: string): string {
     const def = this.defs.get(key);
     if (!def) return '';
-    const fromEnv = def.envVar ? (process.env[def.envVar] ?? '').trim() : '';
+    const fromEnv = def.envVar ? (this.env[def.envVar] ?? '').trim() : '';
     if (fromEnv) return fromEnv;
     return (this.stored.get(key) ?? '').trim();
   }
@@ -521,7 +535,7 @@ export class DeploymentSettingsService {
    */
   async importLegacyLayoutEnv(): Promise<void> {
     for (const [key, envVar] of Object.entries(LEGACY_LAYOUT_ENV_VARS)) {
-      const fromEnv = (process.env[envVar] ?? '').trim();
+      const fromEnv = (this.env[envVar] ?? '').trim();
       if (!fromEnv) continue;
       const saved = (this.stored.get(key) ?? '').trim();
       if (saved) {
@@ -559,7 +573,7 @@ export class DeploymentSettingsService {
     // A setting with no variable can never read `env`, whatever the process
     // environment happens to hold — which is what makes the layout fields
     // editable in the app on a deployment that still sets the old variables.
-    if (def.envVar && (process.env[def.envVar] ?? '').trim()) return 'env';
+    if (def.envVar && (this.env[def.envVar] ?? '').trim()) return 'env';
     return (this.stored.get(key) ?? '').trim() ? 'stored' : 'unset';
   }
 
@@ -629,10 +643,9 @@ export class DeploymentSettingsService {
       this.stored.set(key, value);
     }
 
-    // The git token is consumed through the environment (the credential helper
-    // reads `$GITHUB_TOKEN` at call time, so it never appears in argv). Putting
-    // it there is what makes a token saved here work without a restart.
-    this.syncGitTokenEnv();
+    // A token saved here is in effect at once: the git runner's credentials
+    // read `resolve('gitToken')` on every call, so nothing is published to
+    // the process environment and no restart is needed.
     return { restartRequired: restartKeys.length > 0, restartKeys };
   }
 
@@ -775,18 +788,6 @@ export class DeploymentSettingsService {
     if (orphans.length > 0) {
       await this.db.delete(deploymentSettings).where(inArray(deploymentSettings.key, orphans));
     }
-  }
-
-  /**
-   * Publish the resolved git token as `GITHUB_TOKEN`, the name the credential
-   * helper and every redaction path already read. Only when the environment did
-   * not supply one — otherwise this would overwrite the operator's value with
-   * a stored fallback, inverting the precedence everything else here obeys.
-   */
-  syncGitTokenEnv(): void {
-    if (this.sourceOf('gitToken') !== 'stored') return;
-    const token = this.resolve('gitToken');
-    if (token) process.env.GITHUB_TOKEN = token;
   }
 
   /** The single sign-on values in effect, issuer normalized the way the provider uses it. */

@@ -3,6 +3,7 @@ import express from 'express';
 import type { Server } from 'node:http';
 import { createAccountRoutes } from '../account.routes.js';
 import { AuthService } from '../auth.service.js';
+import { AccountAdmissionRefusedError } from '../account-admission.js';
 import { hashPassword } from '../password-hash.js';
 import type { Database } from '../../database/connection.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
@@ -143,6 +144,20 @@ describe('account routes — admin gate', () => {
 
     expect((await fetch(`${base}/api/admin/accounts/u2`, { method: 'DELETE' })).status).toBe(204);
     expect(accountErasure.eraseUser).toHaveBeenLastCalledWith('u2');
+  });
+
+  it('an account the admission port refuses → 403 carrying the port\'s own words', async () => {
+    const base = await listen(makeApp({ admin: true }));
+    vi.mocked(authService.createAccount).mockRejectedValueOnce(
+      new AccountAdmissionRefusedError('No seat left on this plan'),
+    );
+    const refused = await fetch(`${base}/api/admin/accounts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'b@example.com', password: 'long-enough-pw' }),
+    });
+    expect(refused.status).toBe(403);
+    expect(((await refused.json()) as { error: string }).error).toBe('No seat left on this plan');
   });
 
   it('erasure failure → 500 with a generic body (no internal error text)', async () => {

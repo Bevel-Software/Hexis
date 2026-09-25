@@ -19,6 +19,7 @@ import type { ToolManualDetail, ToolManualSummary } from '../../tool-manuals/too
 import { registerSkillsTools } from '../skills.tools.js';
 import type { ISkillService } from '../skills.contract.js';
 import { AllowedToolsChecker } from '../allowed-tools-check.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * The agent surfaces end to end: a SKILL.md written through the file tools
@@ -41,7 +42,7 @@ const checker = new AllowedToolsChecker(
       capabilities: [{ name: 'search', description: null }],
     }),
   },
-  KB_DIR,
+  testKbContext({ kbDirName: KB_DIR }),
 );
 
 /** What the tool handed the service on its last `getSkill` — the tool's one job is to pass it on. */
@@ -109,8 +110,8 @@ async function start(): Promise<string> {
   const router = express.Router();
   registerWorkspaceTools(
     registry, router, fakeAuth, toolHandler,
-    new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, KB_DIR,
-    { service: {} as never, enabled: false, kbDirName: KB_DIR, recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+    new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, testKbContext({ kbDirName: KB_DIR }),
+    { service: {} as never, enabled: false, kb: testKbContext({ kbDirName: KB_DIR }), recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
     new RoutineWritePolicyService(),
     {} as never,
     checker,

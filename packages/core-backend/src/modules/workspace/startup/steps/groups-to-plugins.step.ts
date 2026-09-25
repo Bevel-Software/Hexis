@@ -5,7 +5,6 @@ import {
   HEXIS_EXTENSION_NS,
   HEXIS_TOOLS_DIR,
   LEGACY_GROUPS_DIR,
-  PLUGINS_DIR,
   PLUGIN_MANIFEST_FILE,
   PLUGIN_MCP_FILE,
   PLUGIN_MCP_SCHEMA,
@@ -18,6 +17,7 @@ import { parseOwnAccessEntries } from '../../../access-model/access-grammar.js';
 import { containsVariableReference } from '../../../../shared/variable-refs.js';
 import { IGNORE_FILENAME, isAbsence, isSkippedEntry, type IFsProbe, type ITreeWalker } from '../../../../shared/fs.contract.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
+import type { KbContext } from '../../../../shared/kb-context.js';
 import { withoutIgnoreLine } from './template-files.step.js';
 import { PluginLayout, hasManifestEntry } from './plugin-layout.js';
 
@@ -163,8 +163,16 @@ export class GroupsToPluginsStep implements OnServerStart {
   /** The plugin-shaped questions, answered the same way the manifests step answers them. */
   private readonly layout: PluginLayout;
 
-  constructor(private readonly disk: IFsProbe & ITreeWalker) {
+  constructor(
+    private readonly disk: IFsProbe & ITreeWalker,
+    /** Read per run, never captured: the setup-completing save may rename the plugins root first. */
+    private readonly kb: Pick<KbContext, 'layout'>,
+  ) {
     this.layout = new PluginLayout(disk);
+  }
+
+  private get pluginsDir(): string {
+    return this.kb.layout.pluginsDir;
   }
 
   async run(ctx: ServerStartContext): Promise<StepResult> {
@@ -184,7 +192,7 @@ export class GroupsToPluginsStep implements OnServerStart {
   private async migrateBranch(branch: KbBranch, refusals: string[]): Promise<void> {
     const repoDir = await branch.repoDir();
     const legacyDir = path.join(repoDir, LEGACY_GROUPS_DIR);
-    const pluginsDir = path.join(repoDir, PLUGINS_DIR);
+    const pluginsDir = path.join(repoDir, this.pluginsDir);
 
     const hasLegacy = await this.disk.isDirectory(legacyDir);
     const hasPlugins = await this.disk.isDirectory(pluginsDir);
@@ -199,9 +207,9 @@ export class GroupsToPluginsStep implements OnServerStart {
     // template-files.step.ts's reserved-dir check).
     if (!hasPlugins && (await this.disk.exists(pluginsDir))) {
       throw new Error(
-        `Branch "${branch.name}": "${PLUGINS_DIR}" exists but is not a directory` +
-          (hasLegacy ? `, so ${LEGACY_GROUPS_DIR}/ cannot be renamed to ${PLUGINS_DIR}/` : '') +
-          `. Remove or rename the "${PLUGINS_DIR}" entry — the platform requires this name to be a folder.`,
+        `Branch "${branch.name}": "${this.pluginsDir}" exists but is not a directory` +
+          (hasLegacy ? `, so ${LEGACY_GROUPS_DIR}/ cannot be renamed to ${this.pluginsDir}/` : '') +
+          `. Remove or rename the "${this.pluginsDir}" entry — the platform requires this name to be a folder.`,
       );
     }
 
@@ -216,7 +224,7 @@ export class GroupsToPluginsStep implements OnServerStart {
     // branch with both roots (refused below) or neither (nothing to migrate)
     // is no less stale. Idempotent: nothing to drop, nothing declared.
     const changed = await this.retireIgnoreRootRules(repoDir, branch, details);
-    const retiredSubject = `Retire the stale ${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ ignore rules`;
+    const retiredSubject = `Retire the stale ${LEGACY_GROUPS_DIR}/ and ${this.pluginsDir}/ ignore rules`;
 
     if (hasLegacy && hasPlugins) {
       // Both present: somebody is mid-migration by hand, or two branches merged
@@ -226,12 +234,12 @@ export class GroupsToPluginsStep implements OnServerStart {
       // ops, only a note (which surfaces in a commit only if the ignore
       // retirement above, or a later step, dirties it).
       log.warn(
-        `${branch.name}: both ${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ exist — leaving both alone. ` +
-          `Merge ${LEGACY_GROUPS_DIR}/ into ${PLUGINS_DIR}/ by hand; nothing is being migrated automatically.`,
+        `${branch.name}: both ${LEGACY_GROUPS_DIR}/ and ${this.pluginsDir}/ exist — leaving both alone. ` +
+          `Merge ${LEGACY_GROUPS_DIR}/ into ${this.pluginsDir}/ by hand; nothing is being migrated automatically.`,
       );
       if (changed) branch.note(retiredSubject);
       branch.note(
-        `${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ both exist — merge by hand; nothing was migrated automatically`,
+        `${LEGACY_GROUPS_DIR}/ and ${this.pluginsDir}/ both exist — merge by hand; nothing was migrated automatically`,
       );
       for (const line of details) branch.note(line);
       return;
@@ -255,8 +263,8 @@ export class GroupsToPluginsStep implements OnServerStart {
     let migrated = false;
     if (hasLegacy) {
       // The Groups→Plugins root rename is ONE declared op, directory and all.
-      branch.move(LEGACY_GROUPS_DIR, PLUGINS_DIR);
-      details.push(`${LEGACY_GROUPS_DIR}/ → ${PLUGINS_DIR}/`);
+      branch.move(LEGACY_GROUPS_DIR, this.pluginsDir);
+      details.push(`${LEGACY_GROUPS_DIR}/ → ${this.pluginsDir}/`);
       migrated = true;
     }
 
@@ -284,9 +292,9 @@ export class GroupsToPluginsStep implements OnServerStart {
     // was not reorganised.
     branch.note(
       hasLegacy
-        ? `Move ${LEGACY_GROUPS_DIR}/ to ${PLUGINS_DIR}/ (Agent Plugins layout)`
+        ? `Move ${LEGACY_GROUPS_DIR}/ to ${this.pluginsDir}/ (Agent Plugins layout)`
         : migrated
-          ? `Reorganise ${PLUGINS_DIR}/ to the Agent Plugins layout`
+          ? `Reorganise ${this.pluginsDir}/ to the Agent Plugins layout`
           : retiredSubject,
     );
     for (const line of details) branch.note(line);
@@ -321,7 +329,7 @@ export class GroupsToPluginsStep implements OnServerStart {
       if (isAbsence(err)) return false;
       throw err;
     }
-    const stale = [`${LEGACY_GROUPS_DIR}/`, `${PLUGINS_DIR}/`];
+    const stale = [`${LEGACY_GROUPS_DIR}/`, `${this.pluginsDir}/`];
     const present = stale.filter((rule) => current.split('\n').some((l) => l.trim() === rule));
     if (present.length === 0) return false;
     // The same drop the template step makes, so a platform comment above a
@@ -344,7 +352,7 @@ export class GroupsToPluginsStep implements OnServerStart {
     details: string[],
     refusals: string[],
   ): Promise<boolean> {
-    const relPlugin = `${PLUGINS_DIR}/${folderName}`;
+    const relPlugin = `${this.pluginsDir}/${folderName}`;
     let changed = false;
 
     const entries = await this.disk.listDir(folderDir);

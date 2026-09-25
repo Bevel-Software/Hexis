@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { configureBranchModel } from '@bevel-software/platform-shared';
+import { describe, it, expect, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IReviewWorkflowService } from '../review-workflow/review-workflow.interface.js';
@@ -67,7 +67,7 @@ function makeService(open: OpenRow[], listBranches: () => Promise<{ name: string
     {} as IAccessControl,
     {} as FileLockService,
     {} as PendingCommitsService,
-    'knowledge-base',
+    testKbContext(),
     openChangeGate(),
   );
   (svc as unknown as { events?: { emit(e: unknown): void } }).events = {
@@ -75,13 +75,6 @@ function makeService(open: OpenRow[], listBranches: () => Promise<{ name: string
   };
   return { svc, git, invalidated, emitted };
 }
-
-beforeEach(() => {
-  configureBranchModel({
-    defaultBranch: 'target-company-state',
-    protectedBranches: ['current-company-state', 'target-company-state'],
-  });
-});
 
 describe('closeChangeRequestsWithDeletedBranches', () => {
   it('closes a request whose source branch is gone', async () => {

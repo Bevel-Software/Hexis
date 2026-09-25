@@ -7,6 +7,7 @@ import os from 'node:os';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../access-control.service.js';
 import { CreatorAccessService } from '../creator-access.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const KB = 'knowledge-base';
 const WS = 'ws-creator';
@@ -61,7 +62,7 @@ describe('CreatorAccessService.planForCreate', () => {
     await fs.mkdir(path.join(repo, 'Plugins'), { recursive: true });
     await write(repo, 'roles.yaml', ROLES_YAML);
     const ws = stubWorkspaceService(workspaceDir);
-    svc = new CreatorAccessService(ws, new AccessControlService(ws, KB, new NodeFs()), KB, new NodeFs());
+    svc = new CreatorAccessService(ws, new AccessControlService(ws, KB, new NodeFs()), testKbContext({ kbDirName: KB }), new NodeFs());
   });
 
   afterEach(async () => {
@@ -175,7 +176,7 @@ describe('CreatorAccessService.planForCreate', () => {
       },
     });
     const ws = stubWorkspaceService(path.join(root, WS));
-    const withFailingDisk = new CreatorAccessService(ws, new AccessControlService(ws, KB, real), KB, failing);
+    const withFailingDisk = new CreatorAccessService(ws, new AccessControlService(ws, KB, real), testKbContext({ kbDirName: KB }), failing);
     expect(await withFailingDisk.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Projects`, 'dir')).toBeNull();
     expect(await withFailingDisk.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Projects/a.md`, 'file')).toBeNull();
     // The same creation on a disk that answers is planned, so it was the
