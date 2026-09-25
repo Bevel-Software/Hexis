@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import * as schema from './schema.js';
@@ -29,7 +30,37 @@ export function assertSchemaName(name: string): string {
       `Database schema name must be a lowercase identifier ([a-z][a-z0-9_]*, at most 63 characters); got "${name}"`,
     );
   }
+  // Names Postgres or drizzle already own. `pg_*` would fail at CREATE
+  // SCHEMA anyway; `information_schema` would not, and `drizzle` is where a
+  // deployment on the default schema keeps its migration ledger, so a
+  // knowledge base placed there would share that ledger's home.
+  if (name.startsWith('pg_') || name === 'information_schema' || name === 'drizzle') {
+    throw new Error(`Database schema name "${name}" is reserved`);
+  }
   return name;
+}
+
+/**
+ * Prove that this handle's connections really search `schema` first, by
+ * asking the server. The schema is set as a startup parameter, and a
+ * transaction- or statement-mode pooler in front of the database (PgBouncer
+ * in those modes, RDS Proxy) either refuses that parameter or resets it
+ * between transactions; every unqualified table name would then resolve to
+ * `public`, and tenants would read each other's rows without a single
+ * error. So a graph refuses to come up on a handle that lost its schema,
+ * which is the failure an operator can see. Only session pooling is
+ * supported in front of a process that serves several knowledge bases.
+ */
+export async function assertSearchPath(db: Pick<Database, 'execute'>, schema: string): Promise<void> {
+  const result = await db.execute(sql`select current_schema() as schema`);
+  const current = (result.rows[0] as { schema?: string } | undefined)?.schema ?? null;
+  if (current !== schema) {
+    throw new Error(
+      `Database connections search "${current ?? '(none)'}" first, not the configured schema "${schema}". ` +
+        'A transaction-mode pooler in front of Postgres drops the search_path startup parameter; ' +
+        'use session pooling, or connect directly.',
+    );
+  }
 }
 
 export interface DbOptions {

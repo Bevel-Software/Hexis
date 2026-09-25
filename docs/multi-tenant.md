@@ -97,16 +97,27 @@ undecryptable, so treat it as permanent.
 Requests reach a tenant by host name (`Host`, or `X-Forwarded-Host` behind
 a proxy the process trusts). A host name no tenant claims is answered with
 404. The process reaches one of its own tenants over loopback through a
-path prefix (`/_tenant/<slug>/…`) that is honoured only for connections
-from the machine itself.
+path prefix (`/_tenant/<slug>/…`) that is honoured only for a connection
+from the machine itself that no proxy forwarded (no `X-Forwarded-For`
+header); a request that gets past that could address a tenant by its slug,
+which grants nothing its host name does not, since sessions, keys and
+tokens are per tenant.
+
+**Connection pooling.** The schema is applied as a connection startup
+parameter, which a pooler in transaction or statement mode (PgBouncer in
+those modes, RDS Proxy) drops or resets. A tenant refuses to start on a
+connection that lost it, so the failure is visible rather than silent, but
+the rule is: session pooling only, or connect to Postgres directly.
 
 ## Capacity
 
 Registered tenants cost a schema and a folder each; there is no practical
 limit on their number. Active tenants cost memory (each graph holds its
 own caches and registries) and database connections (a small pool each),
-so a process serves on the order of a few hundred active tenants, and idle
-eviction keeps the active set to the tenants in use. All active tenants
+so a process serves on the order of a few hundred active tenants (behind a
+session-mode pooler where the connection budget needs it), and idle
+eviction keeps the active set to the tenants in use: a tenant is in use
+while any response to it is open, an event stream a browser holds included. All active tenants
 share one event loop; to serve more traffic, run more processes and route
 host names to them at the load balancer.
 
@@ -116,9 +127,12 @@ A tenant leaves as data a single-tenant deployment reads unchanged:
 
 1. Export the schema: `pg_dump --schema=t_<slug> --no-owner <database>`.
 2. Copy `<WORKSPACES_ROOT>/<slug>` (and its backups folder, if wanted).
-3. Restore the dump into the new database's `public` schema (rename the
-   schema in the dump, or set `DB_SCHEMA=t_<slug>` on the new deployment
-   to keep it).
+3. Restore the dump into the new database as it is, and set
+   `DB_SCHEMA=t_<slug>` on the new deployment. The schema carries its own
+   migration ledger, so the first boot resumes where the tenant left off.
+   Do not rename the schema to `public`: a deployment on `public` reads its
+   ledger from a schema of drizzle's own, would find it empty, and would
+   re-run a history that is already applied.
 4. Set the new deployment's `JWT_SECRET`, `SECRETS_ENC_KEY` and
    `INTERNAL_TOKEN_SECRET` to the values derived for the tenant, so its
    stored secrets and git credential still decrypt. The derivation is

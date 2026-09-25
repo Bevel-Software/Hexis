@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { resolveDatabaseUrl, type TenantConfig } from '../core-config.js';
-import { assertSchemaName } from '../modules/database/connection.js';
+import { DEFAULT_DB_SCHEMA, assertSchemaName } from '../modules/database/connection.js';
 import { DEFAULT_GIT_TIMEOUT_MS } from '../modules/workflow/git/node-git-runner.js';
 import { defaultKbTemplateDir } from '../assets.js';
 import { DEFAULT_GIT_USERNAME } from '../shared/git.contract.js';
@@ -99,6 +99,12 @@ export function tenantConfigFrom(record: TenantRecord, settings: TenantHostSetti
     throw new Error(`Tenant "${slug}": tenantId must be lowercase alphanumeric; got "${tenantId}"`);
   }
   const dbSchema = assertSchemaName(record.dbSchema ?? `t_${slug.replace(/-/g, '_')}`);
+  // The default schema is where a single-tenant deployment on the same
+  // database keeps its tables and, in drizzle's own schema beside it, its
+  // migration ledger; a tenant there would be no tenant at all.
+  if (dbSchema === DEFAULT_DB_SCHEMA) {
+    throw new Error(`Tenant "${slug}": dbSchema must not be "${DEFAULT_DB_SCHEMA}"; a tenant needs a schema of its own`);
+  }
   const adminPassword = record.adminPassword ?? '';
   const loginPasswordEnabled = record.loginPassword ?? adminPassword !== '';
   if (loginPasswordEnabled && !adminPassword) {

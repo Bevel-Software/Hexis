@@ -1,5 +1,14 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { DEFAULT_DB_SCHEMA, assertSchemaName, closeDb, createDb, dbSchemaOf, getDb, type Database } from '../connection.js';
+import {
+  DEFAULT_DB_SCHEMA,
+  assertSchemaName,
+  assertSearchPath,
+  closeDb,
+  createDb,
+  dbSchemaOf,
+  getDb,
+  type Database,
+} from '../connection.js';
 
 /**
  * Pools here are never connected: `pg.Pool` opens nothing until a query is
@@ -35,6 +44,34 @@ describe('schema per knowledge base', () => {
       expect(() => createDb(URL, { schema: bad }), bad).toThrow(/schema name/);
     }
     expect(assertSchemaName('t_acme_2')).toBe('t_acme_2');
+  });
+
+  it('refuses the names Postgres and drizzle already own', () => {
+    for (const reserved of ['pg_catalog', 'pg_toast', 'pg_x', 'information_schema', 'drizzle']) {
+      expect(() => assertSchemaName(reserved), reserved).toThrow(/reserved/);
+    }
+    // The default schema is a valid name here: a single-tenant deployment
+    // lives on it. A tenant source refuses it for a tenant, not this guard.
+    expect(assertSchemaName(DEFAULT_DB_SCHEMA)).toBe(DEFAULT_DB_SCHEMA);
+  });
+});
+
+describe('assertSearchPath', () => {
+  const answering = (schema: string | null) => ({
+    execute: async () => ({ rows: [{ schema }] }) as never,
+  });
+
+  it('passes when the server searches the configured schema first', async () => {
+    await expect(assertSearchPath(answering('t_acme'), 't_acme')).resolves.toBeUndefined();
+  });
+
+  it('refuses a connection whose schema a pooler dropped, naming both schemas and the cause', async () => {
+    // What a transaction-mode pooler leaves behind: the startup parameter
+    // never reached the server, so `public` is searched first.
+    await expect(assertSearchPath(answering('public'), 't_acme')).rejects.toThrow(
+      /search "public" first, not the configured schema "t_acme".*transaction-mode pooler/,
+    );
+    await expect(assertSearchPath(answering(null), 't_acme')).rejects.toThrow(/\(none\)/);
   });
 });
 

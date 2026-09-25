@@ -32,6 +32,10 @@ function tenantApp(slug: string) {
   app.get('/api/whoami', (req, res) => {
     res.json({ tenant: slug, path: req.path, query: req.query });
   });
+  // Anything else: which tenant got it, and with what path.
+  app.use((req, res) => {
+    res.status(404).json({ tenant: slug, path: req.path, unhandled: true });
+  });
   return app;
 }
 
@@ -47,10 +51,15 @@ async function listen(h: TenantHost): Promise<number> {
 }
 
 /** A request with an explicit Host header — which `fetch` refuses to set. */
-function request(port: number, path: string, hostHeader: string): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
+function request(
+  port: number,
+  path: string,
+  hostHeader: string,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: '127.0.0.1', port, path, method: 'GET', headers: { host: hostHeader } },
+      { host: '127.0.0.1', port, path, method: 'GET', headers: { ...headers, host: hostHeader } },
       (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
@@ -89,6 +98,20 @@ describe('selectTenant', () => {
     expect(selectTenant({ hostname: 'acme.test', url: '/_tenant/globex/api/x', peer: '10.0.0.5' })).toEqual({
       kind: 'host',
       host: 'acme.test',
+    });
+    // From a loopback peer that is a reverse proxy on the same machine — it
+    // forwarded someone, and says so — the prefix is not honoured either.
+    expect(
+      selectTenant({ hostname: 'acme.test', url: '/_tenant/globex/api/x', peer: '127.0.0.1', forwardedFor: '203.0.113.9' }),
+    ).toEqual({ kind: 'host', host: 'acme.test' });
+    expect(
+      selectTenant({ hostname: 'acme.test', url: '/_tenant/globex/api/x', peer: '127.0.0.1', forwardedFor: ['203.0.113.9'] }),
+    ).toEqual({ kind: 'host', host: 'acme.test' });
+    // An empty header is no header.
+    expect(selectTenant({ hostname: 'localhost', url: '/_tenant/acme/api/x', peer: '127.0.0.1', forwardedFor: '' })).toEqual({
+      kind: 'slug',
+      slug: 'acme',
+      rest: '/api/x',
     });
     // A prefix that names nothing a slug could be is not a selector either.
     expect(selectTenant({ hostname: 'localhost', url: '/_tenant/../etc', peer: '127.0.0.1' })).toEqual({
@@ -183,6 +206,66 @@ describe('createTenantHost', () => {
     expect(JSON.parse(res.body)).toEqual({ tenant: 'globex', path: '/api/whoami', query: { k: 'v' } });
     const unknown = await request(port, '/_tenant/nobody/api/whoami', '127.0.0.1');
     expect(unknown.status).toBe(404);
+    // The same path through a same-machine reverse proxy: decided by host.
+    const proxied = await request(port, '/_tenant/globex/api/whoami', 'acme.test', { 'x-forwarded-for': '203.0.113.9' });
+    expect(JSON.parse(proxied.body)).toEqual({ tenant: 'acme', path: '/_tenant/globex/api/whoami', unhandled: true });
+  });
+
+  it('keeps a tenant with an open response alive through the sweep, and lets it go once that response closes', async () => {
+    const events: string[] = [];
+    const streams: import('express').Response[] = [];
+    let now = 0;
+    const port = await listen(
+      createTenantHost({
+        source,
+        process: { port: 0, nodeEnv: 'test', trustProxy: '' },
+        idleMinutes: 1,
+        sweepIntervalMs: 10,
+        runtime: {
+          activate: async (d) => {
+            events.push(`activate:${d.slug}`);
+            const app = express();
+            // An event stream: headers sent, body held open until told.
+            app.get('/api/events', (_req, res) => {
+              res.writeHead(200, { 'content-type': 'text/event-stream' });
+              res.write(': hello\n\n');
+              streams.push(res);
+            });
+            return { core: {}, app } as unknown as TenantGraph;
+          },
+          stop: async (g) => {
+            events.push('stop');
+            void g;
+          },
+          busy: async () => false,
+          now: () => now,
+        },
+      }),
+    );
+    const opened = new Promise<http.IncomingMessage>((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: '/api/events', headers: { host: 'acme.test' } }, resolve);
+      req.on('error', reject);
+      req.end();
+    });
+    const stream = await opened;
+    expect(stream.statusCode).toBe(200);
+    expect(streams).toHaveLength(1);
+    expect(host!.runtimes().get('acme')?.open).toBe(1);
+    // An hour with no new request, and several sweeps: the stream keeps it.
+    now += 3_600_000;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(host!.runtimes().get('acme')?.state).toBe('active');
+    expect(events).toEqual(['activate:acme']);
+    // The stream ends; idleness counts from here, so it is not evicted yet...
+    streams[0]!.end();
+    await new Promise<void>((resolve) => stream.on('end', resolve).resume());
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(host!.runtimes().get('acme')?.state).toBe('active');
+    // ...and a minute after it closed, it is.
+    now += 61_000;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(host!.runtimes().get('acme')?.state).toBe('idle');
+    expect(events).toEqual(['activate:acme', 'stop']);
   });
 
   it('answers 503 with Retry-After while a tenant is still starting, and when its start failed', async () => {
@@ -194,6 +277,8 @@ describe('createTenantHost', () => {
         process: { port: 0, nodeEnv: 'test', trustProxy: '' },
         activationWaitMs: 50,
         runtime: {
+          // No retry window here: the second request must try again at once.
+          retry: { initialMs: 0 },
           activate: async (d) => {
             if (fail) throw new Error('no');
             await new Promise<void>((resolve) => {

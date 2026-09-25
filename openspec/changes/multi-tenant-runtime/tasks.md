@@ -35,7 +35,7 @@
 
 ## 6. Database per schema, config split, secrets loader (packages/core-backend) — phase 3
 
-- [x] 6.1 `modules/database/connection.ts`: `createDb(url, { schema, max, idleTimeoutMillis })` with `search_path` as a startup parameter, `getDb` cached per (url, schema), `closeDb`, `dbSchemaOf`, `assertSchemaName`; tests in `__tests__/connection.test.ts`
+- [x] 6.1 `modules/database/connection.ts`: `createDb(url, { schema, max, idleTimeoutMillis })` with `search_path` as a startup parameter, `getDb` cached per (url, schema), `closeDb`, `dbSchemaOf`, `assertSchemaName` (reserved names refused), `assertSearchPath` (a graph refuses a connection whose schema a transaction-mode pooler dropped); tests in `__tests__/connection.test.ts`
 - [x] 6.2 `modules/database/migrate.ts`: the ledger lives in the tenant's schema (`migrationsSchema`) and the lock is keyed by it; the default schema keeps drizzle's ledger
 - [x] 6.3 `migrations/0000_core_init.sql`: `to_regclass('<table>')` for the 7 guards; `__tests__/migrations-unqualified.test.ts` reads every packaged migration for `public.`
 - [x] 6.4 `modules/database/advisory-lock.ts`: `advisoryLockKey(lock, tenantKey)` = `lock ^ crc32(tenantKey)`, empty key unchanged; `{ tenantKey }` on `withAdvisoryLock` and `AdvisoryLease`; tests
@@ -52,9 +52,9 @@
 ## 8. Tenancy module, host, apps/server, docs (packages/core-backend, apps/server) — phase 5
 
 - [x] 8.1 `src/tenancy/tenant-source.contract.ts`, `static-tenant-source.ts` (records, `tenantConfigFrom`, `tenantHostEnv`), `tenant-secrets.ts` (HKDF-SHA256), `tenant-runtime.ts`, `tenant-host.ts`; exported from `index.ts`
-- [x] 8.2 Loopback by PATH PREFIX rather than a header: `TenantConfig.loopbackBaseUrl` names the tenant as `http://127.0.0.1:<port>/_tenant/<slug>`, which the MCP proxy dials and seeds into its UTCP manuals (a header cannot ride a UTCP call, and the proxy reshapes nothing); the host honours the prefix from loopback peers only
+- [x] 8.2 Loopback by PATH PREFIX rather than a header: `TenantConfig.loopbackBaseUrl` names the tenant as `http://127.0.0.1:<port>/_tenant/<slug>`, which the MCP proxy dials and seeds into its UTCP manuals (a header cannot ride a UTCP call, and the proxy reshapes nothing); the host honours the prefix from loopback peers only, and only when no proxy forwarded the request (no `X-Forwarded-For`)
 - [x] 8.3 `apps/server/src/main.ts` runs a host when `TENANTS_FILE` is set; `shell.ts` stops a host (`ShellHost`) where it stops a single graph's worker
-- [x] 8.4 Tests: `tenancy/__tests__/` — secrets derivation, the static source and env, the runtime (activate once under a burst, failed activation retried, eviction mid-activation, idle and busy), the host over real sockets (host to tenant, unknown host 404, process health, loopback prefix from 127.0.0.1 and only a slug-shaped one, 503 while starting and after a failed start, idle sweep and reactivation); `apps/server` shell host-mode shutdown. The two-tenants-in-one-database integration run is manual (see 10.2)
+- [x] 8.4 Tests: `tenancy/__tests__/` — secrets derivation, the static source and env, the runtime (activate once under a burst, failed activation remembered for a growing window then retried, eviction mid-activation, idle and busy, open responses keep it busy), the host over real sockets (host to tenant, unknown host 404, process health, loopback prefix from 127.0.0.1 and only a slug-shaped one and not through a same-machine proxy, 503 while starting and after a failed start, idle sweep and reactivation, an open event stream survives the sweep); `apps/server` shell host-mode shutdown. The two-tenants-in-one-database integration run is manual (see 10.2)
 - [x] 8.5 `docs/multi-tenant.md`, rows in `docs/configuration.md`, `.env.example` section 7, README reference, changeset
 
 ## 9. Seat admission port (packages/core-backend) — phase 6

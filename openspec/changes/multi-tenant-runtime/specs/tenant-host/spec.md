@@ -23,7 +23,7 @@ Core SHALL define a `TenantSource` that resolves a host name to a tenant descrip
 - **THEN** the derived secrets are identical
 
 ### Requirement: The host serves one graph per tenant
-The tenant host SHALL resolve each request's host name to a tenant, activate that tenant's graph on first use exactly once even under concurrent first requests, hand the request to the tenant's app, serve the single-page app for every resolved tenant, answer process health itself and leave readiness per tenant. An unknown host SHALL get a 404. A tenant idle past the configured time SHALL be evicted unless it holds a lease or has queued commits.
+The tenant host SHALL resolve each request's host name to a tenant, activate that tenant's graph on first use exactly once even under concurrent first requests, hand the request to the tenant's app, serve the single-page app for every resolved tenant, answer process health itself and leave readiness per tenant. An unknown host SHALL get a 404. A tenant SHALL count as in use while any response to it is open, idleness SHALL be measured from the last response that closed, and a tenant idle past the configured time SHALL be evicted unless a response is open or it has queued commits. A failed activation SHALL be remembered for a growing window (5 s, doubling to 60 s) and answered from memory inside it.
 
 #### Scenario: Two hosts, two tenants
 - **WHEN** a user signs in on tenant A's host and another on tenant B's
@@ -41,15 +41,23 @@ The tenant host SHALL resolve each request's host name to a tenant, activate tha
 - **WHEN** tenant A is evicted for idleness
 - **THEN** tenant B keeps answering and A activates again on its next request
 
+#### Scenario: An open event stream keeps its tenant
+- **WHEN** a browser holds tenant A's event stream open with no other request for longer than the idle time
+- **THEN** A is not evicted; once the stream closes, the idle time counts from that moment
+
+#### Scenario: Activation keeps failing
+- **WHEN** a tenant's activation fails and requests keep arriving
+- **THEN** the graph is not built again inside the window; each request gets 503 with `Retry-After`, and the next attempt happens once the window has passed
+
 ### Requirement: Loopback carries the tenant
-Requests a graph makes to itself over loopback SHALL name the tenant on the path, under `/_tenant/<slug>/`, and the host SHALL honour that prefix only when the peer address is loopback, stripping it before the tenant's app sees the request.
+Requests a graph makes to itself over loopback SHALL name the tenant on the path, under `/_tenant/<slug>/`, and the host SHALL honour that prefix only when the peer address is loopback and the request carries no `X-Forwarded-For` header (a same-machine reverse proxy adds one), stripping it before the tenant's app sees the request.
 
 #### Scenario: MCP proxy calls its own tenant
 - **WHEN** the MCP proxy fetches a tenant's tool listing over loopback, or a UTCP manual it seeded calls the tenant's REST surface
 - **THEN** the listing and the call are that tenant's, and the tenant's routes see the path without the prefix
 
 #### Scenario: Prefix from outside
-- **WHEN** a request from a non-loopback peer carries the `/_tenant/<slug>/` prefix
+- **WHEN** a request from a non-loopback peer carries the `/_tenant/<slug>/` prefix, or a loopback peer forwards it with `X-Forwarded-For` set
 - **THEN** the prefix is ignored, the host name decides, and the path is served as spelled
 
 #### Scenario: Prefix naming no tenant

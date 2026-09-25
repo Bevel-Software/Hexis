@@ -14,9 +14,16 @@ const log = logger('tenancy');
  * loopback: `http://127.0.0.1:<port>/_tenant/<slug>/api/...`. The MCP proxy
  * and the UTCP manuals it seeds dial the tenant's own REST surface this way,
  * because a loopback request carries no tenant host name and a header cannot
- * ride a UTCP call (the proxy is a passthrough; it reshapes nothing). The
- * host honours the prefix ONLY when the socket peer is loopback, so nothing
- * outside the process can pick a tenant by path.
+ * ride a UTCP call (the proxy is a passthrough; it reshapes nothing).
+ *
+ * The host honours the prefix only for a request that came from this
+ * machine AND was forwarded by nobody: the socket peer is loopback and there
+ * is no `X-Forwarded-For`. A reverse proxy on the same host (nginx, a
+ * Coolify proxy) delivers every public request from a loopback socket, and
+ * every such proxy adds that header; the process's own dial never does.
+ * What the prefix could grant anyone who got past this is only what the
+ * tenant's host name grants already — sessions, keys and tokens are per
+ * tenant — but the addressing rule is stated so it can be relied on.
  */
 export const LOOPBACK_TENANT_PREFIX = '/_tenant';
 
@@ -38,12 +45,18 @@ export type TenantSelector = { kind: 'slug'; slug: string; rest: string } | { ki
 
 /**
  * Which tenant a request is for. The loopback prefix wins, but only from a
- * loopback peer; everything else is decided by the host name (the
- * `X-Forwarded-Host` a trusted proxy set, else `Host`), lowercase and
- * without its port.
+ * loopback peer that no proxy forwarded (no `X-Forwarded-For`); everything
+ * else is decided by the host name (the `X-Forwarded-Host` a trusted proxy
+ * set, else `Host`), lowercase and without its port.
  */
-export function selectTenant(req: { hostname: string; url: string; peer: string | undefined }): TenantSelector {
-  if (isLoopbackAddress(req.peer) && req.url.startsWith(`${LOOPBACK_TENANT_PREFIX}/`)) {
+export function selectTenant(req: {
+  hostname: string;
+  url: string;
+  peer: string | undefined;
+  forwardedFor?: string | string[] | undefined;
+}): TenantSelector {
+  const forwarded = Array.isArray(req.forwardedFor) ? req.forwardedFor.length > 0 : Boolean(req.forwardedFor);
+  if (isLoopbackAddress(req.peer) && !forwarded && req.url.startsWith(`${LOOPBACK_TENANT_PREFIX}/`)) {
     const afterPrefix = req.url.slice(LOOPBACK_TENANT_PREFIX.length + 1);
     const end = afterPrefix.search(/[/?#]/);
     const slug = end === -1 ? afterPrefix : afterPrefix.slice(0, end);
@@ -133,7 +146,12 @@ export function createTenantHost(opts: TenantHostOptions): TenantHost {
   });
 
   app.use(async (req: Request, res, next) => {
-    const selector = selectTenant({ hostname: req.hostname, url: req.url, peer: req.socket.remoteAddress });
+    const selector = selectTenant({
+      hostname: req.hostname,
+      url: req.url,
+      peer: req.socket.remoteAddress,
+      forwardedFor: req.headers['x-forwarded-for'],
+    });
     let descriptor: TenantDescriptor | null;
     try {
       descriptor =
@@ -156,6 +174,11 @@ export function createTenantHost(opts: TenantHostOptions): TenantHost {
     if (selector.kind === 'slug') req.url = selector.rest;
 
     const runtime = runtimeFor(descriptor);
+    // Counted from here, before the graph is even asked for, until the
+    // response closes however it ends — a 503 below included. An open
+    // response is what keeps a tenant from being evicted from under it.
+    runtime.enter();
+    res.on('close', () => runtime.leave());
     let graph: Awaited<ReturnType<TenantRuntime['handle']>> | null;
     try {
       graph = await within(runtime.handle(), activationWaitMs);
@@ -191,8 +214,9 @@ export function createTenantHost(opts: TenantHostOptions): TenantHost {
   }
 
   // Idle tenants are stopped on a timer, never on the request that would
-  // have been their last: a graph that answered nothing for `idleMs` and
-  // holds no queued commit is not worth its pool and its lease.
+  // have been their last: a graph whose last response closed `idleMs` ago,
+  // with none still open and no queued commit, is not worth its pool and
+  // its lease. `busy()` is what keeps an event stream's tenant alive.
   const sweep = async () => {
     for (const runtime of runtimes.values()) {
       if (runtime.state !== 'active' || runtime.idleFor() < idleMs) continue;

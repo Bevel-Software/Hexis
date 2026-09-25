@@ -9,7 +9,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import { configureBranchModel, configureKbLayout } from '@bevel-software/platform-shared';
 import type { TenantConfig } from '../core-config.js';
 import { sql } from 'drizzle-orm';
-import { DEFAULT_DB_SCHEMA } from '../modules/database/connection.js';
+import { DEFAULT_DB_SCHEMA, assertSearchPath } from '../modules/database/connection.js';
 import { DEFAULT_SECRETS_SCOPE } from '../modules/secrets-vault/secrets-variable-loader.js';
 import { KbContext } from '../shared/kb-context.js';
 import { getDb, type Database } from '../modules/database/connection.js';
@@ -339,8 +339,14 @@ export async function createCoreServices(
   const tenantKey = config.dbSchema === DEFAULT_DB_SCHEMA ? '' : config.dbSchema;
   const db = getDb(config.databaseUrl, { schema: config.dbSchema });
   // A schema of its own is created on first use, so a tenant's first
-  // activation needs nothing done by hand; `public` always exists.
-  if (tenantKey) await db.execute(sql.raw(`create schema if not exists "${config.dbSchema}"`));
+  // activation needs nothing done by hand; `public` always exists. Then the
+  // server is asked whether the connections really search that schema: a
+  // pooler that dropped the startup parameter would otherwise land every
+  // tenant's tables in `public`, silently — see `assertSearchPath`.
+  if (tenantKey) {
+    await db.execute(sql.raw(`create schema if not exists "${config.dbSchema}"`));
+    await assertSearchPath(db, config.dbSchema);
+  }
   // Migrations must run BEFORE any service that reads or writes a managed
   // table. `PendingCommitsService.startupReconcile` (called later in this
   // function) hits `pending_commits` — on a fresh DB, deferring migrations to
@@ -1128,12 +1134,6 @@ export async function createCoreServices(
     },
   });
   const leased = withStartupTask(pendingCommitsWorker, reconcileQueue);
-  // Not `start()`: the worker runs only while this process holds the
-  // commit-worker lease. On a redeploy the outgoing container still holds it,
-  // so this one serves requests and declines to drain until that one exits;
-  // then it takes the lease and starts. Two processes draining one shared
-  // clone volume is the failure this prevents — see `core/lifecycle.ts`.
-  const commitWorker = holdCommitWorkerLease(new AdvisoryLease(db, AdvisoryLock.CommitWorker, { tenantKey }), leased);
 
   // SSO providers. The array REFERENCE is shared with the caller's port — an
   // overlay pushes its own plugins into it after construction (they mount when
@@ -1210,6 +1210,19 @@ export async function createCoreServices(
     eventBus,
     [config.adminEmail],
   );
+
+  // THE LAST THING STARTED, once everything above is built: the lease loop
+  // is the one piece of this function that keeps running on its own, and a
+  // throw anywhere after it would leave a loop holding — or forever asking
+  // for — this knowledge base's lock with no graph to stop it. Single-tenant
+  // never noticed (the process exited with the throw); a host that retries
+  // an activation would. Not `start()`: the worker runs only while this
+  // process holds the commit-worker lease. On a redeploy the outgoing
+  // container still holds it, so this one serves requests and declines to
+  // drain until that one exits; then it takes the lease and starts. Two
+  // processes draining one shared clone volume is the failure this prevents
+  // — see `core/lifecycle.ts`.
+  const commitWorker = holdCommitWorkerLease(new AdvisoryLease(db, AdvisoryLock.CommitWorker, { tenantKey }), leased);
 
   return {
     config,

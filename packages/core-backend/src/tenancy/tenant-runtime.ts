@@ -24,7 +24,16 @@ export interface TenantRuntimeDeps {
   /** Whether the graph has work in flight that an eviction would strand. Default: queued commits. */
   busy?: (graph: TenantGraph) => Promise<boolean>;
   now?: () => number;
+  /**
+   * How long a failed activation is remembered before the next request tries
+   * again: `initialMs` after the first failure, doubling per consecutive
+   * failure up to `maxMs`. Defaults: 5 s to 60 s.
+   */
+  retry?: { initialMs?: number; maxMs?: number };
 }
+
+const DEFAULT_RETRY_INITIAL_MS = 5_000;
+const DEFAULT_RETRY_MAX_MS = 60_000;
 
 /**
  * How a tenant's graph is built with the composition root as a distribution
@@ -54,21 +63,33 @@ async function queuedCommits(graph: TenantGraph): Promise<boolean> {
  * says so: `idle → activating → active → evicting → idle`.
  *
  * ACTIVATE ONCE. Requests arriving while the graph is being built all await
- * the one activation in flight; a failed activation is forgotten, so the
- * next request tries again rather than serving the failure forever (the
- * remote may be back, the schema may have been created). An eviction that
- * lands mid-activation waits for the activation and then stops what it
+ * the one activation in flight. A failed activation is remembered for a
+ * short, growing window and answered from memory inside it, so a tenant
+ * whose remote is down or whose token is wrong costs one clone attempt per
+ * window rather than one per request; past the window the next request
+ * tries again, since the remote may be back or the token fixed. An eviction
+ * that lands mid-activation waits for the activation and then stops what it
  * produced, so a graph is never left running behind an evicted runtime.
+ *
+ * IN USE MEANS A RESPONSE IS OPEN. The host tells the runtime when it hands
+ * a request over and when that response closes, so idleness counts from the
+ * last response that ENDED, and a tenant with any response still open — an
+ * event stream a browser holds, a clone in flight — is busy and never
+ * evicted from under it.
  */
 export class TenantRuntime {
   private graph: TenantGraph | null = null;
   private activation: Promise<TenantGraph> | null = null;
   private eviction: Promise<void> | null = null;
+  private failure: { error: unknown; until: number; backoffMs: number } | null = null;
+  private openResponses = 0;
   private lastUsedAt: number;
   private readonly activate: (descriptor: TenantDescriptor) => Promise<TenantGraph>;
   private readonly stopGraph: (graph: TenantGraph) => Promise<void>;
   private readonly isBusy: (graph: TenantGraph) => Promise<boolean>;
   private readonly now: () => number;
+  private readonly retryInitialMs: number;
+  private readonly retryMaxMs: number;
 
   constructor(
     readonly descriptor: TenantDescriptor,
@@ -78,7 +99,26 @@ export class TenantRuntime {
     this.stopGraph = deps.stop ?? ((graph) => stopCore(graph.core));
     this.isBusy = deps.busy ?? queuedCommits;
     this.now = deps.now ?? Date.now;
+    this.retryInitialMs = deps.retry?.initialMs ?? DEFAULT_RETRY_INITIAL_MS;
+    this.retryMaxMs = deps.retry?.maxMs ?? DEFAULT_RETRY_MAX_MS;
     this.lastUsedAt = this.now();
+  }
+
+  /** A request was handed to this tenant; paired with {@link leave} when its response closes. */
+  enter(): void {
+    this.openResponses += 1;
+    this.lastUsedAt = this.now();
+  }
+
+  /** A response to this tenant closed, however it ended. */
+  leave(): void {
+    if (this.openResponses > 0) this.openResponses -= 1;
+    this.lastUsedAt = this.now();
+  }
+
+  /** Responses handed over and not yet closed. */
+  get open(): number {
+    return this.openResponses;
   }
 
   get slug(): string {
@@ -106,24 +146,32 @@ export class TenantRuntime {
     this.lastUsedAt = this.now();
     if (this.eviction) await this.eviction;
     if (this.graph) return this.graph;
+    if (this.failure && this.now() < this.failure.until) throw this.failure.error;
     this.activation ??= this.activate(this.descriptor).then(
       (graph) => {
         this.graph = graph;
         this.activation = null;
+        this.failure = null;
         log.info(`tenant "${this.slug}" activated`);
         return graph;
       },
       (err: unknown) => {
         this.activation = null;
-        log.error(`tenant "${this.slug}" failed to activate:`, { err });
+        const backoffMs = Math.min(this.failure ? this.failure.backoffMs * 2 : this.retryInitialMs, this.retryMaxMs);
+        this.failure = { error: err, until: this.now() + backoffMs, backoffMs };
+        log.error(`tenant "${this.slug}" failed to activate; not asked again for ${backoffMs}ms:`, { err });
         throw err;
       },
     );
     return this.activation;
   }
 
-  /** Whether the graph has work an eviction would strand. False when nothing runs. */
+  /**
+   * Whether an eviction would strand something: a response still open, or
+   * work the graph reports (queued commits). False when nothing runs.
+   */
   async busy(): Promise<boolean> {
+    if (this.openResponses > 0) return true;
     return this.graph ? this.isBusy(this.graph) : false;
   }
 

@@ -91,6 +91,10 @@ describe('tenantConfigFrom', () => {
     expect(() => tenantConfigFrom({ ...acme, gitUsername: 'x"; rm -rf /; #' }, settings)).toThrow(/gitUsername/);
     expect(() => tenantConfigFrom({ ...acme, tenantId: 'ac-me' }, settings)).toThrow(/tenantId/);
     expect(() => tenantConfigFrom({ ...acme, dbSchema: 'Public' }, settings)).toThrow(/schema name/);
+    // A tenant on the default schema would share a single-tenant deployment's
+    // tables and drizzle's own ledger schema: refused as a tenant's schema.
+    expect(() => tenantConfigFrom({ ...acme, dbSchema: 'public' }, settings)).toThrow(/schema of its own/);
+    expect(() => tenantConfigFrom({ ...acme, dbSchema: 'drizzle' }, settings)).toThrow(/reserved/);
     expect(() => tenantConfigFrom({ ...acme, publicBackendUrl: 'not a url' }, settings)).toThrow(/publicBackendUrl/);
   });
 });

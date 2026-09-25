@@ -27,8 +27,12 @@ The database connection SHALL be created for a schema, with `search_path` set to
 - **THEN** no migration re-runs and no data moves
 
 #### Scenario: Invalid schema name
-- **WHEN** a schema name is not a lowercase identifier of at most 63 characters
+- **WHEN** a schema name is not a lowercase identifier of at most 63 characters, or is one Postgres or drizzle owns (`pg_*`, `information_schema`, `drizzle`), or is `public` for a tenant
 - **THEN** the graph refuses to build with a message naming the rule
+
+#### Scenario: A pooler dropped the schema
+- **WHEN** a tenant's graph is built over a connection that does not search its schema first (a transaction- or statement-mode pooler discarded the startup parameter)
+- **THEN** the graph refuses to build, naming the schema found and the schema configured, rather than serving the tenant from `public`
 
 ### Requirement: Advisory locks are keyed by tenant
 Every advisory lock and lease SHALL be taken under a key derived from the lock id and the tenant key, and an empty tenant key SHALL keep today's ids.
