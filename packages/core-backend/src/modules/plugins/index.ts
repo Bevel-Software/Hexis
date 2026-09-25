@@ -1,4 +1,4 @@
-export { PluginIndexService, pluginsWorkspaceId, pluginFolderBelowRoot } from './plugins.service.js';
+export { PluginIndexService, pluginFolderBelowRoot } from './plugins.service.js';
 export {
   PluginProvisionService,
   PluginProvisionError,

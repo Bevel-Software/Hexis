@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -95,7 +96,7 @@ async function makeHarness(): Promise<Harness> {
     workflowService,
     eventBus,
     accessControl,
-    KB,
+    testKbContext({ kbDirName: KB }),
     creatorAccess,
     { isAdmin: async () => false } as unknown as IAdminAccessService,
     new NodeFs(),

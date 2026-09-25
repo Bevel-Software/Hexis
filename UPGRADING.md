@@ -17,6 +17,11 @@ target version first, then:
 2. `docker compose pull app`
 3. `docker compose up -d`
 
+Since 0.21.0 every compose file in this repository sets `pull_policy: always`
+on the app, so `docker compose up` fetches the image the tag currently names
+instead of reusing whatever the host pulled last; if you copied an older
+compose file, take the release's.
+
 Database migrations and the knowledge-base maintenance phase run
 automatically while the app boots — no manual steps, but the first start
 after an upgrade can take a little longer.

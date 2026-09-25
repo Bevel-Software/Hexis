@@ -13,7 +13,8 @@ import {
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
-import { pluginsWorkspaceId, pluginFolderBelowRoot } from './plugins.service.js';
+import { pluginFolderBelowRoot } from './plugins.service.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import { PluginProvisionError, type PluginProvisionService } from './plugin-provision.service.js';
 import { PluginLinkError, type PluginLinksService } from './plugin-links.service.js';
 import { PluginRenameError, type PluginRenameService } from './plugin-rename.service.js';
@@ -159,6 +160,8 @@ export function createPluginsRoutes(
   joinRequestJobs: PluginJoinRequestJobs,
   provision: PluginProvisionService,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
+  /** The released branch's clone — every verdict here is read from it. */
+  kb: Pick<KbContext, 'defaultWorkspaceId'>,
   /** Optional: a host without the link machinery simply has no link routes. */
   links?: PluginLinksService,
   /** Optional: a host without it has no rename route. */
@@ -209,11 +212,30 @@ export function createPluginsRoutes(
    *   POST   /api/plugins/:name/links          { skillPath }  → { root, skills }
    *   DELETE /api/plugins/:name/links?skillPath=              → { root, revoked }
    *   POST   /api/plugins/:name/links/repair   { skillPath }  → { root }
+   *   POST   /api/plugins/:name/links/repair-all              → { repaired, skipped }
    *
    * Refusals carry a `kind` the UI branches on — `needs-skill-write` (409) is
    * the one that becomes "request write access".
+   *
+   * `repair-all` is the plugin PAGE's: it repairs every link of the plugin the
+   * caller can, and reports what it could not. A caller who may not write the
+   * plugin gets the same 404 every other link route gives them, so probing it
+   * confirms nothing about a plugin they cannot see.
    */
   if (links) {
+    /** The one refusal mapping every link route answers with. */
+    const linkFailure = (res: express.Response, err: unknown) => {
+      if (err instanceof PluginLinkError) {
+        res.status(err.status).json({ error: err.message, ...err.payload });
+        return;
+      }
+      if (err instanceof WorkflowDomainError) {
+        res.status(err.status).json(domainErrorBody(err));
+        return;
+      }
+      log.error('link operation failed:', { err });
+      res.status(500).json({ error: 'Failed to update the plugin\'s links' });
+    };
     const linkOp = async (
       req: express.Request,
       res: express.Response,
@@ -237,16 +259,7 @@ export function createPluginsRoutes(
       try {
         res.json(await op(user, String(req.params.name), skillPath));
       } catch (err) {
-        if (err instanceof PluginLinkError) {
-          res.status(err.status).json({ error: err.message, ...err.payload });
-          return;
-        }
-        if (err instanceof WorkflowDomainError) {
-          res.status(err.status).json(domainErrorBody(err));
-          return;
-        }
-        log.error('link operation failed:', { err });
-        res.status(500).json({ error: 'Failed to update the plugin\'s links' });
+        linkFailure(res, err);
       }
     };
     const bodyPath = (req: express.Request) => ((req.body ?? {}) as { skillPath?: unknown }).skillPath;
@@ -254,6 +267,23 @@ export function createPluginsRoutes(
     router.post('/plugins/:name/links/repair', (req, res) =>
       linkOp(req, res, (u, p, s) => links.repair(u, p, s), bodyPath),
     );
+    // No `skillPath`: this one is about the plugin, so it cannot ride `linkOp`.
+    router.post('/plugins/:name/links/repair-all', async (req, res) => {
+      if (!req.userEmail) {
+        res.status(401).json({ error: 'Unauthenticated' });
+        return;
+      }
+      const user = await resolveUser(req);
+      if (!user) {
+        res.status(401).json({ error: 'Unauthenticated' });
+        return;
+      }
+      try {
+        res.json(await links.repairAll(user, String(req.params.name)));
+      } catch (err) {
+        linkFailure(res, err);
+      }
+    });
     router.delete('/plugins/:name/links', (req, res) =>
       linkOp(req, res, (u, p, s) => links.unlink(u, p, s), (r) => r.query.skillPath),
     );
@@ -296,7 +326,7 @@ export function createPluginsRoutes(
         res.json({ plugins: [] });
         return;
       }
-      const wsId = pluginsWorkspaceId();
+      const wsId = kb.defaultWorkspaceId();
       const probes = probesFor(catalog);
       const [readable, writable, owned] = await Promise.all([
         accessControl.canReadBatch(wsId, email, probes),
@@ -453,7 +483,7 @@ export function createPluginsRoutes(
       }
       // By identity — the manifest name the catalog keys on.
       const plugin = (await pluginIndex.catalog()).find((g) => g.name === req.params.name);
-      const wsId = pluginsWorkspaceId();
+      const wsId = kb.defaultWorkspaceId();
       const ownerVerdicts = plugin
         ? await Promise.all(
             plugin.folders.map((f) => accessControl.canOwner(wsId, email, memberProbe(f))),
@@ -494,7 +524,7 @@ export function createPluginsRoutes(
       const catalog = await pluginIndex.catalog();
       // By identity — the manifest name the catalog keys on.
       const plugin = catalog.find((g) => g.name === req.params.name);
-      const wsId = pluginsWorkspaceId();
+      const wsId = kb.defaultWorkspaceId();
       // Same ANY-folder shape `GET /plugins` resolves with, so a plugin can
       // never be listed as discoverable there and rejected as unknown here.
       const verdicts = plugin
@@ -567,7 +597,7 @@ export function createPluginsRoutes(
       return null;
     }
     const writable = await accessControl.canWriteBatch(
-      pluginsWorkspaceId(),
+      kb.defaultWorkspaceId(),
       email,
       plugin.folders.map(accessMdOf),
     );

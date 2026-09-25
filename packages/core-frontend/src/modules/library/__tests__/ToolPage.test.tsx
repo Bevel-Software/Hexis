@@ -61,6 +61,7 @@ vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolPage } from '../components/tool-page/ToolPage';
 import { NAME_MIN_WIDTH } from '../components/NameWithBadges';
+import { expectMenuAtTheEndOfTheTitleRow } from './title-row-actions';
 import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 
 const GITHUB: ToolSecrets = {
@@ -212,6 +213,25 @@ describe('ToolPage: frame', () => {
     const row = title.parentElement as HTMLElement;
     expect(row.className).toContain('flex-nowrap');
     expect(row.className).toContain('overflow-hidden');
+  });
+
+  /**
+   * The `⋯` belongs at the right end of the title row, where the plugin page
+   * and the skill page put their trailing controls. It used to be the last
+   * child of this page's `<header>` — below the description, on a line of its
+   * own under the back link, left-aligned — so the one gesture the three item
+   * pages share was in a different place on one of them.
+   *
+   * Asserted through the shared helper, which `PluginPage.test.tsx` calls
+   * too: the criterion is a comparison, so it is written once.
+   */
+  // The owner's case — the same menu with `Delete tool` in it — is asserted
+  // in `DeleteToolDialog.test.tsx`, which is the file that can actually own
+  // the plugin holding this tool.
+  it('puts the ⋯ at the right end of the title row, where the plugin page has it', async () => {
+    renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    expectMenuAtTheEndOfTheTitleRow();
   });
 
   it('shows no kicker for a legacy ungrouped path either', async () => {

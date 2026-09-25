@@ -6,6 +6,7 @@ import { printable } from '../../shared/printable.js';
 const log = logger('accounts');
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { AuthService } from './auth.service.js';
+import { AccountAdmissionRefusedError } from './account-admission.js';
 import { erasedAccountId, type IAccountErasureService } from './account-erasure.service.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import type { UserAccessRemovalService } from '../access/user-access-removal.service.js';
@@ -64,7 +65,9 @@ export function createAccountRoutes(
       res.status(201).json(user);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
-      res.status(400).json({ error: msg });
+      // The deployment has no place for the account (a seat limit, say): the
+      // port's own words, as a refusal rather than a malformed request.
+      res.status(error instanceof AccountAdmissionRefusedError ? 403 : 400).json({ error: msg });
     }
   });
 

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useInRouterContext, useLocation, useNavigate } from 'react-router-dom';
 import { X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
@@ -71,11 +72,21 @@ function RoutedConnectAgentPill() {
   // The live region is OUTSIDE the `showPill` guard so it is still mounted at
   // the moment the pill disappears — a region that unmounts in the same commit
   // as the thing it is announcing announces nothing.
+  //
+  // It goes to the BODY, though, not into the slot this component fills. That
+  // slot is `SidebarFrame`'s header band, which reserves its 48px for a header
+  // that draws and collapses (`empty:hidden`) for one that does not — and an
+  // `sr-only` span is a child like any other, so leaving it here would hold
+  // the whole band open, invisibly, for every account that has finished
+  // onboarding. That is precisely the empty strip above "Company Context"
+  // this file's half of the fix removes. A portal keeps the region mounted,
+  // keeps the announcement, and leaves the row with nothing in it.
   if (!onboarding.showPill) {
-    return (
+    return createPortal(
       <span role="status" aria-live="polite" className="sr-only">
         {announcement}
-      </span>
+      </span>,
+      document.body,
     );
   }
 

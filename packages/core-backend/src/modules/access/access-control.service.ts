@@ -22,10 +22,14 @@ import type {
   ProspectiveHolders,
   ResolvedPrincipal,
 } from './access-control.interface.js';
-import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginDir,
+import {
+  DEFAULT_KB_LAYOUT,
+  PLUGIN_MANIFEST_FILE,
+  isPersonalPluginDir,
   pluginIdentityOf,
   platformRestoreDestination,
 } from '@bevel-software/platform-shared';
+import type { KbContext } from '../../shared/kb-context.js';
 import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { synthesizePluginPrincipals } from '../access-model/plugin-principals.js';
@@ -291,13 +295,14 @@ interface AccessScope {
  */
 function accessFileListener(
   repoDir: string,
+  pluginsDir: string,
   out: Map<string, AccessFile>,
   pluginDirs: Map<string, string>,
 ): WalkListener {
   return {
     async onFile(dir, name) {
       const rel = dir ? `${dir}/${name}` : name;
-      if (name === PLUGIN_MANIFEST_FILE && dir.startsWith(`${PLUGINS_DIR}/`)) {
+      if (name === PLUGIN_MANIFEST_FILE && dir.startsWith(`${pluginsDir}/`)) {
         const text = await fs.readFile(path.join(repoDir, rel), 'utf-8').catch(() => null);
         pluginDirs.set(dir, pluginIdentityOf(parseManifestText(text), path.posix.basename(dir)));
         return;
@@ -1301,6 +1306,14 @@ export class AccessControlService implements IAccessControl {
      * many fixtures construct this service directly.
      */
     private readonly gitRunner: IGitRunner = new NodeGitRunner(),
+    /**
+     * The knowledge base's layout — which folder is the plugins root, what the
+     * platform files are called. Read per use, never captured: the roots are
+     * renameable from the setup screen. Defaulted for the same reason as
+     * `deploymentOwners`: the fixtures that construct this service directly
+     * run on the default layout.
+     */
+    private readonly kb: Pick<KbContext, 'layout'> = { layout: DEFAULT_KB_LAYOUT },
   ) {
     this.deploymentOwners = new Set(
       deploymentOwners.filter(Boolean).map((e) => canonicalEmail(e)),
@@ -1806,7 +1819,7 @@ export class AccessControlService implements IAccessControl {
         principal.kind === 'plugin' &&
         principal.pluginName &&
         principal.pluginDir &&
-        !isPersonalPluginDir(principal.pluginDir)
+        !isPersonalPluginDir(principal.pluginDir, this.kb.layout)
       ) {
         plugins.set(principal.pluginName, principal.pluginDir);
       }
@@ -1982,7 +1995,7 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     destinationRelativePath: string,
   ): Promise<boolean> {
-    const target = platformRestoreDestination(destinationRelativePath);
+    const target = platformRestoreDestination(destinationRelativePath, this.kb.layout);
     if (target === null) return false;
     const email = canonicalEmail(userEmail);
 
@@ -2143,7 +2156,7 @@ export class AccessControlService implements IAccessControl {
     // / `roles.yaml` because `hasPermissionResolved` admin-rescues those
     // paths, so the bad config remains fixable from inside the app.
     const pluginDirs = new Map<string, string>();
-    await this.disk.walkKb(repoDir, [accessFileListener(repoDir, accessFiles, pluginDirs)]);
+    await this.disk.walkKb(repoDir, [accessFileListener(repoDir, this.kb.layout.pluginsDir, accessFiles, pluginDirs)]);
 
     // Plugin principals (`plugin/<Name>/<verb>`), derived from each plugin
     // folder's own access.md — a plugin being a folder with a manifest, at
@@ -2320,11 +2333,12 @@ export class AccessControlService implements IAccessControl {
       const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '--name-only', ref]);
       const out: string[] = [];
       const pluginDirs: string[] = [];
+      const { pluginsDir } = this.kb.layout;
       for (const line of stdout.split('\n')) {
         const p = line.trim();
         if (!p) continue;
         if (p === 'access.md' || p.endsWith('/access.md')) out.push(p);
-        else if (p.startsWith(`${PLUGINS_DIR}/`) && p.endsWith(`/${PLUGIN_MANIFEST_FILE}`)) {
+        else if (p.startsWith(`${pluginsDir}/`) && p.endsWith(`/${PLUGIN_MANIFEST_FILE}`)) {
           pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
         }
       }

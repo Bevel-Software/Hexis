@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { AuthUser, PullRequestSummary } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
@@ -138,7 +139,7 @@ function makeHarness(requests: PullRequestSummary[], access: Access = {}) {
     accessControl,
     fileLocks,
     pendingCommits,
-    'knowledge-base',
+    testKbContext(),
     openChangeGate(),
   );
   // Which request an UPDATE is closing is not recoverable from the drizzle

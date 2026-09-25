@@ -49,6 +49,50 @@ export default defineConfig([
     rules: { 'no-console': 'error' },
   },
   {
+    // The shared package's live bindings (`DEFAULT_BRANCH`, `PLUGINS_DIR`, …)
+    // and the helpers that read them are the BROWSER'S copy of the branch
+    // model and the knowledge-base layout: one process-wide value, right for
+    // a page that shows one deployment. The backend serves a knowledge base
+    // per composition and reads those facts from `KbContext`
+    // (`packages/core-backend/src/shared/kb-context.ts`), injected into every
+    // service that needs one — a server hosting several knowledge bases in one
+    // process has no single value to put in a binding. This rule is what keeps
+    // a backend module from reaching for the binding out of habit; the one
+    // permitted site (the composition root's mirror for overlays) disables it
+    // on its line and says why.
+    files: ['packages/core-backend/src/**/*.ts', 'packages/mcp-core/src/**/*.ts'],
+    ignores: ['packages/core-backend/src/**/__tests__/**', 'packages/core-backend/src/test-setup.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: '@bevel-software/platform-shared',
+              importNames: [
+                'DEFAULT_BRANCH',
+                'PROTECTED_BRANCHES',
+                'PROTECTED_BRANCH_DISPLAY_NAMES',
+                'configureBranchModel',
+                'currentBranchModel',
+                'branchModelFromEnv',
+                'KNOWLEDGE_BASE_DIR',
+                'SKILLS_DIR',
+                'PLUGINS_DIR',
+                'AGENTS_FILE',
+                'configureKbLayout',
+                'currentKbLayout',
+                'onKbLayoutApplied',
+              ],
+              message:
+                'Process-wide live binding — the browser\'s copy. Read the knowledge base\'s value from the injected KbContext (shared/kb-context.ts) instead.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // Operator scripts, run by hand with `node`, not bundled and not typed.
     // CommonJS is what `node scripts/x.cjs` wants, so the rule that forbids
     // `require()` in app source is measuring the wrong thing here.

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { MarketplaceRepoService, type MarketplaceCompiler } from '../marketplace-repo.service.js';
-import { GitRunError, type IGitRunner } from '../../../shared/git.contract.js';
+import { GitRunError, NO_GIT_CREDENTIALS, type IGitRunner } from '../../../shared/git.contract.js';
 
 const SHA = 'a'.repeat(40);
 
@@ -8,6 +8,7 @@ const SHA = 'a'.repeat(40);
 function runnerFailingRevParse(failure: GitRunError): IGitRunner {
   return {
     defaultTimeoutMs: 1_000,
+    credentials: NO_GIT_CREDENTIALS,
     run: (async (_cwd: string, args: string[]) => {
       if (args.includes('rev-parse')) throw failure;
       return { stdout: '', stderr: '' };

@@ -5,9 +5,8 @@ const log = logger('tool-manuals');
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import AdmZip from 'adm-zip';
-import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import { isAbsence, type IFsProbe, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { IPluginIndexService } from '../plugins/plugins.contract.js';
@@ -54,7 +53,8 @@ export function createToolManualsAgentRoutes(
   archiveDeps?: {
     workspaceService: WorkspaceService;
     accessControl: IAccessControl;
-    kbDirName: string;
+    /** The checkout folder, the released branch, and the layout that names the plugins root. */
+    kb: Pick<KbContext, 'kbDirName' | 'defaultBranch' | 'defaultWorkspaceId' | 'layout'>;
     disk: ITreeWalker & IFsProbe;
     /**
      * Resolves a plugin IDENTITY (its manifest name) to its folder, so a
@@ -110,17 +110,19 @@ export function createToolManualsAgentRoutes(
       if (!folder || folder === '.' || folder === '..' || /[/\\]/.test(folder)) {
         return void res.status(422).json({ error: 'Not a plugin folder name' });
       }
-      const { workspaceService, accessControl, kbDirName, disk, pluginIndex } = archiveDeps;
-      const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
-      await workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
+      const { workspaceService, accessControl, kb, disk, pluginIndex } = archiveDeps;
+      const { kbDirName } = kb;
+      const pluginsDir = kb.layout.pluginsDir;
+      const wsId = kb.defaultWorkspaceId();
+      await workspaceService.getOrCreateForBranch(kb.defaultBranch);
       const wsDir = await workspaceService.getWorkspacePath(wsId);
       // The name is a folder directly under the root, as it always was — or,
       // when no such folder exists, a plugin's IDENTITY, which the index maps
       // to its folder at any depth (`Plugins/departments/eng/ado`). Identity
       // second, so a folder that spells a nested plugin's name keeps meaning
       // the folder.
-      let pluginRel = `${PLUGINS_DIR}/${folder}`;
-      let pluginDir = path.join(wsDir, kbDirName, PLUGINS_DIR, folder);
+      let pluginRel = `${pluginsDir}/${folder}`;
+      let pluginDir = path.join(wsDir, kbDirName, pluginsDir, folder);
       if (pluginIndex && (await disk.lstatOrNull(pluginDir))?.isDirectory() !== true) {
         const byIdentity = (await pluginIndex.catalog()).find((p) => p.name === folder)?.folders[0];
         if (byIdentity) {

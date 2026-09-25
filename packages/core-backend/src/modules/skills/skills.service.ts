@@ -4,9 +4,8 @@ import { logger } from '../../shared/logging.js';
 const log = logger('skills');
 import fs from 'node:fs/promises';
 import { parseDocument } from 'yaml';
-import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { extractFrontmatter, resolveDeclaredId, dedupeById } from '../../shared/frontmatter-id.js';
 import type { IgnoreRules, ITreeWalker } from '../../shared/fs.contract.js';
@@ -54,11 +53,15 @@ export class SkillService implements ISkillService {
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly accessControl: IAccessControl,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
     private readonly disk: ITreeWalker,
     now: () => number = Date.now,
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
+  }
+
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
   }
 
   /** Attach the history source a `version` is answered from. */
@@ -92,7 +95,7 @@ export class SkillService implements ISkillService {
     const found = (await this.scan()).find((s) => s.summary.name === name);
     if (!found) return { ok: false, error: 'not_found' };
 
-    const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
+    const wsId = this.kb.defaultWorkspaceId();
     // Through `readable`, not a bare `canRead`: the two gates must never
     // disagree. `canRead` reads a file's own frontmatter rules off disk on
     // every call while `canReadBatch` resolves them through a per-workspace
@@ -213,7 +216,7 @@ export class SkillService implements ISkillService {
    */
   private async readable(userEmail: string, skillFolders: string[]): Promise<Map<string, boolean>> {
     return this.accessControl.canReadBatch(
-      workspaceIdForBranch(DEFAULT_BRANCH),
+      this.kb.defaultWorkspaceId(),
       userEmail,
       skillFolders.map((p) => `${p}/SKILL.md`),
     );
@@ -238,7 +241,7 @@ export class SkillService implements ISkillService {
     // be read.
     let wsId: string;
     try {
-      wsId = (await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH)).id;
+      wsId = (await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch)).id;
     } catch {
       return [];
     }
@@ -314,15 +317,16 @@ export class SkillService implements ISkillService {
     // Each root starts its own ignore stack (the walk extends it with the
     // root's own file first). Order is cosmetic: the sort below is by name
     // then path, so a same-named pair resolves the same way regardless.
-    await walkRoot(SKILLS_DIR);
-    await walkRoot(PLUGINS_DIR);
+    const { skillsDir, pluginsDir } = this.kb.layout;
+    await walkRoot(skillsDir);
+    await walkRoot(pluginsDir);
     // A skill's id (frontmatter `id`/`name`, else folder name) is how getSkill()
     // resolves it, so it must be unique. Sort by (name, root, path) for a
     // deterministic winner — the shared root FIRST, since `Skills/` is a
     // skill's canonical home and a same-named inline copy is the stale one —
     // then REFUSE later duplicates via the shared dedup — the same rule tools
     // use (no silent auto-suffix that would rebind an id under the caller).
-    const rootRank = (p: string) => (p === SKILLS_DIR || p.startsWith(`${SKILLS_DIR}/`) ? 0 : 1);
+    const rootRank = (p: string) => (p === skillsDir || p.startsWith(`${skillsDir}/`) ? 0 : 1);
     out.sort(
       (a, b) =>
         a.summary.name.localeCompare(b.summary.name) ||

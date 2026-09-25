@@ -24,6 +24,7 @@ describe('KbDocumentShell', () => {
   it.each([
     ['prose', {}],
     ['full-bleed', { variant: 'full-bleed' as const }],
+    ['panel', { variant: 'panel' as const }],
     ['with a rail', { rail: <p>About this file</p> }],
   ])('puts the header first in the column (%s)', (_name, props) => {
     render(
@@ -99,13 +100,60 @@ describe('KbDocumentShell', () => {
     expect(box.className).toContain('h-full');
   });
 
+  /**
+   * `panel` is the reading view's COLUMN with full-bleed's HEIGHT — the one
+   * variant that has to agree with another one, so it is asserted against the
+   * prose column rather than against a list of classes copied out of
+   * `measure.ts`.
+   *
+   * The file page's history and comparison modes use it. They are viewports
+   * the way a PDF is, and they took 'full-bleed' for that reason; what they
+   * are not is a renderer the document makes room for. They stand IN the
+   * document's place, so the column has to stay exactly where the document
+   * left it, which is what this compares.
+   */
+  it('gives a panel the prose column, minus the rhythm a document ends on', () => {
+    const frameOf = (text: string) => (screen.getByText(text).parentElement as HTMLElement).className;
+
+    const prose = render(
+      <KbDocumentShell roomy>
+        <p>The document</p>
+      </KbDocumentShell>,
+    );
+    const reading = frameOf('The document');
+    prose.unmount();
+
+    render(
+      <KbDocumentShell variant="panel" roomy>
+        <p>The log</p>
+      </KbDocumentShell>,
+    );
+    const panel = frameOf('The log');
+
+    // The measure, the margins and the offset the band opens on: identical,
+    // and read off the reading view rather than restated.
+    for (const cls of ['mx-auto', 'max-w-[880px]', 'px-[64px]', 'max-[900px]:px-[18px]', 'pt-3']) {
+      expect(reading).toContain(cls);
+      expect(panel).toContain(cls);
+    }
+    // `roomy` reaches it too, or a panel would keep the nav's margins on a
+    // page that has hidden the nav.
+    expect(panel).not.toContain('px-[40px]');
+
+    // A definite height instead of the bottom rhythm — a column that ends
+    // where the pane does has nothing to leave room after.
+    expect(panel).toContain('h-full');
+    expect(panel).not.toContain('pb-[110px]');
+    expect(reading).toContain('pb-[110px]');
+  });
+
   // The regression this file exists for. `editorContainerRef` carries a
   // capture-phase scroll listener that is the file lock's ONLY activity signal
   // for someone who is reading rather than typing. Scroll events do not
   // bubble, so a ref on an element nested inside the scroller never fires —
   // and nothing type-errors when that happens; locks just silently drop out
   // from under readers after two minutes.
-  it.each(['prose', 'full-bleed'] as const)(
+  it.each(['prose', 'full-bleed', 'panel'] as const)(
     'lands scrollRef on the element that scrolls (%s)',
     (variant) => {
       const ref = createRef<HTMLDivElement>();

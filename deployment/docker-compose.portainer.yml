@@ -31,6 +31,9 @@ services:
 
   app:
     image: ghcr.io/bevel-software/hexis:${HEXIS_VERSION:-latest}
+    # Always pull, so a redeploy of `:latest` cannot start whatever build the
+    # host still holds under that tag. See the root docker-compose.yml.
+    pull_policy: always
     # Run node under a real init so PID 1 reaps orphaned git/shell
     # grandchildren; without it they accumulate as zombies until the
     # container's pid limit is hit. See the root docker-compose.yml.

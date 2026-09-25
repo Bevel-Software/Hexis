@@ -93,6 +93,13 @@ export interface McpProxyOptions {
   readAgentPreamble?: AgentPreambleReader;
   /** Bounds of the downstream (`mcp.json`) connection pool; defaults are 4h idle / 5000 entries. */
   downstreamPool?: Pick<DownstreamPoolOptions<unknown>, 'idleTtlMs' | 'maxEntries' | 'now'>;
+  /**
+   * The scope this knowledge base's secrets vault was registered under (see
+   * `secrets-variable-loader.ts`), so the UTCP clients built here resolve a
+   * caller's `${VAR}`s from that vault and no other's. Default: the single
+   * knowledge base's.
+   */
+  secretsScope?: string;
 }
 
 /** Who a request is from — everything the proxy needs, resolved from that request's own bearer. */
@@ -727,7 +734,7 @@ export class McpService {
    */
   private async buildClient(bearer: string, userId: string, manuals: CallTemplate[]): Promise<CodeModeUtcpClient> {
     const variables = seedBevelHostedManualVars(manuals, this.opts.loopbackBaseUrl, bearer);
-    return CodeModeUtcpClient.create(process.cwd(), utcpClientConfig(userId, variables));
+    return CodeModeUtcpClient.create(process.cwd(), utcpClientConfig(userId, variables, this.opts.secretsScope));
   }
 
   /**
@@ -959,7 +966,7 @@ export class McpService {
   private async connectDownstream(userId: string, template: CallTemplate): Promise<PooledDownstream> {
     // Third-party manuals are never seeded loopback credentials (see
     // `buildClient`), so a pooled client carries no request-scoped bearer.
-    const client = await CodeModeUtcpClient.create(process.cwd(), utcpClientConfig(userId, {}));
+    const client = await CodeModeUtcpClient.create(process.cwd(), utcpClientConfig(userId, {}, this.opts.secretsScope));
     // Our own copy: registration renames the template in place, and recovery
     // re-registers from exactly what discovery used.
     const own = structuredClone(template);
@@ -1240,10 +1247,10 @@ function isErrorResult(result: CallToolResult): boolean {
  * request clients and pooled downstream clients, so both resolve a manual's
  * variables through exactly the same tiers.
  */
-function utcpClientConfig(userId: string, variables: Record<string, string>) {
+function utcpClientConfig(userId: string, variables: Record<string, string>, secretsScope?: string) {
   return new UtcpClientConfigSerializer().validateDict({
     variables,
-    load_variables_from: [bevelSecretsLoaderConfig(userId)],
+    load_variables_from: [bevelSecretsLoaderConfig(userId, secretsScope)],
   });
 }
 

@@ -1,14 +1,13 @@
 import {
-  PLUGINS_DIR,
   PLUGIN_MANIFEST_FILE,
   PLUGIN_MCP_FILE,
-  DEFAULT_BRANCH,
   pluginOfPath,
   type ChangeRequest,
   type IWorkflowService,
+  type KbLayout,
 } from '@bevel-software/platform-shared';
 import { type WorkspaceService } from '../workspace/workspace.service.js';
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { readAt, visibleProposedFiles } from '../../shared/pending-proposals.js';
 import { utcpNamespacePrefix } from '../../shared/utcp-namespace.js';
@@ -56,6 +55,7 @@ export class PendingToolsService implements IPendingToolService {
     private readonly accessControl: IAccessControl,
     private readonly toolManuals: Pick<IToolManualService, 'listAllSummaries'>,
     private readonly workflow: IWorkflowService,
+    private readonly kb: KbContext,
   ) {}
 
   async listPendingTools(userEmail: string): Promise<PendingTool[]> {
@@ -72,19 +72,21 @@ export class PendingToolsService implements IPendingToolService {
       return [];
     }
 
+    const layout = this.kb.layout;
     const proposed = await visibleProposedFiles(
       {
         workspaceService: this.workspaceService,
         accessControl: this.accessControl,
         workflow: this.workflow,
+        kb: this.kb,
       },
       userEmail,
-      isToolDeclaration,
+      (p) => isToolDeclaration(p, layout),
     );
 
     const out: PendingTool[] = [];
     for (const { cr, path, content, isAuthor } of proposed) {
-      for (const descriptor of await this.declarationsIn(cr, path, content)) {
+      for (const descriptor of await this.declarationsIn(cr, path, content, layout)) {
         if (released.has(utcpNamespacePrefix(descriptor.name))) continue;
         out.push({
           slug: descriptor.slug,
@@ -92,7 +94,7 @@ export class PendingToolsService implements IPendingToolService {
           path: descriptor.path,
           type: descriptor.type,
           ...(descriptor.description ? { description: descriptor.description } : {}),
-          plugin: pluginOfPath(descriptor.path),
+          plugin: pluginOfPath(descriptor.path, layout),
           changeRequestNumber: cr.number,
           branch: cr.branch,
           authorName: cr.appAuthor?.name ?? cr.author.name ?? 'Someone',
@@ -118,8 +120,9 @@ export class PendingToolsService implements IPendingToolService {
     cr: ChangeRequest,
     path: string,
     content: string,
+    layout: KbLayout,
   ): Promise<ToolManualDescriptor[]> {
-    if (!isMcpJson(path)) {
+    if (!isMcpJson(path, layout)) {
       let descriptor: ToolManualDescriptor;
       try {
         descriptor = normalizeToolManual(baseName(path), path, content);
@@ -140,22 +143,22 @@ export class PendingToolsService implements IPendingToolService {
     // missing manifest costs a sentence, not the card. No separate access
     // check: this caller already passed the write gate on the `mcp.json`
     // beside it, which is the plugin folder's own verdict.
-    const pluginFolder = path.slice(`${PLUGINS_DIR}/`.length, -(PLUGIN_MCP_FILE.length + 1));
+    const pluginFolder = path.slice(`${layout.pluginsDir}/`.length, -(PLUGIN_MCP_FILE.length + 1));
     const manifest = await readAt(
       this.workspaceService,
-      workspaceIdForBranch(DEFAULT_BRANCH),
+      this.kb.defaultWorkspaceId(),
       cr.branch,
-      `${PLUGINS_DIR}/${pluginFolder}/${PLUGIN_MANIFEST_FILE}`,
+      `${layout.pluginsDir}/${pluginFolder}/${PLUGIN_MANIFEST_FILE}`,
     );
-    return descriptorsFromMcpJson(pluginFolder, content, manifest);
+    return descriptorsFromMcpJson(pluginFolder, content, manifest, layout);
   }
 }
 
 /** `Plugins/<…>/mcp.json` — a plugin's MCP server declarations. */
-function isMcpJson(repoRelPath: string): boolean {
+function isMcpJson(repoRelPath: string, layout: KbLayout): boolean {
   const segments = repoRelPath.split('/');
   return (
-    segments[0] === PLUGINS_DIR &&
+    segments[0] === layout.pluginsDir &&
     segments.length >= 3 &&
     segments[segments.length - 1] === PLUGIN_MCP_FILE
   );
@@ -169,11 +172,11 @@ function isMcpJson(repoRelPath: string): boolean {
  * or a plugin's `mcp.json`. `Plugins/mcp.json` is not one: there is no plugin
  * there for its servers to belong to.
  */
-function isToolDeclaration(repoRelPath: string): boolean {
+function isToolDeclaration(repoRelPath: string, layout: KbLayout): boolean {
   const segments = repoRelPath.split('/');
-  if (segments[0] !== PLUGINS_DIR || segments.length < 2) return false;
+  if (segments[0] !== layout.pluginsDir || segments.length < 2) return false;
   const last = segments[segments.length - 1] ?? '';
   // Case-insensitive, matching the catalog's own walk.
   if (last.toLowerCase().endsWith('.tool')) return true;
-  return isMcpJson(repoRelPath);
+  return isMcpJson(repoRelPath, layout);
 }

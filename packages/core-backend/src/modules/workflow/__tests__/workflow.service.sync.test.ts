@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { RemoteSyncPullResult } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
@@ -37,7 +38,7 @@ function build(opts: { sync: () => Promise<RemoteSyncPullResult> }) {
     {} as IAccessControl,
     {} as FileLockService,
     pendingCommits,
-    'knowledge-base',
+    testKbContext(),
     openChangeGate(),
     events,
   );
@@ -259,7 +260,7 @@ describe('WorkflowService.retireRemoteGoneClone', () => {
     const svc = new WorkflowService(
       {} as Database, git, {} as PullRequestService, {} as IReviewWorkflowService,
       workspaceService, {} as IAccessControl, {} as FileLockService, {} as PendingCommitsService,
-      'knowledge-base',
+      testKbContext(),
       openChangeGate(),
     );
     return { svc, git, workspaceService };
@@ -327,7 +328,7 @@ describe('WorkflowService.retireRemoteGoneClone — what can bring the branch ba
     const svc = new WorkflowService(
       {} as Database, git, {} as PullRequestService, {} as IReviewWorkflowService,
       workspaceService, {} as IAccessControl, {} as FileLockService, {} as PendingCommitsService,
-      'knowledge-base',
+      testKbContext(),
       openChangeGate(),
     );
     expect(await svc.retireRemoteGoneClone('ali%2Fx')).toBe(false);
@@ -356,7 +357,7 @@ describe('WorkflowService.retireRemoteGoneClone — what can bring the branch ba
     const svc = new WorkflowService(
       {} as Database, git, {} as PullRequestService, {} as IReviewWorkflowService,
       workspaceService, {} as IAccessControl, {} as FileLockService, {} as PendingCommitsService,
-      'knowledge-base',
+      testKbContext(),
       openChangeGate(),
     );
     // Retirement enters first; a createBranch for the same name arrives while

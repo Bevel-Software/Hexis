@@ -365,16 +365,33 @@ export function SidebarFrame({
               the seam under the toolbar; the page's title bar is the right
               half.
 
-              Keyed on whether the surface DECLARED a header, not on whether
-              that header drew anything. Knowledge and the Library both pass
-              the connect-your-agent pill, which renders nothing once
-              onboarding is done; if the row went with it, finishing setup
-              would pull the nav up by the band's height and leave the page's
-              title bar aligned to nothing. Settings passes no header at all
-              and gets no band, because it has no title bar on the other side
-              of the seam to hold a line with. */}
+              The band is spent on a header that DRAWS, and on nothing else.
+              It used to be keyed on whether the surface DECLARED one, on the
+              theory that a row coming and going with the connect-your-agent
+              pill would pull the nav up by the band's height the moment
+              onboarding finished. It does pull it up — onto the page title's
+              own band, which is where the nav's first row belongs. What the
+              old rule actually bought was an empty 48px strip above "Company
+              Context" and above the "Everything" lens, for everyone who had
+              finished setting the product up.
+
+              Settings passes no header at all and gets no band, because it
+              has no title bar on the other side of the seam to hold a line
+              with. Knowledge and the Library pass a pill that empties itself,
+              and get the band back the day it has something to say.
+
+              `empty:hidden` rather than a check in React, for the same reason
+              the footer group below uses it: an element that renders null is
+              still an element, so "did this header draw anything" is a
+              question only the DOM can answer. Which makes it the header's
+              business to leave NOTHING here when it has nothing — see
+              `ConnectAgentPill`, whose dismissal receipt goes to the body
+              rather than into this row. */}
           {header !== undefined && (
-            <div data-testid={SIDEBAR_HEADER_TESTID} className={cn(HEADER_BAND, 'w-full')}>
+            <div
+              data-testid={SIDEBAR_HEADER_TESTID}
+              className={cn(HEADER_BAND, 'w-full empty:hidden')}
+            >
               {header}
             </div>
           )}

@@ -292,6 +292,8 @@ dev or in production.
 
 - **[Configuration](docs/configuration.md)**: every environment variable, SSO
   setup, secret generation, backups and health.
+- **[Several knowledge bases in one process](docs/multi-tenant.md)**: the
+  tenants file, what is kept apart, and moving a tenant to its own deployment.
 - **[Troubleshooting](docs/troubleshooting.md)**: the failures you are most
   likely to hit, and what causes them.
 

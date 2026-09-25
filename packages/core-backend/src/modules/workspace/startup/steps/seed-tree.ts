@@ -1,11 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
-  AGENTS_FILE,
   LEGACY_AGENTS_FILE,
   renderKbLayoutPlaceholders,
 } from '@bevel-software/platform-shared';
 import type { IFsProbe, ITreeWalker } from '../../../../shared/fs.contract.js';
+import type { KbContext } from '../../../../shared/kb-context.js';
 import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
 import { reservedRootDirs } from './template-files.step.js';
 import { TEMPLATE_SOURCE_FALLBACKS, TemplateSource } from './template-source.js';
@@ -36,11 +36,12 @@ export function buildSeedTree(
   templateDir: string,
   extraRootDirs: readonly string[],
   seedAdminEmails: readonly string[],
+  /** Read per seed, never captured: the setup-completing save may apply the layout after this builder was composed. */
+  kb: Pick<KbContext, 'layout'>,
 ): (dir: string) => Promise<string[]> {
-  // Validated eagerly; resolved per seed. The core roots are live bindings the
-  // setup-completing save may configure after this builder was composed.
-  reservedRootDirs(extraRootDirs);
-  const seeder = new KbSeedTree(disk, new TemplateSource(disk, templateDir), extraRootDirs, seedAdminEmails);
+  // Validated eagerly; resolved per seed.
+  reservedRootDirs(extraRootDirs, kb.layout);
+  const seeder = new KbSeedTree(disk, new TemplateSource(disk, templateDir, kb), extraRootDirs, seedAdminEmails, kb);
   return (dir) => seeder.seed(dir);
 }
 
@@ -58,6 +59,7 @@ class KbSeedTree {
     private readonly templates: TemplateSource,
     private readonly extraRootDirs: readonly string[],
     private readonly seedAdminEmails: readonly string[],
+    private readonly kb: Pick<KbContext, 'layout'>,
   ) {}
 
   /** Fill `dir` with a complete knowledge base; resolve to what was GENERATED. */
@@ -72,7 +74,7 @@ class KbSeedTree {
     // root never gets a pointless placeholder beside it.
     // Resolved NOW, not when the builder was composed: a seed that runs on the
     // save completing first-run setup must lay down the names that save applied.
-    for (const rootDir of reservedRootDirs(this.extraRootDirs)) {
+    for (const rootDir of reservedRootDirs(this.extraRootDirs, this.kb.layout)) {
       const abs = path.join(dir, rootDir);
       const found = await this.disk.lstatOrNull(abs);
       if (found) {
@@ -149,7 +151,7 @@ class KbSeedTree {
     // `AGENTS.md` this seed had just laid down — two commits saying opposite
     // things about a knowledge base nobody had used yet.
     if (relDir === '' && name === LEGACY_AGENTS_FILE) {
-      await this.copyTemplateFile(name, dest, AGENTS_FILE);
+      await this.copyTemplateFile(name, dest, this.kb.layout.agentsFile);
       return;
     }
     // TWO template entries, ONE destination. A custom template that happens to
@@ -161,7 +163,7 @@ class KbSeedTree {
     // is the file the platform owns, refreshes from the packaged template on
     // every start and tells every agent to read. The twin is skipped, on the
     // same reasoning as the packable spelling above.
-    if (relDir === '' && name === AGENTS_FILE && (await this.templates.carries(LEGACY_AGENTS_FILE))) {
+    if (relDir === '' && name === this.kb.layout.agentsFile && (await this.templates.carries(LEGACY_AGENTS_FILE))) {
       return;
     }
     await this.copyTemplateFile(relDir ? path.join(relDir, name) : name, dest);
@@ -190,7 +192,7 @@ class KbSeedTree {
     if (text === null) {
       await fs.copyFile(from, to);
     } else {
-      await fs.writeFile(to, renderKbLayoutPlaceholders(text), 'utf8');
+      await fs.writeFile(to, renderKbLayoutPlaceholders(text, this.kb.layout), 'utf8');
     }
     await fs.chmod(to, (await fs.stat(from)).mode & 0o777);
   }

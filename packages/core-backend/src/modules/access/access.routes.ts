@@ -9,8 +9,6 @@ const grantLog = logger('access.grant');
 const revokeLog = logger('access.revoke');
 import type { AuthUser } from '@bevel-software/platform-shared';
 import {
-  isProtectedBranch,
-  DEFAULT_BRANCH,
   pluginManifestName,
   FOLDER_GOVERNS_ACCESS_KIND,
 } from '@bevel-software/platform-shared';
@@ -20,7 +18,8 @@ import type {
   GrantSources,
 } from './access-control.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { branchForWorkspaceId, workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { KbContext } from '../../shared/kb-context.js';
+import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { WorkflowService } from '../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
@@ -89,18 +88,19 @@ export function createAccessRoutes(
   workflowService: WorkflowService,
   eventBus: WorkflowEventBus,
   db: Database,
-  kbDirName: string,
+  kb: KbContext,
   /** This deployment's configured admins — the break-glass recovery roster. */
   recoveryAdmins: readonly string[] = [],
 ): express.Router {
   const router = express.Router({ mergeParams: true });
+  const { kbDirName } = kb;
   const mutation = new AccessMutationService(workspaceService, accessControl, kbDirName);
   const rolesAdmin = new RolesAdminService(
     workspaceService,
     workflowService,
     accessControl,
     kbDirName,
-    () => DEFAULT_BRANCH,
+    () => kb.defaultBranch,
     eventBus,
     recoveryAdmins,
   );
@@ -118,10 +118,8 @@ export function createAccessRoutes(
     groups: string[];
     plugins: { name: string; folder: string }[];
   }> => {
-    await workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
-    const { roles, groups, plugins } = await accessControl.kbPrincipals(
-      workspaceIdForBranch(DEFAULT_BRANCH),
-    );
+    await workspaceService.getOrCreateForBranch(kb.defaultBranch);
+    const { roles, groups, plugins } = await accessControl.kbPrincipals(kb.defaultWorkspaceId());
     // `plugins` is defensive: an older resolver double may omit it.
     return { roles, groups, plugins: plugins ?? [] };
   };
@@ -139,7 +137,7 @@ export function createAccessRoutes(
   ): Promise<{ name: string; folder: string }[]> => {
     if (plugins.length === 0) return [];
     const verdicts = await accessControl.canReadBatch(
-      workspaceIdForBranch(DEFAULT_BRANCH),
+      kb.defaultWorkspaceId(),
       email,
       plugins.map((p) => `${p.folder}/access.md`),
     );
@@ -711,7 +709,6 @@ export function createAccessRoutes(
     // resolves to false and is rejected above. Nothing extra needed here — but
     // keep the branch check explicit so the intent is legible.
     void branch;
-    void isProtectedBranch;
   }
 
   /**
@@ -1211,8 +1208,8 @@ export function createAccessRoutes(
 
   /** Fail-fast admin gate for the roles routes. Throws AccessDeniedError. */
   async function assertRolesAdmin(userEmail: string): Promise<void> {
-    await workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
-    await assertCanMutate(workspaceIdForBranch(DEFAULT_BRANCH), DEFAULT_BRANCH, userEmail, 'roles.yaml');
+    await workspaceService.getOrCreateForBranch(kb.defaultBranch);
+    await assertCanMutate(kb.defaultWorkspaceId(), kb.defaultBranch, userEmail, 'roles.yaml');
   }
 
   router.get('/access/roles', async (req, res) => {

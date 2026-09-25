@@ -15,6 +15,7 @@ import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { AccessMutationError, AccessMutationService } from '../access-mutation.service.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * A file that cannot carry frontmatter is never written by an access mutation.
@@ -158,7 +159,7 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
         workflowService,
         { emit: vi.fn() } as unknown as WorkflowEventBus,
         usersDbDouble(),
-        KB,
+        testKbContext({ kbDirName: KB }),
       ),
     );
     server = await new Promise<Server>((resolve) => {

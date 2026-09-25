@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { writeDenial } from '../write-denial.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import type { ChangeReadVerdict, IChangeReadGate } from '../../access-model/change-gate.js';
@@ -34,7 +35,7 @@ describe('writeDenial asks the read gate about the refused path as the refuser s
       eligibleUsers: [],
       targetKind: 'dir',
     });
-    const out = await writeDenial(err, INPUT, noAccess, KB, gate);
+    const out = await writeDenial(err, INPUT, noAccess, testKbContext({ kbDirName: KB }), gate);
     expect(judge).toHaveBeenCalledWith(
       'target-company-state',
       'alice@example.com',
@@ -48,7 +49,7 @@ describe('writeDenial asks the read gate about the refused path as the refuser s
   it('a refusal that says nothing about its kind is judged as a file', async () => {
     const { gate, judge } = gateThat({ allowed: false, unreadable: 'KnowledgeBase' });
     const err = new AccessDeniedError({ path: `${KB}/KnowledgeBase/loose.md`, eligibleRoles: [], eligibleUsers: [] });
-    const out = await writeDenial(err, INPUT, noAccess, KB, gate);
+    const out = await writeDenial(err, INPUT, noAccess, testKbContext({ kbDirName: KB }), gate);
     expect(judge).toHaveBeenCalledWith(expect.any(String), 'alice@example.com', `${KB}/KnowledgeBase/loose.md`, 'file');
     expect(out.details).toMatchObject({
       kind: 'write-denied',
@@ -60,7 +61,7 @@ describe('writeDenial asks the read gate about the refused path as the refuser s
   it('without a gate the read verdict alone decides, as before', async () => {
     const accessControl = { canRead: vi.fn(async () => true) } as unknown as IAccessControl;
     const err = new AccessDeniedError({ path: `${KB}/KnowledgeBase/Sales/deal.md`, eligibleRoles: [], eligibleUsers: [] });
-    const out = await writeDenial(err, INPUT, accessControl, KB);
+    const out = await writeDenial(err, INPUT, accessControl, testKbContext({ kbDirName: KB }));
     expect(accessControl.canRead).toHaveBeenCalledWith('target-company-state', 'alice@example.com', 'KnowledgeBase/Sales/deal.md');
     expect(out.details).toMatchObject({ kind: 'write-denied', canPropose: true });
   });
@@ -68,7 +69,7 @@ describe('writeDenial asks the read gate about the refused path as the refuser s
   it('a gate that cannot answer refuses to offer the route', async () => {
     const gate: IChangeReadGate = { judge: vi.fn(async () => { throw new Error('git down'); }), assertMayChange: vi.fn() };
     const err = new AccessDeniedError({ path: `${KB}/KnowledgeBase/Sales/deal.md`, eligibleRoles: [], eligibleUsers: [] });
-    const out = await writeDenial(err, INPUT, noAccess, KB, gate);
+    const out = await writeDenial(err, INPUT, noAccess, testKbContext({ kbDirName: KB }), gate);
     expect(out.details).toMatchObject({ canPropose: false });
     expect(out.details?.cannotProposeReason).toContain('could not be determined');
   });

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import AdmZip from 'adm-zip';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -55,7 +56,7 @@ async function makeHarness(): Promise<Harness> {
   const workspaceDir = path.join(root, workspaceId);
   // The inner `.git` lets the service accept the workspace without cloning.
   await fs.mkdir(path.join(workspaceDir, KB, '.git'), { recursive: true });
-  const workspaceService = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs());
+  const workspaceService = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
   await workspaceService.getWorkspacePath(workspaceId);
 
   const asked: string[] = [];
@@ -102,7 +103,7 @@ async function makeHarness(): Promise<Harness> {
       workflowService,
       { emit: vi.fn() } as unknown as WorkflowEventBus,
       accessControl,
-      KB,
+      testKbContext({ kbDirName: KB }),
       stubCreatorAccess,
       { isAdmin: async () => false } as unknown as IAdminAccessService,
       new NodeFs(),

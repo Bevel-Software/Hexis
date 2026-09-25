@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -63,7 +64,7 @@ describe('WorkspaceService — a branch origin does not have', () => {
   const deleteOnHost = (branch: string): Promise<void> => runGit(upstream, ['branch', '-D', branch]);
 
   const service = (repoUrl = upstream): WorkspaceService =>
-    new WorkspaceService(workspacesRoot, repoUrl, 'knowledge-base', new NodeFs());
+    new WorkspaceService(workspacesRoot, repoUrl, testKbContext(), new NodeFs());
 
   it('a name nothing has ever cloned or listed is a 404 that names only the branch', async () => {
     const svc = service();

@@ -1,5 +1,10 @@
 import { useState, useCallback, useContext, useEffect, useMemo, useRef } from 'react';
-import { DEFAULT_BRANCH, isProtectedBranch, type FileTreeEntry } from '@bevel-software/platform-shared';
+import {
+  DEFAULT_BRANCH,
+  currentBranchModel,
+  isProtectedBranch,
+  type FileTreeEntry,
+} from '@bevel-software/platform-shared';
 import { useEventBus, canonicalizeWorkspaceId } from '../../workflow/state/event-bus.context';
 import { AuthContext } from '../../auth/state/auth.context';
 import { fetchFileAccess } from '../../access/api';
@@ -810,7 +815,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const resolveSuggestionRouting = useCallback(
     async (targetDirectory: string): Promise<KnowledgeSuggestionTarget | null> => {
       if (!workspaceId || !kbDirName || !authUser) return null;
-      if (!isProtectedBranch(decodeURIComponent(workspaceId))) return null;
+      if (!isProtectedBranch(currentBranchModel(), decodeURIComponent(workspaceId))) return null;
       const prefix = `${kbDirName}/`;
       if (!targetDirectory.startsWith(prefix)) return null;
       const repoRelative = targetDirectory.slice(prefix.length);

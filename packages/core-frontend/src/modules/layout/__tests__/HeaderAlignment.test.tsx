@@ -17,6 +17,7 @@
  * rule the browser would get is the rule this test gets.
  */
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import type { ReactNode } from 'react';
 import { render, screen } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -116,6 +117,31 @@ function flattenCascadeLayers(css: string): string {
 }
 
 /**
+ * Every class a tree actually renders, harvested off the DOM.
+ *
+ * The candidate list has to hold every utility these assertions depend on —
+ * Tailwind emits no rule for a class nobody names — and the band wears more
+ * than `HEADER_BAND`. The sidebar's row adds `empty:hidden`, which is
+ * `SidebarFrame`'s own and the whole of the "a header that draws nothing
+ * reserves no band" rule; a list that named it by hand would keep compiling it
+ * long after the frame stopped using it, and every assertion below it would
+ * pass against a stylesheet describing an app that no longer exists.
+ *
+ * So the list is READ off a render instead. Rendered here before the
+ * stylesheet is in the document, which is fine: this only wants the class
+ * attributes, and unmounts before any test runs.
+ */
+function classesRendered(tree: ReactNode): string[] {
+  const { container, unmount } = render(tree);
+  const found = new Set<string>();
+  for (const element of container.querySelectorAll<HTMLElement>('*')) {
+    for (const cls of element.classList) found.add(cls);
+  }
+  unmount();
+  return [...found];
+}
+
+/**
  * `--spacing-header` as the BUILD resolves it, read back out of the compiled
  * CSS. Not out of `tokens.css`: a value a test parses from source is a value
  * the test has decided for itself, and what the seam depends on is the one
@@ -151,15 +177,27 @@ let stylesheet: HTMLStyleElement;
 beforeAll(async () => {
   // The candidates are the band's own classes, read off the constant the app
   // renders — `flex h-header flex-none items-center` today, whatever it says
-  // tomorrow. `HEADER_COLUMN_TOP` rides along because the column's offset is
-  // the other half of the seam.
-  const css = await compileAppStylesheet(`${HEADER_BAND} ${HEADER_COLUMN_TOP}`.split(/\s+/));
+  // tomorrow — plus every class a real `SidebarFrame` puts on the row, which
+  // is where `empty:hidden` comes from. `HEADER_COLUMN_TOP` rides along
+  // because the column's offset is the other half of the seam.
+  const css = await compileAppStylesheet([
+    ...`${HEADER_BAND} ${HEADER_COLUMN_TOP}`.split(/\s+/),
+    ...classesRendered(
+      <SidebarFrame label="File explorer" header={<div>Connect your agent</div>}>
+        <nav>tree</nav>
+      </SidebarFrame>,
+    ),
+  ]);
 
   // The compiled output has to CONTAIN the height utility, or the rest of
   // this file is measuring an element with no rule behind it and every
   // `auto === auto` comparison passes. This is the assertion that catches a
   // Tailwind or configuration regression rather than a markup one.
   expect(css).toMatch(/\.h-header\s*\{[^}]*height:\s*var\(--spacing-header\)/);
+  // Same for the rule that TAKES the band away again. Without it, the
+  // empty-header case below would read an element with no display rule on it
+  // and call the band gone on the strength of a default.
+  expect(css).toMatch(/:empty\s*\{[^}]*display:\s*none/);
   headerHeight = tokenHeightIn(css);
 
   stylesheet = document.createElement('style');
@@ -243,6 +281,16 @@ const heightOf = (testId: string) =>
 const columnOf = (testId: string) => screen.getByTestId(testId).parentElement!;
 
 /**
+ * A column's top-padding classes — what decides where its first row starts.
+ *
+ * Compared between the two columns rather than against a literal: the number
+ * lives in `HEADER_COLUMN_TOP` and moving it is allowed, moving it on one
+ * side only is the bug.
+ */
+const offsetClassesOf = (column: Element) =>
+  [...column.classList].filter((cls) => cls.startsWith('pt-'));
+
+/**
  * Everything drawn above a band inside its own column.
  *
  * Zero is the contract. Anything here is vertical space between the column's
@@ -301,19 +349,72 @@ describe('the sidebar header row and the page title bar', () => {
     }
   });
 
-  it('reserves the row for a header that draws nothing', () => {
+  it('spends the row on a header that draws', () => {
+    render(
+      <SidebarFrame label="File explorer" header={<div>Connect your agent</div>}>
+        <nav>tree</nav>
+      </SidebarFrame>,
+    );
+    const band = screen.getByTestId(SIDEBAR_HEADER_TESTID);
+    expect(band).not.toBeEmptyDOMElement();
+    expect(window.getComputedStyle(band).display).not.toBe('none');
+    expect(heightOf(SIDEBAR_HEADER_TESTID)).toBe(headerHeight);
+  });
+
+  it('reserves no row for a header that draws nothing', () => {
     // Knowledge and the Library both pass the connect-your-agent pill, which
-    // renders NOTHING once onboarding is done. If the row collapsed with it,
-    // the page's title bar would be left lined up against a nav that had
-    // moved a band's height up — the seam would break for exactly the people
-    // who have finished setting the product up.
+    // draws NOTHING once onboarding is done. The band used to stay anyway, on
+    // the theory that a row coming and going would break the seam — and what
+    // it actually did was open the nav a band's height BELOW the page title
+    // beside it, for everyone who had finished setting the product up.
+    //
+    // Measured against the real sheet, not read off the class list: what this
+    // has to be true of is the box the browser lays out, and a `hidden`
+    // variant that Tailwind stopped emitting would leave the class in place
+    // and the strip on the screen.
     const DismissedPill = () => null;
     render(
       <SidebarFrame label="File explorer" header={<DismissedPill />}>
         <nav>tree</nav>
       </SidebarFrame>,
     );
-    expect(heightOf(SIDEBAR_HEADER_TESTID)).toBe(headerHeight);
+    const band = screen.getByTestId(SIDEBAR_HEADER_TESTID);
+    expect(band).toBeEmptyDOMElement();
+    expect(window.getComputedStyle(band).display).toBe('none');
+  });
+
+  it('opens the nav on the page title band once the header is done drawing', () => {
+    // The consequence, in the seam's own terms: with the band gone, the
+    // sidebar's first ROW is the first thing in the sidebar's column, and the
+    // page's title bar is the first thing in the page's. Both columns open on
+    // `HEADER_COLUMN_TOP`, so both start at the same offset — which is AC1's
+    // "their top edges align", as structurally as a DOM with no layout engine
+    // can put it.
+    const DismissedPill = () => null;
+    render(
+      <>
+        <SidebarFrame label="File explorer" header={<DismissedPill />}>
+          <nav>Company Context</nav>
+        </SidebarFrame>
+        <KbDocumentShell header={<PageHeader />}>
+          <p>The document</p>
+        </KbDocumentShell>
+      </>,
+    );
+    const nav = screen.getByText('Company Context');
+    const titleBar = screen.getByTestId(PAGE_HEADER_TESTID);
+    const offset = offsetClassesOf(nav.parentElement!);
+    // Non-empty first: two columns that have both lost their offset agree
+    // about nothing, and an `[] === []` pass is exactly how this assertion
+    // would stop noticing.
+    expect(offset).toEqual(HEADER_COLUMN_TOP.split(/\s+/));
+    expect(offsetClassesOf(titleBar.parentElement!)).toEqual(offset);
+    // And nothing between the sidebar column's top edge and that first row
+    // takes any height: the collapsed band is all there is, and it is gone.
+    for (let node = nav.previousElementSibling; node; node = node.previousElementSibling) {
+      expect(window.getComputedStyle(node).display).toBe('none');
+    }
+    expect(drawnAbove(PAGE_HEADER_TESTID)).toEqual([]);
   });
 
   it('renders no band for a surface that declares no header', () => {

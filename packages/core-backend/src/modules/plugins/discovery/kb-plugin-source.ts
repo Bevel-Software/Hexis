@@ -1,7 +1,8 @@
 import path from 'node:path';
-import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, pluginManifestName } from '@bevel-software/platform-shared';
+import { PLUGIN_MANIFEST_FILE, pluginManifestName, type KbLayout } from '@bevel-software/platform-shared';
 import type { DiscoveredPlugin, Discovery, PluginSource, PluginSourceWalk } from './plugin-source.js';
 import type { IFsProbe, ITreeWalker, WalkListener } from '../../../shared/fs.contract.js';
+import type { KbContext } from '../../../shared/kb-context.js';
 import { readNativePlugin } from './native.source.js';
 import { BUNDLE_FILE, loadRegistry, readBundlePlugin } from './bundle-dialect/bundle.source.js';
 import type { McpRegistry } from './bundle-dialect/registry.js';
@@ -38,7 +39,11 @@ import type { McpRegistry } from './bundle-dialect/registry.js';
 export class KbPluginSource implements PluginSource {
   readonly dialect = 'kb';
 
-  constructor(private readonly disk: ITreeWalker & IFsProbe) {}
+  constructor(
+    private readonly disk: ITreeWalker & IFsProbe,
+    /** Read per walk, never captured: the plugins root is renameable from the setup screen. */
+    private readonly kb: Pick<KbContext, 'layout'>,
+  ) {}
 
   async discover(kbRoot: string): Promise<Discovery> {
     return (await this.walkWith(kbRoot, [])).discovery;
@@ -47,7 +52,7 @@ export class KbPluginSource implements PluginSource {
   async walkWith(kbRoot: string, listeners: readonly WalkListener[]): Promise<PluginSourceWalk> {
     const warnings: string[] = [];
     const registry = await loadRegistry(kbRoot, warnings);
-    const listener = pluginListener(this.disk, kbRoot, registry, warnings);
+    const listener = pluginListener(this.disk, kbRoot, this.kb.layout, registry, warnings);
     const { holes } = await this.disk.walkKb(kbRoot, [listener.listener, ...listeners]);
     return { discovery: listener.result(), holes };
   }
@@ -57,16 +62,18 @@ export class KbPluginSource implements PluginSource {
 function pluginListener(
   disk: IFsProbe,
   kbRoot: string,
+  layout: KbLayout,
   registry: McpRegistry | null,
   warnings: string[],
 ): { listener: WalkListener; result(): Discovery } {
+  const { pluginsDir } = layout;
   const unreadable: string[] = [];
   const plugins: DiscoveredPlugin[] = [];
   const seen = new Map<string, string>();
   /** Folders claimed as plugins (or as holes standing where a plugin may be): nothing beneath is looked at. */
   const claimed: string[] = [];
 
-  const underRoot = (rel: string) => rel === PLUGINS_DIR || rel.startsWith(`${PLUGINS_DIR}/`);
+  const underRoot = (rel: string) => rel === pluginsDir || rel.startsWith(`${pluginsDir}/`);
   const beneathClaimed = (rel: string) => claimed.some((c) => rel === c || rel.startsWith(`${c}/`));
 
   // Uniqueness is judged on the MANIFEST SLUG, not the raw name: `Sales Team`
@@ -87,18 +94,18 @@ function pluginListener(
   return {
     listener: {
       async onDir(rel, entries) {
-        if (!underRoot(rel) || rel === PLUGINS_DIR || beneathClaimed(rel)) return;
+        if (!underRoot(rel) || rel === pluginsDir || beneathClaimed(rel)) return;
         const has = (name: string) => entries.some((e) => e.isFile() && e.name === name);
         const dir = path.join(kbRoot, rel);
-        const relFolder = rel.slice(PLUGINS_DIR.length + 1);
+        const relFolder = rel.slice(pluginsDir.length + 1);
         if (has(PLUGIN_MANIFEST_FILE)) {
           claimed.push(rel);
           // A manifest that could not be read: a hole, and still claimed.
-          const native = await readNativePlugin(disk, dir, rel, relFolder, warnings, unreadable);
+          const native = await readNativePlugin(disk, dir, rel, relFolder, warnings, unreadable, layout);
           if (native) claim(native);
         } else if (has(BUNDLE_FILE)) {
           claimed.push(rel);
-          const bundle = await readBundlePlugin(dir, rel, relFolder, registry, warnings, unreadable);
+          const bundle = await readBundlePlugin(dir, rel, relFolder, registry, warnings, unreadable, layout);
           if (bundle) claim(bundle);
         }
       },

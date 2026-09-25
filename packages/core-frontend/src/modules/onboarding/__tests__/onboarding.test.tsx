@@ -14,6 +14,8 @@ import { WELCOME_PATH } from '../paths';
 import { resetOnboardingForTests } from '../state/onboarding';
 import { configureMcpUrl } from '../../../shared/mcp';
 import { setSidebarCollapsed, useSidebar } from '../../layout/state/sidebar';
+import { SidebarFrame } from '../../layout/components/SidebarFrame';
+import { SIDEBAR_HEADER_TESTID } from '../../../shared/theme/header';
 
 /**
  * The onboarding contract, end to end on the client:
@@ -833,6 +835,47 @@ describe('ConnectAgentPill', () => {
     mountPill();
     await userEvent.click(screen.getByRole('button', { name: /^Dismiss/ }));
     expect(JSON.parse(String(fetchInit()?.body))).toEqual({ userId: 'u1' });
+  });
+
+  /**
+   * The pill fills `SidebarFrame`'s header band, which is spent on a header
+   * that DRAWS and collapses (`empty:hidden`) for one that does not. "Does
+   * not" is read off the DOM — an element that renders null is still an
+   * element — so a pill with nothing to say has to leave the row literally
+   * empty, and its dismissal receipt goes to the body rather than sitting in
+   * the band invisibly holding 48px open above "Company Context".
+   *
+   * Both halves in one test on purpose: an empty row that had lost the
+   * announcement with it would pass the first assertion and be a regression.
+   */
+  it('leaves the header band empty once onboarding is done, and still says so out loud', async () => {
+    mount(
+      <SidebarFrame label="Library navigation" header={<ConnectAgentPill />}>
+        <nav>Company Context</nav>
+      </SidebarFrame>,
+      newUser(),
+      '/skills-and-tools',
+    );
+    const band = screen.getByTestId(SIDEBAR_HEADER_TESTID);
+    expect(band).not.toBeEmptyDOMElement();
+
+    await userEvent.click(screen.getByRole('button', { name: /^Dismiss/ }));
+
+    expect(band).toBeEmptyDOMElement();
+    expect(
+      screen.getAllByRole('status').some((r) => /Reminder dismissed/.test(r.textContent ?? '')),
+    ).toBe(true);
+  });
+
+  it('leaves it empty for an account that was already done', () => {
+    mount(
+      <SidebarFrame label="Library navigation" header={<ConnectAgentPill />}>
+        <nav>Company Context</nav>
+      </SidebarFrame>,
+      doneUser(),
+      '/skills-and-tools',
+    );
+    expect(screen.getByTestId(SIDEBAR_HEADER_TESTID)).toBeEmptyDOMElement();
   });
 
   /**

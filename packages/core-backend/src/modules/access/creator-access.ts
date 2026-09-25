@@ -33,6 +33,7 @@ import { printable } from '../../shared/printable.js';
 const log = logger('creator-access');
 
 import type { IFsProbe } from '../../shared/fs.contract.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from './access-control.interface.js';
 import { spliceGrant, type Principal } from '../access-model/access-splice.js';
@@ -49,9 +50,13 @@ export class CreatorAccessService implements ICreatorAccess {
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly accessControl: IAccessControl,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
     private readonly disk: IFsProbe,
   ) {}
+
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
+  }
 
   /**
    * Whether something is at `abs`. Links are NOT followed: a link, dangling
@@ -106,7 +111,7 @@ export class CreatorAccessService implements ICreatorAccess {
     const segments = rel.split('/');
     if (kind === 'file') segments.pop();
     const root = segments[0];
-    if (root === undefined || segments.length < 2 || !creatableRootDirNames().has(root)) return null;
+    if (root === undefined || segments.length < 2 || !creatableRootDirNames(this.kb.layout).has(root)) return null;
     const top = `${root}/${segments[1]}`;
     try {
       if (await this.exists(path.join(repoDir, top))) return null;

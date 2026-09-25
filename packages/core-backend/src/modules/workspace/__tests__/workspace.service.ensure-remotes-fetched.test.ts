@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -44,9 +45,8 @@ describe('WorkspaceService.ensureRemotesFetched', () => {
     new WorkspaceService(
       root,
       'https://example.test/kb.git',
-      'knowledge-base',
+      testKbContext(),
       new NodeFs(),
-      'x-access-token',
       runner,
     );
 

@@ -4,7 +4,7 @@ import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { DEFAULT_BRANCH, type AuthUser } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, withLinkedSkillRoots, type AuthUser } from '@bevel-software/platform-shared';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../../access/access-control.service.js';
@@ -13,6 +13,7 @@ import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { PluginLinkIndex } from '../plugin-links.js';
 import { PluginLinksService, PluginLinkError } from '../plugin-links.service.js';
 import type { ProvisionCommitDriver } from '../plugin-provision.service.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * Linking end to end over a real tree: the real resolver decides who may
@@ -36,6 +37,10 @@ describe('PluginLinksService', () => {
   let root: string;
   let repo: string;
   let commits: string[];
+  /** The commit SUBJECT each of those landed with — `undefined` = the default. */
+  let subjects: (string | undefined)[];
+  /** Set to make the commit driver refuse every path containing it. */
+  let failCommitsUnder: string | null;
   let access: AccessControlService;
   let skills: SkillService;
   let index: PluginLinkIndex;
@@ -52,6 +57,8 @@ describe('PluginLinksService', () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-links-'));
     repo = path.join(root, wsId, KB_DIR);
     commits = [];
+    subjects = [];
+    failCommitsUnder = null;
     const workspaceService = {
       getOrCreateForBranch: async () => ({ id: wsId }),
       getWorkspacePath: async (id: string) => path.join(root, id),
@@ -64,8 +71,12 @@ describe('PluginLinksService', () => {
       ensureRemotesFetched: async () => undefined,
     } as unknown as WorkspaceService;
     const driver: ProvisionCommitDriver = {
-      runPendingCommit: async (_ws, _branch, target) => {
+      runPendingCommit: async (_ws, _branch, target, _user, opts) => {
+        if (failCommitsUnder !== null && target.includes(failCommitsUnder)) {
+          throw new Error('the push gate said no');
+        }
         commits.push(target);
+        subjects.push(opts?.summary);
       },
     };
 
@@ -84,9 +95,10 @@ describe('PluginLinksService', () => {
 
     const disk = new NodeFs();
     access = new AccessControlService(workspaceService, KB_DIR, disk);
-    skills = new SkillService(workspaceService, access, KB_DIR, disk);
-    index = new PluginLinkIndex(workspaceService, skills, access, KB_DIR, new KbPluginSource(disk));
-    svc = new PluginLinksService(workspaceService, driver, access, skills, index, KB_DIR);
+    const kb = testKbContext({ kbDirName: KB_DIR });
+    skills = new SkillService(workspaceService, access, kb, disk);
+    index = new PluginLinkIndex(workspaceService, skills, access, kb, new KbPluginSource(disk, kb));
+    svc = new PluginLinksService(workspaceService, driver, access, skills, index, kb);
   });
   afterEach(() => fs.rm(root, { recursive: true, force: true }));
 
@@ -280,5 +292,208 @@ describe('PluginLinksService', () => {
     skills.invalidate();
     index.invalidate();
     expect(await index.pluginsOf('Plugins/GTM/skills/outreach')).toEqual([{ name: 'gtm', linked: false, granted: true }]);
+  });
+
+  /**
+   * A link written into the manifest WITHOUT its grants — the hand edit this
+   * whole surface exists for. `link()` writes both lines; every test below is
+   * about what the index and the repair say when they are absent.
+   */
+  const linkByHand = async (...roots: string[]) => {
+    await write(
+      'Plugins/GTM/plugin.json',
+      `${JSON.stringify(withLinkedSkillRoots({ name: 'gtm', version: '1.0.0' }, roots), null, 2)}\n`,
+    );
+    access.invalidate(wsId);
+    skills.invalidate();
+    index.invalidate();
+  };
+
+  /** Whether the index calls the link to one skill healthy. */
+  const grantedOf = async (skillPath: string) =>
+    (await index.pluginsOf(skillPath)).find((m) => m.name === 'gtm')?.granted;
+
+  describe('granted — the two lines at the root, and nothing else', () => {
+    it('a PUBLIC root is not granted: the grant is the link, not the readability', async () => {
+      // The demo-core shape: the repository root says `read: everyone`, so
+      // GTM's members can read the skill and the link still names nothing.
+      await write('access.md', '---\n---\nread:\n  - everyone\nwrite:\n  - Admin\n');
+      await linkByHand('Skills/Eng/deploy');
+
+      expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
+      expect(await grantedOf('Skills/Eng/deploy')).toBe(false);
+    });
+
+    it('a plugin grant INHERITED from a folder above the root does not count', async () => {
+      await write(
+        'Skills/Eng/access.md',
+        '---\n---\nread:\n  - plugin/gtm/read\nwrite:\n  - Eve <eve@x.io>\n  - plugin/gtm/write\n',
+      );
+      await linkByHand('Skills/Eng/deploy');
+
+      // The members CAN read it — and the root the manifest names still says
+      // nothing about GTM, so the link is one edit of Skills/Eng away from
+      // silently sharing nothing.
+      expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
+      expect(await grantedOf('Skills/Eng/deploy')).toBe(false);
+    });
+
+    it('both lines at the root are granted; a deny BELOW the root is not', async () => {
+      await write(
+        'Skills/Eng/access.md',
+        '---\n---\nread:\n  - plugin/gtm/read\nwrite:\n  - Eve <eve@x.io>\n  - plugin/gtm/write\n',
+      );
+      await write('Skills/Eng/rollback/access.md', '---\n---\nread:\n  - deny plugin/gtm/read\n');
+      await linkByHand('Skills/Eng');
+
+      expect(await grantedOf('Skills/Eng/deploy')).toBe(true);
+      expect(await grantedOf('Skills/Eng/rollback')).toBe(false);
+    });
+
+    it('a deny AT the root beside the lines is not granted — the deny is the operator\'s', async () => {
+      // What a repair leaves behind when someone has denied the plugin: the
+      // grant is spliced in, the deny stays, and the link stays broken.
+      await write(
+        'Skills/Eng/deploy/access.md',
+        '---\n---\nread:\n  - plugin/gtm/read\n  - deny plugin/gtm/read\nwrite:\n  - plugin/gtm/write\n',
+      );
+      await linkByHand('Skills/Eng/deploy');
+
+      expect(await grantedOf('Skills/Eng/deploy')).toBe(false);
+    });
+  });
+
+  describe('repairAll — what opening the plugin page runs', () => {
+    it('does not call a link denied at its root repaired: nothing to write, and the banner keeps it', async () => {
+      // The lines are there; a `deny` beside them is what breaks the link.
+      // The repair has nothing to write, and a root it did not write is not
+      // one it fixed — reporting it repaired would hide it from the one
+      // person who could act, and reload the page for nothing.
+      await write(
+        'Skills/Eng/deploy/access.md',
+        '---\n---\nread:\n  - plugin/gtm/read\n  - deny plugin/gtm/read\nwrite:\n  - Mia <mia@x.io>\n  - plugin/gtm/write\n',
+      );
+      await linkByHand('Skills/Eng/deploy');
+      commits.length = 0;
+
+      const report = await svc.repairAll(manager, 'gtm');
+      expect(report.repaired).toEqual([]);
+      expect(report.skipped).toMatchObject([
+        { root: 'Skills/Eng/deploy', reason: 'denied', skills: [{ path: 'Skills/Eng/deploy', name: 'deploy' }] },
+      ]);
+      // Eve edits Skills/Eng (the fixture's own rule) and Mia the root itself:
+      // both can remove the deny, so both are named.
+      expect(report.skipped[0].editors.users.map((u) => u.email).sort()).toEqual(['eve@x.io', 'mia@x.io']);
+      expect(commits).toEqual([]);
+      expect(await grantedOf('Skills/Eng/deploy')).toBe(false);
+    });
+
+    it('repairs every link the writer may write, silently, and says nothing about them', async () => {
+      await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Eve <eve@x.io>\n  - Mia <mia@x.io>\n');
+      await linkByHand('Skills/Eng/deploy', 'Skills/Eng/rollback');
+      commits.length = 0;
+      subjects.length = 0;
+
+      expect(await svc.repairAll(manager, 'gtm')).toEqual({
+        repaired: ['Skills/Eng/deploy', 'Skills/Eng/rollback'],
+        skipped: [],
+      });
+      expect(commits).toEqual([
+        `${KB_DIR}/Skills/Eng/deploy/access.md`,
+        `${KB_DIR}/Skills/Eng/rollback/access.md`,
+      ]);
+      // The commit is the only trace a silent repair leaves, so it has to
+      // explain itself.
+      expect(subjects).toEqual([
+        'Repair link: gtm → Skills/Eng/deploy (automatic, on opening the plugin page)',
+        'Repair link: gtm → Skills/Eng/rollback (automatic, on opening the plugin page)',
+      ]);
+      expect(await grantedOf('Skills/Eng/deploy')).toBe(true);
+      expect(await grantedOf('Skills/Eng/rollback')).toBe(true);
+    });
+
+    it('writes exactly what the manual repair writes', async () => {
+      await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Mia <mia@x.io>\n');
+      await linkByHand('Skills/Eng/deploy', 'Skills/Eng/rollback');
+
+      await svc.repair(manager, 'gtm', 'Skills/Eng/deploy');
+      await svc.repairAll(manager, 'gtm');
+      expect(await read('Skills/Eng/rollback/access.md')).toEqual(
+        await read('Skills/Eng/deploy/access.md'),
+      );
+    });
+
+    it('leaves a link the writer may not repair alone, and names who can', async () => {
+      // Skills/Eng is Eve's. Mia manages GTM and nothing else.
+      await linkByHand('Skills/Eng/deploy');
+      commits.length = 0;
+
+      const report = await svc.repairAll(manager, 'gtm');
+      expect(report.repaired).toEqual([]);
+      expect(report.skipped).toEqual([
+        {
+          root: 'Skills/Eng/deploy',
+          reason: 'needs-skill-write',
+          skills: [{ path: 'Skills/Eng/deploy', name: 'deploy' }],
+          // Admin holds the write floor on any access.md, so an admin can
+          // always repair a link; the eligible lists carry no display names,
+          // so Eve is named by the address a reader can write to.
+          editors: { roles: ['Admin'], users: [{ name: 'eve@x.io', email: 'eve@x.io' }] },
+        },
+      ]);
+      expect(commits).toEqual([]);
+      expect(await grantedOf('Skills/Eng/deploy')).toBe(false);
+    });
+
+    it('is refused for someone who may not write the plugin — the same 404 as an unknown one', async () => {
+      await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Sam <sam@x.io>\n');
+      await linkByHand('Skills/Eng/deploy');
+
+      await expect(svc.repairAll(member, 'gtm')).rejects.toMatchObject({ status: 404 });
+      await expect(svc.repairAll(manager, 'Ghost')).rejects.toMatchObject({ status: 404 });
+      // Sam may write the skill; being unable to write GTM is what stopped it.
+      expect(commits).toEqual([]);
+      expect(await grantedOf('Skills/Eng/deploy')).toBe(false);
+    });
+
+    it('writes nothing the second time: a root that already carries both lines is left alone', async () => {
+      await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Mia <mia@x.io>\n');
+      await linkByHand('Skills/Eng/deploy');
+      await svc.repairAll(manager, 'gtm');
+      commits.length = 0;
+
+      expect(await svc.repairAll(manager, 'gtm')).toEqual({ repaired: [], skipped: [] });
+      expect(commits).toEqual([]);
+      const rules = await read('Skills/Eng/deploy/access.md');
+      expect(rules.match(/plugin\/gtm\/read/g)).toHaveLength(1);
+      expect(rules.match(/plugin\/gtm\/write/g)).toHaveLength(1);
+    });
+
+    it('a repair that fails leaves the others repaired, and stays in the report', async () => {
+      await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Eve <eve@x.io>\n  - Mia <mia@x.io>\n');
+      await linkByHand('Skills/Eng/deploy', 'Skills/Eng/rollback');
+      failCommitsUnder = 'Skills/Eng/rollback';
+      commits.length = 0;
+
+      const report = await svc.repairAll(manager, 'gtm');
+      expect(report.repaired).toEqual(['Skills/Eng/deploy']);
+      expect(report.skipped).toMatchObject([{ root: 'Skills/Eng/rollback', reason: 'failed' }]);
+      // Eve and Mia both edit the scope, so both are named as able to repair it.
+      expect(report.skipped[0].editors.users.map((u) => u.email).sort()).toEqual([
+        'eve@x.io',
+        'mia@x.io',
+      ]);
+      expect(commits).toEqual([`${KB_DIR}/Skills/Eng/deploy/access.md`]);
+      expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/gtm/read');
+    });
+
+    it('has nothing to do for a plugin whose links are all healthy', async () => {
+      await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Mia <mia@x.io>\n');
+      await svc.link(manager, 'gtm', 'Skills/Eng/deploy');
+      commits.length = 0;
+
+      expect(await svc.repairAll(manager, 'gtm')).toEqual({ repaired: [], skipped: [] });
+      expect(commits).toEqual([]);
+    });
   });
 });

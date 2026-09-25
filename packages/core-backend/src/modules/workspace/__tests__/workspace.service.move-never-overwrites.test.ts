@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -57,7 +58,7 @@ describe('WorkspaceService.moveEntry — a name that is taken is refused, never 
     svc = new WorkspaceService(
       root,
       'https://github.com/Bevel-Software/knowledge-base.git',
-      KB,
+      testKbContext({ kbDirName: KB }),
       new NodeFs(),
     );
   });

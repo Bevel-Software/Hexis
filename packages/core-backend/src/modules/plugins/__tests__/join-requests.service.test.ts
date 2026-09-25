@@ -9,6 +9,7 @@ import {
 import { type WorkspaceService } from '../../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { JoinRequestsService } from '../join-requests.service.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * The derived lifecycle: a join request is open exactly while its branch's
@@ -54,7 +55,7 @@ function makeHarness(byRef: Record<string, string>) {
     rejectChangeRequest: vi.fn(async () => ({ number: 7, state: 'closed' })),
     deleteBranch: vi.fn(async () => undefined),
   } as unknown as IWorkflowService;
-  return { svc: new JoinRequestsService(workspaceService, workflow), workflow, workspaceService };
+  return { svc: new JoinRequestsService(workspaceService, workflow, testKbContext()), workflow, workspaceService };
 }
 
 const refs = (branchMd: string | undefined, defaultMd = DEFAULT_MD) => ({

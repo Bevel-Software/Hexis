@@ -1,7 +1,6 @@
 import express from 'express';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { IPendingSkillService, ISkillService, PluginMembership } from './skills.contract.js';
 import type { IAllowedToolsChecker } from './allowed-tools-check.js';
 
@@ -37,6 +36,8 @@ export interface SkillMembershipGate {
  */
 export function createSkillsRoutes(
   skillService: ISkillService,
+  /** The released branch's clone — where the discoverability verdicts are read. */
+  kb: Pick<KbContext, 'defaultWorkspaceId'>,
   pendingSkills?: IPendingSkillService,
   links?: SkillMembershipSource,
   /**
@@ -75,7 +76,7 @@ export function createSkillsRoutes(
         const folders = [...membership.byPlugin.entries()];
         const verdicts = folders.length
           ? await gate.canReadBatch(
-              workspaceIdForBranch(DEFAULT_BRANCH),
+              kb.defaultWorkspaceId(),
               email,
               folders.map(([, p]) => `${p.folder}/access.md`),
             )

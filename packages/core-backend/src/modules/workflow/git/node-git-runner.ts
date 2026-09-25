@@ -1,7 +1,10 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import {
+  GIT_TOKEN_ENV,
   GitRunError,
+  NO_GIT_CREDENTIALS,
   redactGitToken,
+  type GitCredentials,
   type GitRunOptions,
   type GitRunResult,
   type IGitRunner,
@@ -212,7 +215,33 @@ function spawnGit(args: string[], options: SpawnOptions & { maxBuffer: number })
  * `WorkspaceMutex`'s job and stays the caller's to have done.
  */
 export class NodeGitRunner implements IGitRunner {
-  constructor(readonly defaultTimeoutMs: number = DEFAULT_GIT_TIMEOUT_MS) {}
+  constructor(
+    readonly defaultTimeoutMs: number = DEFAULT_GIT_TIMEOUT_MS,
+    /**
+     * What every call authenticates with. The token goes into the CHILD's
+     * environment only (see {@link childEnv}); a runner built without one
+     * runs git unauthenticated, which is what a directly constructed service
+     * in a test gets.
+     */
+    readonly credentials: GitCredentials = NO_GIT_CREDENTIALS,
+  ) {}
+
+  /**
+   * The environment one invocation runs under. The token in effect goes in
+   * under {@link GIT_TOKEN_ENV}, and a stale one this process inherited from
+   * its own environment goes OUT: a server hosting several knowledge bases
+   * must never let one knowledge base's git call find another's token, or an
+   * operator's, lying in `process.env`. A caller's per-call entry still wins
+   * over the provider's (the setup probe runs with the token it is checking,
+   * not the one in effect), and the fixed entries win over everything.
+   */
+  private childEnv(overrides: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    delete env[GIT_TOKEN_ENV];
+    const token = this.credentials.token();
+    if (token) env[GIT_TOKEN_ENV] = token;
+    return { ...env, ...overrides, ...FIXED_ENV };
+  }
 
   run(cwd: string, args: string[], opts: GitRunOptions & { encoding: 'buffer' }): Promise<GitRunResult<Buffer>>;
   run(cwd: string, args: string[], opts?: GitRunOptions & { encoding?: 'utf8' }): Promise<GitRunResult>;
@@ -224,7 +253,7 @@ export class NodeGitRunner implements IGitRunner {
     try {
       const { promise: pending, child } = spawnGit(args, {
         cwd,
-        env: { ...process.env, ...opts.env, ...FIXED_ENV },
+        env: this.childEnv(opts.env),
         maxBuffer: MAX_OUTPUT_BYTES,
         // Makes the child a process-group leader so that `killTree` can signal
         // the transport helpers it spawns, not just git itself. Not on Windows,
@@ -291,9 +320,13 @@ export class NodeGitRunner implements IGitRunner {
           : Buffer.isBuffer(original.stderr)
             ? original.stderr.toString()
             : undefined;
-      throw new GitRunError(`git ${subcommand} failed: ${redactGitToken(message)}`, {
+      // Scrubbed with the token THIS runner handed the child, and the one a
+      // caller laid over it for the call: both can be echoed back by git.
+      const secrets = [this.credentials.token(), opts.env?.[GIT_TOKEN_ENV]];
+      const scrub = (text: string): string => secrets.reduce<string>((out, token) => redactGitToken(out, token), text);
+      throw new GitRunError(`git ${subcommand} failed: ${scrub(message)}`, {
         exitCode: typeof original.code === 'number' ? original.code : undefined,
-        stderr: stderr === undefined ? undefined : redactGitToken(stderr),
+        stderr: stderr === undefined ? undefined : scrub(stderr),
       });
     } finally {
       // Every timer is cleared on every path. The later ones in particular

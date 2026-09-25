@@ -37,6 +37,8 @@ guide's file name — which is entered in the app and nowhere else; see the
 | `KB_SYNC_SECRET` | setup screen | Bearer secret a git host's webhook or a pipeline presents to `POST /api/sync` so pushes made outside Hexis show up at once — see [git-sync.md](git-sync.md) |
 | `KB_KNOWLEDGE_BASE_DIR` / `KB_SKILLS_DIR` / `KB_PLUGINS_DIR` | retired | The three top-level folders are now entered on the setup screen and the Deployment settings page only. A deployment that still sets one has its value imported into the saved setting on the first start after upgrading (with a log line naming the variable to delete); a saved value that differs wins, and the variable is ignored |
 | `TENANT_ID` | no | Slug branding credential prefixes (default `bevel`) |
+| `DB_SCHEMA` | no | The Postgres schema this deployment's tables live in (default `public`). Set it to keep several knowledge bases in one database, each on a schema of its own. Applied as a connection startup parameter, so a non-default schema needs a direct connection or session-mode pooling; the process refuses to start on a connection that lost it |
+| `TENANTS_FILE` / `TENANT_MASTER_KEY` / `TENANT_IDLE_MINUTES` | multi-tenant | Serve several knowledge bases from one process, one per host name — see [multi-tenant.md](multi-tenant.md) |
 | `KB_TEMPLATE_DIR` | no | Overrides the packaged KB seed template |
 | `INTERNAL_TOKEN_SECRET` | no | Dedicated HMAC key for internal (loopback) tool tokens; unset, one is derived from `JWT_SECRET` |
 | `UPDATE_CHECK` | no | `false` disables the release check behind the admin upgrade banner, the app's one outbound request (air-gapped deployments) |

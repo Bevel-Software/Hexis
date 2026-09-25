@@ -2,6 +2,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { PathTraversalError } from '../../../shared/domain-errors.js';
 import { EntryExistsError } from '../workspace.service.js';
@@ -149,7 +150,7 @@ async function makeHarness(opts: { canRead?: boolean; skillSaveCheck?: SkillSave
       workflowService,
       { emit: vi.fn() } as unknown as WorkflowEventBus,
       accessControl,
-      KB,
+      testKbContext({ kbDirName: KB }),
       stubCreatorAccess,
       { isAdmin: async () => true } as unknown as IAdminAccessService,
       new NodeFs(),

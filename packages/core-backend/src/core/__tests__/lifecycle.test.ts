@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { createShutdown, holdCommitWorkerLease, withStartupTask, type LeasedWorker } from '../lifecycle.js';
+import { createShutdown, holdCommitWorkerLease, stopCore, withStartupTask, type LeasedWorker } from '../lifecycle.js';
+import { BevelSecretsVariableLoader, registerBevelSecretsVariableLoader } from '../../modules/secrets-vault/secrets-variable-loader.js';
 import type { AdvisoryLease } from '../../modules/database/advisory-lock.js';
 
 /** A lease the suite scripts: what each `tryAcquire` answers, and a way to lose it. */
@@ -365,5 +366,81 @@ describe('createShutdown', () => {
     d.finishClose();
     await Promise.all([first, second]);
     expect(d.order.filter((step) => step === 'db.end')).toHaveLength(1);
+  });
+});
+
+describe('stopCore', () => {
+  function graph() {
+    const order: string[] = [];
+    return {
+      order,
+      core: {
+        commitWorker: {
+          async stop() {
+            order.push('commitWorker.stop');
+          },
+        },
+        backgroundJobs: {
+          stopSweeping() {
+            order.push('backgroundJobs.stopSweeping');
+          },
+          async drain() {
+            order.push('backgroundJobs.drain');
+          },
+        },
+        startupRetry: {
+          stop() {
+            order.push('startupRetry.stop');
+          },
+        },
+        db: {
+          $client: {
+            async end() {
+              order.push('db.end');
+            },
+          },
+        },
+        secretsScope: 'acme/t_acme',
+        log: () => undefined,
+      },
+    };
+  }
+
+  it('stops a graph without a server: sweeps and the retry first, the worker, then the pool', async () => {
+    const g = graph();
+    await stopCore(g.core as never);
+    expect(g.order).toEqual([
+      'backgroundJobs.stopSweeping',
+      'startupRetry.stop',
+      'backgroundJobs.drain',
+      'commitWorker.stop',
+      'db.end',
+    ]);
+  });
+
+  it('forgets the graph\'s secrets scope, so a descriptor that outlives it resolves nothing', async () => {
+    const g = graph();
+    registerBevelSecretsVariableLoader(
+      { resolve: async () => 'sk-live' } as never,
+      g.core.secretsScope,
+    );
+    const loader = new BevelSecretsVariableLoader('user-1', g.core.secretsScope);
+    expect(await loader.get('weather_KEY')).toBe('sk-live');
+    await stopCore(g.core as never);
+    expect(await loader.get('weather_KEY')).toBeNull();
+  });
+
+  it('stops a graph that never left a retry asking and never registered a scope', async () => {
+    const g = graph();
+    const core = { ...g.core, startupRetry: null, secretsScope: undefined };
+    await stopCore(core as never);
+    expect(g.order).toEqual(['backgroundJobs.stopSweeping', 'backgroundJobs.drain', 'commitWorker.stop', 'db.end']);
+  });
+
+  it('does not wait past the budget for a worker that never stops, and still ends the pool', async () => {
+    const g = graph();
+    const core = { ...g.core, commitWorker: { stop: () => new Promise<void>(() => undefined) } };
+    await stopCore(core as never, { deadlineMs: 50 });
+    expect(g.order).toEqual(['backgroundJobs.stopSweeping', 'startupRetry.stop', 'backgroundJobs.drain', 'db.end']);
   });
 });

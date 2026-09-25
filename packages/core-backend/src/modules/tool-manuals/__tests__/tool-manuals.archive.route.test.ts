@@ -11,6 +11,7 @@ import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { IToolManualService } from '../tool-manuals.contract.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * `GET /agent/plugins/:folder/archive` — error taxonomy of the plugin-folder
@@ -47,7 +48,7 @@ async function baseUrl(pluginIndex?: { catalog(): Promise<{ name: string; folder
       {} as unknown as IToolManualService,
       manualAuth,
       async () => 'ali@example.com',
-      { workspaceService, accessControl, kbDirName: KB, disk: new NodeFs(), pluginIndex: pluginIndex as never },
+      { workspaceService, accessControl, kb: testKbContext({ kbDirName: KB }), disk: new NodeFs(), pluginIndex: pluginIndex as never },
     ),
   );
   httpServer = await new Promise<HttpServer>((resolve) => {

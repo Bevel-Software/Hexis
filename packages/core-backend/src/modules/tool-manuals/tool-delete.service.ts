@@ -2,14 +2,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
-  DEFAULT_BRANCH,
   HEXIS_EXTENSION_NS,
   PLUGIN_MANIFEST_FILE,
   PLUGIN_MCP_FILE,
   type AuthUser,
 } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import { utcpNamespacePrefix } from '../../shared/utcp-namespace.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { IFsProbe } from '../../shared/fs.contract.js';
@@ -122,9 +121,13 @@ export class ToolDeleteService {
     private readonly pluginIndex: IPluginIndexService,
     private readonly source: PluginSource,
     private readonly vault: Pick<ISecretsVaultService, 'countNamespace' | 'removeNamespace'>,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
     private readonly disk: IFsProbe,
   ) {}
+
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
+  }
 
   /** What deleting `slug` would affect. Owner-gated like the delete itself. */
   async dependents(userEmail: string, slug: string): Promise<ToolDependents> {
@@ -154,8 +157,8 @@ export class ToolDeleteService {
       // removing its file here would be undone by the next sync, or worse.
       throw new ToolDeleteError("This tool's plugin is managed in another format — delete it there.", 422);
     }
-    const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
-    await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
+    const wsId = this.kb.defaultWorkspaceId();
+    await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch);
     const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
 
     if (source === 'manual') await this.deleteManual(user, wsId, kbRoot, tool);
@@ -205,7 +208,7 @@ export class ToolDeleteService {
       }
     }
     if (!best) return null;
-    const owner = await this.accessControl.canOwner(workspaceIdForBranch(DEFAULT_BRANCH), userEmail, best.folder);
+    const owner = await this.accessControl.canOwner(this.kb.defaultWorkspaceId(), userEmail, best.folder);
     return owner ? best : null;
   }
 
@@ -263,10 +266,10 @@ export class ToolDeleteService {
     folder: string,
     home: PluginCatalogEntry,
   ): Promise<ToolDependents['plugins']> {
-    const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
+    const wsId = this.kb.defaultWorkspaceId();
     let discovered;
     try {
-      await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
+      await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch);
       const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
       discovered = await this.source.discover(kbRoot);
     } catch (err) {
@@ -320,7 +323,7 @@ export class ToolDeleteService {
     const parked = path.join(path.dirname(abs), `.deleting-${randomUUID()}`);
     await fs.rename(abs, parked);
     try {
-      await this.commits.runPendingCommit(wsId, DEFAULT_BRANCH, `${this.kbDirName}/${tool.path}`, user, {
+      await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, `${this.kbDirName}/${tool.path}`, user, {
         // The route authorized the delete with the owner verb; see class note.
         systemAuthorized: true,
       });
@@ -393,7 +396,7 @@ export class ToolDeleteService {
     // Commit-stage failures propagate as-is: the pipeline may already hold a
     // local commit, and rewriting the tree under it is the state its own
     // recovery misreads (same contract as McpServerEditService).
-    await this.commits.runPendingCommit(wsId, DEFAULT_BRANCH, `${this.kbDirName}/${folder}`, user, {
+    await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, `${this.kbDirName}/${folder}`, user, {
       systemAuthorized: true,
     });
   }

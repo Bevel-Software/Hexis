@@ -4,6 +4,7 @@ import {
   DOCUMENT_COLUMN,
   DOCUMENT_COLUMN_WIDE,
   documentGutters,
+  documentSideGutters,
 } from '../../../shared/theme/measure';
 import { HEADER_COLUMN_TOP } from '../../../shared/theme/header';
 
@@ -22,7 +23,12 @@ import { HEADER_COLUMN_TOP } from '../../../shared/theme/header';
  * It mounts inside it BELOW the title bar, though — see `header`.
  */
 export interface KbDocumentShellProps {
-  /** Widens the column and opens the second track for the rail. */
+  /**
+   * Widens the column and opens the second track for the rail. Read by the
+   * 'prose' and 'full-bleed' variants only: 'panel' is the document column
+   * standing in for the document, and the pages that use it (history,
+   * comparison) withdraw the rail with the document it describes.
+   */
   rail?: ReactNode;
   /**
    * 'prose'      — the shell scrolls, holds the 880/980 measure and the gutters.
@@ -35,12 +41,22 @@ export interface KbDocumentShellProps {
    *                auto-height column), image, csv, xlsx, the html sandbox
    *                iframe, and the tool form (whose `w-72` aside does not fit
    *                inside 880px minus gutters).
+   * 'panel'      — the reading view's COLUMN with full-bleed's HEIGHT: the same
+   *                880px measure and the same side margins as 'prose', and a
+   *                definite height so a panel that scrolls inside itself gets
+   *                real pixels. For the file page's history and comparison
+   *                modes, which are viewports the way a PDF is but which take
+   *                the DOCUMENT's place and must not move it: switching to
+   *                history changes what is in the column, not where the column
+   *                is. They used to take 'full-bleed', which gave the title
+   *                nothing to stand on at the pane's left edge and started the
+   *                timeline flush against it.
    *
    * The caller picks from the extension, via `getRendererLayout` in
    * `renderers/index.ts` — the same map `getFileRenderer` uses. Getting this
    * wrong does not type-error; it renders a zero-height PDF.
    */
-  variant?: 'prose' | 'full-bleed';
+  variant?: 'prose' | 'full-bleed' | 'panel';
   /**
    * The file tree beside this column is hidden, so the space it gave up should
    * become margin on both sides rather than more line length (proto:709). The
@@ -54,10 +70,11 @@ export interface KbDocumentShellProps {
    * and is the only thing resetting the file lock's idle-release timer for a
    * user who is reading rather than typing. Scroll events do not bubble, so a
    * ref on an element nested *inside* the scroller never fires — which is why
-   * the ref lands on this component's outermost box in BOTH variants, and why
-   * that box carries `overflow-auto` in both. In `full-bleed` the child is
-   * exactly `h-full`, so nothing overflows and no scrollbar appears; the
-   * listener still catches the renderer's own scroller during capture.
+   * the ref lands on this component's outermost box in EVERY variant, and why
+   * that box carries `overflow-auto` in all of them. In `full-bleed` and
+   * `panel` the child is exactly `h-full`, so nothing overflows and no
+   * scrollbar appears; the listener still catches the renderer's own scroller
+   * during capture.
    */
   scrollRef?: Ref<HTMLDivElement>;
   /**
@@ -104,10 +121,35 @@ export function KbDocumentShell({
       data-variant={variant}
       className={cn(
         'relative min-h-0 flex-1 overflow-auto',
-        variant === 'full-bleed' && 'flex flex-col',
+        variant !== 'prose' && 'flex flex-col',
       )}
     >
-      {variant === 'full-bleed' ? (
+      {variant === 'panel' ? (
+        // The reading view's frame, to the class: `DOCUMENT_COLUMN` and
+        // `documentSideGutters` are the same two calls the prose branch below
+        // makes, from the same `roomy` flag, so the title, the tab strip and
+        // whatever panel follows them all open on the margin the document
+        // opens on. The tests compare the two frames rather than restating
+        // either — `__tests__/KbDocumentShell.test.tsx` on the component and
+        // `__tests__/FileViewer.test.tsx` on the real page going into history
+        // and coming back.
+        //
+        // What differs is the height and the bottom: `h-full min-h-0 flex-col`
+        // hands the panel a definite box to scroll inside, exactly as
+        // full-bleed does for a PDF, and the 110px rhythm under a document is
+        // left off a column that ends where the pane does.
+        <div
+          className={cn(
+            DOCUMENT_COLUMN,
+            documentSideGutters(roomy),
+            HEADER_COLUMN_TOP,
+            'flex h-full min-h-0 flex-col',
+          )}
+        >
+          {header}
+          {children}
+        </div>
+      ) : variant === 'full-bleed' ? (
         // A definite height, not a scroll. `h-full` resolves against this
         // component's own (flex-sized, definite) height, so an `h-full` iframe
         // inside gets real pixels instead of collapsing to zero.

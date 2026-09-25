@@ -5,6 +5,7 @@ import '../../auth/auth.middleware.js'; // Express Request.userEmail augmentatio
 import { createSkillsRoutes } from '../skills.routes.js';
 import type { ISkillService } from '../skills.contract.js';
 import type { IAllowedToolsChecker } from '../allowed-tools-check.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * The browser's skill read carries the same `allowed-tools` warnings as
@@ -42,7 +43,7 @@ async function start(checker?: IAllowedToolsChecker): Promise<string> {
     req.userEmail = EMAIL;
     next();
   });
-  app.use('/api', createSkillsRoutes(skillService, undefined, undefined, undefined, checker));
+  app.use('/api', createSkillsRoutes(skillService, testKbContext(), undefined, undefined, undefined, checker));
   server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

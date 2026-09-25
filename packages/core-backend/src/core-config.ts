@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { defaultKbTemplateDir } from './assets.js';
 import { assertKeyDecodesTo32Bytes } from './shared/token-crypto.js';
 import { DEFAULT_GIT_TIMEOUT_MS } from './modules/workflow/git/node-git-runner.js';
+import { DEFAULT_DB_SCHEMA, assertSchemaName } from './modules/database/connection.js';
 import { logger } from './shared/logging.js';
 
 const log = logger('config');
@@ -58,15 +59,104 @@ export function withoutUserinfo(url: string): string {
 }
 
 /**
+ * Everything ONE knowledge base's service graph is built from — the values
+ * that differ between two knowledge bases a process might host. A
+ * single-tenant deployment reads them from the environment ({@link CoreConfig});
+ * a host serving several builds one of these per tenant from its registry.
+ * `createCoreServices` takes this shape, so the two are the same code path.
+ *
+ * `port`, `nodeEnv` and `trustProxy` are process facts a graph still needs
+ * (the loopback address the MCP proxy dials, cookie flags, the proxy hop
+ * count its Express app trusts), so they appear here as well as on
+ * {@link ProcessConfig}: a tenant's config carries the values of the process
+ * it runs in.
+ */
+export interface TenantConfig {
+  readonly port: number;
+  readonly databaseUrl: string;
+  /** The Postgres schema this knowledge base's tables live in. `public` for a single-tenant deployment. */
+  readonly dbSchema: string;
+  readonly nodeEnv: string;
+  readonly tenantId: string;
+  /** The credential prefixes derived from `tenantId` — see the getters on {@link CoreConfig}. */
+  readonly externalApiKeyPrefix: string;
+  readonly internalTokenPrefix: string;
+  readonly uploadTokenPrefix: string;
+  readonly mcpOAuthTokenPrefix: string;
+  readonly workspacesRoot: string;
+  readonly backupsRoot: string;
+  readonly spillRoot: string;
+  readonly docExtractCacheRoot: string;
+  readonly jwtSecret: string;
+  readonly adminEmail: string;
+  readonly adminPassword: string;
+  readonly oidcIssuerUrl: string;
+  readonly oidcClientId: string;
+  readonly oidcClientSecret: string;
+  readonly oidcScopes: string;
+  readonly oidcProviderLabel: string;
+  readonly kbRepoUrl: string;
+  readonly kbDirName: string;
+  readonly gitUsername: string;
+  readonly gitToken: string;
+  readonly kbTemplateDir: string;
+  readonly ontologySessionBlock: boolean;
+  readonly updateCheckEnabled: boolean;
+  readonly loginPasswordEnabled: boolean;
+  readonly allowedEmailDomains: string[];
+  readonly secretsEncKey: string;
+  readonly internalTokenSecret: string;
+  readonly trustProxy: string;
+  readonly gitTimeoutMs: number;
+  readonly publicBackendUrl: string;
+  readonly publicFrontendUrl: string;
+  readonly configuredPublicFrontendUrl: string | null;
+  /**
+   * Where this graph's own REST surface is reached from inside the process
+   * (the MCP proxy dials it, and seeds it into the UTCP manuals it builds).
+   * Unset, `http://127.0.0.1:<port>`; a tenant host names its tenant on the
+   * path — see `tenancy/tenant-host.ts`.
+   */
+  readonly loopbackBaseUrl?: string;
+  /**
+   * The environment the deployment settings (repository, git credential,
+   * branch model, SSO, sync secret, …) resolve against before the stored
+   * layer. Unset, the process's own. A tenant host builds one per tenant
+   * from its record, so a variable set on the host process never reaches
+   * every tenant and a record's values behave as environment-pinned ones.
+   */
+  readonly settingsEnv?: NodeJS.ProcessEnv;
+}
+
+/**
+ * What the PROCESS is configured with, independent of how many knowledge
+ * bases it serves: where it listens, which proxy hops it trusts, and the
+ * environment name. A single-tenant deployment's {@link CoreConfig} is both
+ * this and its one tenant's {@link TenantConfig}.
+ */
+export interface ProcessConfig {
+  readonly port: number;
+  readonly nodeEnv: string;
+  readonly trustProxy: string;
+}
+
+/**
  * Configuration for the CORE platform: the git-backed workspace/workflow,
  * skills, tools, secrets vault, access control, and the MCP surface. Contains
  * NO LLM, connector, or SSO-provider settings — those live on the enterprise
  * `AppConfig` (config.ts), which extends this class. A core-only deployment
  * boots from exactly these env vars.
  */
-export class CoreConfig {
+export class CoreConfig implements TenantConfig, ProcessConfig {
   readonly port: number;
   readonly databaseUrl: string;
+  /**
+   * The Postgres schema this deployment's tables live in (`DB_SCHEMA`,
+   * default `public`). Set it to host this knowledge base beside others in
+   * one database, each on a schema of its own; see
+   * `modules/database/connection.ts` for what that changes.
+   */
+  readonly dbSchema: string;
   readonly nodeEnv: string;
   /**
    * Tenant slug injected into every credential prefix so a deploy can brand its
@@ -155,6 +245,13 @@ export class CoreConfig {
    * credential-helper shell snippet.
    */
   readonly gitUsername: string;
+  /**
+   * The git token the environment supplied (`GIT_TOKEN`, or the legacy
+   * `GITHUB_TOKEN` / `GH_TOKEN`), or `''`. The setup screen's stored token is
+   * read through the settings service instead; the composition root folds
+   * the two into the runner's credentials, environment first.
+   */
+  readonly gitToken: string;
   /**
    * Filesystem path to the KB seed template (the `kb-template/` folder shipped
    * inside this package — see `defaultKbTemplateDir()`). The seeder reads this
@@ -282,6 +379,7 @@ export class CoreConfig {
   constructor() {
     this.port = parseInt(process.env.PORT || '3001', 10);
     this.databaseUrl = resolveDatabaseUrl();
+    this.dbSchema = assertSchemaName((process.env.DB_SCHEMA || DEFAULT_DB_SCHEMA).trim());
     this.nodeEnv = process.env.NODE_ENV || 'development';
     this.tenantId = (process.env.TENANT_ID || 'bevel').trim().toLowerCase();
     if (!/^[a-z0-9]+$/.test(this.tenantId)) {
@@ -352,13 +450,14 @@ export class CoreConfig {
     this.kbRepoUrl = (process.env.KB_REPO_URL || '').trim();
     this.kbDirName = (process.env.KB_DIR_NAME || '').trim();
     // Provider-neutral git token: operators can set GIT_TOKEN (or the legacy
-    // GITHUB_TOKEN / GH_TOKEN). Normalize onto GITHUB_TOKEN — the name the
-    // credential helper and every `$GITHUB_TOKEN` read + redaction use — so all
-    // three work unchanged. GIT_TOKEN takes PRECEDENCE: it's the provider-neutral
-    // name, so setting it must override a stale legacy GITHUB_TOKEN (e.g. when
-    // switching the KB from GitHub to GitLab), not be shadowed by it.
-    const gitToken = process.env.GIT_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
-    if (gitToken) process.env.GITHUB_TOKEN = gitToken;
+    // GITHUB_TOKEN / GH_TOKEN). Read here, never written back: the git runner
+    // hands the token in effect to each child it spawns, so the process
+    // environment does not need to carry it, and a server hosting several
+    // knowledge bases could not carry all of theirs. GIT_TOKEN takes
+    // PRECEDENCE: it's the provider-neutral name, so setting it must override
+    // a stale legacy GITHUB_TOKEN (e.g. when switching the KB from GitHub to
+    // GitLab), not be shadowed by it.
+    this.gitToken = (process.env.GIT_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '').trim();
     this.gitUsername = (process.env.GIT_USERNAME || 'x-access-token').trim();
     // Interpolated into the credential-helper shell snippet, so reject anything
     // that isn't a plain token — no quotes, spaces, or shell metacharacters.

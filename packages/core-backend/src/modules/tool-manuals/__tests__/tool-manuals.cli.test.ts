@@ -15,6 +15,7 @@ import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { utcpNamespacePrefix } from '../../../shared/utcp-namespace.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const KB_DIR = 'knowledge-base';
 const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
@@ -146,7 +147,7 @@ describe('a shell `.tool` in a workspace', () => {
   afterEach(() => rm(root, { recursive: true, force: true }));
 
   test('is listed to local consumers and withheld from remote ones', async () => {
-    const svc = new ToolManualService(workspaceService, allowAll, KB_DIR, disk, new KbPluginSource(disk));
+    const svc = new ToolManualService(workspaceService, allowAll, testKbContext({ kbDirName: KB_DIR }), disk, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })));
     // `list_local_tools` names it, so the local server knows to materialize it.
     expect(await svc.listLocalOnly('user@x.eu')).toEqual([{ slug: 'git', name: 'git', path: 'Plugins/git.tool' }]);
     // The hosted proxy's manual set excludes it entirely.
@@ -157,7 +158,7 @@ describe('a shell `.tool` in a workspace', () => {
   test('its embedded cli tools survive manual serialization', async () => {
     // The whole point of registering the serializer: without it the manual body
     // fails validation and the local server gets nothing to run.
-    const svc = new ToolManualService(workspaceService, allowAll, KB_DIR, disk, new KbPluginSource(disk));
+    const svc = new ToolManualService(workspaceService, allowAll, testKbContext({ kbDirName: KB_DIR }), disk, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })));
     const manual = await svc.resolveInlineManual('user@x.eu', 'git');
     expect(manual).not.toBeNull();
     const tools = (manual as { tools: { name: string; tool_call_template: { call_template_type: string } }[] }).tools;
@@ -206,7 +207,7 @@ describe('manual namespaces are unique, not merely manual names', () => {
   }
 
   const names = async (): Promise<string[]> =>
-    (await new ToolManualService(workspaceService, allowAll, KB_DIR, disk, new KbPluginSource(disk)).listAllSummaries()).map((m) => m.name).sort();
+    (await new ToolManualService(workspaceService, allowAll, testKbContext({ kbDirName: KB_DIR }), disk, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR }))).listAllSummaries()).map((m) => m.name).sort();
 
   it('keeps two manuals whose namespaces genuinely differ', async () => {
     // Underscore-doubling is injective, so `a_b` (a__b_) and `a__b` (a____b_)
@@ -243,7 +244,7 @@ describe('manual namespaces are unique, not merely manual names', () => {
     await writeMcpServer('Vendor', 'a-b');
     await writeTool('a.tool', 'a_b');
     await writeTool('c.tool', 'other');
-    const kept = await new ToolManualService(workspaceService, allowAll, KB_DIR, disk, new KbPluginSource(disk)).listAllSummaries();
+    const kept = await new ToolManualService(workspaceService, allowAll, testKbContext({ kbDirName: KB_DIR }), disk, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR }))).listAllSummaries();
     const namespaces = kept.map((m) => utcpNamespacePrefix(m.name));
     expect(new Set(namespaces).size).toBe(namespaces.length);
   });

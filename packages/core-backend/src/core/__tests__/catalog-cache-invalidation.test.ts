@@ -4,6 +4,7 @@ import { FileChangeNotifier } from '../../modules/kb-fs/file-change-notifier.js'
 import { WorkflowEventBus } from '../../modules/workflow/event-bus.js';
 import { registerCatalogCacheInvalidation } from '../catalog-cache-invalidation.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import { testKbContext } from '../../__tests__/kb-context.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -25,7 +26,7 @@ function setup() {
   const off = registerCatalogCacheInvalidation({
     eventBus,
     fileChangeNotifier,
-    kbDirName: KB_DIR,
+    kb: testKbContext({ kbDirName: KB_DIR }),
     catalogs,
     accessControl,
   });

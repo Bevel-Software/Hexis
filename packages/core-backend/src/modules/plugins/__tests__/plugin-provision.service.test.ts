@@ -15,6 +15,7 @@ import {
   pluginAccessMd,
   personalAccessMd,
 } from '../plugin-provision.service.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const KB = 'knowledge-base';
 const USER: AuthUser = { id: 'u1-abcd', email: 'ali@example.com', name: 'Ali Vega' } as AuthUser;
@@ -50,7 +51,8 @@ async function makeHarness() {
   const commits = { runPendingCommit: vi.fn(async () => undefined) };
   const accessControl = { invalidate: vi.fn() } as unknown as IAccessControl;
   const events = { emit: vi.fn() };
-  const svc = new PluginProvisionService(workspaceService, commits, accessControl, KB, events, new KbPluginSource(new NodeFs()), new NodeFs());
+  const kb = testKbContext({ kbDirName: KB });
+  const svc = new PluginProvisionService(workspaceService, commits, accessControl, kb, events, new KbPluginSource(new NodeFs(), kb), new NodeFs());
   return { svc, dir, commits, accessControl, events, writeFile };
 }
 

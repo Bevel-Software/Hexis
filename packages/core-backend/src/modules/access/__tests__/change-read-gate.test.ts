@@ -8,6 +8,8 @@ import { AccessControlService } from '../access-control.service.js';
 import { ChangeReadGate, isNewTopLevelFolderPath } from '../change-read-gate.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { SYNCED_GROUPS_YAML } from '../../access-model/group-files.js';
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const KB = 'knowledge-base';
 const WS = 'ws-gate';
@@ -56,7 +58,7 @@ describe('ChangeReadGate', () => {
     await write(repo, 'roles.yaml', ROLES_YAML);
     const ws = stubWorkspaceService(workspaceDir);
     access = new AccessControlService(ws, KB, new NodeFs());
-    gate = new ChangeReadGate(ws, access, KB, new NodeFs());
+    gate = new ChangeReadGate(ws, access, testKbContext({ kbDirName: KB }), new NodeFs());
   });
 
   afterEach(async () => {
@@ -255,18 +257,18 @@ describe('isNewTopLevelFolderPath', () => {
   const exists = async (p: string) => onDisk.has(p);
 
   it('is true for a path inside a folder directly under a creatable root that is not on disk', async () => {
-    expect(await isNewTopLevelFolderPath('KnowledgeBase/New/a.md', 'file', exists)).toBe(true);
-    expect(await isNewTopLevelFolderPath('Skills/fresh/SKILL.md', 'file', exists)).toBe(true);
-    expect(await isNewTopLevelFolderPath('Plugins/team/deep/er/x', 'file', exists)).toBe(true);
-    expect(await isNewTopLevelFolderPath('KnowledgeBase/New', 'dir', exists)).toBe(true);
+    expect(await isNewTopLevelFolderPath('KnowledgeBase/New/a.md', 'file', exists, DEFAULT_KB_LAYOUT)).toBe(true);
+    expect(await isNewTopLevelFolderPath('Skills/fresh/SKILL.md', 'file', exists, DEFAULT_KB_LAYOUT)).toBe(true);
+    expect(await isNewTopLevelFolderPath('Plugins/team/deep/er/x', 'file', exists, DEFAULT_KB_LAYOUT)).toBe(true);
+    expect(await isNewTopLevelFolderPath('KnowledgeBase/New', 'dir', exists, DEFAULT_KB_LAYOUT)).toBe(true);
   });
 
   it('is false when the top-level folder exists, for a loose file at the root, and outside the three roots', async () => {
-    expect(await isNewTopLevelFolderPath('KnowledgeBase/Existing/a.md', 'file', exists)).toBe(false);
-    expect(await isNewTopLevelFolderPath('Skills/known', 'dir', exists)).toBe(false);
-    expect(await isNewTopLevelFolderPath('KnowledgeBase/loose.md', 'file', exists)).toBe(false);
-    expect(await isNewTopLevelFolderPath('KnowledgeBase', 'dir', exists)).toBe(false);
-    expect(await isNewTopLevelFolderPath('Data/New/a.md', 'file', exists)).toBe(false);
-    expect(await isNewTopLevelFolderPath('roles.yaml', 'file', exists)).toBe(false);
+    expect(await isNewTopLevelFolderPath('KnowledgeBase/Existing/a.md', 'file', exists, DEFAULT_KB_LAYOUT)).toBe(false);
+    expect(await isNewTopLevelFolderPath('Skills/known', 'dir', exists, DEFAULT_KB_LAYOUT)).toBe(false);
+    expect(await isNewTopLevelFolderPath('KnowledgeBase/loose.md', 'file', exists, DEFAULT_KB_LAYOUT)).toBe(false);
+    expect(await isNewTopLevelFolderPath('KnowledgeBase', 'dir', exists, DEFAULT_KB_LAYOUT)).toBe(false);
+    expect(await isNewTopLevelFolderPath('Data/New/a.md', 'file', exists, DEFAULT_KB_LAYOUT)).toBe(false);
+    expect(await isNewTopLevelFolderPath('roles.yaml', 'file', exists, DEFAULT_KB_LAYOUT)).toBe(false);
   });
 });
