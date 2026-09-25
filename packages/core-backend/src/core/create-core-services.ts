@@ -993,7 +993,7 @@ export async function createCoreServices(
       // Loopback to our own REST tool surface — 127.0.0.1 (not localhost) to pin
       // IPv4 and dodge resolver ambiguity. The proxy authenticates each call with
       // the caller's own connection key.
-      loopbackBaseUrl: `http://127.0.0.1:${config.port}`,
+      loopbackBaseUrl: config.loopbackBaseUrl ?? `http://127.0.0.1:${config.port}`,
       // Manual namespace + UTCP variable prefix (KNOWLEDGE_BASE_API_URL / …).
       manualName: 'KNOWLEDGE_BASE',
       // Oversized chain results spill here too — an external MCP caller has no

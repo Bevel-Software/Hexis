@@ -17,7 +17,9 @@
  * Finer-grained internals are available via the `./modules/*` subpath exports.
  */
 
-export { CoreConfig, type TenantConfig, type ProcessConfig } from './core-config.js';
+export { CoreConfig, resolveDatabaseUrl, type TenantConfig, type ProcessConfig } from './core-config.js';
+// Serving several knowledge bases from one process — see docs/multi-tenant.md.
+export * from './tenancy/index.js';
 export { createCoreServices, type CoreServices } from './core/create-core-services.js';
 export {
   createCoreServer,

@@ -3,13 +3,34 @@ import { createShutdown, logger, type ShutdownDeps } from '@bevel-software/platf
 
 const log = logger('server');
 
-/** What the shell needs of the services it boots: exactly what the shutdown lets go of. */
-export interface ShellCore {
+/** One knowledge base's graph, as the shell lets go of it: exactly what the shutdown needs. */
+export interface ShellGraph {
   commitWorker: ShutdownDeps['commitWorker'];
   db: ShutdownDeps['db'];
   pluginJoinRequestJobs?: ShutdownDeps['backgroundJobs'];
   /** The startup phase's retry, when the boot left one asking. */
   startupRetry?: ShutdownDeps['startupRetry'];
+}
+
+/**
+ * A host of many graphs (see `createTenantHost`): stopping it stops every
+ * tenant it activated, each letting go of its own pool and lease.
+ */
+export interface ShellHost {
+  stop(): Promise<void>;
+}
+
+/** What the shell boots: a single knowledge base's graph, or a host of many. */
+export type ShellCore = ShellGraph | ShellHost;
+
+/** The single graph the shell booted, or null when it booted a host (or nothing yet). */
+function asGraph(core: ShellCore | null): ShellGraph | null {
+  return core && 'db' in core ? core : null;
+}
+
+/** The host the shell booted, or null when it booted a single graph (or nothing yet). */
+function asHost(core: ShellCore | null): ShellHost | null {
+  return core && !('db' in core) ? core : null;
 }
 
 /** The process, as the shell touches it — a seam so a test can stand in for it. */
@@ -54,6 +75,10 @@ export interface ShellIo<Core extends ShellCore> {
  * default is to die on the spot for it. The default is right about ending
  * the process — continuing on unknown state is worse — and wrong about
  * skipping the shutdown, so the same sequence runs first.
+ *
+ * A HOST of many graphs stops where a single graph's commit worker would:
+ * after the server has closed, before anything else, since each tenant it
+ * stops lets go of its own pool and lease in the core's own order.
  */
 export async function runShell<Core extends ShellCore>(io: ShellIo<Core>): Promise<void> {
   let core: Core | null = null;
@@ -68,12 +93,14 @@ export async function runShell<Core extends ShellCore>(io: ShellIo<Core>): Promi
       closeAllConnections: () => undefined,
     } as unknown as ShutdownDeps['server'];
     const noPool = { $client: { end: async () => undefined } } as unknown as ShutdownDeps['db'];
+    const graph = asGraph(core);
+    const host = asHost(core);
     const shutdown = createShutdown({
       server: server ?? notListening,
-      commitWorker: core?.commitWorker ?? { stop: async () => undefined },
-      backgroundJobs: core?.pluginJoinRequestJobs,
-      startupRetry: core?.startupRetry,
-      db: core?.db ?? noPool,
+      commitWorker: graph?.commitWorker ?? { stop: () => host?.stop() ?? Promise.resolve() },
+      backgroundJobs: graph?.pluginJoinRequestJobs,
+      startupRetry: graph?.startupRetry,
+      db: graph?.db ?? noPool,
     });
     shutdown(reason)
       .catch((err: unknown) => log.error('shutdown itself failed', { err }))

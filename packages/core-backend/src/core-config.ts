@@ -111,6 +111,13 @@ export interface TenantConfig {
   readonly publicBackendUrl: string;
   readonly publicFrontendUrl: string;
   readonly configuredPublicFrontendUrl: string | null;
+  /**
+   * Where this graph's own REST surface is reached from inside the process
+   * (the MCP proxy dials it, and seeds it into the UTCP manuals it builds).
+   * Unset, `http://127.0.0.1:<port>`; a tenant host names its tenant on the
+   * path — see `tenancy/tenant-host.ts`.
+   */
+  readonly loopbackBaseUrl?: string;
 }
 
 /**

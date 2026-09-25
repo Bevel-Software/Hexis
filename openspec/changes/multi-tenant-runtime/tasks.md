@@ -44,10 +44,10 @@
 
 ## 7. Lifecycle split (packages/core-backend) — phase 4
 
-- [ ] 7.1 `src/core/lifecycle.ts`: `startCore(core, ext)` and `stopCore(core)`; `createCoreServer` and `createShutdown` call them
-- [ ] 7.2 Keep the `retryUntilMaintained` handle on `CoreServices` and stop it in `stopCore`
-- [ ] 7.3 Timer audit: `join-request-jobs.service.ts`, `pending-commits.worker.ts`, `kb-startup-runner.ts`, `events.routes.ts`, `locking-filesystem.ts`, `tool-delete.service.ts`, `connection-probe.service.ts`, `workspace.tools.ts`, `synced-groups-writer.ts`, `advisory-lock.ts`
-- [ ] 7.4 Test: after `stopCore` no handle of the graph is alive
+- [x] 7.1 `src/core/lifecycle.ts`: `startCore(core, ext)` and `stopCore(core)`; `createCoreServer` calls `startCore` at the same point of its mount order (`opts.boot`, default true) and `createShutdown` runs the same release sequence after closing the server
+- [x] 7.2 `CoreServices.startupRetry` holds the `retryUntilMaintained` handle; `stopCore` and the shell's shutdown stop it; `CoreServices.tenantKey` and `secretsScope` name what the graph registered
+- [x] 7.3 Timer audit: the join-request sweep and heartbeat (stopped and drained), the commit worker (lease loop), the startup retry (handle), the SSE heartbeat (per connection, closed with the server), the connection probe, tool-chain kill timer and locking-filesystem sleeps (per call, bounded), the synced-groups debounce (per instance, file-only)
+- [x] 7.4 `core/__tests__/lifecycle.test.ts`: `stopCore` order, the retry stopped, the secrets scope forgotten, no retry and no scope, the budget
 
 ## 8. Tenancy module, host, apps/server, docs (packages/core-backend, apps/server) — phase 5
 

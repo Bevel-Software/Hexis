@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Server as HttpServer } from 'node:http';
-import { runShell, type ShellCore, type ShellProcess } from '../shell.js';
+import { runShell, type ShellCore, type ShellGraph, type ShellProcess } from '../shell.js';
 
 /** A process that records its handlers and its exit, and can be signalled. */
 function fakeProcess() {
@@ -14,12 +14,12 @@ function fakeProcess() {
 }
 
 /** Services as the shutdown sees them, every step a spy. */
-function fakeCore(): ShellCore & { order: string[] } {
+function fakeCore(): ShellGraph & { order: string[] } {
   const order: string[] = [];
   return {
     order,
     commitWorker: { stop: async () => void order.push('commitWorker.stop') },
-    db: { $client: { end: async () => void order.push('db.end') } } as unknown as ShellCore['db'],
+    db: { $client: { end: async () => void order.push('db.end') } } as unknown as ShellGraph['db'],
     pluginJoinRequestJobs: {
       stopSweeping: () => void order.push('jobs.stopSweeping'),
       drain: async () => void order.push('jobs.drain'),
@@ -57,6 +57,21 @@ describe('runShell', () => {
     await exited(p.exit);
     expect(core.order).toEqual(['jobs.stopSweeping', 'jobs.drain', 'commitWorker.stop', 'db.end']);
     expect(p.exit).toHaveBeenCalledWith(1);
+  });
+
+  it('a host of many graphs is stopped after the server closes, and the process exits 0', async () => {
+    const order: string[] = [];
+    const host = { stop: async () => void order.push('host.stop') };
+    const p = fakeProcess();
+    await runShell({
+      services: async () => host,
+      listen: () => fakeServer(order),
+      process: p.process,
+    });
+    p.signal('SIGTERM');
+    await exited(p.exit);
+    expect(order).toEqual(['server.close', 'server.closeAllConnections', 'host.stop']);
+    expect(p.exit).toHaveBeenCalledWith(0);
   });
 
   it('a boot that fails inside the services builder exits 1 with nothing to release', async () => {
