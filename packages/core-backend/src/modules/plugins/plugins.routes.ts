@@ -212,11 +212,30 @@ export function createPluginsRoutes(
    *   POST   /api/plugins/:name/links          { skillPath }  → { root, skills }
    *   DELETE /api/plugins/:name/links?skillPath=              → { root, revoked }
    *   POST   /api/plugins/:name/links/repair   { skillPath }  → { root }
+   *   POST   /api/plugins/:name/links/repair-all              → { repaired, skipped }
    *
    * Refusals carry a `kind` the UI branches on — `needs-skill-write` (409) is
    * the one that becomes "request write access".
+   *
+   * `repair-all` is the plugin PAGE's: it repairs every link of the plugin the
+   * caller can, and reports what it could not. A caller who may not write the
+   * plugin gets the same 404 every other link route gives them, so probing it
+   * confirms nothing about a plugin they cannot see.
    */
   if (links) {
+    /** The one refusal mapping every link route answers with. */
+    const linkFailure = (res: express.Response, err: unknown) => {
+      if (err instanceof PluginLinkError) {
+        res.status(err.status).json({ error: err.message, ...err.payload });
+        return;
+      }
+      if (err instanceof WorkflowDomainError) {
+        res.status(err.status).json(domainErrorBody(err));
+        return;
+      }
+      log.error('link operation failed:', { err });
+      res.status(500).json({ error: 'Failed to update the plugin\'s links' });
+    };
     const linkOp = async (
       req: express.Request,
       res: express.Response,
@@ -240,16 +259,7 @@ export function createPluginsRoutes(
       try {
         res.json(await op(user, String(req.params.name), skillPath));
       } catch (err) {
-        if (err instanceof PluginLinkError) {
-          res.status(err.status).json({ error: err.message, ...err.payload });
-          return;
-        }
-        if (err instanceof WorkflowDomainError) {
-          res.status(err.status).json(domainErrorBody(err));
-          return;
-        }
-        log.error('link operation failed:', { err });
-        res.status(500).json({ error: 'Failed to update the plugin\'s links' });
+        linkFailure(res, err);
       }
     };
     const bodyPath = (req: express.Request) => ((req.body ?? {}) as { skillPath?: unknown }).skillPath;
@@ -257,6 +267,23 @@ export function createPluginsRoutes(
     router.post('/plugins/:name/links/repair', (req, res) =>
       linkOp(req, res, (u, p, s) => links.repair(u, p, s), bodyPath),
     );
+    // No `skillPath`: this one is about the plugin, so it cannot ride `linkOp`.
+    router.post('/plugins/:name/links/repair-all', async (req, res) => {
+      if (!req.userEmail) {
+        res.status(401).json({ error: 'Unauthenticated' });
+        return;
+      }
+      const user = await resolveUser(req);
+      if (!user) {
+        res.status(401).json({ error: 'Unauthenticated' });
+        return;
+      }
+      try {
+        res.json(await links.repairAll(user, String(req.params.name)));
+      } catch (err) {
+        linkFailure(res, err);
+      }
+    });
     router.delete('/plugins/:name/links', (req, res) =>
       linkOp(req, res, (u, p, s) => links.unlink(u, p, s), (r) => r.query.skillPath),
     );

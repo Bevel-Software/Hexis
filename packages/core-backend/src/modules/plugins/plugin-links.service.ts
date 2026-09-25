@@ -18,9 +18,57 @@ import { pluginPrincipalKey } from '../access-model/access-grammar.js';
 import type { Principal } from '../access-model/access-splice.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
 import type { ISkillService } from '../skills/skills.contract.js';
+import { logger } from '../../shared/logging.js';
 import type { ProvisionCommitDriver } from './plugin-provision.service.js';
 import type { PluginLinkIndex } from './plugin-links.js';
 import type { KbContext } from '../../shared/kb-context.js';
+
+const log = logger('plugins');
+
+/** Who may edit one skill root's access file, in the terms the banner names them. */
+export interface LinkEditors {
+  roles: string[];
+  users: { name: string; email: string }[];
+}
+
+/** One link the automatic repair left alone, and why — see `repairAll`. */
+export interface UnrepairedLink {
+  /** Repo-relative root, as the manifest declares it. */
+  root: string;
+  /**
+   * `needs-skill-write` — the viewer may not write the root's access file, so
+   * nothing was attempted; `failed` — the write was attempted and did not
+   * land; `denied` — both lines are already in the file and the link is still
+   * not granted, which is a `deny` of the plugin at that root: nothing to
+   * write, and only an editor removing the deny would change it. All three
+   * leave the link broken and all three keep the banner.
+   */
+  reason: 'needs-skill-write' | 'failed' | 'denied';
+  /** The skills the plugin's members still cannot read through the root. */
+  skills: { path: string; name: string }[];
+  /** Who can repair it from the skill page. */
+  editors: LinkEditors;
+}
+
+/** What one page-open repair did and what it could not do. */
+export interface LinkRepairReport {
+  /** Roots whose two grant lines are now in place (silent: nothing to show). */
+  repaired: string[];
+  /** What is still broken, and who can fix it. */
+  skipped: UnrepairedLink[];
+}
+
+/**
+ * The commit subject for an automatic repair. It names the plugin, the root
+ * and the fact that nobody asked for it — the commit is the ONLY trace a
+ * silent repair leaves, so the history has to explain itself. Falls back to
+ * the path-derived default when a very long root would blow the 200-character
+ * subject limit: a missed explanation is not worth a failed repair.
+ */
+function repairSummary(plugin: string, root: string): string | undefined {
+  const subject = `Repair link: ${plugin} → ${root} (automatic, on opening the plugin page)`;
+  return subject.length <= 200 ? subject : undefined;
+}
 
 /** A refusal the route passes through: message + HTTP status + a machine-readable kind. */
 export class PluginLinkError extends Error {
@@ -59,7 +107,9 @@ export class PluginLinkError extends Error {
  * skill page says so, for a skill editor to remove.
  *
  * Repair re-grants the tokens for a link that exists but whose grant was
- * hand-removed: the amber dot's one action.
+ * hand-removed — the amber dot's one action, run one link at a time from the
+ * skill page, or over a whole plugin's links by `repairAll` the moment
+ * somebody who may write that plugin opens its page.
  *
  * Every operation is serialised on BOTH sides it writes — the plugin's
  * manifest slug (the same key provisioning locks on) and the skill root whose
@@ -185,7 +235,27 @@ export class PluginLinksService {
     });
   }
 
-  async repair(user: AuthUser, plugin: string, rawRoot: string): Promise<{ root: string }> {
+  /**
+   * Re-grant one link's two tokens. The skill EDITOR's verb (the plugin side
+   * is not consulted): the amber dot's one manual action, and the single
+   * write the automatic repair runs too — see {@link repairAll}.
+   *
+   * `summary` is the commit subject when the caller has a better one than the
+   * path-derived default; the automatic repair passes one that says it was
+   * automatic, because the commit is the only trace it leaves.
+   *
+   * `written` says whether the file changed. A root that already carried
+   * both lines is left alone and reports false — which, for a root the index
+   * called ungranted, means the lines are not what is missing (a `deny`
+   * beside them is): the automatic repair reads it as "still broken", not as
+   * repaired.
+   */
+  async repair(
+    user: AuthUser,
+    plugin: string,
+    rawRoot: string,
+    opts?: { summary?: string },
+  ): Promise<{ root: string; written: boolean }> {
     const folder = await this.pluginFolder(plugin);
     const root = this.rootOrThrow(rawRoot);
     const wsId = this.kb.defaultWorkspaceId();
@@ -203,13 +273,97 @@ export class PluginLinksService {
           root,
         });
       }
-      await this.grantTokens(wsId, user, folder, root);
+      const written = await this.grantTokens(wsId, user, folder, root, opts?.summary);
       this.changed(wsId);
-      return { root };
+      return { root, written };
     });
   }
 
+  /**
+   * Repair EVERY link of `plugin` that is missing its grants — what opening
+   * the plugin's page runs for someone who may write the plugin.
+   *
+   * Two gates, in this order: the caller must be able to write the PLUGIN
+   * (this is the plugin's page repairing its own links, not a way to write
+   * other people's access files), and then, per root, to write that root's
+   * access file. A root they cannot write is left exactly as it is and comes
+   * back in `skipped` with the people who CAN write it, which is the sentence
+   * the banner then says. Nothing comes back for a root that was repaired:
+   * the commit is the trace, the page simply renders with the link healthy.
+   *
+   * Root by root through {@link repair} — the same write, the same manifest
+   * check, the same pair of locks — so the automatic path and the button on
+   * the skill page can never write different things. Each root's failure is
+   * caught into `skipped`: one unwritable file must not cost the others their
+   * repair, nor the page its render.
+   *
+   * A root the repair did not have to write is NOT repaired. The work list
+   * holds only roots the index called ungranted, so a root whose two lines
+   * were already there is broken by something the lines cannot fix — a `deny`
+   * of the plugin in that same file — and reporting it repaired would hide
+   * the one link the writer opening this page could not see anywhere else.
+   */
+  async repairAll(user: AuthUser, plugin: string): Promise<LinkRepairReport> {
+    const folder = await this.pluginFolder(plugin);
+    const wsId = this.kb.defaultWorkspaceId();
+    await this.requirePluginWrite(wsId, user, folder);
+    // Read the work list ONCE, before the first write: `repair` invalidates
+    // the index, and re-reading it per root would rebuild the whole membership
+    // between every commit.
+    const work = (await this.links.membership()).byPlugin.get(folder)?.ungrantedRoots ?? [];
+    if (work.length === 0) return { repaired: [], skipped: [] };
+    const named = new Map((await this.skillService.listSkills(undefined)).map((s) => [s.path, s.name]));
+    const repaired: string[] = [];
+    const skipped: UnrepairedLink[] = [];
+    const leftBroken = async (item: (typeof work)[number], reason: UnrepairedLink['reason']) => {
+      skipped.push({
+        root: item.root,
+        reason,
+        skills: item.skills.map((path) => ({ path, name: named.get(path) ?? path.split('/').pop() ?? path })),
+        editors: await this.editorsOf(wsId, item.root),
+      });
+    };
+    for (const item of work) {
+      try {
+        const { written } = await this.repair(user, folder, item.root, { summary: repairSummary(folder, item.root) });
+        if (written) repaired.push(item.root);
+        else await leftBroken(item, 'denied');
+      } catch (err) {
+        const needsWrite = err instanceof PluginLinkError && err.payload.kind === 'needs-skill-write';
+        if (!needsWrite) log.warn('automatic link repair failed:', { plugin: folder, root: item.root, err });
+        await leftBroken(item, needsWrite ? 'needs-skill-write' : 'failed');
+      }
+    }
+    return { repaired, skipped };
+  }
+
   // --- internal --------------------------------------------------------------
+
+  /**
+   * Who may edit a root's access file — the principals the banner names as
+   * the people who can repair a link this viewer cannot.
+   *
+   * Plugin principals are dropped: `plugin/gtm/write` is a real holder of the
+   * verb, and naming it in a sentence addressed to a person says nothing they
+   * could act on. The eligible lists carry emails and no display names, so an
+   * email stands in — every name here has to be something a reader can go and
+   * ask. A lookup that fails names nobody rather than failing the whole
+   * repair — the banner has a sentence for that.
+   */
+  private async editorsOf(wsId: string, root: string): Promise<LinkEditors> {
+    try {
+      const writers = await this.accessControl.eligibleWriters(wsId, accessMdPathForFolder(root));
+      return {
+        roles: writers.principals
+          ? writers.principals.filter((p) => p.kind !== 'plugin').map((p) => p.name)
+          : writers.roles,
+        users: writers.users.map((u) => ({ name: u.name || u.email, email: u.email })),
+      };
+    } catch (err) {
+      log.warn("couldn't resolve a skill root's editors:", { root, err });
+      return { roles: [], users: [] };
+    }
+  }
 
   /**
    * ONE reservation for both sides of a link: the plugin's manifest AND the
@@ -236,13 +390,28 @@ export class PluginLinksService {
     ];
   }
 
-  private async grantTokens(wsId: string, user: AuthUser, folder: string, root: string): Promise<void> {
+  /**
+   * The two lines, and a commit only if they were not already there — the
+   * `changed` check is what makes re-linking, Repair and the page-open repair
+   * idempotent rather than a stream of empty commits. Returns whether the
+   * file changed, so a caller can tell a repair that wrote from one that had
+   * nothing to write.
+   */
+  private async grantTokens(
+    wsId: string,
+    user: AuthUser,
+    folder: string,
+    root: string,
+    summary?: string,
+  ): Promise<boolean> {
     const [read, write] = this.tokens(folder);
     const a = await this.mutation.grant(wsId, 'folder', root, 'read', read);
     const b = await this.mutation.grant(wsId, 'folder', root, 'write', write);
-    if (a.changed || b.changed) {
-      await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, `${this.kbDirName}/${a.editPath}`, user);
-    }
+    if (!(a.changed || b.changed)) return false;
+    await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, `${this.kbDirName}/${a.editPath}`, user, {
+      summary,
+    });
+    return true;
   }
 
   private rootOrThrow(raw: string): string {

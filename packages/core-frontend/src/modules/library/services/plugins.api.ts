@@ -247,6 +247,51 @@ export async function repairSkillLink(plugin: string, skillPath: string): Promis
   });
 }
 
+/** Who may edit a skill root's access file — who can repair its link. */
+export interface LinkEditors {
+  roles: string[];
+  users: { name: string; email: string }[];
+}
+
+/** One link the page-open repair left alone, and why — mirrors the backend. */
+export interface UnrepairedLink {
+  /** Repo-relative root, as the plugin's manifest declares it. */
+  root: string;
+  /**
+   * `needs-skill-write` — the viewer may not write its access file; `failed`
+   * — the write did not land; `denied` — the lines are there and a `deny` of
+   * the plugin beside them keeps the link broken, so there is nothing to
+   * write and only an editor removing the deny would change it.
+   */
+  reason: 'needs-skill-write' | 'failed' | 'denied';
+  /** The skills the plugin's members still cannot read through it. */
+  skills: { path: string; name: string }[];
+  /** Who the banner names as able to repair it. */
+  editors: LinkEditors;
+}
+
+/** What one page-open repair did, and what is still broken. */
+export interface LinkRepairReport {
+  repaired: string[];
+  skipped: UnrepairedLink[];
+}
+
+/**
+ * Repair every link of a plugin whose grants are missing — what the plugin
+ * page runs, once, on open, for someone who may write the plugin.
+ *
+ * Silent by design: a repaired link shows nothing, so the only thing the
+ * caller does with `repaired` is reload the catalog. `skipped` is the banner.
+ * Refused with the ordinary 404 for a caller who may not write the plugin,
+ * which is why the page asks only when its summary says they can.
+ */
+export async function repairPluginLinks(plugin: string): Promise<LinkRepairReport> {
+  const body = await linkCall(`/api/plugins/${encodeURIComponent(plugin)}/links/repair-all`, {
+    method: 'POST',
+  });
+  return body as unknown as LinkRepairReport;
+}
+
 /**
  * Thrown when a join request is refused because access already landed —
  * between the page load and the click. Not an error to show: the right

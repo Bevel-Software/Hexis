@@ -32,6 +32,9 @@ vi.mock('../services/plugins.api', () => ({
   listJoinRequests: pluginsMock.listJoinRequests,
   reconcileJoinRequest: vi.fn(),
   requestPluginAccess: vi.fn(),
+  // The plugin page repairs its links on open for a manager; these fixtures
+  // are members, so it never fires — but the module still has to export it.
+  repairPluginLinks: vi.fn().mockResolvedValue({ repaired: [], skipped: [] }),
   AlreadyReadableError: class AlreadyReadableError extends Error {},
 }));
 
