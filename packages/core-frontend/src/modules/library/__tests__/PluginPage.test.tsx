@@ -12,6 +12,7 @@ import type { LibraryData } from '../hooks/useLibraryData';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import type { PluginSummary } from '../services/plugins.api';
 import { withAuth } from './auth-harness';
+import { expectMenuAtTheEndOfTheTitleRow } from './title-row-actions';
 
 /**
  * The plugin page: which view a caller gets, what the page says about who runs
@@ -330,6 +331,19 @@ describe('PluginPage', () => {
     expect(screen.getByText('Plugins/GTM')).toBeInTheDocument();
     // The folder's skill files under the identity, not under the folder name.
     expect(screen.getByTestId('library-card-skill-outreach')).toBeInTheDocument();
+  });
+
+  /**
+   * The other half of the shared criterion — see `title-row-actions.ts`. This
+   * page is the reference the tool page was brought into line with, so it is
+   * the one that must not drift: if this fails, the helper is describing the
+   * plugin page's old shape and the tool page has been pinned to it.
+   */
+  it('carries its ⋯ at the right end of the title row', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', displayName: 'GTM' })]);
+    renderPlugin('gtm');
+    await screen.findByRole('heading', { name: 'GTM', level: 1 });
+    expectMenuAtTheEndOfTheTitleRow();
   });
 
   it('offers Rename plugin to a MANAGER, and moves to the new identity once the rename lands', async () => {

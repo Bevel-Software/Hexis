@@ -226,7 +226,17 @@ describe('LibraryCard: the name keeps its width', () => {
 });
 
 describe('PluginIndexRow: the same rule, one line tall', () => {
-  it('holds a long plugin name to the floor beside its chips', () => {
+  /**
+   * The row is the ONE caller that keeps the name and hands the badges back.
+   *
+   * A card's chips sit beside its name and drop under it when the two stop
+   * fitting, and `NAME_MIN_WIDTH` is the floor that decides when. An index
+   * row has somewhere better to put them — its own right edge, beside the
+   * counts — so the name never competes with a chip and is never given a
+   * floor to defend itself with. A floor here would be a claim on space with
+   * nothing left on the line to give it back.
+   */
+  it('gives the name the whole title line, chips or no chips', () => {
     render(
       <PluginIndexRow
         label={LONG_NAME}
@@ -238,8 +248,9 @@ describe('PluginIndexRow: the same rule, one line tall', () => {
 
     const name = screen.getByTitle(LONG_NAME);
     expect(name).toHaveTextContent(LONG_NAME);
-    expect(name.className).toContain(NAME_MIN_WIDTH);
-    expect(name.parentElement!.className).toContain('flex-wrap');
+    expect(name.className).not.toContain(NAME_MIN_WIDTH);
+    // And the chip is not on that line at all — it went to the row's edge.
+    expect(name.parentElement).not.toContainElement(screen.getByText('Owner'));
   });
 
   it('is laid out in a track that can actually run short', () => {
@@ -265,6 +276,8 @@ describe('PluginIndexRow: the same rule, one line tall', () => {
   it('says the whole name on a row that carries no chip at all', () => {
     // The row used to pass its label through as a bare string, so a plugin
     // whose name the row had to truncate had nowhere to finish saying it.
+    // `NameWithBadges` is still what gives it the `title`, which is the only
+    // reason the row still goes through it now that the chips have left.
     render(<PluginIndexRow label={LONG_NAME} meta="4 skills · 2 tools" onOpen={vi.fn()} />);
     const name = screen.getByTitle(LONG_NAME);
     expect(name).toHaveTextContent(LONG_NAME);
