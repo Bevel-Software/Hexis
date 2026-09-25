@@ -357,7 +357,7 @@ export async function createCoreServices(
   // is resolved through them, and a fresh install has none of it in the
   // environment. `load()` is env-first, so an existing deployment sees exactly
   // what it saw before — a stored row only answers where a variable is silent.
-  const settings = new DeploymentSettingsService(db, config.secretsEncKey);
+  const settings = new DeploymentSettingsService(db, config.secretsEncKey, undefined, { env: config.settingsEnv });
   await settings.load();
 
   // The layout variables that were retired this release, folded into their

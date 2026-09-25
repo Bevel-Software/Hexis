@@ -41,6 +41,34 @@ describe('tenantConfigFrom', () => {
     expect(config).toMatchObject({ port: 3001, nodeEnv: 'production', trustProxy: '1', databaseUrl: settings.databaseUrl });
   });
 
+  it('hands the graph its settings as an environment of its own: the record\'s values and nothing of the host\'s', () => {
+    const config = tenantConfigFrom(
+      {
+        ...acme,
+        kbRepoUrl: 'https://github.com/acme/kb.git',
+        gitToken: 'ghp_acme',
+        defaultBranch: 'main',
+        protectedBranches: ['main', 'staging'],
+        allowedEmailDomains: ['@Acme.com'],
+        oidc: { issuerUrl: 'https://login.acme.com', clientId: 'cid', clientSecret: 'sec' },
+      },
+      settings,
+    );
+    expect(config.settingsEnv).toEqual({
+      KB_REPO_URL: 'https://github.com/acme/kb.git',
+      GIT_TOKEN: 'ghp_acme',
+      DEFAULT_BRANCH: 'main',
+      PROTECTED_BRANCHES: 'main,staging',
+      OIDC_ISSUER_URL: 'https://login.acme.com',
+      OIDC_CLIENT_ID: 'cid',
+      OIDC_CLIENT_SECRET: 'sec',
+      ALLOWED_EMAIL_DOMAINS: 'acme.com',
+    });
+    // A record naming nothing pins nothing: the setup screen collects it,
+    // and the defaults stay defaults rather than becoming "set outside the app".
+    expect(tenantConfigFrom(acme, settings).settingsEnv).toEqual({});
+  });
+
   it('derives the three secrets from the master key, differently per tenant', () => {
     const a = tenantConfigFrom(acme, settings);
     const b = tenantConfigFrom({ ...acme, slug: 'globex', hosts: ['globex.example.test'] }, settings);

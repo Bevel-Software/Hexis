@@ -43,6 +43,11 @@ export interface TenantRecord {
   gitToken?: string;
   gitUsername?: string;
   kbDirName?: string;
+  /** The branch model; absent, the tenant's admin enters it on the setup screen. */
+  defaultBranch?: string;
+  protectedBranches?: string | string[];
+  /** The bearer a git host's webhook presents to `POST /api/sync`. */
+  kbSyncSecret?: string;
   /** Default `t_<slug>` with hyphens as underscores. */
   dbSchema?: string;
   /** The credential-prefix brand; default: the slug without hyphens. */
@@ -113,6 +118,34 @@ export function tenantConfigFrom(record: TenantRecord, settings: TenantHostSetti
   }
   const secrets = deriveTenantSecrets(settings.masterKey, slug);
   const besideWorkspaces = (name: string) => path.resolve(settings.workspacesRoot, '..', name, slug);
+  const allowedEmailDomains = (record.allowedEmailDomains ?? [])
+    .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))
+    .filter((d) => d.length > 0);
+  const protectedBranches = Array.isArray(record.protectedBranches)
+    ? record.protectedBranches.join(',')
+    : (record.protectedBranches ?? '');
+  // The record's settings, as the environment a single-tenant deployment
+  // would pin them in: only what the record names, so the setup screen
+  // still collects the rest. Nothing of the host process's environment.
+  const settingsEnv: NodeJS.ProcessEnv = {};
+  for (const [name, value] of [
+    ['KB_REPO_URL', record.kbRepoUrl],
+    ['GIT_TOKEN', record.gitToken],
+    ['GIT_USERNAME', record.gitUsername],
+    ['KB_DIR_NAME', record.kbDirName],
+    ['DEFAULT_BRANCH', record.defaultBranch],
+    ['PROTECTED_BRANCHES', protectedBranches],
+    ['KB_SYNC_SECRET', record.kbSyncSecret],
+    ['OIDC_ISSUER_URL', record.oidc?.issuerUrl],
+    ['OIDC_CLIENT_ID', record.oidc?.clientId],
+    ['OIDC_CLIENT_SECRET', record.oidc?.clientSecret],
+    ['OIDC_SCOPES', record.oidc?.scopes],
+    ['OIDC_PROVIDER_LABEL', record.oidc?.providerLabel],
+    ['ALLOWED_EMAIL_DOMAINS', allowedEmailDomains.join(',')],
+  ] as const) {
+    const trimmed = (value ?? '').trim();
+    if (trimmed) settingsEnv[name] = trimmed;
+  }
   return {
     port: settings.port,
     databaseUrl: settings.databaseUrl,
@@ -145,15 +178,14 @@ export function tenantConfigFrom(record: TenantRecord, settings: TenantHostSetti
     kbTemplateDir: settings.kbTemplateDir,
     ontologySessionBlock: settings.ontologySessionBlock,
     updateCheckEnabled: settings.updateCheckEnabled,
-    allowedEmailDomains: (record.allowedEmailDomains ?? [])
-      .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))
-      .filter((d) => d.length > 0),
+    allowedEmailDomains,
     trustProxy: settings.trustProxy,
     gitTimeoutMs: settings.gitTimeoutMs,
     publicBackendUrl,
     publicFrontendUrl,
     configuredPublicFrontendUrl: publicFrontendUrl,
     loopbackBaseUrl: loopbackTenantBaseUrl(settings.port, slug),
+    settingsEnv,
   };
 }
 

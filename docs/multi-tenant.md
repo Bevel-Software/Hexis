@@ -57,10 +57,18 @@ Per tenant:
 | `adminEmail` | yes | The tenant's owner, as `ADMIN_EMAIL` is for a single-tenant deployment |
 | `adminPassword` | no | The bootstrap password. Absent, password login is off for this tenant (`loginPassword` forces it either way) |
 | `kbRepoUrl`, `gitToken`, `gitUsername` | no | The repository and its credential. Absent, the tenant's admin enters them on its setup screen, exactly as on a single-tenant deployment |
+| `defaultBranch`, `protectedBranches` | no | The branch model (`protectedBranches` as a list or a comma-separated string). Absent, entered on the setup screen |
+| `kbSyncSecret` | no | The bearer a git host's webhook presents to the tenant's `POST /api/sync` |
 | `oidc` | no | `issuerUrl`, `clientId`, `clientSecret`, optional `scopes` and `providerLabel` |
 | `allowedEmailDomains` | no | The SSO sign-up allow-list |
 | `publicBackendUrl`, `publicFrontendUrl` | no | Default `https://<first host>` |
 | `dbSchema`, `tenantId`, `kbDirName` | no | Defaults derived from the slug: `t_<slug>`, the slug without hyphens, `knowledge-base` |
+
+A record's values behave exactly as environment-pinned values do on a
+single-tenant deployment: they win over the tenant's setup screen, which
+shows them as set outside the app. What the record leaves out is collected
+on that tenant's setup screen. The host process's own `KB_REPO_URL`,
+`GIT_TOKEN`, `OIDC_*` and the like are never read for a tenant.
 
 The three secrets a deployment normally sets in its environment
 (`JWT_SECRET`, `SECRETS_ENC_KEY`, `INTERNAL_TOKEN_SECRET`) are derived per

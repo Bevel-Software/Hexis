@@ -520,3 +520,24 @@ describe('DeploymentSettingsService — validation', () => {
     ).toEqual([]);
   });
 });
+
+describe('DeploymentSettingsService — an environment of its own', () => {
+  it('resolves the env-first layer from the environment it was given, not the process\'s', async () => {
+    process.env.KB_REPO_URL = 'https://host.example/leaks-into-every-tenant.git';
+    const { db } = makeDb();
+    const own = new DeploymentSettingsService(db, ENC_KEY, undefined, {
+      env: { KB_REPO_URL: 'https://github.com/acme/kb.git', GIT_USERNAME: 'oauth2' },
+    });
+    await own.load();
+    expect(own.resolve('kbRepoUrl')).toBe('https://github.com/acme/kb.git');
+    expect(own.sourceOf('kbRepoUrl')).toBe('env');
+    expect(own.resolve('gitUsername')).toBe('oauth2');
+    // What the given environment leaves out is not taken from the process either.
+    expect(own.resolve('gitToken')).toBe('');
+    expect(own.sourceOf('gitToken')).toBe('unset');
+    // A service built without one keeps reading the process, as before.
+    const shared = new DeploymentSettingsService(db, ENC_KEY);
+    await shared.load();
+    expect(shared.resolve('kbRepoUrl')).toBe('https://host.example/leaks-into-every-tenant.git');
+  });
+});

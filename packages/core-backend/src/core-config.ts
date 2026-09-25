@@ -118,6 +118,14 @@ export interface TenantConfig {
    * path — see `tenancy/tenant-host.ts`.
    */
   readonly loopbackBaseUrl?: string;
+  /**
+   * The environment the deployment settings (repository, git credential,
+   * branch model, SSO, sync secret, …) resolve against before the stored
+   * layer. Unset, the process's own. A tenant host builds one per tenant
+   * from its record, so a variable set on the host process never reaches
+   * every tenant and a record's values behave as environment-pinned ones.
+   */
+  readonly settingsEnv?: NodeJS.ProcessEnv;
 }
 
 /**

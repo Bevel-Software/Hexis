@@ -424,11 +424,23 @@ export class DeploymentSettingsService {
   private stored = new Map<string, string>();
   private readonly crypto: TokenCrypto | null;
 
+  /**
+   * The environment the env-first layer reads. The process's own for a
+   * single-tenant deployment; a host serving several knowledge bases hands
+   * each graph one built from its tenant record, so a variable set on the
+   * host process can never leak into every tenant, and a record's values
+   * behave exactly as environment-pinned ones do (they win over the setup
+   * screen and the screen shows them as such).
+   */
+  private readonly env: NodeJS.ProcessEnv;
+
   constructor(
     private readonly db: Database,
     private readonly secretsEncKey: string,
     defs: SettingDef[] = CORE_SETTINGS,
+    options: { env?: NodeJS.ProcessEnv } = {},
   ) {
+    this.env = options.env ?? process.env;
     for (const def of defs) this.defs.set(def.key, def);
     // No key configured means secrets cannot be stored — surfaced when someone
     // tries, rather than pretended away by writing plaintext.
@@ -472,7 +484,7 @@ export class DeploymentSettingsService {
   resolve(key: string): string {
     const def = this.defs.get(key);
     if (!def) return '';
-    const fromEnv = def.envVar ? (process.env[def.envVar] ?? '').trim() : '';
+    const fromEnv = def.envVar ? (this.env[def.envVar] ?? '').trim() : '';
     if (fromEnv) return fromEnv;
     return (this.stored.get(key) ?? '').trim();
   }
@@ -523,7 +535,7 @@ export class DeploymentSettingsService {
    */
   async importLegacyLayoutEnv(): Promise<void> {
     for (const [key, envVar] of Object.entries(LEGACY_LAYOUT_ENV_VARS)) {
-      const fromEnv = (process.env[envVar] ?? '').trim();
+      const fromEnv = (this.env[envVar] ?? '').trim();
       if (!fromEnv) continue;
       const saved = (this.stored.get(key) ?? '').trim();
       if (saved) {
@@ -561,7 +573,7 @@ export class DeploymentSettingsService {
     // A setting with no variable can never read `env`, whatever the process
     // environment happens to hold — which is what makes the layout fields
     // editable in the app on a deployment that still sets the old variables.
-    if (def.envVar && (process.env[def.envVar] ?? '').trim()) return 'env';
+    if (def.envVar && (this.env[def.envVar] ?? '').trim()) return 'env';
     return (this.stored.get(key) ?? '').trim() ? 'stored' : 'unset';
   }
 
