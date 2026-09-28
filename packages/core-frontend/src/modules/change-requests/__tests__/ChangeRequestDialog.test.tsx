@@ -22,7 +22,14 @@ vi.mock('../../pr/services/pr-approvals.api', () => ({
   revertPrFile: approvalsApi.revertPrFile,
   unapprovePrFile: approvalsApi.unapprovePrFile,
 }));
-vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: vi.fn() }));
+const mergeApi = vi.hoisted(() => ({
+  mergePullRequest: vi.fn(),
+  refreshChangeRequestFromTarget: vi.fn(),
+}));
+vi.mock('../../pr/services/pr-merge.api', () => ({
+  mergePullRequest: mergeApi.mergePullRequest,
+  refreshChangeRequestFromTarget: mergeApi.refreshChangeRequestFromTarget,
+}));
 const cancelApi = vi.hoisted(() => ({ deleteChangeRequest: vi.fn() }));
 vi.mock('../../pr/services/pr-cancel.api', () => ({
   cancelPullRequest: vi.fn(),
@@ -32,6 +39,7 @@ vi.mock('../../pr/services/pr-cancel.api', () => ({
 import { ChangeRequestDialog } from '../components/ChangeRequestDialog';
 import { AuthContext } from '../../auth/state/auth.context';
 import { readFileOnBranch } from '../services/change-requests.api';
+import { GitApiError } from '../../git/services/git.api';
 
 const CR: PullRequestSummary = {
   number: 12,
@@ -50,6 +58,8 @@ const CR: PullRequestSummary = {
 
 beforeEach(() => {
   detailMock.fetchPrDetail.mockReset();
+  mergeApi.refreshChangeRequestFromTarget.mockReset();
+  cancelApi.deleteChangeRequest.mockReset();
 });
 
 describe('ChangeRequestDialog: a request with no remaining changes', () => {
@@ -377,27 +387,181 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     await waitFor(() => expect(onResolved).toHaveBeenCalled());
   });
 
-  it('Delete request appears for admins only, arms, then deletes and resolves', async () => {
+  /**
+   * Delete is the author's verb as much as the admin's. The dialog asks the
+   * server one question — `viewerCanDelete` — so these tests never encode
+   * "is this an admin"; that decision lives on the server, beside the DELETE
+   * route that enforces it.
+   */
+  it('shows Delete request whenever the server says the viewer may delete, arms, then deletes and resolves', async () => {
     detailMock.fetchPrDetail.mockResolvedValue({
       ...detailWith([approval({})]),
-      viewerCanBypassMerge: true,
+      // An author with no admin rights: exactly the case that used to see
+      // nothing here.
+      viewerCanBypassMerge: false,
+      viewerCanDelete: true,
+      viewerIsAuthor: true,
     });
     cancelApi.deleteChangeRequest.mockResolvedValue(undefined);
     const onResolved = vi.fn();
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={onResolved} />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Delete request' }));
+    // Nothing sent yet — the armed second click is the verdict.
     expect(cancelApi.deleteChangeRequest).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Really delete request and branch?' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: `Really delete request and branch ${CR.branch}?` }),
+    );
     await waitFor(() => expect(cancelApi.deleteChangeRequest).toHaveBeenCalledWith(12));
     await waitFor(() => expect(onResolved).toHaveBeenCalled());
   });
 
-  it('no Delete request for non-admins', async () => {
-    detailMock.fetchPrDetail.mockResolvedValue(detailWith([approval({})]));
+  it('shows no Delete request when the server says the viewer may not delete', async () => {
+    // A signed-in stranger, or an owner of every changed file: they may
+    // decline, never destroy.
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...detailWith([approval({})]),
+      viewerCanDelete: false,
+      viewerIsAuthor: false,
+    });
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
     await screen.findByText('Waiting on Admin');
     expect(screen.queryByRole('button', { name: 'Delete request' })).not.toBeInTheDocument();
+  });
+
+  it('an admin reads exactly the wording the author reads', async () => {
+    // Same request, same branch, different viewer: the sentence must not
+    // change with who is looking — only with which branch is at stake.
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...detailWith([approval({})]),
+      viewerCanBypassMerge: true,
+      viewerCanDelete: true,
+      viewerIsAuthor: false,
+    });
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete request' }));
+    expect(
+      screen.getByRole('button', { name: `Really delete request and branch ${CR.branch}?` }),
+    ).toBeInTheDocument();
+  });
+
+  it('names a draft branch in the armed confirmation', async () => {
+    const named = { ...CR, branch: 'juan/fix-copy' } as PullRequestSummary;
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...detailWith([approval({})]),
+      branch: 'juan/fix-copy',
+      viewerCanDelete: true,
+      viewerIsAuthor: true,
+    });
+    render(<ChangeRequestDialog cr={named} onClose={() => {}} onResolved={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete request' }));
+    // The branch is about to be removed for good; the confirmation says which.
+    expect(
+      screen.getByRole('button', { name: 'Really delete request and branch juan/fix-copy?' }),
+    ).toBeInTheDocument();
+  });
+
+  it('keeps the generic wording for a platform-made suggestions branch', async () => {
+    // The author never chose `suggestions/ali/...`; the platform did. Naming it
+    // would ask them to confirm a path they cannot recognise.
+    const suggested = { ...CR, branch: 'suggestions/ali/notes' } as PullRequestSummary;
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...detailWith([approval({})]),
+      branch: 'suggestions/ali/notes',
+      viewerCanDelete: true,
+      viewerIsAuthor: true,
+    });
+    render(<ChangeRequestDialog cr={suggested} onClose={() => {}} onResolved={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete request' }));
+    expect(
+      screen.getByRole('button', { name: 'Really delete request and branch?' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/suggestions\/ali\/notes\?/)).not.toBeInTheDocument();
+  });
+
+  it('Keep disarms without sending anything', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...detailWith([approval({})]),
+      viewerCanDelete: true,
+      viewerIsAuthor: true,
+    });
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete request' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Keep' }));
+    // Back to the unarmed label, and nothing was asked of the server.
+    expect(await screen.findByRole('button', { name: 'Delete request' })).toBeInTheDocument();
+    expect(cancelApi.deleteChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it('reports the server’s refusal in the dialog and leaves the request alone', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...detailWith([approval({})]),
+      viewerCanDelete: true,
+      viewerIsAuthor: true,
+    });
+    // Applied between opening the dialog and confirming.
+    cancelApi.deleteChangeRequest.mockRejectedValue(
+      new Error('This change request has already been applied.'),
+    );
+    const onResolved = vi.fn();
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={onResolved} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete request' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: `Really delete request and branch ${CR.branch}?` }),
+    );
+    expect(
+      await screen.findByText('This change request has already been applied.'),
+    ).toBeInTheDocument();
+    // The dialog stays open — nothing was removed, so nothing is resolved.
+    expect(onResolved).not.toHaveBeenCalled();
+  });
+
+  it('still offers Delete on a request stuck on a conflict', async () => {
+    // The stuck request is the one its author most wants to throw away and
+    // propose again, which is why the button is no longer hidden while the
+    // dialog is blocked. Reached the way the dialog really reaches it: the
+    // auto-update on open is refused as conflicting.
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...detailWith([approval({})]),
+      behind: true,
+      viewerCanUpdate: true,
+      viewerCanDelete: true,
+      viewerIsAuthor: true,
+    });
+    mergeApi.refreshChangeRequestFromTarget.mockRejectedValue(
+      new GitApiError(409, 'conflicts', { kind: 'change-request-conflicts' }),
+    );
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    // The blocked state is on screen…
+    expect(await screen.findByText(/Nothing changes for anyone until/)).toBeInTheDocument();
+    // …and Delete is there with it, armed wording intact.
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete request' }));
+    expect(
+      screen.getByRole('button', { name: `Really delete request and branch ${CR.branch}?` }),
+    ).toBeInTheDocument();
+  });
+
+  it('points the author at Delete when nothing is left to change, and names them for everyone else', async () => {
+    const empty = {
+      ...detailWith([]),
+      files: [],
+      approvals: [],
+      viewerCanDelete: true,
+    };
+    detailMock.fetchPrDetail.mockResolvedValue({ ...empty, viewerIsAuthor: true });
+    const { unmount } = render(
+      <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />,
+    );
+    // Withdraw is not in this dialog; Delete is, right below this sentence.
+    expect(await screen.findByText(/You can delete it below\./)).toBeInTheDocument();
+    expect(screen.queryByText(/can withdraw it/)).not.toBeInTheDocument();
+    unmount();
+
+    detailMock.fetchPrDetail.mockResolvedValue({ ...empty, viewerIsAuthor: false });
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    // Third person, first name only — the author is who can clear it up.
+    expect(await screen.findByText(/Ali can delete it\./)).toBeInTheDocument();
   });
 
   it("folds a long description to one line: Read more opens it, Hide folds it back", async () => {

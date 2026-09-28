@@ -511,6 +511,22 @@ export class PullRequestService implements IPullRequestService {
       approvals,
     });
 
+    // Hashed here, not on the client: the detail carries an author HASH and no
+    // author email, so the comparison can only happen where the viewer's email
+    // is already known.
+    const viewerIsAuthor = !!(
+      opts.viewerEmail &&
+      summary.authorId &&
+      summary.authorId === hashEmail(opts.viewerEmail)
+    );
+
+    const viewerCanDelete = computeViewerCanDelete({
+      state: summary.state,
+      authorId: summary.authorId,
+      viewerEmail: opts.viewerEmail,
+      viewerCanBypassMerge,
+    });
+
     const detail: PullRequestDetail = {
       ...summary,
       body: row.body,
@@ -527,6 +543,8 @@ export class PullRequestService implements IPullRequestService {
       mergeBaseSha: forkPoint.mergeBaseSha,
       behind: summary.state === 'open' && forkPoint.behind,
       viewerCanUpdate,
+      viewerIsAuthor,
+      viewerCanDelete,
     };
 
     // A patch-less detail is an internal read; it must not be served to the
@@ -631,7 +649,38 @@ export function computeViewerCanUpdate(input: {
   return viewerIsAuthor || input.viewerCanBypassMerge || viewerMayApply;
 }
 
+/**
+ * Pure predicate for the `viewerCanDelete` hint — who may delete a request
+ * outright, closing it AND retiring its branch. The author (their own
+ * proposal and their own branch) or an admin (`viewerCanBypassMerge` is the
+ * proxy — the same `canWriteAtRef('roles.yaml')` predicate the DELETE route
+ * enforces). Mirrors `deleteChangeRequest` exactly, which is why it differs
+ * from its two siblings in both directions:
+ *
+ * - It does NOT grant the owner of every changed file, as
+ *   `computeViewerCanCancel` does. Declining someone else's request leaves
+ *   their branch to rework; deleting it destroys their text.
+ * - It bars only `merged`, not everything that is not `open`. A request
+ *   withdrawn in another tab is `closed` and still has a leftover branch the
+ *   server will retire, so the button must survive it. Applied history is
+ *   nobody's to delete.
+ *
+ * Fail-closed: no viewer email → false, whatever the grants say.
+ */
+export function computeViewerCanDelete(input: {
+  state: PullRequestState;
+  authorId: string | undefined;
+  viewerEmail: string | undefined;
+  viewerCanBypassMerge: boolean;
+}): boolean {
+  if (input.state === 'merged') return false;
+  if (!input.viewerEmail) return false;
+  const viewerIsAuthor = !!(input.authorId && input.authorId === hashEmail(input.viewerEmail));
+  return viewerIsAuthor || input.viewerCanBypassMerge;
+}
+
 export const __testing = {
   computeViewerCanCancel,
   computeViewerCanUpdate,
+  computeViewerCanDelete,
 };

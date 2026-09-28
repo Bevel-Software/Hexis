@@ -2651,11 +2651,16 @@ export class WorkflowService implements IWorkflowService {
   /**
    * DELETE a change request outright: close it (whatever its diff says) and
    * retire its source branch — the request, its proposal, and the branch that
-   * carried it are gone in one verb. Admin-only, resolved the same way every
-   * other admin check here is (write on `roles.yaml` at `origin/<base>`,
-   * never a local ref): this is the moderation verb for a shared deployment,
-   * stronger than reject (which the author or the files' owners can do, and
-   * which leaves the branch for a second round).
+   * carried it are gone in one verb. The request's AUTHOR or an admin, and
+   * nobody else: it is the author's own proposal and their own branch to throw
+   * away, and it is the moderation verb for a shared deployment. Admin rights
+   * resolve the same way every other admin check here does (write on
+   * `roles.yaml` at `origin/<base>`, never a local ref); authorship is the
+   * STORED `authorId` hash, never anything the caller sends.
+   *
+   * Stronger than reject, which the changed files' owners may also do and which
+   * leaves the branch for a second round. They keep reject and do not get this:
+   * an owner must not be able to destroy someone else's text and branch.
    */
   async deleteChangeRequest(number: number, user: AuthUser): Promise<void> {
     const summary = await this.prs.getPr(number);
@@ -2714,8 +2719,17 @@ export class WorkflowService implements IWorkflowService {
         409,
       );
     }
-    if (isAdmin !== true) {
-      throw new WorkflowDomainError('Only an admin can delete a change request.', 403);
+    // Authorship is decided from the STORED author hash, never from anything
+    // the caller sends. Note what is deliberately NOT short-circuited for an
+    // author: the strict fetch and the `null` check above still run. An
+    // author's grant needs no `roles.yaml` read, so skipping them would look
+    // free — but it would let a delete close the request while the branch
+    // removal silently failed against an unreachable origin, and "the shared
+    // repository was down, so nothing changed" is the one refusal that has to
+    // stay honest.
+    const callerIsAuthor = !!(summary.authorId && summary.authorId === hashEmail(user.email));
+    if (!callerIsAuthor && isAdmin !== true) {
+      throw new WorkflowDomainError("Only the request's author or an admin can delete it.", 403);
     }
 
     // Close first (idempotent: an already-closed request just skips to the

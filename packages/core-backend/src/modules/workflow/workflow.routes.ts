@@ -790,7 +790,9 @@ export function createWorkflowRoutes(
 
   /**
    * Delete a change request outright — close it and retire its source
-   * branch. Admin-only; the moderation verb for a shared deployment.
+   * branch. The request's author or an admin: their own proposal to throw
+   * away, and the moderation verb for a shared deployment. The changed files'
+   * owners are NOT included — they keep reject, which leaves the branch.
    */
   router.delete('/workflow/change-requests/:number', async (req, res) => {
     const num = parsePrNumber(req.params.number);
