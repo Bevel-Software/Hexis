@@ -1,13 +1,15 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import {
   DEFAULT_KB_LAYOUT,
   agentsFilePointerSentence,
   type KbLayout,
 } from '@bevel-software/platform-shared';
 import { Banner, Button, Surface, TextField } from '../../../shared/components';
+import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { tokenUsernameForHost } from '../utils/git-host';
 import { isRootFolderSuggestion, rootFolderState, type RootFolderState } from '../utils/root-folders';
 import { copyToClipboard } from '../../../lib/clipboard';
+import { useAppRegistry } from '../../../core/registry';
 import { MarketplaceSection } from '../../settings/components/MarketplaceSection';
 import {
   saveSettings,
@@ -175,7 +177,7 @@ const FIELDS: Record<
   },
   allowedEmailDomains: {
     label: 'Allowed email domains',
-    help: 'Only people with an address at these domains can sign in this way. Separate several with commas. Leave blank to allow any address: safe with a provider that only serves your organisation, risky with one that does not.',
+    help: 'Only people with an address at these domains can sign in through this provider. Separate several with commas. Leave blank to allow any address: safe with a provider that only serves your organisation, risky with one that does not.',
     placeholder: 'example.com',
   },
   auditRetentionDays: {
@@ -269,6 +271,44 @@ const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[]
       'The Audit log records which tools, skills and capabilities each connected agent uses. Choose how long those records are kept; unset, they are kept forever.',
   },
 ];
+
+/**
+ * What the first run asks: where the knowledge lives, which the gate waits
+ * on, and how people sign in, which decides who can follow the admin in.
+ * Everything else is a preference with a working default. It is set on the
+ * Deployment page, by someone who has seen the product it configures; on the
+ * first screen it only made two questions look like five.
+ */
+const FIRST_RUN_SECTIONS: readonly SettingStatus['section'][] = ['knowledge-base', 'sign-in'];
+
+/** The two ways of signing in the section can show, when the distribution runs one. */
+type SignInTab = 'managed' | 'own';
+
+/**
+ * A section's fields. Alone in their section they are its content as it has
+ * always been; beside a distribution's tab they are the panel of theirs, so
+ * the tab that names them has something to name.
+ */
+function SectionFields({ panelOf, children }: { panelOf: SignInTab | null; children: ReactNode }) {
+  if (panelOf === null) return <>{children}</>;
+  return (
+    <div role="tabpanel" id={`sign-in-panel-${panelOf}`} aria-labelledby={`sign-in-tab-${panelOf}`} className="space-y-6">
+      {children}
+    </div>
+  );
+}
+
+/**
+ * The distribution's panel sits inside the settings form, and a browser
+ * submits a form when Enter is pressed in any text input in it. On first
+ * run that submit finishes setup and leaves the screen, from a field that
+ * had nothing to do with it. Held here once, so no panel has to remember:
+ * Enter in one of its inputs is the panel's own key. A text area keeps its
+ * new line and a button its press, neither of which submits anything.
+ */
+function keepEnterFromTheForm(event: KeyboardEvent<HTMLElement>) {
+  if (event.key === 'Enter' && event.target instanceof HTMLInputElement) event.preventDefault();
+}
 
 interface Props {
   settings: SettingStatus[];
@@ -416,6 +456,46 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
 
   const editable = settings.filter((s) => s.source !== 'env');
   const fromEnv = settings.filter((s) => s.source === 'env');
+  const sections = variant === 'setup' ? SECTIONS.filter((s) => FIRST_RUN_SECTIONS.includes(s.id)) : SECTIONS;
+
+  /**
+   * The distribution's own way of signing in, when it runs one, and which of
+   * the two tabs is open. The section opens on the way that is in effect: the
+   * deployment's own provider once it has one, the distribution's until then.
+   * Chosen once, from what was stored when the screen opened, so typing an
+   * issuer does not move the reader to another tab.
+   */
+  const { signInOption } = useAppRegistry();
+  const ownProviderConfigured = OIDC_KEYS.every((key) => settings.find((s) => s.key === key)?.configured === true);
+  const [signInTab, setSignInTab] = useState<SignInTab>(ownProviderConfigured ? 'own' : 'managed');
+
+  /**
+   * Whether the form has a place for this field at all: it is the admin's to
+   * edit, and its section is one this variant shows. A field on a tab that
+   * is not open still counts — the tab is opened for it (see
+   * `showProblems`), where a field the form never draws has nowhere to be
+   * shown.
+   */
+  const hasPlace = (key: string) =>
+    editable.some((s) => s.key === key && sections.some((section) => section.id === s.section));
+
+  /**
+   * Put a refused save's problems where the reader will see them. EVERY
+   * problem ends up on screen, which is the one property this function is
+   * for: one about a field the form draws goes beside that field, with the
+   * tab it lives on opened; one about a field the form does not draw goes
+   * to the message line. A save that failed must never look like a save
+   * that did nothing.
+   */
+  function showProblems(found: Record<string, string>) {
+    setProblems(found);
+    const placed = Object.keys(found).filter(hasPlace);
+    if (signInOption && placed.some((key) => settings.find((s) => s.key === key)?.section === 'sign-in')) {
+      setSignInTab('own');
+    }
+    const unplaced = Object.entries(found).filter(([key]) => !hasPlace(key));
+    if (unplaced.length > 0) setError(unplaced.map(([, message]) => message).join(' '));
+  }
 
   /**
    * Whether saving now would actually change this connection field: something
@@ -922,14 +1002,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
       onSaved();
     } catch (err) {
       if (err instanceof SettingsProblems) {
-        setProblems(err.problems);
-        // A problem about a field this form does not render — the server's
-        // connection check blaming a token the environment supplies, say —
-        // would otherwise vanish, leaving a save that failed silently.
-        const unshown = Object.entries(err.problems).filter(
-          ([key]) => !editable.some((s) => s.key === key),
-        );
-        if (unshown.length > 0) setError(unshown.map(([, message]) => message).join(' '));
+        showProblems(err.problems);
       } else if (err instanceof KbInitFailed) {
         // The values ARE stored — only the initialization failed. The form
         // shows what was saved, and the banner says what to fix and retries
@@ -1180,12 +1253,20 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
             Marketplace section: the button is the last thing on the page, but
             Marketplace is deliberately not part of this form (see below). */}
         <form id="setup-settings-form" onSubmit={submit} className="mt-8 space-y-10">
-          {SECTIONS.map((section) => {
+          {sections.map((section) => {
             const fields = editable.filter((s) => s.section === section.id);
             // A section whose every field comes from the environment has
             // nothing to offer — the locked list at the bottom already names
             // them, and an empty heading would read as something missing.
             if (fields.length === 0) return null;
+            // Two ways of signing in, each on a tab of its own.
+            const tabbed = section.id === 'sign-in' && signInOption !== undefined;
+            const redirectUri = (
+              <p className="mt-1.5 text-meta text-ink-faint">
+                Redirect URI:{' '}
+                <code className="font-mono">{`${window.location.origin}/api/auth/oidc/callback`}</code>
+              </p>
+            );
             return (
               <Surface
                 key={section.id}
@@ -1207,13 +1288,63 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                     )}
                   </div>
                   <p className="mt-1 max-w-[60ch] text-detail text-ink-muted">{section.blurb}</p>
-                  {section.id === 'sign-in' && (
-                    <p className="mt-1.5 text-meta text-ink-faint">
-                      Redirect URI:{' '}
-                      <code className="font-mono">{`${window.location.origin}/api/auth/oidc/callback`}</code>
-                    </p>
-                  )}
+                  {/* About the deployment's own provider: under the heading
+                      when that is all the section holds, inside its tab when
+                      the section has two. */}
+                  {section.id === 'sign-in' && !tabbed && redirectUri}
                 </div>
+                {section.id === 'sign-in' && signInOption && (
+                  <>
+                    <div role="tablist" aria-label="How people sign in" className="flex gap-1 border-b border-line">
+                      {(
+                        [
+                          ['managed', signInOption.label],
+                          ['own', signInOption.ownProviderLabel ?? 'Your own provider'],
+                        ] as const
+                      ).map(([id, label]) => (
+                        <button
+                          key={id}
+                          type="button"
+                          role="tab"
+                          id={`sign-in-tab-${id}`}
+                          aria-selected={signInTab === id}
+                          aria-controls={`sign-in-panel-${id}`}
+                          onClick={() => setSignInTab(id)}
+                          className={`-mb-px border-b-2 px-3 py-2 text-detail font-medium ${
+                            signInTab === id
+                              ? 'border-accent text-ink'
+                              : 'border-transparent text-ink-muted hover:text-ink'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    {signInTab === 'managed' && (
+                      <div
+                        role="tabpanel"
+                        id="sign-in-panel-managed"
+                        aria-labelledby="sign-in-tab-managed"
+                        onKeyDown={keepEnterFromTheForm}
+                      >
+                        {/* The distribution's code: a throw in it costs this
+                            tab, not the form the repository is entered on. */}
+                        <SlotBoundary label="sign-in panel">
+                          <signInOption.Panel variant={variant} ownProviderConfigured={ownProviderConfigured} />
+                        </SlotBoundary>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* The section's own fields: every field it has, in ONE
+                    place. With a distribution's tab beside them they are
+                    the second tab's panel, there while that tab is open;
+                    what was typed stays in the draft either way, so
+                    switching tabs loses nothing and saves what was entered. */}
+                {(!tabbed || signInTab === 'own') && (
+                <SectionFields panelOf={tabbed ? 'own' : null}>
+                {tabbed && redirectUri}
                 {fields
                   .filter(
                     (f) =>
@@ -1320,6 +1451,8 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                   sync &&
                   !fields.some((f) => f.key === 'kbSyncSecret') &&
                   renderSyncPanel()}
+                </SectionFields>
+                )}
               </Surface>
             );
           })}
@@ -1354,18 +1487,17 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
             )}
         </form>
 
-        {/* Outside the form: nothing in it is saved by "Save and continue",
-            and on first run it is optional — the gate never waits on it. The
-            same section in both variants, so first run and Deployment
-            settings cannot drift. */}
-        <MarketplaceSection variant={variant} />
+        {/* Outside the form: nothing in it is saved by "Save and continue".
+            On the Deployment page only: the first run asks for the
+            repository and for sign-in (see FIRST_RUN_SECTIONS). */}
+        {variant === 'settings' && <MarketplaceSection variant={variant} />}
 
         {/* The submit button lives HERE, after Marketplace, though it belongs
             to the form above — `form=` is what lets those two facts hold at
             once. It is the last thing on the page because a reader should
-            meet every section, Marketplace included, before the control that
-            leaves the screen; when it sat above Marketplace, the page looked
-            finished while a section was still below it.
+            meet every section, Marketplace included where it is shown, before
+            the control that leaves the screen; when it sat above Marketplace,
+            the page looked finished while a section was still below it.
 
             A rejected connection stops here rather than at the far side of
             it. Saving these answers would finish setup — the server checks

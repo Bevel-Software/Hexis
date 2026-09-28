@@ -145,6 +145,42 @@ export interface ExplorerItemDef {
   Component: ComponentType<{ tree: FileTreeEntry | null }>;
 }
 
+/**
+ * A way to sign in that the distribution runs for every deployment it hosts,
+ * shown in the "Single sign-on" section as a tab of its own, ahead of the
+ * form for the deployment's own identity provider.
+ *
+ * Core's form asks for an issuer, an application and a secret, because a
+ * self-hosted deployment has to bring its own. A hosted one does not: the
+ * host already runs sign-in with the accounts people have, and what is left
+ * for the admin to decide is who may use it. That decision is the
+ * distribution's, so is the panel that takes it, and core only gives it a
+ * place.
+ *
+ * The section opens on this tab unless the deployment has its own provider
+ * configured, in which case it opens on that one: the tab shown is the way
+ * of signing in that is in effect.
+ *
+ * THE PANEL SITS INSIDE THE SETTINGS FORM. It must not render a `<form>` of
+ * its own, its buttons must be `type="button"`, and it saves through its
+ * own requests: "Save and continue" saves core's settings and nothing of
+ * the panel's.
+ */
+export interface SignInOptionDef {
+  /** The tab's name, e.g. "Google and Microsoft". */
+  label: string;
+  /** The name of the tab holding core's own form. Default "Your own provider". */
+  ownProviderLabel?: string;
+  Panel: ComponentType<SignInOptionPanelProps>;
+}
+
+export interface SignInOptionPanelProps {
+  /** Where the form stands: the first-run gate or the Deployment page. */
+  variant: 'setup' | 'settings';
+  /** Whether the deployment has an identity provider of its own configured. */
+  ownProviderConfigured: boolean;
+}
+
 /** Context passed when the user asks to open a change request from a draft. */
 export interface CrCreationInput {
   workspaceId: string | null;
@@ -326,6 +362,11 @@ export interface AppRegistry {
    * the page ends with its form, as it always has.
    */
   deploymentPanel?: ComponentType;
+  /**
+   * A way to sign in that the DISTRIBUTION runs, offered beside the
+   * deployment's own identity provider. See {@link SignInOptionDef}.
+   */
+  signInOption?: SignInOptionDef;
   /**
    * How many unread items the gear menu's badge should show, if anything is
    * counting. CORE COUNTS NOTHING: the feedback inbox behind that badge is an
