@@ -85,6 +85,24 @@ export interface AuthConfig {
   loginPasswordEnabled?: boolean;
 }
 
+/** What a sign-in provider tells {@link AuthService.loginWithSso} about the sign-in it hands over. */
+export interface SsoLoginOptions {
+  /**
+   * The provider has itself decided that this person may enter: they were
+   * invited, their address is on a domain the deployment claimed, whatever
+   * its rule is. The domain allow-list (`ALLOWED_EMAIL_DOMAINS`) is then
+   * not applied.
+   *
+   * The allow-list exists for a provider that decides nothing: it is what
+   * stands between "the issuer knows this person" and "this person has an
+   * account here". Applied on top of a provider's own decision it is a
+   * second rule the admin set somewhere else, and the person it refuses was
+   * let in by the first. Default false, so every provider that does not say
+   * otherwise is governed by the allow-list as before.
+   */
+  admittedByProvider?: boolean;
+}
+
 export class AuthService {
   constructor(
     private readonly db: Database,
@@ -206,16 +224,25 @@ export class AuthService {
    * verified. Same upsert-by-email + JWT path as password login. Email is the
    * idempotency key, so a user who first used password login and later signs
    * in via SSO (same email) keeps the same account/id.
+   *
+   * WHO MAY ENTER is decided once per sign-in, by whoever is in a position
+   * to decide it. For the deployment's own provider that is the domain
+   * allow-list: the provider signs in whoever its issuer knows, and nobody
+   * has approved the person. A provider that HAS decided (see
+   * {@link SsoLoginOptions.admittedByProvider}) is governed by its own rule
+   * alone; the allow-list is not laid on top of it. The admission port is
+   * asked either way: that is the plan's answer, not a sign-in rule.
    */
   async loginWithSso(
     email: string,
     name: string,
+    opts: SsoLoginOptions = {},
   ): Promise<{ token: string; user: AuthUser }> {
     const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Sign-in returned an invalid email');
     }
-    this.assertAllowedDomain(normalizedEmail);
+    if (!opts.admittedByProvider) this.assertAllowedDomain(normalizedEmail);
     await this.assertAdmitted(normalizedEmail, 'sso');
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
     const user = await this.upsertUserByEmail(normalizedEmail, displayName);

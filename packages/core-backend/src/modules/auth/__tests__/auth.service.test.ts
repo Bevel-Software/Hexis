@@ -574,6 +574,44 @@ describe('AuthService — the SSO domain allow-list', () => {
     ).rejects.toThrow(/domain is not allowed/i);
   });
 
+  /**
+   * One rule per sign-in. A provider that decided for itself who may enter
+   * (an invitation, a claimed domain) is not overruled by a list the admin
+   * set for the deployment's own provider; the plan still has its say.
+   */
+  it('is not laid on top of a provider that decided admission itself', async () => {
+    const { db } = makeFakeDb([[{ ...ROW, email: 'invited@gmail.com', name: 'Invited' }]]);
+    const out = await new AuthService(db, config).loginWithSso('invited@gmail.com', 'Invited', {
+      admittedByProvider: true,
+    });
+    expect(out.user.email).toBe('invited@gmail.com');
+  });
+
+  it('still asks the plan about someone the provider admitted', async () => {
+    const asked: Array<[string, string]> = [];
+    const plan: IAccountAdmission = {
+      canProvision: async (email, reason) => {
+        asked.push([email, reason]);
+        return { ok: false, message: 'No seat left on this plan' };
+      },
+    };
+    const { db } = makeFakeDb([[]]);
+    await expect(
+      new AuthService(db, config, plan).loginWithSso('invited@gmail.com', 'Invited', { admittedByProvider: true }),
+    ).rejects.toBeInstanceOf(AccountAdmissionRefusedError);
+    expect(asked).toEqual([['invited@gmail.com', 'sso']]);
+    expect(vi.mocked(db.insert)).not.toHaveBeenCalled();
+  });
+
+  it('governs a provider that says nothing, or says it did not decide', async () => {
+    for (const opts of [undefined, {}, { admittedByProvider: false }]) {
+      const { db } = makeFakeDb([[]]);
+      await expect(new AuthService(db, config).loginWithSso('someone@gmail.com', 'Someone', opts)).rejects.toThrow(
+        /domain is not allowed/i,
+      );
+    }
+  });
+
   it('admits a subdomain of an allowed domain', async () => {
     const { db } = makeFakeDb([[{ ...ROW, email: 'eu@eu.bevel.software', name: 'EU' }]]);
     const out = await new AuthService(db, config).loginWithSso('eu@eu.bevel.software', 'EU');
