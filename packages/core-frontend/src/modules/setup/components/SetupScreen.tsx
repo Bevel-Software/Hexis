@@ -5,6 +5,7 @@ import {
   type KbLayout,
 } from '@bevel-software/platform-shared';
 import { Banner, Button, Surface, TextField } from '../../../shared/components';
+import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { tokenUsernameForHost } from '../utils/git-host';
 import { isRootFolderSuggestion, rootFolderState, type RootFolderState } from '../utils/root-folders';
 import { copyToClipboard } from '../../../lib/clipboard';
@@ -1269,7 +1270,11 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                     </div>
                     {signInTab === 'managed' && (
                       <div role="tabpanel" id="sign-in-panel-managed" aria-labelledby="sign-in-tab-managed">
-                        <signInOption.Panel variant={variant} ownProviderConfigured={ownProviderConfigured} />
+                        {/* The distribution's code: a throw in it costs this
+                            tab, not the form the repository is entered on. */}
+                        <SlotBoundary label="sign-in panel">
+                          <signInOption.Panel variant={variant} ownProviderConfigured={ownProviderConfigured} />
+                        </SlotBoundary>
                       </div>
                     )}
                   </>

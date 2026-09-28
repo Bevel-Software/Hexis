@@ -132,4 +132,27 @@ describe('SetupScreen: a sign-in the distribution runs', () => {
     });
     expect(screen.getByRole('tab', { name: 'Your identity provider' })).toBeInTheDocument();
   });
+
+  /**
+   * The panel is the distribution's code, on the screen a deployment cannot
+   * be set up without. Its fault costs its own tab: the repository fields,
+   * the other tab and the button that finishes setup all stand.
+   */
+  it('keeps the form when the panel throws, and says so in its place', async () => {
+    function BrokenPanel(): never {
+      throw new Error('the distribution has a bug');
+    }
+    // React and the boundary both report the caught error; neither belongs in the run's output.
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      renderScreen({ registry: makeRegistry({ signInOption: { label: 'Google and Microsoft', Panel: BrokenPanel } }) });
+      expect(screen.getByRole('alert')).toHaveTextContent(/sign-in panel couldn.t be shown/);
+      expect(screen.getByRole('button', { name: 'Save and continue' })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('tab', { name: 'Your own provider' }));
+      expect(providerAddress()).toBeInTheDocument();
+      expect(quiet).toHaveBeenCalled();
+    } finally {
+      quiet.mockRestore();
+    }
+  });
 });
