@@ -168,6 +168,64 @@ export class PullRebaseConflictError extends WorkflowDomainError {
 }
 
 /**
+ * The one sentence a branch-less call is answered with. Names the input and
+ * what to pass, and carries NO stringified value of what was actually
+ * received: the whole point of this refusal is that the caller sent nothing,
+ * and echoing `undefined` back at them is how the branch "undefined" got
+ * invented in the first place.
+ */
+export const BRANCH_REQUIRED_MESSAGE =
+  '`branch` is required: pass the branch (draft) you are working on.';
+
+/**
+ * The caller named no branch — the input is missing, empty, not a string, or
+ * one of the stringified absent values (`"undefined"` / `"null"`) that a
+ * client produces by interpolating a variable it never set.
+ *
+ * Refused, never defaulted. A knowledge-base tool's workspace is NEVER implied
+ * by the credential (identity-only) — it always comes from this argument — so
+ * falling back to the deployment's default branch would make an omitted
+ * argument silently act on the protected branch. And it is refused HERE, at
+ * the boundary, because everything downstream treats the value as a real
+ * branch name: `workspaceIdForBranch` would turn it into a workspace directory
+ * literally named `undefined`, and the clone of that "branch" would fail with
+ * a story about a branch that never existed.
+ *
+ * 400 with kind `branch-required`, so a client tells it apart from the 404
+ * (no such branch) and the 410 (the branch was deleted) without reading prose.
+ */
+export class BranchRequiredError extends WorkflowDomainError {
+  readonly kind = 'branch-required' as const;
+  constructor() {
+    super(BRANCH_REQUIRED_MESSAGE, 400, { kind: 'branch-required' });
+    this.name = 'BranchRequiredError';
+  }
+}
+
+/**
+ * The stringified absent values. Both are syntactically valid git branch
+ * names, so the shape validator (`assertValidBranchName`) accepts them
+ * happily — accepting one is exactly the bug this guard exists for. They are
+ * refused BY NAME, which is why this check cannot be folded into the shape
+ * check however tempting that looks.
+ */
+const STRINGIFIED_ABSENT_VALUES = new Set(['undefined', 'null']);
+
+/**
+ * Refuse a call that names no branch, before anything downstream can turn the
+ * missing value into a directory name, a clone attempt or a log line.
+ *
+ * Deliberately NOT a shape check: a well-formed name this platform has never
+ * seen is a 404 the caller can act on, and a malformed one is a
+ * `BranchNameError` from the canonical validator. This answers only "you sent
+ * nothing", which is the one case where naming the branch back is impossible.
+ */
+export function assertBranchProvided(branch: unknown): asserts branch is string {
+  if (typeof branch !== 'string' || branch.length === 0) throw new BranchRequiredError();
+  if (STRINGIFIED_ABSENT_VALUES.has(branch)) throw new BranchRequiredError();
+}
+
+/**
  * The platform has never heard of this branch: nothing it has cloned, and
  * nothing any listing of origin's branches has mentioned. Distinct from
  * `RemoteBranchGoneError`, which is the SAME git failure about a branch the

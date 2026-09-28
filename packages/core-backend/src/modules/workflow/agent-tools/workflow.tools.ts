@@ -5,6 +5,7 @@ import { toolDef, withBranchInput } from '../../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import type { KbContext } from '../../../shared/kb-context.js';
+import { assertBranchProvided } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
 import { RETIRED_TOOL_MESSAGES } from '@bevel-software/platform-mcp-core';
@@ -171,7 +172,21 @@ export function registerWorkflowTools(
       // normaliser: the root-anchored `/<kbDirName>/…` form names the same
       // workspace path, and a path with no prefix is placed under
       // `<kbDirName>/` rather than refused.
-      toolHandler((args, ctx) => spec.handler(normalizePathArgs(args, kbDirName), ctx), { write: spec.write }),
+      toolHandler(
+        (args, ctx) => {
+          // A tool that takes the auto-injected `branch` hands it STRAIGHT to
+          // `workspaceIdForBranch` — these tools address a workspace by id
+          // rather than going through `getFilesystem`, so the choke point that
+          // guards the file tools never sees them. Without this, a branch-less
+          // `commit_change` commits to a workspace id literally named
+          // "undefined". `skipBranch` tools are exempt because they declare no
+          // `branch` at all: they name their workspace some other way
+          // (`sourceBranch`, a change-request number, any existing clone).
+          if (!spec.skipBranch) assertBranchProvided(args.branch);
+          return spec.handler(normalizePathArgs(args, kbDirName), ctx);
+        },
+        { write: spec.write },
+      ),
     );
   };
 

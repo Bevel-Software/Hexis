@@ -278,9 +278,62 @@ describe('registerWorkflowTools', () => {
     expect(calls.filter((c) => c[0] === 'createBranch')).toHaveLength(0);
   });
 
+  /**
+   * These tools address their workspace by ID — `workspaceIdForBranch(branch)`
+   * straight from the argument — so they never pass the `getFilesystem` choke
+   * point that guards the file tools. A branch-less call used to commit to a
+   * workspace id that was literally the string "undefined". The guard sits on
+   * the mount that injects the `branch` input, so it covers each of these tools
+   * without any of them having to remember it.
+   */
+  describe('a branch-less call to a tool that declares `branch`', () => {
+    const declaresBranch = ['commit_change', 'save_file', 'share_current_branch'];
+    // `commit_change` needs a summary and `save_file` a path — supplied so the
+    // only thing wrong with each call is the missing branch.
+    const bodyFor = (tool: string): Record<string, unknown> =>
+      tool === 'commit_change' ? { summary: 's' } : tool === 'save_file' ? { path: 'KnowledgeBase/x.md' } : {};
+
+    for (const tool of declaresBranch) {
+      it(`${tool} 400s branch-required and acts on nothing`, async () => {
+        const base = await start();
+
+        const res = await post(`${base}/api/agent/tools/${tool}`, writeTok(), bodyFor(tool));
+
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({
+          kind: 'branch-required',
+          error: '`branch` is required: pass the branch (draft) you are working on.',
+        });
+        // No workflow call was made at all — least of all one naming a
+        // workspace id built out of the missing value.
+        expect(calls).toEqual([]);
+      });
+    }
+
+    it('refuses the stringified absent values the same way', async () => {
+      const base = await start();
+      for (const literal of ['undefined', 'null']) {
+        const res = await post(`${base}/api/agent/tools/commit_change`, writeTok(), { summary: 's', branch: literal });
+        expect(res.status, `branch "${literal}" must 400`).toBe(400);
+        expect((await res.json()).kind).toBe('branch-required');
+      }
+      expect(calls).toEqual([]);
+    });
+
+    it('leaves a tool that declares no `branch` alone', async () => {
+      const base = await start();
+      // `list_branches` is repo-global and deliberately takes no branch: the
+      // guard must not start demanding one from the tools that opted out.
+      expect((await post(`${base}/api/agent/tools/list_branches`, writeTok(), {})).status).toBe(200);
+    });
+  });
+
   it('works under a connection key too (both surface)', async () => {
     const base = await start();
-    expect((await post(`${base}/api/agent/tools/commit_change`, 'bevel_key', { summary: 's' })).status).toBe(200);
+    // `branch` is named because every caller must name it — this test is about
+    // the connection-key SURFACE, and an external key is precisely the caller
+    // that carries no focused branch to fall back on.
+    expect((await post(`${base}/api/agent/tools/commit_change`, 'bevel_key', { summary: 's', branch: WS })).status).toBe(200);
   });
 
   it('switch_branch validates + pre-warms + emits a user-scoped event (internal-only)', async () => {
