@@ -30,6 +30,7 @@ import type {
   ChangeRequest,
   ChangeRequestComment,
   ChangeRequestDetail,
+  ChangeRequestUpdateResult,
   ChangeRequestState,
   ChangedFile,
   FileApproval,
@@ -457,8 +458,16 @@ export interface IWorkflowService {
    * someone who may apply it (`viewerCanUpdate`) may run it (403 otherwise).
    * A conflicting merge is aborted, leaving the branch exactly as it was, and
    * surfaces as `ChangeRequestConflictsError` (409).
+   *
+   * Answers the refreshed detail plus `updatedPaths`: which files the merge
+   * changed on the branch, so a caller showing the pre-update files can
+   * replace exactly those.
    */
-  updateFromTarget(workspaceId: string, user: AuthUser, number: number): Promise<ChangeRequestDetail>;
+  updateFromTarget(
+    workspaceId: string,
+    user: AuthUser,
+    number: number,
+  ): Promise<ChangeRequestUpdateResult>;
 
   // Comments
   listComments(number: number): Promise<ChangeRequestComment[]>;
