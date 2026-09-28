@@ -8,6 +8,7 @@ import { Banner, Button, Surface, TextField } from '../../../shared/components';
 import { tokenUsernameForHost } from '../utils/git-host';
 import { isRootFolderSuggestion, rootFolderState, type RootFolderState } from '../utils/root-folders';
 import { copyToClipboard } from '../../../lib/clipboard';
+import { useAppRegistry } from '../../../core/registry';
 import { MarketplaceSection } from '../../settings/components/MarketplaceSection';
 import {
   saveSettings,
@@ -270,6 +271,18 @@ const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[]
   },
 ];
 
+/**
+ * What the first run asks: where the knowledge lives, which the gate waits
+ * on, and how people sign in, which decides who can follow the admin in.
+ * Everything else is a preference with a working default. It is set on the
+ * Deployment page, by someone who has seen the product it configures; on the
+ * first screen it only made two questions look like five.
+ */
+const FIRST_RUN_SECTIONS: readonly SettingStatus['section'][] = ['knowledge-base', 'sign-in'];
+
+/** The two ways of signing in the section can show, when the distribution runs one. */
+type SignInTab = 'managed' | 'own';
+
 interface Props {
   settings: SettingStatus[];
   /**
@@ -416,6 +429,19 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
 
   const editable = settings.filter((s) => s.source !== 'env');
   const fromEnv = settings.filter((s) => s.source === 'env');
+  const sections = variant === 'setup' ? SECTIONS.filter((s) => FIRST_RUN_SECTIONS.includes(s.id)) : SECTIONS;
+
+  /**
+   * The distribution's own way of signing in, when it runs one, and which of
+   * the two tabs is open. The section opens on the way that is in effect: the
+   * deployment's own provider once it has one, the distribution's until then.
+   * Chosen once, from what was stored when the screen opened, so typing an
+   * issuer does not move the reader to another tab.
+   */
+  const { signInOption } = useAppRegistry();
+  const ownProviderConfigured = OIDC_KEYS.every((key) => settings.find((s) => s.key === key)?.configured === true);
+  const [signInTab, setSignInTab] = useState<SignInTab>(ownProviderConfigured ? 'own' : 'managed');
+  const showOwnProvider = !signInOption || signInTab === 'own';
 
   /**
    * Whether saving now would actually change this connection field: something
@@ -1180,7 +1206,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
             Marketplace section: the button is the last thing on the page, but
             Marketplace is deliberately not part of this form (see below). */}
         <form id="setup-settings-form" onSubmit={submit} className="mt-8 space-y-10">
-          {SECTIONS.map((section) => {
+          {sections.map((section) => {
             const fields = editable.filter((s) => s.section === section.id);
             // A section whose every field comes from the environment has
             // nothing to offer — the locked list at the bottom already names
@@ -1207,25 +1233,66 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                     )}
                   </div>
                   <p className="mt-1 max-w-[60ch] text-detail text-ink-muted">{section.blurb}</p>
-                  {section.id === 'sign-in' && (
+                  {section.id === 'sign-in' && showOwnProvider && (
                     <p className="mt-1.5 text-meta text-ink-faint">
                       Redirect URI:{' '}
                       <code className="font-mono">{`${window.location.origin}/api/auth/oidc/callback`}</code>
                     </p>
                   )}
                 </div>
-                {fields
-                  .filter(
-                    (f) =>
-                      !FIELDS[f.key]?.advanced &&
-                      !isLayoutKey(f.key) &&
-                      (section.id !== 'sign-in' || OIDC_KEYS.includes(f.key)),
-                  )
-                  .map((f) => renderField(f))}
+                {section.id === 'sign-in' && signInOption && (
+                  <>
+                    <div role="tablist" aria-label="How people sign in" className="flex gap-1 border-b border-line">
+                      {(
+                        [
+                          ['managed', signInOption.label],
+                          ['own', signInOption.ownProviderLabel ?? 'Your own provider'],
+                        ] as const
+                      ).map(([id, label]) => (
+                        <button
+                          key={id}
+                          type="button"
+                          role="tab"
+                          id={`sign-in-tab-${id}`}
+                          aria-selected={signInTab === id}
+                          aria-controls={`sign-in-panel-${id}`}
+                          onClick={() => setSignInTab(id)}
+                          className={`-mb-px border-b-2 px-3 py-2 text-detail font-medium ${
+                            signInTab === id
+                              ? 'border-accent text-ink'
+                              : 'border-transparent text-ink-muted hover:text-ink'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    {signInTab === 'managed' && (
+                      <div role="tabpanel" id="sign-in-panel-managed" aria-labelledby="sign-in-tab-managed">
+                        <signInOption.Panel variant={variant} ownProviderConfigured={ownProviderConfigured} />
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* The deployment's own provider. With a distribution's tab
+                    beside it, shown only while its tab is open; what was
+                    typed stays in the draft either way, so switching tabs
+                    loses nothing and saves what was entered. */}
+                {(section.id !== 'sign-in' || showOwnProvider) &&
+                  fields
+                    .filter(
+                      (f) =>
+                        !FIELDS[f.key]?.advanced &&
+                        !isLayoutKey(f.key) &&
+                        (section.id !== 'sign-in' || OIDC_KEYS.includes(f.key)),
+                    )
+                    .map((f) => renderField(f))}
 
                 {/* Directly under the three answers it proves. */}
-                {section.id === 'sign-in' && renderOidcPanel()}
+                {section.id === 'sign-in' && showOwnProvider && renderOidcPanel()}
                 {section.id === 'sign-in' &&
+                  showOwnProvider &&
                   fields
                     .filter((f) => !FIELDS[f.key]?.advanced && !OIDC_KEYS.includes(f.key))
                     .map((f) => renderField(f))}
@@ -1285,7 +1352,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                     username, and a provider with unusual scopes does need
                     those. Closed by default, because leaving them open makes a
                     two-field form look like a seven-field one. */}
-                {fields.some((f) => FIELDS[f.key]?.advanced) && (
+                {(section.id !== 'sign-in' || showOwnProvider) && fields.some((f) => FIELDS[f.key]?.advanced) && (
                   <details
                     // Forced open when something inside it is wrong. The branch
                     // pair lives here and the server validates it as a pair, so
@@ -1354,18 +1421,17 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
             )}
         </form>
 
-        {/* Outside the form: nothing in it is saved by "Save and continue",
-            and on first run it is optional — the gate never waits on it. The
-            same section in both variants, so first run and Deployment
-            settings cannot drift. */}
-        <MarketplaceSection variant={variant} />
+        {/* Outside the form: nothing in it is saved by "Save and continue".
+            On the Deployment page only: the first run asks for the
+            repository and for sign-in (see FIRST_RUN_SECTIONS). */}
+        {variant === 'settings' && <MarketplaceSection variant={variant} />}
 
         {/* The submit button lives HERE, after Marketplace, though it belongs
             to the form above — `form=` is what lets those two facts hold at
             once. It is the last thing on the page because a reader should
-            meet every section, Marketplace included, before the control that
-            leaves the screen; when it sat above Marketplace, the page looked
-            finished while a section was still below it.
+            meet every section, Marketplace included where it is shown, before
+            the control that leaves the screen; when it sat above Marketplace,
+            the page looked finished while a section was still below it.
 
             A rejected connection stops here rather than at the far side of
             it. Saving these answers would finish setup — the server checks
