@@ -129,6 +129,7 @@ vi.mock('../state/library-data', () => ({
 
 import { SkillPage } from '../components/skill-page/SkillPage';
 import { LibraryToastProvider } from '../state/toast';
+import { expectTitleRowSpansTheDocumentColumn } from './title-row-actions';
 
 const workspace = {
   workspaceId: 'target-company-state',
@@ -445,6 +446,20 @@ describe('SkillPage', () => {
     expect(screen.getByTestId('md-view').textContent).toContain('name: newsletter');
     // The description is no longer repeated above the pane.
     expect(screen.queryByText('Drafts the Friday newsletter for review.')).toBeNull();
+  });
+
+  /**
+   * The third page in the comparison. The criterion names the plugin page and
+   * this one as the two controls the tool page's title row is measured
+   * against, and they agree only because neither wraps its band in a column
+   * narrower than the layout's — which is exactly what the tool page did.
+   * Asserted here so the day this page grows its own `max-w`, it is this test
+   * that says the row it holds is a control no longer.
+   */
+  it('runs its title row to the shared document column', async () => {
+    renderPage(false);
+    await screen.findByRole('heading', { name: 'newsletter' });
+    expectTitleRowSpansTheDocumentColumn();
   });
 
   it('marks the open tab selected and loads a bundled file on click', async () => {
