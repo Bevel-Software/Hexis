@@ -153,6 +153,31 @@ describe('DeploymentPage', () => {
     expect(screen.queryByTestId('deployment-panel')).toBeNull();
   });
 
+  /**
+   * The other direction of the same independence: the panel is code core did
+   * not write, and a throw in it must cost the panel's own place, not the
+   * form an admin came here to use.
+   */
+  it('keeps the settings form when the distribution panel throws, and says so in its place', async () => {
+    function BrokenPanel(): never {
+      throw new Error('the distribution has a bug');
+    }
+    // React reports a caught render error on the console, and so does the
+    // boundary; both are expected here and neither belongs in the run's output.
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      renderPage(admin(true), { ...EMPTY_REGISTRY, deploymentPanel: BrokenPanel });
+      expect(await screen.findByText('Provider address')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Save and continue' })).toBeInTheDocument();
+      const slot = screen.getByTestId('deployment-panel');
+      expect(slot).toHaveTextContent(/workspace panel couldn.t be shown/);
+      expect(slot).toHaveTextContent(/rest of this page is unaffected/);
+      expect(quiet).toHaveBeenCalled();
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
   it('tells a non-admin this is not theirs, and never fetches the settings', () => {
     renderPage(admin(false));
     expect(screen.getByText(/Admins only/)).toBeInTheDocument();

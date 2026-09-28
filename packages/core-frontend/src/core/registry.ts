@@ -320,8 +320,10 @@ export interface AppRegistry {
    *
    * Rendered for admins only, like the page itself, and independently of the
    * settings load: a panel that offers a way out of the deployment must not
-   * disappear because the settings could not be read. Absent means the page
-   * ends with its form, as it always has.
+   * disappear because the settings could not be read. Rendered inside a
+   * boundary, so the independence holds both ways: a panel that throws loses
+   * its own place on the page, never the settings form above it. Absent means
+   * the page ends with its form, as it always has.
    */
   deploymentPanel?: ComponentType;
   /**

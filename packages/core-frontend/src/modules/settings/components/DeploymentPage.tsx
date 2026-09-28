@@ -1,5 +1,6 @@
 import { PageShell } from '../../../shared/components/PageShell';
 import { Banner, Button } from '../../../shared/components';
+import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { useAdmin } from '../../admin/state/admin.context';
 import { useSetupStatus } from '../../setup/hooks/useSetupStatus';
 import { SetupScreen } from '../../setup/components/SetupScreen';
@@ -85,10 +86,18 @@ export function DeploymentPage() {
 
       {/* The distribution's panel, last on the page and outside every
           condition above: it does not depend on the settings, so neither a
-          load in flight nor a failed one takes it away. */}
+          load in flight nor a failed one takes it away.
+
+          And the other way round: the panel is code core did not write, so
+          it renders inside a boundary. A throw in it costs its own place on
+          the page and not the form above — the form is where an admin fixes
+          the sign-in or the repository connection, and must not go down with
+          a panel it has nothing to do with. */}
       {DeploymentPanel && (
         <div className="mt-10" data-testid="deployment-panel">
-          <DeploymentPanel />
+          <SlotBoundary label="workspace panel">
+            <DeploymentPanel />
+          </SlotBoundary>
         </div>
       )}
     </PageShell>
