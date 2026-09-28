@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const api = vi.hoisted(() => ({
@@ -22,7 +22,7 @@ vi.mock('../../settings/services/github-facade.api', () => ({
 
 import { AppRegistryContext, makeRegistry, type AppRegistry, type SignInOptionPanelProps } from '../../../core/registry';
 import { SetupScreen } from '../components/SetupScreen';
-import type { SettingStatus } from '../services/setup.api';
+import { SettingsProblems, type SettingStatus } from '../services/setup.api';
 
 const setting = (key: string, section: SettingStatus['section'], extra: Partial<SettingStatus> = {}): SettingStatus => ({
   key,
@@ -154,5 +154,123 @@ describe('SetupScreen: a sign-in the distribution runs', () => {
     } finally {
       quiet.mockRestore();
     }
+  });
+});
+
+/**
+ * A refused save names the fields that were wrong. Every one of those
+ * messages has to reach the reader, wherever its field is: a save that
+ * failed must never look like a save that did nothing.
+ */
+describe('SetupScreen: where a refused save says so', () => {
+  const save = () => userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+  it('opens the tab a problem is on, and shows it beside its field', async () => {
+    api.saveSettings.mockRejectedValue(new SettingsProblems({ oidcClientSecret: 'The provider rejected the application secret.' }));
+    renderScreen({ registry: hosted, variant: 'settings' });
+    await userEvent.click(screen.getByRole('tab', { name: 'Your own provider' }));
+    await userEvent.type(providerAddress()!, 'https://login.example.com');
+    await userEvent.click(screen.getByRole('tab', { name: 'Google and Microsoft' }));
+    expect(providerAddress()).toBeNull();
+
+    await save();
+    expect(await screen.findByText('The provider rejected the application secret.')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Your own provider' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByLabelText('Application secret', { exact: false })).toHaveAttribute('aria-invalid', 'true');
+  });
+
+  it('leaves the reader on their tab when the problem is somewhere else', async () => {
+    api.saveSettings.mockRejectedValue(new SettingsProblems({ kbRepoUrl: 'The URL must start with https://' }));
+    renderScreen({ registry: hosted, variant: 'settings' });
+    await userEvent.type(screen.getByLabelText('Repository address', { exact: false }), 'git@example.com:kb.git');
+    await save();
+    expect(await screen.findByText('The URL must start with https://')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Google and Microsoft' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('says a problem out loud when its field has no place on this screen', async () => {
+    // The first run does not show the Audit log section, and a field the
+    // environment supplies is not the form's to show anywhere.
+    api.saveSettings.mockRejectedValue(
+      new SettingsProblems({ auditRetentionDays: 'Enter a number of days.', gitUsername: 'The token username was refused.' }),
+    );
+    api.testConnection.mockResolvedValue({ ok: true, outcome: 'read-write', branches: ['main'], defaultBranch: 'main' });
+    render(
+      <SetupScreen
+        settings={[...settingsWith(false), setting('gitUsername', 'knowledge-base', { source: 'env', envVar: 'GIT_USERNAME' })]}
+        onSaved={() => {}}
+        variant="setup"
+      />,
+    );
+    await userEvent.type(screen.getByLabelText('Repository address', { exact: false }), 'https://example.com/kb.git');
+    await save();
+    const said = await screen.findByText(/Enter a number of days\./);
+    expect(said).toHaveTextContent('The token username was refused.');
+  });
+});
+
+describe('SetupScreen: the form around the distribution panel', () => {
+  function PanelWithFields() {
+    return (
+      <div>
+        <input aria-label="Invite by email" />
+        <textarea aria-label="A note" />
+      </div>
+    );
+  }
+  const withFields = makeRegistry({ signInOption: { label: 'Google and Microsoft', Panel: PanelWithFields } });
+
+  /**
+   * Asserted on the key itself, whose default action IS the submission: a
+   * browser submits through the form's button wherever that button sits,
+   * and the test environment only through one inside the form, which this
+   * form's is not. `fireEvent` answers false when the default was prevented.
+   */
+  const enterIsLeftToTheForm = (field: HTMLElement) => fireEvent.keyDown(field, { key: 'Enter' });
+
+  it('is not submitted by Enter in one of the panel inputs', () => {
+    renderScreen({ registry: withFields, variant: 'settings' });
+    expect(enterIsLeftToTheForm(screen.getByLabelText('Invite by email'))).toBe(false);
+  });
+
+  it('leaves the panel its other keys, and a text area its new line', async () => {
+    renderScreen({ registry: withFields, variant: 'settings' });
+    expect(fireEvent.keyDown(screen.getByLabelText('Invite by email'), { key: 'a' })).toBe(true);
+    expect(enterIsLeftToTheForm(screen.getByLabelText('A note'))).toBe(true);
+    await userEvent.type(screen.getByLabelText('A note'), 'one{Enter}two');
+    expect(screen.getByLabelText('A note')).toHaveValue('one\ntwo');
+  });
+
+  it('is still submitted by Enter in one of its own fields', async () => {
+    renderScreen({ registry: withFields, variant: 'settings' });
+    await userEvent.click(screen.getByRole('tab', { name: 'Your own provider' }));
+    expect(enterIsLeftToTheForm(providerAddress()!)).toBe(true);
+    expect(enterIsLeftToTheForm(screen.getByLabelText('Repository address', { exact: false }))).toBe(true);
+  });
+});
+
+describe('SetupScreen: what each tab names', () => {
+  it.each([
+    ['Google and Microsoft', 'managed-panel'],
+    ['Your own provider', null],
+  ])('gives the tab "%s" a panel of its own', async (name, marker) => {
+    renderScreen({ registry: hosted });
+    const tab = screen.getByRole('tab', { name });
+    await userEvent.click(tab);
+    const panel = screen.getByRole('tabpanel');
+    expect(panel).toHaveAttribute('id', tab.getAttribute('aria-controls'));
+    expect(panel).toHaveAttribute('aria-labelledby', tab.id);
+    if (marker) expect(within(panel).getByTestId(marker)).toBeInTheDocument();
+    else {
+      expect(within(panel).getByLabelText('Provider address', { exact: false })).toBeInTheDocument();
+      expect(within(panel).getByText('Redirect URI:', { exact: false })).toBeInTheDocument();
+      expect(within(panel).getByRole('button', { name: 'Test sign-in configuration' })).toBeInTheDocument();
+    }
+  });
+
+  it('leaves the section as it was when there are no tabs', () => {
+    renderScreen();
+    expect(screen.queryByRole('tabpanel')).toBeNull();
+    expect(screen.getByText('Redirect URI:', { exact: false })).toBeInTheDocument();
   });
 });

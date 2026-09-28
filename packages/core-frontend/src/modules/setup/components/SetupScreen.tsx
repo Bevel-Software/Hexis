@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import {
   DEFAULT_KB_LAYOUT,
   agentsFilePointerSentence,
@@ -177,7 +177,7 @@ const FIELDS: Record<
   },
   allowedEmailDomains: {
     label: 'Allowed email domains',
-    help: 'Only people with an address at these domains can sign in this way. Separate several with commas. Leave blank to allow any address: safe with a provider that only serves your organisation, risky with one that does not.',
+    help: 'Only people with an address at these domains can sign in through this provider. Separate several with commas. Leave blank to allow any address: safe with a provider that only serves your organisation, risky with one that does not.',
     placeholder: 'example.com',
   },
   auditRetentionDays: {
@@ -283,6 +283,32 @@ const FIRST_RUN_SECTIONS: readonly SettingStatus['section'][] = ['knowledge-base
 
 /** The two ways of signing in the section can show, when the distribution runs one. */
 type SignInTab = 'managed' | 'own';
+
+/**
+ * A section's fields. Alone in their section they are its content as it has
+ * always been; beside a distribution's tab they are the panel of theirs, so
+ * the tab that names them has something to name.
+ */
+function SectionFields({ panelOf, children }: { panelOf: SignInTab | null; children: ReactNode }) {
+  if (panelOf === null) return <>{children}</>;
+  return (
+    <div role="tabpanel" id={`sign-in-panel-${panelOf}`} aria-labelledby={`sign-in-tab-${panelOf}`} className="space-y-6">
+      {children}
+    </div>
+  );
+}
+
+/**
+ * The distribution's panel sits inside the settings form, and a browser
+ * submits a form when Enter is pressed in any text input in it. On first
+ * run that submit finishes setup and leaves the screen, from a field that
+ * had nothing to do with it. Held here once, so no panel has to remember:
+ * Enter in one of its inputs is the panel's own key. A text area keeps its
+ * new line and a button its press, neither of which submits anything.
+ */
+function keepEnterFromTheForm(event: KeyboardEvent<HTMLElement>) {
+  if (event.key === 'Enter' && event.target instanceof HTMLInputElement) event.preventDefault();
+}
 
 interface Props {
   settings: SettingStatus[];
@@ -442,7 +468,34 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
   const { signInOption } = useAppRegistry();
   const ownProviderConfigured = OIDC_KEYS.every((key) => settings.find((s) => s.key === key)?.configured === true);
   const [signInTab, setSignInTab] = useState<SignInTab>(ownProviderConfigured ? 'own' : 'managed');
-  const showOwnProvider = !signInOption || signInTab === 'own';
+
+  /**
+   * Whether the form has a place for this field at all: it is the admin's to
+   * edit, and its section is one this variant shows. A field on a tab that
+   * is not open still counts — the tab is opened for it (see
+   * `showProblems`), where a field the form never draws has nowhere to be
+   * shown.
+   */
+  const hasPlace = (key: string) =>
+    editable.some((s) => s.key === key && sections.some((section) => section.id === s.section));
+
+  /**
+   * Put a refused save's problems where the reader will see them. EVERY
+   * problem ends up on screen, which is the one property this function is
+   * for: one about a field the form draws goes beside that field, with the
+   * tab it lives on opened; one about a field the form does not draw goes
+   * to the message line. A save that failed must never look like a save
+   * that did nothing.
+   */
+  function showProblems(found: Record<string, string>) {
+    setProblems(found);
+    const placed = Object.keys(found).filter(hasPlace);
+    if (signInOption && placed.some((key) => settings.find((s) => s.key === key)?.section === 'sign-in')) {
+      setSignInTab('own');
+    }
+    const unplaced = Object.entries(found).filter(([key]) => !hasPlace(key));
+    if (unplaced.length > 0) setError(unplaced.map(([, message]) => message).join(' '));
+  }
 
   /**
    * Whether saving now would actually change this connection field: something
@@ -949,14 +1002,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
       onSaved();
     } catch (err) {
       if (err instanceof SettingsProblems) {
-        setProblems(err.problems);
-        // A problem about a field this form does not render — the server's
-        // connection check blaming a token the environment supplies, say —
-        // would otherwise vanish, leaving a save that failed silently.
-        const unshown = Object.entries(err.problems).filter(
-          ([key]) => !editable.some((s) => s.key === key),
-        );
-        if (unshown.length > 0) setError(unshown.map(([, message]) => message).join(' '));
+        showProblems(err.problems);
       } else if (err instanceof KbInitFailed) {
         // The values ARE stored — only the initialization failed. The form
         // shows what was saved, and the banner says what to fix and retries
@@ -1213,6 +1259,14 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
             // nothing to offer — the locked list at the bottom already names
             // them, and an empty heading would read as something missing.
             if (fields.length === 0) return null;
+            // Two ways of signing in, each on a tab of its own.
+            const tabbed = section.id === 'sign-in' && signInOption !== undefined;
+            const redirectUri = (
+              <p className="mt-1.5 text-meta text-ink-faint">
+                Redirect URI:{' '}
+                <code className="font-mono">{`${window.location.origin}/api/auth/oidc/callback`}</code>
+              </p>
+            );
             return (
               <Surface
                 key={section.id}
@@ -1234,12 +1288,10 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                     )}
                   </div>
                   <p className="mt-1 max-w-[60ch] text-detail text-ink-muted">{section.blurb}</p>
-                  {section.id === 'sign-in' && showOwnProvider && (
-                    <p className="mt-1.5 text-meta text-ink-faint">
-                      Redirect URI:{' '}
-                      <code className="font-mono">{`${window.location.origin}/api/auth/oidc/callback`}</code>
-                    </p>
-                  )}
+                  {/* About the deployment's own provider: under the heading
+                      when that is all the section holds, inside its tab when
+                      the section has two. */}
+                  {section.id === 'sign-in' && !tabbed && redirectUri}
                 </div>
                 {section.id === 'sign-in' && signInOption && (
                   <>
@@ -1269,7 +1321,12 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                       ))}
                     </div>
                     {signInTab === 'managed' && (
-                      <div role="tabpanel" id="sign-in-panel-managed" aria-labelledby="sign-in-tab-managed">
+                      <div
+                        role="tabpanel"
+                        id="sign-in-panel-managed"
+                        aria-labelledby="sign-in-tab-managed"
+                        onKeyDown={keepEnterFromTheForm}
+                      >
                         {/* The distribution's code: a throw in it costs this
                             tab, not the form the repository is entered on. */}
                         <SlotBoundary label="sign-in panel">
@@ -1280,24 +1337,26 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                   </>
                 )}
 
-                {/* The deployment's own provider. With a distribution's tab
-                    beside it, shown only while its tab is open; what was
-                    typed stays in the draft either way, so switching tabs
-                    loses nothing and saves what was entered. */}
-                {(section.id !== 'sign-in' || showOwnProvider) &&
-                  fields
-                    .filter(
-                      (f) =>
-                        !FIELDS[f.key]?.advanced &&
-                        !isLayoutKey(f.key) &&
-                        (section.id !== 'sign-in' || OIDC_KEYS.includes(f.key)),
-                    )
-                    .map((f) => renderField(f))}
+                {/* The section's own fields: every field it has, in ONE
+                    place. With a distribution's tab beside them they are
+                    the second tab's panel, there while that tab is open;
+                    what was typed stays in the draft either way, so
+                    switching tabs loses nothing and saves what was entered. */}
+                {(!tabbed || signInTab === 'own') && (
+                <SectionFields panelOf={tabbed ? 'own' : null}>
+                {tabbed && redirectUri}
+                {fields
+                  .filter(
+                    (f) =>
+                      !FIELDS[f.key]?.advanced &&
+                      !isLayoutKey(f.key) &&
+                      (section.id !== 'sign-in' || OIDC_KEYS.includes(f.key)),
+                  )
+                  .map((f) => renderField(f))}
 
                 {/* Directly under the three answers it proves. */}
-                {section.id === 'sign-in' && showOwnProvider && renderOidcPanel()}
+                {section.id === 'sign-in' && renderOidcPanel()}
                 {section.id === 'sign-in' &&
-                  showOwnProvider &&
                   fields
                     .filter((f) => !FIELDS[f.key]?.advanced && !OIDC_KEYS.includes(f.key))
                     .map((f) => renderField(f))}
@@ -1357,7 +1416,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                     username, and a provider with unusual scopes does need
                     those. Closed by default, because leaving them open makes a
                     two-field form look like a seven-field one. */}
-                {(section.id !== 'sign-in' || showOwnProvider) && fields.some((f) => FIELDS[f.key]?.advanced) && (
+                {fields.some((f) => FIELDS[f.key]?.advanced) && (
                   <details
                     // Forced open when something inside it is wrong. The branch
                     // pair lives here and the server validates it as a pair, so
@@ -1392,6 +1451,8 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                   sync &&
                   !fields.some((f) => f.key === 'kbSyncSecret') &&
                   renderSyncPanel()}
+                </SectionFields>
+                )}
               </Surface>
             );
           })}
