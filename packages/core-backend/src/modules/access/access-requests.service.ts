@@ -4,11 +4,15 @@ import {
   type AuthUser,
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
-import { DuplicateChangeRequestError } from '../../shared/domain-errors.js';
+import {
+  ChangeRequestConflictsError,
+  DuplicateChangeRequestError,
+} from '../../shared/domain-errors.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { spliceGrant } from '../access-model/access-splice.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
+import { logger } from '../../shared/logging.js';
 import { AccessMutationError } from './access-mutation.service.js';
 import {
   rulesFileFor,
@@ -18,6 +22,8 @@ import {
 } from './access-requests.contract.js';
 
 /** How the dialog spells each level — the same words the request is answered in. */
+const log = logger('access.request');
+
 export const LEVEL_LABEL: Record<RequestLevel, string> = {
   write: 'Can edit',
   owner: 'Owner',
@@ -70,10 +76,31 @@ const NOTE_OPEN = '<!--hexis:access-request-note-->';
 const NOTE_CLOSE = '<!--/hexis:access-request-note-->';
 
 /**
+ * The level, recorded on the change request itself.
+ *
+ * The branch says what is proposed, but only while it can be read — and a
+ * clone whose refs are a few seconds stale cannot read a branch cut moments
+ * ago. The request's own row always can. "Requested: <level>" is a promise
+ * about a request, so it is answered from the request, not from a file at a
+ * ref that may not have arrived yet.
+ */
+const LEVEL_MARK = /<!--hexis:access-request-level:(write|owner)-->/;
+
+/**
  * The requester's own words, back out of a request's description, or
  * undefined when they wrote none. Unescaped exactly as they were escaped, so
  * what the banner shows is what was typed.
  */
+/**
+ * The level a request asks for, off its own description. Undefined for a
+ * request opened before this marker existed — those are the skill route's,
+ * and the skill route only ever asked for `write`.
+ */
+export function extractRequestLevel(body: string | null | undefined): RequestLevel | undefined {
+  const hit = body ? LEVEL_MARK.exec(body) : null;
+  return hit ? (hit[1] as RequestLevel) : undefined;
+}
+
 export function extractRequestNote(body: string | null | undefined): string | undefined {
   if (!body) return undefined;
   const start = body.indexOf(NOTE_OPEN);
@@ -138,27 +165,63 @@ export class AccessRequestsService {
     const wsId = kb.defaultWorkspaceId();
     const branch = this.branchFor(user.email, target);
 
-    // FRESH: a repeated click must find the request the previous one opened,
-    // and the cached listing can trail it — a miss here would send the retry
-    // into a duplicate.
-    const existing = (
-      await workflow.listChangeRequestsAuthoredBy(user.email, { fresh: true })
-    ).find((cr) => cr.state === 'open' && cr.branch === branch);
-    if (existing) return { number: existing.number, level };
+    // FRESH, and matched on the BRANCH rather than on the author: a repeated
+    // click must find the request the previous one opened (the cached listing
+    // can trail it), and the same lookup has to prove the branch free before
+    // it is recut below. The branch name already carries the person, so
+    // matching it is matching them.
+    const openOnBranch = async () =>
+      (await workflow.listChangeRequests({ fresh: true })).find(
+        (cr) => cr.state === 'open' && cr.branch === branch,
+      );
+    const existing = await openOnBranch();
+    if (existing) return { number: existing.number, level: await this.levelOf(existing.number) };
 
-    // The branch may already exist (a request listed as closed, a retry after
-    // a failed open). Existence is PROBED, before and — if creation fails —
-    // after: the race shows up as "already exists" locally or as a rejected
-    // push when origin got there first, and a message is not a contract. A
-    // branch that is there is proceeded against; anything else is a real
-    // failure, and a proposal on a branch that was not made would be worse
-    // than the error. STRICT: the list proves absence, and a listing that
-    // could not fetch proves nothing.
+    // Existence is PROBED, before and — if creation fails — after: the race
+    // shows up as "already exists" locally or as a rejected push when origin
+    // got there first, and a message is not a contract. STRICT: the list
+    // proves absence, and a listing that could not fetch proves nothing.
     const branchExists = async () =>
       (await workflow.listBranches(wsId, { freshFetch: true, strictFetch: true })).some(
         (b) => b.name === branch,
       );
-    if (!(await branchExists())) {
+    // A branch still standing here belonged to an ANSWERED request: it holds a
+    // dead proposal on a base that may be months old. It cannot simply be
+    // written to. `openChangeRequest` merges live INTO the source branch, and
+    // that merge conflicts the moment live has touched the same rules file —
+    // which an editor granting anyone anything on this item does. The person
+    // asking would be shown "resolve the conflicts on <an internal branch>",
+    // about a branch they cannot reach, for good.
+    //
+    // So the branch is CUT AGAIN from live. Live's tip is then the merge base,
+    // the auto-merge is a no-op, and the diff is exactly the one grant this
+    // request proposes. Deleting it also retires its clone, so the old content
+    // cannot come back (`deleteBranch`), and `deleteBranch` refuses a branch
+    // with an open request — the guard against recutting one under a request
+    // that opened in the meantime.
+    let present = await branchExists();
+    if (present) {
+      try {
+        await workflow.deleteBranch(wsId, branch, user);
+        // A delete that RETURNED is proof enough; re-probing here would let a
+        // ref list that has not caught up talk us out of cutting the branch we
+        // just removed, and the proposal would have nowhere to go.
+        present = false;
+      } catch (err) {
+        // It raced into an open request, or could not be removed. Answer with
+        // the request if there is one; otherwise carry on against the branch
+        // as it stands, which is what this did before and still works whenever
+        // the live rules have not moved.
+        const raced = await openOnBranch();
+        if (raced) return { number: raced.number, level: await this.levelOf(raced.number) };
+        log.warn(
+          `could not recut the request branch "${branch}": ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+    if (!present) {
       try {
         await workflow.createBranch(wsId, branch, kb.defaultBranch);
       } catch (err) {
@@ -168,12 +231,11 @@ export class AccessRequestsService {
 
     const rulesPath = rulesFileFor(target);
     const wsRulesPath = `${kb.kbDirName}/${rulesPath}`;
-    // The proposal is spliced onto the LIVE copy, not onto whatever the branch
-    // happens to hold. A branch survives a decline (that is how the dialog
-    // knows to say "wasn't accepted"), so a second request splicing onto the
-    // branch would carry the declined level along and ask for two at once.
-    // Starting from live means a new request proposes exactly what was chosen
-    // this time, and drops anything the live rules have since gained.
+    // The proposal is spliced onto the LIVE copy, never onto whatever the
+    // branch holds. Belt and braces with the recut above: a branch that could
+    // not be recut still carries a declined proposal, and splicing onto it
+    // would ask for two levels at once. Starting from live means the request
+    // proposes exactly what was chosen this time.
     const live = await this.readLive(target, wsRulesPath);
     const spliced = spliceGrant(
       live,
@@ -212,38 +274,75 @@ export class AccessRequestsService {
       // winner's request rather than an error: the person asked once, and one
       // request is what they get.
       if (err instanceof DuplicateChangeRequestError) {
-        return { number: err.existingNumber, level };
+        return { number: err.existingNumber, level: await this.levelOf(err.existingNumber) };
+      }
+      // The branch is recut from live above precisely so this cannot happen;
+      // reaching it means something raced. Whatever the cause, the person
+      // asking cannot act on "resolve the conflicts on
+      // reader2/join-artest3-04i7dr4" — they have never heard of that branch
+      // and could not reach it if they had. Say the one thing that IS theirs
+      // to do, and keep the detail where an operator will find it.
+      if (err instanceof ChangeRequestConflictsError) {
+        log.warn(
+          `request branch "${branch}" conflicted with live after being recut: ${err.message}`,
+        );
+        throw new AccessMutationError(
+          'The rules changed while your request was being sent. Try again.',
+          409,
+          { kind: 'request-raced' },
+        );
       }
       throw err;
     }
   }
 
   /**
-   * What `user`'s dialog should say about `target`, read from the request's
-   * branch rather than from any stored status.
+   * What `user`'s dialog should say about `target`.
    *
-   * `pending` and `not-accepted` are the same reading told apart by one fact:
-   * whether the request is still open. Both need the branch to still carry an
-   * unmet proposal naming this person — which is exactly what a settled
-   * request no longer has (its branch is deleted), so an accepted request can
-   * never read as declined, and a person who got the access another way sees
-   * nothing outstanding.
+   * The two states are answered from DIFFERENT sources, because different
+   * things prove them:
+   *
+   *   pending       an open request on this branch. That is the whole proof,
+   *                 and the level comes off the request itself — asking the
+   *                 branch would make "Requested: …" depend on whether this
+   *                 clone has fetched a ref that may be seconds old.
+   *   not-accepted  a closed request AND a branch that still carries an unmet
+   *                 proposal naming this person. A settled request has no
+   *                 branch left, so an accepted one can never read as
+   *                 declined; a branch that cannot be read proves nothing and
+   *                 reads as `none`, which shows the control rather than
+   *                 claiming a refusal nobody made.
    */
   async status(user: AuthUser, target: AccessRequestTarget): Promise<AccessRequestStatus> {
     const { workflow } = this.deps;
     const branch = this.branchFor(user.email, target);
-    const level = await this.levelAskedOn(branch, target, user.email);
 
-    const open = (
-      await workflow.listChangeRequestsAuthoredBy(user.email, { fresh: true })
-    ).find((cr) => cr.state === 'open' && cr.branch === branch);
+    const open = (await workflow.listChangeRequests({ fresh: true })).find(
+      (cr) => cr.state === 'open' && cr.branch === branch,
+    );
     if (open) {
-      return level ? { state: 'pending', level, number: open.number } : { state: 'none' };
+      return { state: 'pending', level: await this.levelOf(open.number), number: open.number };
     }
 
+    const level = await this.levelAskedOn(branch, target, user.email);
     if (!level) return { state: 'none' };
     const last = await workflow.latestClosedChangeRequest(user.email, branch);
     return last ? { state: 'not-accepted', level, number: last.number } : { state: 'none' };
+  }
+
+  /**
+   * The level change request `number` asks for, off its own description.
+   *
+   * `write` when the description does not say: every request that predates the
+   * marker came from the skill page's "Request write access", which asks for
+   * exactly that. A detail that cannot be fetched falls there too — the line
+   * it feeds says which level was asked for, and Can edit is the lesser claim.
+   */
+  private async levelOf(number: number): Promise<RequestLevel> {
+    const detail = await this.deps.workflow
+      .getChangeRequestDetail(number, { patches: false })
+      .catch(() => null);
+    return extractRequestLevel(detail?.body) ?? 'write';
   }
 
   /**
@@ -258,7 +357,11 @@ export class AccessRequestsService {
     email: string,
   ): Promise<RequestLevel | null> {
     const needle = email.trim().toLowerCase();
+    // null ⇒ the branch could not be read at all, which is not "asks for
+    // nothing". Saying nothing is outstanding shows the control, which is
+    // recoverable; claiming a refusal would not be.
     const proposals = await this.deps.lifecycle.proposalsOn(branch, target);
+    if (proposals === null) return null;
     const mine = proposals.filter(
       (p) => p.principal.kind === 'user' && p.principal.email.trim().toLowerCase() === needle,
     );
@@ -297,6 +400,7 @@ export class AccessRequestsService {
     const { user, target, level, note } = input;
     const who = escapeMarkdown(user.name || user.email);
     const lines = [
+      `<!--hexis:access-request-level:${level}-->`,
       `${who} (${escapeMarkdown(user.email)}) asked for **${LEVEL_LABEL[level]}** on ` +
         `${escapeMarkdown(target.path || 'the workspace')}.`,
     ];

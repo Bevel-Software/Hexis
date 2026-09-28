@@ -177,6 +177,21 @@ describe('the person asking', () => {
     expect(await screen.findByText('Requested: Can edit. Waiting on Ed.')).toBeInTheDocument();
   });
 
+  it('shows the level the SERVER reports, not the one this tab typed', async () => {
+    // Two tabs. This one sends Can edit while an Owner request is already
+    // open; the server answers with that open request, Owner and all. Echoing
+    // what was typed would caption somebody else's request with the wrong
+    // level until the dialog was reopened.
+    const user = userEvent.setup();
+    requests.sendAccessRequest.mockResolvedValue({ number: 31, level: 'owner' });
+    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
+
+    await user.click(await screen.findByRole('button', { name: 'Request access' }));
+
+    expect(await screen.findByText('Requested: Owner. Waiting on Ed.')).toBeInTheDocument();
+    expect(screen.queryByText(/Requested: Can edit/)).not.toBeInTheDocument();
+  });
+
   it('shows the same line, and no control, when the dialog is reopened while the request is open', async () => {
     requests.fetchAccessRequestStatus.mockResolvedValue({
       state: 'pending',

@@ -76,7 +76,8 @@ export interface AccessRequestSummary {
  * and a Can edit request on that same folder one request rather than two.
  */
 export interface IAccessRequestLifecycle {
-  proposalsOn(branch: string, target: AccessRequestTarget): Promise<AccessProposal[]>;
+  /** Null ⇒ the branch could not be read; that is not "proposes nothing". */
+  proposalsOn(branch: string, target: AccessRequestTarget): Promise<AccessProposal[] | null>;
   list(
     key: string,
     target: AccessRequestTarget,

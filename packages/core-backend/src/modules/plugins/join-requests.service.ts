@@ -71,15 +71,38 @@ export class JoinRequestsService implements IAccessRequestLifecycle {
 
   /**
    * What `branch` still proposes for `target`, minus everything the person it
-   * names already holds. The single reading every surface goes through: the
-   * editors' listing, the settle check, and the requester's own "am I still
-   * waiting on an answer?".
+   * names already holds — or NULL when the branch's own copy could not be read
+   * at all.
+   *
+   * That distinction is the whole point of the return type. "The branch says
+   * nothing" is NOT "the branch proposes nothing", and the two arrive as the
+   * same empty diff: `pendingProposals` reads an unreadable file as carrying
+   * no grants (fail-closed, which is right for deciding what to SHOW). Used as
+   * the settle test it is fail-open in the one direction that cannot be taken
+   * back — it closes a request nobody answered.
+   *
+   * And unreadable is the normal case for a few seconds. These reads go
+   * through `origin/<branch>` in the DEFAULT branch's clone, whose fetch is
+   * throttled; a request opened moments ago names a ref that clone has not
+   * heard of. So a miss is retried behind a FORCED fetch before it is believed,
+   * and if it still misses the caller is told nothing rather than something
+   * false.
    */
-  async proposalsOn(branch: string, target: AccessRequestTarget): Promise<JoinProposal[]> {
-    await this.refresh();
+  async proposalsOn(
+    branch: string,
+    target: AccessRequestTarget,
+    opts: { fresh?: boolean } = {},
+  ): Promise<JoinProposal[] | null> {
     const rulesPath = rulesFileFor(target);
+    await this.refresh({ force: opts.fresh });
+    let branchText = await this.readAt(branch, rulesPath);
+    if (branchText === null && !opts.fresh) {
+      await this.refresh({ force: true });
+      branchText = await this.readAt(branch, rulesPath);
+    }
+    if (branchText === null) return null;
     const proposals = pendingProposals(
-      await this.readAt(branch, rulesPath),
+      branchText,
       await this.readAt(this.kb.defaultBranch, rulesPath),
       rulesPath,
     );
@@ -172,7 +195,12 @@ export class JoinRequestsService implements IAccessRequestLifecycle {
     const out: JoinRequest[] = [];
     for (const cr of crs) {
       if (cr.state !== 'open' || !isJoinBranchFor(cr.branch, key)) continue;
-      const proposals = await this.proposalsOn(cr.branch, target);
+      const proposals = await this.confirmedProposals(cr.branch, target);
+      // Unreadable: leave it exactly as it is. There is nothing to offer an
+      // editor and nothing that says it is finished, and closing it on a read
+      // that failed would end somebody's request for them. It stays in Change
+      // requests for you, where it can still be answered by hand.
+      if (proposals === null) continue;
       if (proposals.length === 0) {
         await this.settle(cr, actor);
         continue;
@@ -200,10 +228,38 @@ export class JoinRequestsService implements IAccessRequestLifecycle {
     actor: AuthUser,
   ): Promise<boolean> {
     if (cr.state !== 'open' || !isJoinBranchFor(cr.branch, key)) return false;
-    const proposals = await this.proposalsOn(cr.branch, target);
-    if (proposals.length > 0) return false;
+    const proposals = await this.confirmedProposals(cr.branch, target);
+    // Same rule as the listing: only a branch that was READ and, on a fresh
+    // read, proposes nothing is finished.
+    if (proposals === null || proposals.length > 0) return false;
     await this.settle(cr, actor);
     return true;
+  }
+
+  /**
+   * What the branch proposes, with an EMPTY answer confirmed against freshly
+   * fetched refs before anyone acts on it. Null keeps its meaning: nothing
+   * could be read, so nothing can be said.
+   *
+   * The confirmation is there because an empty answer is the terminal one.
+   * These reads go through `origin/<branch>` in the default branch's clone,
+   * and that clone's fetch is throttled — so a branch whose remote-tracking
+   * ref is a few seconds old answers with the commit BEFORE the proposal was
+   * pushed. That is a file identical to live, which is an empty diff, which
+   * reads as "every grant has landed". A request nobody answered is then
+   * closed, its branch deleted, and the person told it was not accepted.
+   *
+   * One extra fetch, on the one path that cannot be undone — and when that
+   * fetch turns up a proposal after all, it is the answer, not a discarded
+   * second opinion.
+   */
+  private async confirmedProposals(
+    branch: string,
+    target: AccessRequestTarget,
+  ): Promise<JoinProposal[] | null> {
+    const first = await this.proposalsOn(branch, target);
+    if (first === null || first.length > 0) return first;
+    return this.proposalsOn(branch, target, { fresh: true });
   }
 
   /**
@@ -274,10 +330,13 @@ export class JoinRequestsService implements IAccessRequestLifecycle {
    * Refresh remote-tracking refs before reading them. Throttled inside, and
    * best-effort: a request pushed seconds ago is worth one fetch, but a fetch
    * failure must degrade to "read what we have" rather than empty the list.
+   *
+   * `force` skips the throttle — for the one caller that has already missed
+   * and must not mistake a stale ref list for an answer.
    */
-  private async refresh(): Promise<void> {
+  private async refresh(opts: { force?: boolean } = {}): Promise<void> {
     await this.workspaceService
-      .ensureRemotesFetched(this.kb.defaultWorkspaceId())
+      .ensureRemotesFetched(this.kb.defaultWorkspaceId(), opts)
       .catch(() => undefined);
   }
 }

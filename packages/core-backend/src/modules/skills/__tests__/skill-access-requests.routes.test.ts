@@ -27,15 +27,19 @@ const FOLDER = 'Skills/Eng/deploy';
 
 async function makeHarness(listBranches: IWorkflowService['listBranches']) {
   const workflow = {
-    listChangeRequestsAuthoredBy: vi.fn(async () => []),
+    listChangeRequests: vi.fn(async () => []),
     listBranches: vi.fn(listBranches),
     createBranch: vi.fn(async () => ({ name: 'x', isDefault: false, isProtected: false })),
+    deleteBranch: vi.fn(async () => undefined),
     commitChanges: vi.fn(async () => null),
     openChangeRequest: vi.fn(async () => ({ number: 42 })),
+    getChangeRequestDetail: vi.fn(async () => ({ body: '' })),
   } as unknown as IWorkflowService;
   const workspaceService = {
     getOrCreateForBranch: vi.fn(async (branch: string) => ({ id: workspaceIdForBranch(branch) })),
     readFile: vi.fn(async () => '---\n---\nwrite:\n  - Eve <eve@x.io>\n'),
+    readFileAtRef: vi.fn(async () => null),
+    ensureRemotesFetched: vi.fn(async () => undefined),
     writeFile: vi.fn(async () => undefined),
   } as unknown as WorkspaceService;
   const accessControl = { canWrite: vi.fn(async () => false) } as unknown as IAccessControl;

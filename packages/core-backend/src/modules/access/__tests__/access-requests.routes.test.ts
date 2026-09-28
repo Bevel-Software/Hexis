@@ -11,6 +11,7 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../access-control.interface.js';
 import type { IAccessRequestLifecycle } from '../access-requests.contract.js';
 import { createAccessRequestRoutes } from '../access-requests.routes.js';
+import { ChangeRequestConflictsError } from '../../../shared/domain-errors.js';
 
 /**
  * Asking for Can edit or Owner on an item, and what the editors then see.
@@ -40,8 +41,10 @@ interface HarnessOpts {
   writable?: string[];
   readable?: boolean;
   openCrs?: { number: number; branch: string; state: string }[];
-  /** What the caller's branch still proposes for the item. */
-  proposals?: ReturnType<typeof proposalFor>[];
+  /** What the caller's branch still proposes — null ⇒ the branch is unreadable. */
+  proposals?: ReturnType<typeof proposalFor>[] | null;
+  /** Branch names the probe reports as already on origin. */
+  existingBranches?: string[];
   lastClosed?: { number: number; state: 'closed' | 'merged' } | null;
   liveRules?: string | null;
   branchRules?: string | null;
@@ -54,6 +57,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
     readable = true,
     openCrs = [],
     proposals = [],
+    existingBranches = [],
     lastClosed = null,
     liveRules = '---\n---\nwrite:\n  - Ed <ed@x.io>\n',
     branchRules = null,
@@ -61,14 +65,25 @@ async function makeHarness(opts: HarnessOpts = {}) {
   } = opts;
 
   const absent = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  const onOrigin = new Set(existingBranches);
   const opened: unknown[] = [];
   const written: { path: string; text: string }[] = [];
 
   const workflow = {
     listChangeRequestsAuthoredBy: vi.fn(async () => openCrs),
     listChangeRequests: vi.fn(async () => openCrs),
-    listBranches: vi.fn(async () => []),
-    createBranch: vi.fn(async () => ({ name: 'x', isDefault: false, isProtected: false })),
+    // The ref list FOLLOWS create and delete, as origin's does: a probe that
+    // ignored them would let the recut pass on a route that never cut anything.
+    listBranches: vi.fn(async () =>
+      [...onOrigin].map((name) => ({ name, isDefault: false, isProtected: false })),
+    ),
+    deleteBranch: vi.fn(async (_ws: string, name: string) => {
+      onOrigin.delete(name);
+    }),
+    createBranch: vi.fn(async (_ws: string, name: string) => {
+      onOrigin.add(name);
+      return { name, isDefault: false, isProtected: false };
+    }),
     commitChanges: vi.fn(async () => null),
     openChangeRequest: vi.fn(async (_ws: string, _u: unknown, input: unknown) => {
       opened.push(input);
@@ -108,7 +123,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
         branch: joinBranchFor(RITA.email, FOLDER),
         requesterName: RITA.name,
         createdAt: '2026-01-01T00:00:00.000Z',
-        proposals,
+        proposals: proposals ?? [],
       },
     ]),
     reconcile: vi.fn(async () => true),
@@ -304,14 +319,38 @@ describe('GET /workspace/:id/access/request — what the requester is told', () 
   const status = (h: { base: string }, kind = 'folder') =>
     fetch(`${h.base}/${LIVE_WS}/access/request?path=${encodeURIComponent(`${KB}/${FOLDER}`)}&kind=${kind}`);
 
-  it('reports the open request and the level it asks for', async () => {
+  it('reports the open request, taking the level off the REQUEST rather than the branch', async () => {
+    // The branch is where the proposal lives, but a clone whose refs are
+    // seconds stale cannot read a branch cut moments ago. "Requested: Owner"
+    // is a promise about a request, so it is answered from the request — here
+    // the branch is deliberately unreadable and the line is still right.
     const branch = joinBranchFor(RITA.email, FOLDER);
     const h = await makeHarness({
       openCrs: [{ number: 31, branch, state: 'open' }],
-      proposals: [proposalFor('owner')],
+      proposals: null,
+      detailBody: '<!--hexis:access-request-level:owner-->\nRita asked for Owner.',
     });
     server = h.server;
     expect(await (await status(h)).json()).toEqual({ state: 'pending', level: 'owner', number: 31 });
+  });
+
+  it("calls a request with no level recorded on it Can edit — the skill button's only level", async () => {
+    const branch = joinBranchFor(RITA.email, FOLDER);
+    const h = await makeHarness({
+      openCrs: [{ number: 31, branch, state: 'open' }],
+      detailBody: 'Opened before the level was recorded.',
+    });
+    server = h.server;
+    expect(await (await status(h)).json()).toMatchObject({ state: 'pending', level: 'write' });
+  });
+
+  it('says nothing is outstanding when the branch cannot be read — never that a request was refused', async () => {
+    // A read that failed proves nothing. Showing the control is recoverable;
+    // telling somebody their request was turned down when nobody turned it
+    // down is not.
+    const h = await makeHarness({ proposals: null, lastClosed: { number: 31, state: 'closed' } });
+    server = h.server;
+    expect(await (await status(h)).json()).toEqual({ state: 'none' });
   });
 
   it('reports a closed request whose proposal is still unmet as not accepted', async () => {
@@ -425,5 +464,124 @@ describe('which request a branch IS', () => {
       expect.anything(),
       expect.anything(),
     );
+  });
+});
+
+describe('a branch left over from an answered request', () => {
+  let server: Server | null = null;
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (server) await new Promise<void>((r) => server!.close(() => r()));
+    server = null;
+  });
+
+  const stale = joinBranchFor(RITA.email, FOLDER);
+
+  it('is CUT AGAIN from live before the new proposal goes on it', async () => {
+    // Opening a change request merges live into its source branch. A branch
+    // still standing here was answered long ago, on a base that may predate
+    // every edit since — and the moment live has touched the same rules file
+    // (an editor granting anyone anything on this item does exactly that)
+    // that merge conflicts. The person asking would be told to resolve
+    // conflicts on an internal branch they cannot reach, for good. Recutting
+    // from live makes live the merge base, so there is nothing to conflict.
+    const h = await makeHarness({ existingBranches: [stale] });
+    server = h.server;
+    const res = await post(`${h.base}/${LIVE_WS}/access/request`, folderBody);
+
+    expect(res.status).toBe(200);
+    expect(h.workflow.deleteBranch).toHaveBeenCalledWith(LIVE_WS, stale, expect.anything());
+    expect(h.workflow.createBranch).toHaveBeenCalledWith(LIVE_WS, stale, LIVE);
+    // Order matters: recut first, THEN write the proposal onto it.
+    const deleted = (h.workflow.deleteBranch as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const written = (h.workspaceService.writeFile as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    expect(deleted).toBeLessThan(written);
+  });
+
+  it('is left alone when there is no branch to recut', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    await post(`${h.base}/${LIVE_WS}/access/request`, folderBody);
+    expect(h.workflow.deleteBranch).not.toHaveBeenCalled();
+    expect(h.workflow.createBranch).toHaveBeenCalledWith(LIVE_WS, stale, LIVE);
+  });
+
+  it('still opens the request when the recut fails, rather than refusing the person', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const h = await makeHarness({ existingBranches: [stale] });
+    (h.workflow.deleteBranch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('the branch could not be removed'),
+    );
+    server = h.server;
+    const res = await post(`${h.base}/${LIVE_WS}/access/request`, folderBody);
+    expect(res.status).toBe(200);
+    expect(h.workflow.openChangeRequest).toHaveBeenCalled();
+  });
+
+  it('answers with the rival request when one opened while the recut was under way', async () => {
+    // `deleteBranch` refuses a branch with an open change request. That
+    // refusal is the guard: somebody else's click got there first, and one
+    // request is what they both get.
+    const h = await makeHarness({ existingBranches: [stale] });
+    let listings = 0;
+    (h.workflow.listChangeRequests as ReturnType<typeof vi.fn>).mockImplementation(async () =>
+      listings++ === 0 ? [] : [{ number: 55, branch: stale, state: 'open' }],
+    );
+    (h.workflow.deleteBranch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('Branch has an open change request (#55).'),
+    );
+    server = h.server;
+    const res = await post(`${h.base}/${LIVE_WS}/access/request`, folderBody);
+    expect(await res.json()).toMatchObject({ number: 55 });
+    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it('answers a re-send with the level the OPEN request asks for, not the one just sent', async () => {
+    // Two tabs: the second sends Can edit while an Owner request is open.
+    // Answering with what was typed would put "Requested: Can edit" over a
+    // request asking for Owner.
+    const h = await makeHarness({
+      openCrs: [{ number: 31, branch: stale, state: 'open' }],
+      detailBody: '<!--hexis:access-request-level:owner-->',
+    });
+    server = h.server;
+    const res = await post(`${h.base}/${LIVE_WS}/access/request`, { ...folderBody, level: 'write' });
+    expect(await res.json()).toEqual({ ok: true, state: 'pending', number: 31, level: 'owner' });
+  });
+
+  it('records the level on the request itself, so it can be read back', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    await post(`${h.base}/${LIVE_WS}/access/request`, { ...folderBody, level: 'owner' });
+    const { description } = h.opened[0] as { description: string };
+    expect(description).toContain('<!--hexis:access-request-level:owner-->');
+  });
+});
+
+describe('what a failed send tells the person', () => {
+  let server: Server | null = null;
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (server) await new Promise<void>((r) => server!.close(() => r()));
+    server = null;
+  });
+
+  it('never asks a reader to resolve conflicts on a branch they have never heard of', async () => {
+    // The dialog shows the server's reason verbatim, so the reason has to be
+    // something the person can act on. "Resolve on
+    // reader2/join-artest3-04i7dr4-0nxlotq and try again" is not.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const h = await makeHarness();
+    (h.workflow.openChangeRequest as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new ChangeRequestConflictsError(joinBranchFor(RITA.email, FOLDER), LIVE, [
+        `${FOLDER}/access.md`,
+      ]),
+    );
+    server = h.server;
+    const res = await post(`${h.base}/${LIVE_WS}/access/request`, folderBody);
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toBe('The rules changed while your request was being sent. Try again.');
+    expect(JSON.stringify(body)).not.toContain('join-');
   });
 });

@@ -53,16 +53,33 @@ function cr(over: Partial<ChangeRequest> = {}): ChangeRequest {
   } as ChangeRequest;
 }
 
-function makeHarness(branchMd: string, holds: Partial<Record<'canRead' | 'canWrite' | 'canOwner' | 'canDownload', boolean>> = {}) {
+function makeHarness(
+  branchMd: string | undefined,
+  holds: Partial<Record<'canRead' | 'canWrite' | 'canOwner' | 'canDownload', boolean>> = {},
+  /** Refs that only appear once a FORCED fetch has run — a branch just pushed. */
+  arrivesOnForcedFetch: string | undefined = undefined,
+  liveMd: string = DEFAULT_MD,
+) {
   const byRef: Record<string, string> = {
-    [`origin/${DEFAULT_BRANCH}`]: DEFAULT_MD,
-    [`origin/${BRANCH}`]: branchMd,
+    [`origin/${DEFAULT_BRANCH}`]: liveMd,
+    ...(branchMd === undefined ? {} : { [`origin/${BRANCH}`]: branchMd }),
   };
+  const fetches: { force: boolean }[] = [];
   const workspaceService = {
-    ensureRemotesFetched: vi.fn(async () => undefined),
-    readFileAtRef: vi.fn(async (_ws: string, ref: string, p: string) =>
-      p === ACCESS_MD ? (byRef[ref] ?? null) : null,
-    ),
+    ensureRemotesFetched: vi.fn(async (_ws: string, opts: { force?: boolean } = {}) => {
+      fetches.push({ force: !!opts.force });
+      if (opts.force && arrivesOnForcedFetch !== undefined) {
+        byRef[`origin/${BRANCH}`] = arrivesOnForcedFetch;
+      }
+    }),
+    readFileAtRef: vi.fn(async (_ws: string, ref: string, p: string) => {
+      if (p !== ACCESS_MD) return null;
+      const text = byRef[ref];
+      // A ref this clone has not heard of is not an empty file — it throws,
+      // exactly as `git show` does for an unknown ref.
+      if (text === undefined) throw new Error(`unknown revision ${ref}`);
+      return text;
+    }),
   } as unknown as WorkspaceService;
   const workflow = {
     rejectChangeRequest: vi.fn(async () => ({ number: 7, state: 'closed' })),
@@ -84,6 +101,7 @@ function makeHarness(branchMd: string, holds: Partial<Record<'canRead' | 'canWri
     svc: new JoinRequestsService(workspaceService, workflow, testKbContext(), accessControl),
     workflow,
     asked,
+    fetches,
   };
 }
 
@@ -138,5 +156,121 @@ describe('a request settles once the person holds what it asked for', () => {
     expect(out).toHaveLength(1);
     expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+describe('a branch that cannot be read settles nothing', () => {
+  /**
+   * The failure this guards against, in full: these reads go through
+   * `origin/<branch>` in the DEFAULT branch's clone, and that clone's fetch is
+   * throttled. A request opened seconds ago names a ref the clone has not
+   * heard of. Read as "the branch proposes nothing" — which is what an empty
+   * diff against a missing file looks like — the request is CLOSED, by
+   * nobody, before any editor has seen it, and the person is told their
+   * request was not accepted.
+   *
+   * So: a miss is retried behind a forced fetch, and a miss that survives that
+   * leaves the request exactly where it was.
+   */
+
+  it('retries behind a FORCED fetch before believing a branch says nothing', async () => {
+    // Present on origin, absent from this clone's refs until it fetches.
+    const h = makeHarness(undefined, {}, ASKS_WRITE);
+    const out = await h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR);
+
+    expect(h.fetches.some((f) => f.force)).toBe(true);
+    expect(out).toHaveLength(1);
+    expect(out[0].proposals.map((p) => p.verb)).toEqual(['write']);
+    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it('leaves the request open — and unclosed — when the branch still cannot be read', async () => {
+    const h = makeHarness(undefined);
+    await expect(h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR)).resolves.toEqual([]);
+    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.workflow.deleteBranch).not.toHaveBeenCalled();
+  });
+
+  it('reconcile refuses to settle one it could not read', async () => {
+    const h = makeHarness(undefined);
+    await expect(h.svc.reconcile('GTM', folderTarget(FOLDER), cr(), ACTOR)).resolves.toBe(false);
+    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it('still settles a branch it DID read that proposes nothing', async () => {
+    // The distinction has to cut both ways, or nothing would ever retire.
+    const h = makeHarness(DEFAULT_MD);
+    await expect(h.svc.reconcile('GTM', folderTarget(FOLDER), cr(), ACTOR)).resolves.toBe(true);
+    expect(h.workflow.rejectChangeRequest).toHaveBeenCalled();
+  });
+});
+
+describe('a person the rules explicitly deny', () => {
+  /**
+   * `ARTest5`-shaped rules: read granted, write DENIED, and the branch
+   * proposing the write anyway. The resolver says that person cannot write
+   * (verified against the real one), so their proposal is unmet and must
+   * survive to reach an editor — "Accept … includes a person the rules
+   * explicitly deny" is unreachable otherwise, and the requester is told a
+   * refusal nobody made.
+   */
+  const DENIED_MD = base(`read:\n  - Ali Baba <${ALI}>\nwrite:\n  - deny Ali Baba <${ALI}>\n`);
+  const ASKS_DESPITE_DENY = base(
+    `read:\n  - Ali Baba <${ALI}>\nwrite:\n  - deny Ali Baba <${ALI}>\n  - Ali Baba <${ALI}>\n`,
+  );
+
+  it('keeps their proposal, so an editor can still accept it', async () => {
+    // Live DENIES the write; the branch adds the grant beside the deny, which
+    // is exactly the text the dialog's own grant writes for this person.
+    const h = makeHarness(ASKS_DESPITE_DENY, { canRead: true, canWrite: false }, undefined, DENIED_MD);
+    const out = await h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR);
+    expect(out).toHaveLength(1);
+    expect(out[0].proposals.map((p) => p.verb)).toEqual(['write']);
+    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it('retires it once the grant has landed and the resolver says they write', async () => {
+    // What Accept does: a same-scope grant beats a same-scope deny, so the
+    // resolver then reports write and the request has nothing left to ask.
+    const h = makeHarness(ASKS_DESPITE_DENY, { canWrite: true }, undefined, DENIED_MD);
+    await expect(h.svc.reconcile('GTM', folderTarget(FOLDER), cr(), ACTOR)).resolves.toBe(true);
+  });
+});
+
+describe('a stale ref must not be mistaken for a finished request', () => {
+  /**
+   * The nastier half of the same hazard. Here the branch's ref RESOLVES — it
+   * is simply a few seconds behind, pointing at the commit before the
+   * proposal was pushed. That reads as a file identical to live, which is an
+   * empty diff, which looks exactly like a request whose grants have all
+   * landed. Nothing about it looks like a failure, and the request is closed.
+   */
+
+  /** Stale: the branch answers with live's own text until a forced fetch. */
+  const staleHarness = () => makeHarness(DEFAULT_MD, {}, ASKS_WRITE);
+
+  it('does not settle a request whose proposal only shows after a fresh fetch', async () => {
+    const h = staleHarness();
+    const out = await h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR);
+
+    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.workflow.deleteBranch).not.toHaveBeenCalled();
+    // And having fetched, it reports the proposal rather than nothing.
+    expect(out).toHaveLength(1);
+    expect(out[0].proposals.map((p) => p.verb)).toEqual(['write']);
+  });
+
+  it('reconcile refuses to settle it either', async () => {
+    const h = staleHarness();
+    await expect(h.svc.reconcile('GTM', folderTarget(FOLDER), cr(), ACTOR)).resolves.toBe(false);
+    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it('confirms with a FORCED fetch before closing anything', async () => {
+    const h = makeHarness(DEFAULT_MD);
+    await h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR);
+    expect(h.fetches.some((f) => f.force)).toBe(true);
+    // Genuinely finished — the confirming read agrees, so it closes.
+    expect(h.workflow.rejectChangeRequest).toHaveBeenCalled();
   });
 });
