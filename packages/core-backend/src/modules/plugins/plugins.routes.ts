@@ -19,6 +19,7 @@ import { PluginProvisionError, type PluginProvisionService } from './plugin-prov
 import { PluginLinkError, type PluginLinksService } from './plugin-links.service.js';
 import { PluginRenameError, type PluginRenameService } from './plugin-rename.service.js';
 import type { JoinRequestsService } from './join-requests.service.js';
+import { folderTarget } from '../access/access-requests.contract.js';
 import type { PluginJoinRequestJobs } from './join-request-jobs.service.js';
 import type { JoinRequestRecord } from './join-request-records.store.js';
 import type {
@@ -619,7 +620,7 @@ export function createPluginsRoutes(
       if (!ctx) return;
       const crs = await workflow.listChangeRequests();
       res.json({
-        requests: await joinRequests.list(joinKeyOf(ctx.plugin), ctx.folder, crs, ctx.user),
+        requests: await joinRequests.list(joinKeyOf(ctx.plugin), folderTarget(ctx.folder), crs, ctx.user),
       });
     } catch (err) {
       log.error('failed to list join requests:', { err });
@@ -649,7 +650,7 @@ export function createPluginsRoutes(
         res.status(404).json({ error: 'Not found' });
         return;
       }
-      res.json({ closed: await joinRequests.reconcile(joinKeyOf(ctx.plugin), ctx.folder, cr, ctx.user) });
+      res.json({ closed: await joinRequests.reconcile(joinKeyOf(ctx.plugin), folderTarget(ctx.folder), cr, ctx.user) });
     } catch (err) {
       log.error('failed to reconcile a join request:', { err });
       res.status(500).json({ error: 'Failed to update the request' });

@@ -62,7 +62,7 @@ import {
   isPlatformRestoreShape,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import { and, eq, inArray, isNotNull, isNull, lt, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
 import type { GitService } from './git/git.service.js';
@@ -1727,6 +1727,38 @@ export class WorkflowService implements IWorkflowService {
 
   getChangeRequest(number: number): Promise<ChangeRequest | null> {
     return this.prs.getPr(number);
+  }
+
+  /**
+   * The newest non-open change request from `sourceBranch` by `authorEmail`.
+   *
+   * Read straight off `change_requests` rather than through the PR listing,
+   * which serves OPEN requests only: the whole point here is the closed ones.
+   * `author_email` is stored lowercased at insert, so the needle is too.
+   * Ordered by `closed_at` with `created_at` as the tiebreak, because a row
+   * closed before the column existed (or by a path that forgot to stamp it)
+   * still has a creation time and must not sort as the oldest.
+   */
+  async latestClosedChangeRequest(
+    authorEmail: string,
+    sourceBranch: string,
+  ): Promise<{ number: number; state: ChangeRequestState } | null> {
+    const email = authorEmail.trim().toLowerCase();
+    if (!email || !sourceBranch) return null;
+    const [row] = await this.db
+      .select({ number: changeRequests.number, state: changeRequests.state })
+      .from(changeRequests)
+      .where(
+        and(
+          eq(changeRequests.authorEmail, email),
+          eq(changeRequests.sourceBranch, sourceBranch),
+          ne(changeRequests.state, 'open'),
+        ),
+      )
+      .orderBy(desc(changeRequests.closedAt), desc(changeRequests.createdAt))
+      .limit(1);
+    if (!row) return null;
+    return { number: row.number, state: row.state as ChangeRequestState };
   }
 
   getChangeRequestDetail(

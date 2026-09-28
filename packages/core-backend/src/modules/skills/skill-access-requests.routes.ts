@@ -3,16 +3,12 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('skills');
 import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
-import {
-  joinBranchFor,
-  type AuthUser,
-  type IWorkflowService,
-} from '@bevel-software/platform-shared';
+import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { spliceGrant } from '../access-model/access-splice.js';
+import { folderTarget } from '../access/access-requests.contract.js';
+import { AccessRequestsService } from '../access/access-requests.service.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
-import { isAbsence } from '../../shared/fs.contract.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { JoinRequestsService } from '../plugins/join-requests.service.js';
@@ -28,13 +24,11 @@ import type { ISkillService } from './skills.contract.js';
  *
  * Why it exists: linking a skill into a plugin needs write on the skill's
  * rules (the link grants the plugin's principal there), and a plugin manager
- * often has no say over a skill some other scope owns. The request is a plain
- * change request whose branch splices `write: <requester>` into the skill
- * folder's `access.md`; the skill's editors see its proposals and accept
- * through the ordinary grant path, and it retires itself once the default
- * branch carries the grant (`JoinRequestsService`, keyed on the skill FOLDER
- * path rather than a plugin name — the branch-name convention takes any
- * exact string).
+ * often has no say over a skill some other scope owns. The request is opened
+ * by the shared `AccessRequestsService` — the same one the Manage access
+ * dialog's Request access uses — keyed on the skill FOLDER path, so this
+ * button and a Can edit request on that same folder are ONE request, shown in
+ * the skill page's banner and in the folder's dialog alike.
  *
  * Fail-closed like the skill catalog: a skill the caller cannot read answers
  * as unknown, and the editors' listing answers `[]` to anyone else.
@@ -49,10 +43,18 @@ export function createSkillAccessRequestRoutes(deps: {
   resolveUser: (req: express.Request) => Promise<AuthUser | null>;
 }): express.Router {
   const { skillService, accessControl, workflow, workspaceService, joinRequests, kb, resolveUser } = deps;
-  const { kbDirName } = kb;
   const router = express.Router();
   const wsId = () => kb.defaultWorkspaceId();
   const rulesOf = (folder: string) => `${folder}/access.md`;
+  // The same opener the Manage access dialog uses, pointed at a skill's
+  // folder. Keyed on that folder's PATH, which is what makes this button and
+  // a Can edit request on the same folder one request rather than two.
+  const requests = new AccessRequestsService({
+    workflow,
+    workspaceService,
+    lifecycle: joinRequests,
+    kb,
+  });
 
   /** The skill the caller may read, by name — or null after answering 404. */
   async function readableSkill(
@@ -82,65 +84,13 @@ export function createSkillAccessRequestRoutes(deps: {
         res.status(409).json({ error: 'You can already edit this skill', kind: 'already-writable' });
         return;
       }
-      const branch = joinBranchFor(user.email, folder);
-      // FRESH: a repeated click must find the request the previous one opened,
-      // and the cached listing can trail it — a miss here would send the
-      // retry into a duplicate refusal.
-      const existing = (await workflow.listChangeRequestsAuthoredBy(user.email, { fresh: true })).find(
-        (cr) => cr.state === 'open' && cr.branch === branch,
-      );
-      if (existing) {
-        res.json({ ok: true, number: existing.number });
-        return;
-      }
-      // The branch may already exist (a request listed as closed, a retry
-      // after a failed open). Existence is PROBED, before and — if creation
-      // fails — after: the race shows up as "already exists" locally or as a
-      // rejected push when origin got there first, and a message is not a
-      // contract. A branch that is there is proceeded against; anything else
-      // is a real failure, and a proposal on a branch that was not made would
-      // be worse than the error. STRICT: the list proves absence, and a
-      // listing that could not fetch proves nothing — it throws instead of
-      // serving refs from before the branch was made (or deleted).
-      const branchExists = async () =>
-        (await workflow.listBranches(wsId(), { freshFetch: true, strictFetch: true })).some(
-          (b) => b.name === branch,
-        );
-      if (!(await branchExists())) {
-        try {
-          await workflow.createBranch(wsId(), branch, kb.defaultBranch);
-        } catch (err) {
-          if (!(await branchExists())) throw err;
-        }
-      }
-      const ws = await workspaceService.getOrCreateForBranch(branch);
-      const accessPath = `${kbDirName}/${rulesOf(folder)}`;
-      // Only a PROVEN absence reads as "no rules yet": any other failure must
-      // not be turned into an empty file that a splice then overwrites.
-      const current = await workspaceService.readFile(ws.id, accessPath).catch((err: unknown) => {
-        if (!isAbsence(err)) throw err;
-        return '';
+      const { number } = await requests.open({
+        user,
+        target: folderTarget(folder),
+        itemName: name,
+        level: 'write',
       });
-      const spliced = spliceGrant(
-        current,
-        'write',
-        { kind: 'user', email: user.email, displayName: user.name },
-        { target: 'folder' },
-      );
-      if (spliced.changed) {
-        await workspaceService.writeFile(ws.id, accessPath, spliced.text);
-        await workflow.commitChanges(ws.id, user, `Request write access to ${name}`);
-      }
-      const detail = await workflow.openChangeRequest(ws.id, user, {
-        sourceBranch: branch,
-        targetBranch: kb.defaultBranch,
-        title: `Access request: ${name}`,
-        description:
-          `${user.name} asked to edit the skill ${name}. An editor of the skill accepts by ` +
-          `granting the access this branch proposes; the request closes itself once ` +
-          `every proposal has landed.`,
-      });
-      res.json({ ok: true, number: detail.number });
+      res.json({ ok: true, number });
     } catch (err) {
       if (err instanceof WorkflowDomainError) {
         res.status(err.status).json(domainErrorBody(err));
@@ -171,7 +121,7 @@ export function createSkillAccessRequestRoutes(deps: {
       const ctx = await requireEditor(req, res, () => res.json({ requests: [] }));
       if (!ctx) return;
       const crs = await workflow.listChangeRequests();
-      res.json({ requests: await joinRequests.list(ctx.folder, ctx.folder, crs, ctx.user) });
+      res.json({ requests: await joinRequests.list(ctx.folder, folderTarget(ctx.folder), crs, ctx.user) });
     } catch (err) {
       log.error('failed to list access requests:', { err });
       res.status(500).json({ error: 'Failed to list access requests' });
@@ -192,7 +142,7 @@ export function createSkillAccessRequestRoutes(deps: {
         res.status(404).json({ error: 'Not found' });
         return;
       }
-      res.json({ closed: await joinRequests.reconcile(ctx.folder, ctx.folder, cr, ctx.user) });
+      res.json({ closed: await joinRequests.reconcile(ctx.folder, folderTarget(ctx.folder), cr, ctx.user) });
     } catch (err) {
       log.error('failed to reconcile an access request:', { err });
       res.status(500).json({ error: 'Failed to reconcile the request' });
