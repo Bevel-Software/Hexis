@@ -3,6 +3,7 @@ import { Banner, Button } from '../../../shared/components';
 import { useAdmin } from '../../admin/state/admin.context';
 import { useSetupStatus } from '../../setup/hooks/useSetupStatus';
 import { SetupScreen } from '../../setup/components/SetupScreen';
+import { useAppRegistry } from '../../../core/registry';
 
 /**
  * Deployment settings, routed at `/deployment` — the first-run setup screen
@@ -27,6 +28,8 @@ import { SetupScreen } from '../../setup/components/SetupScreen';
  */
 export function DeploymentPage() {
   const { isAdmin } = useAdmin();
+  // What the distribution adds to this page, if anything — see the slot.
+  const { deploymentPanel: DeploymentPanel } = useAppRegistry();
   // Read the shared way (`useSetupStatus`: latest read wins, a failed read
   // keeps the last status). Non-admins never read: the endpoint would answer
   // them safely (status without settings), but this page has already told them
@@ -77,6 +80,15 @@ export function DeploymentPage() {
             onSaved={refresh}
             variant="settings"
           />
+        </div>
+      )}
+
+      {/* The distribution's panel, last on the page and outside every
+          condition above: it does not depend on the settings, so neither a
+          load in flight nor a failed one takes it away. */}
+      {DeploymentPanel && (
+        <div className="mt-10" data-testid="deployment-panel">
+          <DeploymentPanel />
         </div>
       )}
     </PageShell>
