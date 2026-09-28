@@ -145,16 +145,30 @@ export function registerWorkflowTools(
     write: boolean;
     /** Register on the internal catalog only (e.g. agent-control tools that make no sense to a remote caller). */
     internalOnly?: boolean;
-    /** Skip the auto-injected `branch` input — for a tool that already declares its own `branch` (switch_branch). */
+    /**
+     * Skip the auto-injected `branch` input — for a tool that declares its own
+     * `branch` with its own meaning (`create_branch`'s fork base,
+     * `switch_branch`'s target draft) or none at all (`merge_branch`,
+     * `open_change_request`, the repo-global reads). It says NOTHING about
+     * whether the tool requires a branch: that is read off the declared schema
+     * below, because reading it off this flag is what let `create_branch` opt
+     * out of the check while still demanding the input.
+     */
     skipBranch?: boolean;
     handler: ToolHandler;
   }): void => {
     const path = `/api/agent/tools/${spec.name}`;
+    const inputs = spec.skipBranch ? spec.inputs : withBranchInput(spec.inputs);
+    // The tool's OWN declaration is the only honest answer to "must this call
+    // name a branch": the injected input and a hand-declared one (the fork
+    // base, the draft to switch to) are equally required, and a tool that adds
+    // or drops the input later moves this with it.
+    const requiresBranch = ((inputs as { required?: string[] }).required ?? []).includes('branch');
     const def = toolDef({
       name: spec.name,
       description: spec.description,
       path,
-      inputs: spec.skipBranch ? spec.inputs : withBranchInput(spec.inputs),
+      inputs,
       outputs: spec.outputs,
       tags: spec.write ? ['workflow', 'write'] : ['workflow'],
     });
@@ -174,15 +188,21 @@ export function registerWorkflowTools(
       // `<kbDirName>/` rather than refused.
       toolHandler(
         (args, ctx) => {
-          // A tool that takes the auto-injected `branch` hands it STRAIGHT to
-          // `workspaceIdForBranch` — these tools address a workspace by id
-          // rather than going through `getFilesystem`, so the choke point that
-          // guards the file tools never sees them. Without this, a branch-less
-          // `commit_change` commits to a workspace id literally named
-          // "undefined". `skipBranch` tools are exempt because they declare no
-          // `branch` at all: they name their workspace some other way
-          // (`sourceBranch`, a change-request number, any existing clone).
-          if (!spec.skipBranch) assertBranchProvided(args.branch);
+          // These tools hand `branch` STRAIGHT to `workspaceIdForBranch` —
+          // they address a workspace by id rather than going through
+          // `getFilesystem`, so the choke point that guards the file tools
+          // never sees them. Without this, a branch-less `commit_change`
+          // commits to a workspace id literally named "undefined", and a
+          // branch-less `create_branch` forks from one: it clones a branch of
+          // that name, fails, and answers `There is no branch named undefined.`
+          //
+          // Keyed on whether the SCHEMA requires `branch`, not on whether the
+          // input was injected. `create_branch` and `switch_branch` declare
+          // their own required `branch`; a check keyed on the injection skipped
+          // exactly those two, which is how the reported bug survived on
+          // `create_branch` — the one tool whose `branch` is a branch the
+          // caller must already have.
+          if (requiresBranch) assertBranchProvided(args.branch);
           return spec.handler(normalizePathArgs(args, kbDirName), ctx);
         },
         { write: spec.write },
@@ -345,6 +365,17 @@ export function registerWorkflowTools(
     handler: async (args, ctx: ToolContext) => {
       const name = args.name as string;
       const base = args.branch as string;
+      // `name` is declared required too, and the same-name refusal below quotes
+      // it. With nothing enforcing it, a call that named neither input compared
+      // undefined to undefined, matched, and answered "not 'undefined', the
+      // draft being created" — an absent value presented as a draft name, the
+      // very sentence this ticket exists to stop. Refused by name instead,
+      // without echoing what was not sent.
+      if (typeof name !== 'string' || name.length === 0) {
+        throw new ToolError('`name` is required: pass the name of the draft to create.', 400, {
+          kind: 'name-required',
+        });
+      }
       // The git op runs in the base's workspace, whose clone has the base
       // checked out — the new draft forks from its HEAD. Resolving a workspace
       // lazily clones its branch from origin, so a `branch` naming the

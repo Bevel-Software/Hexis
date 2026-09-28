@@ -1188,6 +1188,12 @@ export function registerWorkspaceTools(
     // tool the one content rule, and every tool a permission can refuse the
     // proposal route — appended once here so no tool (especially the
     // read-only ones a session hits first) can miss them.
+    // Whether a call to this tool MUST name a branch, read off the tool's own
+    // declaration rather than assumed of the family. Every tool mounted here
+    // requires `branch` today; keying on the schema means a tool that declares
+    // it optional (and resolves absence itself, as `list_tool_setup` does on its
+    // own route) is not handed a refusal it never asked for.
+    const requiresBranch = ((spec.inputs as { required?: string[] }).required ?? []).includes('branch');
     const describe = (): string =>
       (typeof spec.description === 'function' ? spec.description() : spec.description) +
       (spec.proposable ? PROPOSAL_ROUTE_NOTE : '') +
@@ -1242,7 +1248,7 @@ export function registerWorkspaceTools(
           // hands `branch` straight to the workspace service by id — so the
           // check belongs on the mount every one of them shares rather than on
           // the resolver only some of them reach.
-          if (!spec.resolvesBranchItself) assertBranchProvided(args.branch);
+          if (requiresBranch && !spec.resolvesBranchItself) assertBranchProvided(args.branch);
           // BEFORE the normaliser: see `assertToolPathsNotGitInternals`.
           if (spec.fileTool !== false) await assertToolPathsNotGitInternals(args, ctx);
           const normalized = normalizePathArgs(
