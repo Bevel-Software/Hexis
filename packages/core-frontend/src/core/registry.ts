@@ -311,6 +311,22 @@ export interface AppRegistry {
    */
   groupsDirectoryPanel?: ComponentType<GroupsDirectoryPanelProps>;
   /**
+   * A panel at the foot of the Deployment page, below the settings form.
+   * Core's page holds what every deployment has — the repository, the branch
+   * model, sign-in. What a deployment IS beyond that belongs to the
+   * distribution that runs it: a hosted workspace has a plan and can be
+   * deleted by its admin, a self-hosted one is deleted by whoever owns the
+   * server, and core knows neither. The page reserves this slot for it.
+   *
+   * Rendered for admins only, like the page itself, and independently of the
+   * settings load: a panel that offers a way out of the deployment must not
+   * disappear because the settings could not be read. Rendered inside a
+   * boundary, so the independence holds both ways: a panel that throws loses
+   * its own place on the page, never the settings form above it. Absent means
+   * the page ends with its form, as it always has.
+   */
+  deploymentPanel?: ComponentType;
+  /**
    * How many unread items the gear menu's badge should show, if anything is
    * counting. CORE COUNTS NOTHING: the feedback inbox behind that badge is an
    * enterprise module, and core polled its endpoint every thirty seconds
