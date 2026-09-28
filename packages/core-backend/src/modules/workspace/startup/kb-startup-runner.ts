@@ -18,6 +18,7 @@ import {
   type GitFailure,
 } from '../../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
+import { normalizeRepositoryAddress, sameRepository } from '../../kb-fs/remote-url.js';
 
 /**
  * The KB startup phase: run every registered {@link OnServerStart} step, in
@@ -301,6 +302,10 @@ export class KbStartupRunner {
         );
       }
       const heads = await this.ensureRemote();
+      // AFTER the remote answered: the configured address is known to be a
+      // repository we can reach, so a clone of a different one is stale, not
+      // a casualty of a typo in the address.
+      await this.discardClonesOfAnotherRepository();
       const ctx = this.buildContext(heads, handles);
 
       for (const step of this.opts.steps) {
@@ -499,6 +504,57 @@ export class KbStartupRunner {
       protectedBranches: async () => this.opts.protectedBranches().map(handleFor),
       allBranches: async () => [...heads].sort().map(handleFor),
     };
+  }
+
+  /**
+   * Delete every working copy that is a clone of a repository OTHER than the
+   * configured one, so the next use clones it fresh from the right place.
+   *
+   * A clone fetches and pushes through the address stored in its own
+   * `remote.origin.url`, which nothing updates when the configured address
+   * changes. After an operator replaced the repository (2026-09-28: the old
+   * one deleted, a new one saved on the setup screen) every surviving clone
+   * kept asking the old address: Save and Retry failed, and the restart
+   * stopped the boot on `repository … not found`, taking the setup screen
+   * with it.
+   *
+   * Deleted, not re-pointed: the two repositories need not share history, and
+   * a re-pointed clone would push the old one's commits into the new one.
+   * Work committed here and never pushed is lost with the clone — it belonged
+   * to the repository that was replaced.
+   *
+   * Every clone under the workspaces root, not only the branches this phase
+   * touches: the workspace service adopts whatever it finds there. A clone
+   * whose address cannot be read is KEPT — "could not tell" is no reason to
+   * delete someone's work.
+   */
+  private async discardClonesOfAnotherRepository(): Promise<void> {
+    const configured = this.opts.kbRepoUrl();
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await fs.readdir(this.opts.workspacesRoot, { withFileTypes: true });
+    } catch {
+      return; // no workspaces yet
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const repoDir = path.join(this.opts.workspacesRoot, entry.name, this.opts.kbDirName);
+      const hasGit = await fs.access(path.join(repoDir, '.git')).then(() => true, () => false);
+      if (!hasGit) continue;
+      let origin: string;
+      try {
+        origin = (await git(this.opts.gitRunner, repoDir, ['config', '--get', 'remote.origin.url'])).trim();
+      } catch {
+        continue;
+      }
+      if (origin === '' || sameRepository(origin, configured)) continue;
+      // The normalized form carries no userinfo, and the scrub covers the rest.
+      startupLog.warn(
+        `working copy "${entry.name}" is a clone of another repository ` +
+          `(${this.redact(normalizeRepositoryAddress(origin))}) — deleting it; it will be cloned fresh from the configured one.`,
+      );
+      await fs.rm(repoDir, { recursive: true, force: true });
+    }
   }
 
   /**
