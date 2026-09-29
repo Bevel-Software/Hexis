@@ -103,6 +103,100 @@ async function checkout(branch: string): Promise<string> {
   return dir;
 }
 
+/**
+ * The configured repository was replaced while working copies of the old one
+ * were still on disk. A clone fetches through its OWN stored address, so
+ * every one of them kept asking the repository that was gone: the boot
+ * stopped on "repository not found" and took the setup screen with it.
+ */
+describe('KbStartupRunner — the repository was replaced', () => {
+  const touchDefault = step('touch', async (ctx) => {
+    await (await ctx.defaultBranch()).repoDir();
+    return { outcome: 'ok' };
+  });
+  const cloneDir = (branch: string) => path.join(workspacesRoot, encodeURIComponent(branch), 'knowledge-base');
+
+  /** A second, unrelated repository with the same branch names. */
+  async function replacementUpstream(): Promise<string> {
+    const other = path.join(root, 'replacement.git');
+    await git(root, ['init', '--bare', '-b', DEFAULT_BRANCH, other]);
+    const seed = path.join(root, '.seed-replacement');
+    await fs.mkdir(seed);
+    await git(seed, ['init', '-b', DEFAULT_BRANCH]);
+    await fs.writeFile(path.join(seed, 'marker.txt'), 'replacement', 'utf8');
+    await git(seed, ['add', '-A']);
+    await git(seed, ['commit', '-m', 'init']);
+    await git(seed, ['branch', PROTECTED[1]!]);
+    await git(seed, ['remote', 'add', 'origin', other]);
+    await git(seed, ['push', 'origin', ...PROTECTED]);
+    return other;
+  }
+
+  /** Boot once against the first repository, and leave a draft's clone beside it. */
+  async function bootedOnTheOldRepository(): Promise<void> {
+    await populatedUpstream();
+    await makeRunner([touchDefault]).runAll();
+    await fs.mkdir(path.dirname(cloneDir('someone/draft')), { recursive: true });
+    await git(root, ['clone', '-b', DEFAULT_BRANCH, upstream, cloneDir('someone/draft')]);
+  }
+
+  it('deletes the clones of the old repository and clones the new one, even with the old one gone', async () => {
+    await bootedOnTheOldRepository();
+    const replacement = await replacementUpstream();
+    // Gone, as it was in production: any fetch through the old address fails.
+    await fs.rm(upstream, { recursive: true, force: true });
+
+    await makeRunner([touchDefault], { kbRepoUrl: () => replacement }).runAll();
+
+    const repo = cloneDir(DEFAULT_BRANCH);
+    expect((await git(repo, ['config', '--get', 'remote.origin.url'])).trim()).toBe(replacement);
+    expect(await fs.readFile(path.join(repo, 'marker.txt'), 'utf8')).toBe('replacement');
+    // A clone this boot had no reason to touch is swept too: the workspace
+    // service would otherwise adopt it and fetch from the old address.
+    await expect(fs.access(cloneDir('someone/draft'))).rejects.toThrow();
+  });
+
+  it('leaves a clone of the configured repository alone, unpushed work included', async () => {
+    await bootedOnTheOldRepository();
+    const repo = cloneDir(DEFAULT_BRANCH);
+    await fs.writeFile(path.join(repo, 'unpushed.md'), 'local work', 'utf8');
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-m', 'local work']);
+    const head = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+
+    await makeRunner([touchDefault]).runAll();
+
+    expect((await git(repo, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    await expect(fs.access(cloneDir('someone/draft'))).resolves.toBeUndefined();
+  });
+
+  it('does not take a different spelling of the same address for another repository', async () => {
+    await bootedOnTheOldRepository();
+    const repo = cloneDir(DEFAULT_BRANCH);
+    await fs.writeFile(path.join(repo, 'unpushed.md'), 'local work', 'utf8');
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-m', 'local work']);
+    const head = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+
+    // `upstream` ends in `.git`; the same repository without it, and with a
+    // trailing slash.
+    await makeRunner([touchDefault], { kbRepoUrl: () => `${upstream.replace(/\.git$/, '')}/` }).runAll().catch(() => {});
+
+    expect((await git(repo, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+  });
+
+  it('keeps every clone when the configured repository cannot be reached', async () => {
+    // A typo in the address must not cost the working copies: the sweep runs
+    // only once the configured remote has answered.
+    await bootedOnTheOldRepository();
+    await expect(
+      makeRunner([touchDefault], { kbRepoUrl: () => path.join(root, 'no-such-repository.git') }).runAll(),
+    ).rejects.toThrow();
+    await expect(fs.access(path.join(cloneDir(DEFAULT_BRANCH), '.git'))).resolves.toBeUndefined();
+    await expect(fs.access(cloneDir('someone/draft'))).resolves.toBeUndefined();
+  });
+});
+
 describe('KbStartupRunner', () => {
   it('seeds an empty remote with every protected branch before any step runs', async () => {
     const seen: string[] = [];
