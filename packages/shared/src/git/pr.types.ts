@@ -313,6 +313,31 @@ export interface PullRequestDetail extends PullRequestSummary {
    * hint — the update route re-checks the same predicate server-side.
    */
   viewerCanUpdate: boolean;
+  /**
+   * True iff the viewer is this request's author — the person who opened it,
+   * hash-matched against the stored `authorId` so the client never has to
+   * hash an email (and no raw email is exposed to do it with). A request a
+   * person's agent opened belongs to that person. Drives wording that speaks
+   * to the author directly ("You can delete it below.") rather than naming
+   * them in the third person. False when no viewer was passed, and for a
+   * request opened outside this backend (no `authorId`).
+   */
+  viewerIsAuthor: boolean;
+  /**
+   * True iff the viewer may delete this request (close it AND retire its
+   * branch): the request is not applied AND the viewer is either its author
+   * or an admin (`viewerCanBypassMerge` is the proxy — the same
+   * `canWriteAtRef('roles.yaml')` predicate the DELETE route enforces).
+   * Deliberately NOT `viewerCanCancel`: that one also grants the changed
+   * files' owners, who may decline a request but must not destroy someone
+   * else's text and branch.
+   *
+   * Note this is true on a CLOSED request too, mirroring the server: a
+   * request withdrawn in another tab still has a leftover branch for the
+   * delete to retire. Only an applied one is nobody's to delete. A UX hint —
+   * `DELETE /api/workflow/change-requests/:number` re-checks server-side.
+   */
+  viewerCanDelete: boolean;
 }
 
 /**
