@@ -55,12 +55,21 @@ An empty repository is fine: it is set up for you.
 ### Which repositories are in the list
 
 The ones the app reaches **that your own GitHub account can write to**, as
-they were when you connected GitHub. A repository the app reaches and you
+they were when the list was last read. A repository the app reaches and you
 cannot write to is not offered, and cannot be connected by typing its name.
 
-To change which repositories the app reaches, or to bring the list up to
-date after your access changed, press **Connect GitHub again** on the same
-tab.
+Two buttons above the list keep it in step with GitHub:
+
+- **Change repositories on GitHub** opens the app's settings on GitHub in
+  another tab, where you choose which repositories it reaches. Save there,
+  then come back to the tab Hexis is in.
+- **Refresh the list** reads again what you can connect. It sends you to
+  GitHub to sign in and straight back. Press it after changing repositories
+  on GitHub, or after your own access changed: GitHub does not tell Hexis
+  about either.
+
+If an owner of your organisation approved the app after you asked for it,
+press **Already installed? Check again** on the same tab.
 
 If the app reaches no repository you can write to, nothing is connected and
 the tab says so. Add one you can write to, or ask someone who can write to

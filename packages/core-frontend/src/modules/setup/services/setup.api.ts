@@ -399,3 +399,16 @@ export async function startGitHubAppInstallation(): Promise<string> {
   if (!res.ok) await readError(res);
   return ((await res.json()) as { url: string }).url;
 }
+
+/**
+ * Where to sign in on GitHub so the deployment can read again which
+ * repositories may be connected. Nothing is installed: GitHub sends the
+ * browser straight back. It is how a repository added to the installation
+ * on GitHub gets into the list, since GitHub sends nobody back from the
+ * page it is added on.
+ */
+export async function startGitHubAppRefresh(): Promise<string> {
+  const res = await authFetch('/api/setup/github-app/refresh', { method: 'POST' });
+  if (!res.ok) await readError(res);
+  return ((await res.json()) as { url: string }).url;
+}

@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   fetchGitHubRepositories: vi.fn(),
   startGitHubAppRegistration: vi.fn(),
   startGitHubAppInstallation: vi.fn(),
+  startGitHubAppRefresh: vi.fn(),
 }));
 vi.mock('../services/setup.api', async () => {
   const actual = await vi.importActual<typeof import('../services/setup.api')>('../services/setup.api');
@@ -210,7 +211,112 @@ describe('the three steps of connecting GitHub', () => {
     expect(Array.from((picker as HTMLSelectElement).options).map((o) => o.value)).toEqual(['', 'acme/kb', 'acme/website']);
     // What the list is, and how it is brought up to date.
     expect(screen.getByTestId('github-repository')).toHaveTextContent('your own GitHub account can write to');
-    expect(screen.getByRole('button', { name: 'Connect GitHub again' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Refresh the list' })).toBeEnabled();
+  });
+
+  /**
+   * Which repositories the app reaches is decided on GitHub, first; the list
+   * is what came of it. So the connection's controls come before the list.
+   */
+  it('puts the connection to GitHub above the repository it is chosen through', async () => {
+    api.fetchGitHubApp.mockResolvedValue(INSTALLED);
+    show();
+    await openGitHub();
+    const picker = await screen.findByRole('combobox', { name: 'Repository' });
+    for (const name of ['Change repositories on GitHub', 'Refresh the list']) {
+      const button = screen.getByRole('button', { name });
+      expect(button.compareDocumentPosition(picker) & Node.DOCUMENT_POSITION_FOLLOWING, name).toBeTruthy();
+    }
+  });
+
+  /**
+   * With the app installed, the address that installs it opens the
+   * installation's settings on GitHub, and GitHub offers no way back from
+   * there. In this tab the admin would be left on GitHub, the setup screen
+   * gone.
+   */
+  it('opens GitHub in another tab to change what the app reaches, and stays where it is', async () => {
+    api.fetchGitHubApp.mockResolvedValue(INSTALLED);
+    api.startGitHubAppInstallation.mockResolvedValue('https://github.com/apps/hexis-acme/installations/new?state=abc');
+    const assign = vi.fn();
+    standAt();
+    Object.assign(window.location, { assign });
+    const tab = { opener: window as unknown, location: { href: '' }, close: vi.fn() };
+    const open = vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
+    try {
+      show();
+      await openGitHub();
+      await userEvent.click(await screen.findByRole('button', { name: 'Change repositories on GitHub' }));
+      await waitFor(() => expect(tab.location.href).toBe('https://github.com/apps/hexis-acme/installations/new?state=abc'));
+      // Opened at the press, in a tab of its own, which is given no handle on this one.
+      expect(open).toHaveBeenCalledWith('', '_blank');
+      expect(tab.opener).toBeNull();
+      expect(assign).not.toHaveBeenCalled();
+      // And the way back is said: nothing changed there is in the list yet.
+      expect(await screen.findByTestId('github-managed')).toHaveTextContent('Refresh the list');
+      expect(screen.getByRole('combobox', { name: 'Repository' })).toBeInTheDocument();
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  it('goes itself when no tab may be opened, and closes the tab when GitHub cannot be asked', async () => {
+    api.fetchGitHubApp.mockResolvedValue(INSTALLED);
+    api.startGitHubAppInstallation.mockResolvedValue('https://github.com/apps/hexis-acme/installations/new?state=abc');
+    const assign = vi.fn();
+    standAt();
+    Object.assign(window.location, { assign });
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    try {
+      show();
+      await openGitHub();
+      await userEvent.click(await screen.findByRole('button', { name: 'Change repositories on GitHub' }));
+      await waitFor(() => expect(assign).toHaveBeenCalledWith('https://github.com/apps/hexis-acme/installations/new?state=abc'));
+
+      const tab = { opener: window as unknown, location: { href: '' }, close: vi.fn() };
+      open.mockReturnValue(tab as unknown as Window);
+      api.startGitHubAppInstallation.mockRejectedValue(new Error('GitHub could not be reached.'));
+      await userEvent.click(screen.getByRole('button', { name: 'Change repositories on GitHub' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent('GitHub could not be reached');
+      expect(tab.close).toHaveBeenCalled();
+      expect(tab.location.href).toBe('');
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  it('refreshes the list by a sign-in that comes straight back', async () => {
+    api.fetchGitHubApp.mockResolvedValue(INSTALLED);
+    api.startGitHubAppRefresh.mockResolvedValue('https://github.com/login/oauth/authorize?client_id=Iv1.x&state=abc');
+    const assign = vi.fn();
+    standAt();
+    Object.assign(window.location, { assign });
+    show();
+    await openGitHub();
+    await userEvent.click(await screen.findByRole('button', { name: 'Refresh the list' }));
+    await waitFor(() => expect(assign).toHaveBeenCalledWith('https://github.com/login/oauth/authorize?client_id=Iv1.x&state=abc'));
+    expect(api.startGitHubAppInstallation).not.toHaveBeenCalled();
+  });
+
+  it('says the list is up to date when the browser comes back from refreshing it', async () => {
+    api.fetchGitHubApp.mockResolvedValue(INSTALLED);
+    standAt('?github=refreshed');
+    show();
+    expect(await screen.findByText('The list of repositories is up to date.')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'GitHub' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  /** Installed by an owner who approved it later, in a browser of their own. */
+  it('offers to check again for an app that was installed somewhere this browser never came back from', async () => {
+    api.fetchGitHubApp.mockResolvedValue(REGISTERED);
+    api.startGitHubAppRefresh.mockResolvedValue('https://github.com/login/oauth/authorize?client_id=Iv1.x&state=abc');
+    const assign = vi.fn();
+    standAt();
+    Object.assign(window.location, { assign });
+    show();
+    await openGitHub();
+    await userEvent.click(await screen.findByRole('button', { name: 'Already installed? Check again' }));
+    await waitFor(() => expect(assign).toHaveBeenCalledWith('https://github.com/login/oauth/authorize?client_id=Iv1.x&state=abc'));
   });
 });
 

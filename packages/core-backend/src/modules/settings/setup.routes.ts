@@ -549,7 +549,7 @@ export function createSetupRoutes(
     if (!app.permits(after('githubRepository'), after)) {
       log.warn('a repository was named that the person who connected GitHub could not push to');
       return refuse(
-        'Choose a repository your own GitHub account can write to. If this one should be, connect GitHub again from here so the list is brought up to date.',
+        'Choose a repository your own GitHub account can write to. If this one should be, press “Refresh the list” so it is brought up to date.',
       );
     }
     try {

@@ -4,6 +4,7 @@ import {
   fetchGitHubApp,
   fetchGitHubRepositories,
   startGitHubAppInstallation,
+  startGitHubAppRefresh,
   startGitHubAppRegistration,
   type GitHubAppStatus,
   type GitHubRepository,
@@ -12,6 +13,15 @@ import {
 /** How a round trip to GitHub ended, as the address the browser came back on says. */
 const OUTCOMES: Record<string, { tone: 'ok' | 'danger' | 'wait'; text: string }> = {
   connected: { tone: 'ok', text: 'GitHub is connected. Choose the repository below.' },
+  refreshed: { tone: 'ok', text: 'The list of repositories is up to date.' },
+  'not-installed': {
+    tone: 'danger',
+    text: 'The app is not installed anywhere your GitHub account can reach. Install it from here.',
+  },
+  several: {
+    tone: 'wait',
+    text: 'The app is installed in more than one place you can reach. Install it from here and choose the one to connect.',
+  },
   requested: {
     tone: 'wait',
     text: 'You asked an owner of the organisation to install the app. Come back here once they have.',
@@ -103,6 +113,8 @@ export function GitHubRepositoryPanel({ repository, onChoose, problem, disabled,
   const [repositories, setRepositories] = useState<GitHubRepository[] | null>(null);
   const [more, setMore] = useState(false);
   const [listFailed, setListFailed] = useState<string | null>(null);
+  /** GitHub was opened in another tab: what was changed there is not in the list until it is refreshed. */
+  const [managed, setManaged] = useState(false);
   // Asked for at the moment of leaving, not at the press that led to it:
   // GitHub is asked for an address in between, and what the form holds when
   // the browser goes is what has to be kept.
@@ -153,6 +165,49 @@ export function GitHubRepositoryPanel({ repository, onChoose, problem, disabled,
     setStarting(true);
     try {
       const address = await startGitHubAppInstallation();
+      leaving.current?.();
+      window.location.assign(address);
+    } catch (err) {
+      setFailed(err instanceof Error ? err.message : 'Could not open GitHub.');
+      setStarting(false);
+    }
+  }
+
+  /**
+   * Open the installation's settings on GitHub IN ANOTHER TAB. Once the app
+   * is installed, the address that installs it leads there, and GitHub
+   * offers no way back from that page: in this tab the admin would be left
+   * on GitHub with the setup screen gone. The tab is opened at the press,
+   * before the address is known, because a tab opened after an answer has
+   * arrived is one browsers block.
+   */
+  async function manage() {
+    setFailed(null);
+    const tab = window.open('', '_blank');
+    try {
+      const address = await startGitHubAppInstallation();
+      if (tab) {
+        // The page on GitHub gets no handle on this one.
+        tab.opener = null;
+        tab.location.href = address;
+        setManaged(true);
+      } else {
+        // No tab was allowed: this one goes, with what was typed kept.
+        leaving.current?.();
+        window.location.assign(address);
+      }
+    } catch (err) {
+      tab?.close();
+      setFailed(err instanceof Error ? err.message : 'Could not open GitHub.');
+    }
+  }
+
+  /** Sign in on GitHub and come straight back, so what may be connected is read again. */
+  async function refresh() {
+    setFailed(null);
+    setStarting(true);
+    try {
+      const address = await startGitHubAppRefresh();
       leaving.current?.();
       window.location.assign(address);
     } catch (err) {
@@ -225,9 +280,16 @@ export function GitHubRepositoryPanel({ repository, onChoose, problem, disabled,
             The GitHub App <span className="font-medium">{status.app.slug}</span> is ready. Install it on the account or
             organisation that owns the repository, and choose which repositories it may reach.
           </p>
-          <Button type="button" variant="primary" size="sm" onClick={() => void install()} disabled={disabled || starting}>
-            {starting ? 'Opening GitHub…' : 'Install the app on GitHub'}
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" variant="primary" size="sm" onClick={() => void install()} disabled={disabled || starting}>
+              {starting ? 'Opening GitHub…' : 'Install the app on GitHub'}
+            </Button>
+            {/* Installed where this browser never came back from: by an
+                owner who approved it later, or in another browser. */}
+            <Button type="button" variant="outline" size="sm" onClick={() => void refresh()} disabled={disabled || starting}>
+              Already installed? Check again
+            </Button>
+          </div>
         </div>
       )}
 
@@ -237,6 +299,31 @@ export function GitHubRepositoryPanel({ repository, onChoose, problem, disabled,
             Connected to <span className="font-medium text-ink">{installed.account || 'GitHub'}</span> through the app{' '}
             <span className="font-medium text-ink">{status.app.slug}</span>.
           </p>
+          {/* The connection, ABOVE what is chosen through it: which
+              repositories the app reaches is decided first, on GitHub, and
+              the list under it is what came of that. */}
+          <div className="space-y-2" data-testid="github-connection">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => void manage()} disabled={disabled || starting}>
+                Change repositories on GitHub
+              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={() => void refresh()} disabled={disabled || starting}>
+                {starting ? 'Opening GitHub…' : 'Refresh the list'}
+              </Button>
+            </div>
+            {managed ? (
+              <Banner tone="wait" role="status" data-testid="github-managed">
+                GitHub is open in another tab. When you have saved your changes there, come back here and press
+                &ldquo;Refresh the list&rdquo;.
+              </Banner>
+            ) : (
+              <p className="max-w-[60ch] text-meta text-ink-muted">
+                GitHub opens in another tab, where you choose which repositories the app reaches. Refresh the list
+                afterwards: it holds the ones your own GitHub account can write to, as they were when it was last
+                read.
+              </p>
+            )}
+          </div>
           {listFailed && (
             <Banner tone="danger" role="alert">
               {listFailed}
@@ -274,16 +361,6 @@ export function GitHubRepositoryPanel({ repository, onChoose, problem, disabled,
                 {more ? ' Only the first 500 repositories are listed.' : ''}
               </span>
             )}
-          </div>
-          <div className="space-y-2">
-            <p className="max-w-[60ch] text-meta text-ink-muted">
-              The list holds the repositories the app reaches that your own GitHub account can write to, as they were
-              when GitHub was connected. Connect it again to change which the app reaches, or to bring the list up to
-              date.
-            </p>
-            <Button type="button" variant="outline" size="sm" onClick={() => void install()} disabled={disabled || starting}>
-              {starting ? 'Opening GitHub…' : 'Connect GitHub again'}
-            </Button>
           </div>
         </div>
       )}

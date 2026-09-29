@@ -85,6 +85,7 @@ function same(a: string, b: string): boolean {
  *   POST /setup/github-app/manifest      start registering this deployment's own app
  *   GET  /setup/github-app/registered    GitHub sends the browser back: the app exists
  *   POST /setup/github-app/install       where on GitHub the app is installed
+ *   POST /setup/github-app/refresh       where to sign in, to read again what may be connected
  *   GET  /setup/github-app/callback      GitHub sends the browser back: the app is installed
  *   GET  /setup/github-app/repositories  what the deployment may be pointed at
  *
@@ -224,6 +225,31 @@ export function createGitHubAppRoutes(deps: GitHubAppRoutesDeps): express.Router
     res.json({ url: installUrl(credentials.slug, beginRoundTrip(res)) });
   });
 
+  /**
+   * Ask GitHub again what the person may connect, WITHOUT installing
+   * anything: a sign-in with the app and nothing more, which comes back on
+   * the same callback with a code and no installation named.
+   *
+   * It exists because installing comes back only the first time. Once the
+   * app is installed, the address that installs it opens the installation's
+   * settings on GitHub, and GitHub sends nobody back from there: a
+   * repository added on that page was reached by the app and never offered
+   * here, since what is offered is what was recorded when the person
+   * connected. The same goes for an installation an organisation's owner
+   * approved later, in a browser of their own.
+   */
+  router.post('/setup/github-app/refresh', requireAdmin, (_req, res) => {
+    const credentials = connection.credentials();
+    if (!credentials) {
+      res.status(409).json({ error: 'This deployment has no GitHub App yet. Create it first.' });
+      return;
+    }
+    const state = beginRoundTrip(res);
+    res.json({
+      url: `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(credentials.clientId)}&state=${encodeURIComponent(state)}`,
+    });
+  });
+
   router.get('/setup/github-app/callback', requireAdmin, async (req, res) => {
     const returned = cameBack(req);
     res.clearCookie(STATE_COOKIE, { path: '/' });
@@ -243,14 +269,36 @@ export function createGitHubAppRoutes(deps: GitHubAppRoutesDeps): express.Router
       return;
     }
     const code = typeof req.query.code === 'string' ? req.query.code : '';
-    const named = typeof req.query.installation_id === 'string' ? req.query.installation_id : '';
-    if (!code || !/^\d+$/.test(named)) {
+    const given = typeof req.query.installation_id === 'string' ? req.query.installation_id : '';
+    if (!code || (given !== '' && !/^\d+$/.test(given))) {
       finish(res, 'refused');
       return;
     }
+    // Back from installing, GitHub names the installation. Back from a
+    // sign-in alone (see `refresh`) it names none, and the one in question
+    // is the one this deployment has. Either way it is only a name: what
+    // decides is what GitHub says the person reaches, below.
+    const refreshing = given === '';
+    const named = given || connection.installationId();
     try {
       const userToken = await client.exchangeUserCode(credentials, code);
-      const held = (await client.installationsOf(userToken)).find((installation) => installation.id === named);
+      const reached = await client.installationsOf(userToken);
+      let held = named ? reached.find((installation) => installation.id === named) : undefined;
+      if (!named) {
+        // No installation on record and none named: the app was installed
+        // where this browser never came back from (an owner approved it
+        // later). One the person reaches is the one; several are a choice
+        // only installing from here can make.
+        if (reached.length === 0) {
+          finish(res, 'not-installed');
+          return;
+        }
+        if (reached.length > 1) {
+          finish(res, 'several');
+          return;
+        }
+        held = reached[0];
+      }
       if (!held) {
         log.warn('an installation was named that the person who came back cannot reach', { installation: named });
         finish(res, 'not-yours');
@@ -276,8 +324,13 @@ export function createGitHubAppRoutes(deps: GitHubAppRoutesDeps): express.Router
       );
       // A token in hand was another installation's.
       connection.forget();
-      log.info(`GitHub App installed on "${held.account}"`, { installation: held.id, account: held.account });
-      finish(res, 'connected');
+      log.info(
+        refreshing
+          ? `what may be connected through the GitHub App on "${held.account}" was read again`
+          : `GitHub App installed on "${held.account}"`,
+        { installation: held.id, account: held.account, repositories: writable.length },
+      );
+      finish(res, refreshing ? 'refreshed' : 'connected');
     } catch (err) {
       log.error('the installation could not be confirmed:', { detail: err instanceof Error ? err.message : String(err) });
       finish(res, outcomeOf(err));
