@@ -31,7 +31,20 @@ import type { KbContext } from '../../shared/kb-context.js';
 import { failureOf, type GitFailure } from '../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { listRootFolders, pickListingBranch } from './git-root-folders.js';
+import { MANAGED_DEFAULT_BRANCH } from './managed-repository.js';
+import { GIT_MODES, type RepositorySource } from './repository-source.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
+
+/**
+ * What setup needs of the ways a deployment can be given its repository:
+ * the source every reader of the repository asks, and the one thing a mode
+ * has to have DONE before a save that chooses it may go through.
+ */
+export interface RepositorySetup {
+  source: RepositorySource;
+  /** Create the repository the deployment keeps for itself, if it is not there. Never touches one that is. */
+  ensureManaged(initialBranch: string): Promise<void>;
+}
 
 /** Which name a host expects beside the token when none is configured. */
 const DEFAULT_GIT_USERNAME = 'x-access-token';
@@ -138,8 +151,14 @@ export function createSetupRoutes(
   checkOidc: (config: OidcConfiguration) => Promise<OidcCheck> = checkOidcConfiguration,
   /** The issuer-only half, for a test with no application id or secret yet. */
   checkIssuer: (issuerUrl: string) => Promise<IssuerCheck> = (url) => checkOidcIssuer(url),
+  /**
+   * The ways a deployment can be given its repository. Absent, there is the
+   * one there always was: an address and a token, read from the settings.
+   */
+  repository?: RepositorySetup,
 ): express.Router {
   const router = express.Router();
+  const source = repository?.source;
 
   /**
    * Why the last setup-time run of the KB startup phase FAILED, or null. While
@@ -184,7 +203,18 @@ export function createSetupRoutes(
   };
   /** The app-gate answer: settings complete AND the KB phase settled clean, whoever ran it. */
   const kbReady = () =>
-    isComplete(settings, kb) && kbInit === null && kbInitInFlight === null && bootFailure() === null;
+    isComplete(settings, kb, source) && kbInit === null && kbInitInFlight === null && bootFailure() === null;
+
+  /**
+   * Which ways of having a repository this deployment offers and which one
+   * it is on, for the setup screen. `mode` is the one IN EFFECT, inferred
+   * for a deployment that never chose: the screen opens on it, and offers
+   * the first of `modes` to a deployment that has none. Nothing at all from
+   * a mount without the choice, which the screen reads as the one way there
+   * was.
+   */
+  const repositoryStatus = () =>
+    source ? { repository: { mode: source.mode(), modes: [...GIT_MODES].filter((m) => m !== 'github-app') } } : {};
 
   const requireAdmin: express.RequestHandler = async (req, res, next) => {
     if (!(await adminAccess.isAdmin(req.userEmail))) {
@@ -219,9 +249,10 @@ export function createSetupRoutes(
     }
     res.json({
       complete: kbReady(),
-      awaitingRestart: awaitingRestart(settings, kb),
+      awaitingRestart: awaitingRestart(settings, kb, source),
       isAdmin: true,
       settings: settings.describe(),
+      ...repositoryStatus(),
       oidcVerification: await settings.oidcVerification(),
       ...(kbInit ? { kbInit } : bootFailure() !== null ? { kbInit: bootFailureKind() } : {}),
       ...(sync ? { sync: { url: sync.url, last: sync.lastSync() } } : {}),
@@ -265,7 +296,9 @@ export function createSetupRoutes(
       // save that flips it false→true — whichever field arrives last — is the
       // one that must run the KB startup phase, regardless of which save
       // configured the branch model.
-      const wasComplete = isComplete(settings, kb);
+      const wasComplete = isComplete(settings, kb, source);
+      const modeBefore = source?.mode() ?? null;
+      nameBranchesOfManagedRepository(entries);
       if (!(await connectionHoldsFor(entries, wasComplete, res))) return;
       const oidc = await signInHoldsFor(entries, res);
       if (!oidc) return;
@@ -277,7 +310,17 @@ export function createSetupRoutes(
       if (oidc.record) {
         await settings.recordOidcVerification(oidc.record.state, oidc.record.credentials);
       }
-      const { restartRequired, restartKeys } = await settings.save(entries, req.userId ?? null);
+      const saved = await settings.save(entries, req.userId ?? null);
+      /**
+       * The mode owes a restart only when a deployment that was SERVING moved
+       * to another one: its working copies are clones of the repository it
+       * had. A save that names the mode the deployment was already on changed
+       * nothing, and one made before setup was complete is followed by the
+       * startup phase below, which is what a restart would have run.
+       */
+      const modeInEffect = !source || source.mode() === modeBefore || !wasComplete;
+      const restartKeys = saved.restartKeys.filter((key) => !(key === 'gitMode' && modeInEffect));
+      const restartRequired = restartKeys.length > 0;
       /** Whether this save put the stored folder names into the running process. */
       let layoutApplied = false;
       /** Whether this save put the stored branch model into the running process. */
@@ -320,7 +363,7 @@ export function createSetupRoutes(
        * on a re-save of a complete, healthy setup: with the gate open,
        * sessions may be live and that is no longer a quiet moment.
        */
-      if ((!wasComplete || kbInit !== null || bootFailure() !== null) && isComplete(settings, kb)) {
+      if ((!wasComplete || kbInit !== null || bootFailure() !== null) && isComplete(settings, kb, source)) {
         /**
          * The folder names, applied BEFORE the phase for the same reason as
          * the branch model above: they are otherwise applied once at boot, so
@@ -360,6 +403,7 @@ export function createSetupRoutes(
           const raw = initErr instanceof Error ? initErr.message : String(initErr);
           const msg = redactSecret(raw, [
             settings.resolve('gitToken'),
+            source?.credentials.token() ?? '',
             ...urlQuerySecrets(settings.resolve('kbRepoUrl')),
           ]);
           log.error(`KB initialization failed after setup completed: ${msg}`);
@@ -386,8 +430,9 @@ export function createSetupRoutes(
               )
             : restartRequired,
         complete: kbReady(),
-        awaitingRestart: awaitingRestart(settings, kb),
+        awaitingRestart: awaitingRestart(settings, kb, source),
         settings: settings.describe(),
+        ...repositoryStatus(),
         oidcVerification: await settings.oidcVerification(),
       });
     } catch (err) {
@@ -400,6 +445,22 @@ export function createSetupRoutes(
       log.error('save failed:', { err });
       res.status(500).json({ error: 'Could not save these settings.' });
     }
+  }
+
+  /**
+   * A repository the deployment keeps for itself is new, and empty, and has
+   * no branches for anyone to look up: the branch model is ours to name. It
+   * is named only when nobody has — an admin's own answer, or one the
+   * environment supplies, stands. Every other mode has a repository that
+   * already exists, whose branches are asked for, never guessed.
+   */
+  function nameBranchesOfManagedRepository(entries: Record<string, string>): void {
+    if (!source) return;
+    const after = settings.resolveAfter(entries);
+    if (source.mode(after) !== 'managed') return;
+    if (after('defaultBranch') || after('protectedBranches')) return;
+    entries.defaultBranch = MANAGED_DEFAULT_BRANCH;
+    entries.protectedBranches = MANAGED_DEFAULT_BRANCH;
   }
 
   /**
@@ -427,6 +488,22 @@ export function createSetupRoutes(
     res: express.Response,
   ): Promise<boolean> {
     const after = settings.resolveAfter(entries);
+    if (repository && repository.source.mode(after) === 'managed') {
+      // Nothing to prove to a host: the repository is the deployment's own.
+      // What has to hold is that it EXISTS before the save that points
+      // everything at it, so a disk that cannot take it refuses the choice
+      // instead of failing the first clone.
+      try {
+        await repository.ensureManaged(after('defaultBranch') || MANAGED_DEFAULT_BRANCH);
+        return true;
+      } catch (err) {
+        log.error('the managed repository could not be created:', { err });
+        const problem =
+          'The repository could not be created on this deployment’s storage. Check that its backups folder is writable, or connect a repository of your own.';
+        res.status(400).json({ error: problem, problems: { gitMode: problem } });
+        return false;
+      }
+    }
     const now: RepositoryConnection = {
       url: settings.resolve('kbRepoUrl'),
       token: settings.resolve('gitToken'),
@@ -763,8 +840,12 @@ export function createSetupRoutes(
  * deployment signs in perfectly well without it, and gating on it would lock
  * an admin out of the screen where they would set it up.
  */
-export function settingsAnswered(settings: DeploymentSettingsService): boolean {
-  const kb = Boolean(settings.resolve('kbRepoUrl') && settings.resolve('gitToken'));
+export function settingsAnswered(
+  settings: DeploymentSettingsService,
+  /** What answers for the repository. Absent: an address and a token, the one way there was. */
+  source?: Pick<RepositorySource, 'answered'>,
+): boolean {
+  const kb = source ? source.answered() : Boolean(settings.resolve('kbRepoUrl') && settings.resolve('gitToken'));
   const branches =
     validateBranchModel({
       defaultBranch: settings.resolve('defaultBranch'),
@@ -791,14 +872,16 @@ export function settingsAnswered(settings: DeploymentSettingsService): boolean {
 export function isComplete(
   settings: DeploymentSettingsService,
   kb: Pick<KbContext, 'isBranchModelConfigured'>,
+  source?: Pick<RepositorySource, 'answered'>,
 ): boolean {
-  return settingsAnswered(settings) && kb.isBranchModelConfigured();
+  return settingsAnswered(settings, source) && kb.isBranchModelConfigured();
 }
 
 /** Answered, but not yet in effect: everything is stored, the process is stale. */
 export function awaitingRestart(
   settings: DeploymentSettingsService,
   kb: Pick<KbContext, 'isBranchModelConfigured'>,
+  source?: Pick<RepositorySource, 'answered'>,
 ): boolean {
-  return settingsAnswered(settings) && !kb.isBranchModelConfigured();
+  return settingsAnswered(settings, source) && !kb.isBranchModelConfigured();
 }

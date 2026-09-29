@@ -62,6 +62,16 @@ export interface GitCredentials {
   username(): string;
   /** The token in effect, or null when the deployment has none configured. */
   token(): string | null;
+  /**
+   * Make sure {@link token} answers with a credential that is still good,
+   * for one that is not fixed: a token a host issues for an hour has to be
+   * renewed by asking the host, which `token` cannot do, being read where
+   * nothing can wait. The runner awaits this before every call it makes. A
+   * failure here is not the call's failure: git runs with the token in
+   * hand, and the host says what it thinks of it. Absent for a credential
+   * that does not expire.
+   */
+  prepare?(): Promise<void>;
 }
 
 /** The username git is given when a deployment names none. */

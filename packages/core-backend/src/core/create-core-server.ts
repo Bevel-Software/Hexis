@@ -700,6 +700,13 @@ export async function createCoreServer(
       repositoryConnectionCheck(core.gitRunner),
       rootFolderListerFor(core.gitRunner),
       oidcRedirectUri(core.config.publicBackendUrl),
+      // The two sign-in checks keep their defaults.
+      undefined,
+      undefined,
+      {
+        source: core.repositorySource,
+        ensureManaged: (branch) => core.managedRepository.ensure(core.gitRunner, branch),
+      },
     ),
   );
   const toolPageUser = async (userId: string): Promise<AuthUser | undefined> => {

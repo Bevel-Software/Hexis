@@ -24,6 +24,8 @@ import {
   type LastSync,
   type OidcTest,
   type OidcVerification,
+  type GitMode,
+  type RepositoryStatus,
   type SettingStatus,
   type SyncNowResult,
   type SyncStatus,
@@ -195,6 +197,16 @@ const FIELDS: Record<
  */
 const REQUIRED_KEYS = ['kbRepoUrl', 'gitToken', 'defaultBranch', 'protectedBranches'];
 
+/** The half of those every deployment owes, however it has its repository. */
+const BRANCH_MODEL_KEYS = ['defaultBranch', 'protectedBranches'];
+
+/** What each way of having a repository is called on its tab. */
+const GIT_MODE_LABEL: Record<GitMode, string> = {
+  managed: 'Managed for you',
+  'github-app': 'GitHub',
+  token: 'Address and token',
+};
+
 /**
  * The answers a connection test actually proves — the address, the credential
  * and the name that goes beside it.
@@ -289,10 +301,22 @@ type SignInTab = 'managed' | 'own';
  * always been; beside a distribution's tab they are the panel of theirs, so
  * the tab that names them has something to name.
  */
-function SectionFields({ panelOf, children }: { panelOf: SignInTab | null; children: ReactNode }) {
-  if (panelOf === null) return <>{children}</>;
+function SectionFields({
+  panel,
+  children,
+}: {
+  /** The tab these fields are the panel of: which set of tabs, and which one. Null: no tabs. */
+  panel: { group: 'sign-in' | 'repository'; id: string } | null;
+  children: ReactNode;
+}) {
+  if (panel === null) return <>{children}</>;
   return (
-    <div role="tabpanel" id={`sign-in-panel-${panelOf}`} aria-labelledby={`sign-in-tab-${panelOf}`} className="space-y-6">
+    <div
+      role="tabpanel"
+      id={`${panel.group}-panel-${panel.id}`}
+      aria-labelledby={`${panel.group}-tab-${panel.id}`}
+      className="space-y-6"
+    >
       {children}
     </div>
   );
@@ -345,6 +369,12 @@ interface Props {
   kbInit?: KbInitFailure;
   /** Whether the single sign-on configuration in effect is proven. Absent from an older server. */
   oidcVerification?: OidcVerification;
+  /**
+   * The ways this deployment can have its repository, and the one it is on.
+   * Absent from a server that knows one way only: the address and the token,
+   * drawn as they always were, with no tabs.
+   */
+  repository?: RepositoryStatus;
 }
 
 /**
@@ -368,7 +398,15 @@ function sameFailure(a: KbInitFailure, b: KbInitFailure): boolean {
   return a.kind === b.kind && a.cause === b.cause;
 }
 
-export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit, oidcVerification }: Props) {
+export function SetupScreen({
+  settings,
+  onSaved,
+  variant = 'setup',
+  sync,
+  kbInit,
+  oidcVerification,
+  repository,
+}: Props) {
   const [draft, setDraft] = useState<Record<string, string>>({});
   /**
    * The initialization failure on screen: the status endpoint's, until a save
@@ -470,6 +508,35 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
   const [signInTab, setSignInTab] = useState<SignInTab>(ownProviderConfigured ? 'own' : 'managed');
 
   /**
+   * The way the deployment has its repository, and which one's tab is open.
+   * THE TAB IS THE CHOICE: what is open when Save is pressed is what the
+   * deployment is on afterwards. It opens on the way in effect, so a
+   * deployment that is configured stays as it is unless its admin opens
+   * another tab, and on the first way offered for one that has none.
+   * Absent from a server that knows one way only, which is then the only
+   * thing drawn.
+   */
+  const [gitTab, setGitTab] = useState<GitMode>(repository?.mode ?? repository?.modes[0] ?? 'token');
+  /** Whether the repository is reached by an address and a token: the fields, the test, the proof. */
+  const byAddress = !repository || gitTab === 'token';
+  /** A deployment that has a repository is about to be moved to another. */
+  const movesRepository = !!repository && repository.mode !== null && gitTab !== repository.mode;
+
+  /**
+   * What a save sends about the repository, given what was typed: the way
+   * chosen, when it is not the one in effect, and the address and token only
+   * for the way that uses them. Something typed on a tab that was then left
+   * is not an answer, and must not be stored beside the choice of another.
+   */
+  function chosenRepository(typed: Record<string, string>): Record<string, string> {
+    if (!repository) return typed;
+    const kept = Object.fromEntries(
+      Object.entries(typed).filter(([key]) => byAddress || !CONNECTION_KEYS.includes(key)),
+    );
+    return gitTab === repository.mode ? kept : { ...kept, gitMode: gitTab };
+  }
+
+  /**
    * Whether the form has a place for this field at all: it is the admin's to
    * edit, and its section is one this variant shows. A field on a tab that
    * is not open still counts — the tab is opened for it (see
@@ -477,6 +544,9 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
    * shown.
    */
   const hasPlace = (key: string) =>
+    // A setting with no field of its own (the way the repository is had,
+    // which is chosen by its tab) has nowhere to hold a message.
+    FIELDS[key] !== undefined &&
     editable.some((s) => s.key === key && sections.some((section) => section.id === s.section));
 
   /**
@@ -493,6 +563,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
     if (signInOption && placed.some((key) => settings.find((s) => s.key === key)?.section === 'sign-in')) {
       setSignInTab('own');
     }
+    if (repository && placed.some((key) => CONNECTION_KEYS.includes(key))) setGitTab('token');
     const unplaced = Object.entries(found).filter(([key]) => !hasPlace(key));
     if (unplaced.length > 0) setError(unplaced.map(([, message]) => message).join(' '));
   }
@@ -547,6 +618,8 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
    * blank form is the server's to complain about, field by field.
    */
   const mustProveConnection =
+    // A repository the deployment keeps has no host to prove anything to.
+    byAddress &&
     !!resolved('kbRepoUrl') &&
     (variant === 'setup' || CONNECTION_KEYS.some((key) => connectionKeyChanged(key)));
 
@@ -906,7 +979,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
     // this deployment still needs…" directly above this attempt's "Not saved."
     setStillMissing([]);
     try {
-      let payload = draft;
+      let payload = chosenRepository(draft);
       /** What the host said this time, or null when it could not be asked. */
       let proven: ConnectionTest | null = test;
       let probed = false;
@@ -955,6 +1028,8 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
       // above fills the same fields from the same answer.
       if (
         !probed &&
+        // Only a repository reached by its address is asked this way.
+        byAddress &&
         // No address, nothing to look a branch up in.
         !!resolvedIn(payload, 'kbRepoUrl') &&
         (!resolvedIn(payload, 'defaultBranch') || !resolvedIn(payload, 'protectedBranches'))
@@ -973,8 +1048,11 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
       // accepts a batch that answers only some of what it needs. Saying so is
       // the difference between a form that looks broken and one that tells you
       // what is left.
+      // An address and a token are owed only by a deployment that reaches
+      // its repository by them; the branch model by every one.
+      const owed = (result.repository?.mode ?? 'token') === 'token' ? REQUIRED_KEYS : BRANCH_MODEL_KEYS;
       const missing = result.settings
-        .filter((setting) => REQUIRED_KEYS.includes(setting.key) && !setting.configured)
+        .filter((setting) => owed.includes(setting.key) && !setting.configured)
         .map((setting) => FIELDS[setting.key]?.label ?? setting.key);
       setStillMissing(result.complete || result.awaitingRestart ? [] : missing);
       if (result.awaitingRestart) {
@@ -1180,9 +1258,9 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
           <>
             <h1 className="text-display font-semibold text-ink">Set up this deployment</h1>
             <p className="mt-2 max-w-[62ch] text-lede text-ink-muted">
-              One thing is needed before anyone can use it: somewhere to keep your knowledge,
-              skills and tools. Connect a repository below, test it, and the rest fills itself in.
-              Single sign-on is optional and can wait.
+              {repository
+                ? 'One thing is needed before anyone can use it: somewhere to keep your knowledge, skills and tools. Choose where below; this deployment can keep it for you. Single sign-on is optional and can wait.'
+                : 'One thing is needed before anyone can use it: somewhere to keep your knowledge, skills and tools. Connect a repository below, test it, and the rest fills itself in. Single sign-on is optional and can wait.'}
             </p>
           </>
         )}
@@ -1254,7 +1332,17 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
             Marketplace is deliberately not part of this form (see below). */}
         <form id="setup-settings-form" onSubmit={submit} className="mt-8 space-y-10">
           {sections.map((section) => {
-            const fields = editable.filter((s) => s.section === section.id);
+            const fields = editable.filter(
+              (s) =>
+                s.section === section.id &&
+                // Chosen by its tab, not typed into a field.
+                s.key !== 'gitMode' &&
+                // The address, the token and the name beside it belong to the
+                // one way that reaches a repository by them.
+                (byAddress || !CONNECTION_KEYS.includes(s.key)),
+            );
+            // The ways of having a repository, each on a tab of its own.
+            const repositoryTabs = section.id === 'knowledge-base' ? repository : undefined;
             // A section whose every field comes from the environment has
             // nothing to offer — the locked list at the bottom already names
             // them, and an empty heading would read as something missing.
@@ -1287,7 +1375,11 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                       <span className="text-meta text-ink-faint">Optional</span>
                     )}
                   </div>
-                  <p className="mt-1 max-w-[60ch] text-detail text-ink-muted">{section.blurb}</p>
+                  <p className="mt-1 max-w-[60ch] text-detail text-ink-muted">
+                    {repositoryTabs
+                      ? 'Where everything lives, together in one git repository: knowledge, skills and tools. Choose where that repository is.'
+                      : section.blurb}
+                  </p>
                   {/* About the deployment's own provider: under the heading
                       when that is all the section holds, inside its tab when
                       the section has two. */}
@@ -1343,8 +1435,55 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                     what was typed stays in the draft either way, so
                     switching tabs loses nothing and saves what was entered. */}
                 {(!tabbed || signInTab === 'own') && (
-                <SectionFields panelOf={tabbed ? 'own' : null}>
+                <SectionFields panel={tabbed ? { group: 'sign-in', id: 'own' } : null}>
                 {tabbed && redirectUri}
+                {repositoryTabs && (
+                  <div role="tablist" aria-label="Where the repository is" className="flex gap-1 border-b border-line">
+                    {repositoryTabs.modes.map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        role="tab"
+                        id={`repository-tab-${mode}`}
+                        aria-selected={gitTab === mode}
+                        aria-controls={`repository-panel-${mode}`}
+                        onClick={() => setGitTab(mode)}
+                        className={`-mb-px border-b-2 px-3 py-2 text-detail font-medium ${
+                          gitTab === mode
+                            ? 'border-accent text-ink'
+                            : 'border-transparent text-ink-muted hover:text-ink'
+                        }`}
+                      >
+                        {GIT_MODE_LABEL[mode]}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {/* What the open tab asks: nothing, for a repository the
+                    deployment keeps; the address and the token, and the test
+                    that proves them, for one reached by them. */}
+                <SectionFields panel={repositoryTabs ? { group: 'repository', id: gitTab } : null}>
+                {repositoryTabs && movesRepository && (
+                  <Banner tone="wait" role="status" data-testid="moves-repository">
+                    Saving moves this deployment to another repository, which starts without what the
+                    current one holds. Nothing is deleted: the current repository is left as it is, and
+                    this deployment&rsquo;s working copies of it are set aside at the next restart.
+                  </Banner>
+                )}
+                {repositoryTabs && gitTab === 'managed' && (
+                  <div className="space-y-2" data-testid="managed-repository">
+                    <p className="max-w-[60ch] text-detail text-ink">
+                      This deployment keeps the repository itself. There is nothing to connect and
+                      nothing to enter.
+                    </p>
+                    <p className="max-w-[60ch] text-meta text-ink-muted">
+                      Everything is versioned as it is with any repository: every change is a commit,
+                      and changes are reviewed as change requests. The repository is stored with this
+                      deployment&rsquo;s backups, so backing those up backs it up. You can move to a
+                      repository of your own later.
+                    </p>
+                  </div>
+                )}
                 {fields
                   .filter(
                     (f) =>
@@ -1367,7 +1506,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                     section, so the answer to "did I type the token right?"
                     was below the identity-provider questions and, once the
                     page grew, below the fold entirely. */}
-                {section.id === 'knowledge-base' && (
+                {section.id === 'knowledge-base' && byAddress && (
                   <Surface tone="sunken" radius="md" className="p-4">
                     <div className="flex flex-wrap items-center gap-3">
                       <Button
@@ -1403,6 +1542,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                     )}
                   </Surface>
                 )}
+                </SectionFields>
 
                 {/* The layout: the three root folders and the agent guide's
                     file name, in the main section, directly under the test

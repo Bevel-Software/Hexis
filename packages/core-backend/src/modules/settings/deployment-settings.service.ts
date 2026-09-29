@@ -17,6 +17,7 @@ import { TokenCrypto } from '../../shared/token-crypto.js';
 import { assertKbDirNameFree } from '../kb-fs/repo-path.js';
 import { parseRetentionWindow } from '../audit/audit.contract.js';
 import { normalizeIssuerUrl } from './oidc-check.js';
+import { GIT_MODES, isGitMode } from './repository-source.js';
 
 /**
  * A setting an admin may set from the setup screen instead of the environment.
@@ -99,6 +100,25 @@ export const validateHttpsRemote = (value: string): string | null => {
  * The core catalogue. Order is the order the setup screen renders them in.
  */
 export const CORE_SETTINGS: SettingDef[] = [
+  {
+    /**
+     * Which way the deployment is given its repository (see
+     * `RepositorySource`). Unset on a deployment configured before there was
+     * a choice, which is read as `token` when it has an address or a token,
+     * and as nothing chosen when it has neither.
+     *
+     * Restart-to-apply on a deployment that is running: its working copies
+     * were cloned from the repository it had, and they are brought into line
+     * with another one by the startup phase, at a moment when nobody is
+     * using them. The save that completes first-run setup runs that phase
+     * itself, and owes no restart.
+     */
+    key: 'gitMode',
+    envVar: 'GIT_MODE',
+    section: 'knowledge-base',
+    validate: (v) => (isGitMode(v) ? null : `Choose one of: ${GIT_MODES.join(', ')}.`),
+    restartToApply: true,
+  },
   {
     key: 'kbRepoUrl',
     envVar: 'KB_REPO_URL',

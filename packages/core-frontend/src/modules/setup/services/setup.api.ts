@@ -72,6 +72,20 @@ export interface KbInitFailure {
   cause: string;
 }
 
+/**
+ * A way a deployment can have the repository its knowledge base lives in:
+ * one it keeps itself, one on GitHub reached through a GitHub App, or one on
+ * any git host reached by its address and a token.
+ */
+export type GitMode = 'managed' | 'github-app' | 'token';
+
+/** The ways this deployment offers, in the order they are shown, and the one it is on. */
+export interface RepositoryStatus {
+  /** Null on a deployment that has no repository yet. */
+  mode: GitMode | null;
+  modes: GitMode[];
+}
+
 export interface SetupStatus {
   /** Reachable knowledge base AND a process that can serve it. */
   complete: boolean;
@@ -92,6 +106,8 @@ export interface SetupStatus {
   sync?: SyncStatus;
   /** Admins only. Absent from an older server. */
   oidcVerification?: OidcVerification;
+  /** Admins only. Absent from a server that knows one way of having a repository. */
+  repository?: RepositoryStatus;
 }
 
 export interface SaveResult {
@@ -100,6 +116,7 @@ export interface SaveResult {
   awaitingRestart?: boolean;
   settings: SettingStatus[];
   oidcVerification?: OidcVerification;
+  repository?: RepositoryStatus;
 }
 
 /** Field-keyed messages, so the form can mark the input that was wrong. */
