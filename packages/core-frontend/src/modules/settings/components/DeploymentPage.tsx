@@ -77,6 +77,7 @@ export function DeploymentPage() {
             settings={status.settings}
             sync={status.sync}
             oidcVerification={status.oidcVerification}
+            repository={status.repository}
             kbInit={status.kbInit}
             onSaved={refresh}
             variant="settings"
