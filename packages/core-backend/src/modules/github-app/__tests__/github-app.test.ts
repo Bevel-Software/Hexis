@@ -705,6 +705,130 @@ describe('the repositories an installation reaches', () => {
   });
 });
 
+/**
+ * Installing comes back once. With the app installed, the address that
+ * installs it opens the installation's settings on GitHub, and GitHub sends
+ * nobody back from there: a repository added on that page was reached by the
+ * app and never offered. So what may be connected is read again by a sign-in
+ * alone, which comes back with a code and names no installation.
+ */
+describe('reading again what may be connected', () => {
+  async function sentTo(d: ReturnType<typeof deployment>, path: string) {
+    const out = await d.go(path, { method: 'POST', body: '{}' });
+    const { url } = (await out.json()) as { url: string };
+    return { url, state: d.stateOf(url) };
+  }
+  const installedAs = async (d: ReturnType<typeof deployment>, person: string) => {
+    const { state } = await sentTo(d, '/api/setup/github-app/install');
+    await d.go(`/api/setup/github-app/callback?code=code-of-${person}&installation_id=77&setup_action=install&state=${encodeURIComponent(state)}`);
+  };
+  const signedInAs = (d: ReturnType<typeof deployment>, person: string, state: string) =>
+    d.go(`/api/setup/github-app/callback?code=code-of-${person}&state=${encodeURIComponent(state)}`);
+
+  it('sends the browser to sign in with the app, and nowhere that installs anything', async () => {
+    const d = deployment({ env: APP_ENV });
+    const { url } = await sentTo(d, '/api/setup/github-app/refresh');
+    const address = new URL(url);
+    expect(`${address.origin}${address.pathname}`).toBe('https://github.com/login/oauth/authorize');
+    expect(address.searchParams.get('client_id')).toBe(APP.clientId);
+    expect(address.searchParams.get('state')).toBeTruthy();
+    expect(d.hub.calls).toEqual([]);
+  });
+
+  it('offers a repository that was added to the installation on GitHub since', async () => {
+    const world = {
+      installations: { ada: ['77'] },
+      repositories: ['acme/kb'],
+      theirs: { ada: { 'acme/kb': 'push' as const } } as Record<string, Record<string, 'push' | 'pull'>>,
+    };
+    const d = deployment({ env: APP_ENV, world });
+    await installedAs(d, 'ada');
+    const listed = async () =>
+      ((await (await d.go('/api/setup/github-app/repositories')).json()) as { repositories: { fullName: string }[] }).repositories.map((r) => r.fullName);
+    expect(await listed()).toEqual(['acme/kb']);
+
+    // Added on the installation's settings page, from which nobody is sent back.
+    world.repositories = ['acme/kb', 'acme/handbook'];
+    world.theirs = { ada: { 'acme/kb': 'push', 'acme/handbook': 'push' } };
+    // The app reaches it, and it is not offered: it was not there when Ada connected.
+    expect(await listed()).toEqual(['acme/kb']);
+
+    const { state } = await sentTo(d, '/api/setup/github-app/refresh');
+    const back = await signedInAs(d, 'ada', state);
+    expect(back.headers.get('location')).toBe('https://kb.acme.test/?github=refreshed');
+    expect(await listed()).toEqual(['acme/handbook', 'acme/kb']);
+    expect(d.settings.resolve('githubInstallationId')).toBe('77');
+    expect(d.jar.has('hexis_github_state')).toBe(false);
+  });
+
+  it('is asked of the person who came back, about the installation the deployment has', async () => {
+    const d = deployment({ env: APP_ENV, world: { installations: { ada: ['77'], mallory: ['99'] } } });
+    await installedAs(d, 'ada');
+    const before = d.settings.resolve('githubRepositoriesPermitted');
+    const { state } = await sentTo(d, '/api/setup/github-app/refresh');
+    // Mallory reaches another installation of the app, and not this one.
+    const back = await signedInAs(d, 'mallory', state);
+    expect(back.headers.get('location')).toBe('https://kb.acme.test/?github=not-yours');
+    expect(d.settings.resolve('githubInstallationId')).toBe('77');
+    expect(d.settings.resolve('githubRepositoriesPermitted')).toBe(before);
+  });
+
+  it('keeps what was permitted when the person who came back can push to nothing', async () => {
+    const world = {
+      installations: { ada: ['77'], rita: ['77'] },
+      theirs: { rita: { 'acme/kb': 'pull' as const } } as Record<string, Record<string, 'push' | 'pull'>>,
+    };
+    const d = deployment({ env: APP_ENV, world });
+    await installedAs(d, 'ada');
+    const before = d.settings.resolve('githubRepositoriesPermitted');
+    const { state } = await sentTo(d, '/api/setup/github-app/refresh');
+    const back = await signedInAs(d, 'rita', state);
+    expect(back.headers.get('location')).toBe('https://kb.acme.test/?github=nothing-to-write');
+    expect(d.settings.resolve('githubRepositoriesPermitted')).toBe(before);
+  });
+
+  /**
+   * Someone without the right to install asked an owner, who approved it
+   * later in a browser of their own: the app is installed, and this
+   * deployment was never told. A sign-in finds it.
+   */
+  it('finds an installation this browser never came back from, when there is one', async () => {
+    const d = deployment({ env: APP_ENV, world: { installations: { ada: ['77'] } } });
+    const { state } = await sentTo(d, '/api/setup/github-app/refresh');
+    const back = await signedInAs(d, 'ada', state);
+    expect(back.headers.get('location')).toBe('https://kb.acme.test/?github=refreshed');
+    expect(d.settings.resolve('githubInstallationId')).toBe('77');
+    expect(d.settings.resolve('githubRepositoriesPermitted').split('\n')).toEqual(['acme/another', 'acme/kb']);
+  });
+
+  it('chooses none of several, and says there is none when there is none', async () => {
+    const several = deployment({ env: APP_ENV, world: { installations: { ada: ['77', '78'] } } });
+    let trip = await sentTo(several, '/api/setup/github-app/refresh');
+    expect((await signedInAs(several, 'ada', trip.state)).headers.get('location')).toBe('https://kb.acme.test/?github=several');
+    expect(several.settings.resolve('githubInstallationId')).toBe('');
+
+    const none = deployment({ env: APP_ENV, world: { installations: {} } });
+    trip = await sentTo(none, '/api/setup/github-app/refresh');
+    expect((await signedInAs(none, 'ada', trip.state)).headers.get('location')).toBe('https://kb.acme.test/?github=not-installed');
+    expect(none.settings.resolve('githubInstallationId')).toBe('');
+  });
+
+  it('reads nothing for a browser that was not sent, and refuses an installation that is not a number', async () => {
+    const d = deployment({ env: APP_ENV, world: { installations: { ada: ['77'] } } });
+    expect((await signedInAs(d, 'ada', 'made-up')).headers.get('location')).toBe('https://kb.acme.test/?github=state');
+    const { state } = await sentTo(d, '/api/setup/github-app/refresh');
+    const back = await d.go(`/api/setup/github-app/callback?code=code-of-ada&installation_id=7x7&state=${encodeURIComponent(state)}`);
+    expect(back.headers.get('location')).toBe('https://kb.acme.test/?github=refused');
+    expect(d.hub.calls).toEqual([]);
+  });
+
+  it('is not offered to a deployment that has no app', async () => {
+    const d = deployment();
+    expect((await d.go('/api/setup/github-app/refresh', { method: 'POST', body: '{}' })).status).toBe(409);
+    expect(d.jar.size).toBe(0);
+  });
+});
+
 describe('who these routes answer', () => {
   it('answers admins only, and starts nothing for anyone else', async () => {
     const d = deployment({ env: APP_ENV, admin: false });
@@ -712,6 +836,7 @@ describe('who these routes answer', () => {
       ['GET', '/api/setup/github-app'],
       ['POST', '/api/setup/github-app/manifest'],
       ['POST', '/api/setup/github-app/install'],
+      ['POST', '/api/setup/github-app/refresh'],
       ['GET', '/api/setup/github-app/callback?code=code-of-ada&installation_id=77&state=x'],
       ['GET', '/api/setup/github-app/repositories'],
     ] as const) {
