@@ -375,7 +375,7 @@ describe('WorkflowService — change request delegation + cache invalidation', (
     expect(outcome).toEqual({ kind: 'merged', result: mergeResult });
     // The target branch's workspace is pulled so it doesn't fall behind origin.
     expect(workspaceService.getOrCreateForBranch).toHaveBeenCalledWith('main');
-    expect(git.pull).toHaveBeenCalledWith('main');
+    expect(git.pull).toHaveBeenCalledWith('main', {});
     expect(reviewWorkflow.mergePr).toHaveBeenCalledWith(
       4,
       expect.objectContaining({ email: 'alice@example.com' }),

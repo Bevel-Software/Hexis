@@ -582,7 +582,7 @@ describe('WorkflowService — a refusal clears when a change makes it obsolete',
     const { svc } = service(
       store.db,
       (e) => emitted.push(e as { kind: string }),
-      {},
+      { carryApprovalsForward: vi.fn(async () => 0) },
       {
         git: {
           pull: vi.fn(async () => ({ treeChanged: false })),
@@ -591,6 +591,14 @@ describe('WorkflowService — a refusal clears when a change makes it obsolete',
             return { kind: 'merged', alreadyUpToDate: false };
           }),
           push: vi.fn(async () => undefined),
+          hasUnpushedCommits: vi.fn(async () => true),
+          pathsChangedBetween: vi.fn(async () => []),
+          // The head this test is named for: one sha before the merge,
+          // another after it.
+          resolvePrShas: vi
+            .fn()
+            .mockResolvedValueOnce({ baseSha: 'b'.repeat(40), headSha: 'a'.repeat(40) })
+            .mockResolvedValue({ baseSha: 'b'.repeat(40), headSha: 'd'.repeat(40) }),
         } as unknown as Partial<GitService>,
         prs: {
           getPrDetail: vi.fn(async () => ({ state: 'open', branch: 'bo/suggestions', base: 'main', viewerCanUpdate: true })),
