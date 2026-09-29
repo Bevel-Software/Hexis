@@ -314,6 +314,11 @@ export function createSetupRoutes(
       // one that must run the KB startup phase, regardless of which save
       // configured the branch model.
       const wasComplete = isComplete(settings, kb, source);
+      // A different question, asked of the GATE: whether anyone is being
+      // served. Settings that are answered are not a deployment that works
+      // — one whose first clone failed has answered everything and serves
+      // nobody.
+      const wasServing = kbReady();
       nameBranchesOfManagedRepository(entries);
       if (!(await connectionHoldsFor(entries, wasComplete, res))) return;
       const oidc = await signInHoldsFor(entries, res);
@@ -333,8 +338,16 @@ export function createSetupRoutes(
        * what a restart would have run. One that WAS serving stays on the
        * mode it is on, working copies and credential alike, until it is
        * started again.
+       *
+       * SERVING, not answered. The pin protects what is running on the
+       * mode in effect, and behind a shut gate nothing is: a first run
+       * whose initialisation failed, a boot that found its repository
+       * unreachable. Pinned there, the way out of a repository that does
+       * not work would be closed — the admin chooses another, the retry
+       * below runs against the one that just failed, and the screen asks
+       * for a restart that changes nothing.
        */
-      if (source && !wasComplete) source.takeEffect();
+      if (source && !wasServing) source.takeEffect();
       /**
        * The restart the mode owes is read off the two modes themselves, not
        * off what this save wrote: it is owed for as long as the mode chosen

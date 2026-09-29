@@ -41,7 +41,17 @@ afterEach(() => {
  * stored in memory. The managed repository is a stand-in that records being
  * asked for; the startup phase and the remote are stand-ins that count.
  */
-function listen(opts: { kb?: KbContext; ensureFails?: boolean; stored?: Record<string, string> } = {}) {
+function listen(
+  opts: {
+    kb?: KbContext;
+    ensureFails?: boolean;
+    stored?: Record<string, string>;
+    /** The addresses the startup phase cannot reach. */
+    unreachable?: (url: string) => boolean;
+    /** The deployment booted onto a repository it could not reach, and came up gated. */
+    bootFailed?: boolean;
+  } = {},
+) {
   const db = {
     select: () => ({ from: () => Promise.resolve([]) }),
     insert: () => ({ values: () => ({ onConflictDoUpdate: () => Promise.resolve() }) }),
@@ -56,6 +66,8 @@ function listen(opts: { kb?: KbContext; ensureFails?: boolean; stored?: Record<s
   let phaseRuns = 0;
   /** The address the startup phase found configured when it ran. */
   const phaseSaw: string[] = [];
+  /** Stands until the deployment is pointed somewhere the phase can reach. */
+  let bootFailed = opts.bootFailed ?? false;
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -72,7 +84,11 @@ function listen(opts: { kb?: KbContext; ensureFails?: boolean; stored?: Record<s
         runAll: async () => {
           phaseRuns += 1;
           phaseSaw.push(source.url());
+          if (opts.unreachable?.(source.url())) throw new Error(`fatal: repository '${source.url()}' not found`);
+          bootFailed = false;
         },
+        // A boot that survived an unreachable repository, as the runner reports it.
+        ...(opts.bootFailed ? { lastFailure: () => (bootFailed ? 'fatal: unable to access the repository' : null) } : {}),
       },
       kb,
       undefined,
@@ -248,6 +264,54 @@ describe('a deployment that is serving moves to another repository', () => {
     const body = (await (await save({ gitMode: 'token' })).json()) as Record<string, unknown>;
     expect(body).toMatchObject({ ok: true, restartRequired: false, repository: { mode: 'token', chosen: 'token' } });
     expect(probed).toHaveLength(asked);
+  });
+});
+
+/**
+ * The pin protects what is running on the mode in effect. Behind a shut
+ * gate nothing is, however completely the settings were answered, and a
+ * deployment pinned there could not be got out of a repository that does
+ * not work by choosing one that does.
+ */
+describe('a deployment that answered everything and serves nobody', () => {
+  const isHosted = (url: string) => url === HOSTED.kbRepoUrl;
+
+  it('is got going by choosing another way, when its first initialisation failed', async () => {
+    const { save, status, phase, managed, source } = listen({ kb: testKbContext(), unreachable: isHosted });
+    // First run: an address and a token, accepted, and a first clone that fails.
+    const first = await save({ ...HOSTED, ...BRANCHES });
+    expect(first.status).toBe(500);
+    expect(await status()).toMatchObject({ complete: false, kbInit: expect.any(Object), repository: { mode: 'token' } });
+
+    const second = await save({ gitMode: 'managed' });
+    const body = (await second.json()) as Record<string, unknown>;
+    expect(second.status, JSON.stringify(body)).toBe(200);
+    // The retry ran against the repository that was chosen, not the one that had just failed,
+    expect(phase.saw).toEqual([HOSTED.kbRepoUrl, managed.path]);
+    // nothing is owed, and the gate is open.
+    expect(body).toMatchObject({ complete: true, restartRequired: false, repository: { mode: 'managed', chosen: 'managed' } });
+    expect(source.credentials.token()).toBeNull();
+    expect(await status()).toMatchObject({ complete: true });
+    expect(await status()).not.toHaveProperty('kbInit');
+  });
+
+  it('is got going the same way when it booted onto a repository it could not reach', async () => {
+    Object.assign(process.env, { KB_REPO_URL: HOSTED.kbRepoUrl, GIT_TOKEN: HOSTED.gitToken, DEFAULT_BRANCH: 'main', PROTECTED_BRANCHES: 'main' });
+    const { save, status, phase, managed } = listen({ kb: testKbContext(), bootFailed: true, unreachable: isHosted });
+    expect(await status()).toMatchObject({ complete: false, repository: { mode: 'token' } });
+
+    const body = (await (await save({ gitMode: 'managed' })).json()) as Record<string, unknown>;
+    expect(phase.saw).toEqual([managed.path]);
+    expect(body).toMatchObject({ complete: true, restartRequired: false, repository: { mode: 'managed', chosen: 'managed' } });
+  });
+
+  it('is still asked for a restart once it IS serving: the same save, a different deployment', async () => {
+    const { save, phase } = listen({ kb: testKbContext() });
+    await save({ ...HOSTED, ...BRANCHES });
+    const runs = phase.runs();
+    const body = (await (await save({ gitMode: 'managed' })).json()) as Record<string, unknown>;
+    expect(body).toMatchObject({ complete: true, restartRequired: true, repository: { mode: 'token', chosen: 'managed' } });
+    expect(phase.runs()).toBe(runs);
   });
 });
 
