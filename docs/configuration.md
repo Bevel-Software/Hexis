@@ -22,8 +22,12 @@ guide's file name — which is entered in the app and nowhere else; see the
 | `SECRETS_ENC_KEY` | yes | 32-byte key (base64/hex) encrypting vault secrets + MCP OAuth tokens |
 | `DATABASE_URL` | see note | Postgres connection string. Unset under compose, the app builds it from the `POSTGRES_*` values the bundled db was created with |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | no | Credentials for the bundled database (applied only when its volume is first created) |
-| `KB_REPO_URL` | setup screen | https clone/push URL of the knowledge-base repo, on any git host |
-| `GIT_TOKEN` / `GIT_USERNAME` | setup screen | Git credential (HTTP Basic password / host-specific username; see `.env.example` for per-host usernames) |
+| `GIT_MODE` | setup screen | Where the knowledge-base repo is: `managed` (the deployment keeps it), `github-app` (on GitHub, through a GitHub App) or `token` (any git host, by address and token). See [repository.md](repository.md). Unset, a deployment with `KB_REPO_URL` or `GIT_TOKEN` is on `token` |
+| `KB_REPO_URL` | setup screen | With `token`: https clone/push URL of the knowledge-base repo, on any git host |
+| `GIT_TOKEN` / `GIT_USERNAME` | setup screen | With `token`: Git credential (HTTP Basic password / host-specific username; see `.env.example` for per-host usernames) |
+| `GITHUB_APP_REPOSITORY` | setup screen | With `github-app`: the repository, as `owner/name` |
+| `GITHUB_APP_ID` / `GITHUB_APP_SLUG` / `GITHUB_APP_PRIVATE_KEY` / `GITHUB_APP_CLIENT_ID` / `GITHUB_APP_CLIENT_SECRET` | no | A GitHub App you registered yourself, in place of the one the setup screen creates. All five together. The private key is the PEM, with its line breaks written as `\n` or in base64 |
+| `GITHUB_APP_INSTALLATION_ID` | no | The installation of that app to use, in place of installing it from the setup screen |
 | `DEFAULT_BRANCH` / `PROTECTED_BRANCHES` | setup screen | Branch model. Runtime-only: served to the frontend over `/api/config`, so one build runs anywhere |
 | `DOMAIN` | with the `https` profile | Public host name served by the bundled Caddy; also derives the public origins (`https://<DOMAIN>`) and `TRUST_PROXY=1` unless set explicitly |
 | `PUBLIC_BACKEND_URL` / `PUBLIC_FRONTEND_URL` | production | Public origins for OAuth redirects + post-login bounces (derived from `DOMAIN` when set) |

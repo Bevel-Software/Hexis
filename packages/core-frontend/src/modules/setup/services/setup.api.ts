@@ -336,3 +336,50 @@ export async function testOidc(fields: Record<string, string>): Promise<OidcTest
   if (!res.ok) await readError(res);
   return (await res.json()) as OidcTest;
 }
+
+/** Where a deployment's connection to GitHub through a GitHub App stands. */
+export interface GitHubAppStatus {
+  /** Who supplied the app. Null: there is none yet, and this deployment can register its own. */
+  registeredBy: 'environment' | 'setup' | null;
+  app: { slug: string; url: string } | null;
+  /** The installation, and the account it is on, once the app is installed. */
+  installation: { id: string; account: string } | null;
+  /** `owner/name`, once one is chosen. */
+  repository: string | null;
+}
+
+/** A repository the installation reaches. */
+export interface GitHubRepository {
+  fullName: string;
+  private: boolean;
+  defaultBranch: string;
+  writable: boolean;
+}
+
+export async function fetchGitHubApp(): Promise<GitHubAppStatus> {
+  const res = await authFetch('/api/setup/github-app');
+  if (!res.ok) await readError(res);
+  return (await res.json()) as GitHubAppStatus;
+}
+
+/** The manifest of this deployment's own app, and the address on GitHub the browser posts it to. */
+export async function startGitHubAppRegistration(
+  organization: string,
+): Promise<{ action: string; manifest: Record<string, unknown> }> {
+  const res = await authFetch('/api/setup/github-app/manifest', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(organization ? { organization } : {}),
+  });
+  if (!res.ok) await readError(res);
+  return (await res.json()) as { action: string; manifest: Record<string, unknown> };
+}
+
+export async function fetchGitHubRepositories(): Promise<{ repositories: GitHubRepository[]; more: boolean }> {
+  const res = await authFetch('/api/setup/github-app/repositories');
+  if (!res.ok) await readError(res);
+  return (await res.json()) as { repositories: GitHubRepository[]; more: boolean };
+}
+
+/** Where the browser goes to install the app: a navigation, carried by the session cookie. */
+export const GITHUB_APP_INSTALL_PATH = '/api/setup/github-app/install';

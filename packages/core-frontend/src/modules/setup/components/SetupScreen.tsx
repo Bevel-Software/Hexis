@@ -9,6 +9,7 @@ import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { tokenUsernameForHost } from '../utils/git-host';
 import { isRootFolderSuggestion, rootFolderState, type RootFolderState } from '../utils/root-folders';
 import { copyToClipboard } from '../../../lib/clipboard';
+import { GitHubRepositoryPanel } from './GitHubRepositoryPanel';
 import { useAppRegistry } from '../../../core/registry';
 import { MarketplaceSection } from '../../settings/components/MarketplaceSection';
 import {
@@ -217,6 +218,17 @@ const GIT_MODE_LABEL: Record<GitMode, string> = {
  * it there would ask an admin to prove the same repository twice.
  */
 const CONNECTION_KEYS = ['kbRepoUrl', 'gitToken', 'gitUsername'];
+
+/**
+ * The settings each way of having a repository is answered by, on its tab.
+ * What belongs to a tab is sent only while that tab is open, and a refusal
+ * about it opens that tab.
+ */
+const TAB_KEYS: Record<GitMode, readonly string[]> = {
+  managed: [],
+  'github-app': ['githubRepository'],
+  token: CONNECTION_KEYS,
+};
 
 /**
  * The answers the sign-in check proves. Editing one invalidates its result on
@@ -516,7 +528,16 @@ export function SetupScreen({
    * Absent from a server that knows one way only, which is then the only
    * thing drawn.
    */
-  const [gitTab, setGitTab] = useState<GitMode>(repository?.mode ?? repository?.modes[0] ?? 'token');
+  const [gitTab, setGitTab] = useState<GitMode>(() => {
+    // Back from a round trip to GitHub: that tab is where it started, and
+    // where what came of it is said.
+    const backFromGitHub =
+      repository?.modes.includes('github-app') && new URLSearchParams(window.location.search ?? '').has('github');
+    return backFromGitHub ? 'github-app' : (repository?.mode ?? repository?.modes[0] ?? 'token');
+  });
+  /** The tab a setting is answered on, for the ones that belong to one way of having a repository. */
+  const tabOf = (key: string): GitMode | null =>
+    repository ? ((Object.keys(TAB_KEYS) as GitMode[]).find((mode) => TAB_KEYS[mode].includes(key)) ?? null) : null;
   /** Whether the repository is reached by an address and a token: the fields, the test, the proof. */
   const byAddress = !repository || gitTab === 'token';
   /** A deployment that has a repository is about to be moved to another. */
@@ -524,14 +545,17 @@ export function SetupScreen({
 
   /**
    * What a save sends about the repository, given what was typed: the way
-   * chosen, when it is not the one in effect, and the address and token only
-   * for the way that uses them. Something typed on a tab that was then left
-   * is not an answer, and must not be stored beside the choice of another.
+   * chosen, when it is not the one in effect, and only the answers of the
+   * tab that is open. Something entered on a tab that was then left is not
+   * an answer, and must not be stored beside the choice of another.
    */
   function chosenRepository(typed: Record<string, string>): Record<string, string> {
     if (!repository) return typed;
     const kept = Object.fromEntries(
-      Object.entries(typed).filter(([key]) => byAddress || !CONNECTION_KEYS.includes(key)),
+      Object.entries(typed).filter(([key]) => {
+        const tab = tabOf(key);
+        return tab === null || tab === gitTab;
+      }),
     );
     return gitTab === repository.mode ? kept : { ...kept, gitMode: gitTab };
   }
@@ -545,8 +569,9 @@ export function SetupScreen({
    */
   const hasPlace = (key: string) =>
     // A setting with no field of its own (the way the repository is had,
-    // which is chosen by its tab) has nowhere to hold a message.
-    FIELDS[key] !== undefined &&
+    // which is chosen by its tab) has nowhere to hold a message. The
+    // repository on GitHub has one, drawn by that tab's panel.
+    (FIELDS[key] !== undefined || (key === 'githubRepository' && !!repository?.modes.includes('github-app'))) &&
     editable.some((s) => s.key === key && sections.some((section) => section.id === s.section));
 
   /**
@@ -563,7 +588,8 @@ export function SetupScreen({
     if (signInOption && placed.some((key) => settings.find((s) => s.key === key)?.section === 'sign-in')) {
       setSignInTab('own');
     }
-    if (repository && placed.some((key) => CONNECTION_KEYS.includes(key))) setGitTab('token');
+    const owner = placed.map(tabOf).find((tab) => tab !== null);
+    if (owner) setGitTab(owner);
     const unplaced = Object.entries(found).filter(([key]) => !hasPlace(key));
     if (unplaced.length > 0) setError(unplaced.map(([, message]) => message).join(' '));
   }
@@ -1337,6 +1363,8 @@ export function SetupScreen({
                 s.section === section.id &&
                 // Chosen by its tab, not typed into a field.
                 s.key !== 'gitMode' &&
+                // Chosen from a list, by the panel of its tab.
+                s.key !== 'githubRepository' &&
                 // The address, the token and the name beside it belong to the
                 // one way that reaches a repository by them.
                 (byAddress || !CONNECTION_KEYS.includes(s.key)),
@@ -1469,6 +1497,14 @@ export function SetupScreen({
                     current one holds. Nothing is deleted: the current repository is left as it is, and
                     this deployment&rsquo;s working copies of it are set aside at the next restart.
                   </Banner>
+                )}
+                {repositoryTabs && gitTab === 'github-app' && (
+                  <GitHubRepositoryPanel
+                    repository={resolved('githubRepository')}
+                    onChoose={(name) => set('githubRepository', name)}
+                    problem={problems.githubRepository}
+                    disabled={saving}
+                  />
                 )}
                 {repositoryTabs && gitTab === 'managed' && (
                   <div className="space-y-2" data-testid="managed-repository">

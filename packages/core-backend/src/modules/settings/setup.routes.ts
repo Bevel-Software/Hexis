@@ -32,7 +32,7 @@ import { failureOf, type GitFailure } from '../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { listRootFolders, pickListingBranch } from './git-root-folders.js';
 import { MANAGED_DEFAULT_BRANCH } from './managed-repository.js';
-import { GIT_MODES, type RepositorySource } from './repository-source.js';
+import { GIT_MODES, type GitHubAppRepository, type RepositorySource } from './repository-source.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 /**
@@ -44,6 +44,11 @@ export interface RepositorySetup {
   source: RepositorySource;
   /** Create the repository the deployment keeps for itself, if it is not there. Never touches one that is. */
   ensureManaged(initialBranch: string): Promise<void>;
+  /**
+   * The connection to GitHub through a GitHub App. Absent, that way is not
+   * offered, and a save that names it is refused.
+   */
+  githubApp?: Pick<GitHubAppRepository, 'url' | 'answered' | 'prepare' | 'token'>;
 }
 
 /** Which name a host expects beside the token when none is configured. */
@@ -214,7 +219,14 @@ export function createSetupRoutes(
    * was.
    */
   const repositoryStatus = () =>
-    source ? { repository: { mode: source.mode(), modes: [...GIT_MODES].filter((m) => m !== 'github-app') } } : {};
+    source
+      ? {
+          repository: {
+            mode: source.mode(),
+            modes: GIT_MODES.filter((mode) => mode !== 'github-app' || repository?.githubApp !== undefined),
+          },
+        }
+      : {};
 
   const requireAdmin: express.RequestHandler = async (req, res, next) => {
     if (!(await adminAccess.isAdmin(req.userEmail))) {
@@ -464,6 +476,73 @@ export function createSetupRoutes(
   }
 
   /**
+   * The same rule for a repository reached through a GitHub App: a saved
+   * connection is one GitHub has accepted for reading and writing, asked
+   * with the token git will present, which is the installation's.
+   *
+   * That token is also what keeps the repository's NAME honest. It is the
+   * one part of this connection an admin types, and a name the installation
+   * does not reach is refused here by GitHub, not by a list of ours.
+   *
+   * The repository has just said what it calls its trunk, so a deployment
+   * with no branch model is given that one: the same answer the setup
+   * screen fills in for a repository reached by its address.
+   */
+  async function githubConnectionHoldsFor(
+    setup: RepositorySetup,
+    entries: Record<string, string>,
+    after: (key: string) => string,
+    wasComplete: boolean,
+    res: express.Response,
+  ): Promise<boolean> {
+    const refuse = (problem: string, field = 'githubRepository') => {
+      res.status(400).json({ error: problem, problems: { [field]: problem } });
+      return false;
+    };
+    const app = setup.githubApp;
+    if (!app) return refuse('This deployment cannot connect to GitHub through a GitHub App.', 'gitMode');
+    if (!app.answered(after)) {
+      return refuse(
+        after('githubRepository')
+          ? 'Connect GitHub before choosing a repository.'
+          : 'Choose the repository the knowledge base lives in.',
+      );
+    }
+    const url = app.url(after);
+    const unanswered =
+      validateBranchModel({ defaultBranch: after('defaultBranch'), protectedBranches: after('protectedBranches') }) !== null;
+    const changes = setup.source.mode() !== 'github-app' || url !== setup.source.url();
+    if (!changes && (wasComplete || unanswered)) return true;
+    try {
+      await app.prepare();
+    } catch (err) {
+      log.error('GitHub gave no token for the installation:', { detail: err instanceof Error ? err.message : String(err) });
+    }
+    const token = app.token();
+    if (!token) {
+      return refuse('GitHub gave this deployment no access. The app may have been uninstalled: connect it again.', 'gitMode');
+    }
+    const check = await checkConnection({ url, token, username: DEFAULT_GIT_USERNAME });
+    if (check.outcome !== 'connected') {
+      return refuse(
+        check.outcome === 'read-only'
+          ? 'The GitHub App can read that repository but not write to it. Grant it write access to the repository’s contents.'
+          : check.reason === 'unreachable'
+            ? 'GitHub could not be reached. Try again shortly.'
+            : 'The GitHub App cannot reach that repository. Add the repository to the app’s installation on GitHub.',
+      );
+    }
+    if (!after('defaultBranch') && !after('protectedBranches')) {
+      const trunk = check.defaultBranch || check.branches[0] || (check.empty ? MANAGED_DEFAULT_BRANCH : '');
+      if (trunk) {
+        entries.defaultBranch = trunk;
+        entries.protectedBranches = trunk;
+      }
+    }
+    return true;
+  }
+
+  /**
    * A SAVED CONNECTION IS ONE THE HOST HAS ACCEPTED FOR READING AND WRITING.
    *
    * The completeness check asks only whether the answers are present, so
@@ -503,6 +582,9 @@ export function createSetupRoutes(
         res.status(400).json({ error: problem, problems: { gitMode: problem } });
         return false;
       }
+    }
+    if (repository && repository.source.mode(after) === 'github-app') {
+      return githubConnectionHoldsFor(repository, entries, after, wasComplete, res);
     }
     const now: RepositoryConnection = {
       url: settings.resolve('kbRepoUrl'),

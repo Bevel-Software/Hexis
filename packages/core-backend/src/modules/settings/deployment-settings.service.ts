@@ -70,6 +70,17 @@ export interface SettingDef {
    * restart for a change that never happened.
    */
   unsetMeans?: string;
+  /**
+   * Written by the deployment itself, at the end of a flow that PROVED the
+   * value, and never taken from a save. What a GitHub App was given when it
+   * was registered, and which installation of it the admin was shown to
+   * hold, are facts somebody established; accepted from a form they would
+   * be claims, and the claim "installation 42 is mine" is one that reaches
+   * another organisation's repositories. A save that names one is refused,
+   * the setup screen is not told about it, and its value is read like any
+   * other's (the environment first), so an operator can still pin it.
+   */
+  internal?: boolean;
 }
 
 /**
@@ -141,6 +152,52 @@ export const CORE_SETTINGS: SettingDef[] = [
     validate: (v) =>
       /^[A-Za-z0-9._-]+$/.test(v) ? null : 'Use only letters, digits, dot, underscore or hyphen.',
   },
+
+  /**
+   * A repository on GitHub, reached through a GitHub App (see
+   * `modules/github-app/`).
+   *
+   * THE REPOSITORY is the admin's to choose, among those the installation
+   * reaches, and is saved like any setting: a name the installation does not
+   * reach fails the connection check, since the only token presented to
+   * GitHub is the installation's.
+   *
+   * EVERYTHING ELSE is internal: the app's identity and keys, as GitHub
+   * issued them when the app was registered, and the installation, as
+   * GitHub confirmed the admin holds it. Each has a variable, so whoever
+   * operates the deployment can supply an app they registered themselves,
+   * and a host serving many deployments can supply one app for all of them.
+   */
+  {
+    key: 'githubRepository',
+    envVar: 'GITHUB_APP_REPOSITORY',
+    section: 'knowledge-base',
+    validate: (v) =>
+      /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9._-]+$/.test(v) && !v.endsWith('.git')
+        ? null
+        : 'Name the repository as owner/name.',
+  },
+  { key: 'githubAppId', envVar: 'GITHUB_APP_ID', section: 'knowledge-base', internal: true, validate: (v) => (/^\d+$/.test(v) ? null : 'The app id is a number.') },
+  { key: 'githubAppSlug', envVar: 'GITHUB_APP_SLUG', section: 'knowledge-base', internal: true, validate: (v) => (/^[A-Za-z0-9-]+$/.test(v) ? null : 'The app slug is letters, digits and hyphens.') },
+  { key: 'githubAppPrivateKey', envVar: 'GITHUB_APP_PRIVATE_KEY', section: 'knowledge-base', internal: true, secret: true },
+  { key: 'githubAppClientId', envVar: 'GITHUB_APP_CLIENT_ID', section: 'knowledge-base', internal: true },
+  { key: 'githubAppClientSecret', envVar: 'GITHUB_APP_CLIENT_SECRET', section: 'knowledge-base', internal: true, secret: true },
+  {
+    /**
+     * Put in front of the state every round trip to GitHub carries, by a
+     * host that serves several deployments behind ONE app: GitHub sends the
+     * browser back to the one address registered for the app, and the host
+     * reads this to know which deployment to hand it to. Never stored.
+     */
+    key: 'githubAppStateTag',
+    envVar: 'GITHUB_APP_STATE_TAG',
+    section: 'knowledge-base',
+    internal: true,
+    validate: (v) => (/^[a-z0-9-]{1,63}$/.test(v) ? null : 'Lowercase letters, digits and hyphens.'),
+  },
+  { key: 'githubInstallationId', envVar: 'GITHUB_APP_INSTALLATION_ID', section: 'knowledge-base', internal: true, validate: (v) => (/^\d+$/.test(v) ? null : 'The installation id is a number.') },
+  /** Whose account the installation is on, as GitHub names it: shown, never trusted. */
+  { key: 'githubInstallationAccount', section: 'knowledge-base', internal: true },
   {
     key: 'kbDirName',
     envVar: 'KB_DIR_NAME',
@@ -603,7 +660,7 @@ export class DeploymentSettingsService {
    * replace it, which is all anyone needs to finish setup.
    */
   describe(): ResolvedSetting[] {
-    return this.definitions.map((def) => {
+    return this.definitions.filter((def) => !def.internal).map((def) => {
       const source = this.sourceOf(def.key);
       const base = {
         key: def.key,
@@ -636,8 +693,10 @@ export class DeploymentSettingsService {
   async save(
     entries: Record<string, string>,
     updatedBy: string | null,
+    /** Set by {@link record} alone: the batch is the deployment's own, and may name internal settings. */
+    by: 'admin' | 'deployment' = 'admin',
   ): Promise<{ restartRequired: boolean; restartKeys: string[] }> {
-    const { toWrite, toClear } = this.plan(entries);
+    const { toWrite, toClear } = this.plan(entries, by);
 
     /** The settings this save changed that a running server cannot pick up. */
     const restartKeys: string[] = [];
@@ -682,8 +741,22 @@ export class DeploymentSettingsService {
       toClear.includes(key) ? '' : (toWrite.find((w) => w.key === key)?.value ?? this.resolve(key));
   }
 
+  /**
+   * Store what the DEPLOYMENT established, internal settings included: the
+   * end of a flow that proved each value (see `SettingDef.internal`). The
+   * same validation, the same encryption, the same refusal of a setting the
+   * environment pins. Never reachable from a request body: the setup routes
+   * call {@link save}.
+   */
+  async record(entries: Record<string, string>, updatedBy: string | null): Promise<void> {
+    await this.save(entries, updatedBy, 'deployment');
+  }
+
   /** Validate a batch and return the writes (and the clears) it amounts to; throws on any problem. */
-  private plan(entries: Record<string, string>): {
+  private plan(
+    entries: Record<string, string>,
+    by: 'admin' | 'deployment' = 'admin',
+  ): {
     toWrite: { key: string; value: string; def: SettingDef }[];
     toClear: string[];
   } {
@@ -694,6 +767,12 @@ export class DeploymentSettingsService {
     for (const [key, raw] of Object.entries(entries)) {
       const def = this.defs.get(key);
       if (!def) {
+        problems[key] = 'Unknown setting.';
+        continue;
+      }
+      if (def.internal && by !== 'deployment') {
+        // Said the way an unknown setting is: what the deployment keeps for
+        // itself is not the form's to name, or to learn the names of.
         problems[key] = 'Unknown setting.';
         continue;
       }

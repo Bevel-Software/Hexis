@@ -33,6 +33,7 @@ import type { IFsProbe, ITreeWalker } from '../shared/fs.contract.js';
 import type { IGitRunner } from '../shared/git.contract.js';
 import { ManagedRepository, MANAGED_DEFAULT_BRANCH } from '../modules/settings/managed-repository.js';
 import { RepositorySource } from '../modules/settings/repository-source.js';
+import { GitHubAppConnection } from '../modules/github-app/index.js';
 import { AdvisoryLease, AdvisoryLock } from '../modules/database/advisory-lock.js';
 import { holdCommitWorkerLease, withStartupTask, type LeaseLoopHandle } from './lifecycle.js';
 
@@ -195,6 +196,8 @@ export interface CoreServices {
   repositorySource: RepositorySource;
   /** The repository the deployment keeps for itself, when that is the way it chose. */
   managedRepository: ManagedRepository;
+  /** The connection to GitHub through a GitHub App, when that is the way it chose. */
+  githubApp: GitHubAppConnection;
   /**
    * The startup phase's retry when the boot survived an unreachable remote
    * — set by `startCore`, stopped by `stopCore` (see `core/lifecycle.ts`);
@@ -448,10 +451,15 @@ export async function createCoreServices(
   // a deployment can be given its repository in more than one way; what
   // comes back is the address and the credential, as it always was.
   const managedRepository = new ManagedRepository(path.join(config.backupsRoot, 'managed-repository'));
+  const githubApp = new GitHubAppConnection({
+    read: (key) => settings.resolve(key),
+    sourceOf: (key) => settings.sourceOf(key),
+  });
   const repositorySource = new RepositorySource({
     read: (key) => settings.resolve(key),
     fallback: { username: config.gitUsername, token: config.gitToken },
     managed: managedRepository,
+    githubApp,
   });
   const gitCredentialsInEffect = repositorySource.credentials;
   // How git is run, for every module that runs it: one environment, one buffer
@@ -470,6 +478,13 @@ export async function createCoreServices(
     await managedRepository
       .ensure(gitRunner, settings.resolve('defaultBranch') || MANAGED_DEFAULT_BRANCH)
       .catch((err: unknown) => logger('setup').error('the managed repository could not be created:', { err }));
+  }
+  // One reached through a GitHub App has a token in hand before anything
+  // reads it: a working copy's credential helper is stamped according to
+  // whether there is a token, by code that cannot wait for one. A failure is
+  // the startup phase's to report, for the same reason as above.
+  if (repositorySource.mode() === 'github-app') {
+    await githubApp.prepare().catch(() => undefined);
   }
   const workspaceService = new WorkspaceService(
     config.workspacesRoot,
@@ -1271,6 +1286,7 @@ export async function createCoreServices(
     kbStartupRunner,
     repositorySource,
     managedRepository,
+    githubApp,
     settings,
     kb,
     kbDirName,

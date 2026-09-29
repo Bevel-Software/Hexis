@@ -50,7 +50,8 @@ import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection
 import { createAuditRoutes } from '../modules/audit/audit.routes.js';
 import { createAgentRestAuditMiddleware } from '../modules/audit/agent-rest-audit.middleware.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../modules/tool-manuals/tool-manuals.contract.js';
-import { createSetupRoutes } from '../modules/settings/setup.routes.js';
+import { createSetupRoutes, isComplete } from '../modules/settings/setup.routes.js';
+import { createGitHubAppRoutes } from '../modules/github-app/index.js';
 import { oidcRedirectUri } from '../modules/auth/oidc-auth-provider.js';
 import { repositoryConnectionCheck } from '../modules/settings/connection-check.js';
 import { rootFolderListerFor } from '../modules/settings/git-root-folders.js';
@@ -706,8 +707,23 @@ export async function createCoreServer(
       {
         source: core.repositorySource,
         ensureManaged: (branch) => core.managedRepository.ensure(core.gitRunner, branch),
+        githubApp: core.githubApp,
       },
     ),
+  );
+  // Connecting a repository on GitHub through a GitHub App: the round trips
+  // to GitHub the setup screen starts, behind the same sign-in.
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createGitHubAppRoutes({
+      settings: core.settings,
+      connection: core.githubApp,
+      adminAccess: core.adminAccess,
+      publicBackendUrl: core.config.publicBackendUrl,
+      publicFrontendUrl: core.config.publicFrontendUrl,
+      isComplete: () => isComplete(core.settings, core.kb, core.repositorySource),
+    }),
   );
   const toolPageUser = async (userId: string): Promise<AuthUser | undefined> => {
     const u = await core.authService.getUserById(userId);
