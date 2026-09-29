@@ -12,6 +12,7 @@ import type { ICreatorAccess } from '../access-model/creator.js';
 import type { GroupsIndex } from '../access-model/group-files.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { isAbsence } from '../../shared/fs.contract.js';
+import { assertBranchProvided } from '../../shared/domain-errors.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import type { AuthService } from '../auth/auth.service.js';
@@ -77,6 +78,20 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
     const { loadActiveGroups } = deps;
     const fsCache = new Map<string, LocalFilesystem>();
     const getFilesystem = async (branch: string): Promise<LocalFilesystem> => {
+      // THE choke point: every knowledge-base tool resolves its workspace
+      // through here, and a `call_tool_chain` call reaches the very same route
+      // over loopback — so refusing a branch-less call here refuses it on both
+      // paths at once, with no per-tool guard to keep in step.
+      //
+      // Before ANY workspace work, because both things downstream do with this
+      // value are wrong when it is absent: `getOrCreateForUser` defaults a
+      // missing branch to the deployment's default (protected) branch, so an
+      // omitted argument would silently act on `main`; and a present-but-absent
+      // value like the string "undefined" goes to `workspaceIdForBranch`, which
+      // makes it a workspace directory of that name and then tries to clone a
+      // branch nobody ever pushed. Failing closed here means no workspace is
+      // created and no clone is attempted.
+      assertBranchProvided(branch);
       const cached = fsCache.get(branch);
       if (cached) return cached;
       const ws = await deps.workspaceService.getOrCreateForUser(user, branch);
