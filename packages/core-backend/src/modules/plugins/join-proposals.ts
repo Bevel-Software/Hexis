@@ -1,5 +1,6 @@
 import {
   KNOWN_VERBS,
+  ownAccessReadable,
   parseAccessFile,
   parseOwnAccessEntries,
   type ParsedEntry,
@@ -75,15 +76,21 @@ function identityOf(entry: ParsedEntry): string {
  * on the editors' first listing, before anyone had seen it.
  *
  * Null is reserved for "could not be read": a folder `access.md` that does
- * not parse. A file with no frontmatter, or with frontmatter naming no verb,
- * is perfectly readable and simply grants nothing.
+ * not parse, or a file whose frontmatter is broken (never closed, or not a
+ * mapping). A file with no frontmatter, or with frontmatter naming no verb,
+ * is perfectly readable and simply grants nothing. The file grammar's own
+ * null does not tell those apart, so the question is asked separately: a
+ * broken block read as "grants nothing" would close the request on a
+ * reading that failed, the same mistake by another door.
  */
 function entriesOf(
   text: string,
   path: string,
   kind: TargetKind,
 ): Record<Verb, ParsedEntry[]> | null {
-  if (kind === 'file') return parseOwnAccessEntries(text) ?? emptyGrants();
+  if (kind === 'file') {
+    return parseOwnAccessEntries(text) ?? (ownAccessReadable(text) ? emptyGrants() : null);
+  }
   const parsed = parseAccessFile(text, path);
   return parsed.ok ? parsed.file.entries : null;
 }

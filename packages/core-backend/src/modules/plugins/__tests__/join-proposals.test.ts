@@ -153,6 +153,21 @@ describe('pendingProposals on a FILE, whose rules are its own frontmatter', () =
     expect(pendingProposals('# Just a note\n', LIVE, FILE, 'file')).toEqual([]);
   });
 
+  it('says NOTHING about a file whose frontmatter is broken — not "nothing to propose"', () => {
+    // The same rule the folder side keeps: an empty answer closes somebody's
+    // request, so a block that could not be read must not produce one.
+    const neverClosed = '---\nnodeType: "[Note](x)"\nwrite: Rita Reader <rita@x.io>\n# Notes\n\nbody\n';
+    expect(pendingProposals(neverClosed, LIVE, FILE, 'file')).toBeNull();
+    const notAMapping = '---\n- just\n- a list\n---\n# Notes\n';
+    expect(pendingProposals(notAMapping, LIVE, FILE, 'file')).toBeNull();
+    // An empty block is readable, and says nothing.
+    expect(pendingProposals('---\n---\n# Notes\n', LIVE, FILE, 'file')).toEqual([]);
+    // A broken copy on LIVE stays the safe direction: every grant looks incoming.
+    expect(pendingProposals(ASKS_WRITE, neverClosed, FILE, 'file')).toEqual([
+      expect.objectContaining({ verb: 'write', id: 'user:rita@x.io' }),
+    ]);
+  });
+
   it('reads the list form too, and an Owner request', () => {
     const asksOwner =
       '---\nnodeType: "[Note](x)"\nowner:\n  - Rita Reader <rita@x.io>\n---\n# Notes\n';
