@@ -13,6 +13,7 @@ import { X, Lock, Loader2, ChevronDown, Check, Globe, CircleHelp } from 'lucide-
 import {
   canCarryFrontmatter,
   conferredByOthers,
+  DEFAULT_BRANCH,
   effectiveVerbs,
   folderGovernsAccessMessage,
   KNOWN_VERBS,
@@ -55,6 +56,10 @@ import {
   type SuggestResponse,
 } from '../api';
 import { EMAIL_RE, initials, labelInitials } from '../../../lib/email';
+import { AccessRequestControl } from './AccessRequestControl';
+import { AccessRequestsBanner } from './AccessRequestsBanner';
+import { useAccessRequests } from '../hooks/useAccessRequests';
+import { listAccessRequests, reconcileAccessRequest, LEVEL_WORDS } from '../requests.api';
 
 interface Props {
   entry: FileTreeEntry;
@@ -1182,6 +1187,49 @@ export function ManageAccessDialog({
   // Never on a folder-governed file: there is nothing here to write to.
   const canManage = !!data?.canWrite && !folderGoverns;
 
+  /**
+   * Is this sheet showing the LIVE workspace?
+   *
+   * Asking for access is offered there and nowhere else. A draft branch's
+   * rules may differ from the ones the person is actually asking about, and a
+   * file that exists only on a change request has no live rules at all — a
+   * request from either would propose a grant into a branch nobody merges.
+   * Both cases keep today's dialog, unchanged.
+   */
+  const liveWorkspace = !proposal && workspaceId === encodeURIComponent(DEFAULT_BRANCH);
+
+  /** What Accept grants on, and what the request routes are asked about. */
+  const requestTarget = useMemo(
+    () => ({ path: entry.relativePath, kind: targetKind }),
+    [entry.relativePath, targetKind],
+  );
+
+  // The item's open requests, for the people who can answer them. Asked for
+  // unconditionally on the live workspace: the endpoint answers `[]` to
+  // everyone who is not an editor, so "may I answer these" stays the server's
+  // ruling rather than a guess made from `canManage`.
+  const requestsSource = useMemo(
+    () => ({
+      list: () =>
+        workspaceId && governed && liveWorkspace
+          ? listAccessRequests(workspaceId, requestTarget)
+          : Promise.resolve([]),
+      reconcile: (number: number) =>
+        workspaceId
+          ? reconcileAccessRequest(workspaceId, number, requestTarget)
+          : Promise.resolve(false),
+    }),
+    [workspaceId, governed, liveWorkspace, requestTarget],
+  );
+  const accessRequests = useAccessRequests({
+    itemKey: liveWorkspace && governed ? `${workspaceId}:${entry.relativePath}` : null,
+    source: requestsSource,
+    grantOn: requestTarget,
+    // The new row has to be on screen before the request's line goes, or an
+    // Accept looks like it did nothing at all.
+    onGranted: reload,
+  });
+
   // Resolve the CURRENT typed query into a principal to append as a chip: an
   // exact group/role match or a free-typed email. (Suggestion clicks append
   // directly.) Group first — bare grant tokens resolve group-first, so a name
@@ -1826,6 +1874,21 @@ export function ManageAccessDialog({
           </Banner>
         )}
 
+        {/* Somebody is waiting on an answer, at the top of the sheet where the
+            answer is given. No "Manage access" link: this IS that dialog. */}
+        <AccessRequestsBanner
+          itemName={entry.name}
+          folders={[]}
+          requests={accessRequests.requests}
+          onManage={() => {}}
+          onAccept={(r, pr) => void accessRequests.accept(r, pr)}
+          onDecline={(r) => void accessRequests.decline(r)}
+          verbLabel={(verb) => LEVEL_WORDS[verb as 'write' | 'owner'] ?? verb}
+          errorFor={(r) => accessRequests.errors[r.number]}
+          busyFor={(r) => !!accessRequests.busy[r.number]}
+          className="mb-0 mt-3"
+        />
+
         {governed && canManage && (
           <div className="mt-3">
             {/* `items-start`, not `items-stretch`: the verb button is `rounded-full`,
@@ -2149,10 +2212,24 @@ export function ManageAccessDialog({
             ) : (
               <>
                 {!canManage && (
-                  <Banner tone="neutral" role="note" className="mt-3">
-                    Only people with edit access can share this {targetKind}.
-                    {ownerNames && <> Ask an owner: {ownerNames}.</>}
-                  </Banner>
+                  <>
+                    <Banner tone="neutral" role="note" className="mt-3">
+                      Only people with edit access can share this {targetKind}.
+                      {ownerNames && <> Ask an owner: {ownerNames}.</>}
+                    </Banner>
+                    {/* The rest of that sentence. Only on the live workspace,
+                        and only where the item has rules of its own to ask
+                        about — a folder-governed file keeps its pointer at the
+                        folder, whose dialog carries the control. */}
+                    {liveWorkspace && workspaceId && (
+                      <AccessRequestControl
+                        workspaceId={workspaceId}
+                        target={requestTarget}
+                        targetKind={targetKind}
+                        ownerNames={ownerNames}
+                      />
+                    )}
+                  </>
                 )}
 
                 {/* Names WHICH RULE you are editing, and adapts to the target

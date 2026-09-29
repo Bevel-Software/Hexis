@@ -425,6 +425,23 @@ export interface IWorkflowService {
     opts?: { fresh?: boolean },
   ): Promise<ChangeRequest[]>;
   getChangeRequest(number: number): Promise<ChangeRequest | null>;
+  /**
+   * The NEWEST change request from `sourceBranch` by `authorEmail` that is no
+   * longer open, or null when every one of theirs on that branch is still
+   * open (or there never was one).
+   *
+   * Why it is asked this narrowly: a request that has been declined, or that
+   * its author withdrew, leaves no other trace — `listChangeRequestsAuthoredBy`
+   * lists open requests only, and nothing records WHO closed a request. Asking
+   * for the last non-open one on a deterministic branch is enough to tell
+   * "your last request was not accepted" from "you never asked", without a new
+   * column. A MERGED request counts as non-open too: the caller distinguishes
+   * the two by whether the access it asked for has landed.
+   */
+  latestClosedChangeRequest(
+    authorEmail: string,
+    sourceBranch: string,
+  ): Promise<{ number: number; state: ChangeRequestState } | null>;
   getChangeRequestDetail(
     number: number,
     /**
