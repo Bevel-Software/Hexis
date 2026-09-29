@@ -740,7 +740,14 @@ export async function createCoreServices(
   // (the request's branch vs the default branch), so it holds no state — it
   // only needs to read files at refs and to close a request whose proposals
   // have all landed.
-  const joinRequestsService = new JoinRequestsService(workspaceService, workflowService, kb);
+  const joinRequestsService = new JoinRequestsService(
+    workspaceService,
+    workflowService,
+    kb,
+    // Read-only: the one question a request asks of the resolver is whether
+    // the person it names already holds what it proposes.
+    accessControl,
+  );
   // The OTHER half of a join request: the row the subscribe endpoint writes
   // before it answers, and the branch/clone/commit/push/change-request work
   // that runs against it afterwards. The row is what lets the click be

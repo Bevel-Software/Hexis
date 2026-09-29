@@ -817,9 +817,22 @@ export function ChangeRequestDialog({
     detail.approvals.length > 0 &&
     detail.approvals.filter((a) => a.inMergeGate).every((a) => a.isApproved);
 
-  /** Admin-only: delete the request and its branch, with an armed confirm. */
+  /**
+   * The author's or an admin's: delete the request AND its branch, with an
+   * armed confirm. `viewerCanDelete` is the server's verdict on both grants.
+   */
   const [deleteArmed, setDeleteArmed] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  /**
+   * The armed button names the branch it is about to remove — except for a
+   * `suggestions/...` branch, which the platform named for the author and
+   * which they never chose: showing them that internal path asks them to
+   * confirm something they have no way to recognise. Authors and admins read
+   * the same sentence; what varies is the branch, not who is looking.
+   */
+  const armedDeleteLabel = cr.branch.startsWith('suggestions/')
+    ? 'Really delete request and branch?'
+    : `Really delete request and branch ${cr.branch}?`;
   async function deleteRequest() {
     if (deleting) return;
     setDeleting(true);
@@ -1175,7 +1188,10 @@ export function ChangeRequestDialog({
             <p className="mx-auto max-w-[52ch] py-10 text-center text-detail text-ink-faint">
               This request doesn't change anything anymore. What it proposed is already part of
               the current text, or has since been removed on its branch — there is nothing left
-              to review or apply. {firstName} can withdraw it.
+              to review or apply.{' '}
+              {/* Withdraw is not in this dialog; Delete is, right below. Point
+                  at the verb the reader can actually reach from here. */}
+              {detail.viewerIsAuthor ? 'You can delete it below.' : `${firstName} can delete it.`}
             </p>
           </div>
         ) : (
@@ -1387,10 +1403,13 @@ export function ChangeRequestDialog({
                     ? 'Every agent that connects after this picks it up. There is no staged rollout.'
                     : ''}
           </p>
-          {/* Admins carry the moderation verb: delete the request AND its
-              branch, armed on the first click. `viewerCanBypassMerge` is the
-              server's admin verdict — the DELETE route re-checks it. */}
-          {!blocked && detail?.viewerCanBypassMerge && (
+          {/* The author and admins carry the destructive verb: delete the
+              request AND its branch, armed on the first click.
+              `viewerCanDelete` is the server's verdict on both grants — the
+              DELETE route re-checks it. Shown while `blocked` on purpose: a
+              request stuck on a conflict is exactly the one its author most
+              wants to throw away and propose again. */}
+          {detail?.viewerCanDelete && (
             deleteArmed ? (
               <>
                 <Button
@@ -1399,7 +1418,7 @@ export function ChangeRequestDialog({
                   disabled={deleting}
                   onClick={() => void deleteRequest()}
                 >
-                  {deleting ? 'Deleting…' : 'Really delete request and branch?'}
+                  {deleting ? 'Deleting…' : armedDeleteLabel}
                 </Button>
                 <Button variant="quiet" size="sm" disabled={deleting} onClick={() => setDeleteArmed(false)}>
                   Keep

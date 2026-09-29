@@ -830,7 +830,7 @@ describe('/api/plugins routes', () => {
     expect(await res.json()).toEqual({ requests: [] });
     expect(h.joinRequests.list).toHaveBeenCalledWith(
       'GTM',
-      'Plugins/GTM',
+      { path: 'Plugins/GTM', kind: 'folder' },
       expect.anything(),
       expect.objectContaining({ email: ALI }),
     );
