@@ -53,8 +53,8 @@ export function createToolHandlerFactory(resolve: ResolveToolContext) {
       const args = (body ?? {}) as Record<string, unknown>;
       // `sessionId` rides the tool body like `branch` does: the external MCP
       // proxy injects it (ask-tool continuity convention) and the in-process
-      // agent passes its thread id. Surfaced on the context so the ontology
-      // gate can scope to one run without each handler re-reading args.
+      // agent passes its thread id. Surfaced on the context so the
+      // agent-access gate can name the run without each handler re-reading args.
       const sessionId = typeof args.sessionId === 'string' && args.sessionId.length > 0
         ? args.sessionId
         : undefined;

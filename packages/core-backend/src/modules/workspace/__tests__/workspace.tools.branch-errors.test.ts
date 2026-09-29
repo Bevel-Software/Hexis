@@ -21,6 +21,7 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
@@ -172,11 +173,9 @@ describe('workspace tools — a branch that cannot be opened', () => {
       allowAll,
       testKbContext({ kbDirName: KB_DIR }),
       {
-        service: {} as never,
-        enabled: false,
-        kb: testKbContext({ kbDirName: KB_DIR }),
         recoveryBotEmail: 'recovery-bot@bevel.local',
         hooks: new WorkflowHooks(),
+        notes: new ToolDescriptionNotes(),
       },
       new RoutineWritePolicyService(),
       {} as never,

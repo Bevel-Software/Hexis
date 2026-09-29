@@ -7,13 +7,11 @@ import type { IToolRegistry, JsonSchema } from '../tool-registry/tool.contract.j
 import { ToolError, type ToolContext, type ToolHandler } from '../tool-helpers/tool.contract.js';
 import { BRANCH_INPUT, toolDef } from '../tool-helpers/tool-def.js';
 import {
-  recordOntologyRead,
-  assertOntologyWriteAllowed,
-  assertShellAllowedWithinOntology,
-  ONTOLOGY_BOUNDARY_NOTE,
+  notifyAgentRead,
+  assertAgentWriteAllowed,
   SESSION_ID_INPUT,
-  type SessionOntologyGate,
-} from './session-ontology.gate.js';
+  type AgentAccessGate,
+} from './agent-access.gate.js';
 import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
@@ -591,7 +589,7 @@ async function grepWalk(
   max: number,
   depth: number,
   gate: ReadGate,
-  recordOntologyRead: (path: string) => Promise<void>,
+  notifyRead: (path: string) => Promise<void>,
   docs: DocGrepState,
 ): Promise<void> {
   if (out.length >= max || depth > 12) return;
@@ -610,12 +608,12 @@ async function grepWalk(
     if (e.type !== 'directory' && isFolderPlaceholder(e.name)) continue;
     const p = dir ? `${dir}/${e.name}` : e.name;
     if (e.type === 'directory') {
-      await grepWalk(fs, p, re, out, max, depth + 1, gate, recordOntologyRead, docs);
+      await grepWalk(fs, p, re, out, max, depth + 1, gate, notifyRead, docs);
     } else {
-      // Opening a file under a named ontology is a read of that ontology — even
-      // for a root-level grep that resolves to a neutral root. Record it so a
-      // cross-ontology grep poisons later writes (closes the read-leak).
-      await recordOntologyRead(p);
+      // Opening a file is a read of it, even when the walk started at a root
+      // the read hook was already told about — so every file the walk opens
+      // reaches the hook by name (closes the read-leak).
+      await notifyRead(p);
       // A file the walk cannot read is silently skipped: one unreadable entry
       // must not fail a search over the whole tree.
       try {
@@ -664,6 +662,20 @@ const BATCH_SAVE_WARNINGS_OUTPUT: JsonSchema = {
 };
 
 /**
+ * The `sessionId` property inside a BUILT tool def's input schema, or
+ * `undefined` for a tool that declares none. `toolDef` wraps the flat inputs
+ * under `body` and copies the schema it is given, so a note registered after
+ * the tools were built has to be written here rather than onto the shared
+ * `SESSION_ID_INPUT` constant.
+ */
+function sessionIdInputOf(def: { inputs?: unknown }): { description?: string } | undefined {
+  const inputs = def.inputs as
+    | { properties?: { body?: { properties?: Record<string, { description?: string }> } } }
+    | undefined;
+  return inputs?.properties?.body?.properties?.sessionId;
+}
+
+/**
  * Workspace domain tools: the file primitives (replacing Mastra's auto-injected
  * Workspace tools) + unzip. Most just re-expose the SAME `LocalFilesystem`
  * methods Mastra's tools call (via `ctx.getFilesystem(a.branch as string)`), so behaviour is
@@ -681,7 +693,7 @@ export function registerWorkspaceTools(
   docExtract: DocExtractService,
   accessControl: IAccessControl,
   kb: KbContext,
-  sessionOntologyGate: SessionOntologyGate,
+  agentAccessGate: AgentAccessGate,
   writePolicy: IRoutineWritePolicy,
   sessionSink: ISessionSink,
   /**
@@ -780,7 +792,7 @@ export function registerWorkspaceTools(
    * Every spelling first, then the resolved form against the branch's
    * workspace, so a link into the folder is refused the same way. The resolved
    * check only runs on a branch that is already cloned: bootstrapping a clone
-   * here would happen before the handler's access and ontology gates. A branch
+   * here would happen before the handler's access and agent-access gates. A branch
    * not cloned yet (or that does not resolve) is left to the handler; the
    * filesystem refuses again underneath regardless.
    */
@@ -802,7 +814,7 @@ export function registerWorkspaceTools(
    * The branch's workspace root, to judge a spelling against what is on disk
    * — or null when there is nothing to judge it against yet. Only a branch
    * ALREADY cloned is used: bootstrapping one here would clone before the
-   * handler's access and ontology gates have had their say.
+   * handler's access and agent-access gates have had their say.
    */
   const gitCheckRootFor = async (args: Record<string, unknown>, ctx: ToolContext): Promise<string | null> => {
     if (typeof args.branch !== 'string' || args.branch === '') return null;
@@ -1173,6 +1185,14 @@ export function registerWorkspaceTools(
     /** False for a tool that is not a file tool (the shell), which the content rule does not describe. */
     fileTool?: boolean;
     /**
+     * This tool runs through the agent-access gate, so a call to it reaches
+     * the deployment's read or write hook. Such a tool carries the note the
+     * deployment registered ({@link ToolDescriptionNotes}) at the end of its
+     * description — core registers none, so on a core-only deployment the
+     * flag adds nothing to what the agent reads.
+     */
+    gated?: boolean;
+    /**
      * This tool resolves `branch` ITSELF and must not be pre-checked here.
      * Only `execute_command` sets it: for an internal session that leaves the
      * argument off, it falls back to the caller's own focused branch (from its
@@ -1198,7 +1218,8 @@ export function registerWorkspaceTools(
       (typeof spec.description === 'function' ? spec.description() : spec.description) +
       (spec.proposable ? PROPOSAL_ROUTE_NOTE : '') +
       (spec.fileTool === false ? '' : CONTENT_RULE) +
-      kbConventionsNote(kb.layout);
+      kbConventionsNote(kb.layout) +
+      (spec.gated ? agentAccessGate.notes.gatedToolNote() : '');
     const def = toolDef({
       name: spec.name,
       description: describe(),
@@ -1209,16 +1230,32 @@ export function registerWorkspaceTools(
     });
     registry.registerInternalTool(def);
     if (!spec.internalOnly) registry.registerExternalTool(def);
-    // The catalog FOLLOWS the layout. The conventions reminder above names the
-    // guide, and several descriptions name it again as a platform file, so the
-    // save that completes first-run setup — which applies the names the admin
-    // just chose, in that same request, without a restart — must be able to
-    // move the text with them. Rewritten in place: the registry holds this
-    // object, both surfaces hold the same one, and re-registering would be a
-    // duplicate name.
-    kb.onLayoutApplied(() => {
+    /**
+     * What the agent reads about this tool, rebuilt from whatever is in effect
+     * NOW: the layout's names and the notes the deployment registered.
+     *
+     * The catalog FOLLOWS the layout. The conventions reminder above names the
+     * guide, and several descriptions name it again as a platform file, so the
+     * save that completes first-run setup — which applies the names the admin
+     * just chose, in that same request, without a restart — must be able to
+     * move the text with them. Rewritten in place: the registry holds this
+     * object, both surfaces hold the same one, and re-registering would be a
+     * duplicate name. The `sessionId` input is rewritten on the DEF rather
+     * than on `SESSION_ID_INPUT`, because `toolDef` copies the schema it is
+     * given.
+     */
+    const redescribe = (): void => {
       def.description = describe();
-    });
+      const sessionId = sessionIdInputOf(def);
+      if (sessionId) sessionId.description = agentAccessGate.notes.sessionIdDescription();
+    };
+    // Once for a note registered BEFORE the tools were mounted (the `sessionId`
+    // input is copied by `toolDef`, so it carries the bare default until this
+    // runs), and then on every later change: a note may be registered AFTER
+    // the mount, from the tool-surface hook an overlay registers on.
+    redescribe();
+    kb.onLayoutApplied(redescribe);
+    agentAccessGate.notes.onChange(redescribe);
     // Internal-only tools (e.g. `execute_command`) keep their route mounted —
     // our agent calls it over the same loopback — but gate it to internal-source
     // callers so an external connection key can't invoke it by name.
@@ -1288,22 +1325,20 @@ export function registerWorkspaceTools(
   };
 
   // ── session bootstrap (external agents) ─────────────────────────────────
-  // Every read/write tool below scopes the ontology-session boundary off a
-  // `sessionId`. The in-process agent carries its thread id, but an external
-  // agent has no ambient run id and so cannot satisfy the gate until it has
-  // one. This mints that id up front (called ONCE); the MCP proxy then threads
-  // it onto every later gated call via its sessionId-output continuity
+  // Every read/write tool below takes a `sessionId`: the conversation the
+  // call belongs to, which is what a deployment's hooks scope their rule to.
+  // The in-process agent carries its thread id, but an external agent has no
+  // ambient run id, so this mints one up front (called ONCE); the MCP proxy
+  // then threads it onto every later call via its sessionId-output continuity
   // convention. EXTERNAL-ONLY (not registered internal): the in-process agent
   // already supplies its session id and ignores any body value.
   //
   // WHAT the minted id is backed by is the `ISessionSink` port's business
   // (session-sink.ts). In the enterprise app it is a REAL chat-thread id, so
-  // the SAME id works end to end: KB reads scope the ontology boundary under
-  // it, AND `ask` accepts it (its sessionId IS a chat thread, resolved via
-  // getThread) — that unification is what stops a caller reading from one
-  // ontology and then having `ask` write into another. In a core-only
-  // deployment (no chat/ask) the default sink mints a bare id, which is all
-  // the ontology gate needs.
+  // the SAME id works end to end: the file tools take it AND `ask` accepts it
+  // (its sessionId IS a chat thread, resolved via getThread), so a run's reads
+  // and its questions are one conversation rather than two. In a core-only
+  // deployment (no chat/ask) the default sink mints a bare id.
   //
   // The description tells the caller that retrying is safe, and that is a
   // property of the sink rather than a promise this route makes on its own:
@@ -1316,7 +1351,7 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint the KnowledgeBase session id this run needs to read or write the knowledge ontologies. Call this ONCE, before any other KnowledgeBase tool, and only once per run — every gated tool needs the `sessionId` it returns to enforce the one-ontology-per-conversation boundary, and minting a new id mid-run resets that boundary. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: reads and ask then share one ontology boundary. Pass the returned id explicitly as `sessionId` on every subsequent KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it — there is no half-made session to clean up. If a retry lands after a success you simply hold two independent ids, which is harmless: keep passing the one id you have already used for the rest of the run and ignore the other. Returns `{ sessionId }`.',
+      'Mint the id of this conversation, which the KnowledgeBase tools take as `sessionId`. Call this ONCE, at the start of your work and only once per run — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id explicitly as `sessionId` on every subsequent KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it — there is no half-made session to clean up. If a retry lands after a success you simply hold two independent ids, which is harmless: keep passing the one id you have already used for the rest of the run and ignore the other. Returns `{ sessionId }`.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
@@ -1328,12 +1363,12 @@ export function registerWorkspaceTools(
   });
   registry.registerExternalTool(startSessionDef);
   // Mint the session id via the sink and return it (see comment above: one id
-  // spans start_session -> reads -> ask, closing the ontology-pollution gap).
+  // spans start_session -> reads -> ask).
   router.post(
     '/agent/tools/start_session',
     toolAuth,
     // External-only: an internal token already carries its run's sessionId, so
-    // minting a new thread mid-run would reset the ontology boundary. Note
+    // minting a new thread mid-run would split one run in two. Note
     // "external" includes the MCP proxy's `externalProxy` loopback tokens
     // (OAuth/JWT MCP sessions) — the verifier resolves those to
     // `source: 'external'`, and one such session may legitimately mint several
@@ -1348,9 +1383,9 @@ export function registerWorkspaceTools(
   // ── reads ──────────────────────────────────────────────────────────────
   mount({
     name: 'read_file',
+    gated: true,
     description:
-      'Read a workspace file as text. Returns `{ path, content }`. Images (.png/.jpg/.jpeg/.gif/.webp) return the IMAGE ITSELF as native MCP image content (plus a one-line text note naming the file), so you can look at the picture — up to 3.5 MB of raw image data; a larger image gets an honest refusal asking for a locally downscaled copy or a smaller export (`.svg` is text and reads as text). Images come back only on a DIRECT call: inside `call_tool_chain` an image read yields an `{ image_omitted, note }` stub instead. Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods) and PDFs return their EXTRACTED text under an honest `[extracted text of …]` header, with `[slide N]`/`[sheet: Name]`/`[page N]` markers — the extraction is READ-ONLY (layout/images omitted; such files cannot be edited as text, only replaced by uploading a new version). Email files (.eml/.msg) return their EXTRACTED text the same way: a `[from]`/`[to]`/`[subject]`/`[date]` header block, the body (plain-text part preferred; an HTML-only body is stripped to text), and an `[attachments]` name list — attachments are listed, never extracted. Other binary files return a one-line description instead of raw bytes. Optional `offset`/`limit` slice the content (characters for a file, bytes for a `__tool_chain_spill__/…` ref; ignored for an image) — use them to page through large files or a `call_tool_chain` spill rather than reading multi-MB in full. A spill ref is workspace-independent: `branch` is ignored for it.' +
-      ONTOLOGY_BOUNDARY_NOTE,
+      'Read a workspace file as text. Returns `{ path, content }`. Images (.png/.jpg/.jpeg/.gif/.webp) return the IMAGE ITSELF as native MCP image content (plus a one-line text note naming the file), so you can look at the picture — up to 3.5 MB of raw image data; a larger image gets an honest refusal asking for a locally downscaled copy or a smaller export (`.svg` is text and reads as text). Images come back only on a DIRECT call: inside `call_tool_chain` an image read yields an `{ image_omitted, note }` stub instead. Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods) and PDFs return their EXTRACTED text under an honest `[extracted text of …]` header, with `[slide N]`/`[sheet: Name]`/`[page N]` markers — the extraction is READ-ONLY (layout/images omitted; such files cannot be edited as text, only replaced by uploading a new version). Email files (.eml/.msg) return their EXTRACTED text the same way: a `[from]`/`[to]`/`[subject]`/`[date]` header block, the body (plain-text part preferred; an HTML-only body is stripped to text), and an `[attachments]` name list — attachments are listed, never extracted. Other binary files return a one-line description instead of raw bytes. Optional `offset`/`limit` slice the content (characters for a file, bytes for a `__tool_chain_spill__/…` ref; ignored for an image) — use them to page through large files or a `call_tool_chain` spill rather than reading multi-MB in full. A spill ref is workspace-independent: `branch` is ignored for it.',
     inputs: {
       type: 'object',
       properties: {
@@ -1376,12 +1411,12 @@ export function registerWorkspaceTools(
       if (spillStore.isSpillRef(p)) {
         return { path: p, content: await spillStore.read(p, offset, limit) };
       }
-      await recordOntologyRead(sessionOntologyGate, ctx, p);
+      await notifyAgentRead(agentAccessGate, ctx, a.branch as string, p);
       await assertCanRead(readGateFor(a.branch as string, ctx), p);
       const fs = await ctx.getFilesystem(a.branch as string);
       // Reading (extraction, image and binary handling included) happens AFTER
-      // the access gate and the ontology-read recording above — a document
-      // read is still a KB read. ONE registry dispatch picks the reader by
+      // the access gate and the read hook above — a document read is still a
+      // KB read. ONE registry dispatch picks the reader by
       // extension; everything below just maps its ReadResult onto the tool's
       // result shape.
       const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
@@ -1414,9 +1449,9 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'list_files',
+    gated: true,
     description:
-      `List a directory. Returns \`{ path, entries: [{ name, type, size? }] }\`. Omit \`path\` for the workspace root, which holds the repository as the \`${kbDirName}/\` folder: every content path is under it (e.g. \`${kbDirName}/KnowledgeBase\`), and a path given without that prefix is placed under it.` +
-      ONTOLOGY_BOUNDARY_NOTE,
+      `List a directory. Returns \`{ path, entries: [{ name, type, size? }] }\`. Omit \`path\` for the workspace root, which holds the repository as the \`${kbDirName}/\` folder: every content path is under it (e.g. \`${kbDirName}/KnowledgeBase\`), and a path given without that prefix is placed under it.`,
     inputs: {
       type: 'object',
       properties: {
@@ -1446,7 +1481,7 @@ export function registerWorkspaceTools(
     write: false,
     handler: async (a, ctx: ToolContext) => {
       const dir = (a.path as string) || '';
-      await recordOntologyRead(sessionOntologyGate, ctx, dir);
+      await notifyAgentRead(agentAccessGate, ctx, a.branch as string, dir);
       const fs = await ctx.getFilesystem(a.branch as string);
       const entries = withoutPlaceholder((await fs.readdir(dir || '.')) as DirEntry[]);
       const filtered = await filterReadableEntries(readGateFor(a.branch as string, ctx), dir, entries);
@@ -1456,14 +1491,14 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'file_stat',
+    gated: true,
     description: () =>
       'Get a file/directory\'s metadata (name, type, size, …) without returning content. A file also reports `contentMode`: `text` (read, write and edit it as text), `document` (read returns an extraction; replace it by upload) or `binary` (bytes: copy, move, delete, or replace by upload), plus `kind` (`text` | `document` | `image` | `binary`), `mime`, `mimeSource` and `textEditable` — decided by the same file readers read_file, grep and the write tools use, so an extensionless text file is `text/plain`.' +
       ' Every entry also reports what you may DO with it. ' +
       `\`managed\` is true for a platform item — a platform file (${platformFileList(kb.layout)}) or a platform folder (the repository root or a reserved root folder such as \`KnowledgeBase/\`); managed items are never movable or deletable through these tools. ` +
       '`access: { read, write, download, owner }` is your own verdict under the access rules; pass `explainAccess: true` to learn why, and who else holds each verb. `movable` and `deletable` say whether `move_file` / `delete_file` / `delete_folder` would be allowed for you, judged like their dry runs: not managed, no symbolic link, and on a protected branch you hold write on the item AND on every file under a folder (on a draft branch writes are not gated). `movable` judges the source side only; the destination is judged by a `move_file` dry run. ' +
       'For a folder, `descendants` is the number of files under it at any depth; counting stops at 10000 and `descendantsTruncated` says so, and past that point `movable` and `deletable` are false because a folder that large was not judged in full — run the `move_file` or `delete_folder` dry run for the real verdict. ' +
-      'Call this before a move or delete to see what it would touch.' +
-      ONTOLOGY_BOUNDARY_NOTE,
+      'Call this before a move or delete to see what it would touch.',
     inputs: {
       type: 'object',
       properties: {
@@ -1539,7 +1574,7 @@ export function registerWorkspaceTools(
     handler: async (a, ctx: ToolContext) => {
       const p = a.path as string;
       const branch = a.branch as string;
-      await recordOntologyRead(sessionOntologyGate, ctx, p);
+      await notifyAgentRead(agentAccessGate, ctx, branch, p);
       await assertCanRead(readGateFor(branch, ctx), p);
       // Nothing there is a 404, and the placeholder — never content — gets
       // exactly that answer: the one every file tool gives (see not-found.ts).
@@ -1640,9 +1675,9 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'grep',
+    gated: true,
     description:
-      'Regex content search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. `path` may name a DIRECTORY (searches the subtree) or a single FILE (searches just that file); a path with nothing at it is an error, never an empty result. Searches INSIDE Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods), PDFs and email files (.eml/.msg) via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).' +
-      ONTOLOGY_BOUNDARY_NOTE,
+      'Regex content search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. `path` may name a DIRECTORY (searches the subtree) or a single FILE (searches just that file); a path with nothing at it is an error, never an empty result. Searches INSIDE Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods), PDFs and email files (.eml/.msg) via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).',
     inputs: {
       type: 'object',
       properties: {
@@ -1692,11 +1727,10 @@ export function registerWorkspaceTools(
       // (an empty path is the handler's to explain), and here it would
       // otherwise name the workspace directory by another spelling.
       const searchRoot = typeof a.path === 'string' && a.path.length > 0 ? a.path : kbDirName;
-      // The search root itself is checked here (fail-closed for an agent grep on
-      // a named subtree with no sessionId); each file the walk actually opens is
-      // recorded per-file below, so a root-level grep that reaches into multiple
-      // ontologies still records each one (and can poison later writes).
-      await recordOntologyRead(sessionOntologyGate, ctx, searchRoot);
+      // The search root itself goes to the read hook here; each file the walk
+      // actually opens goes to it per-file below, so a hook sees every path a
+      // grep reached rather than only the root it started from.
+      await notifyAgentRead(agentAccessGate, ctx, a.branch as string, searchRoot);
       const fs = await ctx.getFilesystem(a.branch as string);
       const gate = readGateFor(a.branch as string, ctx);
       const out: { path: string; line: number; text: string }[] = [];
@@ -1723,7 +1757,7 @@ export function registerWorkspaceTools(
           max,
           0,
           gate,
-          (p) => recordOntologyRead(sessionOntologyGate, ctx, p),
+          (p) => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p),
           docs,
         );
       } else {
@@ -1768,12 +1802,12 @@ export function registerWorkspaceTools(
   // ── writes (through the lock/commit pipeline) ───────────────────────────
   mount({
     name: 'write_file',
+    gated: true,
     description:
       'Write a workspace TEXT file. The change is committed + pushed as you. Returns `{ path, bytes, outcome }`, where `outcome` is ' +
       '`created`, `replaced` or `updated`.' +
       WRITE_MODE_NOTE +
-      IMAGE_CONVENTION_NOTE +
-      ONTOLOGY_BOUNDARY_NOTE,
+      IMAGE_CONVENTION_NOTE,
     inputs: {
       type: 'object',
       properties: {
@@ -1809,7 +1843,7 @@ export function registerWorkspaceTools(
       // (today only `watchlist_check`, to `.html`). Unrestricted sessions pass straight
       // through (see `assertPathWritable`), so it does not limit other agents.
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
-      await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.path as string);
+      await assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, a.path as string);
       const mode = modeOf(a);
       const fs = await ctx.getFilesystem(a.branch as string);
       await assertNotBinaryOverwrite(readers,a.path as string, fs);
@@ -1851,18 +1885,18 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'write_files',
+    gated: true,
     description:
       'Batch-write many files in ONE commit — far faster than calling write_file once per file when ' +
       'creating many files at once (e.g. seeding a knowledge base). Each entry is `{ path, content }`, and the files it ' +
       'writes are committed + pushed together as you. Prefer this over many write_file ' +
-      'calls. All files must be in the SAME ontology (the boundary below applies to the batch). Text files only. ' +
+      'calls. Text files only. ' +
       'Returns `{ count, files }`: one entry per REQUESTED path, in the order you gave them, each `{ path, outcome }` — ' +
       '`created` / `replaced` / `updated` for a path it wrote, or `refused` with `error` (the code) and `message` (why) for a ' +
       'path it could not. `count` is how many were written. A path it refuses — the mode said no, or the file is not text — ' +
       'does not stop the others; read `files` to see what landed.' +
       WRITE_MODE_NOTE +
-      IMAGE_CONVENTION_NOTE +
-      ONTOLOGY_BOUNDARY_NOTE,
+      IMAGE_CONVENTION_NOTE,
     inputs: {
       type: 'object',
       properties: {
@@ -1915,13 +1949,13 @@ export function registerWorkspaceTools(
       const files = (a.files as Array<{ path: string; content: string }>) ?? [];
       if (files.length === 0) return { count: 0, files: [] };
       const mode = modeOf(a);
-      // The POLICY gates still judge the whole batch: a restricted run or a
-      // cross-ontology batch is a call that should not have been made at all,
-      // not a per-path outcome, and the ontology gate must see every path
-      // before anything lands. What a single FILE is (not text) or what its
-      // path already holds (the mode) is decided per path, below.
+      // The POLICY gate still judges the whole batch: a restricted run is a
+      // call that should not have been made at all, not a per-path outcome.
+      // The write hook is asked PER PATH, below, so a path it refuses is that
+      // path's outcome and the rest of the batch still lands. What a single
+      // FILE is (not text) or what its path already holds (the mode) is
+      // decided per path too.
       for (const f of files) writePolicy.assertPathWritable(ctx.sessionId, f.path);
-      for (const f of files) await assertOntologyWriteAllowed(sessionOntologyGate, ctx, f.path);
       const fs = await ctx.getFilesystem(a.branch as string);
       // `write: true` guarantees a LockingFilesystem here; `writeFiles` lands the
       // batch as one commit. Structural cast avoids a workflow-internal import.
@@ -1947,9 +1981,27 @@ export function registerWorkspaceTools(
         entry.error = details.code ?? details.kind ?? 'refused';
         entry.message = err.message;
       };
+      /**
+       * Record a write-hook refusal on `entry`. Unlike {@link refuse}, ANY
+       * error the hook throws is this path's outcome rather than the batch's:
+       * the hook belongs to the deployment, its message is what the caller is
+       * meant to read, and one refused path must not take the others down.
+       */
+      const refuseByHook = (entry: Record<string, unknown>, err: unknown): void => {
+        const details = err instanceof ToolError ? ((err.details ?? {}) as { code?: string; kind?: string }) : {};
+        entry.outcome = 'refused';
+        entry.error = details.code ?? details.kind ?? 'refused';
+        entry.message = err instanceof Error ? err.message : 'Refused before it was written';
+      };
       for (const f of files) {
         const entry: Record<string, unknown> = { path: f.path };
         outcomes.push(entry);
+        try {
+          await assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, f.path);
+        } catch (err) {
+          refuseByHook(entry, err);
+          continue;
+        }
         try {
           assertNotDocumentEdit(readers, f.path);
           await assertNotBinaryOverwrite(readers, f.path, fs);
@@ -2017,9 +2069,9 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'edit_file',
+    gated: true,
     description:
-      'Replace an exact string in a workspace TEXT file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you.' +
-      ONTOLOGY_BOUNDARY_NOTE,
+      'Replace an exact string in a workspace TEXT file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you.',
     inputs: {
       type: 'object',
       properties: {
@@ -2043,7 +2095,7 @@ export function registerWorkspaceTools(
     handler: async (a, ctx: ToolContext) => {
       assertNotDocumentEdit(readers, a.path as string);
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
-      await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.path as string);
+      await assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, a.path as string);
       const fs = await ctx.getFilesystem(a.branch as string);
       const path = a.path as string;
       const oldStr = a.old_string as string;
@@ -2067,10 +2119,10 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'delete_file',
+    gated: true,
     description: () =>
       'Delete ONE workspace file (a symbolic link is refused: links are never followed or removed). Committed + pushed as you. Its folder stays, even when this was its last file. Files only: a folder is refused with a pointer to `delete_folder`. ' +
-      `A platform file (\`access.md\` or \`.bevelignore\` in any folder, \`roles.yaml\` or \`${kb.layout.agentsFile}\` at the repository root) and git metadata are refused.` +
-      ONTOLOGY_BOUNDARY_NOTE,
+      `A platform file (\`access.md\` or \`.bevelignore\` in any folder, \`roles.yaml\` or \`${kb.layout.agentsFile}\` at the repository root) and git metadata are refused.`,
     inputs: {
       type: 'object',
       properties: {
@@ -2089,14 +2141,14 @@ export function registerWorkspaceTools(
     write: true,
     proposable: true,
     handler: async (a, ctx: ToolContext) => {
-      // A delete propagates no cross-ontology information (it removes a node, it
-      // doesn't carry bytes from elsewhere), so it is NOT ontology-write-gated — it
-      // only records the ontology it touched, like a read. The extension policy
-      // DOES apply though: a dashboard-only run must not delete graph `.md` nodes.
+      // A delete carries no bytes from anywhere else — it removes a node — so
+      // it goes to the READ hook, like a read, not the write hook. The
+      // extension policy DOES apply though: a dashboard-only run must not
+      // delete graph `.md` nodes.
       const path = a.path as string;
       const branch = a.branch as string;
       writePolicy.assertPathWritable(ctx.sessionId, path);
-      await recordOntologyRead(sessionOntologyGate, ctx, path);
+      await notifyAgentRead(agentAccessGate, ctx, branch, path);
       const fs = await ctx.getFilesystem(branch);
       assertPlainPath(path);
       const root = await workspaceRoot(branch, ctx);
@@ -2120,13 +2172,13 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'delete_folder',
+    gated: true,
     description:
       'Delete a workspace FOLDER and every file under it, at any depth; the whole folder lands as ONE committed + pushed change as you — all of it or none of it — then the empty folder is removed. This is the one way a folder goes away: the folder that held it stays, even if this was all it had, and a folder holding nothing but its empty-folder placeholder counts as empty. ' +
       'Preflight first: `dryRun: true` changes nothing and answers `{ path, kind: "folder", descendants, files, filesTruncated, allowed, reason? }` — `descendants` is the file count, `files` names up to 100 of them. ' +
       'A non-empty folder is deleted only with `confirm: true`; without it the call deletes nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm. ' +
       'Refused (in a dry run as `allowed: false` with the `reason`): a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`), git metadata, a folder holding a symbolic link (links are never removed), and a folder holding any file you may not write. A path that is a file is refused with a pointer to `delete_file`, and a path through a symbolic link is refused (links are never followed). ' +
-      'The folder\'s own platform files (`access.md`, `.bevelignore`) go with it in that same one change, so its files are never left ungoverned part-way; you must be able to write those platform files too.' +
-      ONTOLOGY_BOUNDARY_NOTE,
+      'The folder\'s own platform files (`access.md`, `.bevelignore`) go with it in that same one change, so its files are never left ungoverned part-way; you must be able to write those platform files too.',
     inputs: {
       type: 'object',
       properties: {
@@ -2164,7 +2216,7 @@ export function registerWorkspaceTools(
       // The normaliser has already placed the path inside the repository; this
       // is the check that it really is in there before a folder is walked.
       assertInsideRepo(path, kbDirName);
-      await recordOntologyRead(sessionOntologyGate, ctx, path);
+      await notifyAgentRead(agentAccessGate, ctx, branch, path);
       const fs = await ctx.getFilesystem(branch);
       const kind = await kindOf(fs, path);
       if (kind === null) throw new ToolError(`"${path}" does not exist.`, 404);
@@ -2259,7 +2311,8 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'mkdir',
-    description: 'Create a directory (recursive). It lists as an empty folder and persists in git until it is deleted explicitly.' + ONTOLOGY_BOUNDARY_NOTE,
+    gated: true,
+    description: 'Create a directory (recursive). It lists as an empty folder and persists in git until it is deleted explicitly.',
     inputs: {
       type: 'object',
       properties: {
@@ -2279,7 +2332,7 @@ export function registerWorkspaceTools(
     proposable: true,
     handler: async (a, ctx: ToolContext) => {
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
-      await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.path as string);
+      await assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, a.path as string);
       await (await ctx.getFilesystem(a.branch as string)).mkdir(a.path as string, { recursive: true });
       return { path: a.path, created: true };
     },
@@ -2287,12 +2340,12 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'move_file',
+    gated: true,
     description: () =>
       'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Lands as a delete + create, committed + pushed as you. ' +
       `Rules: the destination must not exist — a move never overwrites a file or merges into a folder; a platform file (\`access.md\` or \`.bevelignore\` in any folder, \`roles.yaml\` or \`${kb.layout.agentsFile}\` at the repository root) is refused with "<name> is a platform file and stays in its folder." — a folder that moves takes its own platform files along, still in their folder; a platform folder (the repository root or a reserved root folder such as \`KnowledgeBase/\`) and git metadata are refused; a move cannot create a platform file or folder at \`dest\` either (renaming a note to \`access.md\` is refused); a path through a symbolic link is refused, since links are never followed; on a protected branch you must be able to write both ends — for a folder, every file under it at its old and its new path. ` +
       'Access follows the destination folder. Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination. ' +
-      'A move whose `accessChanges` is true runs only with `confirm: true`; without it the call moves nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm.' +
-      ONTOLOGY_BOUNDARY_NOTE,
+      'A move whose `accessChanges` is true runs only with `confirm: true`; without it the call moves nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm.',
     inputs: {
       type: 'object',
       properties: {
@@ -2332,12 +2385,12 @@ export function registerWorkspaceTools(
       const src = (a.src as string).replace(/\/+$/, '');
       const dest = (a.dest as string).replace(/\/+$/, '');
       const branch = a.branch as string;
-      // A move CARRIES the source content into the destination — a genuine
-      // cross-ontology flow if the two differ — so BOTH endpoints are write-gated
-      // (unlike a plain delete, which moves no content). Check both BEFORE
-      // touching disk so a blocked endpoint can't leave the source already deleted.
-      await assertOntologyWriteAllowed(sessionOntologyGate, ctx, src);
-      await assertOntologyWriteAllowed(sessionOntologyGate, ctx, dest);
+      // A move CARRIES the source content into the destination, so BOTH ends
+      // go to the write hook (unlike a plain delete, which moves no content).
+      // Ask about both BEFORE touching disk, so a refused end can't leave the
+      // source already deleted.
+      await assertAgentWriteAllowed(agentAccessGate, ctx, branch, src);
+      await assertAgentWriteAllowed(agentAccessGate, ctx, branch, dest);
       const fs = await ctx.getFilesystem(branch);
       const root = await workspaceRoot(branch, ctx);
       // Before the kind check, which stats THROUGH a link: a dangling link at
@@ -2448,9 +2501,9 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'copy_file',
+    gated: true,
     description:
-      'Copy a workspace file to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you.'
-      + ONTOLOGY_BOUNDARY_NOTE,
+      'Copy a workspace file to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you.',
     inputs: {
       type: 'object',
       properties: {
@@ -2470,14 +2523,13 @@ export function registerWorkspaceTools(
     write: true,
     proposable: true,
     handler: async (a, ctx: ToolContext) => {
-      // A copy CARRIES the source content into the destination — a genuine
-      // cross-ontology flow if the two differ — so BOTH endpoints are write-gated.
-      // Check both before touching disk.
+      // A copy CARRIES the source content into the destination, so BOTH ends
+      // go to the write hook. Ask about both before touching disk.
       writePolicy.assertPathWritable(ctx.sessionId, a.src as string);
       writePolicy.assertPathWritable(ctx.sessionId, a.dest as string);
-      await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.src as string);
-      await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.dest as string);
       const branch = a.branch as string;
+      await assertAgentWriteAllowed(agentAccessGate, ctx, branch, a.src as string);
+      await assertAgentWriteAllowed(agentAccessGate, ctx, branch, a.dest as string);
       const src = a.src as string;
       const dest = a.dest as string;
       // A copy lands bytes at a name of its own, so it is refused by the same
@@ -2539,9 +2591,9 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'unzip',
+    gated: true,
     description:
-      'Extract a .zip already in the workspace (defaults to the zip\'s parent). Returns extracted files + skipped entries. Existing files are overwritten.' +
-      ONTOLOGY_BOUNDARY_NOTE,
+      'Extract a .zip already in the workspace (defaults to the zip\'s parent). Returns extracted files + skipped entries. Existing files are overwritten.',
     inputs: {
       type: 'object',
       properties: {
@@ -2573,9 +2625,9 @@ export function registerWorkspaceTools(
     write: true,
     handler: async (a, ctx: ToolContext) => {
       const zipPath = a.path as string;
-      // Reading the source archive pins/records the source ontology, so a session
-      // can't unzip from ontology A into ontology B without the A read counting.
-      await recordOntologyRead(sessionOntologyGate, ctx, zipPath);
+      // Opening the archive is a read of the archive, so the read hook hears
+      // about it before a single entry is extracted out of it.
+      await notifyAgentRead(agentAccessGate, ctx, a.branch as string, zipPath);
       // A .zip that is not there is a missing PATH, not an unreadable archive:
       // the service now says so (PathNotFoundError) and the helper turns it
       // into the same 404 every other file tool answers. Only that declared
@@ -2587,10 +2639,10 @@ export function registerWorkspaceTools(
             workspaceIdForBranch(a.branch as string),
             zipPath,
             typeof a.destination === 'string' ? a.destination : undefined,
-            // Each extracted file is a write: a cross-ontology or write-blocked entry
-            // is skipped (not extracted), so an archive can't bypass the boundary — the
-            // extension policy applies per entry too, so a restricted run can't unzip a
-            // `.md` into the graph.
+            // Each extracted file is a write of its own: an entry the write
+            // hook refuses is skipped (not extracted), so an archive can't be
+            // a way around it — the extension policy applies per entry too, so
+            // a restricted run can't unzip a `.md` into the graph.
             (wsRelPath) => {
               // An entry that would land beside the repository is skipped with the
               // corrected-path reason, like any other refused entry.
@@ -2604,7 +2656,7 @@ export function registerWorkspaceTools(
                 );
               }
               writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
-              return assertOntologyWriteAllowed(sessionOntologyGate, ctx, wsRelPath);
+              return assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, wsRelPath);
             },
           ),
         'Nothing to extract',
@@ -2615,9 +2667,9 @@ export function registerWorkspaceTools(
   // ── shell (internal-only) ───────────────────────────────────────────────
   mount({
     name: 'execute_command',
+    gated: true,
     description:
-      'Run a shell command in the workspace directory. Returns `{ stdout, stderr, exitCode }` (output capped). Use for git status/log, grep/rg, build/test commands.' +
-      ONTOLOGY_BOUNDARY_NOTE,
+      'Run a shell command in the workspace directory. Returns `{ stdout, stderr, exitCode }` (output capped). Use for git status/log, grep/rg, build/test commands.',
     internalOnly: true,
     fileTool: false,
     // The one tool the mount's branch check skips: the handler below resolves an
@@ -2714,11 +2766,12 @@ export function registerWorkspaceTools(
           400,
         );
       }
-      // Shell is a write path with no single target path to check, so enforce the
-      // boundary at the session level: refuse once the run is already write-blocked,
-      // or when the run is restricted to a file type (shell could write anything).
+      // Shell is a write path with no single target path to check, so the
+      // write hook is asked once for the call itself, with no path — and the
+      // run must not be restricted to a file type either, since shell could
+      // write anything.
       writePolicy.assertUnrestricted(ctx.sessionId);
-      await assertShellAllowedWithinOntology(sessionOntologyGate, ctx);
+      await assertAgentWriteAllowed(agentAccessGate, ctx, branch);
       // Canonical per-branch bootstrap entry point — it owns the workspace-id
       // encoding and the single-flight clone, so the shell never derives a
       // workspace path by hand.

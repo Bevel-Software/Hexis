@@ -1689,10 +1689,10 @@ export class WorkspaceService implements IWorkspaceService {
     zipWsPath: string,
     destDirWsPath?: string,
     /**
-     * Per-extracted-path write guard (ontology-session boundary). Called with
-     * each entry's workspace-relative target before it is written; if it throws,
-     * the entry is skipped (with the thrown message as the reason) rather than
-     * aborting the whole extraction. Omitted by non-agent / human callers.
+     * Per-extracted-path write guard. Called with each entry's
+     * workspace-relative target before it is written; if it throws, the entry
+     * is skipped (with the thrown message as the reason) rather than aborting
+     * the whole extraction. Omitted by non-agent / human callers.
      */
     guardWrite?: (wsRelativePath: string) => Promise<void>,
   ): Promise<UnzipResult> {
@@ -1813,17 +1813,17 @@ export class WorkspaceService implements IWorkspaceService {
       const relForReport = path
         .relative(workspaceDir, targetAbsolute)
         .replace(/\\/g, '/');
-      // Ontology-session boundary: a write-blocked (or cross-ontology) entry is
-      // skipped, not extracted, so an archive can't be a write path around it.
-      // Runs before any filesystem side effect — including directory creation —
-      // so a blocked entry leaves nothing behind on disk.
+      // An entry the write guard refuses is skipped, not extracted, so an
+      // archive can't be a way around whatever the guard enforces. Runs before
+      // any filesystem side effect — including directory creation — so a
+      // refused entry leaves nothing behind on disk.
       const allowEntry = async (): Promise<boolean> => {
         if (!guardWrite) return true;
         try {
           await guardWrite(relForReport);
           return true;
         } catch (err) {
-          skipped.push({ path: rawName, reason: err instanceof Error ? err.message : 'Blocked by the ontology-session boundary' });
+          skipped.push({ path: rawName, reason: err instanceof Error ? err.message : 'Refused before it was written' });
           return false;
         }
       };

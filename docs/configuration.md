@@ -46,7 +46,6 @@ guide's file name — which is entered in the app and nowhere else; see the
 | `KB_TEMPLATE_DIR` | no | Overrides the packaged KB seed template |
 | `INTERNAL_TOKEN_SECRET` | no | Dedicated HMAC key for internal (loopback) tool tokens; unset, one is derived from `JWT_SECRET` |
 | `UPDATE_CHECK` | no | `false` disables the release check behind the admin upgrade banner, the app's one outbound request (air-gapped deployments) |
-| `ONTOLOGY_SESSION_BLOCK` | no | Ontology-session touch tracking toggle (default on) |
 | `GIT_TIMEOUT_MS` | no | Default ceiling on a git command (default 120000, two minutes). Raise it for a large repository on a slow git host. Two paths set their own: the clones and pushes made at boot and on setup get at least ten minutes, and the setup screen's connection test gives up after twenty seconds |
 | `LOG_LEVEL` | no | Log verbosity of the server (`debug`, `info`, `warn`, `error`; default `info`) |
 

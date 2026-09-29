@@ -1,14 +1,13 @@
-import type { ValidationReport } from '@bevel-software/platform-shared';
+import type { AuthUser, ValidationReport } from '@bevel-software/platform-shared';
 
 /**
  * Workflow lifecycle hooks — the generic seam that replaced the
- * constructor-injected KB validator (and the core-owned ontology write block).
- * Core code invokes the hooks at fixed lifecycle points; the modules that OWN
- * the behavior (the enterprise kb/kb-graph modules today) register handlers in
- * the composition root, right after `createCoreServices` returns. Core
- * registers none, so a core-only deployment runs every hook point as a no-op.
+ * constructor-injected KB validator. Core code invokes the hooks at fixed
+ * lifecycle points; the modules that OWN the behavior register handlers in the
+ * composition root, right after `createCoreServices` returns. Core registers
+ * none, so a core-only deployment runs every hook point as a no-op.
  *
- * Two hook kinds with deliberately different failure semantics:
+ * Three hook kinds, with deliberately different failure semantics:
  *
  *   - `commitValidation` — ADVISORY. Runs at commit time in `GitService`
  *     (`commit` / `commitFile`), exactly where the injected `IKbValidator`
@@ -18,12 +17,18 @@ import type { ValidationReport } from '@bevel-software/platform-shared';
  *     `runValidation(workspaceId)` shape so `KbValidatorService` registers
  *     with a one-line adapter.
  *
- *   - `preWrite` — BLOCKING. Runs before a gated agent write (file-write
- *     tools) or a write-capable shell command; a hook that throws REJECTS the
- *     operation (the error propagates to the tool caller). This is where the
- *     enterprise ontology-session block registers; core registers nothing, so
- *     core never blocks (touch TRACKING stays core — see
- *     `session-ontology.gate.ts`).
+ *   - `agentRead` — BLOCKING. Runs before a gated agent READ of a
+ *     knowledge-base path (reads, `delete_file`, `delete_folder`, and each
+ *     file a `grep` walk opens). A hook that throws REFUSES the read.
+ *
+ *   - `preWrite` — BLOCKING. Runs before a gated agent WRITE (the file-write
+ *     tools, once per path) or a write-capable shell command, which carries no
+ *     path. A hook that throws REFUSES the operation, and the caller sees the
+ *     hook's own message and status.
+ *
+ * The two blocking hooks are the seam a deployment builds a per-conversation
+ * rule on: they carry the session id the call named, and core itself neither
+ * decides nor records anything (see `workspace/agent-access.gate.ts`).
  */
 
 /** What `GitService` knows at the advisory commit-validation point. */
@@ -47,19 +52,35 @@ export type CommitValidationHook = (
 ) => Promise<ValidationReport | void>;
 
 /**
- * What the pre-write gate knows when it consults the blocking hooks. The core
- * gate has already resolved all skip conditions (boundary flag off, neutral
- * path, non-agent caller, recovery bot, missing session id — see
- * `resolveGatedSession`), so by hook time there is always a session id.
+ * What an agent operation looks like to the blocking hooks. The core gate has
+ * already resolved the only two skips it owns (the caller is not an agent, or
+ * is the recovery bot), so every hook call describes a real agent operation.
+ *
+ * `sessionId` is present only when the call carried one — core does NOT fail
+ * closed on its absence, because whether a path needs a session is the
+ * registering deployment's rule, not core's.
  */
-export type PreWriteContext =
-  /** A path-addressed content write (write_file/edit_file/mkdir/move/copy/unzip…). */
-  | { kind: 'file-write'; sessionId: string; wsPath: string }
-  /** A write-capable operation with no resolvable target path (execute_command). */
-  | { kind: 'shell'; sessionId: string };
+export interface AgentOperationContext {
+  /** The conversation the call belongs to, when it named one. */
+  sessionId?: string;
+  /**
+   * The workspace-relative path the operation targets. Absent for a
+   * write-capable operation with no resolvable target (`execute_command`).
+   */
+  wsPath?: string;
+  /** The branch (draft) whose workspace the operation acts on. */
+  branch: string;
+  /** The calling user. */
+  user: AuthUser;
+  /** Whether the caller is the in-app agent (`internal`) or an external one. */
+  source: 'internal' | 'external';
+}
 
-/** Blocking pre-write hook: throw to reject the write; return to allow. */
-export type PreWriteHook = (ctx: PreWriteContext) => Promise<void>;
+/** Blocking pre-read hook: throw to refuse the read; return to allow. */
+export type AgentReadHook = (ctx: AgentOperationContext) => Promise<void>;
+
+/** Blocking pre-write hook: throw to refuse the write; return to allow. */
+export type PreWriteHook = (ctx: AgentOperationContext) => Promise<void>;
 
 /**
  * The registry instance. ONE per composition (created in
@@ -68,11 +89,17 @@ export type PreWriteHook = (ctx: PreWriteContext) => Promise<void>;
  */
 export class WorkflowHooks {
   private readonly commitValidation: CommitValidationHook[] = [];
+  private readonly agentRead: AgentReadHook[] = [];
   private readonly preWrite: PreWriteHook[] = [];
 
   /** Register an advisory commit-time validation hook. */
   onCommitValidation(hook: CommitValidationHook): void {
     this.commitValidation.push(hook);
+  }
+
+  /** Register a blocking pre-read hook. */
+  onAgentRead(hook: AgentReadHook): void {
+    this.agentRead.push(hook);
   }
 
   /** Register a blocking pre-write hook. */
@@ -89,11 +116,22 @@ export class WorkflowHooks {
   }
 
   /**
-   * Run every blocking pre-write hook in registration order. The first throw
-   * propagates and rejects the write; with no hooks registered (core-only)
+   * Run every blocking pre-read hook in registration order. The first throw
+   * propagates and refuses the read; with no hooks registered (core-only)
    * this resolves immediately.
    */
-  async runPreWrite(ctx: PreWriteContext): Promise<void> {
+  async runAgentRead(ctx: AgentOperationContext): Promise<void> {
+    for (const hook of this.agentRead) {
+      await hook(ctx);
+    }
+  }
+
+  /**
+   * Run every blocking pre-write hook in registration order. The first throw
+   * propagates and refuses the write; with no hooks registered (core-only)
+   * this resolves immediately.
+   */
+  async runPreWrite(ctx: AgentOperationContext): Promise<void> {
     for (const hook of this.preWrite) {
       await hook(ctx);
     }
