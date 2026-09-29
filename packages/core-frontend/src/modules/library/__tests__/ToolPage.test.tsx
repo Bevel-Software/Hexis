@@ -61,7 +61,7 @@ vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolPage } from '../components/tool-page/ToolPage';
 import { NAME_MIN_WIDTH } from '../components/NameWithBadges';
-import { expectMenuAtTheEndOfTheTitleRow } from './title-row-actions';
+import { expectMenuAtTheEndOfTheTitleRow, expectTitleRowSpansTheDocumentColumn } from './title-row-actions';
 import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 
 const GITHUB: ToolSecrets = {
@@ -232,6 +232,20 @@ describe('ToolPage: frame', () => {
     renderPage();
     await screen.findByRole('heading', { name: 'heyreach', level: 1 });
     expectMenuAtTheEndOfTheTitleRow();
+  });
+
+  /**
+   * And the right end is the SAME right end. This page used to wrap itself in
+   * `max-w-3xl` — a 768px article centred inside the layout's 800px line — so
+   * its title row, and the `⋯` at the end of it, stopped 16px short of the
+   * plugin page's at every viewport while every structural assertion above
+   * passed on both pages.
+   */
+  it('runs its title row to the document column, not a narrower one of its own', async () => {
+    const { container } = renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    expectTitleRowSpansTheDocumentColumn();
+    expect(container.querySelector('article')!.className).not.toContain('max-w-');
   });
 
   it('shows no kicker for a legacy ungrouped path either', async () => {

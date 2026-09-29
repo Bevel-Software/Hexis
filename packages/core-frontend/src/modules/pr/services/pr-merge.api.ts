@@ -1,3 +1,4 @@
+import type { ChangeRequestUpdateResult } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 import { handleApiResponse } from '../../git/services/git.api';
 
@@ -42,9 +43,16 @@ export async function mergePullRequest(
  * `change-request-conflicts` error payload (status 409) listing the
  * conflicting paths — the caller catches it via `GitApiError` and
  * routes the agent into the resolution flow.
+ *
+ * Answers the refreshed detail itself, plus `updatedPaths` — which files the
+ * merge changed on the branch. A caller that is already showing the request's
+ * files replaces exactly those, and needs no further detail read: this one was
+ * assembled after the merge, with the carried approvals in it.
  */
-export async function refreshChangeRequestFromTarget(prNumber: number): Promise<unknown> {
-  return handleApiResponse(
+export async function refreshChangeRequestFromTarget(
+  prNumber: number,
+): Promise<ChangeRequestUpdateResult> {
+  return handleApiResponse<ChangeRequestUpdateResult>(
     await authFetch(`/api/workflow/change-requests/${prNumber}/update-from-target`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

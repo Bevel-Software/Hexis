@@ -233,8 +233,23 @@ async function start(
   return `http://127.0.0.1:${(httpServer.address() as { port: number }).port}`;
 }
 
-const post = (url: string, body: unknown = {}) =>
+/** POST a body EXACTLY as given — for the tests about a malformed call. */
+const postRaw = (url: string, body: unknown = {}) =>
   fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer x' }, body: JSON.stringify(body) });
+
+/**
+ * POST a well-formed call. Every KB tool requires `branch` — a call that names
+ * none is refused at the mount with 400 `branch-required` — so this names one
+ * unless the test already did. A test ABOUT the missing input uses `postRaw`,
+ * so the thing under test is never papered over by the helper.
+ */
+const post = (url: string, body: unknown = {}) =>
+  postRaw(
+    url,
+    body !== null && typeof body === 'object' && !Array.isArray(body) && !('branch' in body)
+      ? { branch: 'main', ...body }
+      : body,
+  );
 
 beforeEach(() => {
   /* fresh per test via start() */
@@ -456,7 +471,8 @@ describe('workspace file primitives', () => {
     // named "undefined" — it fails closed with a clear 4xx naming the missing
     // branch context, BEFORE any workspace resolve.
     expect(focusedBranch).toBeUndefined();
-    const res = await post(`${base}/api/agent/tools/execute_command`, { command: 'echo should-not-run' });
+    // `postRaw`: the absent field IS the test here, so the body goes as written.
+    const res = await postRaw(`${base}/api/agent/tools/execute_command`, { command: 'echo should-not-run' });
     expect(res.status).toBe(400);
     expect((await res.json()).error).toMatch(/branch/i);
     // The guard runs before `getOrCreateForBranch`, so no workspace (least of all
@@ -471,7 +487,7 @@ describe('workspace file primitives', () => {
     // against that branch's workspace and returns output end to end (AC2) —
     // rather than failing closed the way a context-less external call does.
     focusedBranch = 'main';
-    const res = (await (await post(`${base}/api/agent/tools/execute_command`, { command: 'echo hello-exec' })).json()) as { stdout: string; exitCode: number };
+    const res = (await (await postRaw(`${base}/api/agent/tools/execute_command`, { command: 'echo hello-exec' })).json()) as { stdout: string; exitCode: number };
     expect(res.exitCode).toBe(0);
     expect(res.stdout).toContain('hello-exec');
     // Resolved against the focused branch — never an "undefined" workspace.
@@ -551,6 +567,20 @@ describe('workspace file primitives', () => {
       expect(res.status, `branch "${literal}" must 400`).toBe(400);
       // The message names the literal, so the agent can see what it actually sent.
       expect((await res.json()).error).toContain(literal);
+    }
+    expect(workspacePathCalls).toEqual([]);
+  });
+
+  it('answers a branch-less call with the same kind every other KB tool uses', async () => {
+    const base = await start();
+    // The MESSAGE here is this tool's own — only `execute_command` has a
+    // focused-branch fallback to explain. The DISCRIMINATOR is shared, so a
+    // client switches on one kind across the whole surface instead of matching
+    // prose per tool.
+    for (const body of [{ command: 'x' }, { branch: '', command: 'x' }, { branch: 'undefined', command: 'x' }]) {
+      const res = await postRaw(`${base}/api/agent/tools/execute_command`, body);
+      expect(res.status).toBe(400);
+      expect((await res.json()).kind).toBe('branch-required');
     }
     expect(workspacePathCalls).toEqual([]);
   });
@@ -2266,6 +2296,8 @@ describe('the tools place an unprefixed path inside the repository', () => {
 describe('folders never vanish', () => {
   const KB = (p: string) => `${KB_DIR}/${p}`;
   const tool = async (base: string, name: string, body: Record<string, unknown>) => {
+    // `post` names the branch every KB tool requires; these tests are about
+    // folders, not about the branch input.
     const res = await post(`${base}/api/agent/tools/${name}`, body);
     return { status: res.status, body: (await res.json()) as Record<string, unknown> };
   };

@@ -94,6 +94,8 @@ function detail(over: Record<string, unknown> = {}) {
     viewerCanCancel: false,
     mergeBaseSha: FORK,
     behind: true,
+    needsUpdate: true,
+    updatedPaths: ['Sales/deal.yaml'],
     viewerCanUpdate: true,
     ...over,
   };
@@ -133,7 +135,7 @@ describe('ChangeRequestDialog: diff from the fork point', () => {
   });
 
   it('a request that is up to date reads its files straight away, against its own fork point', async () => {
-    detailMock.fetchPrDetail.mockResolvedValue(detail({ behind: false }));
+    detailMock.fetchPrDetail.mockResolvedValue(detail({ behind: false, needsUpdate: false }));
     const { container } = render(
       <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />,
     );
@@ -148,9 +150,15 @@ describe('ChangeRequestDialog: diff from the fork point', () => {
 
 describe('ChangeRequestDialog: the files after the request brings itself up to date', () => {
   it("re-reads the open file against the fresh fork point, and still marks only the author's line", async () => {
-    detailMock.fetchPrDetail
-      .mockResolvedValueOnce(detail())
-      .mockResolvedValue(detail({ behind: false, mergeBaseSha: MERGED_FORK }));
+    // The merge moves the fork point, so the file the reader is looking at is
+    // read a second time — against the commit the merge left. The FIRST read,
+    // at the old fork point, is not a mistake: it is what puts the proposal on
+    // screen immediately, and it describes what the author started from
+    // exactly as truthfully until the merge lands.
+    detailMock.fetchPrDetail.mockResolvedValue(detail());
+    mergeApi.refreshChangeRequestFromTarget.mockResolvedValue(
+      detail({ behind: false, needsUpdate: false, mergeBaseSha: MERGED_FORK }),
+    );
     // After the merge the branch carries Bob's line too, and the fork point is
     // the target tip it was merged from.
     filesApi.readFileOnBranch.mockImplementation(async () => 'price: 120\nstatus: signed\n');
@@ -158,36 +166,43 @@ describe('ChangeRequestDialog: the files after the request brings itself up to d
       content: TARGET_TIP,
       forkSha: sha,
     }));
-    mergeApi.refreshChangeRequestFromTarget.mockResolvedValue({});
 
     const { container } = render(
       <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />,
     );
 
     await waitFor(() => expect(mergeApi.refreshChangeRequestFromTarget).toHaveBeenCalledWith(21));
+    await waitFor(() =>
+      expect(filesApi.readFileAtForkPoint).toHaveBeenCalledWith(21, MERGED_FORK, 'Sales/deal.yaml'),
+    );
     await waitFor(() => expect(container.querySelector('ins')).not.toBeNull());
-    expect(detailMock.fetchPrDetail).toHaveBeenLastCalledWith(21, { fresh: true });
-    expect(filesApi.readFileAtForkPoint).toHaveBeenCalledWith(21, MERGED_FORK, 'Sales/deal.yaml');
-    // NEVER against the fork point the update replaced: a read fired before
-    // the merge would diff the proposal against a commit that no longer
-    // describes what the author started from.
-    expect(filesApi.readFileAtForkPoint).not.toHaveBeenCalledWith(21, FORK, 'Sales/deal.yaml');
+    // The update's own answer is the fresh detail; there is no second read.
+    expect(detailMock.fetchPrDetail).toHaveBeenCalledTimes(1);
+    // The proposal is still the author's line alone, read against the fork
+    // point the merge left.
     expect([...container.querySelectorAll('del')].map((n) => n.textContent)).toEqual(['price: 100']);
     expect([...container.querySelectorAll('ins')].map((n) => n.textContent)).toEqual(['price: 120']);
     await waitFor(() => expect(screen.queryByText('Loading…')).not.toBeInTheDocument());
   });
 
-  it('an update that lands but cannot be reloaded says so, and still reads the open file', async () => {
-    detailMock.fetchPrDetail.mockResolvedValueOnce(detail()).mockRejectedValue(new Error('503'));
-    mergeApi.refreshChangeRequestFromTarget.mockResolvedValue({});
-    filesApi.readFileOnBranch.mockImplementation(async () => 'price: 125\nstatus: draft\n');
+  it('shows the file against the OLD fork point before the update lands', async () => {
+    // What the reader gets for free now: the diff, immediately, while the
+    // merge runs behind it.
+    let land: (v: unknown) => void = () => {};
+    mergeApi.refreshChangeRequestFromTarget.mockImplementation(
+      () => new Promise((resolve) => (land = resolve)),
+    );
+    detailMock.fetchPrDetail.mockResolvedValue(detail());
+
     const { container } = render(
       <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />,
     );
 
-    expect(
-      await screen.findByText(/Updated, but couldn't reload this change request/),
-    ).toBeInTheDocument();
-    await waitFor(() => expect(container.querySelector('ins')?.textContent).toBe('price: 125'));
+    await waitFor(() => expect(container.querySelector('ins')?.textContent).toBe('price: 120'));
+    expect(filesApi.readFileAtForkPoint).toHaveBeenCalledWith(21, FORK, 'Sales/deal.yaml');
+    land(detail({ behind: false, needsUpdate: false, mergeBaseSha: MERGED_FORK }));
+    await waitFor(() =>
+      expect(filesApi.readFileAtForkPoint).toHaveBeenCalledWith(21, MERGED_FORK, 'Sales/deal.yaml'),
+    );
   });
 });

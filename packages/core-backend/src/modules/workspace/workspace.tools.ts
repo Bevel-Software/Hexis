@@ -18,6 +18,7 @@ import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import { assertBranchProvided } from '../../shared/domain-errors.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a workflow service, so this stays inside the module boundary.
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
@@ -1171,6 +1172,15 @@ export function registerWorkspaceTools(
     proposable?: boolean;
     /** False for a tool that is not a file tool (the shell), which the content rule does not describe. */
     fileTool?: boolean;
+    /**
+     * This tool resolves `branch` ITSELF and must not be pre-checked here.
+     * Only `execute_command` sets it: for an internal session that leaves the
+     * argument off, it falls back to the caller's own focused branch (from its
+     * signed token) rather than refusing. It still answers the same
+     * `branch-required` kind when there is nothing to fall back on — see its
+     * handler. Every other tool takes the check below.
+     */
+    resolvesBranchItself?: boolean;
     handler: ToolHandler;
   }): void => {
     const path = `/api/agent/tools/${spec.name}`;
@@ -1178,6 +1188,12 @@ export function registerWorkspaceTools(
     // tool the one content rule, and every tool a permission can refuse the
     // proposal route — appended once here so no tool (especially the
     // read-only ones a session hits first) can miss them.
+    // Whether a call to this tool MUST name a branch, read off the tool's own
+    // declaration rather than assumed of the family. Every tool mounted here
+    // requires `branch` today; keying on the schema means a tool that declares
+    // it optional (and resolves absence itself, as `list_tool_setup` does on its
+    // own route) is not handed a refusal it never asked for.
+    const requiresBranch = ((spec.inputs as { required?: string[] }).required ?? []).includes('branch');
     const describe = (): string =>
       (typeof spec.description === 'function' ? spec.description() : spec.description) +
       (spec.proposable ? PROPOSAL_ROUTE_NOTE : '') +
@@ -1223,6 +1239,16 @@ export function registerWorkspaceTools(
       // never reached the repository — the whole bug, spelled with a prefix.
       toolHandler(
         async (args, ctx) => {
+          // FIRST, before the path work and before any handler: every tool
+          // mounted here declares `branch` as a required, non-empty string, and
+          // nothing enforced that, so a call that named none was carried down
+          // until `workspaceIdForBranch` made a workspace directory out of the
+          // missing value. Most of these tools would meet the same refusal one
+          // layer down at `getFilesystem`, but not all of them do — `unzip`
+          // hands `branch` straight to the workspace service by id — so the
+          // check belongs on the mount every one of them shares rather than on
+          // the resolver only some of them reach.
+          if (requiresBranch && !spec.resolvesBranchItself) assertBranchProvided(args.branch);
           // BEFORE the normaliser: see `assertToolPathsNotGitInternals`.
           if (spec.fileTool !== false) await assertToolPathsNotGitInternals(args, ctx);
           const normalized = normalizePathArgs(
@@ -2594,6 +2620,9 @@ export function registerWorkspaceTools(
       ONTOLOGY_BOUNDARY_NOTE,
     internalOnly: true,
     fileTool: false,
+    // The one tool the mount's branch check skips: the handler below resolves an
+    // omitted `branch` to the internal caller's focused branch before refusing.
+    resolvesBranchItself: true,
     inputs: {
       type: 'object',
       properties: {
@@ -2650,6 +2679,11 @@ export function registerWorkspaceTools(
         throw new ToolError(
           'execute_command requires a `branch`: pass the branch (draft) whose workspace to run the command in — the one you are currently working on.',
           400,
+          // The same discriminator every other KB tool answers a branch-less
+          // call with, so a client switches on one kind across the surface.
+          // The MESSAGE stays this tool's own: it can name the focused-branch
+          // fallback that only applies here.
+          { kind: 'branch-required' },
         );
       }
       // A stringified absent value. Both are syntactically valid git branch names,
@@ -2662,6 +2696,7 @@ export function registerWorkspaceTools(
           `execute_command got the literal string "${branch}" as \`branch\` — that is a stringified absent value, not a branch. ` +
             'Pass the real branch (draft) whose workspace to run the command in.',
           400,
+          { kind: 'branch-required' },
         );
       }
       // Then the SHAPE, via the one canonical validator every other branch path
