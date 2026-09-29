@@ -277,10 +277,36 @@ export interface PullRequestDetail extends PullRequestSummary {
    */
   mergeBaseSha: string | null;
   /**
-   * True iff the target holds commits the proposal does not contain — the
-   * request needs updating. False for anything not open.
+   * True iff the target holds commits the proposal does not contain. False
+   * for anything not open.
+   *
+   * This is the honest git fact and nothing more — it says the two branches
+   * have diverged, NOT that anything about this request has gone stale. On a
+   * knowledge base where every shared save commits to the default branch,
+   * it is true again minutes after any update. What the dialog acts on is
+   * `needsUpdate`.
    */
   behind: boolean;
+  /**
+   * True iff the request is `behind` AND at least one of the files it
+   * changes was also changed on the target since the fork point — the only
+   * case where the proposal's diff describes text that has moved under it,
+   * and so the only case worth merging the target in for.
+   *
+   * A target that moved in files this request does not contain leaves the
+   * request's diff exactly as true as it was: every "before" side is read at
+   * the fork point, and the apply merges against the latest target whether an
+   * update ran or not. So a request that is `behind` but not `needsUpdate`
+   * opens straight to its files.
+   *
+   * Rename-safe in the conservative direction: the target's change list is
+   * computed without rename detection, so a file the target renamed appears
+   * under both names and a request holding either name counts as affected.
+   * False whenever `behind` is false, and true (with `behind`) when the two
+   * branches share no history at all — there is no fork point to intersect
+   * against, so nothing may be assumed unaffected.
+   */
+  needsUpdate: boolean;
   /**
    * True iff the viewer may Update the request (merge its target into it):
    * the request is open AND the viewer is its author or may apply it. A UX

@@ -278,9 +278,149 @@ describe('registerWorkflowTools', () => {
     expect(calls.filter((c) => c[0] === 'createBranch')).toHaveLength(0);
   });
 
+  /**
+   * These tools address their workspace by ID — `workspaceIdForBranch(branch)`
+   * straight from the argument — so they never pass the `getFilesystem` choke
+   * point that guards the file tools. A branch-less call used to commit to a
+   * workspace id that was literally the string "undefined" — and `create_branch`
+   * used to fork from one, cloning a branch of that name and answering "There is
+   * no branch named undefined." The guard sits on the mount and is keyed on
+   * whether the tool's declared inputs REQUIRE `branch`, so it covers the
+   * injected input and a tool's own alike, without any of them remembering it.
+   */
+  describe('a branch-less call to a tool that declares `branch`', () => {
+    /**
+     * Every tool whose DECLARED inputs require `branch`, read off the mounted
+     * registry — not a list written by hand. The hand-written list is how the
+     * gap that failed Local Testing stayed invisible: it named the three tools
+     * that take the injected input and missed `create_branch`, whose `branch`
+     * is its own (the fork base) and is just as required. Anything mounted
+     * later is swept in without this file being touched.
+     */
+    const branchTakingTools = async (): Promise<string[]> =>
+      (await registryRef!.listInternal())
+        .filter((t) => {
+          const body = (t.inputs as { properties?: { body?: { required?: string[] } } }).properties?.body;
+          return (body?.required ?? []).includes('branch');
+        })
+        .map((t) => t.name);
+
+    // The inputs each tool needs BESIDES `branch`, so the only thing wrong with
+    // every call below is the missing branch.
+    const bodyFor = (tool: string): Record<string, unknown> =>
+      ({
+        commit_change: { summary: 's' },
+        save_file: { path: 'KnowledgeBase/x.md', content: 'c' },
+        create_branch: { name: 'alice/new-draft' },
+        write_file: { path: 'KnowledgeBase/x.md', content: 'c' },
+      })[tool] ?? {};
+
+    it('400s branch-required on every mounted tool that declares `branch`, and acts on nothing', async () => {
+      const base = await start();
+      const tools = await branchTakingTools();
+      // Both kinds are in here: the injected input and a tool's own required
+      // `branch`. `create_branch` is the one the reported bug survived on.
+      expect(tools).toContain('commit_change');
+      expect(tools).toContain('create_branch');
+      expect(tools).toContain('switch_branch');
+
+      for (const tool of tools) {
+        const res = await post(`${base}/api/agent/tools/${tool}`, writeTok(), bodyFor(tool));
+
+        expect(res.status, `${tool} must 400 on a branch-less call`).toBe(400);
+        expect(await res.json(), `${tool} must answer the shared refusal`).toEqual({
+          kind: 'branch-required',
+          error: '`branch` is required: pass the branch (draft) you are working on.',
+        });
+      }
+      // No workflow call was made at all — least of all one naming a workspace
+      // id built out of the missing value, or a branch forked from it.
+      expect(calls).toEqual([]);
+    });
+
+    /**
+     * The exact shapes Local Testing drove over MCP against `create_branch`:
+     * a missing branch answered 404 `There is no branch named undefined.`
+     * (a clone of that "branch" was attempted), an empty one 500 'Invalid
+     * workspace ID', and `["main"]` — which `encodeURIComponent` stringifies
+     * straight back to `main` — answered 200 and really created and pushed a
+     * branch off the default. All four are one refusal now.
+     */
+    it('refuses every absent shape on create_branch, and forks from nothing', async () => {
+      const base = await start();
+      const absent: Array<[string, Record<string, unknown>]> = [
+        ['missing', { name: 'alice/new-draft' }],
+        ['empty', { name: 'alice/new-draft', branch: '' }],
+        ['null', { name: 'alice/new-draft', branch: null }],
+        ['a number', { name: 'alice/new-draft', branch: 42 }],
+        ['an array (stringifies to a real branch name)', { name: 'alice/new-draft', branch: ['main'] }],
+        ['the literal "undefined"', { name: 'alice/new-draft', branch: 'undefined' }],
+        ['the literal "null"', { name: 'alice/new-draft', branch: 'null' }],
+      ];
+
+      for (const [label, body] of absent) {
+        const res = await post(`${base}/api/agent/tools/create_branch`, writeTok(), body);
+        expect(res.status, `branch ${label} must 400`).toBe(400);
+        const answered = await res.json();
+        expect(answered.kind, `branch ${label} must answer branch-required`).toBe('branch-required');
+        expect(JSON.stringify(answered), `branch ${label} must not echo an absent value`).not.toContain('undefined');
+      }
+      // Nothing was forked, from any workspace id.
+      expect(calls).toEqual([]);
+    });
+
+    /**
+     * `create_branch` compares `branch` (the fork base) to `name` and refuses
+     * the two being equal, QUOTING the name. A call that sent neither compared
+     * undefined to undefined, matched, and answered "not 'undefined', the draft
+     * being created" — an absent value presented as a draft name. `name` is
+     * refused by name instead, so no such sentence can be produced.
+     */
+    it('refuses a missing `name` without quoting it back', async () => {
+      const base = await start();
+
+      const res = await post(`${base}/api/agent/tools/create_branch`, writeTok(), { branch: 'main' });
+
+      expect(res.status).toBe(400);
+      const answered = await res.json();
+      expect(answered).toEqual({ kind: 'name-required', error: '`name` is required: pass the name of the draft to create.' });
+      expect(JSON.stringify(answered)).not.toContain('undefined');
+      expect(calls).toEqual([]);
+    });
+
+    it('still forks from a named base once both inputs are given', async () => {
+      const base = await start();
+      // The guards refuse absent inputs, not the tool.
+      const res = await post(`${base}/api/agent/tools/create_branch`, writeTok(), { name: 'alice/new-draft', branch: 'main' });
+
+      expect(res.status).toBe(200);
+      expect(calls).toContainEqual(['createBranch', 'main', 'alice/new-draft']);
+    });
+
+    it('refuses the stringified absent values the same way', async () => {
+      const base = await start();
+      for (const literal of ['undefined', 'null']) {
+        const res = await post(`${base}/api/agent/tools/commit_change`, writeTok(), { summary: 's', branch: literal });
+        expect(res.status, `branch "${literal}" must 400`).toBe(400);
+        expect((await res.json()).kind).toBe('branch-required');
+      }
+      expect(calls).toEqual([]);
+    });
+
+    it('leaves a tool that declares no `branch` alone', async () => {
+      const base = await start();
+      // `list_branches` is repo-global and deliberately takes no branch: the
+      // guard must not start demanding one from the tools that opted out.
+      expect((await post(`${base}/api/agent/tools/list_branches`, writeTok(), {})).status).toBe(200);
+    });
+  });
+
   it('works under a connection key too (both surface)', async () => {
     const base = await start();
-    expect((await post(`${base}/api/agent/tools/commit_change`, 'bevel_key', { summary: 's' })).status).toBe(200);
+    // `branch` is named because every caller must name it — this test is about
+    // the connection-key SURFACE, and an external key is precisely the caller
+    // that carries no focused branch to fall back on.
+    expect((await post(`${base}/api/agent/tools/commit_change`, 'bevel_key', { summary: 's', branch: WS })).status).toBe(200);
   });
 
   it('switch_branch validates + pre-warms + emits a user-scoped event (internal-only)', async () => {

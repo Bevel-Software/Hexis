@@ -124,6 +124,22 @@ export type AcquireLockResult =
  */
 export type ChangeRequest = PullRequestSummary;
 export type ChangeRequestDetail = PullRequestDetail;
+/**
+ * What an Update hands back: the refreshed detail, plus the repo-relative
+ * paths the merge actually changed on the request's branch.
+ *
+ * The dialog runs its update behind the files it is already showing, so when
+ * the update lands it has to replace file content it has read. `updatedPaths`
+ * is which — git's own two-dot diff between the branch head before the merge
+ * and after it, the same list the approvals carry-forward is decided on. A
+ * client that forgot everything instead would re-read every file in the
+ * request to replace the one or two the merge touched, and blank the pane the
+ * reader is mid-sentence in.
+ *
+ * Empty when the merge changed nothing on the branch — including the case
+ * where there was nothing to merge.
+ */
+export type ChangeRequestUpdateResult = ChangeRequestDetail & { updatedPaths: string[] };
 export type ChangeRequestState = PullRequestState;
 export type ChangedFile = PullRequestFile;
 

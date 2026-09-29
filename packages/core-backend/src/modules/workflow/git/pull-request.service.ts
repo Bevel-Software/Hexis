@@ -366,6 +366,60 @@ export class PullRequestService implements IPullRequestService {
     return this.summaryOf(row, workspaceId);
   }
 
+  /**
+   * Did the target change, since the fork point, any file this request also
+   * changes? The question behind `needsUpdate`.
+   *
+   * The intersection is taken over BOTH names of every rename on both sides,
+   * because a wrong "no" is the expensive answer: it would open a request on
+   * a diff read against text that has since moved, with Approve live. So
+   * `pathsChangedBetween` runs without rename detection (a rename on the
+   * TARGET reports the path it left as well as the one it arrived at), and
+   * the request's own side contributes each file's `previousPath` alongside
+   * its `path`.
+   *
+   * Answers true without asking git in the two cases where nothing may be
+   * assumed: no fork point (the branches share no history, so there is no
+   * range to diff) and a failed diff (an infra error must not read as "this
+   * request is fine"). Answers false without asking git when the request is
+   * not behind at all, or changes no files — the common case, and the one
+   * that must stay free.
+   */
+  private async targetTouchesRequestFiles(
+    workspaceId: string,
+    forkPoint: { mergeBaseSha: string | null; behind: boolean },
+    baseSha: string,
+    files: PullRequestFile[],
+  ): Promise<boolean> {
+    if (!forkPoint.behind) return false;
+    if (files.length === 0) return false;
+    // Diverged with no common ancestor: the target's whole history is
+    // "changed since the fork point", so anything this request touches is
+    // touched. Nothing to intersect against, and nothing to skip for.
+    if (!forkPoint.mergeBaseSha) return true;
+    const requestPaths = new Set<string>();
+    for (const f of files) {
+      requestPaths.add(f.path);
+      if (f.previousPath) requestPaths.add(f.previousPath);
+    }
+    try {
+      const onTarget = await this.gitService.pathsChangedBetween(
+        workspaceId,
+        forkPoint.mergeBaseSha,
+        // The target tip the WHOLE detail is pinned to, so this range ends
+        // exactly where `behind` and the file list were computed.
+        baseSha,
+      );
+      return onTarget.some((path) => requestPaths.has(path));
+    } catch (err) {
+      log.warn(
+        'could not compare the target against a change request\'s files; treating it as needing an update',
+        { err },
+      );
+      return true;
+    }
+  }
+
   async getPrDetail(
     prNumber: number,
     opts: { fresh?: boolean; workspaceId?: string; viewerEmail?: string; patches?: boolean } = {},
@@ -392,6 +446,8 @@ export class PullRequestService implements IPullRequestService {
       mergeBaseSha: null,
       behind: false,
     };
+    /** Did the target change, since the fork point, a file this request changes? */
+    let targetChangedShared = false;
     if (workspaceId) {
       const shas = await this.gitService.resolvePrShas(
         workspaceId,
@@ -417,6 +473,17 @@ export class PullRequestService implements IPullRequestService {
       // Pinned to the same two commits as the file list, so "needs updating"
       // and the diff it qualifies can never describe different heads.
       forkPoint = await this.gitService.forkPointForPr(workspaceId, { baseSha, headSha });
+      // Only a target that moved in a file THIS request also changes makes the
+      // proposal's diff describe text that has moved. One extra
+      // `diff --name-only` (and only when the branches have diverged at all)
+      // buys the difference between opening instantly and paying for a merge,
+      // a push and a second detail read.
+      targetChangedShared = await this.targetTouchesRequestFiles(
+        workspaceId,
+        forkPoint,
+        baseSha,
+        files,
+      );
     }
 
     // Validated cache hit: TTL fresh AND head SHA unchanged since we cached.
@@ -542,6 +609,9 @@ export class PullRequestService implements IPullRequestService {
       viewerCanCancel,
       mergeBaseSha: forkPoint.mergeBaseSha,
       behind: summary.state === 'open' && forkPoint.behind,
+      // `behind` AND the divergence actually reaches this request's files.
+      // Both halves, in this order, so a closed request is never either.
+      needsUpdate: summary.state === 'open' && forkPoint.behind && targetChangedShared,
       viewerCanUpdate,
       viewerIsAuthor,
       viewerCanDelete,

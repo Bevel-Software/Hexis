@@ -45,17 +45,26 @@ function detail(overrides: Partial<PullRequestDetail> = {}): PullRequestDetail {
     branch: 'alice/deal',
     base: 'current-company-state',
     behind: true,
+    needsUpdate: true,
     viewerCanUpdate: true,
     headSha: HEAD,
     mergeBaseSha: 'c'.repeat(40),
+    // The pre-flight read asks for no patches, but it still names the files —
+    // which is what the fallback for a failed diff answers with.
+    files: [{ path: 'Sales/Deal.md' }],
     ...overrides,
-  } as PullRequestDetail;
+  } as unknown as PullRequestDetail;
 }
 
 function harness(opts: {
   first?: PullRequestDetail | null;
   /** The published head of the proposal branch as resolved just before the merge. */
   publishedHead?: string;
+  /**
+   * The published head AFTER the merge. Defaults to the merge commit; set it
+   * equal to the pre-merge head to describe a merge that moved nothing.
+   */
+  headAfterMerge?: string;
   resolveError?: Error;
   merge?: { kind: 'clean'; alreadyUpToDate: boolean } | { kind: 'conflicts'; paths: string[] };
   pullError?: Error;
@@ -64,31 +73,42 @@ function harness(opts: {
   changedPathsError?: Error;
   /** How many approval rows the carry-forward wrote. */
   carried?: number;
-  /** The detail the extra read after a carry-forward answers with. */
-  withApprovals?: PullRequestDetail;
+  /** Does the clone hold commits origin has not seen? */
+  unpushed?: boolean;
+  unpushedError?: Error;
 }) {
+  // Two resolves per update: once after the pull (where the branch IS), once
+  // after the merge (where it ended up). One mock that answers in order, so a
+  // test can describe a head that moved without stubbing call indices.
+  const preMergeHead = opts.publishedHead ?? HEAD;
+  const postMergeHead = opts.headAfterMerge ?? MERGED_HEAD;
+  const resolvePrShas = opts.resolveError
+    ? vi.fn().mockRejectedValue(opts.resolveError)
+    : vi
+        .fn()
+        .mockResolvedValueOnce({ baseSha: 'b'.repeat(40), headSha: preMergeHead })
+        .mockResolvedValue({ baseSha: 'b'.repeat(40), headSha: postMergeHead });
   const git = {
     pull: opts.pullError
       ? vi.fn().mockRejectedValue(opts.pullError)
       : vi.fn().mockResolvedValue({ treeChanged: false }),
     mergeFromOrigin: vi.fn().mockResolvedValue(opts.merge ?? { kind: 'clean', alreadyUpToDate: false }),
     push: vi.fn().mockResolvedValue(undefined),
+    hasUnpushedCommits: opts.unpushedError
+      ? vi.fn().mockRejectedValue(opts.unpushedError)
+      : vi.fn().mockResolvedValue(opts.unpushed ?? true),
     pathsChangedBetween: opts.changedPathsError
       ? vi.fn().mockRejectedValue(opts.changedPathsError)
       : vi.fn().mockResolvedValue(opts.changedPaths ?? []),
-    resolvePrShas: opts.resolveError
-      ? vi.fn().mockRejectedValue(opts.resolveError)
-      : vi.fn().mockResolvedValue({
-          baseSha: 'b'.repeat(40),
-          headSha: opts.publishedHead ?? HEAD,
-        }),
+    resolvePrShas,
   };
-  const refreshed = detail({ behind: false, headSha: MERGED_HEAD });
+  const refreshed = detail({ behind: false, needsUpdate: false, headSha: postMergeHead });
+  // Exactly two reads per update: the pre-flight (authority, branch names)
+  // and the one that goes back. A third would be the cost this ticket removed.
   const getPrDetail = vi
     .fn()
     .mockResolvedValueOnce(opts.first === undefined ? detail() : opts.first)
-    .mockResolvedValueOnce(refreshed)
-    .mockResolvedValue(opts.withApprovals ?? refreshed);
+    .mockResolvedValue(refreshed);
   const prs = { getPrDetail, invalidateDetailCache: vi.fn() };
   const pendingCommits = { enqueueIfAbsent: vi.fn().mockResolvedValue(true) };
   const reviewWorkflow = {
@@ -111,19 +131,47 @@ function harness(opts: {
 
 describe('WorkflowService.updateFromTarget', () => {
   it('merges the target into the proposal, pushes, and returns the refreshed detail', async () => {
-    const h = harness({});
-    await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toBe(h.refreshed);
+    const h = harness({ changedPaths: ['Sales/Deal.md'] });
+    await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toEqual({
+      ...h.refreshed,
+      updatedPaths: ['Sales/Deal.md'],
+    });
 
-    // The permission read is computed for THIS caller.
+    // The permission read is computed for THIS caller — and asks for no
+    // patches: all it decides is authority, state and the two branch names.
     expect(h.prs.getPrDetail).toHaveBeenNthCalledWith(1, 7, {
       fresh: true,
       workspaceId: WS,
       viewerEmail: USER.email,
+      patches: false,
     });
     expect(h.git.mergeFromOrigin).toHaveBeenCalledWith(WS, 'alice/deal', 'current-company-state', USER);
     expect(h.git.push).toHaveBeenCalledWith(WS, USER);
     expect(h.prs.invalidateDetailCache).toHaveBeenCalledWith(7);
     expect(h.refreshed.behind).toBe(false);
+  });
+
+  it('costs ONE detail read after the merge', async () => {
+    // The whole point of the ticket on the server side. Two reads total: the
+    // pre-flight that decides authority, and the one that goes back. The
+    // carry-forward runs BEFORE that second read rather than correcting it
+    // with a third.
+    const h = harness({ changedPaths: ['Sales/Deal.md'], carried: 2 });
+    await h.svc.updateFromTarget(WS, USER, 7);
+    expect(h.prs.getPrDetail).toHaveBeenCalledTimes(2);
+    const carriedAt = h.reviewWorkflow.carryApprovalsForward.mock.invocationCallOrder[0];
+    const lastReadAt = h.prs.getPrDetail.mock.invocationCallOrder[1];
+    expect(carriedAt).toBeLessThan(lastReadAt);
+  });
+
+  it('replays the pull with --rebase-merges, so an unpushed merge stays a merge', async () => {
+    // A plain rebase flattens a merge commit origin has not seen into
+    // cherry-picks of the target's commits, which drops the target as a
+    // parent — and the request never contains the target's head however many
+    // times the update runs.
+    const h = harness({});
+    await h.svc.updateFromTarget(WS, USER, 7);
+    expect(h.git.pull).toHaveBeenCalledWith(WS, { preserveMerges: true });
   });
 
   it('refuses a viewer who is neither the author nor able to apply — nothing is merged', async () => {
@@ -157,11 +205,52 @@ describe('WorkflowService.updateFromTarget', () => {
     expect(h.git.push).not.toHaveBeenCalled();
   });
 
-  it('an already up-to-date merge pushes nothing but still returns the refreshed detail', async () => {
-    const h = harness({ merge: { kind: 'clean', alreadyUpToDate: true } });
-    await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toBe(h.refreshed);
+  it('an already up-to-date merge with nothing unpushed pushes nothing', async () => {
+    const h = harness({
+      merge: { kind: 'clean', alreadyUpToDate: true },
+      unpushed: false,
+      headAfterMerge: HEAD,
+    });
+    await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toEqual({
+      ...h.refreshed,
+      updatedPaths: [],
+    });
     expect(h.git.push).not.toHaveBeenCalled();
     expect(h.prs.invalidateDetailCache).toHaveBeenCalledWith(7);
+  });
+
+  it('retries a push that failed last time, even though this merge has nothing to do', async () => {
+    // The loop this ticket closes. An earlier update merged the target in and
+    // its push failed, so the merge is sitting in the clone. This update's
+    // merge is therefore ALREADY up to date — and the old gate, which pushed
+    // only when the merge authored a commit, skipped the push and left the
+    // request behind on the remote for the next open to find.
+    const h = harness({
+      merge: { kind: 'clean', alreadyUpToDate: true },
+      unpushed: true,
+      publishedHead: HEAD,
+      headAfterMerge: MERGED_HEAD,
+      changedPaths: ['Sales/Deal.md'],
+    });
+    await h.svc.updateFromTarget(WS, USER, 7);
+    expect(h.git.hasUnpushedCommits).toHaveBeenCalledWith(WS);
+    expect(h.git.push).toHaveBeenCalledWith(WS, USER);
+  });
+
+  it('falls back to "did this merge author a commit" when git cannot say what is unpushed', async () => {
+    // Never "push anyway": a push on a clone with nothing to push is a wasted
+    // round trip on every update.
+    const clean = harness({ unpushedError: new Error('git exploded') });
+    await clean.svc.updateFromTarget(WS, USER, 7);
+    expect(clean.git.push).toHaveBeenCalledWith(WS, USER);
+
+    const nothingToDo = harness({
+      unpushedError: new Error('git exploded'),
+      merge: { kind: 'clean', alreadyUpToDate: true },
+      headAfterMerge: HEAD,
+    });
+    await nothingToDo.svc.updateFromTarget(WS, USER, 7);
+    expect(nothingToDo.git.push).not.toHaveBeenCalled();
   });
 
   it('a rebase conflict refreshing the checkout queues recovery for the saves, then refuses', async () => {
@@ -183,15 +272,13 @@ describe('WorkflowService.updateFromTarget', () => {
 });
 
 describe('WorkflowService.updateFromTarget: the approvals the merge did not touch', () => {
-  it('carries them onto the new head, and re-reads the detail so the gate sees them', async () => {
-    const withApprovals = detail({ behind: false, headSha: MERGED_HEAD, mergeableInBevel: true });
-    const h = harness({
-      changedPaths: ['Sales/Deal.md'],
-      carried: 2,
-      withApprovals,
-    });
+  it('carries them onto the new head, before the one detail read that goes back', async () => {
+    const h = harness({ changedPaths: ['Sales/Deal.md'], carried: 2 });
 
-    await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toBe(withApprovals);
+    await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toEqual({
+      ...h.refreshed,
+      updatedPaths: ['Sales/Deal.md'],
+    });
 
     // What moved is git's answer between the two heads — never a guess, and
     // never the request's own three-dot diff against the target.
@@ -202,23 +289,33 @@ describe('WorkflowService.updateFromTarget: the approvals the merge did not touc
       MERGED_HEAD,
       ['Sales/Deal.md'],
     );
-    // The first refreshed detail was assembled before the rows existed, so it
-    // is not the one that goes back.
-    expect(h.prs.getPrDetail).toHaveBeenCalledTimes(3);
   });
 
-  it('does not re-read the detail when nothing carried', async () => {
-    const h = harness({ changedPaths: ['Sales/Deal.md'], carried: 0 });
-    await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toBe(h.refreshed);
-    expect(h.reviewWorkflow.carryApprovalsForward).toHaveBeenCalledTimes(1);
-    expect(h.prs.getPrDetail).toHaveBeenCalledTimes(2);
+  it('answers the same list as updatedPaths — carried and re-read cannot disagree', async () => {
+    // A file whose approval was carried (so: untouched by the merge) that the
+    // dialog then re-read would be the dialog discarding content the server
+    // just called unchanged.
+    const h = harness({ changedPaths: ['Sales/Deal.md', 'Sales/Terms.md'], carried: 1 });
+    const result = await h.svc.updateFromTarget(WS, USER, 7);
+    expect(result.updatedPaths).toEqual(['Sales/Deal.md', 'Sales/Terms.md']);
+    expect(h.reviewWorkflow.carryApprovalsForward).toHaveBeenCalledWith(
+      7,
+      HEAD,
+      MERGED_HEAD,
+      result.updatedPaths,
+    );
   });
 
-  it('touches nothing when the merge had nothing to do', async () => {
-    const h = harness({ merge: { kind: 'clean', alreadyUpToDate: true } });
-    await h.svc.updateFromTarget(WS, USER, 7);
+  it('touches nothing when the head did not move', async () => {
+    const h = harness({
+      merge: { kind: 'clean', alreadyUpToDate: true },
+      unpushed: false,
+      headAfterMerge: HEAD,
+    });
+    const result = await h.svc.updateFromTarget(WS, USER, 7);
     expect(h.git.pathsChangedBetween).not.toHaveBeenCalled();
     expect(h.reviewWorkflow.carryApprovalsForward).not.toHaveBeenCalled();
+    expect(result.updatedPaths).toEqual([]);
   });
 
   it('touches nothing when the merge conflicted — the rows describe a head that still stands', async () => {
@@ -250,10 +347,12 @@ describe('WorkflowService.updateFromTarget: the approvals the merge did not touc
   it('falls back to the head the detail reported when that head cannot be resolved', async () => {
     // Bookkeeping never costs the update: an unresolvable ref leaves the
     // carry-forward working off the detail's head, exactly as it did before.
+    // Both resolves fail, so the head reads as unmoved from the detail's own
+    // — there is no pair of shas to diff, and the update still lands.
     const h = harness({ resolveError: new Error('no such ref'), carried: 1 });
     await h.svc.updateFromTarget(WS, USER, 7);
     expect(h.git.push).toHaveBeenCalledWith(WS, USER);
-    expect(h.reviewWorkflow.carryApprovalsForward).toHaveBeenCalledWith(7, HEAD, MERGED_HEAD, []);
+    expect(h.reviewWorkflow.carryApprovalsForward).not.toHaveBeenCalled();
   });
 
   it('carries nothing when there is no head to compare at all', async () => {
@@ -266,7 +365,10 @@ describe('WorkflowService.updateFromTarget: the approvals the merge did not touc
       resolveError: new Error('no such ref'),
       carried: 1,
     });
-    await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toBe(h.refreshed);
+    await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toEqual({
+      ...h.refreshed,
+      updatedPaths: [],
+    });
     expect(h.git.push).toHaveBeenCalledWith(WS, USER);
     expect(h.git.pathsChangedBetween).not.toHaveBeenCalled();
     expect(h.reviewWorkflow.carryApprovalsForward).not.toHaveBeenCalled();
@@ -276,7 +378,11 @@ describe('WorkflowService.updateFromTarget: the approvals the merge did not touc
     // A request that IS up to date is worth more than the carry-forward: the
     // approvals simply go stale, exactly as they did before this existed.
     const h = harness({ changedPathsError: new Error('git exploded') });
-    await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toBe(h.refreshed);
+    const result = await h.svc.updateFromTarget(WS, USER, 7);
+    expect(result).toMatchObject({ number: 7, behind: false });
     expect(h.reviewWorkflow.carryApprovalsForward).not.toHaveBeenCalled();
+    // Which files moved is unknown, so every file the request had is named:
+    // slow beats a dialog that goes on presenting pre-merge text as current.
+    expect(result.updatedPaths).toEqual(['Sales/Deal.md']);
   });
 });
