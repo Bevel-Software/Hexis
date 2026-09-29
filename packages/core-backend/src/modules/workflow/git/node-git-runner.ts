@@ -250,6 +250,12 @@ export class NodeGitRunner implements IGitRunner {
     const timers: NodeJS.Timeout[] = [];
     let timedOut = false;
 
+    // A credential that expires is renewed before it is read. Renewing is
+    // the credential's own business and its failure is not this call's:
+    // plenty of git never leaves the disk, and a call that does is told by
+    // the host what the token in hand is worth.
+    await this.credentials.prepare?.().catch(() => undefined);
+
     try {
       const { promise: pending, child } = spawnGit(args, {
         cwd,
