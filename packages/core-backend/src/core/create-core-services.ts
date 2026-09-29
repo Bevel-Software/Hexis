@@ -486,6 +486,10 @@ export async function createCoreServices(
     // the first thing that needs them.
     kbRepoUrl: () => settings.resolve('kbRepoUrl'),
     workspacesRoot: config.workspacesRoot,
+    // Under the backups root, a persistent volume of its own and one nothing
+    // sweeps: a working copy of a repository that was replaced is kept there,
+    // never deleted (see the runner's `reconcileClonesWithConfiguredRepository`).
+    setAsideRoot: path.join(config.backupsRoot, 'replaced-working-copies'),
     kbDirName,
     templateDir: config.kbTemplateDir,
     defaultBranch: () => kb.defaultBranch,
