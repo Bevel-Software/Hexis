@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   fetchGitHubApp: vi.fn(),
   fetchGitHubRepositories: vi.fn(),
   startGitHubAppRegistration: vi.fn(),
+  startGitHubAppInstallation: vi.fn(),
 }));
 vi.mock('../services/setup.api', async () => {
   const actual = await vi.importActual<typeof import('../services/setup.api')>('../services/setup.api');
@@ -161,13 +162,42 @@ describe('the three steps of connecting GitHub', () => {
     expect(screen.getByRole('button', { name: 'Create the GitHub App' })).toBeEnabled();
   });
 
-  it('goes on to installing an app that exists, by a link that leaves the page', async () => {
+  it('goes on to installing an app that exists, asking where on GitHub before it sends the browser there', async () => {
     api.fetchGitHubApp.mockResolvedValue(REGISTERED);
+    api.startGitHubAppInstallation.mockResolvedValue('https://github.com/apps/hexis-acme/installations/new?state=abc');
+    const assign = vi.fn();
+    standAt();
+    Object.assign(window.location, { assign });
     show();
     await openGitHub();
-    expect(await screen.findByRole('link', { name: 'Install the app on GitHub' })).toHaveAttribute('href', '/api/setup/github-app/install');
+    await userEvent.click(await screen.findByRole('button', { name: 'Install the app on GitHub' }));
+    await waitFor(() => expect(assign).toHaveBeenCalledWith('https://github.com/apps/hexis-acme/installations/new?state=abc'));
     expect(screen.queryByRole('button', { name: 'Create the GitHub App' })).toBeNull();
     expect(api.fetchGitHubRepositories).not.toHaveBeenCalled();
+    expect(api.saveSettings).not.toHaveBeenCalled();
+  });
+
+  /** A round trip is started by asking, never by a link someone could be sent. */
+  it('has no link that starts a round trip', async () => {
+    for (const status of [REGISTERED, INSTALLED]) {
+      api.fetchGitHubApp.mockResolvedValue(status);
+      const { unmount } = render(
+        <SetupScreen settings={settingsOf()} onSaved={() => {}} repository={{ mode: 'github-app', chosen: 'github-app', modes: MODES }} />,
+      );
+      await screen.findByText(/hexis-acme/);
+      expect(screen.queryAllByRole('link').filter((a) => (a.getAttribute('href') ?? '').includes('/api/'))).toEqual([]);
+      unmount();
+    }
+  });
+
+  it('says so in place when GitHub cannot be opened', async () => {
+    api.fetchGitHubApp.mockResolvedValue(REGISTERED);
+    api.startGitHubAppInstallation.mockRejectedValue(new Error('This deployment has no GitHub App yet. Create it first.'));
+    show();
+    await openGitHub();
+    await userEvent.click(await screen.findByRole('button', { name: 'Install the app on GitHub' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('has no GitHub App yet');
+    expect(screen.getByRole('button', { name: 'Install the app on GitHub' })).toBeEnabled();
   });
 
   it('ends with choosing a repository among those the installation reaches', async () => {
@@ -178,10 +208,9 @@ describe('the three steps of connecting GitHub', () => {
     await waitFor(() => expect(picker).toBeEnabled());
     expect(screen.getByTestId('github-repository')).toHaveTextContent('Connected to acme through the app hexis-acme');
     expect(Array.from((picker as HTMLSelectElement).options).map((o) => o.value)).toEqual(['', 'acme/kb', 'acme/website']);
-    expect(screen.getByRole('link', { name: 'Change which repositories the app can reach' })).toHaveAttribute(
-      'href',
-      '/api/setup/github-app/install',
-    );
+    // What the list is, and how it is brought up to date.
+    expect(screen.getByTestId('github-repository')).toHaveTextContent('your own GitHub account can write to');
+    expect(screen.getByRole('button', { name: 'Connect GitHub again' })).toBeEnabled();
   });
 });
 
@@ -258,6 +287,7 @@ describe('coming back from GitHub', () => {
 
   it.each([
     ['not-yours', /not one your GitHub account can reach/],
+    ['nothing-to-write', /no repository your own GitHub account can write to/],
     ['requested', /asked an owner of the organisation/],
     ['unreachable', /could not be reached/],
     ['something-new', /did not complete the connection/],

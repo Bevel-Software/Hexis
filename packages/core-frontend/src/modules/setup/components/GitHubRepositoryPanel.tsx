@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Banner, Button, TextField } from '../../../shared/components';
 import {
-  GITHUB_APP_INSTALL_PATH,
   fetchGitHubApp,
   fetchGitHubRepositories,
+  startGitHubAppInstallation,
   startGitHubAppRegistration,
   type GitHubAppStatus,
   type GitHubRepository,
@@ -20,6 +20,10 @@ const OUTCOMES: Record<string, { tone: 'ok' | 'danger' | 'wait'; text: string }>
     tone: 'danger',
     text: 'That installation is not one your GitHub account can reach, so it was not connected. Install the app on an account or organisation you belong to.',
   },
+  'nothing-to-write': {
+    tone: 'danger',
+    text: 'The app reaches no repository your own GitHub account can write to, so nothing was connected. Add a repository you can write to, or ask someone who can to connect it.',
+  },
   state: { tone: 'danger', text: 'The round trip to GitHub could not be verified. Start it again from here.' },
   refused: { tone: 'danger', text: 'GitHub did not complete the connection. Start it again from here.' },
   unreachable: { tone: 'danger', text: 'GitHub could not be reached. Try again shortly.' },
@@ -29,11 +33,15 @@ const OUTCOMES: Record<string, { tone: 'ok' | 'danger' | 'wait'; text: string }>
 
 /** The outcome on the address, read once and taken off it, so a reload does not say it again. */
 function takeOutcome(): string | null {
-  const url = new URL(window.location.href);
-  const outcome = url.searchParams.get('github');
+  const outcome = new URLSearchParams(window.location.search ?? '').get('github');
   if (!outcome) return null;
-  url.searchParams.delete('github');
-  window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('github');
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+  } catch {
+    // The address stays as it is: the outcome is said once more on a reload, which is all that is lost.
+  }
   return outcome;
 }
 
@@ -129,6 +137,18 @@ export function GitHubRepositoryPanel({ repository, onChoose, problem, disabled 
     }
   }
 
+  /** Ask where on GitHub the app is installed, and go there. Asking is what starts the round trip. */
+  async function install() {
+    setFailed(null);
+    setStarting(true);
+    try {
+      window.location.assign(await startGitHubAppInstallation());
+    } catch (err) {
+      setFailed(err instanceof Error ? err.message : 'Could not open GitHub.');
+      setStarting(false);
+    }
+  }
+
   const said = outcome ? (OUTCOMES[outcome] ?? OUTCOMES.refused!) : null;
   // A repository that is stored but no longer reached is still shown, so it is not silently replaced.
   const listed = repositories ?? [];
@@ -193,9 +213,9 @@ export function GitHubRepositoryPanel({ repository, onChoose, problem, disabled 
             The GitHub App <span className="font-medium">{status.app.slug}</span> is ready. Install it on the account or
             organisation that owns the repository, and choose which repositories it may reach.
           </p>
-          <a href={GITHUB_APP_INSTALL_PATH} className="inline-block text-detail font-medium text-accent underline">
-            Install the app on GitHub
-          </a>
+          <Button type="button" variant="primary" size="sm" onClick={() => void install()} disabled={disabled || starting}>
+            {starting ? 'Opening GitHub…' : 'Install the app on GitHub'}
+          </Button>
         </div>
       )}
 
@@ -243,13 +263,16 @@ export function GitHubRepositoryPanel({ repository, onChoose, problem, disabled 
               </span>
             )}
           </div>
-          <p className="text-meta text-ink-muted">
-            Not in the list?{' '}
-            <a href={GITHUB_APP_INSTALL_PATH} className="font-medium text-accent underline">
-              Change which repositories the app can reach
-            </a>
-            .
-          </p>
+          <div className="space-y-2">
+            <p className="max-w-[60ch] text-meta text-ink-muted">
+              The list holds the repositories the app reaches that your own GitHub account can write to, as they were
+              when GitHub was connected. Connect it again to change which the app reaches, or to bring the list up to
+              date.
+            </p>
+            <Button type="button" variant="outline" size="sm" onClick={() => void install()} disabled={disabled || starting}>
+              {starting ? 'Opening GitHub…' : 'Connect GitHub again'}
+            </Button>
+          </div>
         </div>
       )}
     </div>

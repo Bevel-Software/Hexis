@@ -198,6 +198,13 @@ export const CORE_SETTINGS: SettingDef[] = [
   { key: 'githubInstallationId', envVar: 'GITHUB_APP_INSTALLATION_ID', section: 'knowledge-base', internal: true, validate: (v) => (/^\d+$/.test(v) ? null : 'The installation id is a number.') },
   /** Whose account the installation is on, as GitHub names it: shown, never trusted. */
   { key: 'githubInstallationAccount', section: 'knowledge-base', internal: true },
+  /**
+   * The repositories the person who connected the installation could PUSH
+   * to with their own GitHub account, one `owner/name` a line, as GitHub
+   * listed them when they connected. The deployment may be pointed at one
+   * of these and at nothing else the installation reaches.
+   */
+  { key: 'githubRepositoriesPermitted', section: 'knowledge-base', internal: true },
   {
     key: 'kbDirName',
     envVar: 'KB_DIR_NAME',

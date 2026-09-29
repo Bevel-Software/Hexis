@@ -48,7 +48,7 @@ export interface RepositorySetup {
    * The connection to GitHub through a GitHub App. Absent, that way is not
    * offered, and a save that names it is refused.
    */
-  githubApp?: Pick<GitHubAppRepository, 'url' | 'answered' | 'prepare' | 'token'>;
+  githubApp?: Pick<GitHubAppRepository, 'url' | 'answered' | 'prepare' | 'token' | 'permits'>;
 }
 
 /** Which name a host expects beside the token when none is configured. */
@@ -213,16 +213,21 @@ export function createSetupRoutes(
   /**
    * Which ways of having a repository this deployment offers and which one
    * it is on, for the setup screen. `mode` is the one IN EFFECT, inferred
-   * for a deployment that never chose: the screen opens on it, and offers
-   * the first of `modes` to a deployment that has none. Nothing at all from
-   * a mount without the choice, which the screen reads as the one way there
-   * was.
+   * for a deployment that never chose; `chosen` is the one the settings
+   * say, which differs from it between a move and the restart the move
+   * owes. The screen opens on what was chosen, says a restart is pending
+   * when the two differ, and offers the first of `modes` to a deployment
+   * that has none. `pinned` names the variable that chose for the
+   * deployment, when one did. Nothing at all from a mount without the
+   * choice, which the screen reads as the one way there was.
    */
   const repositoryStatus = () =>
     source
       ? {
           repository: {
             mode: source.mode(),
+            chosen: source.chosen(),
+            ...(settings.sourceOf('gitMode') === 'env' ? { pinned: 'GIT_MODE' } : {}),
             modes: GIT_MODES.filter((mode) => mode !== 'github-app' || repository?.githubApp !== undefined),
           },
         }
@@ -309,7 +314,6 @@ export function createSetupRoutes(
       // one that must run the KB startup phase, regardless of which save
       // configured the branch model.
       const wasComplete = isComplete(settings, kb, source);
-      const modeBefore = source?.mode() ?? null;
       nameBranchesOfManagedRepository(entries);
       if (!(await connectionHoldsFor(entries, wasComplete, res))) return;
       const oidc = await signInHoldsFor(entries, res);
@@ -324,14 +328,24 @@ export function createSetupRoutes(
       }
       const saved = await settings.save(entries, req.userId ?? null);
       /**
-       * The mode owes a restart only when a deployment that was SERVING moved
-       * to another one: its working copies are clones of the repository it
-       * had. A save that names the mode the deployment was already on changed
-       * nothing, and one made before setup was complete is followed by the
-       * startup phase below, which is what a restart would have run.
+       * A deployment that was not serving has nothing on the mode it had:
+       * the mode chosen takes effect now, and the startup phase below is
+       * what a restart would have run. One that WAS serving stays on the
+       * mode it is on, working copies and credential alike, until it is
+       * started again.
        */
-      const modeInEffect = !source || source.mode() === modeBefore || !wasComplete;
-      const restartKeys = saved.restartKeys.filter((key) => !(key === 'gitMode' && modeInEffect));
+      if (source && !wasComplete) source.takeEffect();
+      /**
+       * The restart the mode owes is read off the two modes themselves, not
+       * off what this save wrote: it is owed for as long as the mode chosen
+       * is not the one in effect, whichever save chose it, and no longer
+       * once a save chooses the mode in effect back.
+       */
+      const modePending = source !== undefined && source.chosen() !== source.mode();
+      const restartKeys = [
+        ...saved.restartKeys.filter((key) => key !== 'gitMode'),
+        ...(modePending ? ['gitMode'] : []),
+      ];
       const restartRequired = restartKeys.length > 0;
       /** Whether this save put the stored folder names into the running process. */
       let layoutApplied = false;
@@ -511,10 +525,22 @@ export function createSetupRoutes(
     const url = app.url(after);
     const unanswered =
       validateBranchModel({ defaultBranch: after('defaultBranch'), protectedBranches: after('protectedBranches') }) !== null;
-    const changes = setup.source.mode() !== 'github-app' || url !== setup.source.url();
+    // Against what is CHOSEN now, not what is in effect: a repository that
+    // was proven by the save that chose it is not proven again by the next.
+    const stored = (key: string) => settings.resolve(key);
+    const changes = setup.source.chosen() !== 'github-app' || url !== setup.source.url(stored);
     if (!changes && (wasComplete || unanswered)) return true;
+    // BEFORE GitHub is asked anything with the installation token: that
+    // token reaches every repository the installation covers, and would
+    // answer for one the person connecting it could never have written to.
+    if (!app.permits(after('githubRepository'), after)) {
+      log.warn('a repository was named that the person who connected GitHub could not push to');
+      return refuse(
+        'Choose a repository your own GitHub account can write to. If this one should be, connect GitHub again from here so the list is brought up to date.',
+      );
+    }
     try {
-      await app.prepare();
+      await app.prepare({ asked: true });
     } catch (err) {
       log.error('GitHub gave no token for the installation:', { detail: err instanceof Error ? err.message : String(err) });
     }

@@ -175,7 +175,7 @@ describe('the save that chooses a repository the deployment keeps', () => {
 
 describe('a deployment that moves to a repository it keeps', () => {
   it('leaves the repository it had untouched and sets its working copies aside, unpushed work included', async () => {
-    const { save, managed, hosted, runner, workingCopy, setAsideRoot } = boot(
+    const { save, managed, hosted, runner, source, workingCopy, setAsideRoot } = boot(
       testKbContext({ branchModel: { defaultBranch: 'main', protectedBranches: ['main'] } }),
     );
     // A deployment on a repository of its own, set up and serving.
@@ -192,10 +192,14 @@ describe('a deployment that moves to a repository it keeps', () => {
 
     const moved = await save({ gitMode: 'managed' });
     expect(moved.body).toMatchObject({ ok: true, restartRequired: true });
-    // Until the restart the working copy is where it was.
+    // Until the restart the working copy is where it was, and so is the
+    // deployment: the repository it has is the one it goes on talking to.
     expect(await git(copy, ['config', '--get', 'remote.origin.url'])).toBe(hosted);
+    expect(source.url()).toBe(hosted);
 
-    // The restart: the phase brings the working copies into line.
+    // The restart: the deployment is built on the mode chosen, and the
+    // phase brings the working copies into line.
+    source.takeEffect();
     await runner.runAll();
 
     expect(await git(hosted, ['for-each-ref'])).toBe(hostedBefore);

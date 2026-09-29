@@ -43,7 +43,17 @@ const CONNECTED: ConnectionCheck = { outcome: 'connected', branches: ['trunk', '
  * The setup router over a deployment that has a GitHub App installed (or
  * not), with GitHub's answer to the connection check given by the suite.
  */
-function listen(opts: { kb?: KbContext; installed?: boolean; tokenGiven?: boolean; offered?: boolean; github?: Answer } = {}) {
+function listen(
+  opts: {
+    kb?: KbContext;
+    installed?: boolean;
+    tokenGiven?: boolean;
+    offered?: boolean;
+    github?: Answer;
+    /** What the person who connected GitHub could push to. */
+    permitted?: string[];
+  } = {},
+) {
   const db = {
     select: () => ({ from: () => Promise.resolve([]) }),
     insert: () => ({ values: () => ({ onConflictDoUpdate: () => Promise.resolve() }) }),
@@ -60,6 +70,7 @@ function listen(opts: { kb?: KbContext; installed?: boolean; tokenGiven?: boolea
       if (opts.tokenGiven === false) throw new Error('GitHub answered 404');
     },
     token: () => (opts.tokenGiven === false || prepared === 0 ? null : 'an-installation-token'),
+    permits: (repository) => (opts.permitted ?? ['acme/kb', 'acme/another']).includes(repository),
   };
   const source = new RepositorySource({
     read: (key) => settings.resolve(key),
@@ -151,15 +162,33 @@ describe('choosing a repository on GitHub', () => {
   });
 
   /**
-   * The name is the one part of this connection an admin types. What keeps
-   * it honest is that the only token presented to GitHub is the
-   * installation's: a repository it does not reach is GitHub's to refuse.
+   * The name is the one part of this connection an admin types, and the
+   * installation's token would answer for any repository the installation
+   * covers. So the name is held to what the person who connected GitHub
+   * could push to with their own account, BEFORE that token is used for
+   * anything: GitHub is not asked, so nothing about the repository, not
+   * even that it exists, comes back.
    */
-  it('refuses a repository the installation does not reach, and stores nothing', async () => {
+  it('refuses a repository the person who connected GitHub could not push to, without asking GitHub', async () => {
+    const { save, settings, probed, phaseRuns } = listen({ permitted: ['x/docs'] });
+    for (const name of ['x/payroll', 'x/handbook', 'someone-else/secrets']) {
+      const { status, body } = await save({ gitMode: 'github-app', githubRepository: name });
+      expect(status, name).toBe(400);
+      expect(body.problems?.githubRepository, name).toMatch(/your own GitHub account can write to/);
+    }
+    expect(probed).toEqual([]);
+    expect(settings.resolve('githubRepository')).toBe('');
+    expect(settings.resolve('gitMode')).toBe('');
+    expect(phaseRuns()).toBe(0);
+    // The one they can push to is theirs to connect.
+    expect((await save({ gitMode: 'github-app', githubRepository: 'x/docs' })).status).toBe(200);
+  });
+
+  it('refuses a repository the installation no longer reaches, and stores nothing', async () => {
     const { save, settings, phaseRuns } = listen({
       github: { outcome: 'rejected', reason: 'not-found', field: 'kbRepoUrl', error: 'repository not found' },
     });
-    const { status, body } = await save({ gitMode: 'github-app', githubRepository: 'someone-else/secrets' });
+    const { status, body } = await save({ gitMode: 'github-app', githubRepository: 'acme/kb' });
     expect(status).toBe(400);
     expect(body.problems).toEqual({
       githubRepository: 'The GitHub App cannot reach that repository. Add the repository to the app’s installation on GitHub.',

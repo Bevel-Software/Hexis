@@ -52,8 +52,19 @@ Three steps, each offered once the one before is done:
 
 An empty repository is fine: it is set up for you.
 
-To reach another repository later, use **Change which repositories the app
-can reach** on the same tab.
+### Which repositories are in the list
+
+The ones the app reaches **that your own GitHub account can write to**, as
+they were when you connected GitHub. A repository the app reaches and you
+cannot write to is not offered, and cannot be connected by typing its name.
+
+To change which repositories the app reaches, or to bring the list up to
+date after your access changed, press **Connect GitHub again** on the same
+tab.
+
+If the app reaches no repository you can write to, nothing is connected and
+the tab says so. Add one you can write to, or ask someone who can write to
+it to connect GitHub.
 
 ### Your deployment must be reachable by your browser
 
@@ -73,8 +84,12 @@ Set all five of `GITHUB_APP_ID`, `GITHUB_APP_SLUG`,
 - Callback URL: `<PUBLIC_BACKEND_URL>/api/setup/github-app/callback`.
 - **Request user authorization (OAuth) during installation**: on.
 
-That last setting is required. It is how the deployment checks that the
-installation you come back with is one your GitHub account can reach.
+That last setting is required. It is how the deployment learns which
+repositories of the installation your own GitHub account can write to.
+
+An installation supplied through `GITHUB_APP_INSTALLATION_ID` is the
+operator's statement about their own deployment: everything it reaches can
+be connected.
 
 ## Address and token
 
@@ -85,16 +100,25 @@ access, and press **Test connection**. See
 
 ## Moving to another repository
 
-Open another tab and save. The screen says what that does before you press
-the button:
+Open another tab, tick the confirmation above the button, and press **Save
+and move**. Opening a tab moves nothing: the screen asks at the button,
+naming the way you leave and the way you move to.
 
 - The deployment moves to the other repository, which starts without what
   the current one holds.
 - Nothing is deleted. The repository you leave is untouched.
-- The move takes effect at the next restart. The deployment's working
-  copies of the repository it left are then set aside under
-  `replaced-working-copies/` in the backups volume, with any work that was
-  never pushed.
+- **The move takes effect at the next restart.** Until then the deployment
+  goes on working on the repository it has, and the tab says a restart is
+  pending.
+- At that restart, the deployment's working copies of the repository it
+  left are set aside under `replaced-working-copies/` in the backups
+  volume, with any work that was never pushed.
+
+To take the move back before the restart, open the tab of the way the
+deployment is on and save.
 
 To take history with you, push the old repository into the new one with
 git before you move.
+
+With `GIT_MODE` set in the environment, the choice is made there. The
+other tabs are shown and cannot be opened.

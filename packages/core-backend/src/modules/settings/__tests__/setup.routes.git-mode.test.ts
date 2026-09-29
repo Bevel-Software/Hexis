@@ -183,31 +183,85 @@ describe('a deployment that is serving moves to another repository', () => {
     return mounted;
   }
 
-  it('owes a restart, and leaves the working copies to the startup phase', async () => {
-    const { save, phase, ensured } = await serving();
+  it('owes a restart, and says both where it is and where it is going', async () => {
+    const { save, status, phase, ensured } = await serving();
     const runsBefore = phase.runs();
     const res = await save({ gitMode: 'managed' });
     const body = (await res.json()) as Record<string, unknown>;
-    expect(body).toMatchObject({ ok: true, restartRequired: true, repository: { mode: 'managed' } });
+    expect(body).toMatchObject({ ok: true, complete: true, restartRequired: true, repository: { mode: 'token', chosen: 'managed' } });
+    expect(await status()).toMatchObject({ complete: true, repository: { mode: 'token', chosen: 'managed' } });
     expect(ensured).toHaveLength(1);
     // Sessions may be live: the phase that moves working copies waits for the restart.
     expect(phase.runs()).toBe(runsBefore);
+  });
+
+  /**
+   * The move is a fact about the NEXT start. Until then every working copy
+   * is a clone of the repository the deployment had, so that is the
+   * repository git is handed the address of, and its token is the one
+   * presented. Reading the mode live moved the process at the save: pushes
+   * went out with no credential, and a branch opened in between was cloned
+   * from a repository nothing had prepared.
+   */
+  it('goes on working against the repository it has until it is started again', async () => {
+    const { save, source } = await serving();
+    await save({ gitMode: 'managed' });
+    expect(source.mode()).toBe('token');
+    expect(source.url()).toBe(HOSTED.kbRepoUrl);
+    expect(source.credentials.token()).toBe('the-token');
+    expect(source.credentials.username()).toBe('x-access-token');
+    // A token rotated meanwhile is still the one the next push carries.
+    await save({ gitToken: 'a-rotated-token' });
+    expect(source.credentials.token()).toBe('a-rotated-token');
+  });
+
+  it('is on the repository it chose once it is started again, and presents it nothing of the old one', async () => {
+    const { save, source, managed } = await serving();
+    await save({ gitMode: 'managed' });
+    // What a restart does: the source is built on the mode chosen.
+    source.takeEffect();
+    expect(source.mode()).toBe('managed');
+    expect(source.url()).toBe(managed.path);
+    expect(source.credentials.token()).toBeNull();
+  });
+
+  it('goes on owing the restart through saves about other things', async () => {
+    const { save } = await serving();
+    await save({ gitMode: 'managed' });
+    const body = (await (await save({ kbSyncSecret: 'a-secret-of-sixteen-or-more' })).json()) as Record<string, unknown>;
+    expect(body).toMatchObject({ ok: true, restartRequired: true, repository: { mode: 'token', chosen: 'managed' } });
+  });
+
+  it('owes nothing once the move is taken back', async () => {
+    const { save, probed } = await serving();
+    await save({ gitMode: 'managed' });
+    const asked = probed.length;
+    const body = (await (await save({ gitMode: 'token' })).json()) as Record<string, unknown>;
+    expect(body).toMatchObject({ ok: true, restartRequired: false, repository: { mode: 'token', chosen: 'token' } });
+    // Nothing about the connection changed, so the host is not asked again.
+    expect(probed).toHaveLength(asked);
   });
 
   it('owes none for naming the way it was already on', async () => {
     const { save, probed } = await serving();
     const asked = probed.length;
     const body = (await (await save({ gitMode: 'token' })).json()) as Record<string, unknown>;
-    expect(body).toMatchObject({ ok: true, restartRequired: false, repository: { mode: 'token' } });
-    // Nothing about the connection changed, so the host is not asked again.
+    expect(body).toMatchObject({ ok: true, restartRequired: false, repository: { mode: 'token', chosen: 'token' } });
     expect(probed).toHaveLength(asked);
   });
+});
 
-  it('stops presenting the token it had to the repository it keeps', async () => {
-    const { save, source } = await serving();
-    expect(source.credentials.token()).toBe('the-token');
+describe('a deployment whose way is chosen by the environment', () => {
+  it('says which variable chose', async () => {
+    process.env.GIT_MODE = 'managed';
+    const { status } = listen();
+    expect(await status()).toMatchObject({ repository: { mode: 'managed', chosen: 'managed', pinned: 'GIT_MODE' } });
+  });
+
+  it('says nothing of the kind when the admin chose', async () => {
+    const { save, status } = listen();
     await save({ gitMode: 'managed' });
-    expect(source.credentials.token()).toBeNull();
+    expect(((await status()) as { repository: object }).repository).not.toHaveProperty('pinned');
   });
 });
 

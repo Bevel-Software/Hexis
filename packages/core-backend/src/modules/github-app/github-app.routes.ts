@@ -4,7 +4,7 @@ import type { IAdminAccessService } from '../admin/admin.interface.js';
 import { logger } from '../../shared/logging.js';
 import type { DeploymentSettingsService } from '../settings/deployment-settings.service.js';
 import { GitHubAppClient, GitHubAppError } from './github-app.client.js';
-import type { GitHubAppConnection } from './github-app.connection.js';
+import { repositoriesAsSetting, type GitHubAppConnection } from './github-app.connection.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 const log = logger('github-app');
@@ -84,22 +84,26 @@ function same(a: string, b: string): boolean {
  *   GET  /setup/github-app               where the connection stands
  *   POST /setup/github-app/manifest      start registering this deployment's own app
  *   GET  /setup/github-app/registered    GitHub sends the browser back: the app exists
- *   GET  /setup/github-app/install       send the browser to GitHub to install the app
- *   GET  /setup/github-app/callback      GitHub sends it back: the app is installed
- *   GET  /setup/github-app/repositories  what the installation reaches
+ *   POST /setup/github-app/install       where on GitHub the app is installed
+ *   GET  /setup/github-app/callback      GitHub sends the browser back: the app is installed
+ *   GET  /setup/github-app/repositories  what the deployment may be pointed at
  *
- * The three GET routes GitHub sends the browser to are ordinary
- * navigations, authenticated by the session cookie; each checks a state
- * this browser was given when the round trip started, so a link somebody
- * was sent starts nothing.
+ * A ROUND TRIP IS STARTED BY A POST AND ENDED BY A GET. The two routes
+ * GitHub sends the browser to are ordinary navigations, authenticated by
+ * the session cookie; each checks a state this browser was given when the
+ * round trip started, and spends it. Nothing that starts one is a link, so
+ * a link somebody was sent starts nothing.
  *
- * WHICH INSTALLATION IS THE DEPLOYMENT'S is never taken from the address
- * the browser came back on. GitHub puts an installation's number there and
- * anyone can write another: with one app serving many deployments, that
- * number is the only thing between a deployment and another
- * organisation's repositories. GitHub sends the person back signed in, and
- * the deployment asks GitHub which installations THAT PERSON can reach.
- * Only one of those is ever recorded.
+ * WHAT THE DEPLOYMENT MAY REACH is never taken from the address the browser
+ * came back on. GitHub puts an installation's number there and anyone can
+ * write another: with one app serving many deployments, that number is the
+ * only thing between a deployment and another organisation's repositories.
+ * GitHub sends the person back signed in, and the deployment asks GitHub
+ * two things about THAT PERSON: which installations they reach, and which
+ * repositories of the one they named they can push to with their own
+ * account. The first alone is not enough, since read access to one
+ * repository puts an installation on that list. Only the second is what
+ * the deployment may be pointed at.
  */
 export function createGitHubAppRoutes(deps: GitHubAppRoutesDeps): express.Router {
   const router = express.Router();
@@ -172,7 +176,10 @@ export function createGitHubAppRoutes(deps: GitHubAppRoutesDeps): express.Router
   });
 
   router.get('/setup/github-app/registered', requireAdmin, async (req, res) => {
-    if (!cameBack(req)) {
+    // Spent on return, however the return ends.
+    const returned = cameBack(req);
+    res.clearCookie(STATE_COOKIE, { path: '/' });
+    if (!returned) {
       finish(res, 'state');
       return;
     }
@@ -202,13 +209,19 @@ export function createGitHubAppRoutes(deps: GitHubAppRoutesDeps): express.Router
     }
   });
 
-  router.get('/setup/github-app/install', requireAdmin, (_req, res) => {
+  /**
+   * A POST that answers with the address, and the page sends the browser
+   * there. As a link it was a round trip anyone could start in an admin's
+   * browser by getting them to follow it: the state would be set, and
+   * whatever they then installed would come back with a state that matched.
+   */
+  router.post('/setup/github-app/install', requireAdmin, (_req, res) => {
     const credentials = connection.credentials();
     if (!credentials) {
-      finish(res, 'not-registered');
+      res.status(409).json({ error: 'This deployment has no GitHub App yet. Create it first.' });
       return;
     }
-    res.redirect(installUrl(credentials.slug, beginRoundTrip(res)));
+    res.json({ url: installUrl(credentials.slug, beginRoundTrip(res)) });
   });
 
   router.get('/setup/github-app/callback', requireAdmin, async (req, res) => {
@@ -243,8 +256,22 @@ export function createGitHubAppRoutes(deps: GitHubAppRoutesDeps): express.Router
         finish(res, 'not-yours');
         return;
       }
+      // Reaching the installation is not holding it: read access to one
+      // repository it covers is enough for GitHub to list it. What the
+      // deployment may be pointed at is what THIS PERSON can push to.
+      const theirs = await client.repositoriesOf(userToken, held.id);
+      const writable = theirs.repositories.filter((repository) => repository.writable).map((r) => r.fullName);
+      if (writable.length === 0) {
+        log.warn('the person who came back can push to nothing the installation covers', { installation: held.id });
+        finish(res, 'nothing-to-write');
+        return;
+      }
       await settings.record(
-        { githubInstallationId: held.id, ...(held.account ? { githubInstallationAccount: held.account } : {}) },
+        {
+          githubInstallationId: held.id,
+          githubRepositoriesPermitted: repositoriesAsSetting(writable),
+          ...(held.account ? { githubInstallationAccount: held.account } : {}),
+        },
         req.userId ?? null,
       );
       // A token in hand was another installation's.

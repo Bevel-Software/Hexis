@@ -81,8 +81,16 @@ export type GitMode = 'managed' | 'github-app' | 'token';
 
 /** The ways this deployment offers, in the order they are shown, and the one it is on. */
 export interface RepositoryStatus {
-  /** Null on a deployment that has no repository yet. */
+  /** The way IN EFFECT: the one the running deployment is on. Null on a deployment that has no repository yet. */
   mode: GitMode | null;
+  /**
+   * The way the settings say, which a restart puts in effect. Differs from
+   * `mode` between a move and the restart it owes. Absent from a server
+   * that does not tell the two apart.
+   */
+  chosen?: GitMode | null;
+  /** The environment variable that chose for the deployment, when one did: the choice is then not the screen's to make. */
+  pinned?: string;
   modes: GitMode[];
 }
 
@@ -381,5 +389,13 @@ export async function fetchGitHubRepositories(): Promise<{ repositories: GitHubR
   return (await res.json()) as { repositories: GitHubRepository[]; more: boolean };
 }
 
-/** Where the browser goes to install the app: a navigation, carried by the session cookie. */
-export const GITHUB_APP_INSTALL_PATH = '/api/setup/github-app/install';
+/**
+ * Where on GitHub the app is installed, for the browser to be sent to. Asked
+ * for, never linked to: asking is what starts the round trip, and a link
+ * would let anyone start one in an admin's browser.
+ */
+export async function startGitHubAppInstallation(): Promise<string> {
+  const res = await authFetch('/api/setup/github-app/install', { method: 'POST' });
+  if (!res.ok) await readError(res);
+  return ((await res.json()) as { url: string }).url;
+}

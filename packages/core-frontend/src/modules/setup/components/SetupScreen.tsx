@@ -522,26 +522,52 @@ export function SetupScreen({
   /**
    * The way the deployment has its repository, and which one's tab is open.
    * THE TAB IS THE CHOICE: what is open when Save is pressed is what the
-   * deployment is on afterwards. It opens on the way in effect, so a
+   * deployment is on afterwards. It opens on the way CHOSEN, so a
    * deployment that is configured stays as it is unless its admin opens
    * another tab, and on the first way offered for one that has none.
    * Absent from a server that knows one way only, which is then the only
    * thing drawn.
+   *
+   * Two ways are told apart: the one IN EFFECT, which the running
+   * deployment is on, and the one chosen, which a restart puts in effect.
+   * They differ between a move and the restart the move owes.
    */
+  const inEffect = repository?.mode ?? null;
+  const chosen = repository ? (repository.chosen ?? repository.mode) : null;
   const [gitTab, setGitTab] = useState<GitMode>(() => {
     // Back from a round trip to GitHub: that tab is where it started, and
     // where what came of it is said.
     const backFromGitHub =
-      repository?.modes.includes('github-app') && new URLSearchParams(window.location.search ?? '').has('github');
-    return backFromGitHub ? 'github-app' : (repository?.mode ?? repository?.modes[0] ?? 'token');
+      !repository?.pinned &&
+      repository?.modes.includes('github-app') &&
+      new URLSearchParams(window.location.search ?? '').has('github');
+    return backFromGitHub ? 'github-app' : (chosen ?? repository?.modes[0] ?? 'token');
   });
   /** The tab a setting is answered on, for the ones that belong to one way of having a repository. */
   const tabOf = (key: string): GitMode | null =>
     repository ? ((Object.keys(TAB_KEYS) as GitMode[]).find((mode) => TAB_KEYS[mode].includes(key)) ?? null) : null;
   /** Whether the repository is reached by an address and a token: the fields, the test, the proof. */
   const byAddress = !repository || gitTab === 'token';
-  /** A deployment that has a repository is about to be moved to another. */
-  const movesRepository = !!repository && repository.mode !== null && gitTab !== repository.mode;
+  /** A move was saved and the restart it owes has not happened: the deployment is still on the way it was. */
+  const movePending = inEffect !== null && chosen !== inEffect;
+  /**
+   * Saving NOW would choose another way than the one chosen, on a deployment
+   * that has a repository: a move, or a move taken back. This is what is
+   * asked about at the button, where the decision is made; an open tab is
+   * not a decision.
+   */
+  const savingMoves = inEffect !== null && gitTab !== chosen;
+  const movingTo = GIT_MODE_LABEL[gitTab];
+  const movingFrom = inEffect ? GIT_MODE_LABEL[inEffect] : '';
+  /** A save that moves the deployment away from the way in effect. Taking a move back is not one. */
+  const mustConfirmMove = savingMoves && gitTab !== inEffect;
+  /**
+   * The way the admin said yes to moving TO. Held as the way and not as a
+   * yes, so a yes given to one move is not a yes to another: opening a
+   * third tab asks again.
+   */
+  const [moveConfirmed, setMoveConfirmed] = useState<GitMode | null>(null);
+  const moveIsConfirmed = moveConfirmed === gitTab;
 
   /**
    * What a save sends about the repository, given what was typed: the way
@@ -557,7 +583,9 @@ export function SetupScreen({
         return tab === null || tab === gitTab;
       }),
     );
-    return gitTab === repository.mode ? kept : { ...kept, gitMode: gitTab };
+    // Against the way CHOSEN: a move that is pending was already sent, and
+    // opening the tab of the way in effect is how it is taken back.
+    return gitTab === chosen ? kept : { ...kept, gitMode: gitTab };
   }
 
   /**
@@ -1076,7 +1104,8 @@ export function SetupScreen({
       // what is left.
       // An address and a token are owed only by a deployment that reaches
       // its repository by them; the branch model by every one.
-      const owed = (result.repository?.mode ?? 'token') === 'token' ? REQUIRED_KEYS : BRANCH_MODEL_KEYS;
+      const way = result.repository ? (result.repository.chosen ?? result.repository.mode) : 'token';
+      const owed = (way ?? 'token') === 'token' ? REQUIRED_KEYS : BRANCH_MODEL_KEYS;
       const missing = result.settings
         .filter((setting) => owed.includes(setting.key) && !setting.configured)
         .map((setting) => FIELDS[setting.key]?.label ?? setting.key);
@@ -1475,8 +1504,12 @@ export function SetupScreen({
                         id={`repository-tab-${mode}`}
                         aria-selected={gitTab === mode}
                         aria-controls={`repository-panel-${mode}`}
+                        // Chosen by the environment, the choice is not the
+                        // screen's: the other ways are shown, as what they
+                        // are, and cannot be opened.
+                        disabled={repositoryTabs.pinned !== undefined && mode !== gitTab}
                         onClick={() => setGitTab(mode)}
-                        className={`-mb-px border-b-2 px-3 py-2 text-detail font-medium ${
+                        className={`-mb-px border-b-2 px-3 py-2 text-detail font-medium disabled:cursor-not-allowed disabled:opacity-50 ${
                           gitTab === mode
                             ? 'border-accent text-ink'
                             : 'border-transparent text-ink-muted hover:text-ink'
@@ -1487,15 +1520,32 @@ export function SetupScreen({
                     ))}
                   </div>
                 )}
+                {repositoryTabs?.pinned && (
+                  <p className="text-meta text-ink-faint" data-testid="repository-pinned">
+                    Set by the <span className="font-mono">{repositoryTabs.pinned}</span> environment variable. Change it
+                    there.
+                  </p>
+                )}
                 {/* What the open tab asks: nothing, for a repository the
                     deployment keeps; the address and the token, and the test
                     that proves them, for one reached by them. */}
                 <SectionFields panel={repositoryTabs ? { group: 'repository', id: gitTab } : null}>
-                {repositoryTabs && movesRepository && (
+                {repositoryTabs && movePending && gitTab === chosen && (
+                  <Banner tone="wait" role="status" data-testid="move-pending">
+                    A restart is pending. This deployment is still working on &ldquo;{movingFrom}&rdquo; and moves
+                    here when it is restarted. To stay where it is, open &ldquo;{movingFrom}&rdquo; and save.
+                  </Banner>
+                )}
+                {repositoryTabs && savingMoves && gitTab !== inEffect && (
                   <Banner tone="wait" role="status" data-testid="moves-repository">
                     Saving moves this deployment to another repository, which starts without what the
                     current one holds. Nothing is deleted: the current repository is left as it is, and
                     this deployment&rsquo;s working copies of it are set aside at the next restart.
+                  </Banner>
+                )}
+                {repositoryTabs && savingMoves && gitTab === inEffect && (
+                  <Banner tone="wait" role="status" data-testid="move-taken-back">
+                    Saving takes the move back: this deployment stays on the repository it is working on.
                   </Banner>
                 )}
                 {repositoryTabs && gitTab === 'github-app' && (
@@ -1680,7 +1730,32 @@ export function SetupScreen({
             that they are present, not that they work — and open the app onto
             a repository it cannot reach, which reads as a broken product
             rather than a wrong token. */}
-        <div className="mt-10 flex flex-wrap items-center justify-end gap-3">
+        {/* ASKED WHERE THE DECISION IS MADE. The tab is the choice, and the
+            tab is a screen above this button: an admin who opened another
+            way to read about it, then changed something else and saved,
+            would have moved the deployment to an empty repository. So a
+            save that moves is a save the admin has said yes to, here,
+            naming what is left and what is moved to. */}
+        {mustConfirmMove && (
+          <Surface tone="sunken" radius="md" className="mt-10 p-4" data-testid="confirm-move">
+            <label className="flex items-start gap-2.5 text-detail text-ink">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={moveConfirmed === gitTab}
+                onChange={(e) => setMoveConfirmed(e.target.checked ? gitTab : null)}
+              />
+              <span>
+                Move this deployment from &ldquo;{movingFrom}&rdquo; to &ldquo;{movingTo}&rdquo;.
+                <span className="mt-1 block text-meta text-ink-muted">
+                  It starts on a repository without what the current one holds. Nothing is deleted, and the move takes
+                  effect when the deployment is restarted.
+                </span>
+              </span>
+            </label>
+          </Surface>
+        )}
+        <div className={`${mustConfirmMove ? 'mt-4' : 'mt-10'} flex flex-wrap items-center justify-end gap-3`}>
           {connectionRejected && (
             // Before the button in the DOM so the reason is read first, and
             // so `justify-end` leaves the button itself at the right edge.
@@ -1697,12 +1772,12 @@ export function SetupScreen({
             type="submit"
             form="setup-settings-form"
             variant="primary"
-            disabled={saving || testing || retrying || oidcTesting || connectionRejected}
+            disabled={saving || testing || retrying || oidcTesting || connectionRejected || (mustConfirmMove && !moveIsConfirmed)}
             // Described by the refusal, so a reader who lands on a button
             // that will not move is told why rather than left guessing.
             aria-describedby={connectionRejected ? 'connection-refusal' : undefined}
           >
-            {saving ? 'Saving…' : 'Save and continue'}
+            {saving ? 'Saving…' : mustConfirmMove ? 'Save and move' : 'Save and continue'}
           </Button>
         </div>
 

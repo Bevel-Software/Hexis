@@ -34,15 +34,52 @@ afterEach(() => {
 });
 
 /** GitHub, as far as a suite says: what each person can reach, and every call that was made. */
-function github(world: { installations?: Record<string, string[]>; repositories?: string[]; down?: boolean; tokenLifeMs?: number } = {}) {
+function github(
+  world: {
+    /** The installations each person reaches. */
+    installations?: Record<string, string[]>;
+    /** What the INSTALLATION covers. */
+    repositories?: string[];
+    /** What each PERSON may do in the repositories the installation covers. Default: push, to all of them. */
+    theirs?: Record<string, Record<string, 'push' | 'pull'>>;
+    down?: boolean;
+    /** Accepts the connection and never answers. */
+    silent?: boolean;
+    tokenLifeMs?: number;
+    /** The time GitHub goes by, for a suite that moves the clock. */
+    now?: () => number;
+  } = {},
+) {
   const calls: { method: string; url: string; authorization: string }[] = [];
   let issued = 0;
   const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
+  const covered = () => world.repositories ?? ['acme/kb', 'acme/another'];
   const impl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     const headers = (init?.headers ?? {}) as Record<string, string>;
     calls.push({ method: init?.method ?? 'GET', url, authorization: headers.Authorization ?? '' });
     if (world.down) throw new Error('getaddrinfo ENOTFOUND api.github.com');
+    if (world.silent) {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal!.reason as Error));
+      });
+    }
+    const theirRepositories = /\/user\/installations\/(\d+)\/repositories/.exec(url);
+    if (theirRepositories) {
+      const person = headers.Authorization.replace('Bearer user-token-of-', '');
+      if (!(world.installations?.[person] ?? []).includes(theirRepositories[1]!)) return json(404, { message: 'Not Found' });
+      const may = world.theirs?.[person] ?? Object.fromEntries(covered().map((name) => [name, 'push' as const]));
+      const names = Object.keys(may);
+      return json(200, {
+        total_count: names.length,
+        repositories: names.map((full_name) => ({
+          full_name,
+          private: true,
+          default_branch: 'main',
+          permissions: { pull: true, push: may[full_name] === 'push' },
+        })),
+      });
+    }
     if (url.includes('/app-manifests/')) {
       return url.includes('/good-code/')
         ? json(201, { id: 4242, slug: APP.slug, pem: PEM, client_id: APP.clientId, client_secret: APP.clientSecret, owner: { login: 'acme' }, html_url: 'https://github.com/apps/hexis-acme' })
@@ -59,10 +96,13 @@ function github(world: { installations?: Record<string, string[]>; repositories?
     }
     if (/\/app\/installations\/\d+\/access_tokens$/.test(url)) {
       issued += 1;
-      return json(201, { token: `installation-token-${issued}`, expires_at: new Date(Date.now() + (world.tokenLifeMs ?? 3_600_000)).toISOString() });
+      return json(201, {
+        token: `installation-token-${issued}`,
+        expires_at: new Date((world.now?.() ?? Date.now()) + (world.tokenLifeMs ?? 3_600_000)).toISOString(),
+      });
     }
     if (url.includes('/installation/repositories')) {
-      const names = world.repositories ?? ['acme/kb', 'acme/another'];
+      const names = covered();
       return json(200, {
         total_count: names.length,
         repositories: names.map((full_name) => ({ full_name, private: true, default_branch: 'main', permissions: { push: true } })),
@@ -70,7 +110,7 @@ function github(world: { installations?: Record<string, string[]>; repositories?
     }
     return json(404, { message: 'Not Found' });
   }) as typeof fetch;
-  return { client: new GitHubAppClient(impl), calls, tokensIssued: () => issued };
+  return { client: new GitHubAppClient(impl, Date.now, 150), calls, tokensIssued: () => issued };
 }
 
 function settingsWith(env: Record<string, string> = {}) {
@@ -205,7 +245,14 @@ describe('what the settings keep for the deployment itself', () => {
 
 describe('GitHubAppConnection: the token git presents', () => {
   function connected(world: Parameters<typeof github>[0] = {}, clock = { now: Date.now() }) {
-    const values: Record<string, string> = { ...Object.fromEntries(Object.entries(APP).map(([k, v]) => [`githubApp${k[0]!.toUpperCase()}${k.slice(1)}`, v])), githubAppId: APP.appId, githubInstallationId: '77', githubRepository: 'acme/kb' };
+    const values: Record<string, string> = {
+      ...Object.fromEntries(Object.entries(APP).map(([k, v]) => [`githubApp${k[0]!.toUpperCase()}${k.slice(1)}`, v])),
+      githubAppId: APP.appId,
+      githubInstallationId: '77',
+      githubRepository: 'acme/kb',
+      githubRepositoriesPermitted: 'acme/kb',
+    };
+    world.now = () => clock.now;
     const hub = github(world);
     const connection = new GitHubAppConnection({
       read: (key) => values[key] ?? '',
@@ -226,19 +273,91 @@ describe('GitHubAppConnection: the token git presents', () => {
     expect(connection.answered()).toBe(true);
   });
 
-  it('keeps the one in hand while it is good, and renews it before it runs out', async () => {
+  /** What a renewal started in the background has come to. */
+  const settled = () => new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+  it('asks nothing while the one in hand has time to spare', async () => {
     const { connection, hub, clock } = connected();
     await connection.prepare();
     await connection.prepare();
-    expect(hub.tokensIssued()).toBe(1);
     clock.now += 45 * 60_000;
     await connection.prepare();
     expect(hub.tokensIssued()).toBe(1);
-    // Ten minutes to live: renewed, so no call starts on a token about to die.
-    clock.now += 6 * 60_000;
+  });
+
+  /**
+   * This runs before every git call, the ones that never leave the disk
+   * included. A token that is still good is not a reason to wait.
+   */
+  it('renews one that is close to running out without making the call wait', async () => {
+    const world: Parameters<typeof github>[0] = {};
+    const { connection, hub, clock } = connected(world);
     await connection.prepare();
+    clock.now += 51 * 60_000;
+    // GitHub stops answering: a call that waited would wait for the deadline.
+    world.silent = true;
+    const started = Date.now();
+    await connection.prepare();
+    expect(Date.now() - started).toBeLessThan(100);
+    expect(connection.token()).toBe('installation-token-1');
+    world.silent = false;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    // And once GitHub answers, the next call carries the new one.
+    clock.now += 10_000;
+    await connection.prepare();
+    await settled();
     expect(hub.tokensIssued()).toBe(2);
     expect(connection.token()).toBe('installation-token-2');
+  });
+
+  it('gives a request to GitHub a deadline of its own', async () => {
+    const { connection } = connected({ silent: true });
+    const started = Date.now();
+    await expect(connection.prepare()).rejects.toBeInstanceOf(GitHubAppError);
+    // The suite's client is given 150 ms; left to the platform it is minutes.
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(connection.token()).toBeNull();
+  });
+
+  it('remembers that GitHub gave none, for a while that grows, and asks nothing inside it', async () => {
+    const world: Parameters<typeof github>[0] = { down: true };
+    const { connection, hub, clock } = connected(world);
+    await expect(connection.prepare()).rejects.toBeInstanceOf(GitHubAppError);
+    expect(hub.calls).toHaveLength(1);
+
+    // Every git call in the meantime goes ahead at once, with no token.
+    for (let i = 0; i < 20; i += 1) await connection.prepare();
+    expect(hub.calls).toHaveLength(1);
+    expect(connection.token()).toBeNull();
+
+    // Five seconds the first time, ten the second.
+    clock.now += 5_001;
+    await expect(connection.prepare()).rejects.toBeInstanceOf(GitHubAppError);
+    expect(hub.calls).toHaveLength(2);
+    clock.now += 5_001;
+    await connection.prepare();
+    expect(hub.calls).toHaveLength(2);
+    clock.now += 5_000;
+    await expect(connection.prepare()).rejects.toBeInstanceOf(GitHubAppError);
+    expect(hub.calls).toHaveLength(3);
+
+    // GitHub is back: the next ask gets a token, and nothing is remembered.
+    world.down = false;
+    clock.now += 20_001;
+    await connection.prepare();
+    expect(connection.token()).toBe('installation-token-1');
+  });
+
+  it('asks whatever it remembers when an admin is waiting on the answer', async () => {
+    const world: Parameters<typeof github>[0] = { down: true };
+    const { connection, hub } = connected(world);
+    await expect(connection.prepare()).rejects.toBeInstanceOf(GitHubAppError);
+    await expect(connection.prepare({ asked: true })).rejects.toBeInstanceOf(GitHubAppError);
+    expect(hub.calls).toHaveLength(2);
+    world.down = false;
+    await connection.prepare({ asked: true });
+    expect(connection.token()).toBe('installation-token-1');
   });
 
   it('asks once for every git call that arrives while it is renewing', async () => {
@@ -264,14 +383,64 @@ describe('GitHubAppConnection: the token git presents', () => {
     expect(connection.token()).toBe('installation-token-2');
   });
 
-  it('throws when GitHub gives none, and keeps what it had', async () => {
-    const world = { down: false };
+  it('keeps the token it has when GitHub will not renew it', async () => {
+    const world: Parameters<typeof github>[0] = {};
     const { connection, clock } = connected(world);
     await connection.prepare();
     world.down = true;
     clock.now += 55 * 60_000;
-    await expect(connection.prepare()).rejects.toBeInstanceOf(GitHubAppError);
+    await connection.prepare();
+    await settled();
     expect(connection.token()).toBe('installation-token-1');
+  });
+});
+
+describe('GitHubAppConnection: what the deployment may be pointed at', () => {
+  function connected(permitted: string, installationFrom: 'env' | 'stored' = 'stored', world: Parameters<typeof github>[0] = {}) {
+    const values: Record<string, string> = {
+      githubAppId: APP.appId,
+      githubAppSlug: APP.slug,
+      githubAppPrivateKey: APP.privateKey,
+      githubAppClientId: APP.clientId,
+      githubAppClientSecret: APP.clientSecret,
+      githubInstallationId: '77',
+      githubRepositoriesPermitted: permitted,
+    };
+    const hub = github(world);
+    return new GitHubAppConnection({
+      read: (key) => values[key] ?? '',
+      sourceOf: (key) => (key === 'githubInstallationId' ? installationFrom : 'stored'),
+      client: hub.client,
+    });
+  }
+
+  it('is what the person who connected it could push to, whatever case it is written in', () => {
+    const connection = connected('acme/kb\nAcme/Website');
+    expect(connection.permits('acme/kb')).toBe(true);
+    expect(connection.permits('ACME/website')).toBe(true);
+    expect(connection.permits('acme/secrets')).toBe(false);
+    expect(connection.permits('acme/kb-private')).toBe(false);
+    expect(connection.permits('')).toBe(false);
+  });
+
+  it('is nothing when nobody was shown to be able to push to anything', () => {
+    expect(connected('').permits('acme/kb')).toBe(false);
+  });
+
+  it('is everything the installation reaches when the operator supplied the installation', () => {
+    expect(connected('', 'env').permits('acme/anything')).toBe(true);
+  });
+
+  it('lists what the installation covers AND the person could push to, never the rest', async () => {
+    const world = { repositories: ['acme/kb', 'acme/payroll', 'acme/secrets'] };
+    expect((await connected('acme/kb\nacme/gone-since', 'stored', world).repositories()).repositories.map((r) => r.fullName)).toEqual([
+      'acme/kb',
+    ]);
+    expect((await connected('', 'env', world).repositories()).repositories.map((r) => r.fullName)).toEqual([
+      'acme/kb',
+      'acme/payroll',
+      'acme/secrets',
+    ]);
   });
 
   it('asks GitHub nothing while there is no app or no installation', async () => {
@@ -325,6 +494,28 @@ describe('registering a deployment its own GitHub App', () => {
     expect(settings.resolve('githubAppSlug')).toBe('hexis-acme');
   });
 
+  it('spends the state on every return, however the return ends', async () => {
+    for (const query of ['code=good-code', 'code=stale', '']) {
+      const { go, stateOf, jar } = deployment();
+      const { action } = (await (await go('/api/setup/github-app/manifest', { method: 'POST', body: '{}' })).json()) as { action: string };
+      const state = stateOf(action);
+      const back = await go(`/api/setup/github-app/registered?${query}&state=${encodeURIComponent(state)}`);
+      // Going on to install is a round trip of its own, with a state of its own.
+      const kept = jar.get('hexis_github_state');
+      expect(kept === undefined || decodeURIComponent(kept) !== state, query).toBe(true);
+      if (!back.headers.get('location')!.startsWith('https://github.com/')) expect(kept, query).toBeUndefined();
+      server?.close();
+      server = null;
+    }
+  });
+
+  it('starts nothing from a link: what starts a round trip is a POST', async () => {
+    const { go, jar } = deployment({ env: APP_ENV });
+    const followed = await go('/api/setup/github-app/install');
+    expect(followed.status).toBe(404);
+    expect(jar.size).toBe(0);
+  });
+
   it('registers nothing for a browser that was not sent, or a code GitHub does not know', async () => {
     const { go, stateOf, connection } = deployment();
     const stranger = await go('/api/setup/github-app/registered?code=good-code&state=made-up');
@@ -353,20 +544,79 @@ describe('installing the app, and whose installation it is', () => {
   const world = { installations: { ada: ['77'], mallory: ['99'] } };
 
   async function sentToInstall(d: ReturnType<typeof deployment>) {
-    const out = await d.go('/api/setup/github-app/install');
-    expect(out.headers.get('location')).toMatch(/^https:\/\/github\.com\/apps\/hexis-acme\/installations\/new\?state=/);
-    return d.stateOf(out.headers.get('location'));
+    const out = await d.go('/api/setup/github-app/install', { method: 'POST', body: '{}' });
+    const { url } = (await out.json()) as { url: string };
+    expect(url).toMatch(/^https:\/\/github\.com\/apps\/hexis-acme\/installations\/new\?state=/);
+    return d.stateOf(url);
   }
+  const cameBackAs = (d: ReturnType<typeof deployment>, person: string, state: string, installation = '77') =>
+    d.go(`/api/setup/github-app/callback?code=code-of-${person}&installation_id=${installation}&setup_action=install&state=${encodeURIComponent(state)}`);
 
-  it('records the installation GitHub says the person holds', async () => {
+  it('records the installation, and what the person who connected it can push to', async () => {
     const d = deployment({ env: APP_ENV, world });
     const state = await sentToInstall(d);
-    const back = await d.go(`/api/setup/github-app/callback?code=code-of-ada&installation_id=77&setup_action=install&state=${encodeURIComponent(state)}`);
+    const back = await cameBackAs(d, 'ada', state);
     expect(back.headers.get('location')).toBe('https://kb.acme.test/?github=connected');
     expect(d.settings.resolve('githubInstallationId')).toBe('77');
     expect(d.settings.resolve('githubInstallationAccount')).toBe('org-of-77');
+    expect(d.settings.resolve('githubRepositoriesPermitted').split('\n')).toEqual(['acme/another', 'acme/kb']);
     // The state is spent with the round trip.
     expect(d.jar.has('hexis_github_state')).toBe(false);
+  });
+
+  /**
+   * GitHub counts an installation among a person's when they can READ one
+   * repository it covers. Organisation X installed the app for its own
+   * workspace; Eve, who may read X's handbook, opens a workspace of her own
+   * and comes back naming X's installation. The installation's token reads
+   * and writes everything X gave the app. What Eve may point her workspace
+   * at is what her own account could push to: nothing.
+   */
+  it('gives someone who can only read what the installation covers nothing at all', async () => {
+    const d = deployment({
+      env: APP_ENV,
+      world: {
+        installations: { eve: ['77'] },
+        repositories: ['x/handbook', 'x/payroll', 'x/secrets'],
+        theirs: { eve: { 'x/handbook': 'pull' } },
+      },
+    });
+    const state = await sentToInstall(d);
+    const back = await cameBackAs(d, 'eve', state);
+    expect(back.headers.get('location')).toBe('https://kb.acme.test/?github=nothing-to-write');
+    expect(d.settings.resolve('githubInstallationId')).toBe('');
+    expect(d.settings.resolve('githubRepositoriesPermitted')).toBe('');
+    // No token for the installation was ever asked for, so nothing of X's was listed.
+    expect(d.hub.tokensIssued()).toBe(0);
+    expect((await d.go('/api/setup/github-app/repositories')).status).toBe(409);
+  });
+
+  it('offers someone who can push to one repository that one, and nothing else the installation covers', async () => {
+    const d = deployment({
+      env: APP_ENV,
+      world: {
+        installations: { bo: ['77'] },
+        repositories: ['x/docs', 'x/handbook', 'x/payroll'],
+        theirs: { bo: { 'x/docs': 'push', 'x/handbook': 'pull' } },
+      },
+    });
+    const state = await sentToInstall(d);
+    expect((await cameBackAs(d, 'bo', state)).headers.get('location')).toBe('https://kb.acme.test/?github=connected');
+    expect(d.settings.resolve('githubRepositoriesPermitted')).toBe('x/docs');
+    const listed = (await (await d.go('/api/setup/github-app/repositories')).json()) as { repositories: { fullName: string }[] };
+    expect(listed.repositories.map((r) => r.fullName)).toEqual(['x/docs']);
+    expect(d.connection.permits('x/payroll')).toBe(false);
+    expect(d.connection.permits('x/handbook')).toBe(false);
+  });
+
+  it('brings what may be connected up to date when GitHub is connected again', async () => {
+    const theirs: Record<string, Record<string, 'push' | 'pull'>> = { ada: { 'acme/kb': 'push' } };
+    const d = deployment({ env: APP_ENV, world: { installations: { ada: ['77'] }, theirs } });
+    await cameBackAs(d, 'ada', await sentToInstall(d));
+    expect(d.settings.resolve('githubRepositoriesPermitted')).toBe('acme/kb');
+    theirs.ada = { 'acme/another': 'push' };
+    await cameBackAs(d, 'ada', await sentToInstall(d));
+    expect(d.settings.resolve('githubRepositoriesPermitted')).toBe('acme/another');
   });
 
   /**
@@ -461,7 +711,7 @@ describe('who these routes answer', () => {
     for (const [method, path] of [
       ['GET', '/api/setup/github-app'],
       ['POST', '/api/setup/github-app/manifest'],
-      ['GET', '/api/setup/github-app/install'],
+      ['POST', '/api/setup/github-app/install'],
       ['GET', '/api/setup/github-app/callback?code=code-of-ada&installation_id=77&state=x'],
       ['GET', '/api/setup/github-app/repositories'],
     ] as const) {

@@ -57,6 +57,8 @@ export class GitHubAppError extends Error {
 const API = 'https://api.github.com';
 const WEB = 'https://github.com';
 const API_VERSION = '2022-11-28';
+/** Generous for an API that answers in a fraction of a second, short for something git is waiting on. */
+const REQUEST_TIMEOUT_MS = 10_000;
 /** Repositories listed per installation before the list is said to be cut short. */
 const MAX_REPOSITORIES = 500;
 
@@ -105,6 +107,8 @@ export class GitHubAppClient {
   constructor(
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly now: () => number = Date.now,
+    /** How long one request to GitHub may take. */
+    private readonly timeoutMs: number = REQUEST_TIMEOUT_MS,
   ) {}
 
   /** The app GitHub created from a manifest, for the code it sent the browser back with. Good once, for an hour. */
@@ -182,13 +186,28 @@ export class GitHubAppClient {
   }
 
   /** The repositories the installation reaches, and whether the list was cut short. */
-  async repositories(installationToken: string): Promise<{ repositories: InstallationRepository[]; more: boolean }> {
+  repositories(installationToken: string): Promise<{ repositories: InstallationRepository[]; more: boolean }> {
+    return this.listRepositories(`${API}/installation/repositories`, installationToken);
+  }
+
+  /**
+   * The repositories of an installation that THE PERSON holding `userToken`
+   * reaches, each with that person's own permissions: `writable` is whether
+   * they may push to it, which is another question from whether the
+   * installation may. An installation the person does not reach at all is
+   * GitHub's to refuse.
+   */
+  repositoriesOf(userToken: string, installationId: string): Promise<{ repositories: InstallationRepository[]; more: boolean }> {
+    return this.listRepositories(`${API}/user/installations/${encodeURIComponent(installationId)}/repositories`, userToken);
+  }
+
+  private async listRepositories(url: string, token: string): Promise<{ repositories: InstallationRepository[]; more: boolean }> {
     const repositories: InstallationRepository[] = [];
     let total = 0;
     for (let page = 1; repositories.length < MAX_REPOSITORIES; page += 1) {
       const body = await this.call<{ total_count?: unknown; repositories?: unknown[] }>(
-        `${API}/installation/repositories?per_page=100&page=${page}`,
-        { headers: { Authorization: `Bearer ${installationToken}` } },
+        `${url}?per_page=100&page=${page}`,
+        { headers: { Authorization: `Bearer ${token}` } },
       );
       total = typeof body.total_count === 'number' ? body.total_count : total;
       const batch = Array.isArray(body.repositories) ? body.repositories : [];
@@ -213,6 +232,10 @@ export class GitHubAppClient {
     try {
       res = await this.fetchImpl(url, {
         ...init,
+        // A deadline of ours: left to the platform, a host that accepts
+        // the connection and says nothing is waited on for minutes, by
+        // whatever was waiting on this call.
+        signal: AbortSignal.timeout(this.timeoutMs),
         headers: {
           Accept: 'application/vnd.github+json',
           'X-GitHub-Api-Version': API_VERSION,

@@ -10,7 +10,7 @@ export {
   type InstallationToken,
   type RegisteredApp,
 } from './github-app.client.js';
-export { GitHubAppConnection, type GitHubAppConnectionOptions } from './github-app.connection.js';
+export { GitHubAppConnection, repositoriesAsSetting, type GitHubAppConnectionOptions } from './github-app.connection.js';
 export {
   createGitHubAppRoutes,
   githubAppCallbackUrl,
