@@ -178,8 +178,21 @@ describe('a deployment that moves to a repository it keeps', () => {
     const { save, managed, hosted, runner, source, workingCopy, setAsideRoot } = boot(
       testKbContext({ branchModel: { defaultBranch: 'main', protectedBranches: ['main'] } }),
     );
-    // A deployment on a repository of its own, set up and serving.
+    // A deployment on a repository of its own, set up and serving. The
+    // repository has a history of ITS OWN, written here and not by the
+    // startup phase: two empty repositories the phase seeds within the
+    // same second get the same first commit (same tree, same author, same
+    // time), and the phase would then read them, rightly, as one repository
+    // at two addresses, and keep the working copy instead of setting it
+    // aside. A fast machine did exactly that.
     await git(root, ['init', '--bare', '-b', 'main', hosted]);
+    const theirs = path.join(root, 'theirs');
+    await fs.mkdir(theirs);
+    await git(theirs, ['init', '-b', 'main']);
+    await fs.writeFile(path.join(theirs, 'HANDBOOK.md'), 'what this organisation had before\n', 'utf8');
+    await git(theirs, ['add', '-A']);
+    await git(theirs, ['commit', '-m', 'the handbook']);
+    await git(theirs, ['push', hosted, 'main']);
     const first = await save({ kbRepoUrl: 'https://git.example.com/acme/kb.git', gitToken: 'a-token', defaultBranch: 'main', protectedBranches: 'main' });
     expect(first.status, JSON.stringify(first.body)).toBe(200);
     const copy = workingCopy('main');
@@ -205,7 +218,11 @@ describe('a deployment that moves to a repository it keeps', () => {
     expect(await git(hosted, ['for-each-ref'])).toBe(hostedBefore);
     expect(await git(copy, ['config', '--get', 'remote.origin.url'])).toBe(managed.path);
     expect(await fs.access(path.join(copy, 'unpushed.md')).then(() => true, () => false)).toBe(false);
-    expect(await git(managed.path, ['ls-tree', '-r', '--name-only', 'main'])).toContain('WELCOME.md');
+    const managedHolds = await git(managed.path, ['ls-tree', '-r', '--name-only', 'main']);
+    expect(managedHolds).toContain('WELCOME.md');
+    // Nothing of one repository was pushed into the other.
+    expect(managedHolds).not.toContain('HANDBOOK.md');
+    expect(managedHolds).not.toContain('unpushed.md');
 
     // What was set aside is whole: the commit nobody pushed is in it.
     const [stamp] = await fs.readdir(setAsideRoot);
