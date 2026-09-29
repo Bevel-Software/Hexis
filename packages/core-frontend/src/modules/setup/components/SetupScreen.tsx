@@ -10,6 +10,7 @@ import { tokenUsernameForHost } from '../utils/git-host';
 import { isRootFolderSuggestion, rootFolderState, type RootFolderState } from '../utils/root-folders';
 import { copyToClipboard } from '../../../lib/clipboard';
 import { GitHubRepositoryPanel } from './GitHubRepositoryPanel';
+import { forgetDraft, keepDraft, keptDraft } from '../utils/kept-draft';
 import { useAppRegistry } from '../../../core/registry';
 import { MarketplaceSection } from '../../settings/components/MarketplaceSection';
 import {
@@ -419,7 +420,30 @@ export function SetupScreen({
   oidcVerification,
   repository,
 }: Props) {
-  const [draft, setDraft] = useState<Record<string, string>>({});
+  /** Whether a setting is a secret: what is never written to the browser's storage. */
+  const isSecret = (key: string) => settings.find((s) => s.key === key)?.secret !== false;
+  /**
+   * What was typed before the browser left for GitHub, put back now that it
+   * has returned (see `kept-draft.ts`). Only on a return from GitHub, which
+   * the address says: what was kept for a trip that was abandoned is not
+   * sprung on someone who opens the screen later. And only for settings
+   * that are still this form's to edit.
+   */
+  const [restored] = useState(() => {
+    const back = new URLSearchParams(window.location.search ?? '').has('github');
+    const kept = back ? keptDraft(isSecret) : { draft: {}, dropped: [] };
+    const editableNow = (key: string) => settings.some((s) => s.key === key && s.source !== 'env');
+    return {
+      draft: Object.fromEntries(Object.entries(kept.draft).filter(([key]) => editableNow(key))),
+      dropped: kept.dropped.filter(editableNow),
+    };
+  });
+  // Read once, then gone: in an effect, since the page may be built twice
+  // before it is shown and must find the same thing both times.
+  useEffect(() => forgetDraft(), []);
+  const [draft, setDraft] = useState<Record<string, string>>(restored.draft);
+  /** The secrets that were typed before the trip and not kept, until each is entered again. */
+  const toEnterAgain = restored.dropped.filter((key) => !draft[key]?.trim());
   /**
    * The initialization failure on screen: the status endpoint's, until a save
    * or a retry from this screen answers more recently. A fresh status read
@@ -517,7 +541,12 @@ export function SetupScreen({
    */
   const { signInOption } = useAppRegistry();
   const ownProviderConfigured = OIDC_KEYS.every((key) => settings.find((s) => s.key === key)?.configured === true);
-  const [signInTab, setSignInTab] = useState<SignInTab>(ownProviderConfigured ? 'own' : 'managed');
+  const [signInTab, setSignInTab] = useState<SignInTab>(
+    // What was being typed about the deployment's own provider is shown, not put back out of sight.
+    ownProviderConfigured || [...Object.keys(restored.draft), ...restored.dropped].some((key) => OIDC_KEYS.includes(key))
+      ? 'own'
+      : 'managed',
+  );
 
   /**
    * The way the deployment has its repository, and which one's tab is open.
@@ -1321,6 +1350,17 @@ export function SetupScreen({
         )}
 
         <div ref={noticeRef}>
+          {/* Back from GitHub, with a secret that was typed before the trip
+              and not kept. Said, because an empty field that was full a
+              minute ago otherwise reads as something that went wrong. It
+              goes as each is entered again. */}
+          {toEnterAgain.length > 0 && (
+            <Banner tone="wait" role="status" className="mt-6" data-testid="enter-again">
+              What you had entered is back, except{' '}
+              {toEnterAgain.map((key) => FIELDS[key]?.label ?? key).join(', ')}. For safety, a secret is not kept while
+              the browser is away: enter {toEnterAgain.length === 1 ? 'it' : 'them'} again.
+            </Banner>
+          )}
           {/* Saved, but the knowledge base behind the gate was never set up.
               The cause is the server's classified sentence — what to fix, not
               what git said — and the retry needs nothing re-entered. */}
@@ -1554,6 +1594,9 @@ export function SetupScreen({
                     onChoose={(name) => set('githubRepository', name)}
                     problem={problems.githubRepository}
                     disabled={saving}
+                    // The browser is about to leave for GitHub, and the page
+                    // that comes back is a new one.
+                    onLeaving={() => keepDraft(draft, isSecret)}
                   />
                 )}
                 {repositoryTabs && gitTab === 'managed' && (

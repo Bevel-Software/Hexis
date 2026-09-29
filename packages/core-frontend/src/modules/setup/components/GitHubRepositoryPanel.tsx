@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Banner, Button, TextField } from '../../../shared/components';
 import {
   fetchGitHubApp,
@@ -71,6 +71,11 @@ interface Props {
   /** What a refused save said about the repository. */
   problem?: string;
   disabled?: boolean;
+  /**
+   * Called just before the browser is sent to GitHub. The page that comes
+   * back is a new one, so whatever the form holds has to be kept now.
+   */
+  onLeaving?(): void;
 }
 
 /**
@@ -89,7 +94,7 @@ interface Props {
  * its own and its buttons are buttons; the repository chosen is saved with
  * everything else by "Save and continue".
  */
-export function GitHubRepositoryPanel({ repository, onChoose, problem, disabled }: Props) {
+export function GitHubRepositoryPanel({ repository, onChoose, problem, disabled, onLeaving }: Props) {
   const [status, setStatus] = useState<GitHubAppStatus | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [outcome] = useState(takeOutcome);
@@ -98,6 +103,11 @@ export function GitHubRepositoryPanel({ repository, onChoose, problem, disabled 
   const [repositories, setRepositories] = useState<GitHubRepository[] | null>(null);
   const [more, setMore] = useState(false);
   const [listFailed, setListFailed] = useState<string | null>(null);
+  // Asked for at the moment of leaving, not at the press that led to it:
+  // GitHub is asked for an address in between, and what the form holds when
+  // the browser goes is what has to be kept.
+  const leaving = useRef(onLeaving);
+  leaving.current = onLeaving;
 
   useEffect(() => {
     let mounted = true;
@@ -130,6 +140,7 @@ export function GitHubRepositoryPanel({ repository, onChoose, problem, disabled 
     setStarting(true);
     try {
       const { action, manifest } = await startGitHubAppRegistration(organization.trim());
+      leaving.current?.();
       postManifest(action, manifest);
     } catch (err) {
       setFailed(err instanceof Error ? err.message : 'Could not start creating the app.');
@@ -142,7 +153,9 @@ export function GitHubRepositoryPanel({ repository, onChoose, problem, disabled 
     setFailed(null);
     setStarting(true);
     try {
-      window.location.assign(await startGitHubAppInstallation());
+      const address = await startGitHubAppInstallation();
+      leaving.current?.();
+      window.location.assign(address);
     } catch (err) {
       setFailed(err instanceof Error ? err.message : 'Could not open GitHub.');
       setStarting(false);

@@ -66,6 +66,17 @@ If the app reaches no repository you can write to, nothing is connected and
 the tab says so. Add one you can write to, or ask someone who can write to
 it to connect GitHub.
 
+### What you had entered is kept while you are on GitHub
+
+Connecting GitHub takes your browser away and brings it back, twice. What
+you had typed into the form before leaving is there when you return.
+
+Secrets are the exception: an access token or an application secret you had
+typed is not kept while the browser is away. The screen names the ones to
+enter again.
+
+What is kept stays in that browser tab, for half an hour.
+
 ### Your deployment must be reachable by your browser
 
 GitHub sends your browser back to the deployment twice, at
