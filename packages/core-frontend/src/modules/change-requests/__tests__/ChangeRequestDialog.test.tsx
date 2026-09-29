@@ -520,10 +520,13 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     // The stuck request is the one its author most wants to throw away and
     // propose again, which is why the button is no longer hidden while the
     // dialog is blocked. Reached the way the dialog really reaches it: the
-    // auto-update on open is refused as conflicting.
+    // auto-update on open is refused as conflicting. `needsUpdate` is what
+    // starts that update (the target moved in a file this request changes);
+    // `behind` alone, the target having moved anywhere, no longer does.
     detailMock.fetchPrDetail.mockResolvedValue({
       ...detailWith([approval({})]),
       behind: true,
+      needsUpdate: true,
       viewerCanUpdate: true,
       viewerCanDelete: true,
       viewerIsAuthor: true,
