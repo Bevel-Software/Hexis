@@ -35,6 +35,7 @@ import {
   ProtectedBranchError,
   PullRebaseConflictError,
   RemoteBranchGoneError,
+  VersionNotOnBranchError,
   isMissingRemoteBranchFailure,
 } from '../../../shared/domain-errors.js';
 import {
@@ -2331,6 +2332,10 @@ export class GitService implements IGitService {
     const repoRelativePath = this.stripRepoPrefix(relativePath);
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
+      // Branch-scoped, like the bytes route: a patch is a past version too,
+      // and leaving this route open would let a sha refused there be read
+      // here instead.
+      await this.assertOnBranchHistory(cwd, sha);
       // BOTH sides: at a commit that DELETES a directory the path is absent
       // at `sha` but a tree at `sha^` — and the diff of that deletion is
       // every child's content, exactly what the per-file gate never checked.
@@ -2382,6 +2387,10 @@ export class GitService implements IGitService {
     const repoRelativePath = this.stripRepoPrefix(relativePath);
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
+      // Same branch rule as the patch and the bytes: this route serves the
+      // FULL text of both sides, so it is the most generous of the three and
+      // the least safe one to leave ungated.
+      await this.assertOnBranchHistory(cwd, sha);
       await this.assertNotTreeAtRef(cwd, sha, repoRelativePath, relativePath);
       await this.assertNotTreeAtRef(cwd, `${sha}^`, repoRelativePath, relativePath);
       const current = await this.readFileAtRef(workspaceId, sha, repoRelativePath);
@@ -3270,6 +3279,162 @@ export class GitService implements IGitService {
   }
 
   /**
+   * A repo-relative file's BYTES at an arbitrary git ref — the binary sibling
+   * of {@link readFileAtRef}, with the blob's object id alongside them.
+   *
+   * `readFileAtRef` decodes stdout as UTF-8, which for a PNG or a PDF is not a
+   * lossless round trip: every byte sequence that is not valid UTF-8 comes
+   * back as U+FFFD and the file is ruined. A past version has to be delivered
+   * byte for byte, so this reads through `cat-file --batch`, whose framing is
+   * in BYTES (`<oid> <type> <size>\n<size bytes>\n`) rather than characters.
+   *
+   * One invocation, and absence is a PROTOCOL answer (`<spec> missing`) rather
+   * than a parsed error message — which also covers `<sha>^` of a root commit,
+   * where there is no "before" side at all. `null` therefore means exactly
+   * "nothing is at that path on that side".
+   *
+   * The `oid` is the content's own hash, so it is what the HTTP route uses as
+   * an ETag: cheaper than hashing the body again, and stable for a version
+   * that by definition can never change.
+   */
+  private async blobAtRef(
+    cwd: string,
+    ref: string,
+    repoRelativePath: string,
+  ): Promise<{ bytes: Buffer; blobId: string } | null> {
+    const { stdout } = await this.gitBytes(cwd, ['cat-file', '--batch'], {
+      input: `${ref}:${repoRelativePath}\n`,
+    });
+    const nl = stdout.indexOf(0x0a);
+    if (nl < 0) throw new Error('unexpected end of git cat-file output');
+    // The spec may itself contain spaces (a KB file routinely does), hence the
+    // endsWith checks rather than a split — same protocol reading as the
+    // access resolver's `catFileBatch`.
+    const header = stdout.subarray(0, nl).toString('utf-8');
+    if (header.endsWith(' missing') || header.endsWith(' ambiguous')) return null;
+    const [blobId, type, rawSize] = header.split(' ');
+    // A tree here would be the per-file gate bypassed, and `assertNotTreeAtRef`
+    // is what refuses it before this runs; anything else non-blob (a tag, a
+    // commit) is not a file either. Nothing to serve in either case.
+    if (type !== 'blob' || blobId === undefined) return null;
+    const size = Number(rawSize);
+    if (!Number.isSafeInteger(size) || size < 0) {
+      throw new Error(`unexpected git cat-file header: ${header}`);
+    }
+    return { bytes: stdout.subarray(nl + 1, nl + 1 + size), blobId };
+  }
+
+  /**
+   * A repo-relative file's bytes at `ref`, or `null` when nothing is there.
+   *
+   * The read-only byte counterpart of {@link readFileAtRef}; see
+   * {@link blobAtRef} for why the bytes cannot come back through a string.
+   */
+  async readFileBytesAtRef(
+    workspaceId: string,
+    ref: string,
+    repoRelativePath: string,
+  ): Promise<Buffer | null> {
+    const cwd = await this.repoDir(workspaceId);
+    return (await this.blobAtRef(cwd, ref, repoRelativePath))?.bytes ?? null;
+  }
+
+  /**
+   * Refuse a sha that is not in the history of the branch this workspace has
+   * checked out.
+   *
+   * A file's past is served per BRANCH: the history panel lists what `git log`
+   * on this workspace's own branch touched, and every read of a past save has
+   * to stay inside that list. Without this, a sha lifted from another branch —
+   * or from a change request nobody approved — would be readable through the
+   * workspace of a branch whose history never contained it, which is the
+   * access rules of the viewed branch bypassed by a query parameter.
+   *
+   * `merge-base --is-ancestor` is the exact question, and a commit is its own
+   * ancestor, so the branch head passes. Exit 1 is git's answer for "resolved,
+   * and not an ancestor". An unresolvable object name — a made-up id — gets
+   * the SAME refusal on purpose (see {@link VersionNotOnBranchError}), and
+   * every other failure propagates: a guard that fails open on its own errors
+   * is not a guard.
+   */
+  private async assertOnBranchHistory(cwd: string, sha: string): Promise<void> {
+    try {
+      await this.git(cwd, ['merge-base', '--is-ancestor', sha, 'HEAD']);
+    } catch (err) {
+      if (err instanceof GitRunError && !err.timedOut) {
+        if (err.exitCode === 1) throw new VersionNotOnBranchError();
+        const stderr = err.stderr ?? err.message;
+        if (
+          // git's wording for "I cannot resolve that" varies by subcommand and
+          // by version — `merge-base` says "Not a valid commit name", others
+          // "not a valid object name" / "unknown revision" — so every spelling
+          // that means the same thing is listed rather than one guessed at.
+          /not a valid (object|commit) name|no such commit|bad object|unknown revision|malformed object name|ambiguous argument/i.test(
+            stderr,
+          )
+        ) {
+          throw new VersionNotOnBranchError();
+        }
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Is `sha` in the history of the branch this workspace has checked out?
+   *
+   * The same question {@link assertOnBranchHistory} asks, as a boolean, for
+   * callers that want to decide rather than be refused.
+   */
+  async isOnBranchHistory(workspaceId: string, sha: string): Promise<boolean> {
+    if (!/^[a-f0-9]{7,40}$/i.test(sha)) throw new WorkflowValidationError('invalid commit sha');
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      try {
+        await this.assertOnBranchHistory(cwd, sha);
+        return true;
+      } catch (err) {
+        if (err instanceof VersionNotOnBranchError) return false;
+        throw err;
+      }
+    });
+  }
+
+  /**
+   * One file's BYTES at a save, exactly as they were — the `after` side of
+   * `sha`, or the `before` side (`<sha>^`) for the save that deleted it.
+   *
+   * Every guard the text history surfaces apply, in the same order: the sha is
+   * a sha, the save is on this branch, and the pathspec is not a directory at
+   * that ref (a per-file gate upstream authorized one path, and a tree read
+   * would hand over every child). `null` means the file was not there on the
+   * side asked for.
+   *
+   * Runs inside the workspace's git turn — one turn for the whole read, so the
+   * ancestry check and the bytes it authorizes cannot be separated by another
+   * caller's checkout.
+   */
+  async fileBytesAtCommit(
+    workspaceId: string,
+    relativePath: string,
+    sha: string,
+    side: 'after' | 'before',
+  ): Promise<{ bytes: Buffer; blobId: string } | null> {
+    assertValidRelativePath(relativePath);
+    if (!/^[a-f0-9]{7,40}$/i.test(sha)) {
+      throw new WorkflowValidationError('invalid commit sha');
+    }
+    const repoRelativePath = this.stripRepoPrefix(relativePath);
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      await this.assertOnBranchHistory(cwd, sha);
+      const ref = side === 'before' ? `${sha}^` : sha;
+      await this.assertNotTreeAtRef(cwd, ref, repoRelativePath, relativePath);
+      return this.blobAtRef(cwd, ref, repoRelativePath);
+    });
+  }
+
+  /**
    * The commits on `ref` that touched `repoRelativePath`, newest first, at
    * most `limit` of them. What a skill's `version` is looked up through: each
    * commit is a copy of the file that may have declared a version. Renames are
@@ -3374,6 +3539,27 @@ export class GitService implements IGitService {
       // THIS service's setting, not the runner's: the startup runner spells its
       // literal paths as `:(literal)<path>`, which this variable would turn into
       // a search for a file literally named that.
+      env: { GIT_LITERAL_PATHSPECS: '1', ...opts?.env },
+    });
+  }
+
+  /**
+   * {@link git}, with stdout as raw BYTES.
+   *
+   * A sibling rather than an `encoding` option on `git()` itself: every other
+   * caller in this service reads text, and the two return types (`string` vs
+   * `Buffer`) are not interchangeable at any call site. Same
+   * `GIT_LITERAL_PATHSPECS` and same runner deadline — the only difference is
+   * that the bytes are not decoded.
+   */
+  private gitBytes(
+    cwd: string,
+    args: string[],
+    opts?: Omit<GitRunOptions, 'encoding'>,
+  ): Promise<GitRunResult<Buffer>> {
+    return this.gitRunner.run(cwd, args, {
+      ...opts,
+      encoding: 'buffer',
       env: { GIT_LITERAL_PATHSPECS: '1', ...opts?.env },
     });
   }

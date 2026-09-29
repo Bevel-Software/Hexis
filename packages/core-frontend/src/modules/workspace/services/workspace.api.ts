@@ -62,15 +62,32 @@ export async function listFiles(workspaceId: string): Promise<FileTreeEntry> {
  * - `version` is a cache key appended as `&v=`; `0` or undefined adds nothing,
  *   so the URL stays stable (and browser-cacheable) until the file is known to
  *   have changed. See `useImageRevision`.
+ * - `ref` asks for the file AS IT WAS at that save (a commit sha) instead of
+ *   the working tree, and `side: 'before'` for the version just before it —
+ *   what Version history's preview pane and its "Download this version" read,
+ *   and the only thing the save that deleted a file can show. The backend
+ *   refuses a save outside the viewed branch's history and never falls back to
+ *   today's bytes, so a `ref` that goes wrong is an error, not a stale answer.
  */
 export function rawFileUrl(
   workspaceId: string,
   relativePath: string,
-  options: { download?: boolean; version?: number } = {},
+  options: {
+    download?: boolean;
+    version?: number;
+    ref?: string | null;
+    side?: 'after' | 'before';
+  } = {},
 ): string {
   let url = `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(relativePath)}`;
   if (options.download) url += '&download=1';
   if (options.version) url += `&v=${options.version}`;
+  if (options.ref) {
+    url += `&ref=${encodeURIComponent(options.ref)}`;
+    // `side` only means anything next to a ref — the backend refuses it on its
+    // own — so it is appended only here, and only when it is not the default.
+    if (options.side === 'before') url += '&side=before';
+  }
   return url;
 }
 

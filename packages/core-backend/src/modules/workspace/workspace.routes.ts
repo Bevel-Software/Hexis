@@ -739,7 +739,7 @@ export function createWorkspaceRoutes(
   }
 
   /**
-   * GET /workspace/:id/file/raw?path=<file>[&download=1][&v=<n>]
+   * GET /workspace/:id/file/raw?path=<file>[&download=1][&v=<n>][&ref=<sha>[&side=before]]
    *
    * The bytes of one workspace file: for the document renderers' fetches, the
    * file tree's Download, and the `<img>` tags the markdown pipeline emits for
@@ -750,7 +750,8 @@ export function createWorkspaceRoutes(
    *   request ──▶ auth: Bearer, else the cookie
    *           ──▶ read gate on the path             403 if the caller may not read it
    *           ──▶ download gate, if ?download=1     403 without the download: verb
-   *           ──▶ readFileBinary                    404 missing, 403 traversal
+   *           ──▶ readFileBinary, or the bytes at   404 missing, 403 traversal
+   *               ?ref when one is named
    *           ──▶ Content-Type from the extension, nosniff, a CSP sandbox for
    *               inline svg, attachment disposition for a download, and
    *               Cache-Control: private, no-cache
@@ -760,6 +761,26 @@ export function createWorkspaceRoutes(
    *
    * `?v=` is not read here. The frontend bumps it when it learns an image
    * changed, so the browser asks for a URL it has not cached.
+   *
+   * `?ref=<sha>` serves the file AS IT WAS at that save instead of the working
+   * tree, so Version history can mount the very viewers this route already
+   * feeds. `&side=before` reads `<sha>^` — the version just before a save,
+   * which is the only thing the save that DELETED a file can show. Everything
+   * around the read is deliberately unchanged: the same read gate, the same
+   * download verb, the same content type, the same svg sandbox. What the ref
+   * changes is WHICH bytes, never WHO may have them:
+   *
+   *   - both gates resolve against TODAY's tree, not the rules as they were at
+   *     that save (hx-history-file-preview, decision 3): anyone who may read
+   *     the file now may read any of its past saves, and anyone who may not is
+   *     refused with the same sentence they get for the file itself;
+   *   - the save must be in the history of the branch this workspace has
+   *     checked out — `fileBytesAtChange` refuses anything else with a 404
+   *     carrying `VERSION_NOT_ON_BRANCH_MESSAGE`;
+   *   - a ref that is present but malformed is a 400, never a silent fall back
+   *     to `readFileBinary`. Serving today's bytes for a request that asked for
+   *     a past version would be the worst possible answer — it looks like a
+   *     success — so the ref branch and the working-tree branch are exclusive.
    */
   router.get('/workspace/:id/file/raw', async (req, res) => {
     const id = authenticated(req, res);
@@ -771,6 +792,27 @@ export function createWorkspaceRoutes(
     }
     const filePath = inRepo(res, requested);
     if (filePath === null) return;
+    // A past save, asked for by sha. Validated BEFORE the gates so a
+    // mistyped ref is a 400 rather than a 200 carrying today's bytes.
+    const rawRef = req.query.ref;
+    if (rawRef !== undefined && (typeof rawRef !== 'string' || !/^[a-f0-9]{7,40}$/i.test(rawRef))) {
+      res.status(400).json({ error: 'ref must be a commit sha' });
+      return;
+    }
+    const ref = typeof rawRef === 'string' ? rawRef : null;
+    // Only the two sides exist; `side` without `ref` names nothing, and an
+    // unrecognised value is a spelling mistake in a security-relevant
+    // parameter, not a default to guess at.
+    const rawSide = req.query.side;
+    if (rawSide !== undefined && rawSide !== 'before' && rawSide !== 'after') {
+      res.status(400).json({ error: "side must be 'before' or 'after'" });
+      return;
+    }
+    if (rawSide !== undefined && ref === null) {
+      res.status(400).json({ error: 'side requires ref' });
+      return;
+    }
+    const side = rawSide === 'before' ? 'before' : 'after';
     // `?download=1` flips this from inline-serve (used by PdfRenderer and
     // the image renderers) to "save to disk" — and the save path is gated
     // on per-path `download:` rules in access.md. The inline path stays
@@ -785,7 +827,28 @@ export function createWorkspaceRoutes(
       if (!(await requireDownloadPermission(req, res, id, filePath))) return;
     }
     try {
-      const buffer = await workspaceService.readFileBinary(id, filePath);
+      let buffer: Buffer;
+      if (ref === null) {
+        buffer = await workspaceService.readFileBinary(id, filePath);
+      } else {
+        const at = await workflowService.fileBytesAtChange(id, filePath, ref, side);
+        // Nothing at that path on that side of the save — for `before`, also
+        // how a root commit answers, since it has no parent to read.
+        if (at === null) {
+          res.status(404).json({ error: 'File not found' });
+          return;
+        }
+        // `IWorkflowService` is isomorphic, so the bytes arrive typed as a
+        // `Uint8Array`. `res.send` recognises a Buffer and JSON-encodes
+        // anything else, so a zero-copy view over the same memory is what it
+        // has to be handed — never a copy of a file that may be tens of MB.
+        buffer = Buffer.from(at.bytes.buffer, at.bytes.byteOffset, at.bytes.byteLength);
+        // The blob's object id IS the content hash, and a past version can
+        // never change, so this is the strongest ETag available and costs no
+        // second pass over the bytes. Set BEFORE `res.send`, which then skips
+        // its own weak ETag and answers a matching If-None-Match with a 304.
+        res.setHeader('ETag', `"${at.blobId}"`);
+      }
       const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
       const mimeTypes: Record<string, string> = {
         '.png': 'image/png',
@@ -841,6 +904,16 @@ export function createWorkspaceRoutes(
       // A traversal is the caller's 403; every other read failure here is the
       // route's honest 404 (the image either is not there or cannot be shown).
       if (error instanceof PathTraversalError) {
+        sendError(res, error);
+        return;
+      }
+      // A refusal the ref branch raised has to reach the caller AS ITSELF: a
+      // save from another branch is answered with
+      // `VERSION_NOT_ON_BRANCH_MESSAGE`, and flattening it into the generic
+      // "File not found" would tell a reader their file had vanished. Only
+      // the ref branch can raise one, so the working-tree read keeps the
+      // blanket 404 it has always answered with.
+      if (ref !== null && error instanceof WorkflowDomainError) {
         sendError(res, error);
         return;
       }

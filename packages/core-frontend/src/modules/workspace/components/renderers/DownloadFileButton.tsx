@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useState } from 'react';
 import { Download } from 'lucide-react';
 import { Button } from '../../../../shared/components';
-import { useRendererWorkspaceId } from './rendererWorkspace';
+import { useRendererFileRef, useRendererWorkspaceId } from './rendererWorkspace';
 import { rawFileUrl } from '../../services/workspace.api';
 import { downloadViaBlob } from './downloadFile';
 
@@ -42,6 +42,20 @@ export function DownloadFileButton({
   label?: string;
 }) {
   const workspaceId = useRendererWorkspaceId();
+  /**
+   * A past save, when Version history mounted this. "Download this version"
+   * has to deliver the bytes of THAT save — for the save that deleted the
+   * file, the ones just before it — and the whole of that is which URL the
+   * download reads, under the same `download:` verb as any other.
+   */
+  const fileRef = useRendererFileRef();
+  /**
+   * The save as PRIMITIVES, hoisted out of the object so the read effect can
+   * depend on exactly what it reads. Depending on `fileRef` itself would put
+   * a context object in the dependency list.
+   */
+  const versionRef = fileRef?.ref ?? null;
+  const versionSide = fileRef?.side;
   const canDownload = useContext(CanDownloadContext);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -53,7 +67,11 @@ export function DownloadFileButton({
     setError(null);
     try {
       const outcome = await downloadViaBlob(
-        rawFileUrl(workspaceId, filePath, { download: true }),
+        rawFileUrl(workspaceId, filePath, {
+          download: true,
+          ref: versionRef,
+          side: versionSide,
+        }),
         fileName,
       );
       if (!outcome.ok) {
@@ -66,7 +84,7 @@ export function DownloadFileButton({
     } finally {
       setBusy(false);
     }
-  }, [workspaceId, busy, filePath, fileName]);
+  }, [workspaceId, busy, filePath, fileName, versionRef, versionSide]);
 
   return (
     <span className="inline-flex items-center gap-2">
