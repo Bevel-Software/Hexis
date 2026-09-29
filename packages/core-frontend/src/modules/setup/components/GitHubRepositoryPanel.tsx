@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { Banner, Button, TextField } from '../../../shared/components';
+import { useEffect, useState } from 'react';
+import { Banner, Button, TextField, useLatestRef } from '../../../shared/components';
 import {
   fetchGitHubApp,
   fetchGitHubRepositories,
@@ -106,8 +106,7 @@ export function GitHubRepositoryPanel({ repository, onChoose, problem, disabled,
   // Asked for at the moment of leaving, not at the press that led to it:
   // GitHub is asked for an address in between, and what the form holds when
   // the browser goes is what has to be kept.
-  const leaving = useRef(onLeaving);
-  leaving.current = onLeaving;
+  const leaving = useLatestRef(onLeaving);
 
   useEffect(() => {
     let mounted = true;
