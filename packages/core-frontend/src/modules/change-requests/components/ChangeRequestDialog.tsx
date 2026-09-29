@@ -142,23 +142,36 @@ export function ChangeRequestDialog({
   const [baseRevision, setBaseRevision] = useState(0);
 
   /**
-   * The request has fallen behind AND this reader is one of the people who
-   * may bring it up to date (its author, an admin, or anyone who may apply
-   * it). The server re-checks the same predicate; this only decides whether
-   * the dialog reaches for the update at all.
+   * This request needs bringing up to date AND this reader is one of the
+   * people who may do it (its author, an admin, or anyone who may apply it).
+   * The server re-checks the same predicate; this only decides whether the
+   * dialog reaches for the update at all.
+   *
+   * `needsUpdate`, NOT `behind`. `behind` is true whenever the target holds
+   * any commit this request does not — which, on a knowledge base where every
+   * shared save commits to the default branch, is true again minutes after
+   * every update. Reaching for the merge on that answer made opening a
+   * request pay for one on almost every open, for a change to a file the
+   * request does not contain. `needsUpdate` adds the half that matters: the
+   * target moved in a file THIS request also changes.
    */
-  const behindAndUpdatable =
-    detail !== null && detail.state === 'open' && detail.behind && detail.viewerCanUpdate;
+  const needsUpdateByThisReader =
+    detail !== null && detail.state === 'open' && detail.needsUpdate && detail.viewerCanUpdate;
   /**
-   * Mid-update: the dialog shows one status line and NO file content.
+   * Mid-update: the files are on screen, with one status line above them, and
+   * the two verbs that would act on them are held.
+   *
+   * The files are NOT hidden. They are the proposal, read at the fork point,
+   * and a target that moved in one of them does not make the other nineteen
+   * untrue — where hiding them made every reader wait out a merge before
+   * seeing anything. What the update can change is the verdict, so Approve
+   * and Apply wait for it and the reading does not.
    *
    * Derived rather than stored, so it is already true on the very render the
-   * detail arrives on — a frame of pre-update files, immediately replaced,
-   * would be the dialog showing a version of the change that is about to stop
-   * being true. It also holds the file reads back (see the read effect), so
-   * nothing is fetched against a head the server is in the middle of moving.
+   * detail arrives on: the note and the disabled verbs appear WITH the files,
+   * never a frame after them.
    */
-  const bringingUpToDate = !autoUpdateSettled && behindAndUpdatable && !blocked;
+  const bringingUpToDate = !autoUpdateSettled && needsUpdateByThisReader && !blocked;
 
   const isTop = useModalLayer(true);
   useEffect(() => {
@@ -308,25 +321,19 @@ export function ChangeRequestDialog({
   const asked = useRef<Map<string, object>>(new Map());
   useEffect(() => {
     // `selected` is '' until the detail names any file in an unscoped dialog —
-    // nothing to read yet. Binary files are never read at all (above). A read
-    // held back while the request is being brought up to date is not skipped:
-    // `bringingUpToDate` is a dependency, so it fires the moment the update
-    // settles — against the head the merge left, never the one it replaced.
+    // nothing to read yet. Binary files are never read at all (above).
     //
-    // Nothing is read before the DETAIL either, even though a dialog opened
-    // about a file has a selection from the first render (`initialPath`): until
-    // the detail says whether this request is behind and whether this reader
-    // may update it, there is no way to know that the branch is not about to
-    // move. Reading first would spend a request on content the update then
-    // throws away, and the pane cannot draw a diff before the detail names its
-    // fork point regardless.
-    if (
-      detail !== null &&
-      !bringingUpToDate &&
-      selected &&
-      !selectedIsBinary &&
-      !asked.current.has(selected)
-    ) {
+    // A running update does NOT hold this back. The content read here is the
+    // proposal as it stands, which is what the reader opened the dialog for;
+    // an update in flight can move it, and when it lands it says which files
+    // it moved (`updatedPaths`) and exactly those are read again. Waiting
+    // instead bought one thing — never showing a line the merge later changes
+    // — at the price of showing nothing at all for as long as the merge took.
+    //
+    // Nothing is read before the DETAIL, though: a dialog opened about a file
+    // has a selection from the first render (`initialPath`), and the pane
+    // cannot draw a diff before the detail names its fork point.
+    if (detail !== null && selected && !selectedIsBinary && !asked.current.has(selected)) {
       const token = {};
       asked.current.set(selected, token);
       const current = () => asked.current.get(selected) === token;
@@ -347,7 +354,7 @@ export function ChangeRequestDialog({
           }),
         );
     }
-  }, [selected, selectedIsBinary, cr.branch, branchRevision, bringingUpToDate, detail]);
+  }, [selected, selectedIsBinary, cr.branch, branchRevision, detail]);
 
   /**
    * Read the selected file again, both sides — the Retry link the retryable
@@ -415,11 +422,13 @@ export function ChangeRequestDialog({
   // Raw-vs-raw: the skills API hands back SKILL.md's PARSED body (frontmatter
   // stripped), and diffing that against a raw branch read renders the
   // frontmatter as a deletion and the whole file as changed.
-  // Nothing is read while the request is being brought up to date, on this
-  // side either: the fork point is exactly what the merge moves, so a read
-  // started now would answer about a fork point that no longer exists.
+  // A running update moves the fork point, so this read can answer about one
+  // that is about to be replaced — and is re-run when it is (`baseRevision`,
+  // bumped with `branchRevision` when an update lands). Reading now is what
+  // lets the reader see the change at once; the correction, where there is
+  // one, costs the files the merge actually touched.
   const beforePath =
-    isAdded || renameWithoutOldPath || !selected || selectedIsBinary || bringingUpToDate
+    isAdded || renameWithoutOldPath || !selected || selectedIsBinary
       ? null
       : (movedFrom ?? selected);
   /**
@@ -647,8 +656,16 @@ export function ChangeRequestDialog({
     setVerbError(null);
   }, [selected]);
 
+  /**
+   * Approving and applying are held while the open's update runs — the two
+   * verbs that decide the request, and the only two things the merge can
+   * change the answer to. An approval recorded now would be pinned to a head
+   * the merge is about to replace, and an apply would be a second merge on
+   * the same two branches. The buttons are disabled; these guards are what
+   * make that true rather than merely drawn.
+   */
   async function toggleApprove(path: string, approved: boolean) {
-    if (!detail || verbBusy) return;
+    if (!detail || verbBusy || bringingUpToDate) return;
     setVerbBusy(true);
     setVerbError(null);
     try {
@@ -670,7 +687,7 @@ export function ChangeRequestDialog({
    * instead of one per file.
    */
   async function approveAllMine(paths: string[]) {
-    if (!detail || verbBusy) return;
+    if (!detail || verbBusy || bringingUpToDate) return;
     setVerbBusy(true);
     setVerbError(null);
     try {
@@ -856,28 +873,45 @@ export function ChangeRequestDialog({
     setUpdating(true);
     setError(null);
     try {
-      await refreshChangeRequestFromTarget(cr.number);
+      const result = await refreshChangeRequestFromTarget(cr.number);
       // The branch moved, so every list and every change box behind this
       // dialog is out of date — including their fork points, which this is
       // the only thing that moves.
       window.dispatchEvent(new Event(PR_STALE_EVENT));
-      // The branch has moved: every copy read so far predates the merge.
-      // Forget them now, before anything else can fail, so the dialog never
-      // goes on showing the pre-update text for a branch the server merged.
-      asked.current.clear();
-      setBranchContents({});
-      setBranchFailure(new Map());
-      try {
-        // Re-read in the same render the fresh detail (and so the fresh fork
-        // point) lands in.
-        const seq = ++detailSeq.current;
-        const next = await fetchPrDetail(cr.number, { fresh: true });
-        if (seq === detailSeq.current) setDetail(next);
-      } catch {
-        setError("Updated, but couldn't reload this change request. Close it and open it again.");
-      } finally {
-        setBranchRevision((r) => r + 1);
+      // Forget the copies the merge actually changed — git's own verdict on
+      // which, from the server that ran it — before anything else can fail,
+      // so the dialog never goes on showing pre-update text for a file the
+      // merge rewrote.
+      //
+      // ONLY those. The reader is looking at these files right now: dropping
+      // every copy would blank the pane they are mid-sentence in and re-read
+      // the whole request to replace the one file that moved. An unknown
+      // answer is not silence — the server sends the request's whole file
+      // list when it could not diff, so "drop everything" is still reachable,
+      // just no longer the default.
+      for (const path of result.updatedPaths) {
+        asked.current.delete(path);
       }
+      if (result.updatedPaths.length > 0) {
+        const updated = new Set(result.updatedPaths);
+        setBranchContents((c) =>
+          Object.fromEntries(Object.entries(c).filter(([path]) => !updated.has(path))),
+        );
+        setBranchFailure((m) => new Map([...m].filter(([path]) => !updated.has(path))));
+      }
+      // The Update's own answer IS the fresh detail — the server assembled it
+      // after the merge, with the carried approvals already in it. Fetching
+      // the detail again here would make the server build a second one that
+      // can only say the same thing, on the slowest path the dialog has.
+      //
+      // `detailSeq` still gates it: a detail fetch this dialog started before
+      // the update must not land on top of this one.
+      const seq = ++detailSeq.current;
+      if (seq === detailSeq.current) setDetail(result);
+      // The fork point moved with the branch, so the "before" side of the
+      // open file is re-read too — one file, not the request.
+      setBranchRevision((r) => r + 1);
+      setBaseRevision((r) => r + 1);
       setBroughtUpToDate(true);
     } catch (err) {
       const conflicts =
@@ -909,10 +943,11 @@ export function ChangeRequestDialog({
   const autoUpdateStarted = useRef(false);
   useEffect(() => {
     if (autoUpdateStarted.current || autoUpdateSettled) return;
-    // A viewer who may not update it, a request that is not open or not
-    // behind, and a conflict already on screen are all ruled out here rather
-    // than recorded: none of them can turn back into an update this open owes.
-    if (detail === null || !behindAndUpdatable || blocked) return;
+    // A viewer who may not update it, a request that is not open or does not
+    // need one, and a conflict already on screen are all ruled out here
+    // rather than recorded: none of them can turn back into an update this
+    // open owes.
+    if (detail === null || !needsUpdateByThisReader || blocked) return;
     // An apply is a merge on the same two branches; two at once is how a
     // request ends up half-landed. Not settled — just held, so an apply that
     // fails without conflicting still lets this through afterwards.
@@ -923,15 +958,15 @@ export function ChangeRequestDialog({
     autoUpdateStarted.current = true;
     // The synchronous setState this reaches is the in-flight marker every
     // effect that starts async work has to raise — the render it costs is the
-    // one that swaps the files for "Bringing this up to date…", which is the
-    // whole point. Deferring it would show the pre-update files for a frame.
+    // one that disables Approve and Apply. Deferring it would leave them live
+    // for a frame, over a verdict the merge is about to move.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void updateFromTarget();
     // `updateFromTarget` is re-created every render and is deliberately not a
     // dependency: the guards above are what make this run once, not the dep
     // list.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoUpdateSettled, detail, behindAndUpdatable, blocked, applyBusy]);
+  }, [autoUpdateSettled, detail, needsUpdateByThisReader, blocked, applyBusy]);
 
   // Name the step: recording approvals and merging are separately slow, and one
   // label over both makes the longer half look stalled.
@@ -1087,15 +1122,16 @@ export function ChangeRequestDialog({
           </Banner>
         )}
 
-        {/* The target moved on after this was proposed, and this reader is not
-            one of the people who can do anything about it. Everyone who can
-            never sees this: the dialog has already brought the request up to
-            date by the time it would render, or is saying so above.
+        {/* The target moved on IN A FILE THIS REQUEST CHANGES, and this reader
+            is not one of the people who can do anything about it. A target
+            that moved elsewhere says nothing here, because nothing about this
+            request has gone stale. Everyone who CAN update it never sees this
+            either: the dialog is already doing it, or has said so above.
             "What everyone sees" is the phrase the Deployment page uses for
             the same thing — a business user does not know what a branch is,
             and this dialog never tells them. */}
         {detail !== null &&
-          detail.behind &&
+          detail.needsUpdate &&
           detail.state === 'open' &&
           !detail.viewerCanUpdate &&
           !blocked && (
@@ -1116,26 +1152,25 @@ export function ChangeRequestDialog({
           </p>
         )}
 
-        {/* The update the open is running, in place of the files. NOT beside
-            them: the file content that exists right now is the proposal
-            against text that has already moved, and showing it for the second
-            or two the merge takes would be the dialog answering the reader's
-            question wrongly and then correcting itself. */}
-        {bringingUpToDate ? (
-          <div className="mt-4 min-h-0 flex-1 px-8">
-            <p
-              role="status"
-              className="mx-auto max-w-[52ch] py-10 text-center text-detail text-ink-faint"
-            >
-              Bringing this up to date with what everyone sees…
-            </p>
-          </div>
-        ) : /* A request that no longer changes anything — everything it proposed
+        {/* The update the open is running, ABOVE the files rather than in
+            place of them. The proposal is on screen from the first render and
+            stays there: a merge into a file it changes can move a line or two
+            of it, which is worth saying and is not worth making every reader
+            wait through a merge to see anything at all. What the update can
+            change is the VERDICT, so Approve and Apply are the two things
+            that wait for it (below), and the reading does not. */}
+        {bringingUpToDate && (
+          <p role="status" className="mt-3 px-8 text-detail text-ink-faint">
+            Checking against the latest version…
+          </p>
+        )}
+
+        {/* A request that no longer changes anything — everything it proposed
             has since landed on (or been removed from) the target, or its only
             change was one the merge never takes (roles.yaml). The file grid
             below would render a blank pill over an eternal "Loading…", which
-            reads as a hang; the truth is simpler and gets said instead. */
-        detail !== null && allFiles.length === 0 ? (
+            reads as a hang; the truth is simpler and gets said instead. */}
+        {detail !== null && allFiles.length === 0 ? (
           <div className="mt-4 min-h-0 flex-1 px-8">
             <p className="mx-auto max-w-[52ch] py-10 text-center text-detail text-ink-faint">
               This request doesn't change anything anymore. What it proposed is already part of
@@ -1185,7 +1220,7 @@ export function ChangeRequestDialog({
                   variant={headerVerb === 'approve' ? 'primary' : 'outline'}
                   size="tiny"
                   className="ml-auto shrink-0"
-                  disabled={verbBusy || applyBusy}
+                  disabled={verbBusy || applyBusy || bringingUpToDate}
                   onClick={() => void toggleApprove(selected, headerVerb === 'undo')}
                 >
                   {headerVerb === 'approve' ? 'Approve this file' : 'Approved – Undo'}
@@ -1309,11 +1344,11 @@ export function ChangeRequestDialog({
         <div className="mt-4 border-t border-line bg-sunken px-8 py-4">
           {/* What is the viewer's to approve, above the verdict: a count and
               one button for all of them, or who everyone is waiting on. */}
-          {/* Nothing to approve or wait on while the files are hidden: the
-              verdict belongs to the request as it will stand after the
-              update, which is a second away. */}
+          {/* Shown during a running update too, with its button disabled: the
+              files are on screen, so the line that says whose approval they
+              are waiting on belongs on screen with them. Only the ACT of
+              approving waits for the merge. */}
           {!blocked &&
-            !bringingUpToDate &&
             detail !== null &&
             allFiles.length > 0 &&
             (mine.length > 0 || !canApply) && (
@@ -1330,7 +1365,7 @@ export function ChangeRequestDialog({
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={verbBusy || applyBusy}
+                  disabled={verbBusy || applyBusy || bringingUpToDate}
                   onClick={() => void approveAllMine(mine)}
                 >
                   Approve all mine
@@ -1386,11 +1421,14 @@ export function ChangeRequestDialog({
               but every one of them approvable BY THIS VIEWER (write access) →
               the same click, named for what it is: their authority covers the
               missing approvals. Anyone else gets the waiting line above. */}
-          {!blocked && !bringingUpToDate && canApply && (
+          {/* Rendered throughout a running update, disabled rather than
+              absent: a primary button that appears under the reader's cursor
+              a second after the dialog opens is a click they did not aim. */}
+          {!blocked && canApply && (
             <Button
               variant="primary"
               size="sm"
-              disabled={applyBusy || verbBusy}
+              disabled={applyBusy || verbBusy || bringingUpToDate}
               onClick={() => applying.apply(cr)}
             >
               {applyBusy ? applyLabel : allApproved ? 'Apply changes' : 'Bypass approval and apply'}

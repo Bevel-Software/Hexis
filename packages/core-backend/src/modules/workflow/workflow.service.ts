@@ -43,6 +43,7 @@ import type {
   ChangeRequestApplyFailureKind,
   ChangeRequestComment,
   ChangeRequestDetail,
+  ChangeRequestUpdateResult,
   ChangeRequestState,
   ChangedFile,
   FileApproval,
@@ -576,8 +577,11 @@ export class WorkflowService implements IWorkflowService {
    * and nothing else. The pull itself reports the change, since it is the
    * only code that can observe it under the workspace mutex.
    */
-  private async pullWorkspace(workspaceId: string): Promise<boolean> {
-    const { treeChanged } = await this.git.pull(workspaceId);
+  private async pullWorkspace(
+    workspaceId: string,
+    opts: { preserveMerges?: boolean } = {},
+  ): Promise<boolean> {
+    const { treeChanged } = await this.git.pull(workspaceId, opts);
     const defaultBranch = this.kb.defaultBranch;
     if (treeChanged && branchForWorkspaceId(workspaceId) === defaultBranch) {
       this.events?.emit({ kind: 'fs-tree-changed', workspaceId, branch: defaultBranch });
@@ -1985,13 +1989,29 @@ export class WorkflowService implements IWorkflowService {
    * the enforcement read one predicate. A conflicting merge is aborted
    * inside `mergeFromOrigin`: nothing is committed or pushed, and the branch
    * is exactly what it was.
+   *
+   * ONE detail read after the merge. The read before it exists only to
+   * decide authority and to name the two branches, so it asks for no patches
+   * — that is one git subprocess per changed file it does not spend. The
+   * approvals carry-forward runs BEFORE the final read rather than after it,
+   * against a head resolved with `resolvePrShas` (two rev-parses) instead of
+   * a whole second detail, so the detail that goes back already describes the
+   * approvals it carried. What used to be three detail reads is now one.
    */
   async updateFromTarget(
     workspaceId: string,
     user: AuthUser,
     number: number,
-  ): Promise<ChangeRequestDetail> {
-    const detail = await this.prs.getPrDetail(number, { fresh: true, workspaceId, viewerEmail: user.email });
+  ): Promise<ChangeRequestUpdateResult> {
+    // No patches: all this read decides is authority, state and the two
+    // branch names. Asking for patch text here would diff every changed file
+    // in a request that is about to be merged and read in full anyway.
+    const detail = await this.prs.getPrDetail(number, {
+      fresh: true,
+      workspaceId,
+      viewerEmail: user.email,
+      patches: false,
+    });
     if (!detail) {
       throw new WorkflowValidationError(
         `Change request #${number} not found.`,
@@ -2019,8 +2039,15 @@ export class WorkflowService implements IWorkflowService {
     // merge commit that then cannot push, stranding it in the workspace. A
     // rebase conflict hands the stranded saves to recovery, as every other
     // pull does, before the refusal reaches the caller.
+    //
+    // `preserveMerges`: this is the one pull whose unpushed commit may be a
+    // MERGE — the update that ran before this one and could not push. A plain
+    // rebase replays it as cherry-picks of the target's commits, which drops
+    // the target as a parent, so the branch never contains the target's head
+    // however many times the update runs. Replayed with `--rebase-merges` it
+    // stays a merge and the next push ends the loop.
     try {
-      await this.pullWorkspace(workspaceId);
+      await this.pullWorkspace(workspaceId, { preserveMerges: true });
     } catch (err) {
       if (err instanceof PullRebaseConflictError) {
         await this.queuePullConflictRecovery(workspaceId, err, user);
@@ -2058,12 +2085,102 @@ export class WorkflowService implements IWorkflowService {
     if (outcome.kind === 'conflicts') {
       throw new ChangeRequestConflictsError(detail.branch, detail.base, outcome.paths);
     }
-    // If a new merge commit landed, push so the CR picks it up. When
-    // already up to date there's nothing to share — short-circuit the push.
-    if (!outcome.alreadyUpToDate) {
+    // Push whenever the CLONE holds a commit origin has not seen — not when
+    // THIS merge authored one. The two differ in exactly the case that keeps
+    // a request behind for good: an earlier update merged, its push failed,
+    // and the merge is sitting in the workspace. That merge already contains
+    // the target, so this call's `mergeFromOrigin` reports
+    // `alreadyUpToDate` and the old gate skipped the push — leaving the
+    // request behind on the remote, and the next open with the same work to
+    // do. Asking git what is unpushed retries it instead.
+    //
+    // A failed probe falls back to the old gate rather than to "push
+    // anyway": `trackedPush` on a clone with nothing to push is a wasted
+    // round trip on every single update.
+    const hasUnpushed = await this.git
+      .hasUnpushedCommits(workspaceId)
+      .catch((err: unknown) => {
+        log.warn(
+          `could not tell whether change request #${number} has unpushed commits; falling back to whether this merge authored one`,
+          { err },
+        );
+        return !outcome.alreadyUpToDate;
+      });
+    if (hasUnpushed) {
       await this.trackedPush(workspaceId, user);
-      // The source head moved: the refusal described a revision that is gone.
+    }
+    // Where the branch ended up, as PUBLISHED — two rev-parses, not a second
+    // detail read. Everything below needs only the sha, and the detail that
+    // goes back to the caller is read once, at the end, after the approvals
+    // it should describe have been carried.
+    let headAfterMerge = headBeforeMerge;
+    try {
+      const at = await this.git.resolvePrShas(workspaceId, detail.base, detail.branch);
+      headAfterMerge = at.headSha;
+    } catch (err) {
+      log.warn(
+        `could not resolve the published head of change request #${number} after updating it from target`,
+        { err },
+      );
+    }
+    const headMoved = Boolean(headBeforeMerge) && headAfterMerge !== headBeforeMerge;
+    // The source head moved: the refusal described a revision that is gone.
+    // `hasUnpushed` counts as well as the sha comparison, and deliberately —
+    // a push that just landed moved the published head by definition, and
+    // reading the sha to confirm it is a call that can fail. A refusal left
+    // standing over a revision nobody can apply any more is the worse error.
+    if (headMoved || hasUnpushed) {
       await this.clearApplyFailure(number, { recordedBefore: headMovedAfter });
+    }
+    // The merge is a commit the APPROVERS did not make. Re-pin their
+    // approvals onto the new head for every file whose bytes it left alone —
+    // git's own two-dot diff between the two heads is the verdict on which
+    // those are. Best effort: a request that IS up to date is worth far more
+    // than the bookkeeping, so a failure here is logged and the fresh detail
+    // still goes back.
+    //
+    // The head moving is the real gate: nothing moved, nothing moved under
+    // anyone. It also covers the sha that is not a sha — a resolve that
+    // failed onto a detail with no head — which `pathsChangedBetween` and
+    // `carryApprovalsForward` would refuse anyway.
+    //
+    // This runs BEFORE the detail read, not after it. The rows it writes are
+    // what the caller's `approvals` must describe, so doing it first means
+    // the one read at the end is already correct — where carrying afterwards
+    // needed a THIRD read to correct a detail assembled before the rows
+    // existed.
+    //
+    // The same list answers the caller's `updatedPaths`: "which files did
+    // this merge change" is one question, and the two answers must not be
+    // allowed to differ — a file whose approval was carried (so: untouched)
+    // that the dialog then re-read would be the dialog discarding content the
+    // server just called unchanged.
+    let updatedPaths: string[] = [];
+    if (headMoved) {
+      try {
+        updatedPaths = await this.git.pathsChangedBetween(
+          workspaceId,
+          headBeforeMerge,
+          headAfterMerge,
+        );
+        await this.reviewWorkflow.carryApprovalsForward(
+          number,
+          headBeforeMerge,
+          headAfterMerge,
+          updatedPaths,
+        );
+      } catch (err) {
+        log.warn(
+          `could not carry approvals forward on change request #${number} after updating from target`,
+          { err },
+        );
+        // The diff is what failed, so which files moved is unknown. Say so as
+        // "every file this request had", which is every file a caller can
+        // already be showing: slow beats a dialog that goes on presenting
+        // pre-merge text as current. Anything the merge ADDED is not on the
+        // list and does not need to be — no caller has read it yet.
+        updatedPaths = (detail.files ?? []).map((f) => f.path);
+      }
     }
     this.prs.invalidateDetailCache(number);
     const refreshed = await this.prs.getPrDetail(number, {
@@ -2076,52 +2193,7 @@ export class WorkflowService implements IWorkflowService {
         `Refreshed change request #${number} but could not re-fetch its detail.`,
       );
     }
-    // The merge is a commit the APPROVERS did not make. Re-pin their
-    // approvals onto the new head for every file whose bytes it left alone —
-    // git's own two-dot diff between the two heads is the verdict on which
-    // those are. Best effort: a request that IS up to date is worth far more
-    // than the bookkeeping, so a failure here is logged and the fresh detail
-    // still goes back.
-    //
-    // `alreadyUpToDate` is the real gate: no merge commit, no head to compare,
-    // nothing moved under anyone. The other two conditions are belt-and-braces
-    // over a sha that is not a sha — a resolve that failed onto a detail with
-    // no head, or two heads that somehow read equal — both of which
-    // `pathsChangedBetween` and `carryApprovalsForward` would refuse anyway.
-    // A merge that authored a commit cannot leave the head where it was.
-    if (!outcome.alreadyUpToDate && headBeforeMerge && refreshed.headSha !== headBeforeMerge) {
-      try {
-        const changedPaths = await this.git.pathsChangedBetween(
-          workspaceId,
-          headBeforeMerge,
-          refreshed.headSha,
-        );
-        const carried = await this.reviewWorkflow.carryApprovalsForward(
-          number,
-          headBeforeMerge,
-          refreshed.headSha,
-          changedPaths,
-        );
-        // The detail above was assembled before those rows existed, so its
-        // `approvals` (and the merge gate derived from them) still describe
-        // the pre-merge head. Only re-read when something actually carried.
-        if (carried > 0) {
-          this.prs.invalidateDetailCache(number);
-          const withApprovals = await this.prs.getPrDetail(number, {
-            fresh: true,
-            workspaceId,
-            viewerEmail: user.email,
-          });
-          if (withApprovals) return withApprovals;
-        }
-      } catch (err) {
-        log.warn(
-          `could not carry approvals forward on change request #${number} after updating from target`,
-          { err },
-        );
-      }
-    }
-    return refreshed;
+    return { ...refreshed, updatedPaths };
   }
 
   listComments(number: number): Promise<ChangeRequestComment[]> {
