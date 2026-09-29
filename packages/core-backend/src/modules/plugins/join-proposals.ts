@@ -1,9 +1,11 @@
 import {
   KNOWN_VERBS,
   parseAccessFile,
+  parseOwnAccessEntries,
   type ParsedEntry,
   type Verb,
 } from '../access-model/access-grammar.js';
+import type { TargetKind } from '../access/access-mutation.service.js';
 
 /**
  * What a join branch is PROPOSING, relative to the default branch.
@@ -50,23 +52,69 @@ function identityOf(entry: ParsedEntry): string {
 }
 
 /**
- * Folder rules from one copy of an `access.md`, per verb, grants only.
+ * The per-verb entries one copy of an item's rules declares, or null when the
+ * text could not be read as rules at all.
  *
- * A file that fails to parse yields NO grants. On the branch side that means
- * a malformed proposal offers nothing to accept (fail-closed). On the default
- * side it means every branch grant looks incoming — which is the safe
- * direction too: the manager is shown proposals to consider rather than
- * having them silently swallowed by an unreadable baseline.
+ * THE GRAMMAR FOLLOWS THE ITEM, because there are two of them and the
+ * resolver picks by item as well:
+ *
+ *   folder   a `access.md`, whose folder rules are a BODY of `verb:` block
+ *            lists — `parseAccessFile`, which fails the whole file if a verb
+ *            is not a list.
+ *   file     the node's OWN frontmatter — `parseOwnAccessEntries`, which also
+ *            accepts the single-value scalar form (`write: Rita <r@x.io>`),
+ *            ignores non-access keys like `nodeType:`, and drops a bad entry
+ *            rather than failing the file.
+ *
+ * Reading a file's frontmatter with the FOLDER grammar is what broke every
+ * request whose target was a file: `spliceGrant` writes one grant into a
+ * node's frontmatter as exactly that scalar — the same bytes the dialog's own
+ * grant writes, which the resolver honours — and the folder grammar rejects it
+ * with "'write:' must be a list", failing the parse, yielding no grants, which
+ * reads as a branch with nothing left to propose. The request was then closed
+ * on the editors' first listing, before anyone had seen it.
+ *
+ * Null is reserved for "could not be read": a folder `access.md` that does
+ * not parse. A file with no frontmatter, or with frontmatter naming no verb,
+ * is perfectly readable and simply grants nothing.
  */
-function grantsByVerb(text: string | null, path: string): Map<Verb, Map<string, ParsedEntry>> {
-  const out = new Map<Verb, Map<string, ParsedEntry>>();
-  for (const verb of KNOWN_VERBS) out.set(verb, new Map());
-  if (text === null) return out;
+function entriesOf(
+  text: string,
+  path: string,
+  kind: TargetKind,
+): Record<Verb, ParsedEntry[]> | null {
+  if (kind === 'file') return parseOwnAccessEntries(text) ?? emptyGrants();
   const parsed = parseAccessFile(text, path);
-  if (!parsed.ok) return out;
+  return parsed.ok ? parsed.file.entries : null;
+}
+
+function emptyGrants(): Record<Verb, ParsedEntry[]> {
+  const out = {} as Record<Verb, ParsedEntry[]>;
+  for (const verb of KNOWN_VERBS) out[verb] = [];
+  return out;
+}
+
+/** An index that grants nothing — the baseline a copy nobody could read stands in as. */
+function emptyIndex(): Map<Verb, Map<string, ParsedEntry>> {
+  return new Map(KNOWN_VERBS.map((verb) => [verb, new Map<string, ParsedEntry>()]));
+}
+
+/**
+ * Grants only, indexed by canonical identity, from one copy of the rules.
+ * Null in, null out — an unreadable copy is not an empty one.
+ */
+function grantsByVerb(
+  text: string | null,
+  path: string,
+  kind: TargetKind,
+): Map<Verb, Map<string, ParsedEntry>> | null {
+  if (text === null) return null;
+  const entries = entriesOf(text, path, kind);
+  if (entries === null) return null;
+  const out = emptyIndex();
   for (const verb of KNOWN_VERBS) {
     const byId = out.get(verb)!;
-    for (const entry of parsed.file.entries[verb]) {
+    for (const entry of entries[verb]) {
       if (entry.deny) continue;
       byId.set(identityOf(entry), entry);
     }
@@ -75,19 +123,32 @@ function grantsByVerb(text: string | null, path: string): Map<Verb, Map<string, 
 }
 
 /**
- * The grants `branchText` adds over `defaultText` — the proposals a manager
- * can accept. Empty ⇒ the branch's rules are a subset of the default's.
+ * The grants `branchText` adds over `defaultText` — the proposals an editor
+ * can accept. Empty ⇒ the branch's rules are a subset of the default's, which
+ * is the settled state.
  *
- * `path` is only used to label parse errors; both texts are the same file at
- * two refs.
+ * NULL when the branch's own copy is absent or unreadable, which is a
+ * different fact entirely and the one this surface keeps getting wrong: an
+ * empty answer closes somebody's request, so it has to mean "the branch asks
+ * for nothing more", never "the branch would not tell us".
+ *
+ * An unreadable DEFAULT copy stays what it was — every branch grant looks
+ * incoming. That is the safe direction on that side: an editor is shown
+ * proposals to consider rather than having them swallowed by a baseline
+ * nobody could read.
+ *
+ * `path` labels parse errors; both texts are the same file at two refs, and
+ * `kind` says which grammar that file is written in.
  */
 export function pendingProposals(
   branchText: string | null,
   defaultText: string | null,
   path: string,
-): JoinProposal[] {
-  const branch = grantsByVerb(branchText, path);
-  const base = grantsByVerb(defaultText, path);
+  kind: TargetKind,
+): JoinProposal[] | null {
+  const branch = grantsByVerb(branchText, path, kind);
+  if (branch === null) return null;
+  const base = grantsByVerb(defaultText, path, kind) ?? emptyIndex();
   const out: JoinProposal[] = [];
   for (const verb of KNOWN_VERBS) {
     const baseIds = base.get(verb)!;

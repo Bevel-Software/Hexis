@@ -101,11 +101,18 @@ export class JoinRequestsService implements IAccessRequestLifecycle {
       branchText = await this.readAt(branch, rulesPath);
     }
     if (branchText === null) return null;
+    // `kind` picks the grammar: a folder's rules are block lists in an
+    // access.md body, a file's are its own frontmatter, where one grant is
+    // written as a scalar. Reading one with the other's grammar yields no
+    // grants, which reads as a finished request.
     const proposals = pendingProposals(
       branchText,
       await this.readAt(this.kb.defaultBranch, rulesPath),
       rulesPath,
+      target.kind,
     );
+    // Unreadable rules on the branch: say nothing rather than "nothing left".
+    if (proposals === null) return null;
     return this.unmetProposals(proposals, target);
   }
 
