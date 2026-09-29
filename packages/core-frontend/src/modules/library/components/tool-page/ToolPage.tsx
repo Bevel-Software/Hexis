@@ -316,9 +316,19 @@ export function ToolPage({
  * The reading column. Horizontal and vertical padding come from the Library
  * layout's `<main>`, which already wraps every page under `/skills-and-tools` —
  * repeating them here would double the gutter.
+ *
+ * And no `max-w` of its own, for the same reason the skill page has none: the
+ * layout's `<main>` already holds the shared `DOCUMENT_COLUMN` measure, so a
+ * second, narrower width here is a second column inside the first. It was
+ * `max-w-3xl` — a 768px article centred in the measure's 800px line — and the
+ * 16px that left on each side moved this page's title row in from where the
+ * plugin page's and the skill page's are: the same band, the same group, the
+ * same `⋯`, ending 16px short of the right edge the other two reach. Where
+ * the menu sits on the row is decided by how wide the row is, so the column
+ * is where "the same position as on the plugin page" is actually kept.
  */
 function Article({ children }: { children: ReactNode }) {
-  return <article className="mx-auto w-full max-w-3xl">{children}</article>;
+  return <article className="w-full">{children}</article>;
 }
 
 function SectionHeading({ children }: { children: ReactNode }) {
