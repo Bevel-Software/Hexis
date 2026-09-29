@@ -2907,6 +2907,77 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
+   * How many change requests are open right now.
+   *
+   * Read by the setup screen's repository-change confirmation, which has to
+   * say how many requests the admin is deciding about BEFORE the address is
+   * saved. A plain count — nothing here reaches the repository, so it answers
+   * just as well for a repository that is already gone.
+   */
+  async countOpenChangeRequests(): Promise<number> {
+    const open = await this.db
+      .select({ number: changeRequests.number })
+      .from(changeRequests)
+      .where(eq(changeRequests.state, 'open'));
+    return open.length;
+  }
+
+  /**
+   * Close every open change request because the knowledge-base REPOSITORY was
+   * replaced, and answer how many were closed.
+   *
+   * The admin's own choice on the setup screen: a repository that merely
+   * MOVED keeps its requests (the branches came along), while a repository
+   * that was REPLACED has none of those branches, so every request points at
+   * something this deployment can no longer fetch. Nothing is deleted — the
+   * rows stay, closed, carrying `closed_reason = 'repository-replaced'` so
+   * the reason survives the person who chose it.
+   *
+   * Locks held on those branches go with them. Their holder cannot publish
+   * the bytes (the branch is not in the new repository) and cannot release
+   * the lock by finishing (the request is closed), so the row would sit there
+   * refusing the path until its TTL ran out — and a still-connected client's
+   * heartbeat keeps pushing that out.
+   *
+   * Each close is guarded on `state = 'open'`, so a merge or a withdrawal
+   * racing this call wins and its request is left alone.
+   */
+  async closeOpenChangeRequestsAsRepositoryReplaced(): Promise<number> {
+    const open = await this.db
+      .select({ number: changeRequests.number, sourceBranch: changeRequests.sourceBranch })
+      .from(changeRequests)
+      .where(eq(changeRequests.state, 'open'));
+    let closed = 0;
+    for (const cr of open) {
+      const now = new Date();
+      const updated = await this.db
+        .update(changeRequests)
+        .set({ state: 'closed', closedAt: now, updatedAt: now, closedReason: 'repository-replaced' })
+        .where(and(eq(changeRequests.number, cr.number), eq(changeRequests.state, 'open')))
+        .returning({ id: changeRequests.id });
+      if (updated.length === 0) continue;
+      // Best effort, per branch: a lock table that will not answer must not
+      // leave the requests half closed — the close is the decision the admin
+      // made, and the locks expire on their own within the minute.
+      try {
+        const released = await this.fileLocks.releaseAllOnBranch(cr.sourceBranch);
+        if (released > 0) {
+          crLog.info(`released ${released} file lock(s) held on "${cr.sourceBranch}"`);
+        }
+      } catch (err) {
+        crLog.warn(`could not release the file locks on "${cr.sourceBranch}":`, { err });
+      }
+      this.prs.invalidateDetailCache(cr.number);
+      this.events?.emit({ kind: 'change-request-rejected', number: cr.number });
+      closed++;
+    }
+    if (closed > 0) {
+      crLog.info(`closed ${closed} change request(s): the knowledge-base repository was replaced`);
+    }
+    return closed;
+  }
+
+  /**
    * The sweep above, on demand. Boot runs it once (`create-core-server`),
    * which clears requests stranded BEFORE the process started; a branch that
    * goes missing mid-uptime would otherwise keep its requests broken until

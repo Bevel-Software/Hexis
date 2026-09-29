@@ -18,12 +18,15 @@ import {
   testConnection,
   KbInitFailed,
   testOidc,
+  RepositoryChangeNeedsConfirmation,
   SettingsProblems,
   type ConnectionTest,
   type KbInitFailure,
   type LastSync,
   type OidcTest,
   type OidcVerification,
+  type RepositoryChangeChoice,
+  type RepositoryChangeResult,
   type SettingStatus,
   type SyncNowResult,
   type SyncStatus,
@@ -399,6 +402,20 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
       setInitFailure(kbInit);
     }
   }
+  /**
+   * The repository change the server has REFUSED until it is confirmed, and
+   * how many change requests were open at that moment. Null when there is
+   * nothing to confirm.
+   *
+   * Nothing was saved and nothing was destroyed while this stands: the answer
+   * is a decision only the admin can make, and the draft is kept exactly as
+   * typed so the confirmed save re-sends it.
+   */
+  const [repositoryChange, setRepositoryChange] = useState<{ openChangeRequests: number } | null>(null);
+  /** What to do with the open change requests. Keeping them is the safe default: nothing closes by hesitating. */
+  const [changeChoice, setChangeChoice] = useState<RepositoryChangeChoice>('keep');
+  /** What the save that changed the repository did, so the screen can say so afterwards. */
+  const [repositoryChanged, setRepositoryChanged] = useState<RepositoryChangeResult | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [syncing, setSyncing] = useState(false);
   /** What the last "Sync now" from THIS page came back with (a failure to ask is `error`). */
@@ -896,6 +913,16 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
 
   async function submit(e: FormEvent) {
     e.preventDefault();
+    await saveNow();
+  }
+
+  /**
+   * Store the draft. Called by the form, and again by the repository-change
+   * confirmation with the decision the admin made — the SAME path, so a
+   * confirmed save proves the connection and fills in the branch fields
+   * exactly as an ordinary one does.
+   */
+  async function saveNow(confirmRepositoryChange?: RepositoryChangeChoice) {
     // A save during a sign-in check would clear the draft the check is about.
     if (saving || retrying || oidcTesting) return;
     setSaving(true);
@@ -905,6 +932,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
     // attempt supersedes it — leaving it up put "Saved what you filled in, but
     // this deployment still needs…" directly above this attempt's "Not saved."
     setStillMissing([]);
+    setRepositoryChanged(null);
     try {
       let payload = draft;
       /** What the host said this time, or null when it could not be asked. */
@@ -937,13 +965,18 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
         // Includes a probe the server REFUSED (a 4xx comes back as a
         // rejection, not a throw) — that is an answer about these values.
         if (proven && !proven.ok) {
-          setError(
+          // THE SERVER'S OWN WORDS FIRST. The sentences below say that the
+          // save did not happen; only the host knows WHY — "there is no
+          // repository at that address", "the host rejected the credentials".
+          // Replacing that with a generic sentence is how an admin is left
+          // reading "fix the connection" with no idea what is wrong with it.
+          const refusal =
             proven.outcome === 'read-only'
               ? 'Not saved. The token can read the repository but cannot write to it — grant it write access and test again.'
               : variant === 'setup'
                 ? 'Not saved. Nothing behind this screen works until the repository answers, and it did not — fix the connection above and test it again.'
-                : 'Not saved. The repository did not answer with those details — fix the connection above and test it again.',
-          );
+                : 'Not saved. The repository did not answer with those details — fix the connection above and test it again.';
+          setError(proven.error ? `${refusal} The server said: ${proven.error}` : refusal);
           return;
         }
       }
@@ -961,11 +994,14 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
       ) {
         await probe();
       }
-      const result = await saveSettings(payload);
+      const result = await saveSettings(payload, confirmRepositoryChange);
       // A save while a failure stands re-ran the initialization, and it held.
       setClearedFailure(initFailure);
       setInitFailure(null);
       setRestartRequired(result.restartRequired);
+      // The confirmation was answered — and the answer went through.
+      setRepositoryChange(null);
+      setRepositoryChanged(result.repositoryChange ?? null);
       setDraft({});
       if (result.oidcVerification) setLatest(result.oidcVerification);
       // A save can succeed and STILL leave the deployment unusable: a blank
@@ -1003,6 +1039,11 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
     } catch (err) {
       if (err instanceof SettingsProblems) {
         showProblems(err.problems);
+      } else if (err instanceof RepositoryChangeNeedsConfirmation) {
+        // NOT an error: nothing was saved and nothing was destroyed. The
+        // draft stays exactly as typed — the confirmed save re-sends it.
+        setRepositoryChange({ openChangeRequests: err.openChangeRequests });
+        setChangeChoice('keep');
       } else if (err instanceof KbInitFailed) {
         // The values ARE stored — only the initialization failed. The form
         // shows what was saved, and the banner says what to fix and retries
@@ -1210,6 +1251,94 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
               >
                 {retrying ? 'Initializing…' : 'Retry initialization'}
               </Button>
+            </Banner>
+          )}
+
+          {/* The save the server REFUSED until the admin says yes. Nothing is
+              stored and nothing is deleted while this stands; the draft is
+              still on screen, and answering re-sends it. */}
+          {repositoryChange && (
+            <Banner tone="wait" role="alert" className="mt-6" data-testid="repository-change-confirm">
+              <p className="font-semibold">Change the knowledge-base repository?</p>
+              <p className="mt-1">
+                Every working copy on this server is deleted and cloned fresh from the new address.
+                Anything committed here and not yet pushed from this server is lost.
+              </p>
+              {repositoryChange.openChangeRequests > 0 && (
+                <fieldset className="mt-3">
+                  <legend className="font-semibold">
+                    {repositoryChange.openChangeRequests === 1
+                      ? 'There is 1 open change request.'
+                      : `There are ${repositoryChange.openChangeRequests} open change requests.`}
+                  </legend>
+                  <label className="mt-1 flex items-start gap-2">
+                    <input
+                      type="radio"
+                      name="repository-change-requests"
+                      className="mt-1"
+                      checked={changeChoice === 'keep'}
+                      onChange={() => setChangeChoice('keep')}
+                    />
+                    <span>Keep them open — the same repository only moved.</span>
+                  </label>
+                  <label className="mt-1 flex items-start gap-2">
+                    <input
+                      type="radio"
+                      name="repository-change-requests"
+                      className="mt-1"
+                      checked={changeChoice === 'close'}
+                      onChange={() => setChangeChoice('close')}
+                    />
+                    <span>
+                      Close them as “repository replaced” — this is a different repository and their
+                      branches are not in it. Nothing is deleted, and the file locks held on those
+                      branches are released.
+                    </span>
+                  </label>
+                </fieldset>
+              )}
+              <div className="mt-3 flex gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => void saveNow(repositoryChange.openChangeRequests > 0 ? changeChoice : 'keep')}
+                  disabled={saving || testing}
+                >
+                  {saving ? 'Replacing…' : 'Replace the repository'}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setRepositoryChange(null)}
+                  disabled={saving || testing}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </Banner>
+          )}
+
+          {/* What the save that changed the repository actually did. */}
+          {repositoryChanged && (
+            <Banner tone="ok" role="status" className="mt-6" data-testid="repository-changed">
+              <p>
+                Saved. The working copies were replaced with fresh clones of the new repository.
+              </p>
+              {repositoryChanged.choice === 'close' &&
+                (repositoryChanged.closedChangeRequests === null ? (
+                  <p className="mt-1">
+                    The open change requests could not be closed and are still open — the server log
+                    has the reason.
+                  </p>
+                ) : repositoryChanged.closedChangeRequests > 0 ? (
+                  <p className="mt-1">
+                    {repositoryChanged.closedChangeRequests === 1
+                      ? '1 change request was closed as “repository replaced”.'
+                      : `${repositoryChanged.closedChangeRequests} change requests were closed as “repository replaced”.`}{' '}
+                    Nothing was deleted.
+                  </p>
+                ) : null)}
             </Banner>
           )}
 

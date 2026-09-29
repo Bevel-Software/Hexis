@@ -41,6 +41,7 @@ import {
   isMissingRemoteBranchFailure,
 } from '../../shared/domain-errors.js';
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
+import { normalizeRepositoryAddress, sameRepository } from '../kb-fs/remote-url.js';
 import {
   cloneCredentialArgs,
   cloneCredentialConfigArgs,
@@ -619,6 +620,16 @@ export class WorkspaceService implements IWorkspaceService {
     // process and survived a restart.
     try {
       await fs.access(path.join(repoDir, '.git'));
+      // A clone fetches and pushes through the address stored in its OWN
+      // `remote.origin.url`, which nothing rewrites when the configured
+      // repository changes. Adopting one of the repository that was replaced
+      // is how every later fetch answers "repository not found" — so it is
+      // discarded here and cloned fresh below, the same rule the KB startup
+      // phase applies to the whole workspaces root.
+      if (await this.isCloneOfAnotherRepository(repoDir)) {
+        await fs.rm(repoDir, { recursive: true, force: true });
+        throw new Error('discarded a clone of another repository');
+      }
       // Migration for clones already on disk: re-stamp the tracking config the
       // first time this process opens them, so a clone whose config drifted
       // (duplicate fetch refspec / merge ref) is repaired before anything
@@ -628,7 +639,9 @@ export class WorkspaceService implements IWorkspaceService {
       this.registerBranchDir(branch, workspaceDir);
       return this.buildWorkspaceInfo(branch, workspaceDir);
     } catch {
-      // Not on disk — bootstrap below.
+      // Not on disk, or no longer worth adopting — bootstrap below. The
+      // discard above lands here by throwing for exactly that reason: a
+      // deleted clone is indistinguishable from one that was never there.
     }
 
     // Single-flight bootstrap. Concurrent callers for the same branch
@@ -713,6 +726,60 @@ export class WorkspaceService implements IWorkspaceService {
    */
   isBootstrapInFlight(branch: string): boolean {
     return this.inFlightBootstraps.has(branch);
+  }
+
+  /**
+   * Whether the clone at `repoDir` belongs to a repository OTHER than the
+   * configured one.
+   *
+   * Errs towards NO — "could not tell" must never delete someone's work:
+   * an address that cannot be read (no `origin`, a git that would not run)
+   * leaves the clone alone, and only two addresses that are read and differ
+   * in more than their spelling count as different repositories (see
+   * `kb-fs/remote-url.ts`). An UNCONFIGURED address answers no as well: a
+   * process that does not know where the repository is has no business
+   * declaring a clone stale.
+   */
+  private async isCloneOfAnotherRepository(repoDir: string): Promise<boolean> {
+    const configured = this.kbRepoUrl().trim();
+    if (configured === '') return false;
+    let origin: string;
+    try {
+      const { stdout } = await this.gitRunner.run(repoDir, ['config', '--get', 'remote.origin.url']);
+      origin = stdout.trim();
+    } catch {
+      return false;
+    }
+    if (origin === '' || sameRepository(origin, configured)) return false;
+    // The normalized form carries no userinfo; the token never appears in it.
+    log.warn(
+      `the "${path.basename(path.dirname(repoDir))}" working copy is a clone of another repository ` +
+        `(${normalizeRepositoryAddress(origin)}) — deleting it; it will be cloned fresh from the configured one.`,
+    );
+    return true;
+  }
+
+  /**
+   * Forget everything this process remembers about a working copy that was
+   * DELETED underneath it — the KB startup phase sweeping a clone of a
+   * repository that was replaced.
+   *
+   * At boot there is nothing to forget; this is for the save that changes the
+   * address on a RUNNING server, where `branchDirs` would otherwise keep
+   * answering with the path of a directory that is gone and no later caller
+   * would ever re-clone it. The branch NAME is deliberately left in
+   * `branchesEverHeardOf` — the branch was real, and that record outlives
+   * its clone.
+   */
+  forgetClone(workspaceId: string): void {
+    const branch = branchForWorkspaceId(workspaceId);
+    const workspaceDir = path.join(this.workspacesRoot, workspaceId);
+    const repoDir = path.join(workspaceDir, this.kbDirName);
+    this.branchDirs.delete(branch);
+    this.lastFetchAt.delete(repoDir);
+    this.lastFetchOk.delete(repoDir);
+    // Keyed by branch, not by directory — see `stampCredentialHelper`.
+    this.stampedCredentialFingerprint.delete(branch);
   }
 
   /**

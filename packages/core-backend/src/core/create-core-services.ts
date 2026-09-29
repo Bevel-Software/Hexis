@@ -496,6 +496,12 @@ export async function createCoreServices(
     steps: kbStartupSteps,
     buildSeedTree: buildSeedTree(disk, config.kbTemplateDir, extraDirs, [config.adminEmail], kb),
     gitRunner,
+    // A working copy the phase deletes for belonging to another repository
+    // must leave the workspace service's cache with it: on the SAVE that
+    // changes the address the process is already running, and a cached path
+    // to a directory that is gone is how the next reader gets an ENOENT
+    // instead of a fresh clone.
+    onCloneDiscarded: (workspaceId) => workspaceService.forgetClone(workspaceId),
   });
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.

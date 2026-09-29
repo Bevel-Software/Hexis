@@ -700,6 +700,15 @@ export async function createCoreServer(
       repositoryConnectionCheck(core.gitRunner),
       rootFolderListerFor(core.gitRunner),
       oidcRedirectUri(core.config.publicBackendUrl),
+      undefined,
+      undefined,
+      // What a change of the knowledge-base repository has to decide about.
+      // Bound here rather than handed the whole workflow service: the setup
+      // routes ask two questions and know nothing else about a request.
+      {
+        countOpen: () => core.workflowService.countOpenChangeRequests(),
+        closeAsRepositoryReplaced: () => core.workflowService.closeOpenChangeRequestsAsRepositoryReplaced(),
+      },
     ),
   );
   const toolPageUser = async (userId: string): Promise<AuthUser | undefined> => {

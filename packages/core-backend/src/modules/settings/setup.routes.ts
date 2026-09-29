@@ -31,6 +31,7 @@ import type { KbContext } from '../../shared/kb-context.js';
 import { failureOf, type GitFailure } from '../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { listRootFolders, pickListingBranch } from './git-root-folders.js';
+import { sameRepository } from '../kb-fs/remote-url.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 /** Which name a host expects beside the token when none is configured. */
@@ -71,6 +72,36 @@ export interface LastSyncStatus {
   status: 'synced' | 'partial';
   results: Array<{ branch: string; outcome: string; error?: string }>;
 }
+
+/**
+ * The open change requests, as the repository-change confirmation needs them:
+ * how many there are to decide about, and the close the admin may choose.
+ *
+ * Deliberately narrow — the setup routes never read a request, never write
+ * one, and never learn what is in it. Nothing here deletes anything: closing
+ * leaves every row where it is.
+ */
+export interface RepositoryChangeRequests {
+  /** How many change requests are open right now. */
+  countOpen(): Promise<number>;
+  /** Close every open request as "repository replaced", releasing the file locks on their branches. Answers how many closed. */
+  closeAsRepositoryReplaced(): Promise<number>;
+}
+
+/**
+ * What the admin is asked to confirm before a save changes the knowledge-base
+ * repository, and what they answered.
+ *
+ * `keep` — the repository only MOVED: its branches came along, so the open
+ * change requests still mean something and stay open.
+ * `close` — the repository was REPLACED: none of those branches is in the new
+ * one, so the requests are closed as "repository replaced" (nothing deleted).
+ *
+ * Either way the working copies on disk are replaced — that is not a choice,
+ * it is what changing the address means; the confirmation exists so that
+ * work committed here and never pushed is lost KNOWINGLY.
+ */
+export type RepositoryChangeChoice = 'keep' | 'close';
 
 /**
  * First-run setup — the deployment's own configuration, for the things that
@@ -138,6 +169,16 @@ export function createSetupRoutes(
   checkOidc: (config: OidcConfiguration) => Promise<OidcCheck> = checkOidcConfiguration,
   /** The issuer-only half, for a test with no application id or secret yet. */
   checkIssuer: (issuerUrl: string) => Promise<IssuerCheck> = (url) => checkOidcIssuer(url),
+  /**
+   * What a change of the knowledge-base repository has to decide about, and
+   * what to do when the admin decides to close.
+   *
+   * Injected because the setup routes must stay free of the workflow module —
+   * and a minimal mount (tests, a distribution without change requests) simply
+   * has none: the default answers "no open requests", so the confirmation
+   * offers no choice it cannot honour.
+   */
+  changeRequests: RepositoryChangeRequests = { async countOpen() { return 0; }, async closeAsRepositoryReplaced() { return 0; } },
 ): express.Router {
   const router = express.Router();
 
@@ -251,7 +292,11 @@ export function createSetupRoutes(
   });
 
   async function handleSave(req: express.Request, res: express.Response): Promise<void> {
-    const body = (req.body ?? {}) as { settings?: Record<string, unknown> };
+    const body = (req.body ?? {}) as {
+      settings?: Record<string, unknown>;
+      /** The admin's answer to the repository-change confirmation, when they have given one. */
+      confirmRepositoryChange?: unknown;
+    };
     const entries: Record<string, string> = {};
     for (const [key, value] of Object.entries(body.settings ?? {})) {
       if (typeof value !== 'string') {
@@ -267,6 +312,14 @@ export function createSetupRoutes(
       // configured the branch model.
       const wasComplete = isComplete(settings, kb);
       if (!(await connectionHoldsFor(entries, wasComplete, res))) return;
+      // AFTER the connection check, BEFORE anything is stored. After, because
+      // an address the host will not answer for is refused on its own terms
+      // and there is then nothing to confirm — nobody should have to agree to
+      // losing their working copies only to be told the token was missing.
+      // Before, because a refused save must destroy nothing: the check only
+      // reads the new address and dry-runs a push to it.
+      const repositoryChange = await repositoryChangeFor(entries, body.confirmRepositoryChange, res);
+      if (!repositoryChange) return;
       const oidc = await signInHoldsFor(entries, res);
       if (!oidc) return;
       // Recorded BEFORE the save: the record is keyed by the values it is
@@ -278,6 +331,24 @@ export function createSetupRoutes(
         await settings.recordOidcVerification(oidc.record.state, oidc.record.credentials);
       }
       const { restartRequired, restartKeys } = await settings.save(entries, req.userId ?? null);
+      /**
+       * How many open change requests this save closed as "repository
+       * replaced", null when the admin chose that and it could not be done.
+       * Nothing is ever deleted; `keep` leaves them exactly as they are.
+       */
+      let closedChangeRequests: number | null = 0;
+      if (repositoryChange.choice === 'close') {
+        try {
+          closedChangeRequests = await changeRequests.closeAsRepositoryReplaced();
+        } catch (err) {
+          // The address IS stored — the save is not undone over this, and the
+          // requests are simply still open. Reported as null rather than 0 so
+          // the screen can say so instead of quietly claiming nothing was
+          // open.
+          log.error('the repository changed but its open change requests could not be closed:', { err });
+          closedChangeRequests = null;
+        }
+      }
       /** Whether this save put the stored folder names into the running process. */
       let layoutApplied = false;
       /** Whether this save put the stored branch model into the running process. */
@@ -316,11 +387,26 @@ export function createSetupRoutes(
        * Runs on the false→true completion transition — including when the
        * branch model was configured by an EARLIER save and the repository
        * URL arrives on a later one — and again on any save while a previous
-       * setup-time run stands failed (`kbInit`), so a save is the retry. Never
-       * on a re-save of a complete, healthy setup: with the gate open,
-       * sessions may be live and that is no longer a quiet moment.
+       * setup-time run stands failed (`kbInit`), so a save is the retry.
+       *
+       * AND on a save that CHANGES THE REPOSITORY, complete and healthy or
+       * not. That one is not a quiet moment — the gate is open and sessions
+       * may be live — but it is the moment the working copies stop belonging
+       * to the configured repository, and leaving them until the next restart
+       * is what made Save and Retry fail against a repository that was gone.
+       * The admin has just confirmed that those copies are replaced, so the
+       * phase runs and the app opens on the new repository's content.
+       *
+       * Never on an ordinary re-save of a complete, healthy setup: with the
+       * gate open, sessions may be live and nothing needs doing.
        */
-      if ((!wasComplete || kbInit !== null || bootFailure() !== null) && isComplete(settings, kb)) {
+      if (
+        (!wasComplete ||
+          kbInit !== null ||
+          bootFailure() !== null ||
+          repositoryChange.changing) &&
+        isComplete(settings, kb)
+      ) {
         /**
          * The folder names, applied BEFORE the phase for the same reason as
          * the branch model above: they are otherwise applied once at boot, so
@@ -389,6 +475,11 @@ export function createSetupRoutes(
         awaitingRestart: awaitingRestart(settings, kb),
         settings: settings.describe(),
         oidcVerification: await settings.oidcVerification(),
+        // Only on the save that changed the repository, so an ordinary save
+        // carries no word about change requests at all.
+        ...(repositoryChange.changing
+          ? { repositoryChange: { choice: repositoryChange.choice, closedChangeRequests } }
+          : {}),
       });
     } catch (err) {
       if (err instanceof SettingsValidationError) {
@@ -400,6 +491,49 @@ export function createSetupRoutes(
       log.error('save failed:', { err });
       res.status(500).json({ error: 'Could not save these settings.' });
     }
+  }
+
+
+  /**
+   * What this save does to the knowledge-base repository, and whether the
+   * admin has said yes to it.
+   *
+   * CHANGING THE ADDRESS DESTROYS EVERY WORKING COPY. A clone fetches and
+   * pushes through the address stored in its own `remote.origin.url`, and the
+   * two repositories need not share a single commit — so a clone of the old
+   * one cannot be re-pointed, only deleted and made again from the new
+   * address. Anything committed here and never pushed goes with it. That is
+   * not something to discover afterwards, so the save is REFUSED (409) until
+   * the answer comes back with the admin's decision.
+   *
+   * Only a real change asks: an address that differs from the configured one
+   * in nothing but its spelling — a trailing slash, a `.git` suffix, the case
+   * of the host — is the same repository (see `kb-fs/remote-url.ts`), and so
+   * is a first-run save, where there is no configured address and nothing on
+   * disk to lose.
+   *
+   * Returns null when it has already answered the request.
+   */
+  async function repositoryChangeFor(
+    entries: Record<string, string>,
+    confirmation: unknown,
+    res: express.Response,
+  ): Promise<{ changing: boolean; choice: RepositoryChangeChoice | null } | null> {
+    const unchanged = { changing: false, choice: null } as const;
+    const now = settings.resolve('kbRepoUrl').trim();
+    const next = settings.resolveAfter(entries)('kbRepoUrl').trim();
+    if (now === '' || next === '' || sameRepository(now, next)) return unchanged;
+    if (confirmation === 'keep' || confirmation === 'close') return { changing: true, choice: confirmation };
+    // The count is what the choice is ABOUT, so it is read here rather than
+    // left for the screen to ask for separately: the two questions would
+    // otherwise be answered a round trip apart, and the number on screen
+    // would be the one from before whatever happened in between.
+    const openChangeRequests = await changeRequests.countOpen();
+    res.status(409).json({
+      error: 'This changes the knowledge-base repository.',
+      repositoryChange: { openChangeRequests },
+    });
+    return null;
   }
 
   /**
@@ -451,7 +585,10 @@ export function createSetupRoutes(
     // the environment, whose field the form cannot even edit) is that token's
     // first and only pairing, not a change of it.
     const tokenSupplied = Boolean(entries.gitToken?.trim());
-    if (now.url && next.url !== now.url && next.token && !tokenSupplied) {
+    // A different SPELLING of the configured address is the same repository,
+    // so the stored token is still the token it was saved for: asking for it
+    // again over a trailing slash would be a question with no answer.
+    if (now.url && !sameRepository(next.url, now.url) && next.token && !tokenSupplied) {
       return settings.sourceOf('gitToken') === 'env'
         ? refuse({
             kbRepoUrl:

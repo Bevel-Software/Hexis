@@ -185,6 +185,31 @@ describe('KbStartupRunner — the repository was replaced', () => {
     expect((await git(repo, ['rev-parse', 'HEAD'])).trim()).toBe(head);
   });
 
+it('tells the workspace layer about every working copy it deletes', async () => {
+    // On a SAVE the process is already running, and the workspace service
+    // caches branch→directory. A deleted clone left in that cache is a path
+    // to nothing, and nothing would ever re-clone it.
+    await bootedOnTheOldRepository();
+    const replacement = await replacementUpstream();
+    const discarded: string[] = [];
+
+    await makeRunner([touchDefault], {
+      kbRepoUrl: () => replacement,
+      onCloneDiscarded: (id: string) => discarded.push(id),
+    }).runAll();
+
+    expect(discarded.sort()).toEqual(
+      [encodeURIComponent(DEFAULT_BRANCH), encodeURIComponent('someone/draft')].sort(),
+    );
+  });
+
+  it('says nothing about a working copy it keeps', async () => {
+    await bootedOnTheOldRepository();
+    const discarded: string[] = [];
+    await makeRunner([touchDefault], { onCloneDiscarded: (id: string) => discarded.push(id) }).runAll();
+    expect(discarded).toEqual([]);
+  });
+
   it('keeps every clone when the configured repository cannot be reached', async () => {
     // A typo in the address must not cost the working copies: the sweep runs
     // only once the configured remote has answered.

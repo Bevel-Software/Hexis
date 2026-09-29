@@ -16,6 +16,7 @@ import {
   failureOf,
   gitFailure,
   type GitFailure,
+  type GitFailureKind,
 } from '../../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
 import { normalizeRepositoryAddress, sameRepository } from '../../kb-fs/remote-url.js';
@@ -29,7 +30,9 @@ import { normalizeRepositoryAddress, sameRepository } from '../../kb-fs/remote-u
  *
  * Fully fail-closed: any failure this phase cannot DECLARE (an unhandled
  * step throw, an unreachable remote, a clone that will not come down, a
- * refused write) throws out of `runAll` and stops the boot. The container's
+ * refused write) throws out of `runAll`. The boot stops on it unless the
+ * host ANSWERED about the repository or the credentials, in which case it
+ * comes up gated instead — see `bootMaySurvive`. The container's
  * restart policy is the retry — each attempt at boot time on quiet trees —
  * so an environmental failure converges without a human the moment the
  * environment returns. The one carve-out: a push rejected because a
@@ -68,6 +71,18 @@ export interface KbStartupRunnerOptions {
       template `.gitignore` rule can never silently drop a required seed file
       from the commit. */
   buildSeedTree: (dir: string) => Promise<string[]>;
+  /**
+   * Called with the workspace id of each working copy the phase DELETED for
+   * being a clone of another repository. The workspace service keeps a
+   * branch→directory cache and adopts whatever is on disk, so on a RUNNING
+   * server — the save that changes the address — a deleted clone would
+   * otherwise stay in that cache as a path to nothing. Optional: at boot
+   * nothing has been cached yet, and a minimal graph has no such service.
+   *
+   * Never throws into the phase: the listener is a cache eviction, and a
+   * failing one must not stop a boot.
+   */
+  onCloneDiscarded?: (workspaceId: string) => void;
 }
 
 /**
@@ -96,6 +111,42 @@ export class KbRemoteUnreachableError extends ClassifiedFailure {
     );
     this.name = 'KbRemoteUnreachableError';
   }
+}
+
+/**
+ * The failure kinds a boot may survive GATED rather than stop on: the remote
+ * ANSWERED (or could not be reached at all), and what it said is about the
+ * repository or the credentials — not about what this deployment would write.
+ *
+ * All four are fixed by an operator somewhere other than this process: the
+ * host comes back, the repository is created or the token is granted access
+ * to it, a rotated token is entered on the setup screen. Refusing to boot
+ * over any of them takes away the very screen the fix is entered on — which
+ * is what happened on 2026-09-28, when a replaced repository answered
+ * `not found` inside a step and the container crash-looped.
+ *
+ * Every OTHER failure still stops the boot: it means a step or the template
+ * would write something wrong, and booting over that is worse than not
+ * booting at all.
+ */
+const GATED_BOOT_KINDS: ReadonlySet<GitFailureKind> = new Set([
+  'unreachable',
+  'not-found',
+  'credentials-rejected',
+  'write-refused',
+]);
+
+/**
+ * Whether the boot may come up GATED on this failure instead of stopping.
+ *
+ * {@link KbRemoteUnreachableError} says so by its type — it is raised where
+ * the remote is first contacted, before any step. A failure raised INSIDE the
+ * phase says so by its classification: the same fetch that stops a boot when
+ * it is the first contact must not stop one when a step happened to make it.
+ */
+export function bootMaySurvive(err: unknown): boolean {
+  if (err instanceof KbRemoteUnreachableError) return true;
+  return err instanceof ClassifiedFailure && GATED_BOOT_KINDS.has(err.failure.kind);
 }
 
 export interface RetryOptions {
@@ -242,7 +293,7 @@ export class KbStartupRunner {
           // Stopped by either: a failure that is no longer the remote at all
           // (the knowledge base itself is wrong — asking again will not change
           // it), or a remote answer that a retry cannot change (see above).
-          if (!(err instanceof KbRemoteUnreachableError) || !worthRetrying()) return stopOnStanding();
+          if (!bootMaySurvive(err) || !worthRetrying()) return stopOnStanding();
           delay = Math.min(delay * 2, max);
           log(`remote still unreachable; trying again in ${Math.round(delay / 1000)}s`);
         }
@@ -554,6 +605,14 @@ export class KbStartupRunner {
           `(${this.redact(normalizeRepositoryAddress(origin))}) — deleting it; it will be cloned fresh from the configured one.`,
       );
       await fs.rm(repoDir, { recursive: true, force: true });
+      // The directory name IS the workspace id (`workspaceIdForBranch`).
+      try {
+        this.opts.onCloneDiscarded?.(entry.name);
+      } catch (err) {
+        startupLog.warn(`could not evict the cached working copy "${entry.name}":`, {
+          detail: this.redact(err instanceof Error ? err.message : String(err)),
+        });
+      }
     }
   }
 
