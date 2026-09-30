@@ -34,7 +34,7 @@ open-source core of the Bevel platform.
     </picture>
   </a>
   <a href="https://unite.eu">
-    <img src="docs/logos/unite.png" alt="Unite (formerly Mercateo)" width="160" height="56">
+    <img src="docs/logos/unite.png" alt="Unite" width="160" height="56">
   </a>
   <a href="https://www.workpath.com">
     <picture>
