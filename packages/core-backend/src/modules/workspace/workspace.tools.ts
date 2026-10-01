@@ -1981,25 +1981,19 @@ export function registerWorkspaceTools(
         entry.error = details.code ?? details.kind ?? 'refused';
         entry.message = err.message;
       };
-      /**
-       * Record a write-hook refusal on `entry`. Unlike {@link refuse}, ANY
-       * error the hook throws is this path's outcome rather than the batch's:
-       * the hook belongs to the deployment, its message is what the caller is
-       * meant to read, and one refused path must not take the others down.
-       */
-      const refuseByHook = (entry: Record<string, unknown>, err: unknown): void => {
-        const details = err instanceof ToolError ? ((err.details ?? {}) as { code?: string; kind?: string }) : {};
-        entry.outcome = 'refused';
-        entry.error = details.code ?? details.kind ?? 'refused';
-        entry.message = err instanceof Error ? err.message : 'Refused before it was written';
-      };
       for (const f of files) {
         const entry: Record<string, unknown> = { path: f.path };
         outcomes.push(entry);
         try {
           await assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, f.path);
         } catch (err) {
-          refuseByHook(entry, err);
+          // A DELIBERATE refusal by the deployment's write hook is this path's
+          // outcome and no more: its message is what the caller is meant to
+          // read, and one refused path must not take the others down. Anything
+          // else the hook throws is not a verdict — it is the gate itself
+          // failing — so `refuse` rethrows it and the whole batch fails loudly,
+          // exactly as it does in `write_file`.
+          refuse(entry, err);
           continue;
         }
         try {

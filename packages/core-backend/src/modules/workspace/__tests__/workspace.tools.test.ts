@@ -3910,7 +3910,9 @@ describe('agent read/write hooks', () => {
     refuseWrites('Not in this conversation.');
     const res = await post(`${base}/api/agent/tools/write_file`, {
       path: `${KB_DIR}/a.md`,
-      mode: 'replace',
+      // `overwrite`, so the unchanged file below is the hook's doing: with no
+      // hook this call WOULD replace `a.md`.
+      mode: 'overwrite',
       content: 'clobbered',
       sessionId: 's1',
     });
@@ -3948,6 +3950,29 @@ describe('agent read/write hooks', () => {
     expect(body.count).toBe(2);
     expect(await readFile(join(tempDir, `${KB_DIR}/one.md`), 'utf8')).toBe('1');
     expect(await readFile(join(tempDir, `${KB_DIR}/three.md`), 'utf8')).toBe('3');
+  });
+
+  it('a write hook that fails unexpectedly fails the whole write_files batch, rather than reading as a refusal', async () => {
+    const base = await start();
+    record();
+    // Not a ToolError: the hook did not JUDGE this path, the gate itself
+    // broke. Reporting that as `refused` would let the other paths commit
+    // past a gate that never ran.
+    hooks.onPreWrite(async (op) => {
+      if (op.wsPath === `${KB_DIR}/two.md`) throw new Error('the hook store is down');
+    });
+    const res = await post(`${base}/api/agent/tools/write_files`, {
+      files: [
+        { path: `${KB_DIR}/one.md`, content: '1' },
+        { path: `${KB_DIR}/two.md`, content: '2' },
+        { path: `${KB_DIR}/three.md`, content: '3' },
+      ],
+      sessionId: 's1',
+    });
+    expect(res.status).toBe(500);
+    for (const name of ['one.md', 'two.md', 'three.md']) {
+      await expect(readFile(join(tempDir, `${KB_DIR}/${name}`), 'utf8')).rejects.toThrow();
+    }
   });
 
   it('unzip skips the refused entry with the hook\'s message and extracts the others', async () => {

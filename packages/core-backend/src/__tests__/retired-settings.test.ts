@@ -36,7 +36,7 @@ describe('ONTOLOGY_SESSION_BLOCK is retired', () => {
     for (const value of ['false', 'true', 'nonsense']) {
       process.env.ONTOLOGY_SESSION_BLOCK = value;
       const config = new CoreConfig();
-      expect(() => config.kbRepoUrl).not.toThrow();
+      expect(config.kbRepoUrl).toBe(REQUIRED.KB_REPO_URL);
       expect(config).not.toHaveProperty('ontologySessionBlock');
     }
   });
@@ -47,11 +47,14 @@ describe('ONTOLOGY_SESSION_BLOCK is retired', () => {
     expect(JSON.stringify(new CoreConfig())).toBe(without);
   });
 
-  it('no variable named for it is documented any more', async () => {
+  // BOTH reference docs, so neither can be left promising what the other
+  // retired: `.env.example` is the one a deployment COPIES, so an entry
+  // surviving there is an inert kill-switch somebody sets and believes in.
+  it.each(['docs/configuration.md', '.env.example'])('%s documents no variable named for it', async (doc) => {
     const here = fileURLToPath(new URL('.', import.meta.url));
-    const docs = await readFile(join(here, '../../../../docs/configuration.md'), 'utf8');
-    expect(docs).not.toContain('ONTOLOGY_SESSION_BLOCK');
-    expect(docs.toLowerCase()).not.toContain('ontolog');
+    const text = await readFile(join(here, '../../../../', doc), 'utf8');
+    expect(text).not.toContain('ONTOLOGY_SESSION_BLOCK');
+    expect(text.toLowerCase()).not.toContain('ontolog');
   });
 });
 
