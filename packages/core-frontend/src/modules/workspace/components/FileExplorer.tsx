@@ -74,7 +74,12 @@ import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { AdminContext } from '../../admin/state/admin.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { offersManageAccess } from '../../access/manage-access-affordance';
-import { useAppRegistry } from '../../../core/registry';
+import {
+  useAppRegistry,
+  type FolderMenuContext,
+  type FolderMenuItemDef,
+  type FolderMenuTools,
+} from '../../../core/registry';
 import { fetchFileAccess, fetchProspectiveAccess } from '../../access/api';
 import {
   TreeActionConfirmDialog,
@@ -442,7 +447,16 @@ function ContextMenu({
   /** The row this menu was opened from — Escape hands focus back to it. */
   returnFocusTo?: React.RefObject<HTMLElement | null>;
 }) {
-  const { deleteEntry, unzipHere, kbDirName, fileTree } = useWorkspace();
+  const {
+    deleteEntry,
+    unzipHere,
+    kbDirName,
+    fileTree,
+    createFile,
+    createDirectory,
+    refreshFileTree,
+    workspaceBranch,
+  } = useWorkspace();
   const suggestions = useSuggestions();
   const { isPinned, togglePin, available: pinning } = usePinned();
   const openManageAccess = useManageAccess();
@@ -462,6 +476,89 @@ function ContextMenu({
   // fell below: `Manage access`, `Rename` and `Delete` among them, and for a
   // folder that `Manage access` row is the product's only route to it.
   const pos = usePointerMenuPosition(ref, x, y);
+
+  // ── The deployment's own folder entries ──
+  //
+  // Core registers none (see `FolderMenuItemDef`), so on a core deployment
+  // every line below collapses to nothing: no predicate runs, no write lookup
+  // is spent, no separator is drawn, and this menu is the menu it has always
+  // been. Only a folder's menu offers them, and only a folder that exists on
+  // this branch — a proposed row's folder is on a change request's branch,
+  // where nothing here could create anything.
+  const { folderMenuItems } = useAppRegistry();
+  const { open: openPath } = useTreeNav();
+  const offersRegistered = entry.type === 'directory' && !proposed && folderMenuItems.length > 0;
+  // Answered by the hook the tree's own write hints use, so an entry is told
+  // the same thing about this folder that the rest of the explorer believes.
+  // It short-circuits outside the repository and on an unprotected branch, so
+  // the lookup costs a request only where the answer can actually be "no".
+  const folderCanWrite = useCanWriteFolder(offersRegistered ? entry.relativePath : null);
+  // The branch the workspace IS, not the one a route may be navigating to —
+  // these rows are the workspace's, so an entry is told where they came from.
+  const branch = workspaceBranch ?? '';
+  const folder: FolderMenuContext = useMemo(
+    () => ({
+      path: entry.relativePath,
+      branch,
+      canWrite: folderCanWrite,
+      branchProtected: branch !== '' && isProtectedBranch(currentBranchModel(), branch),
+    }),
+    [entry.relativePath, branch, folderCanWrite],
+  );
+  const registeredItems = useMemo(
+    () =>
+      offersRegistered
+        ? folderMenuItems.filter((item) => {
+            try {
+              return item.appliesTo(folder);
+            } catch (err) {
+              // One deployment entry's broken predicate must not cost the
+              // viewer the whole menu — Delete and Manage access included.
+              // It is left out and said out loud; the others are asked anyway.
+              console.error(`Folder menu entry "${item.id}" failed appliesTo:`, err);
+              return false;
+            }
+          })
+        : [],
+    [offersRegistered, folderMenuItems, folder],
+  );
+
+  /**
+   * Run a registered entry. It creates nothing itself: the tools below are the
+   * workspace's own calls, the same ones "New file" and "New folder" make, so
+   * the access rules, the platform-file rules and the protected-branch rules
+   * reach it unchanged and a refusal arrives as a rejection from the route.
+   *
+   * Whatever it leaves unhandled — a throw, a rejection, or its own
+   * `showError` — is reported the way a refused "New folder" is reported, by
+   * the same `alert`.
+   */
+  const runRegistered = (item: FolderMenuItemDef) => {
+    // Closed BEFORE the action runs, for the reason the inline create input is
+    // unmounted before its create can fail: the alert steals focus, and
+    // dismissing it over a still-open menu would read as a click outside.
+    onClose();
+    const showError = (message: string) => {
+      alert(`${item.label} failed:\n${message}`);
+    };
+    const tools: FolderMenuTools = {
+      createFolder: (path) => createDirectory(path),
+      createFile: (path, content) => createFile(path, content),
+      refreshTree: async () => {
+        await refreshFileTree();
+      },
+      openPath,
+      showError,
+    };
+    void (async () => {
+      try {
+        await item.run(folder, tools);
+      } catch (err) {
+        console.error(`Folder menu entry "${item.id}" failed:`, err);
+        showError(err instanceof Error ? err.message : String(err));
+      }
+    })();
+  };
 
   // Only files whose name ends with `.zip` (case-insensitive) get the
   // extraction affordance — matches the OS shell-extension behavior users
@@ -697,6 +794,26 @@ function ContextMenu({
         <MenuItem role="menuitem" tone="danger" onClick={() => { onWithdraw(); onClose(); }}>
           <span className="flex items-center gap-2"><Undo2 size={14} />Withdraw suggestion</span>
         </MenuItem>
+      )}
+      {registeredItems.length > 0 && (
+        // The deployment's verbs, last and behind a separator: they are
+        // additions to this tree's vocabulary rather than part of it, and the
+        // rule holds in the other direction too — with none registered there
+        // is no separator to explain. Ordinary `MenuItem` buttons, so Tab
+        // reaches them and Enter runs them exactly as for `New folder`.
+        <>
+          <div className="my-1 border-t border-line" data-testid="folder-menu-registered-separator" />
+          {registeredItems.map((item) => (
+            <MenuItem
+              key={item.id}
+              role="menuitem"
+              data-folder-menu-item={item.id}
+              onClick={() => runRegistered(item)}
+            >
+              <span className="flex items-center gap-2">{item.icon}{item.label}</span>
+            </MenuItem>
+          ))}
+        </>
       )}
     </MenuPanel>
     </div>

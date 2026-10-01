@@ -146,6 +146,83 @@ export interface ExplorerItemDef {
 }
 
 /**
+ * The folder a right-click menu was opened on, as the entry is told about it.
+ *
+ * Everything here is what the explorer ALREADY knows when it draws the menu;
+ * nothing new is asked of the server on an entry's behalf, and nothing here is
+ * a gate. `canWrite` and `branchProtected` are for deciding whether to OFFER a
+ * verb — the routes an entry's action goes through decide whether to allow it,
+ * exactly as they do for "New folder".
+ */
+export interface FolderMenuContext {
+  /** Workspace-relative path of the folder, e.g. `knowledge-base/Data`. */
+  path: string;
+  /**
+   * The branch the explorer's rows came from — the branch the workspace IS,
+   * never the one a route may be navigating to. Empty only before the
+   * workspace has bootstrapped, which is before there is a row to right-click.
+   */
+  branch: string;
+  /**
+   * Whether the viewer may write into this folder — the same answer the
+   * explorer's own write hints read, and `false` while it is still unknown.
+   */
+  canWrite: boolean;
+  /** Whether {@link branch} is one of the deployment's protected branches. */
+  branchProtected: boolean;
+}
+
+/**
+ * What a folder menu entry's action may do: the operations Hexis's own entries
+ * use, and only those. An entry creates nothing itself — it asks through here,
+ * so whatever it creates travels the same routes "New file" and "New folder"
+ * travel, and the access rules, the platform-file rules and the
+ * protected-branch rules apply to it unchanged.
+ *
+ * `createFolder` and `createFile` REJECT when the route refuses; an entry that
+ * lets the rejection through has its message shown the way a refused "New
+ * folder" shows one, so handling it is optional rather than the entry's
+ * problem. Paths are workspace-relative, as {@link FolderMenuContext.path} is.
+ */
+export interface FolderMenuTools {
+  createFolder: (path: string) => Promise<void>;
+  createFile: (path: string, content?: string) => Promise<void>;
+  /** Re-read the file tree, so what was created shows up in it. */
+  refreshTree: () => Promise<void>;
+  /** Open a path in the surface this tree belongs to. */
+  openPath: (path: string) => void;
+  /** Show a failure the way the explorer shows its own. */
+  showError: (message: string) => void;
+}
+
+/**
+ * An entry a DEPLOYMENT adds to a folder's right-click menu in the explorer.
+ *
+ * Core registers none. The explorer and its menus are core's, but a verb like
+ * "New ontology" belongs to the distribution that has ontologies, so core
+ * offers the place rather than the entry.
+ *
+ * Registered entries are drawn after core's own, behind a separator, in the
+ * order registered — a deployment's verbs read as additions rather than as
+ * part of the tree's own vocabulary. With none registered there is no
+ * separator and the menu is exactly as it was.
+ *
+ * `appliesTo` is called every time a folder's menu opens, so keep it cheap and
+ * synchronous; one that throws leaves its entry out of that menu and is
+ * logged, and the rest of the menu is unaffected.
+ */
+export interface FolderMenuItemDef {
+  /** Stable, and unique among registered entries — it keys the rendered row. */
+  id: string;
+  label: string;
+  icon?: ReactNode;
+  /** Whether this entry belongs in THIS folder's menu. */
+  appliesTo: (folder: FolderMenuContext) => boolean;
+  /** What the entry does. A rejection's message is shown as an error. */
+  run: (folder: FolderMenuContext, tools: FolderMenuTools) => void | Promise<void>;
+}
+
+/**
  * A way to sign in that the distribution runs for every deployment it hosts,
  * shown in the "Single sign-on" section as a tab of its own, ahead of the
  * form for the deployment's own identity provider.
@@ -338,6 +415,11 @@ export interface AppRegistry {
   /** Extra rows in the explorer's Pinned section (see {@link ExplorerItemDef}). */
   explorerItems: ExplorerItemDef[];
   /**
+   * Extra entries in a FOLDER's right-click menu in the explorer, drawn after
+   * core's own behind a separator (see {@link FolderMenuItemDef}).
+   */
+  folderMenuItems: FolderMenuItemDef[];
+  /**
    * The Groups settings page's directory-connection panel. Core's Groups
    * page manages MANUAL groups and renders the IdP-synced roster read-only;
    * HOW a deployment connects an identity provider (e.g. SCIM provisioning)
@@ -423,6 +505,7 @@ export const EMPTY_REGISTRY: AppRegistry = {
   fileViewerPanels: [],
   renderers: [],
   explorerItems: [],
+  folderMenuItems: [],
   apps: [],
   toolbarItems: [],
 };
