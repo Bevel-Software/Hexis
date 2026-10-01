@@ -102,6 +102,12 @@ export type { ILlmUsageMeter } from './modules/tool-auth/llm-usage-meter.js';
 export type { AuthProviderPlugin } from './modules/auth/auth.routes.js';
 export type { IErasureParticipant } from './modules/auth/account-erasure.service.js';
 export {
+  alwaysWritable,
+  READ_ONLY_CODE,
+  type IWriteAccess,
+  type WriteAccessVerdict,
+} from './modules/write-access/write-access.js';
+export {
   AccountAdmissionRefusedError,
   AccountDeactivatedError,
   ACCOUNT_DEACTIVATED_MESSAGE,

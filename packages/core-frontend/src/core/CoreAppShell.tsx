@@ -23,6 +23,7 @@ import { EventBusFocusBinder } from '../modules/workflow/state/EventBusFocusBind
 import { ChangeRequestStaleBinder } from '../modules/workflow/state/ChangeRequestStaleBinder';
 import { Toolbar } from '../modules/toolbar/components/Toolbar';
 import { DemoBanner } from '../modules/layout/components/DemoBanner';
+import { ReadOnlyBanner } from '../modules/layout/components/ReadOnlyBanner';
 import { FileExplorer } from '../modules/workspace/components/FileExplorer';
 import { FileViewer } from '../modules/workspace/components/FileViewer';
 import { OpenChangeRequestsProvider } from '../modules/workspace/state/open-change-requests';
@@ -175,6 +176,7 @@ function AuthenticatedAppInner() {
 // and its onboarding-import banner after these.
 const CORE_BANNERS: BannerDef[] = [
   { id: 'demo', order: 20, node: <DemoBanner /> },
+  { id: 'read-only', order: 25, node: <ReadOnlyBanner /> },
   { id: 'roles-corrupted', order: 30, node: <RolesCorruptedBanner /> },
 ];
 

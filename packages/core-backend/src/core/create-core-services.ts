@@ -142,6 +142,7 @@ import { BevelOAuthProvider } from '../modules/mcp/oauth/bevel-oauth-provider.js
 import { getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { ToolRegistry } from '../modules/tool-registry/tool-registry.js';
 import { createToolContextResolver } from '../modules/tool-helpers/tool-context.js';
+import { alwaysWritable, type IWriteAccess } from '../modules/write-access/write-access.js';
 import { createToolHandlerFactory } from '../modules/tool-helpers/tool-handler.js';
 import { TokenCrypto } from '../shared/token-crypto.js';
 import { UpdateCheckService } from '../modules/update-check/update-check.service.js';
@@ -327,6 +328,8 @@ export interface CoreServices {
   toolAuthMiddleware: ReturnType<typeof createToolAuthMiddleware>;
   manualAuthMiddleware: ReturnType<typeof createManualAuthMiddleware>;
   toolHandlerFactory: ReturnType<typeof createToolHandlerFactory>;
+  /** Whether the deployment may be changed right now — `ports.writeAccess`, or always. */
+  writeAccess: IWriteAccess;
   // ── Server-time seams (enterprise overwrites after construction) ────────
   /** `start_session` backing — core default {@link UuidSessionSink}. */
   sessionSink: ISessionSink;
@@ -1134,7 +1137,8 @@ export async function createCoreServices(
     creatorAccess,
     loadActiveGroups,
   });
-  const toolHandlerFactory = createToolHandlerFactory(resolveToolContext);
+  const writeAccess = ports.writeAccess ?? alwaysWritable;
+  const toolHandlerFactory = createToolHandlerFactory(resolveToolContext, writeAccess);
   const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService);
   // Read-only manual endpoints accept the above PLUS a browser JWT, so a
   // logged-in user can browse the catalog with their session. Execution routes
@@ -1353,6 +1357,7 @@ export async function createCoreServices(
     toolAuthMiddleware,
     manualAuthMiddleware,
     toolHandlerFactory,
+    writeAccess,
     // Server-time seams — defaults here; the enterprise overlay overwrites
     // (or, for the array, pushes into) these after construction.
     sessionSink: ports.sessionSink ?? new UuidSessionSink(),

@@ -6,6 +6,7 @@ import { hasHttpStatus, ToolError, type ToolHandler } from './tool.contract.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import type { ResolveToolContext } from './tool-context.js';
+import { alwaysWritable, READ_ONLY_CODE, refuseWriteTool, type IWriteAccess } from '../write-access/write-access.js';
 import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
 
 function isAsyncIterable(v: unknown): v is AsyncIterable<unknown> {
@@ -29,7 +30,7 @@ export interface ToolHandlerOptions {
  * The handler receives `req.body` as the flat args (UTCP's `body_field` already
  * delivered the inner body as the request body).
  */
-export function createToolHandlerFactory(resolve: ResolveToolContext) {
+export function createToolHandlerFactory(resolve: ResolveToolContext, writeAccess: IWriteAccess = alwaysWritable) {
   return function toolHandler(handler: ToolHandler, opts: ToolHandlerOptions = {}) {
     return async (req: Request, res: Response): Promise<void> => {
       const auth = req.toolAuth;
@@ -40,6 +41,15 @@ export function createToolHandlerFactory(resolve: ResolveToolContext) {
       if (opts.write && auth.scope === 'read') {
         res.status(403).json({ error: 'This tool requires write access.' });
         return;
+      }
+      // The tool layer's half of the read-only gate: the HTTP gate lets every
+      // tool call through, since only here is a write tool told from a read.
+      if (opts.write) {
+        const refusal = await refuseWriteTool(writeAccess);
+        if (refusal !== null) {
+          res.status(403).json({ error: refusal, code: READ_ONLY_CODE });
+          return;
+        }
       }
       const abort = new AbortController();
       req.on('close', () => {
