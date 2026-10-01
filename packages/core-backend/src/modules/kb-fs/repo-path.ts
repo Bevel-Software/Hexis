@@ -51,6 +51,22 @@ import { sanitizedPath } from '../../shared/printable.js';
 const CONTROL_CHARACTERS = /[\x00-\x1F\x7F]/;
 
 /**
+ * Whether `value` carries one of them — THE predicate, so the places that
+ * accept a NAME enforce the same rule as the normaliser that joins it into a
+ * path. The checkout folder name is the one that matters: it is not a caller's
+ * path, it is deployment configuration (`KB_DIR_NAME`, and the `kbDirName`
+ * setting), and it is PREFIXED onto every workspace-relative path. A name with
+ * a line break in it would therefore make the normaliser emit exactly the path
+ * this rule exists to exclude, from inputs that were each clean. Refused where
+ * the name is set — at boot in `core-config` and in the settings validator —
+ * so the deployment fails loudly instead of serving a path nothing downstream
+ * can safely read.
+ */
+export function hasControlCharacter(value: string): boolean {
+  return CONTROL_CHARACTERS.test(value);
+}
+
+/**
  * True when `wsPath` is the repository folder or lies under it.
  *
  * Judged segment by segment, not by string prefix: `knowledge-base/../x.md`
@@ -158,6 +174,20 @@ export function normalizeWorkspacePath(wsPath: string, kbDirName: string): strin
   // is normalised, so no gate downstream is ever asked about a string that
   // means one thing to it and two things to git.
   if (CONTROL_CHARACTERS.test(wsPath)) refuse();
+  // …and the FOLDER NAME, which is prefixed onto the result rather than read
+  // from it: a clean path joined to `kb\nname` comes out carrying the line
+  // break, so the normaliser would itself emit what the check above refuses.
+  // Said as the configuration error it is — the caller's path is fine, and an
+  // operator reading a refusal about their own path would have nothing to fix.
+  // `core-config` and the `kbDirName` setting validator both refuse this at
+  // the point it is SET, so reaching here means the two drifted.
+  if (CONTROL_CHARACTERS.test(kbDirName)) {
+    throw new WorkflowValidationError(
+      `the configured checkout folder name (kbDirName / KB_DIR_NAME) contains a control character: "${sanitizedPath(kbDirName)}". ` +
+        'Every workspace path is prefixed with it, so no path can be resolved until the setting is corrected.',
+      { kind: 'kb-dir-name-control-character', kbDirName: sanitizedPath(kbDirName) },
+    );
+  }
   // The root-anchored form, and ONLY for the repository folder: `/<kbDirName>/…`
   // is what the app's Copy path gives (it is the form a Markdown link resolves
   // from) and names the same workspace path. `/tmp/x` and `//x` are not that

@@ -152,9 +152,23 @@ describe('GitService.fileBytesAtCommit', () => {
       'knowledge-base/docs/child.md\rzzz',
       'knowledge-base/docs/child.md\nknowledge-base/logo.png',
     ]) {
+      // Both the TYPE and the sentence. Two different validators are called
+      // `assertValidRelativePath` — the shared one in
+      // `packages/shared/src/workspace/filename.ts`, which throws a plain
+      // `Error('Invalid path: …')`, and the kb-fs one in
+      // `modules/kb-fs/branch-name.ts`, which throws `WorkflowValidationError`
+      // (status 400). `GitService` imports the kb-fs one, and the 400 is what
+      // makes the route answer 400 rather than 500, so the type is asserted
+      // here deliberately and the message pins which of the two ran.
       await expect(
         svc.fileBytesAtCommit(workspaceId, injected, addSha, 'after'),
       ).rejects.toThrow(WorkflowValidationError);
+      await expect(
+        svc.fileBytesAtCommit(workspaceId, injected, addSha, 'after'),
+      ).rejects.toThrow(/control character/);
+      await expect(
+        svc.fileBytesAtCommit(workspaceId, injected, addSha, 'after'),
+      ).rejects.toMatchObject({ status: 400 });
     }
     // The refusal is the PATH's, decided before the sha is resolved or the
     // workspace's git turn is taken — so a caller cannot reach git with one.

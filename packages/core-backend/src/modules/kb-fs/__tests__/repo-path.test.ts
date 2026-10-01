@@ -4,6 +4,7 @@ import {
   assertKbDirNameFree,
   assertRepoRootNameFree,
   assertRepoRootNameFreeArgs,
+  hasControlCharacter,
   isInsideRepo,
   normalizePathArgs,
   normalizeWorkspacePath,
@@ -175,6 +176,49 @@ describe('a line break in a path — one name to the gates, two object names to 
         WorkflowValidationError,
       );
     }
+  });
+
+  it('refuses a CHECKOUT FOLDER NAME carrying one, which the normaliser would otherwise emit', () => {
+    // The name is prefixed onto the result rather than read from it, so a
+    // clean path joined to `kb\nname` would come out carrying the break: the
+    // normaliser would emit exactly what it refuses from a caller, from inputs
+    // that were each individually fine.
+    let err: unknown;
+    try {
+      normalizeWorkspacePath('Docs/report.md', 'kb\nname');
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(WorkflowValidationError);
+    const e = err as WorkflowValidationError;
+    // Named as the CONFIGURATION error it is: an operator told their own path
+    // was invalid would have nothing to fix.
+    expect(e.message).toMatch(/checkout folder name/);
+    expect(e.message).toMatch(/KB_DIR_NAME/);
+    expect(e.message).toContain('"kb\\nname"');
+    expect(e.payload).toMatchObject({ kind: 'kb-dir-name-control-character', kbDirName: 'kb\\nname' });
+    // The guarantee the fence is for: no return value of this function carries
+    // a control character, whatever it was given.
+    for (const dir of ['kb\nname', 'kb\rname', 'kb\u0000name']) {
+      for (const p of ['Docs/report.md', `${dir}/Docs/report.md`, 'x']) {
+        let out: string | null = null;
+        try {
+          out = normalizeWorkspacePath(p, dir);
+        } catch {
+          out = null;
+        }
+        if (out !== null) expect(hasControlCharacter(out), `${dir} + ${p}`).toBe(false);
+      }
+    }
+  });
+
+  it('exposes the rule as a predicate, so the places that SET a name share it', () => {
+    expect(hasControlCharacter('knowledge-base')).toBe(false);
+    expect(hasControlCharacter('kb\nname')).toBe(true);
+    expect(hasControlCharacter('kb\u007Fname')).toBe(true);
+    // U+2028 is not in the range: nothing to git, and a name carrying one is
+    // creatable today — refusing it would make an existing file unreadable.
+    expect(hasControlCharacter('kb\u2028name')).toBe(false);
   });
 
   it('leaves ordinary names alone — the rule costs no real path', () => {
