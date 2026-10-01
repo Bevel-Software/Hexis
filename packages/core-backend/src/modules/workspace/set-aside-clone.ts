@@ -19,6 +19,15 @@ import path from 'node:path';
  * Where working copies are set aside. NOT under the workspaces root: the
  * workspace service's orphan sweep removes every folder there that is not a
  * known branch's, and what is set aside has to outlive that sweep.
+ *
+ * PASS THE OVERRIDE, and pass BOTH CALLERS THE SAME ONE. The fallback is a
+ * sibling of the workspaces root, which is a lasting place only when that
+ * parent is itself a mounted volume — in the shipped compose file it is the
+ * container's own filesystem, so a copy left there is gone at the next
+ * recreate, having been kept on the promise that it would not be. The
+ * composition root therefore roots both the startup phase and the workspace
+ * service at one directory under the backups volume; the fallback is for a
+ * test, or a caller with no deployment layout to speak of.
  */
 export function setAsideRootFor(workspacesRoot: string, override?: string): string {
   return override ?? path.resolve(workspacesRoot, '..', 'replaced-working-copies');

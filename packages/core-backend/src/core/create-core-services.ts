@@ -486,12 +486,26 @@ export async function createCoreServices(
   if (repositorySource.mode() === 'github-app') {
     await githubApp.prepare().catch(() => undefined);
   }
+  /**
+   * Where a working copy of a replaced repository is kept, for BOTH the places
+   * that find one: the KB startup phase sweeping the workspaces root, and the
+   * workspace service refusing to adopt one on a branch open. One variable,
+   * passed to both, because they move the same clones for the same reason and
+   * an admin looking for their work must have one folder to look in — the two
+   * drifted apart once already, and the copy the workspace service set aside
+   * landed in the image's own filesystem and was gone at the next recreate.
+   *
+   * Under the backups root: a persistent volume of its own, and one nothing
+   * sweeps (see the runner's `reconcileClonesWithConfiguredRepository`).
+   */
+  const replacedWorkingCopiesRoot = path.join(config.backupsRoot, 'replaced-working-copies');
   const workspaceService = new WorkspaceService(
     config.workspacesRoot,
     () => repositorySource.url(),
     kb,
     disk,
     gitRunner,
+    replacedWorkingCopiesRoot,
   );
   // The KB startup phase: every seeding, scaffolding and migration concern,
   // run through one runner at the deployment's quiet moments (boot + setup
@@ -529,10 +543,9 @@ export async function createCoreServices(
     // the first thing that needs them.
     kbRepoUrl: () => repositorySource.url(),
     workspacesRoot: config.workspacesRoot,
-    // Under the backups root, a persistent volume of its own and one nothing
-    // sweeps: a working copy of a repository that was replaced is kept there,
-    // never deleted (see the runner's `reconcileClonesWithConfiguredRepository`).
-    setAsideRoot: path.join(config.backupsRoot, 'replaced-working-copies'),
+    // The same folder the workspace service sets aside into — see
+    // `replacedWorkingCopiesRoot` above for why the two must agree.
+    setAsideRoot: replacedWorkingCopiesRoot,
     kbDirName,
     templateDir: config.kbTemplateDir,
     defaultBranch: () => kb.defaultBranch,

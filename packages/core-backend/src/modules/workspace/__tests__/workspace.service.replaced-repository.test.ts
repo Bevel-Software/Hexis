@@ -71,21 +71,21 @@ async function upstream(name: string, marker: string): Promise<string> {
   return bare;
 }
 
-function service(kbRepoUrl: () => string) {
+function service(kbRepoUrl: () => string, setAsideRoot?: string) {
   return new WorkspaceService(
     workspacesRoot,
     kbRepoUrl,
     testKbContext({ branchModel: { defaultBranch: BRANCH, protectedBranches: [BRANCH] } }),
     new NodeFs(),
     new NodeGitRunner(),
+    setAsideRoot,
   );
 }
 
 const cloneDir = () => path.join(workspacesRoot, encodeURIComponent(BRANCH), 'knowledge-base');
 
-/** Every working copy under the set-aside root, as repo directories. */
-async function setAside(): Promise<string[]> {
-  const setAsideRoot = path.join(root, 'replaced-working-copies');
+/** Every working copy under a set-aside root, as repo directories. */
+async function setAside(setAsideRoot = path.join(root, 'replaced-working-copies')): Promise<string[]> {
   const stamps = await fs.readdir(setAsideRoot).catch(() => [] as string[]);
   const kept: string[] = [];
   for (const stamp of stamps) {
@@ -176,6 +176,49 @@ describe('a working copy of a repository that was replaced', () => {
 
     expect((await git(cloneDir(), ['config', '--get', 'remote.origin.url'])).trim()).toBe(configured);
     expect(await setAside()).toEqual([]);
+  });
+});
+
+/**
+ * WHERE it is set aside is not a detail. A deployment runs from an image whose
+ * filesystem is replaced on every recreate, and only the mounted volumes
+ * survive that — so a working copy kept beside the workspaces root was kept
+ * until the next `docker compose up` and no longer, while the screen had
+ * promised the admin it was there to recover from. The composition root roots
+ * this service and the KB startup phase at ONE directory under the backups
+ * volume; this is the half of that the service owes.
+ */
+describe('where a working copy is set aside', () => {
+  it('goes to the root it was given, not beside the workspaces root', async () => {
+    const old = await upstream('old', 'old repository');
+    const replacement = await upstream('replacement', 'new repository');
+    await fs.mkdir(path.dirname(cloneDir()), { recursive: true });
+    await git(root, ['clone', '-b', BRANCH, old, cloneDir()]);
+    await fs.writeFile(path.join(cloneDir(), 'unpushed.md'), 'local work', 'utf8');
+    await git(cloneDir(), ['add', '-A']);
+    await git(cloneDir(), ['commit', '-m', 'local work']);
+    // Somewhere the workspaces root cannot be reached from by walking up:
+    // the backups volume, as the deployment mounts it.
+    const backups = path.join(root, 'backups', 'replaced-working-copies');
+
+    await service(() => replacement, backups).getOrCreateForBranch(BRANCH);
+
+    const kept = await setAside(backups);
+    expect(kept).toHaveLength(1);
+    expect(await fs.readFile(path.join(kept[0]!, 'unpushed.md'), 'utf8')).toBe('local work');
+    // And nothing was left in the place that does not outlive the container.
+    expect(await setAside()).toEqual([]);
+  });
+
+  it('falls back beside the workspaces root when no root is given', async () => {
+    const old = await upstream('old', 'old repository');
+    const replacement = await upstream('replacement', 'new repository');
+    await fs.mkdir(path.dirname(cloneDir()), { recursive: true });
+    await git(root, ['clone', '-b', BRANCH, old, cloneDir()]);
+
+    await service(() => replacement).getOrCreateForBranch(BRANCH);
+
+    expect(await setAside()).toHaveLength(1);
   });
 });
 
