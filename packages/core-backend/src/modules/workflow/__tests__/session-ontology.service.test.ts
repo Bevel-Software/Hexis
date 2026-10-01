@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 import { SessionOntologyService } from '../session-ontology.service.js';
 import type { Database } from '../../database/connection.js';
@@ -90,7 +91,7 @@ vi.mock('drizzle-orm', async (importOriginal) => {
 
 function makeService() {
   const db = makeFakeDb();
-  return { svc: new SessionOntologyService(db as unknown as Database), db };
+  return { svc: new SessionOntologyService(db as unknown as Database, testKbContext()), db };
 }
 
 describe('SessionOntologyService (touched-set model)', () => {
@@ -157,7 +158,7 @@ describe('SessionOntologyService (touched-set model)', () => {
   it('survives a "restart": a new instance re-reads the touched set from the store', async () => {
     await svc.checkOperation('s1', P_READ, false);
     await svc.checkOperation('s1', PL_READ, false);
-    const afterRestart = new SessionOntologyService(db as unknown as Database);
+    const afterRestart = new SessionOntologyService(db as unknown as Database, testKbContext());
     // The poison persists across the restart: writes still blocked.
     expect((await afterRestart.checkOperation('s1', P_READ, true)).allow).toBe(false);
   });

@@ -40,8 +40,71 @@
     {
       "idx": 5,
       "version": "7",
-      "when": 1788359464311,
-      "tag": "0005_pii_encryption",
+      "when": 1788791352625,
+      "tag": "0005_github_facade",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789034558662,
+      "tag": "0006_api_tokens_revoked_by",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789406950616,
+      "tag": "0007_github_facade_registered",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1789563611048,
+      "tag": "0008_change_request_apply_failure",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1789649918539,
+      "tag": "0009_change_request_apply_failure_kind",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1789813372971,
+      "tag": "0010_plugin_join_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1789903776474,
+      "tag": "0011_plugin_join_request_claim",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1790179003112,
+      "tag": "0012_agent_audit",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1790243482866,
+      "tag": "0013_agent_identity_and_key_soft_delete",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1790847276662,
+      "tag": "0014_pii_encryption",
       "breakpoints": true
     }
   ]

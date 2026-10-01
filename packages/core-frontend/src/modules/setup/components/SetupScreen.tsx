@@ -1,13 +1,83 @@
-import { useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
+import {
+  DEFAULT_KB_LAYOUT,
+  agentsFilePointerSentence,
+  type KbLayout,
+} from '@bevel-software/platform-shared';
 import { Banner, Button, Surface, TextField } from '../../../shared/components';
+import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { tokenUsernameForHost } from '../utils/git-host';
+import { isRootFolderSuggestion, rootFolderState, type RootFolderState } from '../utils/root-folders';
+import { copyToClipboard } from '../../../lib/clipboard';
+import { GitHubRepositoryPanel } from './GitHubRepositoryPanel';
+import { forgetDraft, keepDraft, keptDraft } from '../utils/kept-draft';
+import { useAppRegistry } from '../../../core/registry';
+import { MarketplaceSection } from '../../settings/components/MarketplaceSection';
 import {
   saveSettings,
+  syncNow,
+  syncOutcomeError,
   testConnection,
+  KbInitFailed,
+  testOidc,
   SettingsProblems,
   type ConnectionTest,
+  type KbInitFailure,
+  type LastSync,
+  type OidcTest,
+  type OidcVerification,
+  type GitMode,
+  type RepositoryStatus,
   type SettingStatus,
+  type SyncNowResult,
+  type SyncStatus,
 } from '../services/setup.api';
+
+/** A value to paste elsewhere, with the one button such a value needs. */
+function CopyValue({ value, label }: { value: string; label: string }) {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (timer.current) clearTimeout(timer.current);
+  }, []);
+  const copy = async () => {
+    // `copyToClipboard` answers false for every ordinary reason a copy does
+    // not land (no secure context, no focus, no clipboard at all); the button
+    // says so rather than pretending.
+    const landed = await copyToClipboard(value);
+    setState(landed ? 'copied' : 'failed');
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setState('idle'), 1500);
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <code className="min-w-0 break-all rounded bg-surface px-2 py-1 font-mono text-meta text-ink">
+        {value}
+      </code>
+      <Button type="button" variant="outline" size="sm" onClick={() => void copy()} aria-label={label}>
+        {state === 'copied' ? 'Copied' : state === 'failed' ? 'Couldn’t copy' : 'Copy'}
+      </Button>
+    </div>
+  );
+}
+
+/** "main updated, ali/x up to date" — the per-branch outcomes as one phrase. */
+function describeOutcomes(results: LastSync['results']): string {
+  if (results.length === 0) return 'nothing to sync yet';
+  const word = (r: LastSync['results'][number]): string => {
+    switch (r.outcome) {
+      case 'up-to-date':
+        return 'up to date';
+      case 'not-cloned':
+        return 'not cloned';
+      case 'remote-gone':
+        return 'deleted on the host';
+      default:
+        return r.outcome;
+    }
+  };
+  return results.map((r) => `${r.branch} ${word(r)}`).join(', ');
+}
 
 /** Copy for each setting: what it is, in the words of someone who has to fill it in. */
 const FIELDS: Record<
@@ -39,6 +109,38 @@ const FIELDS: Record<
     help: 'What the repository folder is called inside each workspace. Cosmetic; leave it as it is.',
     placeholder: 'knowledge-base',
     advanced: true,
+  },
+  kbSyncSecret: {
+    label: 'Sync secret',
+    help: 'Lets your git host tell this deployment when the repository changes, so pushes and merged pull requests show up right away. Add a webhook, action or pipeline step that calls POST /api/sync/<branch> with this value as a bearer token. Optional: without it, only an administrator can trigger a sync. Stored encrypted, and never shown again.',
+    placeholder: 'A long random string',
+    advanced: true,
+  },
+  // The three roots are NOT under Advanced: a repository whose skills live in
+  // `skills/` connected fine, got an empty `Skills/` scaffolded beside it and
+  // imported nothing — a choice that has to be seen to be made.
+  knowledgeBaseDir: {
+    label: 'Knowledge folder',
+    help: 'The top-level folder in the repository that holds the knowledge. Change it only to read a repository laid out by someone else.',
+    placeholder: 'KnowledgeBase',
+  },
+  skillsDir: {
+    label: 'Skills folder',
+    help: 'The top-level folder that holds shared skills. The three folder names must differ. Case matters: skills and Skills are different folders.',
+    placeholder: 'Skills',
+  },
+  pluginsDir: {
+    label: 'Plugins folder',
+    help: 'The top-level folder that holds plugins. The three folder names must differ.',
+    placeholder: 'Plugins',
+  },
+  // Beside the folders, and not under Advanced, for the same reason they are
+  // not: a repository that already has an `AGENTS.md` of its own loses it to
+  // the platform's on the first boot unless this is answered first.
+  agentsFile: {
+    label: 'Agent guide file',
+    help: 'The file the platform writes its own guide to, at the top of the repository. Change it if your repository already has an AGENTS.md you want to keep — that file then stays yours, and the platform never writes to it. Must end in .md.',
+    placeholder: 'AGENTS.md',
   },
   defaultBranch: {
     label: 'Main branch',
@@ -79,8 +181,13 @@ const FIELDS: Record<
   },
   allowedEmailDomains: {
     label: 'Allowed email domains',
-    help: 'Only people with an address at these domains can sign in this way. Separate several with commas. Leave blank to allow any address: safe with a provider that only serves your organisation, risky with one that does not.',
+    help: 'Only people with an address at these domains can sign in through this provider. Separate several with commas. Leave blank to allow any address: safe with a provider that only serves your organisation, risky with one that does not.',
     placeholder: 'example.com',
+  },
+  auditRetentionDays: {
+    label: 'Keep events for',
+    help: 'How many days an agent’s recorded calls stay in the Audit log before they are removed. Leave it blank, or enter 0, to keep them forever. Applies without a restart.',
+    placeholder: 'forever',
   },
 };
 
@@ -92,6 +199,16 @@ const FIELDS: Record<
  */
 const REQUIRED_KEYS = ['kbRepoUrl', 'gitToken', 'defaultBranch', 'protectedBranches'];
 
+/** The half of those every deployment owes, however it has its repository. */
+const BRANCH_MODEL_KEYS = ['defaultBranch', 'protectedBranches'];
+
+/** What each way of having a repository is called on its tab. */
+const GIT_MODE_LABEL: Record<GitMode, string> = {
+  managed: 'Managed for you',
+  'github-app': 'GitHub',
+  token: 'Address and token',
+};
+
 /**
  * The answers a connection test actually proves — the address, the credential
  * and the name that goes beside it.
@@ -102,6 +219,61 @@ const REQUIRED_KEYS = ['kbRepoUrl', 'gitToken', 'defaultBranch', 'protectedBranc
  * it there would ask an admin to prove the same repository twice.
  */
 const CONNECTION_KEYS = ['kbRepoUrl', 'gitToken', 'gitUsername'];
+
+/**
+ * The settings each way of having a repository is answered by, on its tab.
+ * What belongs to a tab is sent only while that tab is open, and a refusal
+ * about it opens that tab.
+ */
+const TAB_KEYS: Record<GitMode, readonly string[]> = {
+  managed: [],
+  'github-app': ['githubRepository'],
+  token: CONNECTION_KEYS,
+};
+
+/**
+ * The answers the sign-in check proves. Editing one invalidates its result on
+ * screen; the scopes, the button text and the allowed domains are not among
+ * them, and the server never re-checks a save that changes only those.
+ */
+const OIDC_KEYS = ['oidcIssuerUrl', 'oidcClientId', 'oidcClientSecret'];
+
+/** How the configuration in effect is labelled, in both variants. */
+const OIDC_VERIFICATION_LABEL: Record<OidcVerification, string> = {
+  verified: 'Verified',
+  unverified: 'Unverified — sign in once to confirm',
+  'not-configured': 'Not configured',
+  unrecordable: 'Not recorded — set SECRETS_ENC_KEY to keep verification',
+};
+
+/** The three root folder fields, checked against the repository's listing. */
+const ROOT_FOLDER_KEYS = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'] as const;
+const isRootFolderKey = (key: string): key is (typeof ROOT_FOLDER_KEYS)[number] =>
+  (ROOT_FOLDER_KEYS as readonly string[]).includes(key);
+
+/**
+ * The knowledge-base LAYOUT fields — the three folders and the agent guide's
+ * file name — which render together, under the connection test whose listing
+ * the folders are checked against, rather than with the connection fields
+ * above it.
+ */
+const LAYOUT_KEYS: readonly (keyof KbLayout)[] = [...ROOT_FOLDER_KEYS, 'agentsFile'];
+const isLayoutKey = (key: string): boolean => (LAYOUT_KEYS as readonly string[]).includes(key);
+
+/**
+ * The consent that rides along with a renamed guide: keep the platform's
+ * one-sentence pointer in the customer's own `AGENTS.md`. Not a text field, so
+ * it has no {@link FIELDS} entry and is drawn by hand under the name it
+ * belongs to.
+ */
+const AGENTS_LINK_KEY = 'agentsFileLink';
+
+/** How a near-miss folder differs from the configured name, as the warning words it. */
+const VARIANT_DIFFERENCE: Record<Extract<RootFolderState, { kind: 'variant' }>['difference'], string> = {
+  case: 'differs only by case',
+  'trailing-s': 'differs only by a trailing s',
+  'case-and-trailing-s': 'differs by case and a trailing s',
+};
 
 /** The blocks, in the order they are worked through. */
 const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[] = [
@@ -117,11 +289,76 @@ const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[]
     blurb:
       'Optional, and you can add it later. Lets people sign in with the account they already have instead of a password.',
   },
+  {
+    id: 'audit',
+    title: 'Audit log',
+    blurb:
+      'The Audit log records which tools, skills and capabilities each connected agent uses. Choose how long those records are kept; unset, they are kept forever.',
+  },
 ];
+
+/**
+ * What the first run asks: where the knowledge lives, which the gate waits
+ * on, and how people sign in, which decides who can follow the admin in.
+ * Everything else is a preference with a working default. It is set on the
+ * Deployment page, by someone who has seen the product it configures; on the
+ * first screen it only made two questions look like five.
+ */
+const FIRST_RUN_SECTIONS: readonly SettingStatus['section'][] = ['knowledge-base', 'sign-in'];
+
+/** The two ways of signing in the section can show, when the distribution runs one. */
+type SignInTab = 'managed' | 'own';
+
+/**
+ * A section's fields. Alone in their section they are its content as it has
+ * always been; beside a distribution's tab they are the panel of theirs, so
+ * the tab that names them has something to name.
+ */
+function SectionFields({
+  panel,
+  children,
+}: {
+  /** The tab these fields are the panel of: which set of tabs, and which one. Null: no tabs. */
+  panel: { group: 'sign-in' | 'repository'; id: string } | null;
+  children: ReactNode;
+}) {
+  if (panel === null) return <>{children}</>;
+  return (
+    <div
+      role="tabpanel"
+      id={`${panel.group}-panel-${panel.id}`}
+      aria-labelledby={`${panel.group}-tab-${panel.id}`}
+      className="space-y-6"
+    >
+      {children}
+    </div>
+  );
+}
+
+/**
+ * The distribution's panel sits inside the settings form, and a browser
+ * submits a form when Enter is pressed in any text input in it. On first
+ * run that submit finishes setup and leaves the screen, from a field that
+ * had nothing to do with it. Held here once, so no panel has to remember:
+ * Enter in one of its inputs is the panel's own key. A text area keeps its
+ * new line and a button its press, neither of which submits anything.
+ */
+function keepEnterFromTheForm(event: KeyboardEvent<HTMLElement>) {
+  if (event.key === 'Enter' && event.target instanceof HTMLInputElement) event.preventDefault();
+}
 
 interface Props {
   settings: SettingStatus[];
-  /** Re-read the status after a save, so the gate can let the app through. */
+  /**
+   * Re-read the status after a save, so the gate can let the app through.
+   *
+   * The host must let only its LATEST read land (`SetupGate` and
+   * `DeploymentPage` both read through `useSetupStatus`, which does): each
+   * fresh `kbInit` replaces the failure on
+   * screen, so an earlier read answering late — the refresh after a failed
+   * save, landing after a retry that succeeded — would otherwise put the
+   * cleared failure back.
+   */
   onSaved(): void;
   /**
    * Where the screen is standing. `setup` (the default) is the first-run
@@ -132,6 +369,25 @@ interface Props {
    * and the restart banners must never drift between first run and later.
    */
   variant?: 'setup' | 'settings';
+  /**
+   * The remote-sync facts to show beside the sync secret: the address a hook
+   * calls, and what the last call did. Absent on a build without the module.
+   */
+  sync?: SyncStatus;
+  /**
+   * A standing knowledge-base initialization failure, from the status
+   * endpoint — so the banner is there when the screen is opened, not only
+   * right after the save that failed.
+   */
+  kbInit?: KbInitFailure;
+  /** Whether the single sign-on configuration in effect is proven. Absent from an older server. */
+  oidcVerification?: OidcVerification;
+  /**
+   * The ways this deployment can have its repository, and the one it is on.
+   * Absent from a server that knows one way only: the address and the token,
+   * drawn as they always were, with no tabs.
+   */
+  repository?: RepositoryStatus;
 }
 
 /**
@@ -150,8 +406,77 @@ interface Props {
  * silently outranking the infrastructure config someone is reviewing in a
  * repo, which is the same rule the server enforces.
  */
-export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
-  const [draft, setDraft] = useState<Record<string, string>>({});
+/** Two reports of the same initialization failure (a status read builds a new object each time). */
+function sameFailure(a: KbInitFailure, b: KbInitFailure): boolean {
+  return a.kind === b.kind && a.cause === b.cause;
+}
+
+export function SetupScreen({
+  settings,
+  onSaved,
+  variant = 'setup',
+  sync,
+  kbInit,
+  oidcVerification,
+  repository,
+}: Props) {
+  /** Whether a setting is a secret: what is never written to the browser's storage. */
+  const isSecret = (key: string) => settings.find((s) => s.key === key)?.secret !== false;
+  /**
+   * What was typed before the browser left for GitHub, put back now that it
+   * has returned (see `kept-draft.ts`). Only on a return from GitHub, which
+   * the address says: what was kept for a trip that was abandoned is not
+   * sprung on someone who opens the screen later. And only for settings
+   * that are still this form's to edit.
+   */
+  const [restored] = useState(() => {
+    const back = new URLSearchParams(window.location.search ?? '').has('github');
+    const kept = back ? keptDraft(isSecret) : { draft: {}, dropped: [] };
+    const editableNow = (key: string) => settings.some((s) => s.key === key && s.source !== 'env');
+    return {
+      draft: Object.fromEntries(Object.entries(kept.draft).filter(([key]) => editableNow(key))),
+      dropped: kept.dropped.filter(editableNow),
+    };
+  });
+  // Read once, then gone: in an effect, since the page may be built twice
+  // before it is shown and must find the same thing both times.
+  useEffect(() => forgetDraft(), []);
+  const [draft, setDraft] = useState<Record<string, string>>(restored.draft);
+  /** The secrets that were typed before the trip and not kept, until each is entered again. */
+  const toEnterAgain = restored.dropped.filter((key) => !draft[key]?.trim());
+  /**
+   * The initialization failure on screen: the status endpoint's, until a save
+   * or a retry from this screen answers more recently. A fresh status read
+   * (a new `kbInit` from the host) takes over again — adjusted during render
+   * rather than in an effect, so the stale banner never paints. That a fresh
+   * prop really is the latest read is the host's promise (see `onSaved`), and
+   * each retry or save that clears the failure here also asks for that read.
+   */
+  const [initFailure, setInitFailure] = useState<KbInitFailure | null>(kbInit ?? null);
+  const [seenKbInit, setSeenKbInit] = useState(kbInit);
+  /**
+   * The failure a save or retry from THIS screen has just seen cleared, until a
+   * status read agrees. A read that went out before the retry — the refresh
+   * after the failed save — can still answer after it, reporting that same
+   * failure as standing; this screen knows better, so the stale copy is not
+   * shown. The guard lifts on the first read without a failure, and never
+   * hides a DIFFERENT failure: that is news, whenever it arrives.
+   */
+  const [clearedFailure, setClearedFailure] = useState<KbInitFailure | null>(null);
+  if (kbInit !== seenKbInit) {
+    setSeenKbInit(kbInit);
+    if (!kbInit) {
+      setClearedFailure(null);
+      setInitFailure(null);
+    } else if (!(clearedFailure && sameFailure(kbInit, clearedFailure))) {
+      setClearedFailure(null);
+      setInitFailure(kbInit);
+    }
+  }
+  const [retrying, setRetrying] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  /** What the last "Sync now" from THIS page came back with (a failure to ask is `error`). */
+  const [syncResult, setSyncResult] = useState<SyncNowResult | null>(null);
   const [problems, setProblems] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [test, setTest] = useState<ConnectionTest | null>(null);
@@ -171,6 +496,25 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
    * shown as if it were about the new ones.
    */
   const connectionEpoch = useRef(0);
+  const [oidcTest, setOidcTest] = useState<OidcTest | null>(null);
+  const [oidcTesting, setOidcTesting] = useState(false);
+  /** The same staleness guard as {@link connectionEpoch}, for the sign-in answers. */
+  const oidcEpoch = useRef(0);
+  /**
+   * A verification state newer than the one the host last passed in — what a
+   * save or a test just answered. Dropped for good the moment the host passes
+   * in anything new (its own refresh supersedes it, even one that comes back
+   * to the value it replaced) and when a sign-in field is edited.
+   */
+  const [latest, setLatest] = useState<OidcVerification | null>(null);
+  const [hostVerification, setHostVerification] = useState(oidcVerification);
+  if (hostVerification !== oidcVerification) {
+    // Adjusting state to a changed prop during render, rather than in an
+    // effect: React re-renders at once, before anything stale is painted.
+    setHostVerification(oidcVerification);
+    setLatest(null);
+  }
+  const verification = latest ?? oidcVerification;
 
   /**
    * What a field would save as, given a set of typed answers: what is in them,
@@ -186,6 +530,126 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
 
   const editable = settings.filter((s) => s.source !== 'env');
   const fromEnv = settings.filter((s) => s.source === 'env');
+  const sections = variant === 'setup' ? SECTIONS.filter((s) => FIRST_RUN_SECTIONS.includes(s.id)) : SECTIONS;
+
+  /**
+   * The distribution's own way of signing in, when it runs one, and which of
+   * the two tabs is open. The section opens on the way that is in effect: the
+   * deployment's own provider once it has one, the distribution's until then.
+   * Chosen once, from what was stored when the screen opened, so typing an
+   * issuer does not move the reader to another tab.
+   */
+  const { signInOption } = useAppRegistry();
+  const ownProviderConfigured = OIDC_KEYS.every((key) => settings.find((s) => s.key === key)?.configured === true);
+  const [signInTab, setSignInTab] = useState<SignInTab>(
+    // What was being typed about the deployment's own provider is shown, not put back out of sight.
+    ownProviderConfigured || [...Object.keys(restored.draft), ...restored.dropped].some((key) => OIDC_KEYS.includes(key))
+      ? 'own'
+      : 'managed',
+  );
+
+  /**
+   * The way the deployment has its repository, and which one's tab is open.
+   * THE TAB IS THE CHOICE: what is open when Save is pressed is what the
+   * deployment is on afterwards. It opens on the way CHOSEN, so a
+   * deployment that is configured stays as it is unless its admin opens
+   * another tab, and on the first way offered for one that has none.
+   * Absent from a server that knows one way only, which is then the only
+   * thing drawn.
+   *
+   * Two ways are told apart: the one IN EFFECT, which the running
+   * deployment is on, and the one chosen, which a restart puts in effect.
+   * They differ between a move and the restart the move owes.
+   */
+  const inEffect = repository?.mode ?? null;
+  const chosen = repository ? (repository.chosen ?? repository.mode) : null;
+  const [gitTab, setGitTab] = useState<GitMode>(() => {
+    // Back from a round trip to GitHub: that tab is where it started, and
+    // where what came of it is said.
+    const backFromGitHub =
+      !repository?.pinned &&
+      repository?.modes.includes('github-app') &&
+      new URLSearchParams(window.location.search ?? '').has('github');
+    return backFromGitHub ? 'github-app' : (chosen ?? repository?.modes[0] ?? 'token');
+  });
+  /** The tab a setting is answered on, for the ones that belong to one way of having a repository. */
+  const tabOf = (key: string): GitMode | null =>
+    repository ? ((Object.keys(TAB_KEYS) as GitMode[]).find((mode) => TAB_KEYS[mode].includes(key)) ?? null) : null;
+  /** Whether the repository is reached by an address and a token: the fields, the test, the proof. */
+  const byAddress = !repository || gitTab === 'token';
+  /** A move was saved and the restart it owes has not happened: the deployment is still on the way it was. */
+  const movePending = inEffect !== null && chosen !== inEffect;
+  /**
+   * Saving NOW would choose another way than the one chosen, on a deployment
+   * that has a repository: a move, or a move taken back. This is what is
+   * asked about at the button, where the decision is made; an open tab is
+   * not a decision.
+   */
+  const savingMoves = inEffect !== null && gitTab !== chosen;
+  const movingTo = GIT_MODE_LABEL[gitTab];
+  const movingFrom = inEffect ? GIT_MODE_LABEL[inEffect] : '';
+  /** A save that moves the deployment away from the way in effect. Taking a move back is not one. */
+  const mustConfirmMove = savingMoves && gitTab !== inEffect;
+  /**
+   * The way the admin said yes to moving TO. Held as the way and not as a
+   * yes, so a yes given to one move is not a yes to another: opening a
+   * third tab asks again.
+   */
+  const [moveConfirmed, setMoveConfirmed] = useState<GitMode | null>(null);
+  const moveIsConfirmed = moveConfirmed === gitTab;
+
+  /**
+   * What a save sends about the repository, given what was typed: the way
+   * chosen, when it is not the one in effect, and only the answers of the
+   * tab that is open. Something entered on a tab that was then left is not
+   * an answer, and must not be stored beside the choice of another.
+   */
+  function chosenRepository(typed: Record<string, string>): Record<string, string> {
+    if (!repository) return typed;
+    const kept = Object.fromEntries(
+      Object.entries(typed).filter(([key]) => {
+        const tab = tabOf(key);
+        return tab === null || tab === gitTab;
+      }),
+    );
+    // Against the way CHOSEN: a move that is pending was already sent, and
+    // opening the tab of the way in effect is how it is taken back.
+    return gitTab === chosen ? kept : { ...kept, gitMode: gitTab };
+  }
+
+  /**
+   * Whether the form has a place for this field at all: it is the admin's to
+   * edit, and its section is one this variant shows. A field on a tab that
+   * is not open still counts — the tab is opened for it (see
+   * `showProblems`), where a field the form never draws has nowhere to be
+   * shown.
+   */
+  const hasPlace = (key: string) =>
+    // A setting with no field of its own (the way the repository is had,
+    // which is chosen by its tab) has nowhere to hold a message. The
+    // repository on GitHub has one, drawn by that tab's panel.
+    (FIELDS[key] !== undefined || (key === 'githubRepository' && !!repository?.modes.includes('github-app'))) &&
+    editable.some((s) => s.key === key && sections.some((section) => section.id === s.section));
+
+  /**
+   * Put a refused save's problems where the reader will see them. EVERY
+   * problem ends up on screen, which is the one property this function is
+   * for: one about a field the form draws goes beside that field, with the
+   * tab it lives on opened; one about a field the form does not draw goes
+   * to the message line. A save that failed must never look like a save
+   * that did nothing.
+   */
+  function showProblems(found: Record<string, string>) {
+    setProblems(found);
+    const placed = Object.keys(found).filter(hasPlace);
+    if (signInOption && placed.some((key) => settings.find((s) => s.key === key)?.section === 'sign-in')) {
+      setSignInTab('own');
+    }
+    const owner = placed.map(tabOf).find((tab) => tab !== null);
+    if (owner) setGitTab(owner);
+    const unplaced = Object.entries(found).filter(([key]) => !hasPlace(key));
+    if (unplaced.length > 0) setError(unplaced.map(([, message]) => message).join(' '));
+  }
 
   /**
    * Whether saving now would actually change this connection field: something
@@ -198,6 +662,25 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
     if (!typed) return false;
     return typed !== (settings.find((s) => s.key === key)?.value ?? '').trim();
   };
+
+  /**
+   * Something typed that a save would actually store. The retry sends an EMPTY
+   * save — pressed now, it would re-run against the stored values while a
+   * corrected token sits unsaved in the form — so it waits, and Save (which
+   * retries too) is the way to try with the new values. Judged like the
+   * connection gate above — an edit put back changes nothing — and a token
+   * username that is just what an address answers (the one typed, or the one
+   * stored) is not an edit of its own: typing the address fills it in, and once
+   * the address is put back or cleared, nothing the admin did is left unsaved.
+   */
+  const answeredUsernames = [draft.kbRepoUrl, settings.find((s) => s.key === 'kbRepoUrl')?.value].map(
+    (address) => (address ? tokenUsernameForHost(address)?.username : undefined),
+  );
+  const draftChanged = Object.keys(draft).some(
+    (key) =>
+      !(key === 'gitUsername' && answeredUsernames.includes(draft.gitUsername)) &&
+      connectionKeyChanged(key),
+  );
 
   /**
    * Whether THIS save has to stand behind the repository connection.
@@ -218,6 +701,8 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
    * blank form is the server's to complain about, field by field.
    */
   const mustProveConnection =
+    // A repository the deployment keeps has no host to prove anything to.
+    byAddress &&
     !!resolved('kbRepoUrl') &&
     (variant === 'setup' || CONNECTION_KEYS.some((key) => connectionKeyChanged(key)));
 
@@ -227,6 +712,8 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
    * reader has already changed.
    */
   const connectionRejected = mustProveConnection && test?.ok === false;
+  /** Of those, the host let the token read but not write — a different fix. */
+  const connectionReadOnly = connectionRejected && test?.outcome === 'read-only';
 
   function set(key: string, value: string) {
     setDraft((d) => {
@@ -249,6 +736,12 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
       delete next[key];
       return next;
     });
+    if (OIDC_KEYS.includes(key)) {
+      oidcEpoch.current++;
+      setOidcTest(null);
+      // A test's "Verified" was about the values before this edit.
+      setLatest(null);
+    }
     if (CONNECTION_KEYS.includes(key)) {
       // Any in-flight test is now asking about values that are gone; the epoch
       // bump makes its answer land as stale rather than as evidence.
@@ -349,9 +842,218 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
     }
   }
 
+  /**
+   * "Test sign-in configuration": the check a save runs, on the values typed
+   * (the server falls back to those in effect). Nothing is saved.
+   */
+  async function runOidcTest() {
+    setOidcTesting(true);
+    setError(null);
+    const epoch = oidcEpoch.current;
+    const fields = Object.fromEntries(Object.entries(draft).filter(([key]) => OIDC_KEYS.includes(key)));
+    try {
+      const result = await testOidc(fields);
+      if (epoch !== oidcEpoch.current) return;
+      setOidcTest(result);
+      if (result.oidcVerification) setLatest(result.oidcVerification);
+    } catch (err) {
+      if (epoch === oidcEpoch.current) {
+        setOidcTest({ ok: false, error: err instanceof Error ? err.message : 'Could not test the sign-in configuration.' });
+      }
+    } finally {
+      setOidcTesting(false);
+    }
+  }
+
+  /** What a sign-in test came back with, in words. */
+  function describeOidcTest(result: OidcTest): string {
+    switch (result.outcome) {
+      case 'verified':
+        return 'Verified. The provider accepted the application ID and secret.';
+      case 'issuer-verified':
+        return 'The provider address is a sign-in provider. Enter the application ID and secret to check them too.';
+      default:
+        return result.error ?? 'The sign-in configuration could not be checked.';
+    }
+  }
+
+  /**
+   * The test button, its answer and the verification label: beside the
+   * provider fields, or on its own when every one of them is set by the
+   * environment.
+   */
+  function renderOidcPanel() {
+    return (
+      <Surface tone="sunken" radius="md" className="p-4">
+        {verification && (
+          <p className="mb-3 text-detail text-ink-muted">
+            Status:{' '}
+            <span
+              data-testid="oidc-verification"
+              className={`font-medium ${
+                verification === 'verified'
+                  ? 'text-ok'
+                  : verification === 'unverified'
+                    ? 'text-wait'
+                    : 'text-ink-faint'
+              }`}
+            >
+              {OIDC_VERIFICATION_LABEL[verification]}
+            </span>
+          </p>
+        )}
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void runOidcTest()}
+            disabled={oidcTesting || saving}
+          >
+            {oidcTesting ? 'Checking…' : 'Test sign-in configuration'}
+          </Button>
+          <span className="text-meta text-ink-faint">
+            Checks the provider address, then the application ID and secret, with the provider.
+          </span>
+        </div>
+        {oidcTest && (
+          <p
+            role="status"
+            className={`mt-3 text-detail ${
+              oidcTest.ok ? 'text-ok' : oidcTest.outcome === 'unverified' ? 'text-wait' : 'text-danger'
+            }`}
+          >
+            {describeOidcTest(oidcTest)}
+          </p>
+        )}
+      </Surface>
+    );
+  }
+
+  async function runSync() {
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      setSyncResult(await syncNow());
+      // The status carries the last-sync record; refetch so it shows this one.
+      onSaved();
+    } catch (err) {
+      setSyncResult({
+        ok: false,
+        results: [],
+        error: err instanceof Error ? err.message : 'Could not sync.',
+      });
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  /**
+   * Beside the sync secret: the address a hook calls (in both variants — an
+   * admin wiring a hook needs it before first run too), and once the
+   * deployment is live, what the last call did plus a button to make one.
+   */
+  function renderSyncPanel() {
+    if (!sync) return null;
+    const last = sync.last;
+    return (
+      <Surface tone="surface" radius="md" className="mt-3 space-y-3 border border-line p-3">
+        <div className="space-y-1.5">
+          <span className="text-meta font-medium text-ink">Address for the hook</span>
+          <CopyValue value={`${sync.url}/<branch>`} label="Copy the sync address" />
+          <p className="text-meta text-ink-faint">
+            Replace <code className="font-mono">&lt;branch&gt;</code> with the branch that changed;
+            send the secret as a bearer token.
+          </p>
+        </div>
+        {variant === 'settings' && (
+          <div className="space-y-2">
+            <p role="status" className="text-meta text-ink-muted">
+              {last
+                ? `Last sync ${new Date(last.at).toLocaleString()} by ${last.by}: ${describeOutcomes(last.results)}.`
+                : 'No sync since this server started.'}
+            </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void runSync()}
+                disabled={syncing}
+              >
+                {syncing ? 'Syncing…' : 'Sync now'}
+              </Button>
+              <span className="text-meta text-ink-faint">
+                Pulls every branch from the repository with your own session — the same thing the
+                hook does.
+              </span>
+            </div>
+            {syncResult && (
+              <p
+                role="status"
+                // One line per failed branch: the server's sentences are
+                // joined with newlines and rendered as such.
+                className={`whitespace-pre-line text-detail ${syncResult.ok ? 'text-ok' : 'text-danger'}`}
+              >
+                {syncResult.error
+                  ? syncResult.error
+                  : syncResult.ok
+                    ? `Synced: ${describeOutcomes(syncResult.results)}.`
+                    : (syncResult.results
+                        .map(syncOutcomeError)
+                        .filter((e): e is string => !!e)
+                        .join('\n') ||
+                      `Not fully synced: ${describeOutcomes(syncResult.results)}.`)}
+              </p>
+            )}
+          </div>
+        )}
+      </Surface>
+    );
+  }
+
+  /**
+   * Re-run the knowledge-base initialization. No endpoint of its own: any save
+   * while the failure stands re-runs the phase, and an EMPTY one changes no
+   * setting — so nothing has to be typed again, and the server's one-save-at-a-
+   * time chain covers this exactly as it covers the form.
+   */
+  async function retryInitialization() {
+    if (retrying || saving || draftChanged) return;
+    setRetrying(true);
+    setError(null);
+    try {
+      const result = await saveSettings({});
+      setClearedFailure(initFailure);
+      setInitFailure(null);
+      if (result.awaitingRestart) {
+        setNeedsRestart(true);
+        // As after a save: the settings page still wants fresh status, or its
+        // host keeps the failure this retry just cleared.
+        if (variant === 'settings') onSaved();
+        return;
+      }
+      if (result.complete && variant === 'setup') {
+        // The same full reload the completing save does, for the same reason:
+        // the browser's branch model predates the app it is about to open.
+        window.location.reload();
+        return;
+      }
+      onSaved();
+    } catch (err) {
+      if (err instanceof KbInitFailed) {
+        setClearedFailure(null);
+        setInitFailure(err.kbInit);
+      } else setError(err instanceof Error ? err.message : 'Could not retry the initialization.');
+    } finally {
+      setRetrying(false);
+    }
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (saving) return;
+    // A save during a sign-in check would clear the draft the check is about.
+    if (saving || retrying || oidcTesting) return;
     setSaving(true);
     setError(null);
     setProblems({});
@@ -360,7 +1062,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
     // this deployment still needs…" directly above this attempt's "Not saved."
     setStillMissing([]);
     try {
-      let payload = draft;
+      let payload = chosenRepository(draft);
       /** What the host said this time, or null when it could not be asked. */
       let proven: ConnectionTest | null = test;
       let probed = false;
@@ -388,11 +1090,15 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
         setTesting(true);
         await probe();
         setTesting(false);
+        // Includes a probe the server REFUSED (a 4xx comes back as a
+        // rejection, not a throw) — that is an answer about these values.
         if (proven && !proven.ok) {
           setError(
-            variant === 'setup'
-              ? 'Not saved. Nothing behind this screen works until the repository answers, and it did not — fix the connection above and test it again.'
-              : 'Not saved. The repository did not answer with those details — fix the connection above and test it again.',
+            proven.outcome === 'read-only'
+              ? 'Not saved. The token can read the repository but cannot write to it — grant it write access and test again.'
+              : variant === 'setup'
+                ? 'Not saved. Nothing behind this screen works until the repository answers, and it did not — fix the connection above and test it again.'
+                : 'Not saved. The repository did not answer with those details — fix the connection above and test it again.',
           );
           return;
         }
@@ -405,20 +1111,32 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
       // above fills the same fields from the same answer.
       if (
         !probed &&
+        // Only a repository reached by its address is asked this way.
+        byAddress &&
+        // No address, nothing to look a branch up in.
+        !!resolvedIn(payload, 'kbRepoUrl') &&
         (!resolvedIn(payload, 'defaultBranch') || !resolvedIn(payload, 'protectedBranches'))
       ) {
         await probe();
       }
       const result = await saveSettings(payload);
+      // A save while a failure stands re-ran the initialization, and it held.
+      setClearedFailure(initFailure);
+      setInitFailure(null);
       setRestartRequired(result.restartRequired);
       setDraft({});
+      if (result.oidcVerification) setLatest(result.oidcVerification);
       // A save can succeed and STILL leave the deployment unusable: a blank
       // field means "leave it alone", not "this is wrong", so the server
       // accepts a batch that answers only some of what it needs. Saying so is
       // the difference between a form that looks broken and one that tells you
       // what is left.
+      // An address and a token are owed only by a deployment that reaches
+      // its repository by them; the branch model by every one.
+      const way = result.repository ? (result.repository.chosen ?? result.repository.mode) : 'token';
+      const owed = (way ?? 'token') === 'token' ? REQUIRED_KEYS : BRANCH_MODEL_KEYS;
       const missing = result.settings
-        .filter((setting) => REQUIRED_KEYS.includes(setting.key) && !setting.configured)
+        .filter((setting) => owed.includes(setting.key) && !setting.configured)
         .map((setting) => FIELDS[setting.key]?.label ?? setting.key);
       setStillMissing(result.complete || result.awaitingRestart ? [] : missing);
       if (result.awaitingRestart) {
@@ -445,8 +1163,17 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
       }
       onSaved();
     } catch (err) {
-      if (err instanceof SettingsProblems) setProblems(err.problems);
-      else setError(err instanceof Error ? err.message : 'Could not save these settings.');
+      if (err instanceof SettingsProblems) {
+        showProblems(err.problems);
+      } else if (err instanceof KbInitFailed) {
+        // The values ARE stored — only the initialization failed. The form
+        // shows what was saved, and the banner says what to fix and retries
+        // without asking for any of it again.
+        setClearedFailure(null);
+        setInitFailure(err.kbInit);
+        setDraft({});
+        onSaved();
+      } else setError(err instanceof Error ? err.message : 'Could not save these settings.');
     } finally {
       setSaving(false);
       // The page scrolls now, and every message lands at the top of it while
@@ -465,11 +1192,93 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
    */
   const remoteBranches = test?.ok ? (test.branches ?? []) : [];
 
+  /**
+   * The top-level folders the connection test found, or null when there is
+   * nothing to judge the root fields against: no test yet, a failed one, a
+   * listing that did not come back — or an EMPTY repository, whose one message
+   * already says everything will be set up, and three "will be created" notes
+   * beneath it would only repeat that.
+   */
+  const remoteRootFolders =
+    test?.ok && !test.empty && Array.isArray(test.rootFolders) ? test.rootFolders : null;
+
+  /**
+   * What the repository holds for one root field, as it would save now. Judged
+   * live against the listing — the listing describes the repository, not the
+   * field, so correcting the name to the one suggested says "found" at once.
+   * Never a problem that blocks the save: an admin may mean to create the
+   * folder, or to rename the old one later.
+   */
+  function renderRootFolderState(key: keyof KbLayout) {
+    if (!remoteRootFolders) return null;
+    const name = resolved(key) || DEFAULT_KB_LAYOUT[key];
+    const state = rootFolderState(name, remoteRootFolders);
+    const folder = (value: string) => <code className="font-mono">{value}</code>;
+    return (
+      <p id={`${key}-repo-state`} className={`mt-1 text-meta ${state.kind === 'variant' ? 'text-wait' : 'text-ok'}`}>
+        {state.kind === 'found' && <>{folder(name)} found in the repository.</>}
+        {state.kind === 'missing' && (
+          <>{folder(name)} is not in the repository yet — it will be created.</>
+        )}
+        {state.kind === 'variant' && (
+          <>
+            Not found — the repository has {folder(state.candidate)} (
+            {VARIANT_DIFFERENCE[state.difference]}): set
+            this field to {folder(state.candidate)} or rename the folder.
+          </>
+        )}
+      </p>
+    );
+  }
+
+  /**
+   * Under the guide's name, once it is no longer `AGENTS.md`: the exact
+   * sentence the platform would add to the customer's own `AGENTS.md`, and the
+   * consent to keep it there.
+   *
+   * Shown ONLY while the name differs, because that is the only time there is
+   * anything to point at — under the default name the guide IS `AGENTS.md`.
+   * The sentence is rendered by the same helper the server appends with, so
+   * what the admin reads here is what lands in their file, character for
+   * character.
+   */
+  function renderAgentsFileLink() {
+    const name = resolved('agentsFile') || DEFAULT_KB_LAYOUT.agentsFile;
+    if (name === DEFAULT_KB_LAYOUT.agentsFile) return null;
+    // Unset means on: the server reads an unanswered setting the same way.
+    const on = (draft[AGENTS_LINK_KEY] ?? settings.find((s) => s.key === AGENTS_LINK_KEY)?.value ?? 'true') !== 'false';
+    return (
+      <div className="mt-2 space-y-2" data-testid="agents-file-link">
+        <label className="flex cursor-pointer select-none items-start gap-2 text-detail text-ink">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={on}
+            onChange={(e) => set(AGENTS_LINK_KEY, e.target.checked ? 'true' : 'false')}
+          />
+          <span>Keep a pointer to {name} in your own AGENTS.md</span>
+        </label>
+        <CopyValue value={agentsFilePointerSentence(name)} label="Copy the pointer sentence" />
+        <p className="text-meta text-ink-faint">
+          While this is ticked, every start looks for “{name}” in your AGENTS.md and adds the
+          sentence at the end when it is not there — in your own words counts too. Nothing is added
+          if you have no AGENTS.md, and no file is ever created for it. Untick it to stop.
+        </p>
+      </div>
+    );
+  }
+
   function renderField(setting: SettingStatus) {
     const copy = FIELDS[setting.key];
     if (!copy) return null;
     const isBranchField = setting.key === 'defaultBranch' || setting.key === 'protectedBranches';
-    const listId = isBranchField && remoteBranches.length > 0 ? `${setting.key}-options` : undefined;
+    const isFolderField = isRootFolderKey(setting.key);
+    const suggestions = isBranchField
+      ? remoteBranches
+      : isFolderField
+        ? (remoteRootFolders ?? []).filter(isRootFolderSuggestion)
+        : [];
+    const listId = suggestions.length > 0 ? `${setting.key}-options` : undefined;
     return (
       <div key={setting.key}>
         <label className="block space-y-1.5">
@@ -491,12 +1300,15 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
         </label>
         {listId && (
           <datalist id={listId}>
-            {remoteBranches.map((b) => (
+            {suggestions.map((b) => (
               <option key={b} value={b} />
             ))}
           </datalist>
         )}
         <p className="mt-1 text-meta text-ink-faint">{copy.help}</p>
+        {isRootFolderKey(setting.key) && renderRootFolderState(setting.key)}
+        {setting.key === 'agentsFile' && renderAgentsFileLink()}
+        {setting.key === 'kbSyncSecret' && renderSyncPanel()}
         {/* Only AFTER setup: on first run there is nothing yet to lose, so
             the caution would be noise. Once a deployment is live, this field
             is the one whose careless edit strands everything. */}
@@ -530,14 +1342,50 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
           <>
             <h1 className="text-display font-semibold text-ink">Set up this deployment</h1>
             <p className="mt-2 max-w-[62ch] text-lede text-ink-muted">
-              One thing is needed before anyone can use it: somewhere to keep your knowledge,
-              skills and tools. Connect a repository below, test it, and the rest fills itself in.
-              Single sign-on is optional and can wait.
+              {repository
+                ? 'One thing is needed before anyone can use it: somewhere to keep your knowledge, skills and tools. Choose where below; this deployment can keep it for you. Single sign-on is optional and can wait.'
+                : 'One thing is needed before anyone can use it: somewhere to keep your knowledge, skills and tools. Connect a repository below, test it, and the rest fills itself in. Single sign-on is optional and can wait.'}
             </p>
           </>
         )}
 
         <div ref={noticeRef}>
+          {/* Back from GitHub, with a secret that was typed before the trip
+              and not kept. Said, because an empty field that was full a
+              minute ago otherwise reads as something that went wrong. It
+              goes as each is entered again. */}
+          {toEnterAgain.length > 0 && (
+            <Banner tone="wait" role="status" className="mt-6" data-testid="enter-again">
+              What you had entered is back, except{' '}
+              {toEnterAgain.map((key) => FIELDS[key]?.label ?? key).join(', ')}. For safety, a secret is not kept while
+              the browser is away: enter {toEnterAgain.length === 1 ? 'it' : 'them'} again.
+            </Banner>
+          )}
+          {/* Saved, but the knowledge base behind the gate was never set up.
+              The cause is the server's classified sentence — what to fix, not
+              what git said — and the retry needs nothing re-entered. */}
+          {initFailure && (
+            <Banner tone="danger" role="alert" className="mt-6" data-testid="kb-init-failure">
+              <p className="font-semibold">Saved, but the knowledge base could not be initialized</p>
+              <p className="mt-1">{initFailure.cause}</p>
+              {draftChanged && (
+                <p className="mt-1">
+                  The form has unsaved changes — saving them retries the initialization with them.
+                </p>
+              )}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={() => void retryInitialization()}
+                disabled={retrying || saving || testing || draftChanged}
+              >
+                {retrying ? 'Initializing…' : 'Retry initialization'}
+              </Button>
+            </Banner>
+          )}
+
           {error && (
             <Banner tone="danger" role="alert" className="mt-6">
               {error}
@@ -574,13 +1422,36 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
           </Banner>
         )}
 
-        <form onSubmit={submit} className="mt-8 space-y-10">
-          {SECTIONS.map((section) => {
-            const fields = editable.filter((s) => s.section === section.id);
+        {/* Named so its submit button can sit outside it, below the
+            Marketplace section: the button is the last thing on the page, but
+            Marketplace is deliberately not part of this form (see below). */}
+        <form id="setup-settings-form" onSubmit={submit} className="mt-8 space-y-10">
+          {sections.map((section) => {
+            const fields = editable.filter(
+              (s) =>
+                s.section === section.id &&
+                // Chosen by its tab, not typed into a field.
+                s.key !== 'gitMode' &&
+                // Chosen from a list, by the panel of its tab.
+                s.key !== 'githubRepository' &&
+                // The address, the token and the name beside it belong to the
+                // one way that reaches a repository by them.
+                (byAddress || !CONNECTION_KEYS.includes(s.key)),
+            );
+            // The ways of having a repository, each on a tab of its own.
+            const repositoryTabs = section.id === 'knowledge-base' ? repository : undefined;
             // A section whose every field comes from the environment has
             // nothing to offer — the locked list at the bottom already names
             // them, and an empty heading would read as something missing.
             if (fields.length === 0) return null;
+            // Two ways of signing in, each on a tab of its own.
+            const tabbed = section.id === 'sign-in' && signInOption !== undefined;
+            const redirectUri = (
+              <p className="mt-1.5 text-meta text-ink-faint">
+                Redirect URI:{' '}
+                <code className="font-mono">{`${window.location.origin}/api/auth/oidc/callback`}</code>
+              </p>
+            );
             return (
               <Surface
                 key={section.id}
@@ -601,15 +1472,162 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
                       <span className="text-meta text-ink-faint">Optional</span>
                     )}
                   </div>
-                  <p className="mt-1 max-w-[60ch] text-detail text-ink-muted">{section.blurb}</p>
-                  {section.id === 'sign-in' && (
-                    <p className="mt-1.5 text-meta text-ink-faint">
-                      Redirect URI:{' '}
-                      <code className="font-mono">{`${window.location.origin}/api/auth/oidc/callback`}</code>
-                    </p>
-                  )}
+                  <p className="mt-1 max-w-[60ch] text-detail text-ink-muted">
+                    {repositoryTabs
+                      ? 'Where everything lives, together in one git repository: knowledge, skills and tools. Choose where that repository is.'
+                      : section.blurb}
+                  </p>
+                  {/* About the deployment's own provider: under the heading
+                      when that is all the section holds, inside its tab when
+                      the section has two. */}
+                  {section.id === 'sign-in' && !tabbed && redirectUri}
                 </div>
-                {fields.filter((f) => !FIELDS[f.key]?.advanced).map((f) => renderField(f))}
+                {section.id === 'sign-in' && signInOption && (
+                  <>
+                    <div role="tablist" aria-label="How people sign in" className="flex gap-1 border-b border-line">
+                      {(
+                        [
+                          ['managed', signInOption.label],
+                          ['own', signInOption.ownProviderLabel ?? 'Your own provider'],
+                        ] as const
+                      ).map(([id, label]) => (
+                        <button
+                          key={id}
+                          type="button"
+                          role="tab"
+                          id={`sign-in-tab-${id}`}
+                          aria-selected={signInTab === id}
+                          aria-controls={`sign-in-panel-${id}`}
+                          onClick={() => setSignInTab(id)}
+                          className={`-mb-px border-b-2 px-3 py-2 text-detail font-medium ${
+                            signInTab === id
+                              ? 'border-accent text-ink'
+                              : 'border-transparent text-ink-muted hover:text-ink'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    {signInTab === 'managed' && (
+                      <div
+                        role="tabpanel"
+                        id="sign-in-panel-managed"
+                        aria-labelledby="sign-in-tab-managed"
+                        onKeyDown={keepEnterFromTheForm}
+                      >
+                        {/* The distribution's code: a throw in it costs this
+                            tab, not the form the repository is entered on. */}
+                        <SlotBoundary label="sign-in panel">
+                          <signInOption.Panel variant={variant} ownProviderConfigured={ownProviderConfigured} />
+                        </SlotBoundary>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* The section's own fields: every field it has, in ONE
+                    place. With a distribution's tab beside them they are
+                    the second tab's panel, there while that tab is open;
+                    what was typed stays in the draft either way, so
+                    switching tabs loses nothing and saves what was entered. */}
+                {(!tabbed || signInTab === 'own') && (
+                <SectionFields panel={tabbed ? { group: 'sign-in', id: 'own' } : null}>
+                {tabbed && redirectUri}
+                {repositoryTabs && (
+                  <div role="tablist" aria-label="Where the repository is" className="flex gap-1 border-b border-line">
+                    {repositoryTabs.modes.map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        role="tab"
+                        id={`repository-tab-${mode}`}
+                        aria-selected={gitTab === mode}
+                        aria-controls={`repository-panel-${mode}`}
+                        // Chosen by the environment, the choice is not the
+                        // screen's: the other ways are shown, as what they
+                        // are, and cannot be opened.
+                        disabled={repositoryTabs.pinned !== undefined && mode !== gitTab}
+                        onClick={() => setGitTab(mode)}
+                        className={`-mb-px border-b-2 px-3 py-2 text-detail font-medium disabled:cursor-not-allowed disabled:opacity-50 ${
+                          gitTab === mode
+                            ? 'border-accent text-ink'
+                            : 'border-transparent text-ink-muted hover:text-ink'
+                        }`}
+                      >
+                        {GIT_MODE_LABEL[mode]}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {repositoryTabs?.pinned && (
+                  <p className="text-meta text-ink-faint" data-testid="repository-pinned">
+                    Set by the <span className="font-mono">{repositoryTabs.pinned}</span> environment variable. Change it
+                    there.
+                  </p>
+                )}
+                {/* What the open tab asks: nothing, for a repository the
+                    deployment keeps; the address and the token, and the test
+                    that proves them, for one reached by them. */}
+                <SectionFields panel={repositoryTabs ? { group: 'repository', id: gitTab } : null}>
+                {repositoryTabs && movePending && gitTab === chosen && (
+                  <Banner tone="wait" role="status" data-testid="move-pending">
+                    A restart is pending. This deployment is still working on &ldquo;{movingFrom}&rdquo; and moves
+                    here when it is restarted. To stay where it is, open &ldquo;{movingFrom}&rdquo; and save.
+                  </Banner>
+                )}
+                {repositoryTabs && savingMoves && gitTab !== inEffect && (
+                  <Banner tone="wait" role="status" data-testid="moves-repository">
+                    Saving moves this deployment to another repository, which starts without what the
+                    current one holds. Nothing is deleted: the current repository is left as it is, and
+                    this deployment&rsquo;s working copies of it are set aside at the next restart.
+                  </Banner>
+                )}
+                {repositoryTabs && savingMoves && gitTab === inEffect && (
+                  <Banner tone="wait" role="status" data-testid="move-taken-back">
+                    Saving takes the move back: this deployment stays on the repository it is working on.
+                  </Banner>
+                )}
+                {repositoryTabs && gitTab === 'github-app' && (
+                  <GitHubRepositoryPanel
+                    repository={resolved('githubRepository')}
+                    onChoose={(name) => set('githubRepository', name)}
+                    problem={problems.githubRepository}
+                    disabled={saving}
+                    // The browser is about to leave for GitHub, and the page
+                    // that comes back is a new one.
+                    onLeaving={() => keepDraft(draft, isSecret)}
+                  />
+                )}
+                {repositoryTabs && gitTab === 'managed' && (
+                  <div className="space-y-2" data-testid="managed-repository">
+                    <p className="max-w-[60ch] text-detail text-ink">
+                      This deployment keeps the repository itself. There is nothing to connect and
+                      nothing to enter.
+                    </p>
+                    <p className="max-w-[60ch] text-meta text-ink-muted">
+                      Everything is versioned as it is with any repository: every change is a commit,
+                      and changes are reviewed as change requests. The repository is stored with this
+                      deployment&rsquo;s backups, so backing those up backs it up. You can move to a
+                      repository of your own later.
+                    </p>
+                  </div>
+                )}
+                {fields
+                  .filter(
+                    (f) =>
+                      !FIELDS[f.key]?.advanced &&
+                      !isLayoutKey(f.key) &&
+                      (section.id !== 'sign-in' || OIDC_KEYS.includes(f.key)),
+                  )
+                  .map((f) => renderField(f))}
+
+                {/* Directly under the three answers it proves. */}
+                {section.id === 'sign-in' && renderOidcPanel()}
+                {section.id === 'sign-in' &&
+                  fields
+                    .filter((f) => !FIELDS[f.key]?.advanced && !OIDC_KEYS.includes(f.key))
+                    .map((f) => renderField(f))}
 
                 {/* Immediately under the two fields it proves, and above the
                     Advanced block it fills in — the middle of the sequence
@@ -617,7 +1635,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
                     section, so the answer to "did I type the token right?"
                     was below the identity-provider questions and, once the
                     page grew, below the fold entirely. */}
-                {section.id === 'knowledge-base' && (
+                {section.id === 'knowledge-base' && byAddress && (
                   <Surface tone="sunken" radius="md" className="p-4">
                     <div className="flex flex-wrap items-center gap-3">
                       <Button
@@ -628,13 +1646,13 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
                         // Also while SAVING: a save may be asking the remote
                         // itself, and a second test racing it would overwrite
                         // both the result and the versions derived from it.
-                        disabled={testing || saving}
+                        disabled={testing || saving || retrying}
                       >
                         {testing ? 'Checking…' : 'Test connection'}
                       </Button>
                       <span className="text-meta text-ink-faint">
-                        Checks the address and token against the host, and fills in the versions
-                        below.
+                        Checks the address and token against the host, looks for the folders below,
+                        and fills in the versions.
                       </span>
                     </div>
                     {test && (
@@ -653,6 +1671,14 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
                     )}
                   </Surface>
                 )}
+                </SectionFields>
+
+                {/* The layout: the three root folders and the agent guide's
+                    file name, in the main section, directly under the test
+                    whose listing the folders are checked against — the
+                    connection fields above it stay next to the button that
+                    proves them. */}
+                {fields.filter((f) => isLayoutKey(f.key)).map((f) => renderField(f))}
 
                 {/* Everything a normal setup never touches, out of the way but
                     not hidden: a self-hosted git server does need the token
@@ -684,37 +1710,119 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
                     </div>
                   </details>
                 )}
+
+                {/* The sync panel normally hangs off the secret's field. When
+                    the secret comes from the environment that field is in the
+                    locked list below, not here — but the address, the last
+                    sync and Sync now are about the deployment, not the secret,
+                    and an admin with an env-set secret needs them just as much. */}
+                {section.id === 'knowledge-base' &&
+                  sync &&
+                  !fields.some((f) => f.key === 'kbSyncSecret') &&
+                  renderSyncPanel()}
+                </SectionFields>
+                )}
               </Surface>
             );
           })}
 
 
-          {/* A rejected connection stops here rather than at the far side of
-              it. Saving these answers would finish setup — the server checks
-              that they are present, not that they work — and open the app onto
-              a repository it cannot reach, which reads as a broken product
-              rather than a wrong token. */}
-          <div className="flex flex-wrap items-center gap-3">
-            <Button
-              type="submit"
-              variant="primary"
-              disabled={saving || testing || connectionRejected}
-              // Described by the refusal, so a reader who lands on a button
-              // that will not move is told why rather than left guessing.
-              aria-describedby={connectionRejected ? 'connection-refusal' : undefined}
-            >
-              {saving ? 'Saving…' : 'Save and continue'}
-            </Button>
-            {connectionRejected && (
-              // Not a live region: the test panel above already announced the
-              // host's own words, and the save banner announces a blocked
-              // attempt. This is the label for a button that will not move.
-              <span id="connection-refusal" className="text-meta text-danger">
-                The repository turned that connection down. Fix it above and test again.
-              </span>
+          {/* When EVERY knowledge-base setting comes from the environment the
+              section above does not render at all, and the sync panel that
+              normally lives inside it would vanish with it. The panel is
+              about the deployment, not about any one editable field, so it
+              gets its own place here in that case. */}
+          {sync && editable.every((s) => s.section !== 'knowledge-base') && (
+            <Surface as="section" tone="surface" radius="lg" elevation="card" className="p-6">
+              <h2 className="text-title font-semibold text-ink">Repository sync</h2>
+              <p className="mt-1 max-w-[60ch] text-detail text-ink-muted">
+                The knowledge-base connection is set by the environment. The sync hook is still
+                yours to wire up and check on here.
+              </p>
+              {renderSyncPanel()}
+            </Surface>
+          )}
+
+          {/* Every sign-in setting from the environment: the section above
+              does not render, but whether that configuration works is still
+              the admin's to see and to test. */}
+          {editable.every((s) => s.section !== 'sign-in') &&
+            verification &&
+            verification !== 'not-configured' && (
+              <Surface as="section" tone="surface" radius="lg" elevation="card" className="p-6 space-y-4">
+                <h2 className="text-title font-semibold text-ink">Single sign-on</h2>
+                {renderOidcPanel()}
+              </Surface>
             )}
-          </div>
         </form>
+
+        {/* Outside the form: nothing in it is saved by "Save and continue".
+            On the Deployment page only: the first run asks for the
+            repository and for sign-in (see FIRST_RUN_SECTIONS). */}
+        {variant === 'settings' && <MarketplaceSection variant={variant} />}
+
+        {/* The submit button lives HERE, after Marketplace, though it belongs
+            to the form above — `form=` is what lets those two facts hold at
+            once. It is the last thing on the page because a reader should
+            meet every section, Marketplace included where it is shown, before
+            the control that leaves the screen; when it sat above Marketplace,
+            the page looked finished while a section was still below it.
+
+            A rejected connection stops here rather than at the far side of
+            it. Saving these answers would finish setup — the server checks
+            that they are present, not that they work — and open the app onto
+            a repository it cannot reach, which reads as a broken product
+            rather than a wrong token. */}
+        {/* ASKED WHERE THE DECISION IS MADE. The tab is the choice, and the
+            tab is a screen above this button: an admin who opened another
+            way to read about it, then changed something else and saved,
+            would have moved the deployment to an empty repository. So a
+            save that moves is a save the admin has said yes to, here,
+            naming what is left and what is moved to. */}
+        {mustConfirmMove && (
+          <Surface tone="sunken" radius="md" className="mt-10 p-4" data-testid="confirm-move">
+            <label className="flex items-start gap-2.5 text-detail text-ink">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={moveConfirmed === gitTab}
+                onChange={(e) => setMoveConfirmed(e.target.checked ? gitTab : null)}
+              />
+              <span>
+                Move this deployment from &ldquo;{movingFrom}&rdquo; to &ldquo;{movingTo}&rdquo;.
+                <span className="mt-1 block text-meta text-ink-muted">
+                  It starts on a repository without what the current one holds. Nothing is deleted, and the move takes
+                  effect when the deployment is restarted.
+                </span>
+              </span>
+            </label>
+          </Surface>
+        )}
+        <div className={`${mustConfirmMove ? 'mt-4' : 'mt-10'} flex flex-wrap items-center justify-end gap-3`}>
+          {connectionRejected && (
+            // Before the button in the DOM so the reason is read first, and
+            // so `justify-end` leaves the button itself at the right edge.
+            // Not a live region: the test panel above already announced the
+            // host's own words, and the save banner announces a blocked
+            // attempt. This is the label for a button that will not move.
+            <span id="connection-refusal" className="text-meta text-danger">
+              {connectionReadOnly
+                ? 'That token can read the repository but cannot write to it. Grant write access and test again.'
+                : 'The repository turned that connection down. Fix it above and test again.'}
+            </span>
+          )}
+          <Button
+            type="submit"
+            form="setup-settings-form"
+            variant="primary"
+            disabled={saving || testing || retrying || oidcTesting || connectionRejected || (mustConfirmMove && !moveIsConfirmed)}
+            // Described by the refusal, so a reader who lands on a button
+            // that will not move is told why rather than left guessing.
+            aria-describedby={connectionRejected ? 'connection-refusal' : undefined}
+          >
+            {saving ? 'Saving…' : mustConfirmMove ? 'Save and move' : 'Save and continue'}
+          </Button>
+        </div>
 
         {fromEnv.length > 0 && (
           <Surface tone="sunken" radius="md" className="mt-10 p-4">

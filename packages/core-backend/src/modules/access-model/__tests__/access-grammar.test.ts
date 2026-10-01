@@ -5,6 +5,7 @@ import {
   registerAccessFrontmatterExtensions,
   accessFrontmatterExtensionList,
   parseOwnAccessEntries,
+  parseRolesYaml,
 } from '../access-grammar.js';
 import { parseGroupsFile } from '../group-files.js';
 
@@ -19,6 +20,23 @@ describe('parseYamlSubset — inline empty collections', () => {
     const res = parseYamlSubset('groups: {}');
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.value).toEqual({ groups: {} });
+  });
+});
+
+describe("the reserved 'plugin/' prefix — no role or group may pose as a plugin principal", () => {
+  it('parseGroupsFile skips such a group with a warning and keeps the rest', () => {
+    const res = parseGroupsFile('groups:\n  plugin/GTM/read:\n    - mallory@x.io\n  Sales:\n    - sam@x.io\n', 'groups.yaml');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect([...res.groups.keys()]).toEqual(['sales']);
+    expect(res.warnings.some((w) => w.includes("reserved 'plugin/'"))).toBe(true);
+  });
+
+  it('parseRolesYaml refuses such a role outright', () => {
+    const res = parseRolesYaml('roles:\n  Admin:\n    - admin@x.io\n  plugin/GTM/read:\n    - mallory@x.io\n');
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors.some((e) => e.includes("reserved 'plugin/'"))).toBe(true);
   });
 });
 

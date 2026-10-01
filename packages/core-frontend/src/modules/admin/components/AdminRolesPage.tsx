@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { Loader2, UsersRound, X } from 'lucide-react';
+import { Loader2, Lock, UsersRound, X } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { useLatestRef } from '../../../shared/components/useLatestRef';
 import { useAdmin } from '../state/admin.context';
 import {
   addMember,
@@ -13,28 +13,13 @@ import {
   unassignGroup,
   type RoleRosterEntry,
 } from '../services/roles.api';
-import { suggestPrincipals } from '../../access/api';
-import { EMAIL_RE, isGroupPrefixed } from '../../../lib/email';
+import { AddMemberInput } from './AddMemberInput';
+import { EMAIL_RE, initials, isGroupPrefixed } from '../../../lib/email';
 import { useExclusiveRunner, type ExclusiveRunner } from '../hooks/useExclusiveRunner';
-
-/** The default-branch workspace id — roles are managed there (admin status derives from it). */
-// A function, not a constant: the branch model arrives from `/api/config`
-// during boot, and a module-scope capture would freeze this at the empty
-// string that exists before it.
-const rolesWorkspaceId = () => encodeURIComponent(DEFAULT_BRANCH);
 
 function errMessage(err: unknown, fallback: string): string {
   if (err instanceof Error) return err.message;
   return fallback;
-}
-
-function initials(value: string): string {
-  const cleaned = value.trim();
-  if (!cleaned) return '?';
-  const [name] = cleaned.split('@');
-  const parts = name.split(/[.\s_-]+/).filter(Boolean);
-  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-  return name.slice(0, 2).toUpperCase();
 }
 
 interface SelfRemoveTarget {
@@ -43,7 +28,16 @@ interface SelfRemoveTarget {
 }
 
 /**
- * Roles & Members, routed standalone at `/roles-and-members` (below the
+ * The note beside a fixed Admin member, and the refusal shown when someone
+ * tries to add that address as a regular member. Word-for-word the sentence
+ * the backend's 422 leads with (`roles-admin.service.ts`), so the two
+ * surfaces say the same thing.
+ */
+const FIXED_ADMIN_NOTE =
+  'Deployment admin, set in the server configuration; cannot be removed here';
+
+/**
+ * App roles (formerly Roles & Members), routed standalone at `/roles-and-members` (below the
  * persistent toolbar). Admin-gated: non-admins get a clear "Admins only"
  * state instead of the roster (the backend enforces the same gate on every
  * roles endpoint — this is presentation, not the security boundary).
@@ -63,7 +57,7 @@ export function AdminRolesPage() {
 
   // Bump on every load so a stale in-flight response never overwrites the
   // current roster. (The initial fetch does NOT go through the exclusive
-  // runner, so — unlike the Groups page — a mutation response can still race
+  // runner, so — unlike the Groups & Members page — a mutation response can still race
   // it; the bump in applyRoster is what drops the superseded load.)
   const requestId = useRef(0);
 
@@ -115,7 +109,7 @@ export function AdminRolesPage() {
 
   if (!isAdmin) {
     return (
-      <PageShell title="Roles & Members">
+      <PageShell title="App roles">
         <div className="text-sm text-ink-muted">
           Admins only. Ask an admin if you need a membership changed.
         </div>
@@ -124,7 +118,7 @@ export function AdminRolesPage() {
   }
 
   return (
-    <PageShell title="Roles & Members">
+    <PageShell title="App roles">
       <p className="mb-3 text-xs text-ink-muted leading-snug">
         Roles are defined by the app — what each one unlocks is fixed. Manage
         who holds them: add people by email, or assign a group.
@@ -169,11 +163,10 @@ function RoleCard({
   const [busy, setBusy] = useState(false);
 
   // Add-member input + people autocomplete (same suggest source as Manage
-  // Access, scoped to people/emails — a role's members are emails).
+  // Access, scoped to people/emails — a role's members are emails). The
+  // suggestion mechanics live in AddMemberInput, shared with the Groups & Members page;
+  // the submit rules below stay here.
   const [memberEmail, setMemberEmail] = useState('');
-  const [suggestions, setSuggestions] = useState<{ name: string; email: string }[]>([]);
-  const [showSuggest, setShowSuggest] = useState(false);
-  const suggestReq = useRef(0);
 
   // Optimistic member removal: lowercased emails hidden from the chip list
   // before the server confirms. Reconciled when the authoritative roster lands.
@@ -183,35 +176,6 @@ function RoleCard({
   // roster, or rolled back on error.
   const [pendingAdds, setPendingAdds] = useState<string[]>([]);
 
-  useEffect(() => {
-    const q = memberEmail.trim();
-    // Server withholds people until q ≥ 2 chars (harvesting guard); mirror that.
-    if (q.length < 2) {
-      // Invalidate any in-flight request so a late 2+ char response can't
-      // repopulate the dropdown after the user backspaced below the threshold.
-      suggestReq.current++;
-      setSuggestions([]);
-      return;
-    }
-    const myReq = ++suggestReq.current;
-    const t = setTimeout(() => {
-      suggestPrincipals(rolesWorkspaceId(), q)
-        .then((res) => {
-          if (myReq !== suggestReq.current) return;
-          // People only; drop anyone already a member (server or optimistic).
-          const existing = new Set([
-            ...role.members.map((m) => m.toLowerCase()),
-            ...pendingAdds.map((e) => e.toLowerCase()),
-          ]);
-          setSuggestions((res.people ?? []).filter((p) => !existing.has(p.email.toLowerCase())));
-        })
-        .catch(() => {
-          if (myReq === suggestReq.current) setSuggestions([]);
-        });
-    }, 200);
-    return () => clearTimeout(t);
-  }, [memberEmail, role.members, pendingAdds]);
-
   // Dialogs.
   const [selfRemove, setSelfRemove] = useState<SelfRemoveTarget | null>(null);
   const [convertOpen, setConvertOpen] = useState(false);
@@ -219,12 +183,28 @@ function RoleCard({
   // Assign-group input (roles with a group-assignable capability only).
   const [groupName, setGroupName] = useState('');
 
+  // Ties the "why there is no X" note to the fixed chips it explains.
+  const fixedNoteId = useId();
+
+  // Members the SERVER CONFIGURATION fixes (deployment admins on Admin). They
+  // get their own chips — badged, no remove control — and are dropped from the
+  // editable list below so an address named in both `roles.yaml` and
+  // `ADMIN_EMAIL` renders once.
+  const fixedMembers = role.fixedMembers ?? [];
+  const fixedLower = new Set(fixedMembers.map((m) => m.toLowerCase()));
+
   // Members shown in the UI = server members minus any optimistically-removed,
   // plus any optimistically-added not yet reflected in the server roster.
-  const serverMembers = role.members.filter((m) => !pendingRemovals.has(m.toLowerCase()));
+  const serverMembers = role.members.filter(
+    (m) => !pendingRemovals.has(m.toLowerCase()) && !fixedLower.has(m.toLowerCase()),
+  );
   const serverLower = new Set(role.members.map((m) => m.toLowerCase()));
   const extraAdds = pendingAdds.filter((e) => !serverLower.has(e.toLowerCase()));
   const visibleMembers = [...serverMembers, ...extraAdds];
+  // The Admin ≥1-direct-email invariant counts what is in the FILE, so the
+  // fixed members hidden from `visibleMembers` still count towards it — but a
+  // fixed member the file does NOT name contributes nothing.
+  const hiddenFixedCount = role.members.filter((m) => fixedLower.has(m.toLowerCase())).length;
 
   // Self-heal the optimistic set against the authoritative roster: once the
   // server confirms (member gone) OR a removal was a no-op (member never there),
@@ -265,8 +245,10 @@ function RoleCard({
     [onApply, runExclusive],
   );
 
-  const submitAddMember = async (override?: string) => {
-    const email = (override ?? memberEmail).trim();
+  // `value` is whatever the input handed over: the typed text, or the email of
+  // a chosen suggestion. The two are deliberately indistinguishable here.
+  const submitAddMember = async (value: string) => {
+    const email = value.trim();
     // Mirror the backend's refusal of `group:`-prefixed member values with an
     // inline hint (a `group:lee@x.io` would pass the email regex server-side
     // check order matters — see roles-edit.addMember).
@@ -281,14 +263,22 @@ function RoleCard({
       return;
     }
     const lower = email.toLowerCase();
+    // Already a fixed member: the backend refuses this with the same sentence
+    // (422 `fixed-deployment-admin`). Mirrored here so the refusal is instant
+    // and no optimistic chip flashes for a write that can never land.
+    if (fixedLower.has(lower)) {
+      setError(`${FIXED_ADMIN_NOTE}. ${email} is already an Admin.`);
+      setMemberEmail('');
+      return;
+    }
     // Already a member (or already pending) — clear the input and do nothing.
     if (
       role.members.some((m) => m.toLowerCase() === lower) ||
       pendingAdds.some((e) => e.toLowerCase() === lower)
     ) {
+      // Clearing the input is what empties the suggestion list — it falls back
+      // below the two-character threshold.
       setMemberEmail('');
-      setShowSuggest(false);
-      setSuggestions([]);
       return;
     }
     // Optimistic: show the chip and clear the input immediately. The add commit
@@ -298,8 +288,6 @@ function RoleCard({
     setError(null);
     setPendingAdds((prev) => [...prev, email]);
     setMemberEmail('');
-    setShowSuggest(false);
-    setSuggestions([]);
     try {
       const rows = await runExclusive(() => addMember(role.canonical, email));
       onApply(rows);
@@ -427,13 +415,32 @@ function RoleCard({
         <p className="mt-1 text-xs text-ink-muted">{role.capability.description}</p>
       )}
 
-      {/* Member chips — optimistically hides members pending removal. */}
+      {/* Member chips — fixed members first (no remove control), then the
+          editable ones, optimistically hiding any pending removal. */}
       <div className="mt-3 flex flex-wrap gap-2">
-        {visibleMembers.length === 0 ? (
+        {fixedMembers.map((email) => (
+          <span
+            key={`fixed:${email}`}
+            // No remove control, deliberately: the server configuration owns
+            // this membership. The note below the row says so, and
+            // `aria-describedby` ties it to every fixed chip.
+            aria-describedby={fixedNoteId}
+            className="inline-flex max-w-full items-center gap-1.5 pl-1 pr-2 py-1 bg-sunken border border-line rounded-full text-xs text-ink"
+            title={FIXED_ADMIN_NOTE}
+          >
+            <span className="w-5 h-5 shrink-0 rounded-full bg-ink-muted text-white text-[9px] font-semibold flex items-center justify-center">
+              {initials(email)}
+            </span>
+            <span className="min-w-0 truncate max-w-[14rem]">{email}</span>
+            <Lock size={11} className="shrink-0 text-ink-faint" aria-hidden="true" />
+          </span>
+        ))}
+        {visibleMembers.length === 0 && fixedMembers.length === 0 ? (
           <span className="text-xs text-ink-faint">No members.</span>
         ) : (
           visibleMembers.map((email) => {
-            const isLastAdminMember = role.isAdmin && visibleMembers.length === 1;
+            const isLastAdminMember =
+              role.isAdmin && visibleMembers.length + hiddenFixedCount === 1;
             return (
               <span
                 key={email}
@@ -463,66 +470,26 @@ function RoleCard({
         )}
       </div>
 
-      {/* Add member — with people autocomplete (Manage Access suggest source). */}
-      {/* The input is capped rather than fixed-width, and its wrapper may shrink,
-          so the row fits the card on a narrow viewport instead of pushing the
-          Add button past the card border. */}
-      <div className="mt-3 flex items-center gap-1.5">
-        <div className="relative flex-1 min-w-0 max-w-[16rem]">
-          <input
-            type="email"
-            value={memberEmail}
-            onChange={(e) => {
-              setMemberEmail(e.target.value);
-              setShowSuggest(true);
-            }}
-            onFocus={() => setShowSuggest(true)}
-            // Delay so a click on a suggestion lands before the list unmounts.
-            onBlur={() => setTimeout(() => setShowSuggest(false), 150)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') submitAddMember();
-              if (e.key === 'Escape') setShowSuggest(false);
-            }}
-            placeholder="Add member by email"
-            disabled={busy}
-            className="text-xs px-2 py-1 border border-line rounded-sm focus:outline-none focus:border-accent w-full min-w-0"
-            aria-label="Member email"
-            autoComplete="off"
-          />
-          {showSuggest && suggestions.length > 0 && (
-            <ul className="absolute z-10 mt-1 w-full sm:w-72 max-w-full max-h-56 overflow-auto bg-white border border-line rounded-lg shadow-lg py-1">
-              {suggestions.map((p) => (
-                <li key={p.email}>
-                  <button
-                    type="button"
-                    // onMouseDown (not onClick) so it fires before the input's blur.
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      submitAddMember(p.email);
-                    }}
-                    className="w-full text-left px-2 py-1.5 hover:bg-hover flex items-center gap-2"
-                  >
-                    <span className="w-5 h-5 rounded-full bg-ink-muted text-white text-[9px] font-semibold flex items-center justify-center shrink-0">
-                      {initials(p.email)}
-                    </span>
-                    <span className="flex-1 truncate text-xs text-ink">{p.name || p.email}</span>
-                    <span className="text-[10px] text-ink-faint truncate">{p.email}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={() => submitAddMember()}
-          disabled={busy}
-          className="shrink-0 px-3 py-1 text-xs rounded-sm border border-line hover:bg-hover disabled:opacity-50 flex items-center gap-1"
-        >
-          {busy && <Loader2 size={12} className="animate-spin" />}
-          Add
-        </button>
-      </div>
+      {/* Why those chips have no X. Rendered once for the row, not per chip. */}
+      {fixedMembers.length > 0 && (
+        <p id={fixedNoteId} className="mt-1.5 text-xs text-ink-muted">
+          {FIXED_ADMIN_NOTE}.
+        </p>
+      )}
+
+      {/* Add member — with people autocomplete (Manage Access suggest source).
+          Members already on the role, optimistic ones included, are excluded
+          from the suggestions: offering them would be offering a no-op — and
+          a fixed member would be offering a refusal. */}
+      <AddMemberInput
+        value={memberEmail}
+        onValueChange={setMemberEmail}
+        onSubmit={submitAddMember}
+        exclude={[...role.members, ...fixedMembers, ...pendingAdds]}
+        inputLabel="Member email"
+        busy={busy}
+        className="mt-3"
+      />
 
       {/* Group assignments — everyone in an assigned group holds the role.
           The section shows whenever there is something to see: assignments the
@@ -603,7 +570,7 @@ function RoleCard({
         >
           <p className="text-sm text-ink">
             Grants keep working — the name stays; it just becomes a group. Manage its
-            members on the Groups page afterwards.
+            members on the Groups & Members page afterwards.
           </p>
         </ConfirmDialog>
       )}
@@ -648,10 +615,7 @@ function ConfirmDialog({
   const panelRef = useRef<HTMLDivElement>(null);
   // Latest onCancel without re-running the mount effect on every parent render
   // (the parent passes a fresh closure each time, e.g. when `busy` flips).
-  const onCancelRef = useRef(onCancel);
-  useEffect(() => {
-    onCancelRef.current = onCancel;
-  }, [onCancel]);
+  const onCancelRef = useLatestRef(onCancel);
 
   // Real modal behaviour: hand focus to the dialog on open, restore it to the
   // trigger on close, close on Escape, and trap Tab/Shift+Tab inside the panel
@@ -694,7 +658,8 @@ function ConfirmDialog({
       document.removeEventListener('keydown', onKeyDown, true);
       previouslyFocused?.focus?.();
     };
-  }, []);
+    // The ref is stable for the component's life; listed for the linter.
+  }, [onCancelRef]);
 
   return (
     <div

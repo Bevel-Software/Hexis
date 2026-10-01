@@ -18,6 +18,7 @@
  */
 
 import type { ValidationReport } from '@bevel-software/platform-shared';
+import { sanitizedPath } from './printable.js';
 
 export class WorkflowDomainError extends Error {
   readonly status: number;
@@ -167,6 +168,156 @@ export class PullRebaseConflictError extends WorkflowDomainError {
 }
 
 /**
+ * The one sentence a branch-less call is answered with. Names the input and
+ * what to pass, and carries NO stringified value of what was actually
+ * received: the whole point of this refusal is that the caller sent nothing,
+ * and echoing `undefined` back at them is how the branch "undefined" got
+ * invented in the first place.
+ */
+export const BRANCH_REQUIRED_MESSAGE =
+  '`branch` is required: pass the branch (draft) you are working on.';
+
+/**
+ * The caller named no branch — the input is missing, empty, not a string, or
+ * one of the stringified absent values (`"undefined"` / `"null"`) that a
+ * client produces by interpolating a variable it never set.
+ *
+ * Refused, never defaulted. A knowledge-base tool's workspace is NEVER implied
+ * by the credential (identity-only) — it always comes from this argument — so
+ * falling back to the deployment's default branch would make an omitted
+ * argument silently act on the protected branch. And it is refused HERE, at
+ * the boundary, because everything downstream treats the value as a real
+ * branch name: `workspaceIdForBranch` would turn it into a workspace directory
+ * literally named `undefined`, and the clone of that "branch" would fail with
+ * a story about a branch that never existed.
+ *
+ * 400 with kind `branch-required`, so a client tells it apart from the 404
+ * (no such branch) and the 410 (the branch was deleted) without reading prose.
+ */
+export class BranchRequiredError extends WorkflowDomainError {
+  readonly kind = 'branch-required' as const;
+  constructor() {
+    super(BRANCH_REQUIRED_MESSAGE, 400, { kind: 'branch-required' });
+    this.name = 'BranchRequiredError';
+  }
+}
+
+/**
+ * The stringified absent values. Both are syntactically valid git branch
+ * names, so the shape validator (`assertValidBranchName`) accepts them
+ * happily — accepting one is exactly the bug this guard exists for. They are
+ * refused BY NAME, which is why this check cannot be folded into the shape
+ * check however tempting that looks.
+ */
+const STRINGIFIED_ABSENT_VALUES = new Set(['undefined', 'null']);
+
+/**
+ * Refuse a call that names no branch, before anything downstream can turn the
+ * missing value into a directory name, a clone attempt or a log line.
+ *
+ * Deliberately NOT a shape check: a well-formed name this platform has never
+ * seen is a 404 the caller can act on, and a malformed one is a
+ * `BranchNameError` from the canonical validator. This answers only "you sent
+ * nothing", which is the one case where naming the branch back is impossible.
+ */
+export function assertBranchProvided(branch: unknown): asserts branch is string {
+  if (typeof branch !== 'string' || branch.length === 0) throw new BranchRequiredError();
+  if (STRINGIFIED_ABSENT_VALUES.has(branch)) throw new BranchRequiredError();
+}
+
+/**
+ * The platform has never heard of this branch: nothing it has cloned, and
+ * nothing any listing of origin's branches has mentioned. Distinct from
+ * `RemoteBranchGoneError`, which is the SAME git failure about a branch the
+ * platform did know — and answering that for a name nobody ever pushed told
+ * the reader their typo "no longer exists on the remote", which implies it
+ * once did. 404, and the message names the branch and nothing else: no git
+ * output, no remote URL.
+ */
+export class BranchNotFoundError extends WorkflowDomainError {
+  readonly kind = 'branch-not-found' as const;
+  constructor(readonly branch: string) {
+    super(`There is no branch named ${branch}.`, 404, {
+      kind: 'branch-not-found',
+      branch,
+    });
+    this.name = 'BranchNotFoundError';
+  }
+}
+
+/**
+ * The clone's branch no longer exists on origin: the fetch that refreshes
+ * `refs/remotes/origin/<branch>` found no such ref. Distinct from an
+ * unreachable remote — the host answered, and the answer was "gone" — so a
+ * caller can treat the clone as stale rather than the sync as failed. 410.
+ *
+ * Only for a branch the platform KNEW: a clone of it, or a listing that named
+ * it. For a name it has never heard of, the same git failure is a
+ * `BranchNotFoundError` — see `WorkspaceService.hasHeardOfBranch`. A sync
+ * always has the clone in hand, so it is always this one.
+ */
+export class RemoteBranchGoneError extends WorkflowDomainError {
+  readonly kind = 'remote-branch-gone' as const;
+  constructor(readonly branch: string) {
+    super(`Branch "${branch}" no longer exists on the remote.`, 410, {
+      kind: 'remote-branch-gone',
+      branch,
+    });
+    this.name = 'RemoteBranchGoneError';
+  }
+}
+
+/**
+ * Whether a failed clone or fetch failed because origin has no such branch, as
+ * opposed to being unreachable or refusing the credential. Git's wording for
+ * the two shapes: `Remote branch <x> not found in upstream origin` (clone) and
+ * `couldn't find remote ref refs/heads/<x>` (fetch). The ONE classifier for
+ * this fact — the workspace bootstrap and the git layer both consult it, so
+ * a wording learned by one is learned by both.
+ */
+export function isMissingRemoteBranchFailure(message: string): boolean {
+  return /Remote branch .* not found in upstream|couldn't find remote ref/i.test(message);
+}
+
+/**
+ * The caller named a path that resolves outside the workspace it was asked
+ * for. In practice that means an absolute path: a `..` climb is refused one
+ * step earlier, as an invalid path, by the same validator the file verbs run
+ * first.
+ *
+ * 403 carrying the exact message the file verbs answer, because
+ * `WorkspaceService.assertWithinWorkspace` throws a bare `Error` with this
+ * text and `workspace.routes.sendError` maps that text to 403. The lock
+ * service raises this instead of a bare `Error`, because `toHttpError` on the
+ * workflow routes reads the status off the class and would otherwise call it
+ * a 500. Both surfaces then answer identically for the same input. See
+ * `canonicalFileIdentity`.
+ */
+export class PathTraversalError extends WorkflowDomainError {
+  readonly kind = 'path-traversal' as const;
+  constructor() {
+    super('Path traversal detected', 403, { kind: 'path-traversal' });
+    this.name = 'PathTraversalError';
+  }
+}
+
+/**
+ * The caller named a path inside the repository's internal git folder: any
+ * `.git` segment, in any case, however it was spelled or reached (see
+ * `shared/git-internals.ts`). One message for every such path, whether or not
+ * anything is there, so the refusal is not an existence oracle.
+ */
+export const GIT_INTERNALS_MESSAGE = "That path is inside the repository's internal git data and is not available.";
+
+export class GitInternalsError extends WorkflowDomainError {
+  readonly kind = 'git-internals' as const;
+  constructor() {
+    super(GIT_INTERNALS_MESSAGE, 403, { kind: 'git-internals' });
+    this.name = 'GitInternalsError';
+  }
+}
+
+/**
  * Generic 400 for workflow-input validation (malformed branch names, missing
  * fields, etc.). Carries an optional payload so callers can attach typed
  * discriminators (`kind: '...'`) when the frontend needs to switch on the
@@ -176,6 +327,69 @@ export class WorkflowValidationError extends WorkflowDomainError {
   constructor(message: string, payload?: Record<string, unknown>) {
     super(message, 400, payload);
     this.name = 'WorkflowValidationError';
+  }
+}
+
+/**
+ * The next step a missing path always offers, in one sentence.
+ *
+ * Lives HERE, the layer with no module imports, because both surfaces that
+ * answer a missing path need it and they sit on opposite sides of a module
+ * boundary: this class (raised by services, rendered by the HTTP routes) and
+ * `modules/workspace/not-found.ts` (the file tools), which re-exports the
+ * constant under its own name. One sentence, written once, so the two cannot
+ * drift apart.
+ */
+export const NOT_FOUND_NEXT_STEP = 'Check the path with list_files.';
+
+/**
+ * Nothing is at the path the caller named.
+ *
+ * Raised by a SERVICE that probed the path itself, where the file tools' own
+ * `not-found` helper (modules/workspace/not-found.ts) cannot reach: the zip
+ * reader, for instance, answers "ADM-ZIP: Invalid filename" for a missing
+ * archive, which is not a filesystem error at all and would otherwise be
+ * dressed up as an unreadable archive. The helper recognises this class and
+ * the raw `ENOENT`/`ENOTDIR` shapes alike, so both end as the one 404.
+ *
+ * 404 with a `not_found` kind and the requested path, which is also what the
+ * HTTP routes answer — a path that is not there gets one answer whichever
+ * surface asked. The MESSAGE AND THE PAYLOAD ARE BUILT HERE, not by whoever
+ * catches it, because not every surface catches it: the tools pass through
+ * `orDeclaredNotFound`, which re-renders the same three parts, but
+ * `POST /workspace/:id/unzip` sends this error straight to `domainErrorBody`.
+ * Sanitizing the path and appending the next step in the constructor is what
+ * makes those two answers the same answer.
+ */
+export class PathNotFoundError extends WorkflowDomainError {
+  readonly kind = 'not_found' as const;
+  /** The requested path, sanitized — never the path on disk. */
+  readonly path: string;
+  constructor(path: string) {
+    const safe = sanitizedPath(path);
+    super(
+      `There is no file or directory at "${safe}" in this workspace. ${NOT_FOUND_NEXT_STEP}`,
+      404,
+      { kind: 'not_found', path: safe },
+    );
+    this.name = 'PathNotFoundError';
+    this.path = safe;
+  }
+}
+
+/**
+ * An archive the caller uploaded that the zip reader cannot open. 422, not
+ * 400: the request is well-formed and the path is fine — the BYTES are not a
+ * readable zip, which is the caller's to fix but not their spelling's.
+ *
+ * A type, because the route used to recognise this by the `Could not read zip
+ * file` prefix its message happens to start with, and a reworded message
+ * would silently have turned it into a 500.
+ */
+export class UnreadableArchiveError extends WorkflowDomainError {
+  constructor(reason: string) {
+    super(`Could not read zip file: ${reason}`, 422, { kind: 'unreadable-archive' });
+    this.name = 'UnreadableArchiveError';
   }
 }
 
@@ -272,6 +486,28 @@ export class ChangeRequestConflictsError extends WorkflowDomainError {
       },
     );
     this.name = 'ChangeRequestConflictsError';
+  }
+}
+
+/**
+ * A direct branch merge was asked to do what an open change request is
+ * waiting for a person to do: merge `sourceBranch` into `targetBranch`.
+ * Carries the request's number so the caller can point the person at it.
+ */
+export class OpenChangeRequestBlocksMergeError extends WorkflowDomainError {
+  readonly kind = 'open-change-request-blocks-merge' as const;
+  constructor(
+    readonly sourceBranch: string,
+    readonly targetBranch: string,
+    readonly number: number,
+  ) {
+    super(
+      `Change request #${number} proposes merging "${sourceBranch}" into "${targetBranch}" and is still open. ` +
+        `A change request is merged by a person: ask the user to review #${number} in the app.`,
+      409,
+      { kind: 'open-change-request-blocks-merge', sourceBranch, targetBranch, number },
+    );
+    this.name = 'OpenChangeRequestBlocksMergeError';
   }
 }
 

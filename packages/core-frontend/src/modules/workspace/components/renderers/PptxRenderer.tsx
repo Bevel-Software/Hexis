@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Presentation } from 'lucide-react';
-import { useWorkspace } from '../../state/workspace.context';
+import { useRendererWorkspaceId } from './rendererWorkspace';
 import { authFetch } from '../../../../lib/api';
+import { rawFileUrl } from '../../services/workspace.api';
 import { DownloadFileButton } from './DownloadFileButton';
 import { extractPptxOutline, type PptxSlide } from './pptxOutline';
 import { readBodyCapped } from './readBodyCapped';
@@ -47,7 +48,7 @@ const MAX_ARCHIVE_BYTES = 200 * 1024 * 1024;
 const MAX_LINES_PER_SLIDE = 500;
 
 export function PptxRenderer({ filePath }: FileRendererProps) {
-  const { workspaceId } = useWorkspace();
+  const workspaceId = useRendererWorkspaceId();
   const [slides, setSlides] = useState<PptxSlide[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -64,7 +65,7 @@ export function PptxRenderer({ filePath }: FileRendererProps) {
     (async () => {
       try {
         const res = await authFetch(
-          `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(filePath)}`,
+          rawFileUrl(workspaceId, filePath),
           { signal: abort.signal },
         );
         if (cancelled) return;

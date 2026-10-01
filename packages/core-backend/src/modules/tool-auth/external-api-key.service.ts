@@ -1,5 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { and, desc, eq, isNotNull, isNull } from 'drizzle-orm';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('external-api-key');
+import { and, asc, desc, eq, isNotNull, isNull, type SQL } from 'drizzle-orm';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
 import { externalApiKeys, users } from '../database/schema.js';
@@ -8,36 +11,59 @@ import {
   TokenNotFoundError,
   TokenStillActiveError,
 } from './external-api-key.errors.js';
-import type {
-  ExternalApiKeySummary,
-  IExternalApiKeyService,
-  MintedExternalApiKey,
+import {
+  DEFAULT_KEY_KIND,
+  type AdminExternalApiKeySummary,
+  type ExternalApiKeySummary,
+  type IExternalApiKeyService,
+  type KeyKindSpec,
+  type MintOptions,
+  type RevokedBy,
+  type MintedExternalApiKey,
 } from './external-api-key.interface.js';
 
-// Plaintext format: `<tenant>_<43 base64url chars>`. 32 random bytes encoded
+// Plaintext format: `<prefix><43 base64url chars>`. 32 random bytes encoded
 // base64url is 43 chars and gives 256 bits of entropy — overkill against
-// brute force, cheap to copy. The tenant prefix (default `bevel_`) lets the
-// auth middleware route key-vs-JWT requests without parsing both shapes.
+// brute force, cheap to copy. The prefix lets the auth middleware route
+// key-vs-JWT requests without parsing both shapes.
 const TOKEN_BYTES = 32;
+// A GitHub-shaped token: 20 random bytes as 40 hex digits — alphanumeric,
+// as GitHub's own are, and 160 bits, which a hash lookup never exhausts.
+const GITHUB_TOKEN_BYTES = 20;
 
 const MAX_LABEL_LEN = 200;
 
 export class ExternalApiKeyService implements IExternalApiKeyService {
+  private readonly prefixes: readonly string[];
+
   /**
    * @param keyPrefix Tenant-derived plaintext prefix (e.g. `bevel_`) — injected
    *   from {@link AppConfig.externalApiKeyPrefix} so a deploy can brand its keys.
+   *   Every key of the default kind is minted with it.
+   * @param kinds Other kinds a key may be minted as, each with the spelling
+   *   that kind has — a Claude link's `gho_` and GitHub's alphabet, the
+   *   shape claude.ai expects from a GitHub host. Same key, same table, same
+   *   revocation; the KIND is stored on the row and is what tells such keys
+   *   apart (a label is the person's to edit), the spelling is only what the
+   *   outside world sees and what routes the bearer back here.
    */
   constructor(
     private readonly db: Database,
     private readonly keyPrefix: string,
-  ) {}
-
-  /** True if a bearer string carries this tenant's external-API-key prefix. */
-  looksLikeExternalApiKey(token: string): boolean {
-    return typeof token === 'string' && token.startsWith(this.keyPrefix);
+    private readonly kinds: Readonly<Record<string, KeyKindSpec>> = {},
+  ) {
+    this.prefixes = [keyPrefix, ...Object.values(kinds).map((k) => k.prefix)];
   }
 
-  async mint(userId: string, label: string): Promise<MintedExternalApiKey> {
+  /** True if a bearer string carries one of this service's key prefixes. */
+  looksLikeExternalApiKey(token: string): boolean {
+    return typeof token === 'string' && this.prefixes.some((p) => token.startsWith(p));
+  }
+
+  async mint(userId: string, label: string, options: MintOptions = {}): Promise<MintedExternalApiKey> {
+    const kind = options.kind ?? DEFAULT_KEY_KIND;
+    const spec: KeyKindSpec | undefined = kind === DEFAULT_KEY_KIND ? { prefix: this.keyPrefix } : this.kinds[kind];
+    if (!spec) throw new Error(`Unknown key kind "${kind}"`);
     const trimmed = (label ?? '').trim();
     if (trimmed.length === 0) {
       throw new InvalidTokenLabelError('Label cannot be empty');
@@ -48,12 +74,16 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
       );
     }
 
-    const plaintext = this.keyPrefix + randomBytes(TOKEN_BYTES).toString('base64url');
+    const random =
+      spec.shape === 'github-token'
+        ? randomBytes(GITHUB_TOKEN_BYTES).toString('hex')
+        : randomBytes(TOKEN_BYTES).toString('base64url');
+    const plaintext = spec.prefix + random;
     const tokenHash = hashToken(plaintext);
 
     const [row] = await this.db
       .insert(externalApiKeys)
-      .values({ userId, tokenHash, label: trimmed })
+      .values({ userId, tokenHash, label: trimmed, kind })
       .returning();
 
     return {
@@ -99,7 +129,7 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     // the worst case is a slightly stale `last_used_at`, which is fine for
     // a "when was this key last used" audit view.
     this.touchLastUsed(row.tokenId).catch((err) => {
-      console.warn('[external-api-key] touchLastUsed failed:', err);
+      log.warn('touchLastUsed failed:', { err });
     });
 
     return {
@@ -114,39 +144,84 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
   }
 
   async listForUser(userId: string): Promise<ExternalApiKeySummary[]> {
+    // A key the owner deleted for good is gone from THEIR listings — that is
+    // what the deletion means to them; the row lives on for the Audit log.
     const rows = await this.db
       .select()
       .from(externalApiKeys)
-      .where(eq(externalApiKeys.userId, userId))
+      .where(and(eq(externalApiKeys.userId, userId), isNull(externalApiKeys.deletedAt)))
       .orderBy(desc(externalApiKeys.createdAt));
     return rows.map(toSummary);
   }
 
+  async ownerOf(id: string): Promise<string | null> {
+    const [row] = await this.db
+      .select({ userId: externalApiKeys.userId })
+      .from(externalApiKeys)
+      .where(eq(externalApiKeys.id, id))
+      .limit(1);
+    return row?.userId ?? null;
+  }
+
+  async listForDeployment(): Promise<AdminExternalApiKeySummary[]> {
+    // Owner joined in so the admin overview is one round-trip; ordered by
+    // owner email so per-account grouping is a linear pass, newest key
+    // first within an account (same order the owner sees on their own page).
+    const rows = await this.db
+      .select({
+        key: externalApiKeys,
+        userId: users.id,
+        email: users.email,
+        name: users.name,
+      })
+      .from(externalApiKeys)
+      .innerJoin(users, eq(externalApiKeys.userId, users.id))
+      .orderBy(asc(users.email), desc(externalApiKeys.createdAt));
+    return rows.map((row) => ({
+      ...toSummary(row.key),
+      user: { id: row.userId, email: row.email, name: row.name },
+    }));
+  }
+
   async revoke(id: string, userId: string): Promise<void> {
-    // Scope the WHERE by userId so a user can never revoke another user's
-    // token even if they learn the id. Idempotent on already-revoked rows
-    // because we only set `revokedAt` when it's currently null — re-revoking
-    // returns 0 rows changed but no error.
+    // Scope by userId so a user can never revoke another user's token even
+    // if they learn the id.
+    await this.markRevoked(
+      and(eq(externalApiKeys.id, id), eq(externalApiKeys.userId, userId))!,
+      'owner',
+    );
+  }
+
+  async revokeAny(id: string): Promise<void> {
+    // No owner scope: the caller is an admin acting across the deployment.
+    // The route that exposes this is admin-gated; nothing user-facing may
+    // reach it. Recorded as such so the owner is told it was taken, not
+    // that they disconnected it.
+    await this.markRevoked(eq(externalApiKeys.id, id), 'admin');
+  }
+
+  /**
+   * Set `revokedAt` (and who did it) on the rows matching `scope`. Idempotent
+   * on already-revoked rows because we only write when `revokedAt` is
+   * currently null — re-revoking returns 0 rows changed but no error, and
+   * never rewrites who ended it first. Throws TokenNotFoundError when `scope`
+   * matches nothing at all.
+   */
+  private async markRevoked(scope: SQL, by: RevokedBy): Promise<void> {
     const result = await this.db
       .update(externalApiKeys)
-      .set({ revokedAt: new Date() })
-      .where(
-        and(
-          eq(externalApiKeys.id, id),
-          eq(externalApiKeys.userId, userId),
-          isNull(externalApiKeys.revokedAt),
-        ),
-      )
+      .set({ revokedAt: new Date(), revokedBy: by })
+      .where(and(scope, isNull(externalApiKeys.revokedAt)))
       .returning({ id: externalApiKeys.id });
 
     if (result.length === 0) {
-      // Distinguish "doesn't exist / not yours" from "already revoked".
+      // Distinguish "doesn't exist / out of scope" from "already revoked".
       // The latter must stay idempotent (return success); only the former
       // throws.
       const [existing] = await this.db
         .select({ id: externalApiKeys.id })
         .from(externalApiKeys)
-        .where(and(eq(externalApiKeys.id, id), eq(externalApiKeys.userId, userId)))
+        .where(scope)
         .limit(1);
       if (!existing) {
         throw new TokenNotFoundError();
@@ -155,14 +230,16 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
   }
 
   async remove(id: string, userId: string): Promise<void> {
-    // Only revoked rows may be hard-deleted — deleting an active key would
+    // Only revoked rows may be deleted — deleting an active key would
     // silently cut off a live agent. Scope by userId so a user can only
     // delete their own tokens. Validate first (so we can return a precise
-    // not-found vs still-active error), then delete inside a transaction.
+    // not-found vs still-active error), then mark the row deleted.
     const [existing] = await this.db
       .select({ revokedAt: externalApiKeys.revokedAt })
       .from(externalApiKeys)
-      .where(and(eq(externalApiKeys.id, id), eq(externalApiKeys.userId, userId)))
+      .where(
+        and(eq(externalApiKeys.id, id), eq(externalApiKeys.userId, userId), isNull(externalApiKeys.deletedAt)),
+      )
       .limit(1);
     if (!existing) {
       throw new TokenNotFoundError();
@@ -172,16 +249,19 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
       throw new TokenStillActiveError();
     }
 
-    // Dependents (e.g. the enterprise LLM-usage metering rows) hang off this
-    // row via ON DELETE CASCADE foreign keys, so a bare delete takes any audit
-    // trail with it — this service doesn't have to know those tables exist.
+    // A deletion in name: the row stays, marked, because the Audit log's
+    // events hang off it and the trail must outlive the key's owner's wish
+    // to be rid of it. The key was revoked already, so nothing can use it;
+    // deleting hides it from the owner and tells an admin it was deleted.
     await this.db
-      .delete(externalApiKeys)
+      .update(externalApiKeys)
+      .set({ deletedAt: new Date() })
       .where(
         and(
           eq(externalApiKeys.id, id),
           eq(externalApiKeys.userId, userId),
           isNotNull(externalApiKeys.revokedAt),
+          isNull(externalApiKeys.deletedAt),
         ),
       );
   }
@@ -202,8 +282,11 @@ function toSummary(row: typeof externalApiKeys.$inferSelect): ExternalApiKeySumm
   return {
     id: row.id,
     label: row.label,
+    kind: row.kind,
     createdAt: row.createdAt.getTime(),
     lastUsedAt: row.lastUsedAt ? row.lastUsedAt.getTime() : null,
     revokedAt: row.revokedAt ? row.revokedAt.getTime() : null,
+    revokedBy: (row.revokedBy as RevokedBy | null) ?? null,
+    deletedAt: row.deletedAt ? row.deletedAt.getTime() : null,
   };
 }

@@ -1,4 +1,7 @@
 import express, { type Request, type RequestHandler } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('declared-variables');
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
 import type { ISecretsVaultService } from '../secrets-vault/secrets-vault.contract.js';
@@ -136,13 +139,13 @@ export function createDeclaredVariableRoutes(
         key: utcpNamespacedKey(manual.name, v.name),
       }));
       const { values, missing } = await resolveAll(who.userId, entries);
-      console.info(
-        `[declared-variables] local tool "${manual.path}" resolved for user=${who.userId}: ` +
+      log.info(
+        `local tool "${manual.path}" resolved for user=${who.userId}: ` +
           `provided=[${Object.keys(values).join(',')}] missing=[${missing.join(',')}]`,
       );
       res.set('Cache-Control', 'no-store').json({ name: manual.name, variables: values, missing });
     } catch (err) {
-      console.error('[declared-variables] local tool resolve failed:', err instanceof Error ? err.message : err);
+      log.error('local tool resolve failed:', { err });
       res.status(500).json({ error: 'Failed to resolve variables' });
     }
   });

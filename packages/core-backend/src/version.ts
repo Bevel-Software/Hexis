@@ -6,12 +6,16 @@ import { readFileSync } from 'node:fs';
  * rollout by sha *before* smoke-testing it.
  *
  * Sources, in priority order:
- *  - `GIT_SHA` — baked at image build time via the Dockerfile `ARG`/`ENV`
- *    (set from `git rev-parse HEAD` by CI or `docker compose build`).
- *  - `SOURCE_COMMIT` — Coolify injects this for git-based deploys, so the
- *    sha is correct on hosted deploys even when no explicit build arg was
- *    passed. `.git` is in `.dockerignore`, so the sha can't be derived
- *    inside the build — it has to be passed in.
+ *  - `GIT_SHA` — baked into the image by the Dockerfile from its ONE build
+ *    arg, `SOURCE_COMMIT` (CI, Coolify and a manual build all pass that
+ *    name). Baked under a different name deliberately: a runtime variable
+ *    overrides an image ENV of the same name, and `SOURCE_COMMIT` is what
+ *    a hosted deployment UI writes at runtime — once as an empty literal
+ *    that blanked the real value. Nothing at runtime sets `GIT_SHA`.
+ *  - `SOURCE_COMMIT` — the runtime value Coolify injects for git-based
+ *    deploys, so a build that was not given the arg still reports a sha.
+ *    `.git` is in `.dockerignore`, so the sha can't be derived inside the
+ *    build — it has to be passed in.
  *  - `'unknown'` — local `tsx` runs and any build that wired neither.
  */
 export function resolveGitSha(env: NodeJS.ProcessEnv = process.env): string {

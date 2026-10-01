@@ -1,20 +1,20 @@
 /**
- * The name of a person's own space — the prototype's `MINE()` (line 2078),
- * which reads `me().name.split(' ')[0] + "'s List"`.
+ * The name of a person's own space — the prototype's `MINE()`, which named
+ * it after the person (`Juan's List`).
  *
  * It is called a PLUGIN here rather than a list because that is what it now is:
  * the same page, the same sections, the same card grid as `Plugins/Engineering`.
  * The only difference is which items it holds, and that is a query, not a kind.
  *
- * First name only, deliberately. "Juan's Plugin" is what a colleague would call
- * it out loud; "Juan Viera's Plugin" is what a directory would call it.
+ * One name for everyone, deliberately: the page is always the reader's own,
+ * so the reader's name on it adds nothing — and a sign-in record's spelling
+ * of a name is not a style guide. (`displayFirstName` still greets people
+ * on the welcome page.)
  */
-export function personalPluginName(displayName: string | null | undefined): string {
-  const first = displayFirstName(displayName);
-  // Nobody signed in, or a user record with no name: the space still exists and
-  // still needs a heading, and "Yours" is true for whoever is reading it.
-  if (!first) return 'Yours';
-  return `${first}'s Plugin`;
+export const PERSONAL_PLUGIN_NAME = 'Personal plugin';
+
+export function personalPluginName(): string {
+  return PERSONAL_PLUGIN_NAME;
 }
 
 /**
@@ -22,12 +22,10 @@ export function personalPluginName(displayName: string | null | undefined): stri
  *
  * Sign-in records are not a style guide — an account created from a lowercase
  * email or a hastily typed name should still be greeted the way a person
- * writes their own name. The capital belongs HERE rather than at each call
- * site, so the welcome page and the plugin heading cannot disagree about how
- * to spell the same person.
+ * writes their own name. The capital belongs HERE rather than at the call
+ * site, so every greeting spells the same person the same way.
  *
- * Empty when there is no name to work with, and each caller picks its own
- * fallback: the plugin heading says "Yours", the welcome page says "there".
+ * Empty when there is no name to work with; the welcome page then says "there".
  */
 export function displayFirstName(displayName: string | null | undefined): string {
   const first = (displayName ?? '').trim().split(/\s+/)[0] ?? '';

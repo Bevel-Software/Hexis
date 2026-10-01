@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { PageShell } from '../../../shared/components/PageShell';
@@ -49,23 +49,54 @@ export function SecretsPage() {
   const [tools, setTools] = useState<ToolSecrets[]>([]);
   const [secrets, setSecrets] = useState<SecretSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  /** A refetch is in flight over a list that is already on screen. */
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Read ONCE, synchronously, before the fragment is stripped below. Kept in
   // its own slot (not the API `error` above) so the initial refresh() — whose
   // success path clears the API error — can't race the outcome away.
   const [oauthOutcome] = useState(readHashOutcome);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  /**
+   * Which load is allowed to publish. Saving two rows in quick succession
+   * starts two refetches, and the first can answer last: its list still says
+   * the second variable needs a key, so the row that was just saved flips back
+   * to `Needs a key` and stays there. The same newest-wins rule the probe
+   * itself follows, for the same reason — a late answer describing an earlier
+   * state is worse than no answer.
+   */
+  const loadSeq = useRef(0);
+
+  /**
+   * @param quiet keep the panels on screen while they refetch.
+   *
+   * The loud refresh drops the page to "Loading…", which UNMOUNTS every panel
+   * — and a panel row holds the verdict of the probe its own save just
+   * started. Nothing persists a verdict, so a loud refetch after a save throws
+   * away the only copy of the answer the save was waiting for. Same fix
+   * `useToolPage` made for the tool page, for the same reason.
+   */
+  const refresh = useCallback(async (quiet = false) => {
+    const mine = ++loadSeq.current;
+    if (!quiet) setLoading(true);
+    setRefreshing(true);
     try {
       const [t, s] = await Promise.all([listToolSecrets(), listSecrets()]);
+      if (loadSeq.current !== mine) return;
       setTools(t);
       setSecrets(s);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // Inside the guard too: an older load failing after a newer one
+      // succeeded would raise an alert about a request nobody is waiting on.
+      if (loadSeq.current === mine) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      // `loading` is the FIRST paint's spinner, and only the newest load may
+      // take it down — an orphan clearing it would uncover an empty page.
+      if (loadSeq.current === mine) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, []);
 
@@ -106,8 +137,18 @@ export function SecretsPage() {
   return (
     <PageShell
       title="Secrets"
+      // The header's Refresh is QUIET, like the refetch a save triggers: a loud
+      // one drops the page to "Loading…", which unmounts the panel holding the
+      // verdict of a probe still in flight and throws away the only copy of it.
+      // Disabling the button is the feedback instead — the list it would
+      // replace with a spinner is already on screen.
       actions={
-        <Button variant="quiet" size="sm" disabled={loading} onClick={() => void refresh()}>
+        <Button
+          variant="quiet"
+          size="sm"
+          disabled={loading || refreshing}
+          onClick={() => void refresh(true)}
+        >
           Refresh
         </Button>
       }
@@ -163,7 +204,7 @@ export function SecretsPage() {
                   </Badge>
                 )}
               </div>
-                <ToolSecretsPanel tool={tool} onChanged={() => void refresh()} />
+                <ToolSecretsPanel tool={tool} onChanged={() => void refresh(true)} />
               </Surface>
             </li>
           ))}

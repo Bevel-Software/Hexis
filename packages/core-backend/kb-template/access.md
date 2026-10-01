@@ -18,9 +18,11 @@ owner:
 #
 # Each entry is a grant (a bare principal) or a denial (the lowercase word
 # `deny`, a space, then the principal — capitalised forms like `Deny` are
-# treated as part of a name). A principal is a role name from roles.yaml,
-# matched case-insensitively, or a user reference in `Name <email>` form.
-# See roles.yaml for the identity to role mapping.
+# treated as part of a name). A principal is a role name from roles.yaml
+# (matched case-insensitively), a group name from groups.yaml, a person as
+# `Name <email>`, or `everyone` — every signed-in person and their agents, the
+# whole organisation. `read: everyone` in a folder's BODY opens that folder to
+# all; the same line in a file's frontmatter only makes that one file visible.
 #
 # To tighten or widen a subtree, drop an access.md into any folder at any depth,
 # with the same two blocks. For example, in KnowledgeBase/Finance/access.md:

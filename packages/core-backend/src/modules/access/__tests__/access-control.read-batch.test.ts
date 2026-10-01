@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -75,7 +76,7 @@ describe('AccessControlService.canReadBatch — tree/content parity', () => {
       'Knowledge/Closed/SelfGranted.md',
       '---\nread:\n  - Product Manager\n---\n# self\n',
     );
-    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
     return { svc, repo };
   }
 

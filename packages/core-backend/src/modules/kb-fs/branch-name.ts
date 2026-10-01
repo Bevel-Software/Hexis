@@ -1,8 +1,8 @@
 import { BranchNameError, WorkflowValidationError } from '../../shared/domain-errors.js';
 
-// Single source of truth for the protected-branch list lives in `@bevel-software/platform-shared` so
-// the backend guard and the frontend banner/disabling logic can't drift apart.
-export { PROTECTED_BRANCHES, isProtectedBranch } from '@bevel-software/platform-shared';
+// The protected-branch list is the knowledge base's (`KbContext.protectedBranches`):
+// services ask the context they were built with, so the backend guard and the
+// frontend banner (which reads the same model from `/api/config`) can't drift.
 // Authorship inference lives in `@bevel-software/platform-shared` for the same reason — the
 // picker's `canDelete` rule and the backend authorisation check on
 // `deleteBranch` must agree on every edge case (uppercase email, dotted

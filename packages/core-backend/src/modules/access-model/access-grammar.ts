@@ -12,6 +12,17 @@
  */
 
 import { parse as parseFullYaml } from 'yaml';
+import {
+  KNOWN_VERBS,
+  VERB_REQUIRES,
+  VERBS_BROADEST_FIRST,
+  pluginManifestName,
+  requiredVerbsFor,
+  sourceVerbsFor,
+  type Verb,
+} from '@bevel-software/platform-shared';
+import { canonicalEmail } from '../../shared/email-identity.js';
+import { scanFrontmatter } from './frontmatter-lines.js';
 import type { GroupsIndex } from './group-files.js';
 
 // ---------------------------------------------------------------------------
@@ -27,44 +38,47 @@ export const ADMIN_CANONICAL = 'admin';
  *
  * `read` controls who may VIEW a path (the file viewer, embed surface, and
  * the agent's read tools). It is **default-deny**: a path with no effective
- * `read:` or `owner:` grant is not readable. To make content public, list the
- * built-in role `everyone` under `read:`.
+ * `read:`, `write:`, `download:` or `owner:` grant is not readable. To make
+ * content public, list the built-in role `everyone` under `read:`.
  *
  * The verbs nest: `owner` is a superset of `read` + `write` + `download`, and
- * `write` is itself a superset of `read` (anyone who can edit can view). An
- * `owner` grant therefore confers all three lower verbs, a `write` grant
- * additionally confers `read`, and `owner` also marks the principal as a
- * contact point for the node (surfaced in the UI so users know who to ask).
- * See `sourceVerbsFor` for how these implications fold into resolution.
+ * `write` and `download` are each a superset of `read` (anyone who can edit, or
+ * who may save a copy, can view). An `owner` grant therefore confers all three
+ * lower verbs, and a `write` or `download` grant additionally confers `read`;
+ * `owner` also marks the principal as a contact point for the node (surfaced in
+ * the UI so users know who to ask). `write` and `download` stay independent of
+ * each other — neither confers the other. Denials run the other way: a verb
+ * denied at a scope takes every verb that presupposes it down with it there.
+ *
+ * The verbs, the dependency graph between them (`VERB_REQUIRES`) and the two
+ * lists derived from it (`sourceVerbsFor`, `requiredVerbsFor`) live in
+ * `@bevel-software/platform-shared` (`workspace/access-verbs.ts`), because the
+ * share dialog folds the same verbs on the client and must never do it by a
+ * second table. They are re-exported here so the grammar remains the one
+ * import for everything on the server side.
  */
-export const KNOWN_VERBS = ['read', 'write', 'download', 'owner'] as const;
-export type Verb = (typeof KNOWN_VERBS)[number];
+export { KNOWN_VERBS, VERB_REQUIRES, VERBS_BROADEST_FIRST, requiredVerbsFor, sourceVerbsFor };
+export type { Verb };
 const KNOWN_VERBS_SET: ReadonlySet<string> = new Set<string>(KNOWN_VERBS);
 export const EVERYONE_CANONICAL = 'everyone';
 /** Display name for the built-in `everyone` role in the share UI. */
 export const EVERYONE_DISPLAY = 'Everyone';
 
-/**
- * Verbs whose entries contribute to resolving `verb`, target verb first.
- * `owner` implies `read`, `write`, and `download`; `write` additionally
- * implies `read`. So resolving `read` folds in `write` and `owner`, resolving
- * `write`/`download` folds in `owner`, and resolving `owner` uses only `owner`.
+/*
+ * How the graph is applied on the server (the table itself is in shared):
  *
- * The implication is **grant-only** (see `resolveAtPath`): a superset grant
- * confers the lower verb, but a superset *denial* does not — `deny write` says
- * nothing about `read`, so it never strips a separate read grant. The target
- * verb itself contributes both its grants and its denials.
+ *   - `resolveScopes` reads `sourceVerbsFor` for the grants that confer the
+ *     target verb and `requiredVerbsFor` for the denials that strip it. Within
+ *     ONE scope a grant of the verb, or of one that confers it, beats a denial
+ *     of the verb or of one it presupposes.
+ *   - `plugin-principals.ts` reads `sourceVerbsFor` to decide who lands in
+ *     `plugin/<slug>/read`; `personal-spaces.step.ts` reads it to ask whether
+ *     a space is already open.
+ *
+ * `download` presupposes `read` because the pair is otherwise a DEAD
+ * combination: the raw-file route read-gates before it download-gates, so a
+ * download-only grant let its holder neither open the file nor save it.
  */
-export function sourceVerbsFor(verb: Verb): Verb[] {
-  switch (verb) {
-    case 'owner':
-      return ['owner'];
-    case 'read':
-      return ['read', 'write', 'owner'];
-    default:
-      return [verb, 'owner'];
-  }
-}
 export const RESERVED_ROLE_NAMES = new Set(['deny', EVERYONE_CANONICAL]);
 export const DENY_PREFIX = 'deny ';
 /**
@@ -85,6 +99,73 @@ export const GROUP_REF_PREFIX = 'group:';
  * registered in the principal index under its `role/<canonical>` alias.
  */
 export const ROLE_TOKEN_PREFIX = 'role/';
+
+/**
+ * PLUGIN-principal token prefix in access.md entries: `plugin/<Name>/<verb>`
+ * names everyone who holds `<verb>` on the plugin folder `Plugins/<Name>` —
+ * `plugin/GTM/read` is the GTM plugin's members, `plugin/GTM/write` its
+ * managers. Membership is DERIVED at model-load time from the plugin's own
+ * `access.md` (see `plugin-principals.ts`), so a grant naming one follows the
+ * plugin's roster with no copying. This is how a shared skill under `Skills/`
+ * is made visible to a plugin: `read: plugin/GTM/read` on the skill folder.
+ *
+ * The name half is canonicalised with the plugin's MANIFEST slug, so
+ * `plugin/Sales Team/read` and `plugin/sales-team/read` are one principal —
+ * the same identity a conformant client keys the plugin on. Reserved in the
+ * group name-safety rules like `role/`.
+ */
+export const PLUGIN_TOKEN_PREFIX = 'plugin/';
+
+/** The verbs a plugin token may name — each is a distinct principal. */
+export const PLUGIN_TOKEN_VERBS = ['read', 'write', 'owner'] as const;
+export type PluginTokenVerb = (typeof PLUGIN_TOKEN_VERBS)[number];
+
+/** The canonical key of a plugin principal, from the plugin's manifest slug. */
+export function pluginPrincipalKey(slug: string, verb: PluginTokenVerb): string {
+  return `${PLUGIN_TOKEN_PREFIX}${slug}/${verb}`;
+}
+
+/**
+ * The parts of a CANONICAL plugin key, or null when the text is not one:
+ * exactly one separator after the prefix, a slug that is its own manifest
+ * slug, one of the three verbs. A generated key never carries a nested
+ * name, so `plugin/a/b/read` is a typo, not a principal.
+ */
+export function parsePluginPrincipalKey(
+  canonical: string,
+): { slug: string; verb: PluginTokenVerb } | null {
+  if (!canonical.startsWith(PLUGIN_TOKEN_PREFIX)) return null;
+  const rest = canonical.slice(PLUGIN_TOKEN_PREFIX.length);
+  const cut = rest.indexOf('/');
+  if (cut <= 0 || rest.indexOf('/', cut + 1) !== -1) return null;
+  const slug = rest.slice(0, cut);
+  if (pluginManifestName(slug) !== slug) return null;
+  const verb = rest.slice(cut + 1);
+  if (!(PLUGIN_TOKEN_VERBS as readonly string[]).includes(verb)) return null;
+  return { slug, verb: verb as PluginTokenVerb };
+}
+
+/**
+ * The canonical key for ANY spelling of a plugin token — `plugin/Sales Team/read`,
+ * `Plugin/sales-team/READ` — or null when the text is not one: a name must be
+ * present and hold no further `/`, the verb must be one of the three. The ONE
+ * place a plugin's spelling folds to its slug: the access-file parser, the
+ * role canonicaliser (which grant and revoke compare through) and the link
+ * service all go through it, so a grant written one way is found again
+ * however it was spelled.
+ */
+export function canonicalPluginToken(token: string): string | null {
+  const body = token.trim();
+  if (!body.toLowerCase().startsWith(PLUGIN_TOKEN_PREFIX)) return null;
+  const rest = body.slice(PLUGIN_TOKEN_PREFIX.length).trim();
+  const cut = rest.lastIndexOf('/');
+  const name = cut > 0 ? rest.slice(0, cut).trim() : '';
+  const verb = cut > 0 ? rest.slice(cut + 1).trim().toLowerCase() : '';
+  if (!name || name.includes('/') || !(PLUGIN_TOKEN_VERBS as readonly string[]).includes(verb)) return null;
+  const slug = pluginManifestName(name);
+  if (!slug) return null;
+  return pluginPrincipalKey(slug, verb as PluginTokenVerb);
+}
 
 export const USER_REF_REGEX = /^(.+?)\s+<\s*([^<>\s]+@[^<>\s]+)\s*>\s*$/;
 export const EMAIL_REGEX = /^[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+$/;
@@ -224,9 +305,33 @@ export function hasAccessFrontmatterExtension(p: string): boolean {
 export interface RolesIndex {
   byCanonical: Map<
     string,
-    { displayName: string; emails: Set<string>; groupRefs?: Set<string>; kind?: 'role' | 'group' }
+    {
+      displayName: string;
+      emails: Set<string>;
+      groupRefs?: Set<string>;
+      kind?: 'role' | 'group' | 'plugin';
+      /** For `kind: 'plugin'`: the plugin's identity (its manifest name) the principal derives from. */
+      pluginName?: string;
+      /** For `kind: 'plugin'`: the repo-relative plugin directory, e.g. `Plugins/GTM`. */
+      pluginDir?: string;
+      /**
+       * For `kind: 'plugin'`: the role and group keys whose members the
+       * principal was expanded FROM — the non-user entries of the plugin's
+       * own rules, as `byCanonical` keys. `emails` is the flattened roster;
+       * this is its provenance, kept so a question asked of a PRINCIPAL
+       * rather than a person ("what can this team read?") can follow the
+       * team into the plugins that admit it, the way a member's key set does.
+       */
+      sourceKeys?: Set<string>;
+    }
   >;
   byEmail: Map<string, Set<string>>;
+  /**
+   * Principal keys EVERY caller holds, known or not — a plugin whose own
+   * rules grant `everyone` yields a plugin principal no email list can
+   * enumerate. The resolver unions these into every caller's key set.
+   */
+  publicKeys?: Set<string>;
 }
 // ---------------------------------------------------------------------------
 // Tiny YAML subset parser — handles only block mappings + block sequences
@@ -402,26 +507,18 @@ export function parseYamlSubset(
 export function extractFrontmatter(
   text: string,
 ): { ok: true; frontmatter: string } | { ok: false; error: string } {
-  const lines = text.split(/\r?\n/);
-  if (lines.length === 0 || lines[0].trim() !== '---') {
-    return { ok: false, error: 'expected `---` on the first line' };
+  const scan = scanFrontmatter(text);
+  if (scan.kind === 'none') return { ok: false, error: 'expected `---` on the first line' };
+  if (scan.kind === 'unterminated') {
+    return { ok: false, error: 'unterminated frontmatter — no closing `---` found' };
   }
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') {
-      return { ok: true, frontmatter: lines.slice(1, i).join('\n') };
-    }
-  }
-  return { ok: false, error: 'unterminated frontmatter — no closing `---` found' };
+  return { ok: true, frontmatter: scan.fm.join('\n') };
 }
 
-/** The text AFTER the closing frontmatter fence ('' when there is no fence). */
+/** The text AFTER the closing frontmatter fence ('' when there is no closed block). */
 export function bodyAfterFrontmatter(text: string): string {
-  const lines = text.split(/\r?\n/);
-  if (lines.length === 0 || lines[0].trim() !== '---') return '';
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') return lines.slice(i + 1).join('\n');
-  }
-  return '';
+  const scan = scanFrontmatter(text);
+  return scan.kind === 'frontmatter' ? scan.post.slice(1).join('\n') : '';
 }
 
 // ---------------------------------------------------------------------------
@@ -429,12 +526,18 @@ export function bodyAfterFrontmatter(text: string): string {
 // ---------------------------------------------------------------------------
 
 export function canonicalRoleName(name: string): string {
-  return name.trim().toLowerCase().replace(/\s+/g, ' ');
+  // A plugin token canonicalises to its KEY (slugged name), not to its
+  // lowercased spelling — see `canonicalPluginToken`.
+  return canonicalPluginToken(name) ?? name.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-export function canonicalEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
+/**
+ * Re-exported from `shared/email-identity.ts`, where it lives beside the
+ * identity HASH that must normalise identically. The grammar keeps the name
+ * because its parsers and splices read as prose with it, and its own callers
+ * keep importing it from here.
+ */
+export { canonicalEmail };
 
 // ---------------------------------------------------------------------------
 // Entry parser
@@ -482,6 +585,23 @@ export function parseAccessEntry(
     const suffix = canonicalRoleName(role.slice(ROLE_TOKEN_PREFIX.length));
     if (!suffix) return { ok: false, error: `entry '${body}' names no role after '${ROLE_TOKEN_PREFIX}'` };
     role = `${ROLE_TOKEN_PREFIX}${suffix}`;
+  } else if (role.startsWith(PLUGIN_TOKEN_PREFIX)) {
+    // `plugin/<Name>/<verb>`: the name is canonicalised to the plugin's
+    // manifest slug, the verb must be one of the three. Anything else is a
+    // parse error naming the valid shapes — a token that silently resolved to
+    // nothing would be a grant nobody gets and nobody is told about.
+    const key = canonicalPluginToken(body);
+    // Exactly one separator: `plugin/GTM/foo/read` is a typo, not a grant to
+    // some plugin whose slug happens to fold `GTM/foo` into `gtm-foo`.
+    if (key === null) {
+      return {
+        ok: false,
+        error:
+          `entry '${body}' is not a plugin principal — write it as ` +
+          `${PLUGIN_TOKEN_PREFIX}<plugin>/read, ${PLUGIN_TOKEN_PREFIX}<plugin>/write or ${PLUGIN_TOKEN_PREFIX}<plugin>/owner`,
+      };
+    }
+    role = key;
   }
   return { ok: true, entry: { kind: 'role', role, displayRole: body, deny } };
 }
@@ -526,6 +646,16 @@ export function parseRolesYaml(
     if (canonical.startsWith(ROLE_TOKEN_PREFIX)) {
       errors.push(
         `roles.yaml: role '${displayName}' starts with the reserved '${ROLE_TOKEN_PREFIX}' prefix — that spelling is the explicit role token in access entries`,
+      );
+      continue;
+    }
+    // A role spelled `plugin/…` would be overwritten by the synthesised plugin
+    // principal of the same key while its members kept the token — plugin
+    // access for people who are not plugin members. Refused at parse time,
+    // like the group name-safety rule.
+    if (canonical.startsWith(PLUGIN_TOKEN_PREFIX)) {
+      errors.push(
+        `roles.yaml: role '${displayName}' starts with the reserved '${PLUGIN_TOKEN_PREFIX}' prefix — that spelling is the plugin-principal token in access entries`,
       );
       continue;
     }
@@ -855,6 +985,25 @@ function verbValuesNeedFullYaml(root: unknown): boolean {
 }
 
 /**
+ * Whether an access.md's FRONTMATTER says the file is private: its `read`
+ * denies `everyone` and names nobody but people — the shape the personal
+ * template seeds (`deny everyone` and the owner), and what a person writes
+ * to keep a plugin to a few named colleagues. A role or group beside the
+ * denial is a roster, not a private list; no frontmatter, or a `read` that
+ * never mentions `everyone`, is not a statement of privacy at all (what such
+ * a file admits is whatever the folder above it says). The frontmatter
+ * alone is read on purpose: it is the block a reader sees first and the one
+ * the Library's "Private" mark reflects, so the mark and the file agree.
+ */
+export function isPrivateAccessMd(text: string): boolean {
+  const own = parseOwnAccessEntries(text);
+  if (!own) return false;
+  const deniesEveryone = (e: ParsedEntry) => e.kind === 'role' && e.deny && e.role === EVERYONE_CANONICAL;
+  if (!own.read.some(deniesEveryone)) return false;
+  return own.read.every((e) => deniesEveryone(e) || (e.kind === 'user' && !e.deny));
+}
+
+/**
  * Parse the access verbs a node file declares in its own YAML frontmatter.
  * Returns the per-verb entry lists, or null when the file has no frontmatter
  * or declares no access verb at all.
@@ -892,4 +1041,26 @@ export function parseOwnAccessEntries(text: string): OwnEntries | null {
     sawVerb = true;
   }
   return sawVerb ? entries : null;
+}
+
+/**
+ * Whether a node file's frontmatter could be READ at all, which
+ * {@link parseOwnAccessEntries} does not say: its null covers a file with no
+ * frontmatter, one that names no access verb, and one whose frontmatter is
+ * broken, and only the last of those is a failure to read.
+ *
+ * Readable: no frontmatter block at all (the file grants nothing), or a
+ * block that parses to a mapping. Not readable: a block that is never
+ * closed, or one that does not parse to a mapping. For a caller that must
+ * not take "could not tell" for "grants nothing".
+ */
+export function ownAccessReadable(text: string): boolean {
+  const scan = scanFrontmatter(text);
+  if (scan.kind === 'none') return true;
+  if (scan.kind === 'unterminated') return false;
+  const block = scan.fm.join('\n');
+  // An empty block says nothing, and says it readably.
+  if (!block.trim()) return true;
+  const root = ownEntriesRoot(block);
+  return root != null && typeof root === 'object' && !Array.isArray(root);
 }

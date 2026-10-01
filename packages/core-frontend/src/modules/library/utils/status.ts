@@ -1,4 +1,5 @@
-import { formatRelativeTime } from '../../../lib/utils';
+import { skillUnderRoot } from '@bevel-software/platform-shared';
+import { probeWords } from '../../secrets-vault/probe/probe-verdict';
 import type { ProbeVerdict, ToolSecrets, ToolVarStatus } from '../../secrets-vault/services/tool-secrets.api';
 
 /**
@@ -12,15 +13,20 @@ import type { ProbeVerdict, ToolSecrets, ToolVarStatus } from '../../secrets-vau
  */
 
 /**
- * Three states, and no fourth.
+ * Four states, and no fifth.
  *
  * There used to be an `off` — "not set up yet", drawn in grey. Grey reads as
  * *disabled*, or as *not your problem*: an unconfigured integration looked like
  * furniture next to the amber ones, when in fact it is the state that most
  * needs somebody. Anything that needs a person is amber; anything that was
  * working and stopped is red. Nothing that needs a person is grey.
+ *
+ * `urgent` sits between the two: it needs a person, like amber, but it is
+ * blocking OTHER people right now — a plugin's members locked out of a skill
+ * it ships — where amber blocks only the reader's own use. Orange, the same
+ * colour the sidebar count turns for it, so the card and the count agree.
  */
-export type GemState = 'ok' | 'warn' | 'err';
+export type GemState = 'ok' | 'warn' | 'urgent' | 'err';
 
 export interface AttentionStatus {
   state: GemState;
@@ -38,14 +44,6 @@ export interface AttentionStatus {
 }
 
 /**
- * Stored, and PROVEN to work by a real call.
- *
- * Reachable ONLY from a passing probe verdict. Nothing derived from what is
- * merely stored may return this — that inference is the entire bug.
- */
-const OK: AttentionStatus = { state: 'ok', text: 'Connected' };
-
-/**
  * In place, and untested — all a STORED value can ever support.
  *
  * Two words rather than one because they describe two different things the
@@ -55,7 +53,7 @@ const SIGNED_IN: AttentionStatus = { state: 'ok', text: 'Signed in' };
 const KEY_SAVED: AttentionStatus = { state: 'ok', text: 'Key saved' };
 
 /** Severity order for aggregation: broken sign-in beats anything merely unset. */
-const RANK: Record<GemState, number> = { ok: 0, warn: 1, err: 2 };
+const RANK: Record<GemState, number> = { ok: 0, warn: 1, urgent: 2, err: 3 };
 
 /**
  * What ONE variable is: in place, or `Needs <the thing>`.
@@ -94,10 +92,17 @@ function varStatus(v: ToolVarStatus, canWrite: boolean): AttentionStatus {
  * The word for a tool that is fully SET UP, decided by whether the credential
  * has actually been tested.
  *
- * Three outcomes, and the reason there are three: `Connected` is a claim we can
- * back — something called the provider and it answered. `Key saved` is the
- * narrower claim we can back when nothing tested it: a value is stored, and
- * that is genuinely all we know. `Not working` is the provider's own verdict.
+ * Four outcomes, and the reason there are four: `Connected` is a claim we can
+ * back — something called the provider and it answered. `Not working` is the
+ * provider's own verdict. `Unverified` is what a probe that reached no verdict
+ * leaves behind — most often a manual that defines no health check, so there
+ * is nothing to call. `Key saved` is the narrower claim for a tool NOTHING has
+ * probed at all: a value is stored, and that is genuinely all we know.
+ *
+ * The first three are `probeWords`, shared verbatim with the Connect page and
+ * the vault, which probe after their own saves now. The fourth is this
+ * module's alone, because it is the one a list of cards can reach — no verdict
+ * was ever asked for there.
  *
  * `Key saved` stays GREEN. It is a complete, true statement about a tool that
  * needs nothing from anybody, and painting it amber would put a permanent
@@ -109,18 +114,16 @@ function varStatus(v: ToolVarStatus, canWrite: boolean): AttentionStatus {
  * lie in a component whose entire job is to stop telling small lies.
  */
 function healthStatus(tool: ToolSecrets, verdict?: ProbeVerdict | null): AttentionStatus {
-  if (verdict?.status === 'ok') {
-    // The app's one relative-time formatter, not a local dialect of it. A
-    // verdict with no usable timestamp still just happened — it cannot outlive
-    // the component holding it — so "just now" is the honest fallback.
-    return { ...OK, hint: `Checked ${formatRelativeTime(verdict.checkedAt) || 'just now'}.` };
-  }
-  if (verdict?.status === 'failed') {
-    return {
-      state: 'err',
-      text: 'Not working',
-      hint: verdict.detail ?? 'The provider rejected this credential.',
-    };
+  // A verdict exists: the probe's own vocabulary wins outright, and it is the
+  // SAME vocabulary the Connect page and the vault render — `probeWords` is
+  // the single place those sentences are written, so one provider rejection
+  // cannot come out as two different complaints depending on where the key was
+  // typed. `Unverified` included: a manual with no health check has nothing to
+  // prove "Key saved" with either, and saying the narrower true thing is the
+  // rule this module is built on.
+  if (verdict) {
+    const { tone, text, hint } = probeWords(verdict);
+    return { state: tone, text, hint };
   }
   // The word has to match what the user actually did. A tool with no variables
   // asked nothing of them, so "Key saved" would name a key that does not exist;
@@ -132,7 +135,7 @@ function healthStatus(tool: ToolSecrets, verdict?: ProbeVerdict | null): Attenti
   return {
     state: 'ok',
     text,
-    hint: verdict?.detail ?? "Not verified — this tool hasn't been tested yet.",
+    hint: "Not verified — this tool hasn't been tested yet.",
   };
 }
 
@@ -213,8 +216,34 @@ export type LibraryFilter =
   | { kind: 'all' }
   | { kind: 'owned' }
   | { kind: 'group'; plugin: string }
+  /**
+   * A team from the active group source: what being in it lets a person
+   * use. The slice is the server's (`TeamAccess`), not a property of the
+   * items — see `filterLibraryItems`'s `teams` argument.
+   */
+  | { kind: 'team'; group: string }
   /** Owned by someone, in no plugin — the prototype calls these "yours alone". */
   | { kind: 'ungrouped' };
+
+/**
+ * What one team can use, by id — `GET /api/teams`, one entry per group.
+ * Ids only: the names are the catalog's, and the slice is applied to it.
+ * The server opens the list with `EVERYONE_TEAM` — not a group but the
+ * built-in org-wide principal: what a person in no group at all can use.
+ */
+export interface TeamAccess {
+  name: string;
+  plugins: string[];
+  skills: string[];
+  tools: string[];
+}
+
+/**
+ * The org-wide entry's name, as the server spells it. No group can take
+ * it — `everyone` is a reserved name in the access rules — so a team of
+ * this name IS the organisation, and the page says so.
+ */
+export const EVERYONE_TEAM = 'Everyone';
 
 /**
  * What an empty view says.
@@ -231,25 +260,162 @@ export type LibraryFilter =
 export function emptyMessageFor(filter: LibraryFilter, query: string): string {
   if (query.trim()) return 'Nothing here matches yet.';
   if (filter.kind === 'owned') return "You're not responsible for changes in any skills yet.";
+  if (filter.kind === 'team' && filter.group === EVERYONE_TEAM) return 'Nothing is shared with everyone yet.';
+  if (filter.kind === 'team') return `${filter.group} can't use anything you can see yet.`;
   return 'Nothing here matches yet.';
 }
 
 export interface LibraryFilterable {
   kind: 'skill' | 'integration';
+  /**
+   * The catalog id a team slice names — a skill's name, a tool's slug. The
+   * team lens fails closed without it: an item that cannot be named cannot
+   * be in a team's slice.
+   */
+  id?: string;
   name: string;
   description: string;
+  /** Named in the item's `owner:` grant — "Owned by me" lists exactly these. */
   owned: boolean;
   /** Folder plugin from the item's KB path, or null when it sits in none. */
   plugin: string | null;
+  /**
+   * Lives under the shared `Skills/` root rather than in a plugin folder.
+   * Such an item has no folder plugin, but it is not "yours alone" either —
+   * it is owned by a scope and shared into plugins by link — so the
+   * ungrouped view leaves it out and only the catalog-wide view lists it.
+   */
+  shared?: boolean;
+  /**
+   * Every plugin the item belongs to, inline or by link. `plugin` above is the
+   * FOLDER plugin only (routing, "yours alone"); this is what the plugin
+   * page and the sidebar counts go by.
+   */
+  plugins?: { name: string }[];
 }
 
-/** Sidebar selection narrows; the query matches name/description within it. */
+/**
+ * "Yours alone": in no plugin folder, not a shared skill, and in no plugin
+ * by link either — a tool under a root a plugin links arrives on that
+ * plugin's page with the skills beside it, so it is not alone.
+ */
+export function isUngrouped(item: Pick<LibraryFilterable, 'plugin' | 'shared' | 'plugins'>): boolean {
+  return item.plugin === null && !item.shared && !(item.plugins?.length ?? 0);
+}
+
+/** Whether an item belongs to `plugin` — by folder, or by a link from the plugin's manifest. */
+export function isInPlugin(item: Pick<LibraryFilterable, 'plugin' | 'plugins'>, plugin: string): boolean {
+  return item.plugin === plugin || (item.plugins?.some((m) => m.name === plugin) ?? false);
+}
+
+/**
+ * The item as the plugin page should show it: a LINK whose grant is missing
+ * gets the note in the tools' grammar — "Needs setup", and "share with plugin
+ * members" for someone who can edit the skill's rules — because until the
+ * grant is back, the plugin's members cannot read it. In ORANGE (`urgent`),
+ * not amber: it locks other people out, and the sidebar count for the plugin
+ * is the same colour. Healthy links are untouched.
+ */
+export function withLinkHealth<T extends LibraryFilterable & { status: AttentionStatus; canWrite?: boolean }>(
+  item: T,
+  plugin: string,
+): T {
+  const membership = (item.plugins as { name: string; linked?: boolean; granted?: boolean }[] | undefined)?.find(
+    (m) => m.name === plugin,
+  );
+  if (!membership?.linked || membership.granted !== false) return item;
+  // One amber note at a time, and the card's own comes first: a skill whose
+  // tools need setup, or one under review, already says what to do — the
+  // broken link is reported once that is settled, not in its place.
+  if (item.status.state !== 'ok') return item;
+  return {
+    ...item,
+    status: {
+      state: 'urgent',
+      text: item.canWrite ? 'Needs setup: share with plugin members' : 'Needs setup',
+      hint: `The skill's access rules no longer name ${plugin}'s members. Repair the link from the skill page.`,
+    },
+  };
+}
+
+/**
+ * Where an item that reaches `plugin` by LINK actually lives — the folder
+ * holding it, which is what the card's Linked pill names on hover.
+ *
+ * Null for an item the plugin's own folder holds, and for one that is not in
+ * the plugin at all: an inline card has nothing to disclose, and a page that
+ * pilled every card would be saying nothing with three more words.
+ *
+ * The answer is the MANIFEST'S ROOT, not the item's parent folder: the pill
+ * discloses the place somebody linked, and a manifest may name a whole shelf
+ * (`Skills/Testing`, which HOLDS the skill folder) or one skill folder
+ * outright (`Skills/Testing/test-shared-linking`, which IS it). Dropping the
+ * path's last segment gets the first case right and the second wrong — it
+ * would answer `Skills/Testing` for a skill whose shelf nobody linked. A tool
+ * is the same question asked of a file. Deepest root wins, as everywhere else
+ * a path is attributed to a place.
+ *
+ * No roots is the degraded read — the plugins endpoint failed, or its summary
+ * has not arrived — and the parent folder stands in, which is where the item
+ * lives in every case but the one above.
+ */
+export function linkedHomeOf(
+  item: Pick<LibraryFilterable, 'plugins'> & { path: string },
+  plugin: string,
+  linkedRoots: readonly string[] = [],
+): string | null {
+  const membership = (item.plugins as { name: string; linked?: boolean }[] | undefined)?.find(
+    (m) => m.name === plugin,
+  );
+  if (!membership?.linked) return null;
+  // `skillUnderRoot` is the one containment rule for a linked root — a tool
+  // under the root is under it the same way a skill is.
+  let root: string | null = null;
+  for (const candidate of linkedRoots) {
+    if (!skillUnderRoot(item.path, candidate)) continue;
+    if (root === null || candidate.length > root.length) root = candidate;
+  }
+  if (root !== null) return root;
+  const cut = item.path.lastIndexOf('/');
+  // A path with no parent (nothing this catalog serves, but the slice would
+  // otherwise silently answer with the empty string) names itself.
+  return cut > 0 ? item.path.slice(0, cut) : item.path;
+}
+
+/** The distinct plugin names an item belongs to. */
+export function pluginsOfItem(item: Pick<LibraryFilterable, 'plugin' | 'plugins'>): string[] {
+  const names = new Set<string>();
+  if (item.plugin !== null) names.add(item.plugin);
+  for (const m of item.plugins ?? []) names.add(m.name);
+  return [...names];
+}
+
+/**
+ * Whether `item` is in `team`'s slice — by the id the server named. A skill
+ * is named among the team's skills, a tool among its tools; an item without
+ * an id, or a team the server did not list, is a no.
+ */
+export function isInTeam(
+  item: Pick<LibraryFilterable, 'kind' | 'id'>,
+  team: Pick<TeamAccess, 'skills' | 'tools'> | undefined,
+): boolean {
+  if (!team || item.id === undefined) return false;
+  return (item.kind === 'skill' ? team.skills : team.tools).includes(item.id);
+}
+
+/**
+ * Sidebar selection narrows; the query matches name/description within it.
+ * `teams` is what the team lens slices by — the server's per-group access
+ * (`GET /api/teams`); without it the team lens is empty, never everything.
+ */
 export function filterLibraryItems<T extends LibraryFilterable>(
-  items: T[],
+  items: readonly T[],
   filter: LibraryFilter,
   query: string,
+  teams: readonly TeamAccess[] = [],
 ): T[] {
   const q = query.trim().toLowerCase();
+  const team = filter.kind === 'team' ? teams.find((t) => t.name === filter.group) : undefined;
   return items.filter((item) => {
     if (q && !item.name.toLowerCase().includes(q) && !item.description.toLowerCase().includes(q)) {
       return false;
@@ -260,9 +426,11 @@ export function filterLibraryItems<T extends LibraryFilterable>(
       case 'owned':
         return item.owned;
       case 'group':
-        return item.plugin === filter.plugin;
+        return isInPlugin(item, filter.plugin);
+      case 'team':
+        return isInTeam(item, team);
       case 'ungrouped':
-        return item.plugin === null;
+        return isUngrouped(item);
     }
   });
 }
@@ -279,8 +447,9 @@ export function pluginCounts<T extends LibraryFilterable>(
 ): { plugin: string; count: number }[] {
   const counts = new Map<string, number>();
   for (const item of items) {
-    if (item.plugin === null) continue;
-    counts.set(item.plugin, (counts.get(item.plugin) ?? 0) + 1);
+    // A linked skill counts for every plugin that links it, like the plugin
+    // index's own totals.
+    for (const name of pluginsOfItem(item)) counts.set(name, (counts.get(name) ?? 0) + 1);
   }
   return [...counts.entries()]
     .map(([plugin, count]) => ({ plugin, count }))

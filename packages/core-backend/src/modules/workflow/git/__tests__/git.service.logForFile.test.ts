@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -120,7 +121,7 @@ describe('GitService.logForFile', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await commitFile(repo, 'Knowledge/Foo.md', 'one\n', 'first save');
@@ -140,7 +141,7 @@ describe('GitService.logForFile', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await commitFile(repo, 'Knowledge/Foo.md', 'base\n', 'base edit');
@@ -159,7 +160,7 @@ describe('GitService.logForFile', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await runGit(repo, ['commit', '--allow-empty', '-m', 'init']);
@@ -174,7 +175,7 @@ describe('GitService.logForFile', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     // 110 commits is the minimum that still proves "clamped to 100" — going
@@ -206,7 +207,7 @@ describe('GitService.logForFile', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     await runGit(repo, ['commit', '--allow-empty', '-m', 'init']);
     const user = { id: 'u', name: 'Test', email: 't@x.com' };

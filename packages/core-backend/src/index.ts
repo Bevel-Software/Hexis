@@ -17,7 +17,9 @@
  * Finer-grained internals are available via the `./modules/*` subpath exports.
  */
 
-export { CoreConfig } from './core-config.js';
+export { CoreConfig, resolveDatabaseUrl, type TenantConfig, type ProcessConfig } from './core-config.js';
+// Serving several knowledge bases from one process — see docs/multi-tenant.md.
+export * from './tenancy/index.js';
 export { createCoreServices, type CoreServices } from './core/create-core-services.js';
 export {
   createCoreServer,
@@ -25,6 +27,25 @@ export {
   type ToolSurfaceCtx,
 } from './core/create-core-server.js';
 export { noopRecoveryAgent, type CorePorts } from './core/core-ports.js';
+// Logging: the contract, the slot a shell installs its sink into, and the
+// tagged-logger lookup every module logs through. See shared/logging.ts.
+export { setLogger, logger, createConsoleLogger } from './shared/logging.js';
+export type { ILogger, LogFields } from './shared/logger.contract.js';
+// The shutdown sequence a shell's signal handlers call, and the lease-loop
+// handle type `CoreServices.commitWorker` carries.
+export {
+  createShutdown,
+  startCore,
+  stopCore,
+  withStartupTask,
+  type BootableCore,
+  type CoreStopDeps,
+  type ShutdownDeps,
+  type ShutdownOptions,
+  type StopCoreOptions,
+  type LeaseLoopHandle,
+  type LeasedWorker,
+} from './core/lifecycle.js';
 
 // Packaged assets (migrations/, kb-template/) + the migration runners.
 export { coreMigrationsDir, defaultKbTemplateDir } from './assets.js';
@@ -33,7 +54,16 @@ export {
   runEnterpriseMigrations,
   runPiiEncryptionBackfill,
 } from './modules/database/migrate.js';
-export { getDb, type Database } from './modules/database/connection.js';
+export {
+  getDb,
+  createDb,
+  closeDb,
+  dbSchemaOf,
+  assertSchemaName,
+  DEFAULT_DB_SCHEMA,
+  type Database,
+  type DbOptions,
+} from './modules/database/connection.js';
 
 // PII column encryption (see shared/column-crypto.ts). `encryptedText` and
 // `blindIndex` are exported so an enterprise overlay can seal its own schema's
@@ -41,6 +71,7 @@ export { getDb, type Database } from './modules/database/connection.js';
 // build a Database without constructing CoreConfig.
 export {
   initColumnCrypto,
+  isColumnCryptoInitialised,
   encryptedText,
   blindIndex,
   encryptPii,
@@ -63,6 +94,7 @@ export {
 export type {
   IExternalApiKeyService,
   ExternalApiKeySummary,
+  AdminExternalApiKeySummary,
 } from './modules/tool-auth/external-api-key.interface.js';
 
 // Key port/seam types an overlay implements.
@@ -84,6 +116,13 @@ export type {
 export type { ILlmUsageMeter } from './modules/tool-auth/llm-usage-meter.js';
 export type { AuthProviderPlugin } from './modules/auth/auth.routes.js';
 export type { IErasureParticipant } from './modules/auth/account-erasure.service.js';
+export {
+  AccountAdmissionRefusedError,
+  admitEveryone,
+  type AccountAdmissionVerdict,
+  type AccountProvisionReason,
+  type IAccountAdmission,
+} from './modules/auth/account-admission.js';
 export {
   WorkflowHooks,
   type CommitValidationHook,

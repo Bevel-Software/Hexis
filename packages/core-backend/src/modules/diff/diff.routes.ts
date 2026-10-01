@@ -5,6 +5,7 @@ import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { canReadWorkspacePath, toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import { WorkflowDomainError, WorkflowValidationError } from '../../shared/domain-errors.js';
+import { domainErrorBody } from '../../shared/http-errors.js';
 import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import '../auth/auth.middleware.js';
@@ -13,10 +14,7 @@ function toHttpError(
   err: unknown,
 ): { status: number; body: Record<string, unknown> } {
   if (err instanceof WorkflowDomainError) {
-    return {
-      status: err.status,
-      body: { error: err.message, ...(err.payload ?? {}) },
-    };
+    return { status: err.status, body: domainErrorBody(err) };
   }
   const message = err instanceof Error ? err.message : 'Unknown error';
   return { status: 500, body: { error: message } };

@@ -3,9 +3,19 @@ import { authFetch } from '../../../lib/api';
 export interface ExternalApiKeySummary {
   id: string;
   label: string;
+  /** `key` for one created by hand; `github-link` for one minted when a product (Claude) connected through the GitHub facade. */
+  kind: string;
   createdAt: number;
   lastUsedAt: number | null;
   revokedAt: number | null;
+  /**
+   * Who ended it, once revoked: `owner` (you disconnected it) or `admin` (an
+   * admin revoked it — it will not come back by reconnecting). Null while
+   * live, and on keys revoked before this was recorded.
+   */
+  revokedBy: 'owner' | 'admin' | null;
+  /** Never set on a key the owner can see: a deleted key leaves their listings. */
+  deletedAt?: number | null;
   /** Model-proxy usage for this key today + the daily cap (in tokens). */
   llmUsage?: { usedTodayTokens: number; dailyTokenCap: number };
 }

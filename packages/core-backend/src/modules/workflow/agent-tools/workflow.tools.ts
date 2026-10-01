@@ -1,16 +1,24 @@
 import type { Router, RequestHandler } from 'express';
-import { DEFAULT_BRANCH, PROTECTED_BRANCHES } from '@bevel-software/platform-shared';
 import type { IToolRegistry, JsonSchema } from '../../tool-registry/tool.contract.js';
 import { ToolError, type ToolContext, type ToolHandler } from '../../tool-helpers/tool.contract.js';
 import { toolDef, withBranchInput } from '../../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
+import type { KbContext } from '../../../shared/kb-context.js';
+import { assertBranchProvided } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import { assertInsideRepo } from '../../kb-fs/repo-path.js';
+import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
+import { RETIRED_TOOL_MESSAGES } from '@bevel-software/platform-mcp-core';
 
-// A function, not a constant: the branch model is applied during boot, and a
-// module-scope capture would freeze this at the empty set that exists before it.
-const protectedInline = () => [...PROTECTED_BRANCHES].map((b) => `\`${b}\``).join(' / ');
+/** `knowledge-base/KnowledgeBase/x.md` → `KnowledgeBase/x.md`; anything else unchanged. */
+function stripKbDir(path: string, kbDirName: string): string {
+  return path.startsWith(`${kbDirName}/`) ? path.slice(kbDirName.length + 1) : path;
+}
+
+// Read at call time, not captured: the branch model is applied during boot,
+// and a value taken at registration would be the empty set that exists before it.
+const protectedInline = (kb: Pick<KbContext, 'protectedBranches'>) =>
+  [...kb.protectedBranches].map((b) => `\`${b}\``).join(' / ');
 
 // Output sub-schemas for the git-aliased workflow payloads (Branch, Change,
 // ChangeRequestComment, …). Defined once and referenced by the individual tool
@@ -71,11 +79,33 @@ const commentSchema: JsonSchema = {
   required: ['id', 'author', 'body', 'headSha', 'createdAt'],
 };
 
+const changeRequestUrlSchema: JsonSchema = {
+  type: 'string',
+  description:
+    'Link a person can open: absolute (`https://<public address>/change-requests/<number>`) when the deployment ' +
+    'has a public address configured, else the relative in-app path (with `urlNote`).',
+};
+const changeRequestUrlNoteSchema: JsonSchema = { type: 'string', description: 'Present only when `url` is relative — how to get absolute links.' };
+
+/** The link to a change request, for a tool whose payload is not the change request itself. */
+const changeRequestLinkSchema: JsonSchema = {
+  type: 'object',
+  properties: { number: { type: 'integer' }, url: changeRequestUrlSchema, urlNote: changeRequestUrlNoteSchema },
+  required: ['number', 'url'],
+};
+
+/** `{ number, url, urlNote? }` of a change request summary or detail. */
+function linkOf(cr: { number: number; url: string; urlNote?: string }): { number: number; url: string; urlNote?: string } {
+  return { number: cr.number, url: cr.url, ...(cr.urlNote ? { urlNote: cr.urlNote } : {}) };
+}
+
 const changeRequestDetailSchema: JsonSchema = {
   type: 'object',
   description: 'Full change-request detail (aliased from the underlying pull request).',
   properties: {
     number: { type: 'integer' },
+    url: changeRequestUrlSchema,
+    urlNote: changeRequestUrlNoteSchema,
     title: { type: 'string' },
     body: { type: 'string' },
     author: { type: 'object', properties: { login: { type: 'string' }, name: { type: 'string' } }, required: ['login'] },
@@ -85,23 +115,7 @@ const changeRequestDetailSchema: JsonSchema = {
     comments: { type: 'array', items: commentSchema },
     approvals: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Per-file approval state, one entry per file in `files`.' },
   },
-  required: ['number', 'title', 'body', 'headSha', 'baseSha', 'files', 'comments', 'approvals'],
-  additionalProperties: true,
-};
-
-const mergeOutcomeSchema: JsonSchema = {
-  type: 'object',
-  description: 'Either a completed merge or a signal that conflicts must be resolved first.',
-  properties: {
-    kind: { type: 'string', enum: ['merged', 'conflicts-need-resolution'] },
-    result: {
-      type: 'object',
-      description: 'Present when `kind` is `merged`.',
-      properties: { prNumber: { type: 'integer' }, sha: { type: 'string', description: 'Merge commit SHA.' }, mergedAt: { type: 'string', description: 'ISO timestamp.' } },
-    },
-    conflictedPaths: { type: 'array', items: { type: 'string' }, description: 'Present when `kind` is `conflicts-need-resolution` — paths to resolve on the source branch.' },
-  },
-  required: ['kind'],
+  required: ['number', 'url', 'title', 'body', 'headSha', 'baseSha', 'files', 'comments', 'approvals'],
   additionalProperties: true,
 };
 
@@ -119,9 +133,10 @@ export function registerWorkflowTools(
   router: Router,
   toolAuth: RequestHandler,
   toolHandler: ToolHandlerFactory,
-  /** The clone folder at the workspace root; `save_file` refuses a path outside it. */
-  kbDirName: string,
+  /** The clone folder at the workspace root (`save_file` refuses a path outside it) and the branch model. */
+  kb: Pick<KbContext, 'kbDirName' | 'defaultBranch' | 'defaultWorkspaceId' | 'protectedBranches'>,
 ): void {
+  const { kbDirName } = kb;
   const mount = (spec: {
     name: string;
     description: string;
@@ -130,16 +145,30 @@ export function registerWorkflowTools(
     write: boolean;
     /** Register on the internal catalog only (e.g. agent-control tools that make no sense to a remote caller). */
     internalOnly?: boolean;
-    /** Skip the auto-injected `branch` input — for a tool that already declares its own `branch` (switch_branch). */
+    /**
+     * Skip the auto-injected `branch` input — for a tool that declares its own
+     * `branch` with its own meaning (`create_branch`'s fork base,
+     * `switch_branch`'s target draft) or none at all (`merge_branch`,
+     * `open_change_request`, the repo-global reads). It says NOTHING about
+     * whether the tool requires a branch: that is read off the declared schema
+     * below, because reading it off this flag is what let `create_branch` opt
+     * out of the check while still demanding the input.
+     */
     skipBranch?: boolean;
     handler: ToolHandler;
   }): void => {
     const path = `/api/agent/tools/${spec.name}`;
+    const inputs = spec.skipBranch ? spec.inputs : withBranchInput(spec.inputs);
+    // The tool's OWN declaration is the only honest answer to "must this call
+    // name a branch": the injected input and a hand-declared one (the fork
+    // base, the draft to switch to) are equally required, and a tool that adds
+    // or drops the input later moves this with it.
+    const requiresBranch = ((inputs as { required?: string[] }).required ?? []).includes('branch');
     const def = toolDef({
       name: spec.name,
       description: spec.description,
       path,
-      inputs: spec.skipBranch ? spec.inputs : withBranchInput(spec.inputs),
+      inputs,
       outputs: spec.outputs,
       tags: spec.write ? ['workflow', 'write'] : ['workflow'],
     });
@@ -153,18 +182,42 @@ export function registerWorkflowTools(
       path.slice('/api'.length),
       toolAuth,
       ...(spec.internalOnly ? [requireInternalSource] : []),
-      toolHandler(spec.handler, { write: spec.write }),
+      // Every path input becomes a repository path here, once, through the one
+      // normaliser: the root-anchored `/<kbDirName>/…` form names the same
+      // workspace path, and a path with no prefix is placed under
+      // `<kbDirName>/` rather than refused.
+      toolHandler(
+        (args, ctx) => {
+          // These tools hand `branch` STRAIGHT to `workspaceIdForBranch` —
+          // they address a workspace by id rather than going through
+          // `getFilesystem`, so the choke point that guards the file tools
+          // never sees them. Without this, a branch-less `commit_change`
+          // commits to a workspace id literally named "undefined", and a
+          // branch-less `create_branch` forks from one: it clones a branch of
+          // that name, fails, and answers `There is no branch named undefined.`
+          //
+          // Keyed on whether the SCHEMA requires `branch`, not on whether the
+          // input was injected. `create_branch` and `switch_branch` declare
+          // their own required `branch`; a check keyed on the injection skipped
+          // exactly those two, which is how the reported bug survived on
+          // `create_branch` — the one tool whose `branch` is a branch the
+          // caller must already have.
+          if (requiresBranch) assertBranchProvided(args.branch);
+          return spec.handler(normalizePathArgs(args, kbDirName), ctx);
+        },
+        { write: spec.write },
+      ),
     );
   };
 
-  // A workspace for a repo-global op (branch listing, change-request reads /
-  // merges) that doesn't act on any one draft. All clones share one origin, so
-  // any existing one is equivalent — reusing a clone already on disk avoids
+  // A workspace for a repo-global op (branch listing, change-request reads)
+  // that doesn't act on any one draft. All clones share one origin, so any
+  // existing one is equivalent — reusing a clone already on disk avoids
   // cloning a branch (or failing when the default branch isn't on the remote)
   // just to run a global op. Falls back to the default branch on a cold start
   // with no workspaces yet.
   const repoGlobalWorkspaceId = async (ctx: ToolContext): Promise<string> =>
-    (await ctx.workspaceService.findAnyWorkspaceId()) ?? workspaceIdForBranch(DEFAULT_BRANCH);
+    (await ctx.workspaceService.findAnyWorkspaceId()) ?? kb.defaultWorkspaceId();
 
   mount({
     name: 'list_branches',
@@ -228,7 +281,7 @@ export function registerWorkflowTools(
         path: {
           type: 'string',
           minLength: 1,
-          description: `Workspace-relative path, as write_file expects: starts with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`).`,
+          description: `Workspace-relative path, as write_file expects: under \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash — a path without that prefix is placed under \`${kbDirName}/\`, so it names the same file.`,
         },
       },
       required: ['path'],
@@ -248,9 +301,9 @@ export function registerWorkflowTools(
       const path = args.path as string;
       const branch = args.branch as string;
       // This tool commits whatever is on disk at `path` through the lock
-      // protocol, bypassing the locking filesystem's own guard. A path without
-      // the clone-folder prefix names a file git can never see: refuse it
-      // before a lock is taken, with the same corrected-path message.
+      // protocol, bypassing the locking filesystem's own guard. The normaliser
+      // above has already placed the path inside the clone; this is the check
+      // that what came out is really in there, before a lock is taken.
       if (typeof path !== 'string' || path.length === 0) {
         throw new ToolError('`path` is required and must be a non-empty string.', 400);
       }
@@ -287,7 +340,7 @@ export function registerWorkflowTools(
     name: 'create_branch',
     description:
       'Create a new unprotected draft named `name`, forked from the existing branch `branch`. The ' +
-      `backend rejects protected names (${protectedInline()}) and filesystem-invalid names — surface ` +
+      `backend rejects protected names (${protectedInline(kb)}) and filesystem-invalid names — surface ` +
       'those errors verbatim. Convention: `<email-localpart>/<kebab-slug>`. Does NOT switch the ' +
       'agent onto the new draft.',
     // `branch` here is the fork BASE — its own meaning — so skip the generic
@@ -312,6 +365,17 @@ export function registerWorkflowTools(
     handler: async (args, ctx: ToolContext) => {
       const name = args.name as string;
       const base = args.branch as string;
+      // `name` is declared required too, and the same-name refusal below quotes
+      // it. With nothing enforcing it, a call that named neither input compared
+      // undefined to undefined, matched, and answered "not 'undefined', the
+      // draft being created" — an absent value presented as a draft name, the
+      // very sentence this ticket exists to stop. Refused by name instead,
+      // without echoing what was not sent.
+      if (typeof name !== 'string' || name.length === 0) {
+        throw new ToolError('`name` is required: pass the name of the draft to create.', 400, {
+          kind: 'name-required',
+        });
+      }
       // The git op runs in the base's workspace, whose clone has the base
       // checked out — the new draft forks from its HEAD. Resolving a workspace
       // lazily clones its branch from origin, so a `branch` naming the
@@ -334,12 +398,13 @@ export function registerWorkflowTools(
     description:
       'Open a change request from a draft branch into a target branch. Auto-merges the latest target ' +
       'into the source first, pushes, then creates the CR. On conflicts returns a ' +
-      '`change-request-conflicts` error with affected paths. The author marker is injected server-side.',
+      '`change-request-conflicts` error with affected paths. The author marker is injected server-side. ' +
+      'An agent proposes; a person reviews and merges the request in the app — hand the user its `url`.',
     inputs: {
       type: 'object',
       properties: {
         sourceBranch: { type: 'string', minLength: 1, description: 'The draft branch carrying the changes.' },
-        targetBranch: { type: 'string', minLength: 1, description: `The branch to apply to (e.g. '${DEFAULT_BRANCH}').` },
+        targetBranch: { type: 'string', minLength: 1, description: `The branch to apply to (e.g. '${kb.defaultBranch}').` },
         title: { type: 'string', minLength: 1, maxLength: 256, description: 'Short imperative title (≤256 chars).' },
         description: { type: 'string', description: 'Optional markdown body shown verbatim to reviewers.' },
       },
@@ -376,7 +441,7 @@ export function registerWorkflowTools(
       properties: {
         number: { type: 'integer', minimum: 1, description: 'Change request number.' },
         body: { type: 'string', minLength: 1, description: 'Comment body (Markdown).' },
-        path: { type: 'string', description: 'Workspace-relative path for a file-level/inline comment.' },
+        path: { type: 'string', description: `Repository-relative path of the changed file for a file-level/inline comment (e.g. \`KnowledgeBase/Foo.md\`); the workspace form \`${kbDirName}/KnowledgeBase/Foo.md\`, with or without a leading slash, names the same file.` },
         line: { type: 'integer', minimum: 1, description: 'Line number for an inline comment. Requires `path`.' },
         parentId: { type: 'string', description: 'Comment id to reply to.' },
       },
@@ -385,8 +450,11 @@ export function registerWorkflowTools(
     },
     outputs: {
       type: 'object',
-      properties: { comment: { ...commentSchema, description: 'The posted review comment.' } },
-      required: ['comment'],
+      properties: {
+        comment: { ...commentSchema, description: 'The posted review comment.' },
+        changeRequest: { ...changeRequestLinkSchema, description: 'The change request commented on.' },
+      },
+      required: ['comment', 'changeRequest'],
     },
     write: true,
     // Keyed by change-request number, not a draft — the workspace is only a
@@ -396,7 +464,10 @@ export function registerWorkflowTools(
     handler: async (args, ctx: ToolContext) => {
       const number = args.number as number;
       const line = typeof args.line === 'number' ? args.line : undefined;
-      const path = typeof args.path === 'string' ? args.path : undefined;
+      // A change request's files are repository-relative; the workspace form
+      // Copy path gives (`/<kbDirName>/…`, its slash already dropped by the
+      // mount) carries the clone folder, which no changed file would match.
+      const path = typeof args.path === 'string' ? stripKbDir(args.path, kbDirName) : undefined;
       if (line !== undefined && !path) {        throw new ToolError('`path` is required when `line` is provided (inline comments anchor to a file).', 400);
       }
       const detail = await ctx.workflowService.getChangeRequestDetail(number, {
@@ -412,58 +483,64 @@ export function registerWorkflowTools(
         { body: args.body as string, path, line, parentId: typeof args.parentId === 'string' ? args.parentId : undefined },
         detail.headSha,
       );
-      return { comment };
+      return { comment, changeRequest: linkOf(detail) };
     },
   });
 
   mount({
-    name: 'merge_change_request',
+    name: 'merge_branch',
     description:
-      'Merge a change request into its target branch. Returns `merged` or ' +
-      '`conflicts-need-resolution`. Hard blocks (closed, no files, missing approvals) raise an error. ' +
-      '`bypass: true` proceeds despite soft warnings (admin only).',
+      'Merge branch `source` into branch `target` as you, and publish `target`. An agent proposes and syncs; ' +
+      'a person merges: this tool never lands a change request. It refuses when a change request from `source` ' +
+      'into `target` is open (naming it) — ask the user to review that request in the app instead. It refuses ' +
+      'when `target` is a protected branch unless you could commit every changed file directly to it. ' +
+      'SYNC: merging the target into your draft (`source` = the change request\'s target, `target` = your draft) ' +
+      'is always allowed, even with that draft\'s request open — use it to bring a draft up to date. ' +
+      'Returns `merged` with the merge commit, or `conflicts-need-resolution` with the conflicting paths ' +
+      '(nothing is written; resolve them on `source` and merge again).',
+    // Names both branches itself; the merge runs in `target`'s workspace.
+    skipBranch: true,
     inputs: {
       type: 'object',
       properties: {
-        number: { type: 'integer', minimum: 1, description: 'Change request number.' },
-        bypass: { type: 'boolean', description: 'Proceed despite missing owner approvals on .md files (admin only).' },
+        source: { type: 'string', minLength: 1, description: 'The branch whose commits are merged in.' },
+        target: { type: 'string', minLength: 1, description: 'The branch that receives the merge.' },
       },
-      required: ['number'],
+      required: ['source', 'target'],
       additionalProperties: false,
     },
     outputs: {
       type: 'object',
-      properties: { outcome: mergeOutcomeSchema },
+      properties: {
+        outcome: {
+          type: 'object',
+          description: 'Either a completed merge or a signal that conflicts must be resolved first.',
+          properties: {
+            kind: { type: 'string', enum: ['merged', 'conflicts-need-resolution'] },
+            sha: { type: 'string', description: 'Present when `kind` is `merged` — the tip of `target` after the merge.' },
+            conflictedPaths: { type: 'array', items: { type: 'string' }, description: 'Present when `kind` is `conflicts-need-resolution`.' },
+          },
+          required: ['kind'],
+        },
+      },
       required: ['outcome'],
     },
     write: true,
-    // Keyed by change-request number, not a draft — the workspace is only a
-    // scratch clone to run the merge in, so resolve any existing one rather than
-    // requiring a `branch`.
-    skipBranch: true,
     handler: async (args, ctx: ToolContext) => {
-      const number = args.number as number;
-      const workspaceId = await repoGlobalWorkspaceId(ctx);
-      const detail = await ctx.workflowService.getChangeRequestDetail(number, {
-        fresh: true,
-        workspaceId,
-        viewerEmail: ctx.user.email,
-      });
-      if (!detail) {        throw new ToolError(`Change request #${number} not found.`, 404);
+      const source = args.source;
+      const target = args.target;
+      if (typeof source !== 'string' || source.length === 0 || typeof target !== 'string' || target.length === 0) {
+        throw new ToolError('`source` and `target` are required branch names.', 400);
       }
-      const outcome = await ctx.workflowService.mergeChangeRequest(
-        number,
-        ctx.user,
-        detail.headSha,
-        detail.approvals,
-        detail.state,
-        detail.title,
-        detail.base,
-        workspaceId,
-        { bypass: args.bypass === true },
-      );
-      return { outcome };
+      return { outcome: await ctx.workflowService.mergeBranch(ctx.user, source, target) };
     },
+  });
+
+  // `merge_change_request` is retired: a change request is merged by a person
+  // in the app. It is in no catalog, but a caller holding an old manual still
+  // posts to its path — answer with who merges now, not a bare 404.
+  router.post('/agent/tools/merge_change_request', toolAuth, (_req, res) => {
+    res.status(410).json({ error: RETIRED_TOOL_MESSAGES.merge_change_request });
   });
 
   mount({

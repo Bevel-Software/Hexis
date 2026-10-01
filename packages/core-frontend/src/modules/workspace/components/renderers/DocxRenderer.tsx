@@ -6,8 +6,9 @@ import { useEffect, useState } from 'react';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error — mammoth ships no .d.ts
 import mammoth from 'mammoth/mammoth.browser.js';
-import { useWorkspace } from '../../state/workspace.context';
+import { useRendererWorkspaceId } from './rendererWorkspace';
 import { authFetch } from '../../../../lib/api';
+import { rawFileUrl } from '../../services/workspace.api';
 import { sanitizeDocxHtml } from './sanitizeDocxHtml';
 import { DownloadFileButton } from './DownloadFileButton';
 import type { FileRendererProps } from './types';
@@ -30,7 +31,7 @@ import type { FileRendererProps } from './types';
  * ignores `onSave` / `onValueChange` / `readOnly`.
  */
 export function DocxRenderer({ filePath }: FileRendererProps) {
-  const { workspaceId } = useWorkspace();
+  const workspaceId = useRendererWorkspaceId();
   const [html, setHtml] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -42,9 +43,7 @@ export function DocxRenderer({ filePath }: FileRendererProps) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await authFetch(
-          `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(filePath)}`,
-        );
+        const res = await authFetch(rawFileUrl(workspaceId, filePath));
         if (cancelled) return;
         if (!res.ok) {
           setError(`Failed to load Word document (HTTP ${res.status})`);

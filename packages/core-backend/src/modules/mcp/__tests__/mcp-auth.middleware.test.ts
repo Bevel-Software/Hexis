@@ -48,6 +48,8 @@ function makeExternalApiKeyService(
 
 function makeOAuthProvider(
   verify?: (t: string) => Promise<{ extra?: Record<string, unknown> }>,
+  /** Whether an agent connection still admits requests — true unless a test says otherwise. */
+  live?: (connectionId: string) => Promise<boolean>,
 ) {
   return {
     looksLikeAccessToken: (t: string) => typeof t === 'string' && t.startsWith('bevel-mcp_'),
@@ -57,6 +59,8 @@ function makeOAuthProvider(
           throw new InvalidTokenError('unknown token');
         }),
     ),
+    isConnectionLive: vi.fn(live ?? (async () => true)),
+    noteConnectionUse: vi.fn(),
   } as unknown as BevelOAuthProvider;
 }
 
@@ -140,20 +144,23 @@ describe('createMcpAuthMiddleware', () => {
     expect((auth as any).verifyToken).not.toHaveBeenCalled();
   });
 
-  it('401s with WWW-Authenticate when a bevel_ token is unknown or revoked', async () => {
+  it('401s a bevel_ token that is unknown or revoked with a plain invalid_token challenge — no resource_metadata', async () => {
     const mw = makeMw({ keys: makeExternalApiKeyService(async () => null) });
     const { req, res, next, setHeader, status, json } = makeReqRes('Bearer bevel_revoked');
 
     await mw(req, res, next);
 
+    // A caller who configured a key is not invited into a browser sign-in:
+    // signing in does not repair the key.
+    expect(setHeader).toHaveBeenCalledTimes(1);
     expect(setHeader).toHaveBeenCalledWith(
       'WWW-Authenticate',
-      expect.stringContaining('Bearer'),
+      'Bearer error="invalid_token", error_description="Invalid or revoked connection key"',
     );
     expect(status).toHaveBeenCalledWith(401);
-    expect(json).toHaveBeenCalledWith(
-      expect.objectContaining({ error: expect.stringMatching(/connection key/i) }),
-    );
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid or revoked connection key. Mint a new one in External agent access.',
+    });
     expect(next).not.toHaveBeenCalled();
   });
 
@@ -176,7 +183,7 @@ describe('createMcpAuthMiddleware', () => {
     const auth = makeAuthService();
     const externalApiKeys = makeExternalApiKeyService();
     const oauth = makeOAuthProvider(async () => ({
-      extra: { userId: 'user-5', userEmail: 'eve@example.com' },
+      extra: { userId: 'user-5', userEmail: 'eve@example.com', connectionId: 'conn-5' },
     }));
     const mw = makeMw({ auth, keys: externalApiKeys, oauth });
     const { req, res, next } = makeReqRes('Bearer bevel-mcp_token123');
@@ -185,12 +192,26 @@ describe('createMcpAuthMiddleware', () => {
 
     expect(req.userId).toBe('user-5');
     expect(req.userEmail).toBe('eve@example.com');
-    // OAuth sessions are unmetered like JWT sessions — no connection key id.
+    // OAuth sessions are unmetered like JWT sessions — no connection key id…
     expect(req.externalApiKeyId).toBeUndefined();
+    // …but they ARE attributed to the agent behind the grant, for the Audit log.
+    expect(req.agentConnectionId).toBe('conn-5');
     expect(next).toHaveBeenCalled();
     // Neither the connection-key nor the JWT path may see this token shape.
     expect((externalApiKeys as any).verifyAndLoadToken).not.toHaveBeenCalled();
     expect((auth as any).verifyToken).not.toHaveBeenCalled();
+  });
+
+  it('binds no agent for an OAuth token minted before connections existed, and still admits it', async () => {
+    const oauth = makeOAuthProvider(async () => ({
+      extra: { userId: 'user-5', userEmail: 'eve@example.com', connectionId: null },
+    }));
+    const mw = makeMw({ oauth });
+    const { req, res, next } = makeReqRes('Bearer bevel-mcp_token123');
+    await mw(req, res, next);
+    expect(req.userId).toBe('user-5');
+    expect(req.agentConnectionId).toBeUndefined();
+    expect(next).toHaveBeenCalled();
   });
 
   it('401s with the discovery challenge when the OAuth token is invalid/expired/revoked', async () => {
@@ -273,6 +294,46 @@ describe('createMcpAuthMiddleware', () => {
       expect(next).toHaveBeenCalled();
       expect(req.userId).toBe('user-7');
       expect(req.userEmail).toBe('seven@example.com');
+      // A plain loopback identity names no agent.
+      expect(req.agentConnectionId).toBeUndefined();
+    });
+
+    it('carries the agent connection of an exchanged grant, so the local server stays attributed', async () => {
+      const token = internal.mint({ userId: 'user-7', externalProxy: true, connectionId: 'conn-7' }, 60_000);
+      const auth = makeAuthService();
+      (auth.getUserById as ReturnType<typeof vi.fn>) = vi.fn(async () => ({
+        id: 'user-7',
+        email: 'seven@example.com',
+      }));
+      const oauth = makeOAuthProvider();
+      const mw = makeMw({ internal, auth, oauth });
+      const { req, res, next } = makeReqRes(`Bearer ${token}`);
+      await mw(req, res, next);
+      expect(next).toHaveBeenCalled();
+      expect(req.agentConnectionId).toBe('conn-7');
+      // Every request through the exchanged grant asks whether the
+      // connection still admits one, and counts as a use of it.
+      expect((oauth as any).isConnectionLive).toHaveBeenCalledWith('conn-7');
+      expect((oauth as any).noteConnectionUse).toHaveBeenCalledWith('conn-7');
+    });
+
+    it('401s an exchanged grant whose agent connection was revoked — the token is stateless, the connection is not', async () => {
+      const token = internal.mint({ userId: 'user-7', externalProxy: true, connectionId: 'conn-7' }, 60_000);
+      const auth = makeAuthService();
+      (auth.getUserById as ReturnType<typeof vi.fn>) = vi.fn(async () => ({
+        id: 'user-7',
+        email: 'seven@example.com',
+      }));
+      const oauth = makeOAuthProvider(undefined, async () => false);
+      const mw = makeMw({ internal, auth, oauth });
+      const { req, res, next, status, setHeader } = makeReqRes(`Bearer ${token}`);
+      await mw(req, res, next);
+      expect(next).not.toHaveBeenCalled();
+      expect(status).toHaveBeenCalledWith(401);
+      expect(setHeader).toHaveBeenCalledWith('WWW-Authenticate', expect.stringContaining('resource_metadata'));
+      expect(req.agentConnectionId).toBeUndefined();
+      // A refused request is no use of the connection.
+      expect((oauth as any).noteConnectionUse).not.toHaveBeenCalled();
     });
 
     it('401s an expired internal token', async () => {

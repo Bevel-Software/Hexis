@@ -328,11 +328,11 @@ describe('claudeInstallUrl: the documented install link', () => {
   });
 });
 
-describe('chatgptInstallUrl: the settings pane, since ChatGPT prefills nothing', () => {
-  it('opens ChatGPT’s connector settings over https', () => {
+describe('chatgptInstallUrl: settings itself, since ChatGPT prefills nothing', () => {
+  it('opens ChatGPT’s settings root over https, not a pane it can rename', () => {
     const link = chatgptInstallUrl();
     expect(link.startsWith('https://chatgpt.com/')).toBe(true);
-    expect(link).toContain('settings');
+    expect(link).toBe('https://chatgpt.com/#settings');
   });
 });
 

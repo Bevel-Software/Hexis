@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -99,7 +100,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await commitFile(repo, 'Knowledge/Foo.md', 'line one\n', 'base');
@@ -121,7 +122,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await commitFile(repo, 'Knowledge/Same.md', 'unchanged\n', 'base');
@@ -143,7 +144,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await commitFile(repo, 'Knowledge/Old.md', 'going away\n', 'base');
@@ -165,7 +166,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await commitFile(repo, 'Knowledge/Seed.md', 'seed\n', 'base');
@@ -207,7 +208,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     const diff = await svc.diffFileBetweenBranches(
@@ -232,7 +233,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await commitFile(repo, 'Knowledge/Foo.md', 'baseline\n', 'base');
@@ -257,7 +258,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await commitFile(repo, 'Knowledge/Foo.md', 'baseline\n', 'base');
@@ -282,7 +283,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await commitFile(repo, 'Knowledge/Seed.md', 'seed\n', 'base');
@@ -305,7 +306,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await commitFile(repo, 'Knowledge/Seed.md', 'seed\n', 'base');
@@ -327,7 +328,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await commitFile(repo, 'Knowledge/Foo.md', 'baseline\n', 'base');
@@ -352,7 +353,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await expect(
@@ -371,7 +372,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await expect(
@@ -389,7 +390,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await expect(
@@ -407,7 +408,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await expect(
@@ -429,7 +430,7 @@ describe('GitService.diffFileBetweenBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     await runGit(repo, ['commit', '--allow-empty', '-m', 'init']);
     const user = { id: 'u', name: 'Test', email: 't@x.com' };

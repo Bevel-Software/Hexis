@@ -4,6 +4,7 @@ import type { GemState } from '../utils/status';
 const TONE: Record<GemState, string> = {
   ok: 'bg-ok',
   warn: 'bg-wait-dot',
+  urgent: 'bg-urgent',
   err: 'bg-danger',
 };
 

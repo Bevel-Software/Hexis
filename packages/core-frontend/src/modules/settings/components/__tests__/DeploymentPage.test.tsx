@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
+import { KbInitFailed } from '../../../setup/services/setup.api';
+import { AppRegistryContext, EMPTY_REGISTRY, type AppRegistry } from '../../../../core/registry';
 
 /**
  * The deployment settings page — first-run setup with a permanent address.
@@ -11,6 +13,19 @@ import { AdminContext, type AdminContextValue } from '../../../admin/state/admin
  */
 
 const apiMock = vi.hoisted(() => ({ fetchSetupStatus: vi.fn(), saveSettings: vi.fn() }));
+// The Marketplace section reads the registration state on mount, and the
+// credentials only once its drawer opens — the count is asserted below.
+const facadeMock = vi.hoisted(() => ({
+  fetchGitHubFacade: vi.fn(async () => ({
+    host: 'kb.test', appId: '123456', clientId: 'Iv1.x', clientSecret: 's', webhookSecret: 'w',
+    privateKeyPem: 'p', marketplaceUrl: 'https://kb.test/git/marketplace.git', createdAt: 0, rotatedAt: null,
+  })),
+  rotateGitHubFacade: vi.fn(),
+  fetchMarketplaceRegistration: vi.fn(async () => false),
+  setMarketplaceRegistration: vi.fn(),
+}));
+vi.mock('../../services/github-facade.api', () => facadeMock);
+
 vi.mock('../../../setup/services/setup.api', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   fetchSetupStatus: apiMock.fetchSetupStatus,
@@ -36,18 +51,35 @@ const COMPLETE_STATUS = {
   ],
 };
 
-function renderPage(value: AdminContextValue) {
+function renderPage(value: AdminContextValue, registry: AppRegistry = EMPTY_REGISTRY) {
   return render(
-    <AdminContext.Provider value={value}>
-      <DeploymentPage />
-    </AdminContext.Provider>,
+    <AppRegistryContext.Provider value={registry}>
+      <AdminContext.Provider value={value}>
+        <DeploymentPage />
+      </AdminContext.Provider>
+    </AppRegistryContext.Provider>,
   );
 }
+
+/** What a distribution would put at the foot of the page. */
+function WorkspacePanel() {
+  return <section aria-label="Workspace">Delete this workspace</section>;
+}
+const WITH_PANEL: AppRegistry = { ...EMPTY_REGISTRY, deploymentPanel: WorkspacePanel };
 
 describe('DeploymentPage', () => {
   beforeEach(() => {
     apiMock.fetchSetupStatus.mockReset();
     apiMock.fetchSetupStatus.mockResolvedValue(COMPLETE_STATUS);
+  });
+
+  it('shows whether the single sign-on configuration is verified', async () => {
+    apiMock.fetchSetupStatus.mockResolvedValue({ ...COMPLETE_STATUS, oidcVerification: 'unverified' });
+    renderPage(admin(true));
+    expect(await screen.findByTestId('oidc-verification')).toHaveTextContent(
+      'Unverified — sign in once to confirm',
+    );
+    expect(screen.getByRole('button', { name: 'Test sign-in configuration' })).toBeInTheDocument();
   });
 
   it('shows the setup form to an admin — AFTER setup is complete', async () => {
@@ -63,10 +95,94 @@ describe('DeploymentPage', () => {
     ).toBeInTheDocument();
   });
 
+  /**
+   * The settings host of the Marketplace section: the same section the first
+   * run shows, here without "Optional" (there is nothing to skip past), and
+   * with its credentials still waiting for the drawer.
+   */
+  it('renders the Marketplace section below the form, credentials unfetched until opened', async () => {
+    facadeMock.fetchGitHubFacade.mockClear();
+    renderPage(admin(true));
+    const section = await screen.findByTestId('marketplace-deployment-section');
+    expect(section).toHaveAttribute('id', 'marketplace');
+    expect(screen.getByRole('heading', { name: 'Marketplace' })).toBeInTheDocument();
+    expect(screen.getByText('Register this deployment with your Claude organization')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Skip for now' })).toBeNull();
+    // After the settings fields, and BEFORE "Save and continue": the button is
+    // the last thing on the page, so a reader meets this section before the
+    // control that leaves the screen. The button is tied to the form it sits
+    // outside of by `form=`.
+    const save = screen.getByRole('button', { name: 'Save and continue' });
+    expect(save.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    expect(save).toHaveAttribute('form', 'setup-settings-form');
+    expect(await screen.findByRole('button', { name: 'Mark as registered' })).toBeInTheDocument();
+    expect(facadeMock.fetchGitHubFacade).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The distribution's slot: what a deployment is beyond its settings (a
+   * hosted workspace's plan, its deletion) is not core's to know, so the page
+   * gives it a place and nothing more.
+   */
+  it('renders the distribution panel last on the page, after the form and its save button', async () => {
+    renderPage(admin(true), WITH_PANEL);
+    const panel = await screen.findByRole('region', { name: 'Workspace' });
+    const save = await screen.findByRole('button', { name: 'Save and continue' });
+    expect(save.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByTestId('deployment-panel')).toContainElement(panel);
+  });
+
+  it('keeps the distribution panel when the settings cannot be loaded', async () => {
+    apiMock.fetchSetupStatus.mockRejectedValueOnce(new Error('down'));
+    renderPage(admin(true), WITH_PANEL);
+    expect(await screen.findByText(/Couldn't load the deployment settings/)).toBeInTheDocument();
+    // A way out of the deployment must not depend on its settings being readable.
+    expect(screen.getByRole('region', { name: 'Workspace' })).toBeInTheDocument();
+  });
+
+  it('shows the distribution panel to admins only, and nothing in its place without one', async () => {
+    renderPage(admin(false), WITH_PANEL);
+    expect(screen.getByText(/Admins only/)).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Workspace' })).toBeNull();
+    expect(screen.queryByTestId('deployment-panel')).toBeNull();
+  });
+
+  it('ends with the form when no distribution panel is registered', async () => {
+    renderPage(admin(true));
+    await screen.findByText('Provider address');
+    expect(screen.queryByTestId('deployment-panel')).toBeNull();
+  });
+
+  /**
+   * The other direction of the same independence: the panel is code core did
+   * not write, and a throw in it must cost the panel's own place, not the
+   * form an admin came here to use.
+   */
+  it('keeps the settings form when the distribution panel throws, and says so in its place', async () => {
+    function BrokenPanel(): never {
+      throw new Error('the distribution has a bug');
+    }
+    // React reports a caught render error on the console, and so does the
+    // boundary; both are expected here and neither belongs in the run's output.
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      renderPage(admin(true), { ...EMPTY_REGISTRY, deploymentPanel: BrokenPanel });
+      expect(await screen.findByText('Provider address')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Save and continue' })).toBeInTheDocument();
+      const slot = screen.getByTestId('deployment-panel');
+      expect(slot).toHaveTextContent(/workspace panel couldn.t be shown/);
+      expect(slot).toHaveTextContent(/rest of this page is unaffected/);
+      expect(quiet).toHaveBeenCalled();
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
   it('tells a non-admin this is not theirs, and never fetches the settings', () => {
     renderPage(admin(false));
     expect(screen.getByText(/Admins only/)).toBeInTheDocument();
     expect(screen.queryByText('Provider address')).toBeNull();
+    expect(screen.queryByTestId('marketplace-deployment-section')).toBeNull();
     // Never fetched, not merely never rendered: the page already told them
     // this is not theirs, so a request nothing renders is pure noise.
     expect(apiMock.fetchSetupStatus).not.toHaveBeenCalled();
@@ -94,6 +210,31 @@ describe('DeploymentPage', () => {
     // Still the form, not a blank page: the last good settings render on.
     expect(screen.getByText('Provider address')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+
+  it('an out-of-date status answer cannot bring back a failure a retry cleared', async () => {
+    const WRITE_REFUSED = { kind: 'write-refused' as const, cause: 'Grant the token push access, then retry.' };
+    const FAILED = { ...COMPLETE_STATUS, complete: false, kbInit: WRITE_REFUSED };
+    apiMock.fetchSetupStatus.mockResolvedValueOnce(FAILED);
+    renderPage(admin(true));
+    await screen.findByTestId('kb-init-failure');
+
+    // The refresh after a failed save is slow to answer…
+    let answerStale!: (s: unknown) => void;
+    apiMock.fetchSetupStatus.mockReturnValueOnce(new Promise((r) => (answerStale = r)));
+    apiMock.saveSettings.mockRejectedValueOnce(new KbInitFailed(WRITE_REFUSED));
+    fireEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+    await waitFor(() => expect(apiMock.fetchSetupStatus).toHaveBeenCalledTimes(2));
+
+    // …a retry succeeds meanwhile, and its refresh answers first.
+    apiMock.fetchSetupStatus.mockResolvedValueOnce(COMPLETE_STATUS);
+    apiMock.saveSettings.mockResolvedValueOnce({ ...COMPLETE_STATUS, restartRequired: false });
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry initialization' }));
+    await waitFor(() => expect(apiMock.fetchSetupStatus).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.queryByTestId('kb-init-failure')).toBeNull());
+
+    await act(async () => answerStale(FAILED));
+    expect(screen.queryByTestId('kb-init-failure')).toBeNull();
   });
 
   it('offers a retry when the status cannot be loaded, and the retry fetches again', async () => {

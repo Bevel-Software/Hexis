@@ -12,7 +12,7 @@ import type { Database } from '../../../database/connection.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { GitService } from '../../git/git.service.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
-import { hashEmail as hash } from '../../../../shared/hash-email.js';
+import { hashEmail as hash } from '../../../../shared/email-identity.js';
 import { AccessUnreadableError } from '../../../access-model/access-errors.js';
 
 function file(overrides: Partial<PullRequestFile>): PullRequestFile {
@@ -234,6 +234,19 @@ describe('ReviewWorkflowService.getApprovalStates', () => {
     expect(states[0].eligibleApprovers.roles).toEqual([]);
     expect(states[0].eligibleApprovers.users).toEqual([]);
     expect(states[0].isApproved).toBe(false);
+    // Empty because it could not be resolved — not because nobody may write.
+    expect(states[0].eligibilityResolved).toBe(false);
+  });
+
+  it('a failed eligibility lookup is marked unresolved, not "outside the gate"', async () => {
+    const svc = makeService([], {});
+    const access = (svc as unknown as { accessControl: IAccessControl }).accessControl;
+    access.eligibleWritersForPathsAtRef = async () => {
+      throw new Error('git show timed out');
+    };
+    const states = await svc.getApprovalStates(1, [file({ path: 'Knowledge/Foo.md' })], HEAD, BASE, null, 'ws-1');
+    expect(states[0].eligibleApprovers.roles).toEqual([]);
+    expect(states[0].eligibilityResolved).toBe(false);
   });
 
   it('marks a file approved when an eligible approver has a non-stale approval', async () => {
@@ -358,6 +371,35 @@ describe('ReviewWorkflowService.getApprovalStates', () => {
     expect(states[0].eligibleApprovers.roles).toEqual([]);
     expect(states[0].eligibleApprovers.users).toEqual([]);
     expect(states[0].isApproved).toBe(false);
+    expect(states[0].inMergeGate).toBe(false);
+    // The tree answered: nobody may write it, so it truly is outside the gate.
+    expect(states[0].eligibilityResolved).toBe(true);
+  });
+
+  it('stamps each file with the gate\'s own relevance verdict', async () => {
+    const svc = makeService([], {
+      'Knowledge/Foo.md': ALICE_ELIGIBLE,
+      'assets/shot.png': ALICE_ELIGIBLE,
+      'roles.yaml': ALICE_ELIGIBLE,
+      'Knowledge/Ops/Makefile': ALICE_ELIGIBLE,
+    });
+    const states = await svc.getApprovalStates(
+      1,
+      [
+        file({ path: 'Knowledge/Foo.md' }),
+        file({ path: 'assets/shot.png', isBinary: true }),
+        file({ path: 'roles.yaml' }),
+        file({ path: 'Knowledge/Ops/Makefile' }),
+        file({ path: 'assets/unowned.bin', isBinary: true }),
+      ],
+      HEAD,
+      BASE,
+      null,
+      'ws-1',
+    );
+    // Every file with an eligible approver binds the gate, whatever its type;
+    // a file nobody can approve does not.
+    expect(states.map((s) => s.inMergeGate)).toEqual([true, true, true, true, false]);
   });
 
   it('flags self-approval via the authorId hash marker', async () => {
@@ -556,6 +598,143 @@ describe('mergePr — roles.yaml privilege-escalation guard', () => {
     // Assert the authorization gate actually let the merge through: the local
     // merge was invoked (not just that no auth error was thrown).
     expect(mergeChangeRequestMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * The gate is extension-blind. Driven through the real path — getApprovalStates
+ * → evaluateMergeGate → mergePr — for an extensionless file, a binary file, a
+ * Markdown file and a mix: a missing approval makes the request non-mergeable
+ * and refuses a plain merge, an approval clears it, and an admin bypass merges
+ * past it with the bypassed files recorded in the merge commit body.
+ */
+describe('merge gate — every file type', () => {
+  beforeEach(() => {
+    mergeChangeRequestMock.mockClear();
+  });
+
+  const HEAD = 'head-sha-1';
+  const BASE = 'current-company-state';
+  const ADMIN = { id: 'u-alice', name: 'Alice', email: 'alice@bevel.software' };
+  const OWNER = { id: 'u-olga', name: 'Olga', email: 'olga@bevel.software' };
+  const AUTHOR = { id: 'u-mallory', name: 'Mallory', email: 'mallory@bevel.software' };
+  // Olga owns every Knowledge file; only Alice can write roles.yaml (admin).
+  const OWNED = { roles: ['Finance'], users: [], emails: [OWNER.email] };
+  const ELIGIBILITY = {
+    'roles.yaml': { roles: ['Admin'], users: [], emails: [ADMIN.email] },
+    'Knowledge/Ops/Makefile': OWNED,
+    'Knowledge/Finance/report.pdf': OWNED,
+    'Knowledge/Foo.md': OWNED,
+  };
+
+  const KINDS = {
+    extensionless: [file({ path: 'Knowledge/Ops/Makefile' })],
+    binary: [file({ path: 'Knowledge/Finance/report.pdf', isBinary: true, patch: undefined })],
+    markdown: [file({ path: 'Knowledge/Foo.md' })],
+    mixed: [
+      file({ path: 'Knowledge/Ops/Makefile' }),
+      file({ path: 'Knowledge/Finance/report.pdf', isBinary: true, patch: undefined }),
+      file({ path: 'Knowledge/Foo.md' }),
+    ],
+  } as const;
+
+  function approvalRows(files: readonly PullRequestFile[]): ApprovalRow[] {
+    return files.map((f) => ({
+      prNumber: 1,
+      path: f.path,
+      approverEmail: OWNER.email,
+      approverName: OWNER.name,
+      headSha: HEAD,
+      approvedAt: new Date('2026-09-17T12:00:00Z'),
+    }));
+  }
+
+  for (const [kind, files] of Object.entries(KINDS)) {
+    describe(`${kind} request`, () => {
+      it('without approvals: not mergeable, every file named, plain merge refused', async () => {
+        const svc = makeService([], ELIGIBILITY);
+        const approvals = await svc.getApprovalStates(1, [...files], HEAD, BASE, null, 'ws-1');
+        const gate = svc.evaluateMergeGate({ prNumber: 1, state: 'open', approvals });
+
+        const expected = files.map((f) => `Waiting on approval for ${f.path} from Finance.`);
+        expect(gate.mergeable).toBe(false);
+        expect(gate.reasons).toEqual(expected);
+        expect(gate.warnings).toEqual(expected);
+
+        await expect(
+          svc.mergePr(1, AUTHOR, HEAD, approvals, 'open', 'Update', BASE, 'ws-1'),
+        ).rejects.toMatchObject({ name: 'MergeBlockedError' });
+        expect(mergeChangeRequestMock).not.toHaveBeenCalled();
+      });
+
+      it('with approvals: mergeable, no reasons, merges without bypass', async () => {
+        const svc = makeService(approvalRows(files), ELIGIBILITY);
+        const approvals = await svc.getApprovalStates(1, [...files], HEAD, BASE, null, 'ws-1');
+        const gate = svc.evaluateMergeGate({ prNumber: 1, state: 'open', approvals });
+        expect(gate).toEqual({ mergeable: true, reasons: [], warnings: [] });
+
+        await svc.mergePr(1, AUTHOR, HEAD, approvals, 'open', 'Update', BASE, 'ws-1');
+        expect(mergeChangeRequestMock).toHaveBeenCalledTimes(1);
+        const [, , , message] = mergeChangeRequestMock.mock.calls[0] as unknown as [
+          string, string, string, { subject: string; body: string },
+        ];
+        expect(message.body).not.toMatch(/bypassed/);
+      });
+
+      it('with the bypass: an admin merges past the missing approvals, recorded in the commit', async () => {
+        const svc = makeService([], ELIGIBILITY);
+        const approvals = await svc.getApprovalStates(1, [...files], HEAD, BASE, null, 'ws-1');
+
+        await svc.mergePr(1, ADMIN, HEAD, approvals, 'open', 'Update', BASE, 'ws-1', { bypass: true });
+        expect(mergeChangeRequestMock).toHaveBeenCalledTimes(1);
+        const [, , , message] = mergeChangeRequestMock.mock.calls[0] as unknown as [
+          string, string, string, { subject: string; body: string },
+        ];
+        expect(message.body).toContain('Approval requirements bypassed:');
+        for (const f of files) {
+          expect(message.body).toContain(`- Waiting on approval for ${f.path} from Finance.`);
+        }
+      });
+
+      it('with the bypass: a non-admin is refused', async () => {
+        const svc = makeService([], ELIGIBILITY);
+        const approvals = await svc.getApprovalStates(1, [...files], HEAD, BASE, null, 'ws-1');
+
+        await expect(
+          svc.mergePr(1, OWNER, HEAD, approvals, 'open', 'Update', BASE, 'ws-1', { bypass: true }),
+        ).rejects.toMatchObject({ name: 'BypassAuthError' });
+        expect(mergeChangeRequestMock).not.toHaveBeenCalled();
+      });
+    });
+  }
+
+  it('a partly approved mix names only the unapproved files, and bypass records only those', async () => {
+    const files = KINDS.mixed;
+    const svc = makeService(approvalRows([files[2]]), ELIGIBILITY);
+    const approvals = await svc.getApprovalStates(1, [...files], HEAD, BASE, null, 'ws-1');
+    const gate = svc.evaluateMergeGate({ prNumber: 1, state: 'open', approvals });
+    expect(gate.mergeable).toBe(false);
+    expect(gate.reasons).toEqual([
+      'Waiting on approval for Knowledge/Ops/Makefile from Finance.',
+      'Waiting on approval for Knowledge/Finance/report.pdf from Finance.',
+    ]);
+
+    await svc.mergePr(1, ADMIN, HEAD, approvals, 'open', 'Update', BASE, 'ws-1', { bypass: true });
+    const [, , , message] = mergeChangeRequestMock.mock.calls[0] as unknown as [
+      string, string, string, { subject: string; body: string },
+    ];
+    expect(message.body).toContain('- Waiting on approval for Knowledge/Ops/Makefile from Finance.');
+    expect(message.body).toContain('- Waiting on approval for Knowledge/Finance/report.pdf from Finance.');
+    expect(message.body).not.toContain('Knowledge/Foo.md');
+  });
+
+  it('bypass never overrides a hard block, whatever the file type', async () => {
+    const svc = makeService([], ELIGIBILITY);
+    const approvals = await svc.getApprovalStates(1, [...KINDS.binary], HEAD, BASE, null, 'ws-1');
+    await expect(
+      svc.mergePr(1, ADMIN, HEAD, approvals, 'closed', 'Update', BASE, 'ws-1', { bypass: true }),
+    ).rejects.toMatchObject({ name: 'MergeBlockedError', message: 'Merge gate rejected: This pull request is closed.' });
+    expect(mergeChangeRequestMock).not.toHaveBeenCalled();
   });
 });
 

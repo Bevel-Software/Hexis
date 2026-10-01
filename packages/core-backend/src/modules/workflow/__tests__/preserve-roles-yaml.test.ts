@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -13,6 +14,7 @@ import { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowService } from '../workflow.service.js';
 import type { Database } from '../../database/connection.js';
 import { RolesYamlPreservationError } from '../../../shared/domain-errors.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
 /**
  * Focused tests for the roles.yaml-preservation guard inside
@@ -80,7 +82,7 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
 
     const git = {
       fetch: vi.fn().mockResolvedValue(undefined),
-      pull: vi.fn().mockResolvedValue(undefined),
+      pull: vi.fn().mockResolvedValue({ treeChanged: true }),
       // Resolve roles.yaml at origin/<ref> from the per-test content.
       readFileAtRef: vi.fn(async (_ws: string, ref: string) =>
         ref === `origin/${BASE}` ? opts.baseRoles : ref === `origin/${HEAD}` ? opts.headRoles : null,
@@ -119,7 +121,8 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
       {} as unknown as Database,
       git, prs, reviewWorkflow, workspaceService, ac,
       fileLocks, {} as unknown as PendingCommitsService,
-      KB_DIR,
+      testKbContext({ kbDirName: KB_DIR }),
+      openChangeGate(),
     );
     // Conflicts are now surfaced by the local merge inside `reviewWorkflow.mergePr`
     // (mocked to resolve here), so there's no provider "mergeable" pre-check to stub.

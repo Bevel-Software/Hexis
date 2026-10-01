@@ -33,6 +33,17 @@ export function initColumnCrypto(secretsEncKey: string): void {
   columnCrypto = new TokenCrypto(columnKey.toString('base64'));
 }
 
+/**
+ * Whether {@link initColumnCrypto} has run. The composition root refuses to
+ * build a graph before it has: a process that serves several knowledge bases
+ * installs ONE column key for all of them (see `tenancy/tenant-host.ts`), and
+ * a graph built without any key would seal nothing and read every sealed row
+ * as its blob.
+ */
+export function isColumnCryptoInitialised(): boolean {
+  return columnCrypto !== null;
+}
+
 function requireCrypto(): TokenCrypto {
   if (!columnCrypto) {
     throw new Error(

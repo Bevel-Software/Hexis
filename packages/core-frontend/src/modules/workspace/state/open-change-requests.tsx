@@ -5,7 +5,12 @@ import {
   listOpenChangeRequests,
 } from '../../change-requests/services/change-requests.api';
 import { useWorkspace } from './workspace.context';
-import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../core/events';
+import {
+  PR_STALE_FALLBACK_MS,
+  SUGGESTIONS_OPTIMISTIC_EVENT,
+  SUGGESTIONS_RETRACTED_EVENT,
+  subscribePrStale,
+} from '../../../core/events';
 import {
   NO_CHANGE_REQUESTS,
   OpenChangeRequestsContext,
@@ -62,10 +67,45 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
    * moment it exists.
    */
   const [announced, setAnnounced] = useState<{ cr: PullRequestSummary; at: number }[]>([]);
+  /**
+   * The other direction: folders whose proposed files the client just took
+   * out of every request (a folder delete). Paths under one are hidden until
+   * BOTH lists have answered from a fetch that started after the retraction —
+   * `answeredFrom` holds each list's latest answered start. Ordered by a
+   * counter, not the clock: the retraction and its refetch happen in the same
+   * tick, and two equal `Date.now()` stamps would keep the folder hidden
+   * after the refetch answered. (The server has finished removing the files
+   * before the event fires, so any fetch that starts later is the truth.) A
+   * failed fetch answers too: it empties its list, so nothing stale is left
+   * to hide, and a token that outlived its refetch would hide proposals made
+   * under the folder later.
+   */
+  const [retracted, setRetracted] = useState<{ prefix: string; at: number }[]>([]);
+  const [answeredFrom, setAnsweredFrom] = useState({ all: 0, mine: 0 });
 
   useEffect(() => {
     let cancelled = false;
+    /** Strictly increasing order of retractions and fetch starts. */
+    let order = 0;
+    /**
+     * The latest fetch start each list has applied. Loads overlap — the
+     * fallback poll, a stale event, a tab coming back into view, a
+     * retraction — and an answer from an older fetch that lands after a newer
+     * one is dropped: it would put an applied request's markers back in the
+     * tree, or predate a retraction whose hide token the newer answer already
+     * lifted and bring the removed proposals back. Per list, since the two
+     * requests settle apart.
+     */
+    const applied = { all: 0, mine: 0 };
+    const supersedes = (list: 'all' | 'mine', startedOrder: number) => {
+      if (cancelled || startedOrder < applied[list]) return false;
+      applied[list] = startedOrder;
+      return true;
+    };
+    const answer = (list: 'all' | 'mine', startedOrder: number) =>
+      setAnsweredFrom((prev) => ({ ...prev, [list]: Math.max(prev[list], startedOrder) }));
     const load = (opts: { fresh?: boolean } = {}) => {
+      const startedOrder = ++order;
       // When THIS fetch left the building — only a fetch that STARTED after
       // an announcement may declare its request gone. The announce and the
       // stale event fire in the same tick, so a same-tick fresh fetch can
@@ -74,19 +114,24 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
       const startedAt = Date.now();
       listOpenChangeRequests(opts)
         .then((data) => {
-          if (!cancelled) setRequests(data);
+          if (!supersedes('all', startedOrder)) return;
+          setRequests(data);
+          answer('all', startedOrder);
         })
         .catch((err) => {
           // A queue that cannot load is not an error state on a page about a
           // document. The dots and the banner simply do not appear.
           console.warn('[OpenChangeRequests] load failed:', err);
-          if (!cancelled) setRequests([]);
+          if (!supersedes('all', startedOrder)) return;
+          setRequests([]);
+          answer('all', startedOrder);
         });
       listMyChangeRequests(opts)
         .then((data) => {
-          if (cancelled) return;
+          if (!supersedes('mine', startedOrder)) return;
           const open = data.filter((c) => c.state === 'open');
           setMine(open);
+          answer('mine', startedOrder);
           // Reconcile: an announced entry whose every path the real list now
           // carries has been overtaken; one whose request is GONE (declined,
           // merged, withdrawn elsewhere) must not haunt the tree either — but
@@ -104,7 +149,9 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
         .catch((err) => {
           // Same degradation contract: no suggestion rows, not an error page.
           console.warn('[OpenChangeRequests] mine load failed:', err);
-          if (!cancelled) setMine([]);
+          if (!supersedes('mine', startedOrder)) return;
+          setMine([]);
+          answer('mine', startedOrder);
         });
     };
     load();
@@ -114,8 +161,23 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     // the event fires because the sender KNOWS the list changed, and a cached
     // answer would hide exactly the change it is announcing (the suggestion
     // rows for a just-uploaded file would sit invisible until the TTL).
-    const onStale = () => load({ fresh: true });
-    window.addEventListener(PR_STALE_EVENT, onStale);
+    // Coalesced: one action can raise the event more than once (see
+    // `subscribePrStale`), and each used to be its own fresh request.
+    const offStale = subscribePrStale(() => load({ fresh: true }));
+    // The fallback for a stale event that never came. Stale events now follow
+    // the bus's merge / reject / apply-failed broadcasts, so a dropped bus
+    // event would otherwise leave an applied request's markers in this tree
+    // until a reload. Cached reads (a merge, a recorded refusal and a cleared
+    // one all evict the server's list cache, so the first read after any of
+    // them is already true), and only while visible — a
+    // hidden tab catches up the moment it is shown instead.
+    const reconcile = setInterval(() => {
+      if (!document.hidden) load();
+    }, PR_STALE_FALLBACK_MS);
+    const onVisible = () => {
+      if (!document.hidden) load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     const onAnnounce = (e: Event) => {
       const cr = (e as CustomEvent<PullRequestSummary>).detail;
       if (!cr || typeof cr.number !== 'number') return;
@@ -125,18 +187,44 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
       ]);
     };
     window.addEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
+    const onRetract = (e: Event) => {
+      const folder = (e as CustomEvent<{ folder?: unknown }>).detail?.folder;
+      if (typeof folder !== 'string' || !folder) return;
+      const prefix = `${folder.replace(/\/+$/, '')}/`;
+      const at = ++order;
+      setRetracted((prev) => [...prev.filter((r) => r.prefix !== prefix), { prefix, at }]);
+      // An announced proposal under the folder is gone too.
+      setAnnounced((prev) =>
+        prev.map((a) => ({
+          ...a,
+          cr: { ...a.cr, touchedNodePaths: a.cr.touchedNodePaths.filter((p) => !p.startsWith(prefix)) },
+        })),
+      );
+      load({ fresh: true });
+    };
+    window.addEventListener(SUGGESTIONS_RETRACTED_EVENT, onRetract);
     return () => {
       cancelled = true;
-      window.removeEventListener(PR_STALE_EVENT, onStale);
+      clearInterval(reconcile);
+      document.removeEventListener('visibilitychange', onVisible);
+      offStale();
       window.removeEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
+      window.removeEventListener(SUGGESTIONS_RETRACTED_EVENT, onRetract);
     };
   }, []);
 
   const value = useMemo<OpenChangeRequests>(() => {
     if (!kbDirName) return NO_CHANGE_REQUESTS;
+    // A retraction stays in force until both lists answered from after it.
+    const answered = Math.min(answeredFrom.all, answeredFrom.mine);
+    const hidden = retracted.filter((r) => r.at > answered).map((r) => r.prefix);
+    const touched = (pr: PullRequestSummary) =>
+      hidden.length === 0
+        ? pr.touchedNodePaths
+        : pr.touchedNodePaths.filter((p) => !hidden.some((prefix) => p.startsWith(prefix)));
     const byPath = new Map<string, PullRequestSummary[]>();
     for (const pr of requests) {
-      for (const repoRelative of pr.touchedNodePaths) {
+      for (const repoRelative of touched(pr)) {
         const workspaceRelative = `${kbDirName}/${repoRelative}`;
         const list = byPath.get(workspaceRelative);
         if (list) list.push(pr);
@@ -151,7 +239,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     // fetch) would otherwise produce a row whose click does nothing.
     const announcedCrs = announced.map((a) => a.cr);
     for (const pr of [...mine, ...announcedCrs]) {
-      for (const repoRelative of pr.touchedNodePaths) {
+      for (const repoRelative of touched(pr)) {
         const workspaceRelative = `${kbDirName}/${repoRelative}`;
         const list = byPath.get(workspaceRelative);
         if (!list) byPath.set(workspaceRelative, [pr]);
@@ -164,7 +252,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     // untangle, so the row just links to the older one.
     const minePaths = new Map<string, number>();
     for (const pr of [...mine, ...announcedCrs]) {
-      for (const repoRelative of pr.touchedNodePaths) {
+      for (const repoRelative of touched(pr)) {
         const workspaceRelative = `${kbDirName}/${repoRelative}`;
         if (!minePaths.has(workspaceRelative)) minePaths.set(workspaceRelative, pr.number);
       }
@@ -175,7 +263,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
       minePaths,
       mineNumbers: new Set([...mine, ...announcedCrs].map((pr) => pr.number)),
     };
-  }, [requests, mine, announced, kbDirName]);
+  }, [requests, mine, announced, retracted, answeredFrom, kbDirName]);
 
   return (
     <OpenChangeRequestsContext.Provider value={value}>

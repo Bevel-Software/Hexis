@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -130,7 +131,7 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     service = new RolesAdminService(
       workspace,
       workflow.svc,
-      new AccessControlService(workspace as never, KB),
+      new AccessControlService(workspace as never, KB, new NodeFs()),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -214,7 +215,7 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     const svc = new RolesAdminService(
       workspace,
       workflow.svc,
-      new AccessControlService(workspace as never, KB),
+      new AccessControlService(workspace as never, KB, new NodeFs()),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -277,7 +278,7 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     const svc = new RolesAdminService(
       workspace,
       workflow.svc,
-      new AccessControlService(workspace as never, KB),
+      new AccessControlService(workspace as never, KB, new NodeFs()),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -301,7 +302,7 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     const svc = new RolesAdminService(
       workspace,
       workflow.svc,
-      new AccessControlService(workspace as never, KB),
+      new AccessControlService(workspace as never, KB, new NodeFs()),
       KB,
       () => DEFAULT_BRANCH,
     );

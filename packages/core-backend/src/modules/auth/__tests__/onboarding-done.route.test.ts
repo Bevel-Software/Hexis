@@ -142,6 +142,8 @@ describe('POST /auth/onboarding-done', () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('Could not save that');
     expect(body.error).not.toContain(detail);
-    expect(logged).toHaveBeenCalledWith('Onboarding-done error:', detail);
+    // Logged through the port: the console sink prefixes the module tag and
+    // carries the detail as a field, still server-side only.
+    expect(logged).toHaveBeenCalledWith('[auth] Onboarding-done error:', { detail });
   });
 });

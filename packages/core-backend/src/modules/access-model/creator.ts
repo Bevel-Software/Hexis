@@ -10,22 +10,25 @@
 import type { Principal } from './access-splice.js';
 
 /**
- * How a pending creation gets its creator read grant.
- *   - `seed-access-md`: merge the grant into `wsRelPath` (a new directory's
- *     own `access.md`, workspace-relative) — BEFORE or alongside the creation,
- *     via the caller's own lock+commit machinery. The caller MUST re-read the
- *     file's CURRENT text under its lock and write `apply(current)` ('' when
- *     absent), never a precomputed fresh file: two concurrent creators can
- *     both plan a seed for the same new directory, and a blind overwrite
- *     would silently revoke whichever grant landed first. Skip the write when
- *     `apply` returns the input unchanged, and call `noteAccessFileWritten`
- *     after a write so the resolver cache drops.
- *   - `frontmatter`: run the new file's content through `apply` before
- *     writing it, so the grant lands atomically inside the created file.
+ * How a pending creation gets its creator read grant — there is one way:
+ * `seed-access-md` merges the grant into `wsRelPath` (the new top-level
+ * folder's own `access.md`, workspace-relative) BEFORE or alongside the
+ * creation, via the caller's own lock+commit machinery. The caller MUST
+ * re-read the file's CURRENT text under its lock and write `apply(current)`
+ * ('' when absent), never a precomputed fresh file: two concurrent creators
+ * can both plan a seed for the same new directory, and a blind overwrite
+ * would silently revoke whichever grant landed first. Skip the write when
+ * `apply` returns the input unchanged, and call `noteAccessFileWritten`
+ * after a write so the resolver cache drops.
+ *
+ * Kept a union of one so a second plan kind can return without touching the
+ * consumers' `plan?.kind === 'seed-access-md'` reads.
  */
-export type CreationGrantPlan =
-  | { kind: 'seed-access-md'; wsRelPath: string; apply: (current: string) => string }
-  | { kind: 'frontmatter'; apply: (content: string) => string };
+export type CreationGrantPlan = {
+  kind: 'seed-access-md';
+  wsRelPath: string;
+  apply: (current: string) => string;
+};
 
 /** The creator identity a grant is written for. */
 export interface Creator {
@@ -45,12 +48,6 @@ export interface ICreatorAccess {
     wsRelPath: string,
     kind: 'file' | 'dir',
   ): Promise<CreationGrantPlan | null>;
-
-  grantInExtractedFile(
-    workspaceId: string,
-    creator: Creator,
-    wsRelPath: string,
-  ): Promise<string | null>;
 
   noteAccessFileWritten(workspaceId: string): void;
 }

@@ -74,7 +74,7 @@ async function exchange(baseUrl: string, authorization?: string): Promise<Respon
 describe('POST /mcp/local-token', () => {
   it('exchanges a valid OAuth access token for an internal token with the loopback identity + TTL', async () => {
     const oauth = makeOAuthProvider(async () => ({
-      extra: { userId: 'user-5', userEmail: 'eve@example.com' },
+      extra: { userId: 'user-5', userEmail: 'eve@example.com', connectionId: 'conn-9' },
       // A grant with plenty of life left: the loopback constant is the binding cap.
       expiresAt: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
     }));
@@ -88,19 +88,39 @@ describe('POST /mcp/local-token', () => {
     // above outlives it, so the constant is the cap that binds.
     expect(body.expiresInMs).toBe(MCP_LOOPBACK_TOKEN_TTL_MS);
     // The minted token verifies to the resolved user with the externalProxy
-    // flag — identical shape to the hosted session's loopback bearer.
-    expect(internalTokens.verify(body.token)).toEqual({ userId: 'user-5', externalProxy: true });
+    // flag — identical shape to the hosted session's loopback bearer — plus
+    // the grant's agent connection, so the local server's calls stay
+    // attributed to that agent in the Audit log.
+    expect(internalTokens.verify(body.token)).toEqual({
+      userId: 'user-5',
+      externalProxy: true,
+      connectionId: 'conn-9',
+    });
     // …and the tool-auth verifier resolves it to source 'external', exactly
     // how /api/agent/* will treat the local server.
     const verify = createTokenVerifier(
       { looksLikeExternalApiKey: () => false } as unknown as IExternalApiKeyService,
       internalTokens,
     );
+    // …carrying the agent connection, which the REST recorder attributes
+    // the local server's direct tool calls to.
     await expect(verify(body.token)).resolves.toEqual({
       ok: true,
-      auth: { source: 'external', userId: 'user-5', scope: 'write' },
+      auth: { source: 'external', userId: 'user-5', connectionId: 'conn-9', scope: 'write' },
     });
     expect((oauth as any).verifyAccessToken).toHaveBeenCalledWith('bevel-mcp_valid123');
+  });
+
+  it('mints without a connection claim for a grant that carries none (a token from before connections existed)', async () => {
+    const oauth = makeOAuthProvider(async () => ({
+      extra: { userId: 'user-5', userEmail: 'eve@example.com' },
+      expiresAt: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
+    }));
+    const { baseUrl, internalTokens } = await mount(oauth);
+    const res = await exchange(baseUrl, 'Bearer bevel-mcp_valid123');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { token: string };
+    expect(internalTokens.verify(body.token)).toEqual({ userId: 'user-5', externalProxy: true });
   });
 
   /**

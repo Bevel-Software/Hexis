@@ -59,6 +59,16 @@ describe('sanitizeError', () => {
     expect(out.endsWith('…')).toBe(true);
   });
 
+  it('honours a raised cap, and falls back to 200 for a cap that is not a positive whole number', () => {
+    const long = 'x'.repeat(500);
+    expect(sanitizeError(long, { maxLen: 300 })).toHaveLength(300);
+    for (const maxLen of [Number.NaN, Number.POSITIVE_INFINITY, 0, -5, 12.5]) {
+      const out = sanitizeError(long, { maxLen });
+      expect(out).toHaveLength(200);
+      expect(out.endsWith('…')).toBe(true);
+    }
+  });
+
   it('is idempotent on already-sanitised text', () => {
     const once = sanitizeError(new Error('Authorization: Bearer abc; token=def123'));
     const twice = sanitizeError(once);

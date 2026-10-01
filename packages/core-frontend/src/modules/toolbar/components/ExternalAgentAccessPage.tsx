@@ -6,7 +6,8 @@ import { PageShell } from '../../../shared/components/PageShell';
 import { buttonClasses } from '../../../shared/components';
 import { formatRelativeTime } from '../../../lib/utils';
 import {
-  ConnectionInstructions,
+  AssistantConnectionInstructions,
+  OtherAgentConnectionInstructions,
   CopyBlock,
   claudeCodeCommand,
   hexisMcpClaudeCommand,
@@ -17,6 +18,10 @@ import {
   useCopyFeedback,
   workspaceBaseUrl,
 } from '../../../shared/mcp';
+import { CODEX_LOGIN_NOTE, GITHUB_LINK_KIND, marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
+import { AgentInstructionsCard } from './AgentInstructionsCard';
+import { CoworkSetupSteps } from './CoworkSetupSteps';
+import { useAdmin } from '../../admin/state/admin.context';
 import {
   type ExternalApiKeySummary,
   type MintedExternalApiKey,
@@ -38,12 +43,17 @@ function formatRelative(ts: number | null): string {
 
 /**
  * The External agent access page, routed standalone at
- * `/external-agent-access` (below the persistent toolbar), in two tabs:
+ * `/external-agent-access` (below the persistent toolbar), in three tabs:
  *
  *  - "Your agent" (default) — connecting the user's own interactive agent
- *    (Claude Code, Claude Desktop, Cursor…). No key: the agent gets only the
+ *    (Claude, ChatGPT, Claude Code, Cursor…). No key: the agent gets only the
  *    server URL, and on first connect the browser opens our authorization
  *    flow (sign in + choose tools on /connect). Copy-paste configs only.
+ *  - "Marketplaces" — skills as native plugins rather than through the MCP
+ *    server: the git remote Claude Code and Codex install from (with a key
+ *    from the autonomous tab), and the Cowork / claude.ai route, where the
+ *    person connects their Claude account and gets the marketplace compiled
+ *    for what they may read. Their Claude links are listed here.
  *  - "Autonomous agents" — the external-API-key surface for pipelines/CI
  *    that can't open a browser: lists existing keys, mints new ones,
  *    disconnects revoked ones, permanently deletes disconnected ones. The
@@ -73,7 +83,13 @@ export function ExternalAgentAccessPage() {
    */
   const workspaceUrl = workspaceBaseUrl();
 
-  const [tab, setTab] = useState<'agent' | 'autonomous'>('agent');
+  const [tab, setTab] = useState<'agent' | 'marketplace' | 'autonomous'>('agent');
+  // Whether the Cowork drawer is expanded. Only the registration state waits
+  // on it; everything else in the drawer renders either way.
+  const [coworkOpen, setCoworkOpen] = useState(false);
+  // Only the wording of the "not set up yet" notice depends on this; the
+  // tutorial itself is the same for everyone.
+  const { isAdmin } = useAdmin();
   const [keys, setKeys] = useState<ExternalApiKeySummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -160,7 +176,14 @@ export function ExternalAgentAccessPage() {
   // top, never-used ones last among the active), with disconnected keys sunk
   // to the bottom. Non-destructive — nothing is hidden or deleted, just ordered
   // so a long list of stale/test keys doesn't bury the ones in use.
-  const sortedKeys = [...keys].sort((a, b) => {
+  // ONE list from the server, two views of it: live Claude links belong to
+  // the Marketplaces tab (they were minted by a connection, not created
+  // here), everything else — hand-made keys, and Claude links once
+  // disconnected, so they can be deleted — to the autonomous tab. Told
+  // apart by the stored kind, never the label.
+  const isClaudeLink = (k: ExternalApiKeySummary) => k.kind === GITHUB_LINK_KIND;
+  const claudeLinks = keys.filter((k) => isClaudeLink(k) && k.revokedAt === null);
+  const sortedKeys = keys.filter((k) => !isClaudeLink(k) || k.revokedAt !== null).sort((a, b) => {
     const aRevoked = a.revokedAt !== null;
     const bRevoked = b.revokedAt !== null;
     if (aRevoked !== bRevoked) return aRevoked ? 1 : -1;
@@ -169,11 +192,17 @@ export function ExternalAgentAccessPage() {
 
   return (
     <>
-      <PageShell title="External agent access" padded={false}>
-        <div className="flex border-b border-line px-4 shrink-0" role="tablist">
+      <PageShell title="External agent access" padded={false} card={false}>
+        <div className="space-y-4">
+          <section
+            className="bg-white border border-line rounded-lg overflow-hidden"
+            data-testid="agent-connection-section"
+          >
+            <div className="flex border-b border-line px-4 shrink-0" role="tablist">
           {(
             [
               ['agent', 'Your agent'],
+              ['marketplace', 'Marketplaces'],
               ['autonomous', 'Autonomous agents'],
             ] as const
           ).map(([id, name]) => (
@@ -191,28 +220,62 @@ export function ExternalAgentAccessPage() {
               {name}
             </button>
           ))}
-        </div>
+            </div>
 
-        {tab === 'agent' && (
+            {tab === 'agent' && (
           <div className="px-4 py-3 space-y-4">
             <p className="text-xs text-ink-muted leading-snug">
               Pick where your agent runs. Everything it saves appears under your name.
             </p>
-            {/* LOCAL FIRST. The local server is the recommended connection for
-                every agent that can run it — it serves everything the hosted
-                endpoint does PLUS the plugins' local-only tools — so its drawer
-                leads, and the hosted URL follows for the agents that cannot
-                (web assistants, cloud platforms). Two CLOSED drawers, native
-                <details> (the SecretsPage "Advanced" precedent): the choice is
-                the headline, and neither config wall is worth reading until
-                the reader has picked their side of it. */}
+            {/* CLAUDE AND CHATGPT FIRST, and OPEN. They are what most people
+                arriving here already use, and Claude's is the one connection
+                that is a single click — so the page opens on its button and
+                the address to paste, with nothing to expand first. The local
+                server follows for agents that run on your machine (it still
+                serves everything the hosted endpoint does PLUS the plugins'
+                local-only tools), then the configs for everything else. Native
+                <details> (the SecretsPage "Advanced" precedent); the second
+                and third stay closed, because neither config wall is worth
+                reading until the reader has picked their side of it.
+
+                `open` is a default, not controlled state: nothing here waits
+                on it, and a drawer that reopens on a tab switch is the page
+                returning to where it starts. */}
+            <details className="border border-line rounded" open>
+              <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
+                Claude and ChatGPT
+              </summary>
+              <div className="px-3 pb-3 space-y-3">
+                <p className="text-meta text-ink-muted leading-snug">
+                  claude.ai, Claude Desktop and ChatGPT connect to the hosted endpoint. No key
+                  needed: the first time the agent connects, your browser opens so you can sign
+                  in and choose which tools to share with it.
+                </p>
+                <AssistantConnectionInstructions mcpUrl={mcpUrl} />
+                {/* `buttonClasses`, not a hand-rolled class string — the one
+                    button primitive exists because 171 sites once shared 153
+                    variants between them, and its docstring prescribes exactly
+                    this shape for links. */}
+                <Link
+                  to="/connect"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={buttonClasses({ variant: 'outline', size: 'sm', className: 'w-full' })}
+                >
+                  <Wrench size={12} />
+                  Configure your tools
+                  <ExternalLink size={11} className="opacity-60" aria-hidden="true" />
+                </Link>
+              </div>
+            </details>
+
             <details className="border border-line rounded">
               <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
                 Desktop agents: Claude Code, Claude Desktop, Cursor, Windsurf, Cline and similar
               </summary>
               <div className="px-3 pb-3 space-y-2">
                 <p className="text-meta text-ink-muted leading-snug">
-                  Recommended: runs this workspace as a local MCP server (needs Node), so the
+                  Runs this workspace as a local MCP server (needs Node), so the
                   agent gets everything the hosted endpoint serves, plus your plugins'
                   local-only tools — the ones{' '}
                   <span className="font-mono">list_local_tools</span> names. No key needed: the
@@ -227,8 +290,8 @@ export function ExternalAgentAccessPage() {
                   </button>{' '}
                   tab shows that setup.)
                 </p>
-                {/* "(local server)" disambiguates from the hosted drawer's
-                    ConnectionInstructions block, which labels ITS command
+                {/* "(local server)" disambiguates from the "Any other agent"
+                    drawer's hosted block, which labels ITS command
                     "Connect Claude Code" — two identically named blocks on one
                     page with different commands is a paste-the-wrong-one trap. */}
                 <CopyBlock
@@ -248,6 +311,36 @@ export function ExternalAgentAccessPage() {
                   </p>
                   <CopyBlock label={null} value={hexisMcpJsonSnippet(workspaceUrl)} rows={12} />
                 </div>
+                {/* The same note the welcome page's Desktop agents hint carries,
+                    and for the same reason: this is the config a GUI-launched
+                    client reads, and that client was started by the window
+                    server rather than by a login shell, so it never sourced the
+                    profile that put Homebrew's or nvm's `npx` on PATH. The
+                    snippet above stays plain `npx` — it is right for every
+                    client launched from a terminal — and this says what to
+                    substitute in the copy that is not. Both halves of the gap,
+                    because an absolute `npx` is a script whose
+                    `#!/usr/bin/env node` line looks `node` up on that same
+                    PATH; and `where.exe npx`, because this paragraph sits under
+                    "on Windows, prefer the JSON config", `which` is not a
+                    command there, and a bare `where` is PowerShell's alias for
+                    Where-Object. The path it prints holds backslashes, which
+                    JSON needs doubled — said here, since the field is JSON. */}
+                <p className="text-meta text-ink-muted leading-snug">
+                  Needs Node 22.13+ or 24 on the machine. If the client reports that{' '}
+                  <span className="font-mono">npx</span> was not found, it was launched from the
+                  Dock or a desktop icon and cannot see your shell's PATH: run{' '}
+                  <span className="font-mono">which npx</span> in a terminal (
+                  <span className="font-mono">where.exe npx</span> in PowerShell) and use the full
+                  path it prints as the <span className="font-mono">"command"</span> above — on
+                  Windows with each backslash doubled, or with forward slashes, since the field is
+                  JSON. If it then reports{' '}
+                  <span className="font-mono">env: node: No such file or directory</span>, that
+                  same folder holds <span className="font-mono">node</span>: add it to the
+                  config's <span className="font-mono">"env"</span> PATH, in front of the usual
+                  system folders rather than instead of them — the sign-in opens your browser
+                  through those.
+                </p>
               </div>
             </details>
 
@@ -257,28 +350,26 @@ export function ExternalAgentAccessPage() {
               </summary>
               <div className="px-3 pb-3 space-y-3">
                 <p className="text-meta text-ink-muted leading-snug">
-                  claude.ai, ChatGPT and other agents that can't run a process on your machine
-                  connect to the hosted endpoint. No key needed: the first time the agent
-                  connects, your browser opens so you can sign in and choose which tools to
-                  share with it.
+                  Claude Code, cloud platforms and other agents can connect to the same hosted
+                  endpoint, without running anything on your machine. No key needed here
+                  either: your browser opens to sign in the first time.
                 </p>
-                {/* `buttonClasses`, not a hand-rolled class string — the one
-                    button primitive exists because 171 sites once shared 153
-                    variants between them, and its docstring prescribes exactly
-                    this shape for links. */}
-                <Link
-                  to="/connect"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className={buttonClasses({ variant: 'outline', size: 'sm', className: 'w-full' })}
-                >
-                  <Wrench size={12} />
-                  Configure your tools
-                  <ExternalLink size={11} className="opacity-60" aria-hidden="true" />
-                </Link>
-                <ConnectionInstructions mcpUrl={mcpUrl} />
+                <OtherAgentConnectionInstructions mcpUrl={mcpUrl} />
               </div>
             </details>
+
+            <p className="text-meta text-ink-muted leading-snug">
+              Prefer your skills installed as native plugins rather than read through the MCP
+              server? The{' '}
+              <button
+                type="button"
+                onClick={() => setTab('marketplace')}
+                className="underline text-ink-muted hover:text-ink"
+              >
+                Marketplaces
+              </button>{' '}
+              tab has the git remote for Claude Code and Codex, and the Cowork route.
+            </p>
 
             <p className="text-[11px] text-ink-muted leading-snug">
               Running an unattended pipeline or CI agent that can't open a browser? Use the{' '}
@@ -294,7 +385,122 @@ export function ExternalAgentAccessPage() {
           </div>
         )}
 
-        {tab === 'autonomous' && (
+            {tab === 'marketplace' && (
+          <div className="px-4 py-3 space-y-4">
+            <p className="text-xs text-ink-muted leading-snug">
+              Every skill you may read, compiled into a plugin marketplace. One address serves
+              every Claude surface: Claude Code and Codex clone it as a git remote, Cowork and
+              claude.ai fetch it as a repository once your account is connected.
+            </p>
+
+            {/* CONTROLLED, both attributes together. A closed <details> still
+                MOUNTS its children, so the registration state waits on
+                `coworkOpen` and is read again each time the drawer opens.
+                `onToggle` alone is not enough: this subtree unmounts on a tab
+                switch and the fresh <details> comes back closed while the
+                state stayed true. With `open` bound too, the element cannot
+                disagree with the state that gates the read. */}
+            <details
+              className="border border-line rounded"
+              data-testid="cowork-section"
+              open={coworkOpen}
+              onToggle={(e) => setCoworkOpen(e.currentTarget.open)}
+            >
+              <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
+                Cowork and claude.ai
+              </summary>
+              <div className="px-3 pb-3 space-y-3">
+                <CoworkSetupSteps isAdmin={isAdmin} opened={coworkOpen} />
+                <div className="space-y-1">
+                  <div className="text-xs font-medium text-ink">Your Claude connections</div>
+                  {loadError && (
+                    <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">
+                      {loadError}
+                    </div>
+                  )}
+                  {loading ? (
+                    <div className="text-meta text-ink-muted">Loading…</div>
+                  ) : loadError ? null : claudeLinks.length === 0 ? (
+                    <div className="text-meta text-ink-muted">
+                      None yet. One appears here after you connect from Cowork or claude.ai.
+                    </div>
+                  ) : (
+                    <ul className="divide-y divide-line border border-line rounded">
+                      {claudeLinks.map((k) => (
+                        <li key={k.id} className="flex items-center gap-3 px-3 py-2 text-sm">
+                          <div className="flex-1 min-w-0">
+                            <div className="font-medium truncate">{k.label}</div>
+                            <div className="text-meta text-ink-muted">
+                              Connected {formatRelative(k.createdAt)} · Last used {formatRelative(k.lastUsedAt)}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => handleDisconnect(k.id)}
+                            className="text-xs px-2 py-1 rounded text-ink hover:bg-hover border border-line"
+                            title="Disconnect this Claude account. Its marketplace stops updating; connect again from Claude to resume."
+                          >
+                            Disconnect
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            </details>
+
+            <details className="border border-line rounded" data-testid="marketplace-section">
+              <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
+                Claude Code, Codex and the skills CLI
+              </summary>
+              <div className="px-3 pb-3 space-y-3">
+                <p className="text-meta text-ink-muted leading-snug">
+                  These clone the marketplace as a git remote. The URL carries an external API
+                  key from the{' '}
+                  <button
+                    type="button"
+                    onClick={() => setTab('autonomous')}
+                    className="underline text-ink-muted hover:text-ink"
+                  >
+                    Autonomous agents
+                  </button>{' '}
+                  tab — the key dialog there shows these commands filled in.
+                </p>
+                <CopyBlock label="Marketplace git remote" value={marketplaceGitUrl()} rows={2} />
+                <CopyBlock
+                  label="Claude Code (one install, everything you may read)"
+                  value={marketplaceCommands('<external-api-key>').claude}
+                  rows={2}
+                />
+                <CopyBlock
+                  label="Codex"
+                  value={marketplaceCommands('<external-api-key>').codex}
+                  rows={5}
+                />
+                <p className="text-meta text-ink-muted leading-snug">{CODEX_LOGIN_NOTE}</p>
+                <CopyBlock
+                  label="Any other agent, via the skills CLI"
+                  value={marketplaceCommands('<external-api-key>').skills}
+                  rows={2}
+                />
+                <p className="text-meta text-ink-muted leading-snug">
+                  The key stays in the URL: Claude Code refreshes marketplaces in the background
+                  without credential helpers. Revoke the key to cut the agent off. In Claude Code
+                  add it through the CLI or the Claude Code section of the Desktop app's
+                  Customize screen; the Chat and Cowork screens use the route above instead.
+                </p>
+                <p className="text-meta text-ink-muted leading-snug">
+                  Add it through Claude Code: the CLI, or the Claude Code section of the
+                  Desktop app's Customize screen. The Chat and Cowork plugin screens accept
+                  only GitHub, GitLab and Bitbucket remotes and refuse this one as an
+                  unsupported host.
+                </p>
+              </div>
+            </details>
+          </div>
+        )}
+
+            {tab === 'autonomous' && (
           <div className="px-4 py-3 space-y-4">
             <p className="text-xs text-ink-muted leading-snug">
               For autonomous agents and pipelines (CI, scheduled jobs) that can't open a browser to
@@ -343,8 +549,11 @@ export function ExternalAgentAccessPage() {
               )}
               {loading ? (
                 <div className="text-xs text-ink-muted">Loading…</div>
-              ) : keys.length === 0 ? (
-                <div className="text-xs text-ink-muted">No external API keys yet.</div>
+              ) : sortedKeys.length === 0 ? (
+                <div className="text-xs text-ink-muted">
+                  No external API keys yet.
+                  {claudeLinks.length > 0 && ' Your Claude connections are on the Marketplaces tab.'}
+                </div>
               ) : (
                 <ul className="divide-y divide-line border border-line rounded">
                   {sortedKeys.map((k) => {
@@ -365,7 +574,10 @@ export function ExternalAgentAccessPage() {
                           <div className="font-medium truncate">{k.label}</div>
                           <div className="text-[11px] text-ink-muted">
                             Created {formatRelative(k.createdAt)} · Last used {formatRelative(k.lastUsedAt)}
-                            {revoked && ' · Disconnected'}
+                            {/* A key an admin took is not one you can reconnect — say so,
+                                or people try. Your own disconnect keeps its word. */}
+                            {revoked &&
+                              (k.revokedBy === 'admin' ? ' · Revoked by an admin' : ' · Disconnected')}
                           </div>
                           {usage && (
                             <div className="mt-1 max-w-xs">
@@ -412,7 +624,11 @@ export function ExternalAgentAccessPage() {
               )}
             </div>
           </div>
-        )}
+            )}
+          </section>
+
+          <AgentInstructionsCard />
+        </div>
       </PageShell>
 
       <Dialog
@@ -481,89 +697,144 @@ export function ExternalAgentAccessPage() {
                   {copied ? <Check size={14} /> : <Copy size={14} />}
                 </button>
               </div>
-              <div>
-                <div className="text-xs font-medium text-ink mb-1">
-                  Desktop agents — the local server (recommended)
+              {/* Three drawers in the interactive tab's order — the hosted
+                  endpoint Claude and ChatGPT use, then the local server, then
+                  the marketplace — all CLOSED, with the key filled in. The key
+                  is the news here; which config the reader needs is their
+                  call, and five config walls in a row buried the one thing the
+                  dialog exists to hand over. */}
+              <details className="border border-line rounded">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
+                  Claude, ChatGPT and pipelines — the hosted endpoint
+                </summary>
+                <div className="px-3 pb-3 space-y-3">
+                  <div>
+                    <p className="text-meta text-ink-muted mb-1 leading-snug">
+                      The address Claude and ChatGPT connect to — they sign in through the
+                      browser, from the Your agent tab, and need no key. With this key it
+                      serves agents that can't run a process on your machine, and CI where
+                      installing Node is unwanted. Claude Code, via the hosted endpoint:
+                    </p>
+                    <textarea
+                      readOnly
+                      value={claudeCodeCommand(mcpUrl, reveal.plaintext)}
+                      rows={3}
+                      className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                    />
+                  </div>
+                  <div>
+                    <div className="text-xs font-medium text-ink mb-1">Connect Langdock</div>
+                    <ol className="text-meta text-ink-muted mb-1 leading-snug list-decimal pl-4 space-y-0.5">
+                      <li>In Langdock, open your workspace settings and go to MCP servers → Add server.</li>
+                      <li>Choose <span className="font-medium">HTTP</span> (Streamable HTTP) as the transport.</li>
+                      <li>Give it a name (e.g. <span className="font-medium">Bevel</span>), paste the URL below into the server URL field, and add the Authorization header under custom headers.</li>
+                      <li>Save, then enable the server in any assistant you want it available in.</li>
+                    </ol>
+                    <textarea
+                      readOnly
+                      value={langdockSnippet(mcpUrl, reveal.plaintext)}
+                      rows={3}
+                      className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                    />
+                  </div>
+                  <div>
+                    <div className="text-xs font-medium text-ink mb-1">Other agents (JSON config)</div>
+                    <p className="text-meta text-ink-muted mb-1 leading-snug">
+                      The hosted endpoint for most clients that load servers from a JSON config —
+                      when the local server below isn't wanted.
+                    </p>
+                    <textarea
+                      readOnly
+                      value={jsonConfigSnippet(mcpUrl, reveal.plaintext)}
+                      rows={11}
+                      className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                    />
+                  </div>
                 </div>
-                <p className="text-meta text-ink-muted mb-1 leading-snug">
-                  For agents that run on your machine: Claude Code, Claude Desktop, Cursor,
-                  Windsurf, Cline and similar. Runs this workspace as a local MCP server (needs
-                  Node): the agent gets everything the hosted endpoint serves, plus your
-                  plugins' local-only tools. In Claude Code:
-                </p>
-                <textarea
-                  readOnly
-                  value={hexisMcpClaudeCommand(workspaceUrl, reveal.plaintext)}
-                  rows={3}
-                  className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
-                  onFocus={(e) => e.currentTarget.select()}
-                />
-                <p className="text-meta text-ink-muted mt-1 leading-snug">
-                  On Windows, prefer the JSON config below — this one-liner assumes a POSIX
-                  shell (macOS, Linux, WSL or Git Bash).
-                </p>
-                <p className="text-meta text-ink-muted mt-2 mb-1 leading-snug">
-                  Or as a JSON config, for Claude Desktop, Cursor, Windsurf, Cline and
-                  similar:
-                </p>
-                <textarea
-                  readOnly
-                  value={hexisMcpJsonSnippet(workspaceUrl, reveal.plaintext)}
-                  rows={13}
-                  className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
-                  onFocus={(e) => e.currentTarget.select()}
-                />
-              </div>
-              <div>
-                <div className="text-xs font-medium text-ink mb-1">
-                  Web agents and pipelines — the hosted endpoint
+              </details>
+
+              <details className="border border-line rounded">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
+                  Desktop agents — the local server
+                </summary>
+                <div className="px-3 pb-3 space-y-2">
+                  <p className="text-meta text-ink-muted leading-snug">
+                    For agents that run on your machine: Claude Code, Claude Desktop, Cursor,
+                    Windsurf, Cline and similar. Runs this workspace as a local MCP server (needs
+                    Node): the agent gets everything the hosted endpoint serves, plus your
+                    plugins' local-only tools. In Claude Code:
+                  </p>
+                  <textarea
+                    readOnly
+                    value={hexisMcpClaudeCommand(workspaceUrl, reveal.plaintext)}
+                    rows={3}
+                    className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
+                  <p className="text-meta text-ink-muted leading-snug">
+                    On Windows, prefer the JSON config below — this one-liner assumes a POSIX
+                    shell (macOS, Linux, WSL or Git Bash).
+                  </p>
+                  <p className="text-meta text-ink-muted leading-snug">
+                    Or as a JSON config, for Claude Desktop, Cursor, Windsurf, Cline and
+                    similar:
+                  </p>
+                  <textarea
+                    readOnly
+                    value={hexisMcpJsonSnippet(workspaceUrl, reveal.plaintext)}
+                    rows={13}
+                    className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
                 </div>
-                <p className="text-meta text-ink-muted mb-1 leading-snug">
-                  For agents that can't run a process on your machine, and for CI where
-                  installing Node is unwanted. Claude Code, via the hosted endpoint:
-                </p>
-                <textarea
-                  readOnly
-                  value={claudeCodeCommand(mcpUrl, reveal.plaintext)}
-                  rows={3}
-                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
-                  onFocus={(e) => e.currentTarget.select()}
-                />
-              </div>
-              <div>
-                <div className="text-xs font-medium text-ink mb-1">
-                  Connect Langdock
+              </details>
+
+              <details className="border border-line rounded">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
+                  Skills as native plugins — the marketplace
+                </summary>
+                <div className="px-3 pb-3 space-y-2">
+                  <p className="text-meta text-ink-muted leading-snug">
+                    Every skill you may read, compiled into a plugin marketplace served as a git
+                    remote. One install brings all of it; a later update fetches what changed.
+                    The key stays in the URL because Claude Code refreshes marketplaces without
+                    credential helpers. Add it through Claude Code (the CLI, or the Claude
+                    Code section of the Desktop app's Customize screen): the Chat and Cowork
+                    plugin screens accept only GitHub, GitLab and Bitbucket remotes.
+                  </p>
+                  <textarea
+                    readOnly
+                    aria-label="Claude Code marketplace command"
+                    value={marketplaceCommands(reveal.plaintext).claude}
+                    rows={2}
+                    className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
+                  <p className="text-meta text-ink-muted leading-snug">
+                    Codex — add the marketplace, install the plugin, sign in, check. {CODEX_LOGIN_NOTE}
+                  </p>
+                  <textarea
+                    readOnly
+                    aria-label="Codex marketplace command"
+                    value={marketplaceCommands(reveal.plaintext).codex}
+                    rows={5}
+                    className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
+                  <p className="text-meta text-ink-muted leading-snug">Any other agent, through the skills CLI:</p>
+                  <textarea
+                    readOnly
+                    aria-label="skills CLI command"
+                    value={marketplaceCommands(reveal.plaintext).skills}
+                    rows={2}
+                    className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
                 </div>
-                <ol className="text-[11px] text-ink-muted mb-1 leading-snug list-decimal pl-4 space-y-0.5">
-                  <li>In Langdock, open your workspace settings and go to MCP servers → Add server.</li>
-                  <li>Choose <span className="font-medium">HTTP</span> (Streamable HTTP) as the transport.</li>
-                  <li>Give it a name (e.g. <span className="font-medium">Bevel</span>), paste the URL below into the server URL field, and add the Authorization header under custom headers.</li>
-                  <li>Save, then enable the server in any assistant you want it available in.</li>
-                </ol>
-                <textarea
-                  readOnly
-                  value={langdockSnippet(mcpUrl, reveal.plaintext)}
-                  rows={3}
-                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
-                  onFocus={(e) => e.currentTarget.select()}
-                />
-              </div>
-              <div>
-                <div className="text-xs font-medium text-ink mb-1">
-                  Other agents (JSON config)
-                </div>
-                <p className="text-[11px] text-ink-muted mb-1 leading-snug">
-                  The hosted endpoint for most clients that load servers from a JSON config —
-                  when the local server above isn't wanted.
-                </p>
-                <textarea
-                  readOnly
-                  value={jsonConfigSnippet(mcpUrl, reveal.plaintext)}
-                  rows={11}
-                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
-                  onFocus={(e) => e.currentTarget.select()}
-                />
-              </div>
+              </details>
             </div>
             <div className="flex justify-end px-4 py-3 border-t border-line">
               <button

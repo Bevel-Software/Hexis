@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -70,7 +71,7 @@ describe('GitService.commitChanges', () => {
 
   it('commits many dirty files + a delete as ONE commit attributed to the user', async () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), testKbContext({ kbDirName: PROCESS_MAP_DIR }));
 
     // The caller writes the batch to disk first (the git layer never writes content).
     await fs.mkdir(path.join(repo, 'Product/Knowledge'), { recursive: true });
@@ -97,7 +98,7 @@ describe('GitService.commitChanges', () => {
 
   it('returns null on a clean tree (nothing to commit)', async () => {
     const { workspaceDir } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), testKbContext({ kbDirName: PROCESS_MAP_DIR }));
 
     const change = await svc.commitChanges(workspaceId, USER, 'no-op');
     expect(change).toBeNull();
@@ -105,7 +106,7 @@ describe('GitService.commitChanges', () => {
 
   it('onlyPaths scopes the commit — an unrelated dirty file is NOT swept in', async () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), testKbContext({ kbDirName: PROCESS_MAP_DIR }));
 
     // The batch's own file, plus a CONCURRENT save's bytes whose commit is
     // still queued — the shared per-branch workspace makes this ordinary.
@@ -127,7 +128,7 @@ describe('GitService.commitChanges', () => {
 
   it('onlyPaths keeps a staged RENAME whole — old path deletion rides the scoped commit', async () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), testKbContext({ kbDirName: PROCESS_MAP_DIR }));
 
     // A staged rename shows as one `R` porcelain record (new-path + old-path).
     // The scope names only the NEW path; the old path must ride along or the
@@ -148,7 +149,7 @@ describe('GitService.commitChanges', () => {
 
   it('a REAL `git add` failure aborts the scoped commit — only the pathspec miss is tolerated', async () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), testKbContext({ kbDirName: PROCESS_MAP_DIR }));
 
     await fs.writeFile(path.join(repo, 'Old.md'), 'new bytes\n');
     // Hold git's index lock: `git add` now fails with a real error (index
@@ -172,7 +173,7 @@ describe('GitService.commitChanges', () => {
     // pathspecs were passed on the command line — the scoped path feeds them
     // via `--pathspec-from-file=-` on stdin instead.
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), testKbContext({ kbDirName: PROCESS_MAP_DIR }));
 
     const dir = 'Product/Knowledge/A Rather Long Folder Name To Inflate The Pathspec Bytes';
     await fs.mkdir(path.join(repo, dir), { recursive: true });
@@ -202,7 +203,7 @@ describe('GitService.commitChanges', () => {
 
   it('a big batch containing a fully-staged deletion still commits (per-path fallback)', async () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), testKbContext({ kbDirName: PROCESS_MAP_DIR }));
 
     // Stage Old.md's deletion fully — the batched `git add` then has nothing
     // in the worktree to match for it and fails with the ONE expected miss,
@@ -226,7 +227,7 @@ describe('GitService.commitChanges', () => {
 
   it('onlyPaths with nothing of its own dirty is a no-op even when other files are dirty', async () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), testKbContext({ kbDirName: PROCESS_MAP_DIR }));
 
     await fs.writeFile(path.join(repo, 'Old.md'), 'someone else mid-save\n');
     const change = await svc.commitChanges(workspaceId, USER, 'Sync directory groups', [

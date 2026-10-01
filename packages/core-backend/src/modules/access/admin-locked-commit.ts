@@ -46,11 +46,12 @@
  */
 
 import path from 'node:path';
+import { logger } from '../../shared/logging.js';
 
-import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import { LockingFilesystem, type WriteValidator } from '../kb-fs/locking-filesystem.js';
 import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
-import type { FileContent } from '@mastra/core/workspace';
 
 export interface LockedCommitDeps {
   workspaceService: IWorkspaceService;
@@ -65,7 +66,7 @@ export interface LockedCommitDeps {
   /** Contention wording: what is "being edited by <holder>". */
   contendedSubject: string;
   /** Pre-disk write validator handed to LockingFilesystem writes. */
-  validateWrite?: (path: string, content: FileContent) => void;
+  validateWrite?: WriteValidator;
 }
 
 export interface LockedWrite {
@@ -114,8 +115,7 @@ export class AdminLockedCommits {
         path.posix.join(this.deps.kbDirName, repoRel),
       );
     } catch (err) {
-      const code = (err as NodeJS.ErrnoException | null)?.code;
-      if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+      if (isAbsence(err)) return null;
       throw err;
     }
   }
@@ -256,10 +256,10 @@ export class AdminLockedCommits {
             await this.deps.workflowService.releaseLock(workspaceId, this.defaultBranch, h, actor);
           }
         } catch (releaseErr) {
-          console.warn(
-            `[${this.deps.logTag}] could not release lock on ${h}${pushRetry ? ' (push-retry release)' : ''}; ` +
+          logger(this.deps.logTag).warn(
+            `could not release lock on ${h}${pushRetry ? ' (push-retry release)' : ''}; ` +
               'it frees on TTL — continuing with the remaining locks:',
-            releaseErr instanceof Error ? releaseErr.message : releaseErr,
+            { err: releaseErr },
           );
         }
       }
@@ -286,7 +286,7 @@ export class AdminLockedCommits {
           try {
             await workspaceService.deleteFile(workspaceId, this.wsRel(f.repoRel));
           } catch (err) {
-            if ((err as NodeJS.ErrnoException | null)?.code !== 'ENOENT') throw err;
+            if (!isAbsence(err)) throw err;
           }
         } else {
           await workspaceService.writeFile(workspaceId, this.wsRel(f.repoRel), f.content);
@@ -306,9 +306,7 @@ export class AdminLockedCommits {
       // normally; the error itself tells the caller "saved locally, sharing
       // will be resolved" and the pending-commit ladder retries the push.
       if (err instanceof PushNeedsAgentResolutionError) {
-        console.warn(
-          `[${logTag}] commit landed but the push needs resolution — edit saved; publishing will be retried`,
-        );
+        logger(logTag).warn('commit landed but the push needs resolution — edit saved; publishing will be retried');
         throw err;
       }
       const unrestored = new Set<string>();
@@ -318,9 +316,9 @@ export class AdminLockedCommits {
           else await workspaceService.writeFile(workspaceId, this.wsRel(f.repoRel), f.original);
         } catch (restoreErr) {
           // Deleting an already-absent file IS the original state.
-          if (f.original === null && (restoreErr as NodeJS.ErrnoException | null)?.code === 'ENOENT') continue;
+          if (f.original === null && isAbsence(restoreErr)) continue;
           unrestored.add(this.wsRel(f.repoRel));
-          console.warn(`[${logTag}] could not restore ${f.repoRel} after a failed commit`);
+          logger(logTag).warn(`could not restore ${f.repoRel} after a failed commit`);
         }
       }
       if (unrestored.size > 0 && typeof err === 'object' && err !== null) {

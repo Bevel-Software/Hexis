@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { isProtectedBranch } from '@bevel-software/platform-shared';
+import { currentBranchModel, isProtectedBranch } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { fetchFileAccess, type AccessEligible } from '../api';
 
@@ -98,7 +98,7 @@ export function useFileAccess(
       setState({ canWrite: null, canDownload: null, eligible: EMPTY_ELIGIBLE, owners: EMPTY_ELIGIBLE, loading: false, error: null });
       return;
     }
-    if (!isProtectedBranch(branch)) {
+    if (!isProtectedBranch(currentBranchModel(), branch)) {
       // `canDownload: null` — NOT true. The write short-circuits are this
       // hook's own policy, and they match the backend's write gates; the raw
       // endpoint gates EVERY download regardless of branch or path, so

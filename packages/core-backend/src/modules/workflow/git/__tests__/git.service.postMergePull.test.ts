@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -109,7 +110,7 @@ describe('post-merge refresh of the target branch workspace', () => {
         [baseWsId]: path.dirname(baseRepo),
       }),
       stubWorkflowHooks(),
-      KB_DIR,
+      testKbContext({ kbDirName: KB_DIR }),
     );
 
     // 1. The merge lands on origin/BASE (run from the caller's workspace).
@@ -119,7 +120,7 @@ describe('post-merge refresh of the target branch workspace', () => {
     expect(merged.kind).toBe('merged');
 
     // 2. The post-merge refresh of the TARGET branch's own workspace succeeds.
-    await expect(git.pull(baseWsId)).resolves.toBeUndefined();
+    await expect(git.pull(baseWsId)).resolves.toEqual({ treeChanged: true });
 
     // The workspace is at origin's head, and serves the merged file.
     const originHead = await gitOut(baseRepo, ['rev-parse', `origin/${BASE}`]);
@@ -163,7 +164,7 @@ describe('post-merge refresh of the target branch workspace', () => {
         [baseWsId]: path.dirname(baseRepo),
       }),
       stubWorkflowHooks(),
-      KB_DIR,
+      testKbContext({ kbDirName: KB_DIR }),
     );
 
     const merged = await git.mergeChangeRequest(
@@ -203,7 +204,7 @@ describe('post-merge refresh of the target branch workspace', () => {
       // ~40% of rounds hit the fatal pre-fix (measured), so 20 rounds makes a
       // pre-fix regression a practical certainty while staying quick.
       for (let round = 0; round < 20; round += 1) {
-        await expect(git.pull(baseWsId)).resolves.toBeUndefined();
+        await expect(git.pull(baseWsId)).resolves.toEqual({ treeChanged: round === 0 });
       }
     } finally {
       stop = true;
@@ -254,7 +255,7 @@ describe('post-merge refresh of the target branch workspace', () => {
         [baseWsId]: path.dirname(baseRepo),
       }),
       stubWorkflowHooks(),
-      KB_DIR,
+      testKbContext({ kbDirName: KB_DIR }),
     );
 
     const merged = await git.mergeChangeRequest(
@@ -268,7 +269,7 @@ describe('post-merge refresh of the target branch workspace', () => {
     expect(upstreamLog.split('\n')).toContain(latestSource);
 
     // ...and the post-merge refresh of the base workspace serves that revision.
-    await expect(git.pull(baseWsId)).resolves.toBeUndefined();
+    await expect(git.pull(baseWsId)).resolves.toEqual({ treeChanged: true });
     const revision = await fs.readFile(path.join(baseRepo, 'revision.md'), 'utf8');
     expect(revision.replace(/\r\n/g, '\n')).toBe('second revision\n');
   });

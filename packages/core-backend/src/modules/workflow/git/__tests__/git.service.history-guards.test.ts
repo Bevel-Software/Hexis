@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -34,7 +35,7 @@ describe('GitService history guards', () => {
     svc = new GitService(
       stubWorkspaceService({ [workspaceId]: workspaceDir }),
       stubWorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
   });
 

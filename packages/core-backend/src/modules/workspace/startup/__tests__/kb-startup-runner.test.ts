@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
+import { NodeFs } from '../../../kb-fs/node-fs.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -6,8 +8,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { KbStartupRunner } from '../kb-startup-runner.js';
 import { WorkspaceService } from '../../workspace.service.js';
-import { redactSecret } from '../kb-git.js';
+import { NodeGitRunner } from '../../../workflow/git/node-git-runner.js';
+import { ClassifiedFailure, classifyGitFailure, failureOf } from '../../../../shared/git-failure.js';
+import { gitCredentials } from '../../../../shared/git.contract.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
+
+/**
+ * The token in effect for the runners these suites build, changed by the
+ * cases that need one — the way the setup screen changes it on a running
+ * deployment: through the provider the runner reads on every call, never
+ * through this process's environment.
+ */
+let token: string | null = null;
+const credentials = gitCredentials('x-access-token', () => token);
 
 const execFileAsync = promisify(execFile);
 
@@ -63,9 +76,10 @@ function makeRunner(steps: OnServerStart[], overrides: Partial<Parameters<typeof
 
 function runnerOpts(steps: OnServerStart[], overrides: Record<string, unknown> = {}) {
   return {
+    gitRunner: new NodeGitRunner(undefined, credentials),
     kbRepoUrl: () => upstream,
-    gitUsername: () => 'x-access-token',
     workspacesRoot,
+    setAsideRoot: path.join(root, 'set-aside'),
     kbDirName: 'knowledge-base',
     templateDir: path.join(root, 'template'),
     defaultBranch: () => DEFAULT_BRANCH,
@@ -89,6 +103,216 @@ async function checkout(branch: string): Promise<string> {
   await git(root, ['clone', '-b', branch, upstream, dir]);
   return dir;
 }
+
+/**
+ * The configured repository was replaced while working copies of the old one
+ * were still on disk. A clone fetches through its OWN stored address, so
+ * every one of them kept asking the repository that was gone: the boot
+ * stopped on "repository not found" and took the setup screen with it.
+ */
+describe('KbStartupRunner — the repository was replaced', () => {
+  const touchDefault = step('touch', async (ctx) => {
+    await (await ctx.defaultBranch()).repoDir();
+    return { outcome: 'ok' };
+  });
+  const cloneDir = (branch: string) => path.join(workspacesRoot, encodeURIComponent(branch), 'knowledge-base');
+
+  /** A second, unrelated repository with the same branch names. */
+  async function replacementUpstream(): Promise<string> {
+    const other = path.join(root, 'replacement.git');
+    await git(root, ['init', '--bare', '-b', DEFAULT_BRANCH, other]);
+    const seed = path.join(root, '.seed-replacement');
+    await fs.mkdir(seed);
+    await git(seed, ['init', '-b', DEFAULT_BRANCH]);
+    await fs.writeFile(path.join(seed, 'marker.txt'), 'replacement', 'utf8');
+    await git(seed, ['add', '-A']);
+    await git(seed, ['commit', '-m', 'init']);
+    await git(seed, ['branch', PROTECTED[1]!]);
+    await git(seed, ['remote', 'add', 'origin', other]);
+    await git(seed, ['push', 'origin', ...PROTECTED]);
+    return other;
+  }
+
+  /** Boot once against the first repository, and leave a draft's clone beside it. */
+  async function bootedOnTheOldRepository(): Promise<void> {
+    await populatedUpstream();
+    await makeRunner([touchDefault]).runAll();
+    await fs.mkdir(path.dirname(cloneDir('someone/draft')), { recursive: true });
+    await git(root, ['clone', '-b', DEFAULT_BRANCH, upstream, cloneDir('someone/draft')]);
+  }
+
+  /** Where one run set its working copies aside: the single dated folder under the root. */
+  async function setAside(): Promise<string> {
+    const runs = await fs.readdir(path.join(root, 'set-aside'));
+    expect(runs).toHaveLength(1);
+    return path.join(root, 'set-aside', runs[0]!);
+  }
+
+  it('clones the new repository in place of the old one\'s clones, even with the old one gone', async () => {
+    await bootedOnTheOldRepository();
+    const replacement = await replacementUpstream();
+    // Gone, as it was in production: any fetch through the old address fails.
+    await fs.rm(upstream, { recursive: true, force: true });
+
+    await makeRunner([touchDefault], { kbRepoUrl: () => replacement }).runAll();
+
+    const repo = cloneDir(DEFAULT_BRANCH);
+    expect((await git(repo, ['config', '--get', 'remote.origin.url'])).trim()).toBe(replacement);
+    expect(await fs.readFile(path.join(repo, 'marker.txt'), 'utf8')).toBe('replacement');
+    // A clone this boot had no reason to touch leaves the workspaces root
+    // too: the workspace service would otherwise adopt it and fetch from the
+    // old address.
+    await expect(fs.access(cloneDir('someone/draft'))).rejects.toThrow();
+  });
+
+  /**
+   * The old repository is GONE, so its clones are the last copy of what it
+   * held, and the commit nobody pushed exists nowhere else at all. They
+   * leave the workspaces root and nothing else happens to them.
+   */
+  it('sets the old repository\'s clones aside whole, unpushed work included, and deletes nothing', async () => {
+    await bootedOnTheOldRepository();
+    const old = cloneDir(DEFAULT_BRANCH);
+    await fs.writeFile(path.join(old, 'unpushed.md'), 'the only copy', 'utf8');
+    await git(old, ['add', '-A']);
+    await git(old, ['commit', '-m', 'never pushed']);
+    const head = (await git(old, ['rev-parse', 'HEAD'])).trim();
+    const replacement = await replacementUpstream();
+    await fs.rm(upstream, { recursive: true, force: true });
+
+    await makeRunner([touchDefault], { kbRepoUrl: () => replacement }).runAll();
+
+    const kept = await setAside();
+    const keptDefault = path.join(kept, encodeURIComponent(DEFAULT_BRANCH));
+    expect((await git(keptDefault, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    expect(await fs.readFile(path.join(keptDefault, 'unpushed.md'), 'utf8')).toBe('the only copy');
+    expect(await fs.readFile(path.join(keptDefault, 'marker.txt'), 'utf8')).toBe('seeded');
+    // The draft's clone too, under its own workspace's name.
+    await expect(fs.access(path.join(kept, encodeURIComponent('someone/draft'), '.git'))).resolves.toBeUndefined();
+    // And the probe that compared the histories left no refs behind in it.
+    expect((await git(keptDefault, ['for-each-ref', 'refs/hexis-probe/'])).trim()).toBe('');
+  });
+
+  /**
+   * The shipped compose files mount the backups root as a volume of its own,
+   * where a rename across to it is refused. That is the path production
+   * takes: a copy, and the original removed only once the copy is whole.
+   */
+  it('sets a clone aside across volumes, by copying it whole', async () => {
+    await bootedOnTheOldRepository();
+    const old = cloneDir(DEFAULT_BRANCH);
+    await fs.writeFile(path.join(old, 'unpushed.md'), 'the only copy', 'utf8');
+    await git(old, ['add', '-A']);
+    await git(old, ['commit', '-m', 'never pushed']);
+    const head = (await git(old, ['rev-parse', 'HEAD'])).trim();
+    const replacement = await replacementUpstream();
+    await fs.rm(upstream, { recursive: true, force: true });
+    const crossDevice = Object.assign(new Error('EXDEV: cross-device link not permitted'), { code: 'EXDEV' });
+    const rename = vi.spyOn(fs, 'rename').mockRejectedValue(crossDevice);
+    try {
+      await makeRunner([touchDefault], { kbRepoUrl: () => replacement }).runAll();
+    } finally {
+      rename.mockRestore();
+    }
+
+    const keptDefault = path.join(await setAside(), encodeURIComponent(DEFAULT_BRANCH));
+    expect((await git(keptDefault, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    expect(await fs.readFile(path.join(keptDefault, 'unpushed.md'), 'utf8')).toBe('the only copy');
+    expect(await fs.readFile(path.join(cloneDir(DEFAULT_BRANCH), 'marker.txt'), 'utf8')).toBe('replacement');
+  });
+
+  /**
+   * A clone that cannot be set aside stays exactly where it is, and the boot
+   * stops saying why: deleting it to get past would be the one outcome this
+   * whole path exists to rule out.
+   */
+  it('deletes nothing when a clone cannot be set aside, and says why', async () => {
+    await bootedOnTheOldRepository();
+    const old = cloneDir(DEFAULT_BRANCH);
+    const head = (await git(old, ['rev-parse', 'HEAD'])).trim();
+    const replacement = await replacementUpstream();
+    await fs.rm(upstream, { recursive: true, force: true });
+    const rename = vi.spyOn(fs, 'rename').mockRejectedValue(Object.assign(new Error('EXDEV'), { code: 'EXDEV' }));
+    const cp = vi.spyOn(fs, 'cp').mockRejectedValue(Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }));
+    try {
+      await expect(makeRunner([touchDefault], { kbRepoUrl: () => replacement }).runAll()).rejects.toThrow(
+        /Could not set aside the working copy.*no space left.*Nothing was deleted/s,
+      );
+    } finally {
+      rename.mockRestore();
+      cp.mockRestore();
+    }
+    expect((await git(old, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+  });
+
+  /**
+   * The one change the setup screen tells an admin to make: the same
+   * repository, moved. The clone is pointed at the new address and kept, and
+   * the commit that was never pushed goes on to be pushed there.
+   */
+  it('keeps a clone of the same repository at a new address, and points it there', async () => {
+    await bootedOnTheOldRepository();
+    const repo = cloneDir(DEFAULT_BRANCH);
+    await fs.writeFile(path.join(repo, 'unpushed.md'), 'local work', 'utf8');
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-m', 'local work']);
+    const head = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+    // Moved: everything the old address held is at the new one, and the old
+    // one answers nothing any more.
+    const moved = path.join(root, 'moved.git');
+    await git(root, ['clone', '--bare', upstream, moved]);
+    await fs.rm(upstream, { recursive: true, force: true });
+
+    await makeRunner([touchDefault], { kbRepoUrl: () => moved }).runAll();
+
+    expect((await git(repo, ['config', '--get', 'remote.origin.url'])).trim()).toBe(moved);
+    expect((await git(repo, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    expect((await git(cloneDir('someone/draft'), ['config', '--get', 'remote.origin.url'])).trim()).toBe(moved);
+    expect((await git(repo, ['for-each-ref', 'refs/hexis-probe/'])).trim()).toBe('');
+    // Nothing was another repository's, so nothing was set aside.
+    await expect(fs.access(path.join(root, 'set-aside'))).rejects.toThrow();
+  });
+
+  it('leaves a clone of the configured repository alone, unpushed work included', async () => {
+    await bootedOnTheOldRepository();
+    const repo = cloneDir(DEFAULT_BRANCH);
+    await fs.writeFile(path.join(repo, 'unpushed.md'), 'local work', 'utf8');
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-m', 'local work']);
+    const head = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+
+    await makeRunner([touchDefault]).runAll();
+
+    expect((await git(repo, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    await expect(fs.access(cloneDir('someone/draft'))).resolves.toBeUndefined();
+  });
+
+  it('does not take a different spelling of the same address for another repository', async () => {
+    await bootedOnTheOldRepository();
+    const repo = cloneDir(DEFAULT_BRANCH);
+    await fs.writeFile(path.join(repo, 'unpushed.md'), 'local work', 'utf8');
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-m', 'local work']);
+    const head = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+
+    // `upstream` ends in `.git`; the same repository without it, and with a
+    // trailing slash.
+    await makeRunner([touchDefault], { kbRepoUrl: () => `${upstream.replace(/\.git$/, '')}/` }).runAll().catch(() => {});
+
+    expect((await git(repo, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+  });
+
+  it('keeps every clone when the configured repository cannot be reached', async () => {
+    // A typo in the address must not cost the working copies: the sweep runs
+    // only once the configured remote has answered.
+    await bootedOnTheOldRepository();
+    await expect(
+      makeRunner([touchDefault], { kbRepoUrl: () => path.join(root, 'no-such-repository.git') }).runAll(),
+    ).rejects.toThrow();
+    await expect(fs.access(path.join(cloneDir(DEFAULT_BRANCH), '.git'))).resolves.toBeUndefined();
+    await expect(fs.access(cloneDir('someone/draft'))).resolves.toBeUndefined();
+  });
+});
 
 describe('KbStartupRunner', () => {
   it('seeds an empty remote with every protected branch before any step runs', async () => {
@@ -474,24 +698,58 @@ describe('KbStartupRunner', () => {
   });
 });
 
-describe('redactSecret', () => {
-  it('scrubs the configured token wherever it appears', () => {
+describe('KbStartupRunner — what a failed phase throws', () => {
+  it('a scrubbed message (tokens, a presigned query) that still carries what git said', async () => {
     const prev = process.env.GITHUB_TOKEN;
-    process.env.GITHUB_TOKEN = 'ghp_supersecret';
+    // Tokens that spell parts of git's own wording: scrubbing them rewrites the
+    // diagnostic, so the scrubbed message alone would no longer read as unreachable.
+    process.env.GITHUB_TOKEN = 'onnect';
     try {
-      expect(redactSecret('fatal: ghp_supersecret was rejected')).toBe('fatal: *** was rejected');
+      const err = await makeRunner([step('noop', async () => ({ outcome: 'ok' }))], {
+        kbRepoUrl: () => 'https://127.0.0.1:1/kb.git?X-Amz-Signature=SECRETSIG',
+        gitRunner: new NodeGitRunner(undefined, gitCredentials('x-access-token', 'access')),
+      })
+        .runAll()
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+      expect(err).toBeInstanceOf(ClassifiedFailure);
+      const message = (err as Error).message;
+      expect(message).not.toContain('SECRETSIG');
+      expect(message).not.toMatch(/onnect|access/);
+      expect(failureOf(err).kind).toBe('unreachable');
+      expect(classifyGitFailure(message).kind).not.toBe('unreachable');
     } finally {
       if (prev === undefined) delete process.env.GITHUB_TOKEN;
       else process.env.GITHUB_TOKEN = prev;
     }
   });
+});
 
-  it('scrubs URL userinfo — a user:pass@ remote must not leak the password', () => {
-    expect(redactSecret("fetch of 'https://alice:hunter2@example.com/kb.git' failed")).toBe(
-      "fetch of 'https://***@example.com/kb.git' failed",
-    );
-    // A plain URL is untouched.
-    expect(redactSecret('https://example.com/kb.git')).toBe('https://example.com/kb.git');
+describe('KbStartupRunner redaction', () => {
+  it('scrubs the token in effect from a failure, even one that never reached the environment', async () => {
+    const saved = process.env.GITHUB_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    try {
+      await populatedUpstream();
+      const runner = makeRunner(
+        [
+          step('leaky', async () => {
+            throw new Error('the host said ghp_settingsonly42 is not welcome');
+          }),
+        ],
+        { gitRunner: new NodeGitRunner(undefined, gitCredentials('x-access-token', 'ghp_settingsonly42')) },
+      );
+      const err = await runner.runAll().then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+      expect(err?.message).toContain('KB startup step "leaky" failed');
+      expect(err?.message).not.toContain('ghp_settingsonly42');
+    } finally {
+      if (saved !== undefined) process.env.GITHUB_TOKEN = saved;
+    }
   });
 });
 
@@ -503,10 +761,8 @@ describe('KbStartupRunner credentials', () => {
   // the repo with nothing, so every later push prompts for a username, finds
   // no tty, and dies — commits pile up locally and reach the remote never.
   // Only real git tells the two spellings apart, so this drives real git.
-  const ORIGINAL = process.env.GITHUB_TOKEN;
   afterEach(() => {
-    if (ORIGINAL === undefined) delete process.env.GITHUB_TOKEN;
-    else process.env.GITHUB_TOKEN = ORIGINAL;
+    token = null;
   });
 
 
@@ -524,7 +780,7 @@ describe('KbStartupRunner credentials', () => {
   }
 
   it('leaves the boot clone able to authenticate a push of its own', async () => {
-    process.env.GITHUB_TOKEN = 'ghp_boot';
+    token = 'ghp_boot';
     await populatedUpstream();
     // The branch handle clones lazily, so a step has to actually reach for the
     // repo before there is anything on disk to inspect.
@@ -548,7 +804,7 @@ describe('KbStartupRunner credentials', () => {
     // path (`--replace-all`), so drift a second value in out of band and let
     // WorkspaceService adopt the clone — that is the code the guarantee is
     // about.
-    process.env.GITHUB_TOKEN = 'ghp_boot';
+    token = 'ghp_boot';
     await populatedUpstream();
     const repo = await materializeDefaultBranchClone();
     // App-shaped drift: a second stamp of OURS with a stale username — the
@@ -557,7 +813,7 @@ describe('KbStartupRunner credentials', () => {
     await git(repo, ['config', '--add', 'credential.helper',
       '!f() { echo "username=stale-user"; echo "password=$GITHUB_TOKEN"; }; f']);
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', () => 'x-access-token');
+    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
     await ws.getOrCreateForBranch(DEFAULT_BRANCH);
 
     const all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
@@ -570,19 +826,19 @@ describe('KbStartupRunner credentials', () => {
     // git chains every configured helper, so an operator's clone-local
     // `cache`/`store`/custom helper coexists with ours — and losing it on a
     // token change would break the very fallback auth they set up.
-    process.env.GITHUB_TOKEN = 'ghp_boot';
+    token = 'ghp_boot';
     await populatedUpstream();
     const repo = await materializeDefaultBranchClone();
     await git(repo, ['config', '--add', 'credential.helper', 'cache --timeout=300']);
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', () => 'x-access-token');
+    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
     await ws.getOrCreateForBranch(DEFAULT_BRANCH); // stamp with token
     let all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
     expect(all).toContain('cache --timeout=300');
     expect(all).toContain('password=$GITHUB_TOKEN');
 
-    delete process.env.GITHUB_TOKEN;
-    const ws2 = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', () => 'x-access-token');
+    token = null;
+    const ws2 =new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
     await ws2.getOrCreateForBranch(DEFAULT_BRANCH); // unset OUR helper only
     all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
     expect(all).toContain('cache --timeout=300');
@@ -593,12 +849,12 @@ describe('KbStartupRunner credentials', () => {
     // A deployment that lost its token must not keep a clone-local helper
     // answering with an empty password — it would shadow whatever fallback
     // auth the operator switched to.
-    process.env.GITHUB_TOKEN = 'ghp_boot';
+    token = 'ghp_boot';
     await populatedUpstream();
     const repo = await materializeDefaultBranchClone(); // stamped
-    delete process.env.GITHUB_TOKEN;
+    token = null;
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', () => 'x-access-token');
+    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
     await ws.getOrCreateForBranch(DEFAULT_BRANCH);
 
     await expect(git(repo, ['config', '--local', '--get', 'credential.helper']))
@@ -609,13 +865,13 @@ describe('KbStartupRunner credentials', () => {
     // The rotation gap: the setup screen can supply a token AFTER a branch
     // was first opened, and the cached fast path returns before the adoption
     // re-stamp. The fingerprint check must catch the change there.
-    delete process.env.GITHUB_TOKEN;
+    token = null;
     await populatedUpstream();
     const repo = await materializeDefaultBranchClone(); // no helper
 
-    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', () => 'x-access-token');
+    const ws = new WorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
     await ws.getOrCreateForBranch(DEFAULT_BRANCH); // adopt, tokenless
-    process.env.GITHUB_TOKEN = 'ghp_late';
+    token = 'ghp_late';
     await ws.getOrCreateForBranch(DEFAULT_BRANCH); // cached fast path
 
     const helper = (await git(repo, ['config', '--local', '--get', 'credential.helper'])).trim();
@@ -624,7 +880,7 @@ describe('KbStartupRunner credentials', () => {
   });
 
   it('clones without a helper when the deployment has no token — an open remote still boots', async () => {
-    delete process.env.GITHUB_TOKEN;
+    token = null;
     await populatedUpstream();
     const repo = await materializeDefaultBranchClone();
     // `--get` exits 1 when the key is unset. Assert on that exit code rather

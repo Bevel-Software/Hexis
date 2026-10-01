@@ -34,6 +34,8 @@ import {
   canonicalRoleName,
   accessMdDeclaresBodyRules,
 } from './access-grammar.js';
+import { freshAccessMd } from './access-template.js';
+import { scanFrontmatter } from './frontmatter-lines.js';
 
 /**
  * Which rule block a mutation edits.
@@ -195,24 +197,14 @@ interface Frontmatter {
  * grant into a fresh file synthesise one.
  */
 function splitFrontmatter(text: string): Frontmatter & { hasFrontmatter: boolean } {
-  const eol = text.includes('\r\n') ? '\r\n' : '\n';
-  const lines = text.split(/\r?\n/);
-  // Opening fence must be the very first line.
-  if (lines[0]?.trim() !== '---') {
-    return { pre: [], fm: [], post: lines, eol, hasFrontmatter: false };
+  const scan = scanFrontmatter(text);
+  if (scan.kind === 'unterminated') {
+    throw new AccessSpliceError('unterminated frontmatter — no closing `---`');
   }
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') {
-      return {
-        pre: lines.slice(0, 1), // the opening ---
-        fm: lines.slice(1, i),
-        post: lines.slice(i), // closing --- onward (body preserved)
-        eol,
-        hasFrontmatter: true,
-      };
-    }
+  if (scan.kind === 'none') {
+    return { pre: [], fm: [], post: scan.lines, eol: scan.eol, hasFrontmatter: false };
   }
-  throw new AccessSpliceError('unterminated frontmatter — no closing `---`');
+  return { pre: scan.open, fm: scan.fm, post: scan.post, eol: scan.eol, hasFrontmatter: true };
 }
 
 function joinFrontmatter(f: Frontmatter): string {
@@ -383,8 +375,16 @@ export function spliceGrant(
   const f = splitFrontmatter(text);
 
   if (!f.hasFrontmatter) {
-    // Fresh file — synthesise a minimal frontmatter block, keep any body lines
-    // the caller passed (usually none for a new access.md).
+    // A fresh FOLDER access.md gets the platform's two-block shape, the grant
+    // in the body and the explanation of both blocks in place — the same
+    // file a person would find beside a plugin, so every generated
+    // access.md teaches the same rules. (Only for an EMPTY file: text
+    // without a frontmatter is the legacy single-block format, kept as it is.)
+    if (opts.target === 'folder' && text.trim() === '') {
+      return { text: freshAccessMd(`${verb}:${f.eol}  - ${renderEntry(principal, deny)}`, f.eol), changed: true };
+    }
+    // Fresh node frontmatter — synthesise a minimal block, keep any body
+    // lines the caller passed.
     const itemLine = opts.allowScalar
       ? `${verb}: ${renderEntry(principal, deny)}`
       : `${verb}:${f.eol}  - ${renderEntry(principal, deny)}`;

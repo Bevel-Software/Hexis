@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -6,6 +7,7 @@ import { WorkspaceService } from '../../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { WorkspaceMutex } from '../../kb-fs/mutex.js';
 import { DiffService } from '../diff.service.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * Atomic-seed regression suite.
@@ -54,7 +56,8 @@ async function setup(): Promise<Fixture> {
   const workspaceService = new WorkspaceService(
     workspacesRoot,
     'https://github.com/Bevel-Software/knowledge-base.git',
-    'knowledge-base',
+    testKbContext(),
+    new NodeFs(),
   );
   const mutex = new WorkspaceMutex();
   const diffService = new DiffService(
@@ -63,6 +66,7 @@ async function setup(): Promise<Fixture> {
     workspacesRoot,
     backupsRoot,
     'knowledge-base',
+    new NodeFs(),
   );
   workspaceService.setDiffService(diffService);
   return { workspacesRoot, backupsRoot, workspaceDir, repoDir, workspaceId, workspaceService, diffService };

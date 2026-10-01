@@ -1,21 +1,31 @@
-import path from 'node:path';
 import fs from 'node:fs/promises';
-import type { Dirent } from 'node:fs';
-import {
-  DEFAULT_BRANCH,
-  PLUGINS_DIR,
-  pluginOfPath,
-  isPersonalPluginFolder,
-} from '@bevel-software/platform-shared';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('plugins');
+import path from 'node:path';
+import { isPrivateAccessMd } from '../access-model/access-grammar.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { ISkillService } from '../skills/skills.contract.js';
 import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
 import type { PluginCatalogEntry, IPluginIndexService } from './plugins.contract.js';
+import type { PluginLinkIndex } from './plugin-links.js';
+import type { PluginSource } from './discovery/plugin-source.js';
 
 const CACHE_TTL_MS = 60_000;
+
+/** What one discovery pass keeps about a plugin, before the counts and verdicts. */
+interface ScannedPlugin {
+  folders: string[];
+  /** The roots it links skills from — see `PluginSummary.linkedRoots`. */
+  linkedRoots: string[];
+  linksAreManaged: boolean;
+  displayName: string;
+  warnings: string[];
+}
 
 /**
  * The plugin index: every plugin folder in the default-branch KB, with its
@@ -50,10 +60,22 @@ export class PluginIndexService implements IPluginIndexService {
     private readonly accessControl: IAccessControl,
     private readonly skillService: ISkillService,
     private readonly toolManualService: IToolManualService,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
+    /** Where plugins come from — the one discovery every catalog shares. */
+    private readonly source: PluginSource,
     now: () => number = Date.now,
+    /**
+     * The link index, when the deployment has one: a plugin's skill count is
+     * then inline PLUS linked. Optional so hosts composing their own service
+     * set (and older tests) keep the inline-only count.
+     */
+    private readonly links?: PluginLinkIndex,
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
+  }
+
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
   }
 
   invalidate(): void {
@@ -63,6 +85,9 @@ export class PluginIndexService implements IPluginIndexService {
   async catalog(): Promise<PluginCatalogEntry[]> {
     const cached = this.cache.get();
     if (cached) return cached;
+    // See `TtlCache.begin`: taken before the read so an `invalidate()` that
+    // lands mid-build discards this result instead of being overwritten by it.
+    const token = this.cache.begin();
     const entries = await this.build();
     // A failed scan and a KB with genuinely no plugin folders both serve `[]`,
     // but only the second is a fact worth holding for the TTL. Caching the
@@ -72,7 +97,7 @@ export class PluginIndexService implements IPluginIndexService {
     // never arrive in that window. So a degraded read is served, not stored,
     // and the next caller retries.
     if (entries === null) return [];
-    this.cache.set(entries);
+    this.cache.set(entries, token);
     return entries;
   }
 
@@ -91,103 +116,201 @@ export class PluginIndexService implements IPluginIndexService {
    */
   private async build(): Promise<PluginCatalogEntry[] | null> {
     try {
-      const wsId = (await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH)).id;
+      const wsId = (await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch)).id;
       const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
 
-      const folders = await this.scanFolders(kbRoot);
-      if (folders.size === 0) return [];
+      const scanned = await this.scanFolders(kbRoot);
+      if (scanned.size === 0) return [];
+      const folders = new Map([...scanned].map(([name, p]) => [name, p.folders]));
 
-      const [skillCounts, toolCounts] = await Promise.all([
-        this.countSkills(),
-        this.countTools(),
+      const [{ skillCounts, brokenLinkCounts }, toolCounts] = await Promise.all([
+        this.countThroughLinks(folders),
+        this.countTools(scanned),
       ]);
 
       const entries: PluginCatalogEntry[] = [];
       for (const [name, pluginFolders] of folders) {
         // One folder, one access boundary — the folder IS the plugin.
         const [primary] = pluginFolders;
-        const [owners, writers, readers] = await Promise.all([
+        const [owners, writers, readers, isPrivate] = await Promise.all([
           this.accessControl.eligibleOwners(wsId, primary),
           this.accessControl.eligibleWriters(wsId, primary),
           this.accessControl.eligibleReaders(wsId, primary),
+          this.readsAsPrivate(path.join(kbRoot, primary, 'access.md')),
         ]);
         entries.push({
           name,
+          displayName: scanned.get(name)?.displayName ?? name,
           folders: pluginFolders,
+          linkedRoots: scanned.get(name)?.linkedRoots ?? [],
+          linksAreManaged: scanned.get(name)?.linksAreManaged ?? false,
           skillCount: skillCounts.get(name) ?? 0,
           toolCount: toolCounts.get(name) ?? 0,
+          brokenLinks: brokenLinkCounts.get(name) ?? 0,
           owners,
           writers,
           readers,
+          isPrivate,
+          warnings: scanned.get(name)?.warnings ?? [],
         });
       }
       return entries.sort((a, b) => a.name.localeCompare(b.name));
     } catch (err) {
-      console.warn(
-        `[plugins] plugin index unavailable: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      log.warn(`plugin index unavailable: ${err instanceof Error ? err.message : String(err)}`);
       return null;
     }
   }
 
-  /** name → repo-relative plugin folder (always a single-element list). */
-  private async scanFolders(kbRoot: string): Promise<Map<string, string[]>> {
-    const byName = new Map<string, string[]>();
-    let children: Dirent[];
-    try {
-      children = await fs.readdir(path.join(kbRoot, PLUGINS_DIR), { withFileTypes: true });
-    } catch {
-      return byName; // a KB without a `Plugins/` root simply has no plugins
+  /**
+   * name → repo-relative plugin folder (always a single-element list), from
+   * the configured source. Personal folders live under Plugins/ but are not
+   * plugins: one exists per person, private by construction, and listing them
+   * would put a locked row per employee in everyone's index. `exists` is the
+   * source's existence rule (see `DiscoveredPlugin`) — for native plugins,
+   * the `access.md` the class doc describes.
+   */
+  private async scanFolders(kbRoot: string): Promise<Map<string, ScannedPlugin>> {
+    const byName = new Map<string, ScannedPlugin>();
+    const discovered = await this.source.discover(kbRoot);
+    for (const w of discovered.warnings) log.warn(w);
+    for (const plugin of discovered.plugins) {
+      if (plugin.personal || !plugin.exists) continue;
+      byName.set(plugin.name, {
+        folders: [plugin.folder],
+        linkedRoots: plugin.linkedRoots,
+        linksAreManaged: plugin.linksAreManaged,
+        displayName: plugin.displayName,
+        // Discovery prefixes what it says about one plugin with that
+        // plugin's folder; the page names the plugin already, so the
+        // prefix goes. Whatever names no folder (an unreadable registry)
+        // stays in the log alone.
+        warnings: discovered.warnings
+          .filter((w) => w.startsWith(`${plugin.folder}: `) || w.startsWith(`${plugin.folder}/`))
+          .map((w) => w.slice(plugin.folder.length).replace(/^[:/]\s*/, '')),
+      });
     }
-    const candidates = children.filter(
-      (child) =>
-        child.isDirectory() &&
-        !child.name.startsWith('.') &&
-        // Personal folders live under Plugins/ but are not plugins: one exists
-        // per person, private by construction, and listing them would put a
-        // locked row per employee in everyone's index.
-        !isPersonalPluginFolder(child.name),
-    );
-    // A plugin exists exactly when its folder carries an `access.md` (see the
-    // class doc) — stat that file, don't trust the directory.
-    const verdicts = await Promise.all(
-      candidates.map(async (child) => {
-        try {
-          return (await fs.stat(path.join(kbRoot, PLUGINS_DIR, child.name, 'access.md'))).isFile();
-        } catch {
-          return false;
-        }
-      }),
-    );
-    candidates.forEach((child, i) => {
-      if (verdicts[i]) byName.set(child.name, [`${PLUGINS_DIR}/${child.name}`]);
-    });
     return byName;
   }
 
-  private async countSkills(): Promise<Map<string, number>> {
-    // `undefined` is the documented GLOBAL, unfiltered mode — counts are a
-    // property of the plugin, not of who is asking.
-    return bucketByPlugin(await this.skillService.listSkills(undefined));
+  /**
+   * Two counts from ONE read of the link index — the membership is built
+   * once per cold catalog, not once per count: `TtlCache` has no
+   * single-flight, so two concurrent readers of an empty cache would each
+   * discover the tree and resolve every linked skill's access.
+   *
+   *  - `skillCounts`: with links, a skill counts for EVERY plugin that holds
+   *    it — inline in its folder, or linked from a manifest. Personal folders
+   *    are already absent from the membership (they are places, not plugins).
+   *  - `brokenLinkCounts`: how many linked skills each plugin's members
+   *    cannot read — memberships reported as linked but not granted. From the
+   *    UNFILTERED index, so the count reaches the plugin's managers even when
+   *    the missing grant locks them out of the skill too.
+   *
+   * Without a link index: skills bucket by folder, and no link can be broken.
+   */
+  private async countThroughLinks(
+    folders: Map<string, string[]>,
+  ): Promise<{ skillCounts: Map<string, number>; brokenLinkCounts: Map<string, number> }> {
+    const skillCounts = new Map<string, number>();
+    const brokenLinkCounts = new Map<string, number>();
+    if (!this.links) {
+      // `undefined` is the documented GLOBAL, unfiltered mode — counts are a
+      // property of the plugin, not of who is asking.
+      return {
+        skillCounts: bucketByFolder(await this.skillService.listSkills(undefined), folders),
+        brokenLinkCounts,
+      };
+    }
+    for (const memberships of (await this.links.membership()).bySkill.values()) {
+      for (const m of memberships) {
+        skillCounts.set(m.name, (skillCounts.get(m.name) ?? 0) + 1);
+        if (m.linked && !m.granted) brokenLinkCounts.set(m.name, (brokenLinkCounts.get(m.name) ?? 0) + 1);
+      }
+    }
+    return { skillCounts, brokenLinkCounts };
   }
 
-  private async countTools(): Promise<Map<string, number>> {
-    return bucketByPlugin(await this.toolManualService.listAllSummaries());
+  /**
+   * Tools belong to the plugin whose FOLDER holds them — matched by path
+   * prefix against the discovered folders, not by `pluginOfPath`'s
+   * second-segment rule, so a dialect plugin nested three folders deep still
+   * counts the servers its bundle expands.
+   *
+   * And to every plugin one of whose LINKED ROOTS holds them. A root is a
+   * skill folder or a folder of skills, and a `.tool` manual sitting beside
+   * those skills reaches the plugin the same way they do — the plugin's page
+   * lists it, so the plugin's total has to count it. Once per plugin: a root
+   * inside the plugin's own folder says nothing the folder did not say first.
+   *
+   * Without a link index, inline only — the same degradation `countThroughLinks`
+   * makes for skills. A host that composes no link index has asked for totals
+   * that count what each plugin's folder holds, and a catalog that counted a
+   * plugin's linked tools while leaving its linked skills out would describe a
+   * plugin that exists nowhere.
+   */
+  private async countTools(scanned: Map<string, ScannedPlugin>): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    const plugins = [...scanned].map(([name, p]) => ({
+      name,
+      folders: p.folders,
+      roots: this.links ? p.linkedRoots : [],
+    }));
+    const bump = (name: string) => counts.set(name, (counts.get(name) ?? 0) + 1);
+    for (const tool of await this.toolManualService.listAllSummaries()) {
+      const inline = plugins.find((p) => p.folders.some((f) => tool.path.startsWith(`${f}/`)));
+      if (inline) bump(inline.name);
+      for (const p of plugins) {
+        if (p === inline) continue;
+        if (p.roots.some((root) => tool.path.startsWith(`${root}/`))) bump(p.name);
+      }
+    }
+    return counts;
+  }
+
+  /**
+   * What the plugin's own access.md says of itself — see
+   * `PluginCatalogEntry.isPrivate`. Read from disk rather than through the
+   * resolver: the mark reflects the file's frontmatter as written. An
+   * ABSENT file makes no statement (false: a plugin discovered by its
+   * manifest may have no rules yet); any other failure to read it is a real
+   * one and propagates, so the catalog never claims a privacy verdict it
+   * could not inspect — `build` degrades the whole read, as for any fault.
+   */
+  private async readsAsPrivate(accessMdPath: string): Promise<boolean> {
+    try {
+      return isPrivateAccessMd(await fs.readFile(accessMdPath, 'utf8'));
+    } catch (err) {
+      if (isAbsence(err)) return false;
+      throw err;
+    }
   }
 }
 
-/** Count items per plugin folder name; ungrouped items (`null`) count nowhere. */
-function bucketByPlugin(items: { path: string }[]): Map<string, number> {
+/**
+ * Count items per plugin by FOLDER PREFIX against the discovered folders —
+ * not by `pluginOfPath`'s second-segment rule, which would file a nested
+ * plugin's skills under its grouping folder. Items in no plugin count nowhere.
+ */
+function bucketByFolder(items: { path: string }[], folders: Map<string, string[]>): Map<string, number> {
   const counts = new Map<string, number>();
+  const byFolder = [...folders.entries()].map(([name, [folder]]) => ({ name, prefix: `${folder}/` }));
   for (const item of items) {
-    const plugin = pluginOfPath(item.path);
-    if (plugin === null) continue;
-    counts.set(plugin, (counts.get(plugin) ?? 0) + 1);
+    const owner = byFolder.find((f) => item.path.startsWith(f.prefix));
+    if (!owner) continue;
+    counts.set(owner.name, (counts.get(owner.name) ?? 0) + 1);
   }
   return counts;
 }
 
-/** The default-branch workspace id every plugin resolution runs against. */
-export function pluginsWorkspaceId(): string {
-  return workspaceIdForBranch(DEFAULT_BRANCH);
+/**
+ * A plugin folder's path BELOW the plugins root: `GTM`, or `teams/deep`.
+ *
+ * The key a join request is cut by — its branch, and the row that records it
+ * — so it lives here rather than in any one of the three places that need to
+ * compute it. The whole path, not the basename, so two plugins whose folders
+ * share a basename can never share a branch; and it survives a rename of the
+ * plugin's identity, which moves no folder.
+ */
+export function pluginFolderBelowRoot(folder: string): string {
+  return folder.slice(folder.indexOf('/') + 1);
 }

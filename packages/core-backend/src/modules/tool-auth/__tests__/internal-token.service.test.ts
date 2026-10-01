@@ -22,6 +22,12 @@ describe('InternalTokenService', () => {
     expect(svc.verify(token)).toEqual({ userId: 'user-A', externalProxy: true });
   });
 
+  it('round-trips the connectionId claim (the agent behind an exchanged OAuth grant)', () => {
+    const svc = new InternalTokenService({ secret: 'test-secret' });
+    const token = svc.mint({ userId: 'user-A', externalProxy: true, connectionId: 'conn-1' });
+    expect(svc.verify(token)).toEqual({ userId: 'user-A', externalProxy: true, connectionId: 'conn-1' });
+  });
+
   it('round-trips the focusedBranch claim (the in-process agent workspace branch)', () => {
     const svc = new InternalTokenService({ secret: 'test-secret' });
     const token = svc.mint({ userId: 'user-A', sessionId: 'run-1', focusedBranch: 'main' });

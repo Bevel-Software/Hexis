@@ -1,17 +1,22 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, HEXIS_EXTENSION_NS, HEXIS_LINKED_SKILLS_KEY } from '@bevel-software/platform-shared';
 import { PluginIndexService } from '../plugins.service.js';
+import type { PluginLinkIndex } from '../plugin-links.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ISkillService, SkillSummary } from '../../skills/skills.contract.js';
 import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const KB_DIR = 'knowledge-base';
 const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
+const kbContext = testKbContext({ kbDirName: KB_DIR });
 
 const OLGA = { name: 'Olga Ivanova', email: 'olga@bevel.software' };
 
@@ -46,26 +51,61 @@ describe('PluginIndexService', () => {
   const toolService = (list: ToolManualSummary[] = []): IToolManualService =>
     ({ listAllSummaries: async () => list }) as unknown as IToolManualService;
 
+  /**
+   * A link index that resolves no memberships — enough to put the service in
+   * the mode every real host runs in (counts follow links), without a tree to
+   * discover. Omit it to get the degraded, inline-only host.
+   */
+  const emptyLinks = () =>
+    ({ membership: async () => ({ bySkill: new Map(), byPlugin: new Map() }) }) as unknown as PluginLinkIndex;
+
   const svc = (opts: {
     access?: IAccessControl;
     skills?: SkillSummary[];
     tools?: ToolManualSummary[];
     workspace?: WorkspaceService;
+    /** Absent: the host that composes no link index — inline-only counts. */
+    links?: PluginLinkIndex;
   } = {}) =>
     new PluginIndexService(
       opts.workspace ?? workspaceService,
       opts.access ?? principals,
       skillService(opts.skills),
       toolService(opts.tools),
-      KB_DIR,
+      kbContext,
+      new KbPluginSource(new NodeFs(), kbContext),
+      Date.now,
+      opts.links,
     );
 
   const kb = () => join(root, wsId, KB_DIR);
 
-  /** A REAL plugin: a folder carrying the access.md that makes it exist. */
-  const pluginDir = async (name: string) => {
-    await mkdir(join(kb(), 'Plugins', name), { recursive: true });
-    await writeFile(join(kb(), 'Plugins', name, 'access.md'), '---\nread:\n  - everyone\n---\n');
+  /**
+   * A REAL plugin: a folder carrying the manifest discovery reads AND the
+   * access.md that makes it exist to the index (a legacy folder without a
+   * manifest gets one from the boot step before the index ever runs).
+   */
+  const pluginDir = async (
+    folder: string,
+    linkedRoots: string[] = [],
+    names?: { name: string; displayName: string },
+  ) => {
+    await mkdir(join(kb(), 'Plugins', folder), { recursive: true });
+    // Both names, as every manifest carries them: the identity the folder
+    // folds to, and the spelling people see. The folder itself is not an
+    // input to either — creation writes both, and the boot backfill gave
+    // them to the manifests written before the field was mandatory. Pass
+    // `names` for a folder spelled like neither, which is what makes a
+    // reader that consulted it fail.
+    const manifest: Record<string, unknown> = names
+      ? { ...names }
+      : { name: folder.toLowerCase(), displayName: folder };
+    // The roots a manifest links, where `linkedSkillRoots` reads them.
+    if (linkedRoots.length > 0) {
+      manifest.extensions = { [HEXIS_EXTENSION_NS]: { [HEXIS_LINKED_SKILLS_KEY]: linkedRoots } };
+    }
+    await writeFile(join(kb(), 'Plugins', folder, 'plugin.json'), JSON.stringify(manifest));
+    await writeFile(join(kb(), 'Plugins', folder, 'access.md'), '---\nread:\n  - everyone\n---\n');
   };
 
   beforeEach(async () => {
@@ -77,10 +117,17 @@ describe('PluginIndexService', () => {
   test('enumerates Plugins/ folders carrying an access.md, sorted by name', async () => {
     await pluginDir('GTM');
     await pluginDir('Engineering');
+    // A folder spelled like NEITHER of its names: both answers can only have
+    // come from the file, so a reader that fell back to the folder would say
+    // 'mktg' here, or call it 'Mktg'.
+    await pluginDir('Mktg', [], { name: 'marketing', displayName: 'Marketing Platform' });
 
     const catalog = await svc().catalog();
-    expect(catalog.map((g) => g.name)).toEqual(['Engineering', 'GTM']);
-    expect(catalog[1].folders).toEqual(['Plugins/GTM']);
+    // The manifest's `name` is the identity and its `displayName` what people
+    // see — both read from the file, neither from the folder.
+    expect(catalog.map((g) => g.name)).toEqual(['engineering', 'gtm', 'marketing']);
+    expect(catalog[1]).toMatchObject({ displayName: 'GTM', folders: ['Plugins/GTM'] });
+    expect(catalog[2]).toMatchObject({ displayName: 'Marketing Platform', folders: ['Plugins/Mktg'] });
   });
 
   test('a folder without an access.md is not a plugin', async () => {
@@ -90,10 +137,14 @@ describe('PluginIndexService', () => {
     await mkdir(join(kb(), 'Plugins', 'Ghost'), { recursive: true });
     await mkdir(join(kb(), 'Plugins', 'Residue'), { recursive: true });
     await writeFile(join(kb(), 'Plugins', 'Residue', 'notes.md'), 'leftover');
+    // A manifest alone is a plugin to discovery but not to the index: the
+    // access.md is what a deleted plugin's residue lacks.
+    await mkdir(join(kb(), 'Plugins', 'Manifest-only'), { recursive: true });
+    await writeFile(join(kb(), 'Plugins', 'Manifest-only', 'plugin.json'), '{"name":"manifest-only"}');
     await pluginDir('Real');
 
     const catalog = await svc().catalog();
-    expect(catalog.map((g) => g.name)).toEqual(['Real']);
+    expect(catalog.map((g) => g.name)).toEqual(['real']);
   });
 
   test('the retired Skills/ and Tools/ roots are NOT plugin roots', async () => {
@@ -102,7 +153,7 @@ describe('PluginIndexService', () => {
     await pluginDir('Engineering');
 
     const catalog = await svc().catalog();
-    expect(catalog.map((g) => g.name)).toEqual(['Engineering']);
+    expect(catalog.map((g) => g.name)).toEqual(['engineering']);
   });
 
   test('ignores loose files and dot-dirs under the plugin root', async () => {
@@ -113,7 +164,7 @@ describe('PluginIndexService', () => {
     await writeFile(join(kb(), 'Plugins', 'slack.tool'), '{}');
 
     const catalog = await svc().catalog();
-    expect(catalog.map((g) => g.name)).toEqual(['GTM']);
+    expect(catalog.map((g) => g.name)).toEqual(['gtm']);
   });
 
   test('counts skills and tools from the global catalogs by pluginOfPath', async () => {
@@ -126,12 +177,148 @@ describe('PluginIndexService', () => {
       tools: tools('Plugins/GTM/heyreach.tool', 'Plugins/slack.tool'),
     }).catalog();
 
-    const gtm = catalog.find((g) => g.name === 'GTM')!;
+    const gtm = catalog.find((g) => g.name === 'gtm')!;
     expect(gtm.skillCount).toBe(2);
     expect(gtm.toolCount).toBe(1);
-    const product = catalog.find((g) => g.name === 'Product')!;
+    const product = catalog.find((g) => g.name === 'product')!;
     expect(product.skillCount).toBe(1);
     expect(product.toolCount).toBe(0);
+  });
+
+  /**
+   * A plugin's manifest points at roots elsewhere, and the catalog has to say
+   * so: the page uses them to tell a card that LIVES in the plugin from one it
+   * only reaches. A skill under such a root carries its own membership record;
+   * a `.tool` manual beside it carries none, so the root is the only witness —
+   * which is why the tools it brings in are counted here too.
+   */
+  test("serves a plugin's linked roots, and counts the tools that reach it through them", async () => {
+    await pluginDir('GTM', ['Skills/Testing', 'Plugins/Shared/observability']);
+    await pluginDir('Product');
+
+    const catalog = await svc({
+      links: emptyLinks(),
+      tools: tools(
+        'Plugins/GTM/heyreach.tool',
+        'Plugins/Shared/observability/grafana.tool',
+        // A sibling folder sharing a prefix is NOT under the root.
+        'Plugins/Shared/observability-archive/old.tool',
+      ),
+    }).catalog();
+
+    const gtm = catalog.find((g) => g.name === 'gtm')!;
+    expect(gtm.linkedRoots).toEqual(['Skills/Testing', 'Plugins/Shared/observability']);
+    // Its own, plus the one under the linked root; never the archive's.
+    expect(gtm.toolCount).toBe(2);
+    // Product links nothing and holds nothing.
+    const product = catalog.find((g) => g.name === 'product')!;
+    expect(product.linkedRoots).toEqual([]);
+    expect(product.toolCount).toBe(0);
+  });
+
+  test('counts a tool ONCE for a plugin whose linked root sits inside its own folder', async () => {
+    await pluginDir('GTM', ['Plugins/GTM/tools']);
+
+    const catalog = await svc({ links: emptyLinks(), tools: tools('Plugins/GTM/tools/grafana.tool') }).catalog();
+    expect(catalog.find((g) => g.name === 'gtm')!.toolCount).toBe(1);
+  });
+
+  /**
+   * A host that composes no link index counts what each plugin's FOLDER holds
+   * — for skills (see `countThroughLinks`) and, for the same reason, for
+   * tools. Counting a plugin's linked tools there while its linked skills went
+   * uncounted would describe a plugin that exists on no screen.
+   */
+  test('counts tools inline-only when the host has no link index', async () => {
+    await pluginDir('GTM', ['Skills/Testing', 'Plugins/Shared/observability']);
+
+    const catalog = await svc({
+      skills: skills('Plugins/GTM/outreach', 'Skills/Testing/test-shared-linking'),
+      tools: tools('Plugins/GTM/heyreach.tool', 'Plugins/Shared/observability/grafana.tool'),
+    }).catalog();
+
+    // The roots are still SERVED — the page needs them to draw the pill; it is
+    // the counting that degrades, and it degrades the same way for both kinds.
+    const gtm = catalog.find((g) => g.name === 'gtm')!;
+    expect(gtm.linkedRoots).toEqual(['Skills/Testing', 'Plugins/Shared/observability']);
+    expect(gtm).toMatchObject({ skillCount: 1, toolCount: 1 });
+  });
+
+  test("counts the linked skills a plugin's members cannot read, from the unfiltered link index", async () => {
+    await pluginDir('GTM');
+    await pluginDir('Product');
+    // The link index's view: GTM links two shared skills, one of which lost
+    // its grant; Product's inline skill is granted by definition.
+    const membership = vi.fn(async () => ({
+      bySkill: new Map([
+        ['Skills/Eng/deploy', [{ name: 'gtm', linked: true, granted: false }]],
+        ['Skills/Eng/rollback', [{ name: 'gtm', linked: true, granted: true }]],
+        ['Plugins/Product/roadmap', [{ name: 'product', linked: false, granted: true }]],
+      ]),
+      byPlugin: new Map(),
+    }));
+    const links = { membership } as unknown as PluginLinkIndex;
+    const catalog = await new PluginIndexService(
+      workspaceService,
+      principals,
+      skillService(skills('Skills/Eng/deploy', 'Skills/Eng/rollback', 'Plugins/Product/roadmap')),
+      toolService(),
+      kbContext,
+      new KbPluginSource(new NodeFs(), kbContext),
+      Date.now,
+      links,
+    ).catalog();
+
+    expect(catalog.find((g) => g.name === 'gtm')).toMatchObject({ skillCount: 2, brokenLinks: 1 });
+    expect(catalog.find((g) => g.name === 'product')).toMatchObject({ skillCount: 1, brokenLinks: 0 });
+    // Both counts from ONE read of the index: its cache has no single-flight,
+    // so two concurrent reads of a cold catalog would build the tree twice.
+    expect(membership).toHaveBeenCalledTimes(1);
+    // Without a link index there are no links to be broken.
+    expect((await svc().catalog()).every((g) => g.brokenLinks === 0)).toBe(true);
+  });
+
+  test("marks a plugin private when its access.md's own block denies everyone and names only people", async () => {
+    await pluginDir('GTM'); // read: everyone — discoverable, not private
+    await pluginDir('Mine');
+    await writeFile(
+      join(kb(), 'Plugins', 'Mine', 'access.md'),
+      '---\n# the file\nread:\n  - deny everyone\n  - Ali Vega <ali@x.io>\n---\nread:\n  - deny everyone\n  - Ali Vega <ali@x.io>\n',
+    );
+    // A role beside the denial is a roster, not a private list.
+    await pluginDir('Team');
+    await writeFile(
+      join(kb(), 'Plugins', 'Team', 'access.md'),
+      '---\nread:\n  - deny everyone\n  - Sales Team\n---\nread:\n  - Sales Team\n',
+    );
+    // A frontmatter that never mentions everyone makes no statement.
+    await pluginDir('Quiet');
+    await writeFile(join(kb(), 'Plugins', 'Quiet', 'access.md'), '---\nread: []\n---\nread:\n  - Ali Vega <ali@x.io>\n');
+
+    const catalog = await svc().catalog();
+    expect(Object.fromEntries(catalog.map((g) => [g.name, g.isPrivate]))).toEqual({
+      gtm: false,
+      mine: true,
+      team: false,
+      quiet: false,
+    });
+  });
+
+  test("carries what discovery left out of a plugin, in that plugin's entry, without the folder prefix", async () => {
+    await pluginDir('GTM');
+    await mkdir(join(kb(), 'Plugins', 'Ado'), { recursive: true });
+    await writeFile(
+      join(kb(), 'Plugins', 'Ado', 'plugin.bundle.json'),
+      JSON.stringify({ name: 'ado', mcpProfile: 'global', sourceSkillRoots: ['../escape'] }),
+    );
+    const catalog = await svc().catalog();
+    const ado = catalog.find((g) => g.name === 'ado')!;
+    expect(ado.warnings).toEqual([
+      'sourceSkillRoots entry "../escape" is not a folder path — ignored',
+      'mcpProfile "global" named but no registry could be read',
+    ]);
+    // Nothing of that is GTM's.
+    expect(catalog.find((g) => g.name === 'gtm')!.warnings).toEqual([]);
   });
 
   test('resolves principals on the plugin folder', async () => {
@@ -190,7 +377,7 @@ describe('PluginIndexService', () => {
     await expect(service.catalog()).resolves.toEqual([]);
 
     fail = false;
-    expect((await service.catalog()).map((g) => g.name)).toEqual(['GTM']);
+    expect((await service.catalog()).map((g) => g.name)).toEqual(['gtm']);
     warn.mockRestore();
   });
 
@@ -214,12 +401,12 @@ describe('PluginIndexService', () => {
     await pluginDir('GTM');
     const service = svc();
 
-    expect((await service.catalog()).map((g) => g.name)).toEqual(['GTM']);
+    expect((await service.catalog()).map((g) => g.name)).toEqual(['gtm']);
     // A plugin added out of band is NOT seen while the cache holds…
     await pluginDir('Finance');
-    expect((await service.catalog()).map((g) => g.name)).toEqual(['GTM']);
+    expect((await service.catalog()).map((g) => g.name)).toEqual(['gtm']);
     // …and IS seen once the file-change subscriber drops it.
     service.invalidate();
-    expect((await service.catalog()).map((g) => g.name)).toEqual(['Finance', 'GTM']);
+    expect((await service.catalog()).map((g) => g.name)).toEqual(['finance', 'gtm']);
   });
 });

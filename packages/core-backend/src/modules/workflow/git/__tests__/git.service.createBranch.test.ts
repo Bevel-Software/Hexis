@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -90,7 +91,7 @@ describe('GitService.createBranch', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     const info = await svc.createBranch(workspaceId, 'alice/new-draft');
@@ -133,7 +134,7 @@ describe('GitService.createBranch', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     await svc.createBranch(workspaceId, 'alice/new-draft');

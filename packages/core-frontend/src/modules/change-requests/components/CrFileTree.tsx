@@ -8,10 +8,11 @@ import {
   FileEdit,
   FilePlus2,
   FileX2,
-  X,
+  Lock,
 } from 'lucide-react';
 import type { FileApprovalState, PrFileStatus } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
+import { hasOwnApproval } from '../utils/approval';
 
 /**
  * The change request's files as a TREE — the Knowledge sidebar's visual
@@ -24,9 +25,11 @@ import { cn } from '../../../lib/utils';
  *  - INLINE after the name: the approval STATE — green ✓ confirmed, amber
  *    clock for outdated confirmations, grey clock waiting — with the
  *    eligible approvers in the tooltip.
- *  - RIGHT, revealed on hover: the ACTION for eligible viewers — a filled
- *    green check to confirm the file, turning into an ✕ (withdraw) once
- *    YOUR confirmation is the current one.
+ *  - For a file that is the VIEWER's to approve, the state is theirs instead:
+ *    a filled green check "Approved by you", or an outlined one "Waiting on
+ *    your approval". A status mark, not a control — approving is the labelled
+ *    button in the selected file's header, where the reviewer is reading
+ *    (an unlabelled check on a tree row was not findable).
  *
  * Right-click a revertable file for the destructive verb, armed inside its
  * own context menu. Selection (which file the diff shows) stays a plain
@@ -43,19 +46,25 @@ export interface CrTreeFileState {
   /** Git status when changed (drives the kind icon). */
   status?: PrFileStatus;
   approval?: FileApprovalState;
+  /**
+   * The access sentence when this file's copy came back REFUSED — the lock
+   * glyph's tooltip, and the reason it is there. The same sentence the pane
+   * shows, so a reader who meets the lock in the list and the sentence in the
+   * pane is told one thing, not two. Absent for every other file, including
+   * one whose read merely broke: that is retryable and says so in the pane.
+   */
+  deniedNote?: string;
 }
 
 interface CrFileTreeProps {
   files: CrTreeFileState[];
   selected: string;
-  /** The viewer — whose own current confirmation the withdraw action needs. */
+  /** The viewer — whose own current confirmation the status mark reads. */
   currentUserEmail: string;
   onSelect(path: string): void;
-  /** Confirm `path`, or withdraw the viewer's own confirmation of it. */
-  onToggleApprove(path: string, hasOwnApproval: boolean): void;
   /** Revert `path` on the source branch. Only called when approvable+changed. */
   onRevert(path: string): void;
-  /** Disables the verbs while one is in flight. */
+  /** Disables the revert verb while one is in flight. */
   busy: boolean;
 }
 
@@ -96,7 +105,6 @@ export function CrFileTree({
   selected,
   currentUserEmail,
   onSelect,
-  onToggleApprove,
   onRevert,
   busy,
 }: CrFileTreeProps) {
@@ -121,12 +129,10 @@ export function CrFileTree({
         selected={selected}
         currentUserEmail={currentUserEmail}
         onSelect={onSelect}
-        onToggleApprove={onToggleApprove}
         onContextMenu={(path, e) => {
           e.preventDefault();
           setMenu({ path, x: e.clientX, y: e.clientY });
         }}
-        busy={busy}
       />
       {menu && (
         <RevertMenu
@@ -151,9 +157,7 @@ function Level({
   selected,
   currentUserEmail,
   onSelect,
-  onToggleApprove,
   onContextMenu,
-  busy,
 }: {
   folder: TreeFolder;
   depth: number;
@@ -162,9 +166,7 @@ function Level({
   selected: string;
   currentUserEmail: string;
   onSelect(path: string): void;
-  onToggleApprove(path: string, hasOwnApproval: boolean): void;
   onContextMenu(path: string, e: React.MouseEvent): void;
-  busy: boolean;
 }) {
   return (
     <>
@@ -196,9 +198,7 @@ function Level({
                 selected={selected}
                 currentUserEmail={currentUserEmail}
                 onSelect={onSelect}
-                onToggleApprove={onToggleApprove}
                 onContextMenu={onContextMenu}
-                busy={busy}
               />
             )}
           </div>
@@ -208,15 +208,19 @@ function Level({
         const name = file.path.slice(file.path.lastIndexOf('/') + 1);
         const on = selected === file.path;
         const eligible = file.changed && file.approval?.viewerCanApprove === true;
-        // The withdraw action toggles YOUR current confirmation, nobody
-        // else's — stale rows stay for audit without arming it (presplit
-        // PrFileRow's rule, kept verbatim).
-        const email = currentUserEmail.trim().toLowerCase();
-        const hasOwnApproval =
-          !!email &&
-          !!file.approval?.approvedBy.some(
-            (a) => a.email.toLowerCase() === email && !a.isStale,
-          );
+        // The viewer's own state wins the slot when there is one: approved
+        // by them, or still waiting on them. Otherwise the general badge.
+        // "Waiting" means the gate needs them: one eligible approval satisfies
+        // a file, so once someone else has confirmed it the file waits on
+        // nobody and reads "Confirmed" — the footer's count agrees. The header
+        // still lets them add their own.
+        const viewerMark = !eligible
+          ? null
+          : hasOwnApproval(file.approval, currentUserEmail)
+            ? 'approved'
+            : file.approval?.inMergeGate && !file.approval.isApproved
+              ? 'waiting'
+              : null;
         return (
           <div
             key={file.path}
@@ -243,33 +247,11 @@ function Level({
             >
               {name}
             </button>
-            <ApprovalStateBadge approval={file.changed ? file.approval : undefined} />
-            {eligible && (
-              <span className="flex flex-none items-center opacity-70 group-hover/row:opacity-100">
-                {hasOwnApproval ? (
-                  <button
-                    type="button"
-                    disabled={busy}
-                    title="Withdraw your confirmation"
-                    aria-label={`Withdraw your confirmation of ${file.path}`}
-                    onClick={() => onToggleApprove(file.path, true)}
-                    className="rounded-sm p-1 text-ok transition-colors hover:bg-danger-soft hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    <X size={12} />
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    disabled={busy}
-                    title="Confirm this file"
-                    aria-label={`Confirm ${file.path}`}
-                    onClick={() => onToggleApprove(file.path, false)}
-                    className="rounded-sm bg-ok p-1 text-white transition-colors hover:opacity-85 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    <Check size={12} />
-                  </button>
-                )}
-              </span>
+            {file.deniedNote && <DeniedMark note={file.deniedNote} />}
+            {viewerMark ? (
+              <ViewerApprovalMark state={viewerMark} />
+            ) : (
+              <ApprovalStateBadge approval={file.changed ? file.approval : undefined} />
             )}
           </div>
         );
@@ -299,15 +281,49 @@ function KindIcon({ status }: { status?: PrFileStatus }) {
 }
 
 /**
+ * A file whose copy the viewer may not read. Beside the name rather than in
+ * place of the kind icon: what the request DID to the file is still true and
+ * still worth seeing, and the lock is the extra fact — this one you can't open.
+ */
+function DeniedMark({ note }: { note: string }) {
+  return (
+    <span
+      role="img"
+      aria-label={note}
+      title={note}
+      className="flex flex-none items-center text-ink-faint"
+    >
+      <Lock size={11} />
+    </span>
+  );
+}
+
+/** The viewer's own approval state on a file that is theirs to approve. */
+function ViewerApprovalMark({ state }: { state: 'approved' | 'waiting' }) {
+  const label = state === 'approved' ? 'Approved by you' : 'Waiting on your approval';
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      title={label}
+      className={cn(
+        'flex flex-none items-center rounded-sm p-0.5',
+        state === 'approved' ? 'bg-ok text-white' : 'border border-ok text-ok',
+      )}
+    >
+      <Check size={11} />
+    </span>
+  );
+}
+
+/**
  * The approval STATE, inline after the name — presplit PrApprovalBadge:
  * green ✓ confirmed, amber clock for outdated confirmations, grey clock
- * waiting; nothing at all for files outside the gate (keeps the tree quiet).
+ * waiting; nothing at all for files outside the gate (keeps the tree quiet,
+ * and names no one the gate does not wait on — the footer's rule).
  */
 function ApprovalStateBadge({ approval }: { approval?: FileApprovalState }) {
-  if (!approval) return null;
-  const hasEligible =
-    approval.eligibleApprovers.roles.length > 0 || approval.eligibleApprovers.users.length > 0;
-  if (!hasEligible) return null;
+  if (!approval?.inMergeGate) return null;
   const who = [
     ...approval.eligibleApprovers.roles,
     ...approval.eligibleApprovers.users.map((u) => u.name || u.email),

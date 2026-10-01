@@ -2,7 +2,7 @@
 
 ## Upgrading
 
-Pin the version you run in `.env` (`HEXIS_VERSION=0.10.0`) — left unset it
+Pin the version you run in `.env` (`HEXIS_VERSION=0.15.1`) — left unset it
 tracks `latest`, and an unplanned `pull` becomes an unplanned upgrade.
 
 The app tells you when it's time: admins see an in-app banner when a newer
@@ -17,23 +17,72 @@ target version first, then:
 2. `docker compose pull app`
 3. `docker compose up -d`
 
+Since 0.21.0 every compose file in this repository sets `pull_policy: always`
+on the app, so `docker compose up` fetches the image the tag currently names
+instead of reusing whatever the host pulled last; if you copied an older
+compose file, take the release's.
+
 Database migrations and the knowledge-base maintenance phase run
 automatically while the app boots — no manual steps, but the first start
 after an upgrade can take a little longer.
+
+The maintenance phase commits to the knowledge base on every branch when a
+release needs it. The current steps: rename a legacy `Groups/` root to
+`Plugins/`; create the `Skills/` root (and take back the `.bevelignore` rule an
+earlier release added for it — the Skills & Tools sidebar shows that root as
+a file tree now); write a `plugin.json` into every plugin folder that predates
+the manifest. Each is idempotent, so a second start writes nothing.
+
+### The knowledge-base layout is no longer read from the environment
+
+`KB_KNOWLEDGE_BASE_DIR`, `KB_SKILLS_DIR` and `KB_PLUGINS_DIR` are retired: the
+three root folder names, and the agent guide's file name beside them, are
+entered on the setup screen and the Deployment settings page.
+
+Nothing changes for most deployments: on the first start, each of the three
+still set in your environment is imported once into its saved setting and the
+log names the variable to delete. A value that is not a usable folder name is
+not imported — the start warns and falls back to the default name for that
+root, so check the log once after upgrading. Delete the variables from your
+`.env` at your
+convenience.
+
+One deployment shape does change at the upgrade. Where a value is ALREADY saved
+from the app and the variable is still set to something else, the two disagreed
+— and until this release the variable won. From now on the saved value wins,
+the start warns that the variable is ignored, and those names take effect at
+that boot. The import only runs where nothing is saved, so editing `.env`
+cannot hand precedence back: if the variable's names are the ones you want,
+enter them on the Deployment settings page.
+
+A plugin is named by its manifest: the `name` in `plugin.json` is what the
+marketplace publishes, what the plugin's page address uses, and what grants
+spell (`plugin/<name>/read`). The manifests the maintenance phase writes name
+each folder in slug form (`Sales Team` → `sales-team`), and grants written
+before this release already resolved through that slug, so they keep working.
+If you wrote a manifest by hand whose `name` differs from the folder's slug,
+grants that spelled the folder no longer name that plugin: open the plugin's
+page and rename its identifier to the slug the grants use, or respell the
+grants. The folder name (or the manifest's `displayName`) stays the label
+people see, so nothing is relabelled.
 
 **Downgrading is not supported** once a version's migrations have run: an
 older app cannot read a newer database. To go back, restore the backup you
 took before upgrading.
 
-### PII encryption (0.14+)
+### Personal data in the database is encrypted (0.23+)
 
-From 0.14, personal data in the database — emails, display names, and
+From 0.23, personal data in the database — emails, display names, and
 change-request/review text — is encrypted with a key derived from
 `SECRETS_ENC_KEY`, in addition to the secrets vault it already sealed. The
 first boot after the upgrade rewrites existing rows automatically; nothing
 to do. Upgrade with a single app instance (the normal
 `docker compose pull app && up -d` flow already replaces the container) —
 don't run old and new versions against the same database side by side.
+
+A process that serves several knowledge bases (`TENANTS_FILE`) seals every
+tenant's rows with one key derived from `TENANT_MASTER_KEY`; see
+docs/multi-tenant.md for what that means when a tenant leaves.
 
 What it changes for operations:
 

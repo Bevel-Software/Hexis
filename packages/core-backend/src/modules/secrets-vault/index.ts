@@ -12,6 +12,7 @@ export type {
   OAuthProviderConfig,
   PutStaticSecretInput,
   CreateOAuthSecretInput,
+  ForcedRefreshOutcome,
 } from './secrets-vault.contract.js';
 export {
   InvalidSecretError,
@@ -20,6 +21,8 @@ export {
 } from './secrets-vault.contract.js';
 export {
   registerBevelSecretsVariableLoader,
+  unregisterBevelSecretsVariableLoader,
   bevelSecretsLoaderConfig,
   BEVEL_SECRETS_LOADER_TYPE,
+  DEFAULT_SECRETS_SCOPE,
 } from './secrets-variable-loader.js';

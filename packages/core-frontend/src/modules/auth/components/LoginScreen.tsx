@@ -11,6 +11,13 @@ const OAUTH_ERROR_MESSAGES: Record<string, string> = {
   state: 'Sign-in could not be verified. Please try again.',
   auth: 'Sign-in failed. Please try again.',
   start: 'Could not start sign-in. Please try again.',
+  not_configured: 'Single sign-on is not configured on this deployment.',
+  admission: 'This workspace has no seat available for your account. Ask its admin.',
+  // Who you are was proven; nobody has given that person an account here.
+  not_invited: 'You do not have an account in this workspace yet. Ask its admin to invite you.',
+  // The provider signed the person in but does not vouch for the address.
+  unverified_email:
+    'Your sign-in provider has not verified your email address, so it cannot be used to sign in here.',
 };
 
 export function LoginScreen() {

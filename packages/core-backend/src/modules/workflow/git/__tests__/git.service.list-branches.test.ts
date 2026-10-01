@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -82,7 +83,7 @@ describe('GitService.listBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     const branches = await svc.listBranches(workspaceId);
@@ -101,7 +102,7 @@ describe('GitService.listBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     const branches = await svc.listBranches(workspaceId);
@@ -115,7 +116,7 @@ describe('GitService.listBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     // Prime the cache: first call fetches and populates lastImplicitFetchAt.
     await svc.listBranches(workspaceId);
@@ -131,7 +132,7 @@ describe('GitService.listBranches', () => {
     const freshSvc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     const branches = await freshSvc.listBranches(workspaceId);
     expect(branches.map((b) => b.name)).toContain('bob/draft-two');
@@ -145,7 +146,7 @@ describe('GitService.listBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     // Should not throw and should return the refs we already had on disk.
@@ -159,7 +160,7 @@ describe('GitService.listBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
 
     // current-company-state is the workspace clone's checked-out branch (the
@@ -179,7 +180,7 @@ describe('GitService.listBranches', () => {
     const svc = new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
     // Simulate a just-completed clone — the workspace is freshly fetched.
     svc.noteWorkspaceFetched(workspaceId);
@@ -194,5 +195,40 @@ describe('GitService.listBranches', () => {
 
     const branches = await svc.listBranches(workspaceId);
     expect(branches.map((b) => b.name)).not.toContain('carol/draft-three');
+  });
+
+  // A listing is the one moment the platform sees origin's set of branches,
+  // and the workspace layer needs that memory to tell a branch that was
+  // DELETED (410) from a name that never existed (404). Wired in the
+  // composition root; the listener is how the fact gets there.
+  it('tells the listener every branch name the listing returned', async () => {
+    await seedWorkspace(root, workspaceId);
+    const svc = new GitService(
+      stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
+      new WorkflowHooks(),
+      testKbContext(),
+    );
+    const seen: string[][] = [];
+    svc.setBranchesListedListener((names) => seen.push(names));
+
+    const branches = await svc.listBranches(workspaceId);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual(branches.map((b) => b.name));
+    expect(seen[0]).toContain('alice/draft-one');
+  });
+
+  it('still serves the listing when the listener throws', async () => {
+    await seedWorkspace(root, workspaceId);
+    const svc = new GitService(
+      stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
+      new WorkflowHooks(),
+      testKbContext(),
+    );
+    svc.setBranchesListedListener(() => { throw new Error('listener blew up'); });
+
+    await expect(svc.listBranches(workspaceId)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'alice/draft-one' })]),
+    );
   });
 });

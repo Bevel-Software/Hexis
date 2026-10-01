@@ -1,0 +1,204 @@
+import { useMemo } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
+import { libraryUploadTarget, useWorkspace } from '../../workspace/state/workspace.context';
+import { checkoutRoot } from '../../workspace/utils/fileTree';
+import { KB_ROUTE_PREFIX, kbFileUrl, safeDecode } from '../../workspace/routing/kb-routes';
+import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
+import { Puzzle } from 'lucide-react';
+import {
+  EmptyTreeNotice,
+  FileTreeNode,
+  TreeChrome,
+  UploadNotices,
+  type TreeMenuItem,
+  type TreeNav,
+} from '../../workspace/components/FileExplorer';
+
+/**
+ * One of the Library's two reserved roots — `Skills/` or `Plugins/` — as a
+ * file tree, made of the SAME rows as Knowledge's explorer — right-click menu
+ * (new file, new folder, rename, delete, manage access, download), drag to
+ * move, drop to upload, the caller's proposed files shown in accent. One tree
+ * component in the app, holding a different root.
+ *
+ * The root is a collapsible folder row named after the folder, exactly as
+ * Knowledge and Data are top-level folders in the Knowledge explorer: open
+ * by default with its children collapsed under it, a drop target for uploads
+ * into the root, the create buttons on hover, the folder's menu on
+ * right-click — minus what a platform-owned root must not offer
+ * (`FileTreeNode.reserved`: no rename, delete, drag or pin).
+ *
+ * Two things differ from Knowledge, and both are the surroundings' (see
+ * `TreeChrome`), not the rows':
+ *
+ *  - A click opens the file on its ITEM PAGE, here in Skills & Tools — at
+ *    the item's canonical default-branch URL, whatever branch is checked
+ *    out. The Library speaks the default branch everywhere; this is no
+ *    exception. A skill's SKILL.md opens the skill page; a plugin's
+ *    manifest or a loose file opens the plugin page; a tool file opens the
+ *    tool page — `WorkspaceItemRoute` decides, from the path alone.
+ *  - The current row is the file the URL names, not the pane workspace's
+ *    open tab, which the Library never sets.
+ *
+ * Renders nothing only while the tree is loading, or while the workspace has
+ * no repository checkout in it — there is no folder to draw a row for, and
+ * the empty state below says why. Once the checkout is here the folder is
+ * always drawn — empty when the knowledge base has none yet, at the path it
+ * will get — because the folder is where new things go, and a person cannot
+ * put one there if the way there is not on screen. The reserved root is
+ * forced visible by the tree filter even to a reader who may open nothing
+ * beneath it, so the row is present for everyone.
+ */
+export function RootFolderTree({
+  dir,
+  testId,
+  menuItems,
+}: {
+  dir: string;
+  testId: string;
+  /**
+   * The surface's own context-menu items for an entry, injected into the
+   * tree's menu after its create verbs — see `TreeNav.menuItems`. The tree
+   * itself grows no verb per caller.
+   */
+  menuItems?: (entry: FileTreeEntry) => TreeMenuItem[];
+}) {
+  const { kbDirName } = useWorkspace();
+  const { tree, suggestionOnlyPaths } = useMergedWorkspaceTree();
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  // `Skills/` and `Plugins/` are children of the CHECKOUT and of nothing
+  // else. A folder of either name sitting beside the checkout is somebody
+  // else's directory, and this tree has never had any business rendering it —
+  // it did, on core-staging, because the root used to be found by searching
+  // the workspace for a folder that looked like a knowledge base.
+  const root = useMemo((): { entry: FileTreeEntry; absent: boolean } | null => {
+    const kbRoot = checkoutRoot(tree, kbDirName);
+    if (!kbRoot) return null;
+    const found = kbRoot.children?.find((c) => c.type === 'directory' && c.name === dir);
+    if (found) return { entry: found, absent: false };
+    // No folder yet (a knowledge base from before the root existed, or one
+    // whose folder was removed): the row is drawn anyway, empty, at the
+    // path the folder will have. Every write creates its parents, so the
+    // first drop, file or subfolder made here creates the folder itself;
+    // what would READ the folder (download) is withheld until then.
+    // MISSING FOLDER, not missing checkout: the two are different answers and
+    // only this one draws a row. A checkout that is not there gets the empty
+    // state, because there is no path a first write could even go to.
+    return {
+      entry: { name: dir, relativePath: `${kbRoot.relativePath}/${dir}`, type: 'directory', children: [] },
+      absent: true,
+    };
+  }, [tree, kbDirName, dir]);
+
+  const nav = useMemo<TreeNav>(
+    () => ({
+      activePath: activeWorkspacePath(location.pathname, kbDirName),
+      open: (path) => navigate(kbFileUrl(DEFAULT_BRANCH, path)),
+      menuItems,
+    }),
+    [location.pathname, kbDirName, navigate, menuItems],
+  );
+
+  // No checkout: no root row to draw, and `EmptyTreeNotice` says why — the
+  // same surface, and the same reason, as the Knowledge explorer beside it.
+  // Still nothing at all while the tree is loading, as before.
+  if (!root) {
+    if (!tree) return null;
+    return (
+      <div data-testid={testId}>
+        <EmptyTreeNotice rootPath={null} />
+      </div>
+    );
+  }
+
+  return (
+    // The two Library trees sit in ONE sidebar over ONE piece of upload
+    // state: each names itself so a drop's banners appear in the tree that
+    // took the drop, and only there. Before that, dropping into `Skills/`
+    // painted the same notice above `Skills/` AND above `Plugins/`.
+    <TreeChrome nav={nav} suggestionOnlyPaths={suggestionOnlyPaths} uploadTarget={libraryUploadTarget(dir)}>
+      {/* A right-click that lands between the tree's rows is the tree's, not
+          the nav's behind it: with nothing wired for the gap the browser's
+          own menu is the honest answer, as in Knowledge. The rows stop their
+          own events before reaching here. */}
+      <div data-testid={testId} onContextMenu={(e) => e.stopPropagation()}>
+        <UploadNotices />
+        <FileTreeNode entry={root.entry} depth={0} reserved absent={root.absent} collapseChildren />
+        {/* The same listing as Knowledge's explorer, so the same answer when
+            it shows nothing — judged on THIS root, with it as where a first
+            one goes: an empty Skills tree is empty however full Knowledge is. */}
+        <EmptyTreeNotice rootPath={root.entry.relativePath} scope="root" />
+      </div>
+    </TreeChrome>
+  );
+}
+
+/** The shared `Skills/` root. */
+export function SkillsTree() {
+  return <RootFolderTree dir={SKILLS_DIR} testId="skills-tree" />;
+}
+
+/**
+ * The `Plugins/` root — every plugin folder as it is on disk. A GROUPING
+ * folder's row (the root, or a folder no plugin owns) offers "New plugin"
+ * when the caller wires it, and the plugin is made THERE: the verb carries
+ * the folder's path below the plugins root. The one verb this root has that
+ * Knowledge's folders do not, injected rather than built into the tree. An
+ * intent: the layout owns the dialog.
+ */
+export function PluginsTree({
+  onCreatePlugin,
+  isGroupingFolder = () => true,
+}: {
+  /** Make a plugin in `parent` — a path below the plugins root, `''` for the root. */
+  onCreatePlugin?: (parent: string) => void;
+  /**
+   * Whether a repo-relative folder may HOLD a plugin: the root and folders no
+   * plugin owns. A plugin's own folder, or anything beneath one, cannot — a
+   * plugin claims its subtree, and a plugin made inside it would be listed
+   * nowhere. The layout answers from the plugin index.
+   */
+  isGroupingFolder?: (repoRelFolder: string) => boolean;
+} = {}) {
+  const { kbDirName } = useWorkspace();
+  const menuItems = useMemo(() => {
+    if (!onCreatePlugin) return undefined;
+    return (entry: FileTreeEntry): TreeMenuItem[] => {
+      if (entry.type !== 'directory') return [];
+      const rel = repoRelative(entry.relativePath, kbDirName);
+      if (rel === null || !isGroupingFolder(rel)) return [];
+      const parent = rel === PLUGINS_DIR ? '' : rel.slice(PLUGINS_DIR.length + 1);
+      return [{ id: 'new-plugin', label: 'New plugin', icon: <Puzzle size={14} />, onSelect: () => onCreatePlugin(parent) }];
+    };
+  }, [onCreatePlugin, isGroupingFolder, kbDirName]);
+  return <RootFolderTree dir={PLUGINS_DIR} testId="plugins-tree" menuItems={menuItems} />;
+}
+
+/**
+ * A tree entry's path relative to the REPOSITORY (`Plugins/Teams`), from its
+ * workspace-relative one (`<kbDir>/Plugins/Teams`); null when it does not
+ * sit under the knowledge base at all.
+ */
+function repoRelative(workspacePath: string, kbDirName: string | null): string | null {
+  if (kbDirName === null) return null;
+  const prefix = `${kbDirName}/`;
+  return workspacePath.startsWith(prefix) ? workspacePath.slice(prefix.length) : null;
+}
+
+/**
+ * The workspace-relative path a Library URL names, or null. Library item
+ * pages live at `/workspace/<default>/<kbDir>/...` — the inverse of
+ * `kbFileUrl`, segment by segment. Any other URL (the index, a lens, a
+ * plugin page) names no file, so no row is current.
+ */
+function activeWorkspacePath(pathname: string, kbDirName: string | null): string | null {
+  const prefix = `${KB_ROUTE_PREFIX}/`;
+  if (!pathname.startsWith(prefix)) return null;
+  const [branch, ...rest] = pathname.slice(prefix.length).split('/').map(safeDecode);
+  if (branch !== DEFAULT_BRANCH || rest.length < 2) return null;
+  if (kbDirName !== null && rest[0] !== kbDirName) return null;
+  return rest.join('/');
+}

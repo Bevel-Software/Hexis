@@ -4,9 +4,8 @@ import { Banner, Button } from '../../../shared/components';
 import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
 import { useOpenChangeRequests } from '../../workspace/hooks/useOpenChangeRequests';
 import { PR_STALE_EVENT } from '../../../core/events';
-import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
+import { refusalLine, useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../hooks/useCrFileDiffs';
-import { useDefaultBranchFile } from '../hooks/useFileOnBranch';
 import { changeAuthorName, formatWhen } from '../utils/author';
 import { conflictResolutionPrompt } from '../utils/conflict';
 import { isBinaryFile } from '../../workspace/components/renderers';
@@ -22,6 +21,11 @@ export interface FileChangeBoxesProps {
   canDecide: boolean;
   /** Who the decision waits on, for the non-owner's footer. */
   ownersLabel: string;
+  /**
+   * For a viewer who can decide: how many approvers besides them the file
+   * still waits on. Feeds "Waiting on you and N others".
+   */
+  othersPending?: number;
   /** The default branch just changed under this file — a request landed. */
   onApplied(): void;
 }
@@ -33,8 +37,8 @@ export interface FileChangeBoxesProps {
  * text become that text?") is unanswerable without the text, which is why
  * this is not a banner pointing at a review queue somewhere else.
  *
- * Owns the whole decision loop: per-request diffs against the default
- * branch, Approve (approvals → merge → wait for the outcome event),
+ * Owns the whole decision loop: per-request diffs from each request's fork
+ * point (see `useCrFileDiffs`), Approve (approvals → merge → wait for the outcome event),
  * Decline, the author's Withdraw, and "Read the whole change" opening the
  * shared {@link ChangeRequestDialog}. Resolutions dispatch
  * {@link PR_STALE_EVENT} so the tree dots, the tabs and this very list
@@ -45,6 +49,7 @@ export function FileChangeBoxes({
   requests,
   canDecide,
   ownersLabel,
+  othersPending,
   onApplied,
 }: FileChangeBoxesProps) {
   const { mineNumbers } = useOpenChangeRequests();
@@ -61,8 +66,7 @@ export function FileChangeBoxes({
   // Binary files never diff (see the box's `binary` prop) — so never fetch
   // and decode their default-branch bytes either.
   const binary = isBinaryFile(repoRelativePath);
-  const rawOnMain = useDefaultBranchFile(binary ? null : repoRelativePath, revision);
-  const crDiffs = useCrFileDiffs(requests, repoRelativePath, rawOnMain, revision);
+  const crDiffs = useCrFileDiffs(requests, repoRelativePath, revision);
 
   const resolved = useCallback(() => {
     setApplied(true);
@@ -119,7 +123,8 @@ export function FileChangeBoxes({
         // `[]` is the diff hook's "overtaken" answer — the proposal and the
         // file now say the same thing — distinct from `null`, which only
         // means a side has not arrived yet.
-        const fileDiff = crDiffs.get(cr.number) ?? null;
+        const read = crDiffs.get(cr.number) ?? null;
+        const fileDiff = read === 'unreadable' ? null : read;
         return (
           <ChangeBox
             key={cr.number}
@@ -127,20 +132,19 @@ export function FileChangeBoxes({
             author={changeAuthorName(cr)}
             when={formatWhen(cr.createdAt)}
             mine={mine}
-            canDecide={canDecide && !mine}
+            // Approval rights come from the file, not from authorship: an
+            // eligible approver decides their own proposal too (the gate
+            // accepts it and records it as a self-approval).
+            canDecide={canDecide}
             diff={fileDiff}
             binary={binary}
+            unreadable={read === 'unreadable'}
             upToDate={fileDiff !== null && fileDiff.length === 0}
             blocked={blockedCrs.has(cr.number)}
             conflictPrompt={conflictResolutionPrompt(cr)}
-            // A conflict already speaks through `blocked`; repeating it as a
-            // refusal line would say the same thing twice in one box.
-            refusal={
-              applying.refusals.get(cr.number)?.conflicts === false
-                ? (applying.refusals.get(cr.number)?.reason ?? null)
-                : null
-            }
+            refusal={refusalLine(cr, applying.refusals)}
             owner={ownersLabel}
+            othersPending={othersPending}
             busy={busyCr === cr.number || applying.activeCr === cr.number}
             phase={applying.activeCr === cr.number ? applying.phase : 'idle'}
             onApprove={() => applying.apply(cr)}

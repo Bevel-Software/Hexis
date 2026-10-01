@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -55,7 +56,7 @@ describe('AccessControlService — at-ref batch reads (git cat-file --batch)', (
       // Fixture repo has no remote; at-ref model loading fetches best-effort.
       ensureRemotesFetched: async () => undefined,
     } as unknown as WorkspaceService;
-    svc = new AccessControlService(stub, PROCESS_MAP_DIR);
+    svc = new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs());
   });
 
   afterAll(async () => {

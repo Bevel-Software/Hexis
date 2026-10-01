@@ -1,6 +1,8 @@
+import { readFileSync } from 'node:fs';
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import AdmZip from 'adm-zip';
 import * as XLSX from 'xlsx';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -26,7 +28,9 @@ import { notesTargetFromRels } from '../extract-pptx.js';
 
 // ── fixture builders ───────────────────────────────────────────────────────
 
-const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
+
+const W_NS ='xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
 const A_NS = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"';
 
 function docxBytes(bodyXml: string): Buffer {
@@ -195,6 +199,48 @@ describe('extractDocx', () => {
     expect(res.summary).toContain('1 table');
   });
 
+  // Fixture Word files (under ./fixtures) — the reported case: "however", a
+  // soft line break, "suits" came out as "howeversuits".
+  it('turns a soft line break inside a paragraph into one space (fixture)', () => {
+    const res = extractDocx(readFileSync(join(FIXTURES, 'soft-break.docx')));
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('The terms apply, however suits are filed separately.');
+    expect(res.summary).toContain('formatting omitted');
+  });
+
+  it('turns a tab element into one tab, ignoring tab STOPS in paragraph properties (fixture)', () => {
+    const res = extractDocx(readFileSync(join(FIXTURES, 'tab.docx')));
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('Name\tValue');
+  });
+
+  it('places breaks between the surrounding run text and still joins other runs with no separator', () => {
+    const p =
+      '<w:p><w:r><w:t>how</w:t></w:r><w:r><w:t>ever</w:t><w:br/><w:t>suits</w:t></w:r>' +
+      '<w:r><w:cr/><w:t>next</w:t><w:tab/><w:t>col</w:t></w:r></w:p>';
+    const res = extractDocx(docxBytes(p));
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('however suits next\tcol');
+  });
+
+  it('adds nothing for run properties or breaks inside a tracked deletion', () => {
+    const p =
+      '<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs></w:pPr>' +
+      '<w:r><w:rPr><w:b/></w:rPr><w:t>kept</w:t></w:r>' +
+      '<w:del w:id="1" w:author="a"><w:r><w:br/><w:delText>gone</w:delText></w:r></w:del>' +
+      '<w:r><w:t>together</w:t></w:r></w:p>';
+    const res = extractDocx(docxBytes(p));
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('kepttogether');
+  });
+
+  it('keeps a table cell’s soft break as a space, so the row stays one line', () => {
+    const table = `<w:tbl><w:tr><w:tc><w:p><w:r><w:t>a</w:t><w:br/><w:t>b</w:t></w:r></w:p></w:tc><w:tc>${para('c')}</w:tc></w:tr></w:tbl>`;
+    const res = extractDocx(docxBytes(table));
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('a b\tc');
+  });
+
   it('returns a typed failure for bytes that are not a zip', () => {
     const res = extractDocx(Buffer.from('this is not a docx at all'));
     expect(res.ok).toBe(false);
@@ -215,6 +261,17 @@ describe('extractDocx', () => {
 // ── pptx ───────────────────────────────────────────────────────────────────
 
 describe('extractPptx', () => {
+  it('turns a line break between runs into one space, ignoring tab stops in paragraph properties', () => {
+    const slide =
+      `<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" ${A_NS}><p:txBody>` +
+      '<a:p><a:pPr><a:tabLst><a:tab pos="914400" algn="l"/></a:tabLst></a:pPr>' +
+      '<a:r><a:t>however</a:t></a:r><a:br><a:rPr lang="en-US"/></a:br><a:r><a:t>suits</a:t></a:r></a:p>' +
+      '</p:txBody></p:sld>';
+    const res = extractPptx(pptxBytes({ 1: slide }));
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['[slide 1]', 'however suits']);
+  });
+
   it('emits [slide N] markers in NUMERIC order with per-paragraph lines and notes', () => {
     const res = extractPptx(
       pptxBytes(

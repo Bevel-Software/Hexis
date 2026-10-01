@@ -7,14 +7,13 @@ import { makeWorkspaceFixture } from '../../../__tests__/testFixtures';
 import { GitContext, type GitContextValue } from '../../../../git/state/git.context';
 import { MarkdownRenderer } from '../MarkdownRenderer';
 
-// Capture navigation so we can assert link clicks resolve + open the right file.
-const navMock = vi.hoisted(() => ({ openFile: vi.fn() }));
-vi.mock('../../../routing/kb-routes', async (importActual) => ({
-  // Keep the real `resolveRelativePath` (and any other pure helpers) so link
-  // resolution is exercised for real; only the navigation hook is stubbed.
-  ...(await importActual<typeof import('../../../routing/kb-routes')>()),
-  useFileNav: () => ({ openFile: navMock.openFile }),
-  KB_ROUTE_PREFIX: '/workspace',
+// Capture navigation so we can assert link clicks resolve + open the right
+// file. The router's `navigate` is stubbed rather than the nav hook, so the
+// real resolution (`resolveKbHref` → `kbFileUrl`) is exercised end to end.
+const navigateMock = vi.hoisted(() => vi.fn());
+vi.mock('react-router-dom', async (importActual) => ({
+  ...(await importActual<typeof import('react-router-dom')>()),
+  useNavigate: () => navigateMock,
 }));
 
 function makeGit(): GitContextValue {
@@ -142,6 +141,58 @@ describe('MarkdownRenderer', () => {
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('hello world');
   });
 
+  // --- Paste makes a link ---
+
+  function paste(textarea: HTMLElement, text: string) {
+    fireEvent.paste(textarea, { clipboardData: { getData: (type: string) => (type === 'text/plain' ? text : '') } });
+  }
+
+  function editorWith(value: string, selection: [number, number]) {
+    const onValueChange = vi.fn();
+    render(
+      <MemoryRouter>
+        <WorkspaceContext.Provider value={makeWorkspace()}>
+          <GitContext.Provider value={makeGit()}>
+            <MarkdownRenderer content={value} filePath="Knowledge/Foo.md" onSave={async () => {}} onValueChange={onValueChange} />
+          </GitContext.Provider>
+        </WorkspaceContext.Provider>
+      </MemoryRouter>,
+    );
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    textarea.setSelectionRange(...selection);
+    return { textarea, onValueChange };
+  }
+
+  it('pasting a bare workspace path with no selection inserts a root-anchored link named after the file', () => {
+    const { textarea, onValueChange } = editorWith('See  here', [4, 4]);
+    paste(textarea, '/knowledge-base/KnowledgeBase/File Type examples/subfile.md');
+    const expected = 'See [subfile](</knowledge-base/KnowledgeBase/File Type examples/subfile.md>) here';
+    expect(textarea.value).toBe(expected);
+    expect(onValueChange).toHaveBeenCalledWith(expected);
+  });
+
+  it('pasting a URL with no selection inserts a link labelled with host and path', () => {
+    const { textarea } = editorWith('', [0, 0]);
+    paste(textarea, 'https://example.com/docs/guide?x=1');
+    expect(textarea.value).toBe('[example.com/docs/guide](https://example.com/docs/guide?x=1)');
+  });
+
+  it('pasting with a selection makes the selection the label', () => {
+    const { textarea } = editorWith('read the guide now', [9, 14]);
+    paste(textarea, '/knowledge-base/Knowledge/Guide.md');
+    expect(textarea.value).toBe('read the [guide](/knowledge-base/Knowledge/Guide.md) now');
+  });
+
+  it('pasting ordinary text is left to the browser', () => {
+    const { textarea, onValueChange } = editorWith('hello', [5, 5]);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.assign(event, { clipboardData: { getData: () => 'just some words' } });
+    fireEvent(textarea, event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(textarea.value).toBe('hello');
+    expect(onValueChange).not.toHaveBeenCalled();
+  });
+
   // --- Link rendering in preview (readOnly) mode ---
 
   function renderPreview(content: string, filePath: string) {
@@ -157,7 +208,7 @@ describe('MarkdownRenderer', () => {
   }
 
   it('renders a nodeType frontmatter value as a clickable link that navigates', async () => {
-    navMock.openFile.mockClear();
+    navigateMock.mockClear();
     const user = userEvent.setup();
     renderPreview(
       '---\nnodeType: "[Process](../NodeTypes/Process.md)"\n---\n\n# Body',
@@ -165,25 +216,68 @@ describe('MarkdownRenderer', () => {
     );
     const link = screen.getByRole('link', { name: 'Process' });
     await user.click(link);
-    expect(navMock.openFile).toHaveBeenCalledWith('Knowledge/NodeTypes/Process.md');
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/Knowledge/NodeTypes/Process.md');
   });
 
   it('renders a bare body link whose path contains spaces as a working link', async () => {
-    navMock.openFile.mockClear();
+    navigateMock.mockClear();
     const user = userEvent.setup();
     renderPreview('[Open](Some File.md)', 'Knowledge/Foo.md');
     const link = screen.getByRole('link', { name: 'Open' });
     await user.click(link);
-    expect(navMock.openFile).toHaveBeenCalledWith('Knowledge/Some File.md');
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/Knowledge/Some%20File.md');
   });
 
   it('renders an angle-bracketed body link with spaces as a working link', async () => {
-    navMock.openFile.mockClear();
+    navigateMock.mockClear();
     const user = userEvent.setup();
     renderPreview('[Open](<Some File.md>)', 'Knowledge/Foo.md');
     const link = screen.getByRole('link', { name: 'Open' });
     await user.click(link);
-    expect(navMock.openFile).toHaveBeenCalledWith('Knowledge/Some File.md');
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/Knowledge/Some%20File.md');
+  });
+
+  // The link a paste wraps a Copy path in: root-anchored, so it opens the same
+  // file however deep the linking page sits.
+  it('opens a pasted root-anchored link from a file in a different folder', async () => {
+    navigateMock.mockClear();
+    const user = userEvent.setup();
+    renderPreview(
+      '[subfile](</knowledge-base/KnowledgeBase/File Type examples/subfile.md>)',
+      'knowledge-base/KnowledgeBase/Other/Deep/parent.md',
+    );
+    await user.click(screen.getByRole('link', { name: 'subfile' }));
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/knowledge-base/KnowledgeBase/File%20Type%20examples/subfile.md',
+    );
+  });
+
+  it('keeps the branch of an absolute citation URL instead of resolving it against the file', async () => {
+    navigateMock.mockClear();
+    const user = userEvent.setup();
+    renderPreview('[Cited](/workspace/target-company-state/knowledge-base/GTM/Bundle.md#status)', 'Knowledge/Foo.md');
+    await user.click(screen.getByRole('link', { name: 'Cited' }));
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/target-company-state/knowledge-base/GTM/Bundle.md#status',
+    );
+  });
+
+  // --- Images in preview mode ---
+
+  it('serves a relative image from the raw file route of the current workspace, resolved against the file', () => {
+    renderPreview('![Shot](./assets/shot.png)', 'Knowledge/Sub/Foo.md');
+    expect(screen.getByRole('img', { name: 'Shot' })).toHaveAttribute(
+      'src',
+      '/api/workspace/ws-1/file/raw?path=Knowledge%2FSub%2Fassets%2Fshot.png',
+    );
+  });
+
+  it('serves an absolute workspace image URL by its path, from the current workspace (the branch rule)', () => {
+    renderPreview('![Shot](/workspace/other-branch/knowledge-base/assets/shot.png)', 'Knowledge/Foo.md');
+    expect(screen.getByRole('img', { name: 'Shot' })).toHaveAttribute(
+      'src',
+      '/api/workspace/ws-1/file/raw?path=knowledge-base%2Fassets%2Fshot.png',
+    );
   });
 
   // --- Background autosave must not disturb the editing UI (BEVA ticket) ---

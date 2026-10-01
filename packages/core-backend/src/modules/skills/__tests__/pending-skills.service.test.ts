@@ -1,10 +1,11 @@
 import { describe, test, expect } from 'vitest';
-import type { ChangeRequest, IWorkflowService } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, type ChangeRequest, type IWorkflowService } from '@bevel-software/platform-shared';
 import { PendingSkillsService } from '../pending-skills.service.js';
-import { hashEmail } from '../../../shared/hash-email.js';
+import { hashEmail } from '../../../shared/email-identity.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ISkillService, SkillSummary } from '../skills.contract.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * The half of the catalog that is NOT on the default branch.
@@ -37,7 +38,7 @@ function cr(over: Partial<ChangeRequest> = {}): ChangeRequest {
     author: { login: 'user-abc', name: 'service' },
     appAuthor: { name: 'Ali Raza' },
     branch: 'agent/weekly-newsletter',
-    base: 'main',
+    base: DEFAULT_BRANCH,
     state: 'open',
     createdAt: '2026-08-06T09:00:00.000Z',
     touchedNodePaths: ['Plugins/Engineering/weekly-newsletter/SKILL.md'],
@@ -77,7 +78,7 @@ function harness(opts: {
     listChangeRequests: async () => opts.crs,
   } as unknown as IWorkflowService;
 
-  return new PendingSkillsService(workspaceService, accessControl, skillService, workflow);
+  return new PendingSkillsService(workspaceService, accessControl, skillService, workflow, testKbContext());
 }
 
 const ADMIN_WRITES = {
@@ -210,6 +211,7 @@ describe('PendingSkillsService', () => {
       {} as unknown as IAccessControl,
       { listSkills: async () => [] } as unknown as ISkillService,
       workflow,
+      testKbContext(),
     );
     await expect(svc.listPendingSkills(AUTHOR)).resolves.toEqual([]);
   });

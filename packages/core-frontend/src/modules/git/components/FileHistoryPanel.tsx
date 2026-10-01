@@ -265,6 +265,11 @@ export function FileHistoryPanel({ filePath }: Props) {
                     // relative link in it has no meaningful "current" document
                     // to resolve against — the target may have moved or stopped
                     // existing since. Links render inert.
+                    //
+                    // No image resolver either: the checked-out tree holds
+                    // today's copy of a picture, not the one this commit had,
+                    // so the viewer names each workspace image instead of
+                    // fetching bytes that may not match (`?ref=` in TODOS.md).
                     <MarkdownDiffViewer payload={mdPayload} />
                   )
                 )}

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, type MockInstance } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { AuthUser, Change } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
@@ -8,9 +9,11 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowEventBus } from '../event-bus.js';
-import { WorkflowService } from '../workflow.service.js';
+import { WorkflowService, syncConflictMessage } from '../workflow.service.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 import type { Database } from '../../database/connection.js';
 import {
+  PullRebaseConflictError,
   PullRebaseConflictError,
   PushNeedsAgentResolutionError,
   WorkflowValidationError,
@@ -87,7 +90,7 @@ function makePending(): PendingCommitsService {
 function makeGit(overrides: Partial<{
   commitFile: Change | null;
   pushBehavior: 'ok' | 'nff' | 'auth-fail';
-  pullBehavior: 'ok' | 'fail';
+  pullBehavior: 'ok' | 'fail' | 'conflict';
   pushAfterPullBehavior: 'ok' | 'fail';
   hasUnpushedCommits: boolean;
 }> = {}): GitService {
@@ -120,6 +123,8 @@ function makeGit(overrides: Partial<{
     }),
     pull: vi.fn().mockImplementation(async () => {
       if (pullBehavior === 'fail') throw new Error('git pull failed: merge conflict');
+      if (pullBehavior === 'conflict') throw new PullRebaseConflictError('feat/x', ['foo.md'], 'CONFLICT (content)');
+      return { treeChanged: true };
     }),
   } as unknown as GitService;
 }
@@ -139,7 +144,8 @@ function makeFacade(
     {} as IAccessControl,
     locks,
     pending,
-    'knowledge-base',
+    testKbContext(),
+    openChangeGate(),
     events,
   );
 }
@@ -176,6 +182,18 @@ describe('WorkflowService.releaseLock — new (enqueue, no synchronous commit)',
     // Only lock-released fires synchronously now; file-changed lands when
     // the worker's commit succeeds (covered in the runPendingCommit suite).
     expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual(['lock-released']);
+  });
+
+  it('answers hasQueuedCommit under the canonical identity, whatever spelling the caller has', async () => {
+    // `releaseLock` stores the row under the canonical path; a caller that
+    // asks with another spelling of the same file must find it, or it would
+    // re-arm a retry vehicle that already exists.
+    const pending = makePending();
+    (pending.hasLiveRowFor as Mock).mockResolvedValue(true);
+    const svc = makeFacade(makeGit(), makeFileLocks(USER.id), pending, events);
+
+    await expect(svc.hasQueuedCommit('ws-1', 'feat/x', './knowledge-base//x.md')).resolves.toBe(true);
+    expect(pending.hasLiveRowFor).toHaveBeenCalledWith('ws-1', 'feat/x', 'knowledge-base/x.md');
   });
 
   it('throws lock-not-held when the caller does not hold the lock', async () => {
@@ -458,6 +476,29 @@ describe('WorkflowService.runPendingCommit — worker entry point', () => {
     expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
       'git-sync-failed',
     ]);
+  });
+
+  it('a rebase CONFLICT on the recovery path raises the banner WITH its files, like the remote sync does', async () => {
+    // The banner keeps the latest failure per branch. The remote sync raises
+    // the conflict variant (files as links); if this path then raised the
+    // generic variant for the same conflict, the retry would take the links
+    // away — seen on staging. Every path names the files.
+    const git = makeGit({
+      commitFile: null,
+      hasUnpushedCommits: true,
+      pushBehavior: 'nff',
+      pullBehavior: 'conflict',
+    });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+    await expect(svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER)).rejects.toBeInstanceOf(
+      PushNeedsAgentResolutionError,
+    );
+    const failed = emitSpy.mock.calls.map((c) => c[0] as Record<string, unknown>).find((e) => e.kind === 'git-sync-failed');
+    expect(failed).toMatchObject({
+      branch: 'feat/x',
+      conflictedPaths: ['foo.md'],
+      reason: syncConflictMessage('feat/x', ['foo.md']),
+    });
   });
 
   it('recovers from non-fast-forward push via pull --rebase + retry, emits file-changed exactly once', async () => {
@@ -748,5 +789,96 @@ describe('WorkflowService.updateFromRemote — pull-conflict recovery dispatch',
     );
 
     await expect(svc.updateFromRemote('main', USER)).rejects.toBe(CONFLICT);
+  });
+});
+
+describe('WorkflowService.updateFromRemote — the tree-change announcement', () => {
+  /**
+   * The announcement under test is what keeps the DEFAULT branch's catalog
+   * caches (skills, tool manuals, plugin index) honest: a pull is the one way
+   * a tree changes without passing the write routes, so `pullWorkspace` owes
+   * the process an `fs-tree-changed` — and owes it ONLY when the pull moved
+   * HEAD, on the default branch, after the pull resolved. Asserted through
+   * `updateFromRemote`, the public verb that wraps `pullWorkspace`.
+   */
+  const DEFAULT_WS = 'target-company-state'; // == the test env's DEFAULT_BRANCH
+
+  function makePullingGit(result: { treeChanged: boolean } | Error): {
+    git: GitService;
+    pullSettled: () => boolean;
+  } {
+    let settled = false;
+    const git = {
+      pull: vi.fn().mockImplementation(async () => {
+        // A microtask gap, so an emit issued before the await would be
+        // observably premature rather than coincidentally ordered.
+        await Promise.resolve();
+        settled = true;
+        if (result instanceof Error) throw result;
+        return result;
+      }),
+    } as unknown as GitService;
+    return { git, pullSettled: () => settled };
+  }
+
+  function treeChangedEvents(emitSpy: MockInstance): unknown[] {
+    return emitSpy.mock.calls
+      .map((c) => c[0] as { kind: string })
+      .filter((e) => e.kind === 'fs-tree-changed');
+  }
+
+  it('emits fs-tree-changed for the default workspace once the pull has changed the tree', async () => {
+    const events = new WorkflowEventBus();
+    const emitSpy = vi.spyOn(events, 'emit');
+    const { git, pullSettled } = makePullingGit({ treeChanged: true });
+    let settledAtEmit: boolean | undefined;
+    emitSpy.mockImplementation(() => {
+      settledAtEmit = pullSettled();
+    });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await svc.updateFromRemote(DEFAULT_WS, USER);
+
+    expect(treeChangedEvents(emitSpy)).toEqual([
+      { kind: 'fs-tree-changed', workspaceId: DEFAULT_WS, branch: DEFAULT_WS },
+    ]);
+    // After the pull RESOLVED — an emit for a pull that later failed would
+    // make other clients refetch a tree that never changed.
+    expect(settledAtEmit).toBe(true);
+  });
+
+  it('stays silent when the pull found nothing new (treeChanged: false)', async () => {
+    const events = new WorkflowEventBus();
+    const emitSpy = vi.spyOn(events, 'emit');
+    const { git } = makePullingGit({ treeChanged: false });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await svc.updateFromRemote(DEFAULT_WS, USER);
+
+    // An "already up to date" sync must not drop the catalogs or make every
+    // attached browser refetch its file tree.
+    expect(treeChangedEvents(emitSpy)).toEqual([]);
+  });
+
+  it('stays silent for a non-default workspace even when the tree changed', async () => {
+    const events = new WorkflowEventBus();
+    const emitSpy = vi.spyOn(events, 'emit');
+    const { git } = makePullingGit({ treeChanged: true });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await svc.updateFromRemote(encodeURIComponent('alice/draft'), USER);
+
+    expect(treeChangedEvents(emitSpy)).toEqual([]);
+  });
+
+  it('stays silent when the pull throws', async () => {
+    const events = new WorkflowEventBus();
+    const emitSpy = vi.spyOn(events, 'emit');
+    const { git } = makePullingGit(new Error('git fetch failed: could not resolve host'));
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await expect(svc.updateFromRemote(DEFAULT_WS, USER)).rejects.toThrow();
+
+    expect(treeChangedEvents(emitSpy)).toEqual([]);
   });
 });

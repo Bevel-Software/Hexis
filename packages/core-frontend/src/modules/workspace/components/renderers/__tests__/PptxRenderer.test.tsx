@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, within, waitFor } from '@testing-library/react';
 import JSZip from 'jszip';
 import {
   WorkspaceContext,
@@ -121,5 +121,18 @@ describe('PptxRenderer', () => {
     expect(
       await screen.findByText(/Failed to load presentation \(HTTP 403\)/),
     ).toBeInTheDocument();
+  });
+});
+
+/** The URL the viewer asks for is the raw file route, built by `rawFileUrl`. */
+describe('PptxRenderer fetch', () => {
+  it('asks the raw file route for exactly this file', async () => {
+    const bytes = await deckBytes();
+    apiMock.authFetch.mockResolvedValue({ ok: true, arrayBuffer: async () => bytes });
+    renderPptx();
+    await waitFor(() => expect(apiMock.authFetch).toHaveBeenCalled());
+    expect(apiMock.authFetch.mock.calls[0][0]).toBe(
+      '/api/workspace/ws-1/file/raw?path=Inbox%2Fall-hands.pptx',
+    );
   });
 });

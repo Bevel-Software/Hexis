@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -121,6 +122,7 @@ function recordingAccessControl(opts: {
       return opts.canWriteBatchAtRef?.(ref, userEmail, paths) ?? new Map(paths.map((p) => [p, true]));
     },
     eligibleWritersAtRef: async () => opts.eligible?.() ?? { roles: ['Admin'], users: [] },
+    holdsAdminRootWrite: async () => false,
     eligibleWritersForPathsAtRef: async (_w, _ref, paths) =>
       new Map(paths.map((p) => [p, { roles: [], users: [], emails: new Set<string>() }])),
     findEmailByHash: async () => null,
@@ -139,7 +141,7 @@ async function makeSvc(
   const svc = new GitService(
     stubWorkspaceService(workspaceId, workspaceDir),
     new WorkflowHooks(),
-    'knowledge-base',
+    testKbContext(),
     undefined,
     ac ?? null,
   );
@@ -261,7 +263,7 @@ describe('GitService — push gate uses origin/<branch> (not HEAD or working tre
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
       undefined,
       ac,
     );
@@ -305,7 +307,7 @@ describe('GitService — push gate uses origin/<branch> (not HEAD or working tre
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
       undefined,
       ac,
     );
@@ -336,7 +338,7 @@ describe('GitService — push gate uses origin/<branch> (not HEAD or working tre
     const svc = new GitService(
       stubWorkspaceService(workspaceId, workspaceDir),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
       undefined,
       ac,
     );

@@ -23,7 +23,10 @@
  *     The agent must delete entries individually via `deleteFile`.
  *   - `mkdir` followed by a `.gitkeep` write is the canonical way to land
  *     "create empty folder" as a one-file change — the locking write of
- *     `.gitkeep` carries the commit.
+ *     `.gitkeep` carries the commit. The same placeholder keeps a folder
+ *     whose last file was deleted or moved out: `delete_file` / `move_file`
+ *     write it through `writeFile` here (see `keepFolderOf` in the tools),
+ *     because a folder exists until it is deleted explicitly.
  *
  * Path conventions: Mastra's `inputPath` is workspace-relative (e.g.
  * `knowledge-base/Knowledge/Foo.md`) — the same shape the human
@@ -33,8 +36,11 @@
  */
 
 import fs from 'node:fs/promises';
+import path from 'node:path';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('locking-fs');
 import {
-  LocalFilesystem,
   type LocalFilesystemOptions,
   type CopyOptions,
   type FileContent,
@@ -44,13 +50,36 @@ import {
 import type { AuthUser, Change, IWorkflowService } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import type { FileChangeNotifier } from './file-change-notifier.js';
+import { isAbsence } from '../../shared/fs.contract.js';
+import { DestinationTakenError, lstatOrNull, renameNoReplace, takenError } from '../../shared/rename-no-replace.js';
 import { assertInsideRepo } from './repo-path.js';
+import { GitGuardedFilesystem } from './git-guarded-filesystem.js';
 import type { CreationGrantPlan, ICreatorAccess } from '../access-model/creator.js';
 
 /** How many times to retry a contended acquire before giving up. */
 const ACQUIRE_RETRY_ATTEMPTS = 3;
 /** Backoff between retries (ms). 3 attempts × 2s ≈ 6s ceiling. */
 const ACQUIRE_RETRY_DELAY_MS = 2_000;
+
+/**
+ * Whatever a lock cycle's `check` threw — an Error or any other value — carried
+ * out of `lockedCycle`: nothing was written, so every lock it unwinds releases
+ * untouched. `withLock` hands the caller the original `reason`.
+ */
+class CheckRefusal {
+  constructor(readonly reason: unknown) {}
+}
+
+/**
+ * A pre-disk write validator: called with the (workspace-relative path, full
+ * candidate content) of a write; throw (or reject) to refuse it. `appliesTo`
+ * names the paths it guards — only a validator that declares it is also run
+ * for the ops whose candidate has to be read first (append, copy, move), so an
+ * unrelated copy never pays for reading its source.
+ */
+export type WriteValidator = ((path: string, content: FileContent) => void | Promise<void>) & {
+  appliesTo?: (path: string) => boolean;
+};
 
 /**
  * Dependencies the wrapper needs to talk to the workflow lock service.
@@ -76,12 +105,16 @@ export interface LockingFilesystemContext {
   /**
    * Optional pre-disk write validator. Invoked with the (workspace-relative
    * path, full content) of every WHOLE-FILE write BEFORE the bytes land. Throw
-   * to refuse the write — nothing hits disk and the lock is released without a
-   * commit. Used to reject a `roles.yaml` edit that would lock out admins; see
-   * `roles-yaml-guard.ts`. Whole-file writes only (`writeFile` / `writeFiles`);
-   * partial ops (`appendFile`) are not validated.
+   * to refuse the write — nothing hits disk. It runs before the lock (so an
+   * ordinary refusal takes none) and again once the lock is held, on exactly
+   * the bytes that land, so a validator reading the current file judges the
+   * state it replaces; a refusal there releases the lock untouched. Used to
+   * reject a `roles.yaml` edit that would lock out admins (and, for agents,
+   * one that creates a role); see `roles-yaml-guard.ts`. `appendFile`,
+   * `copyFile` and `moveFile` are validated too, with the resulting content,
+   * when the destination is a path the validator's `appliesTo` claims.
    */
-  validateWrite?: (path: string, content: FileContent) => void;
+  validateWrite?: WriteValidator;
   /**
    * Post-commit hook for the BATCH `writeFiles` path (which commits via
    * `commitChanges` and so skips `runPendingCommit`'s emit). Single-file ops
@@ -90,16 +123,17 @@ export interface LockingFilesystemContext {
   fileChanges?: FileChangeNotifier;
   /**
    * Optional creator read-grant planner (see `modules/access/creator-access`).
-   * When present, a write/mkdir that CREATES a KB node the acting user can't
-   * read gets an automatic `read:` grant — seeded into a new directory's
-   * `access.md` or folded into a new markdown file's frontmatter — so the
-   * agent's creations don't vanish from the driving user's explorer under
-   * default-deny reads. Absent (tests, non-KB filesystems) → no grants.
+   * When present, a write/mkdir that starts a NEW FOLDER directly under one
+   * of the three roots the acting user can't read gets an automatic `read:`
+   * grant seeded into that folder's `access.md`, so the agent's creations
+   * don't vanish from the driving user's explorer under default-deny reads.
+   * Any other creation the user could not see is refused by the lock's read
+   * gate. Absent (tests, non-KB filesystems) → no grants.
    */
   creatorAccess?: ICreatorAccess;
 }
 
-export class LockingFilesystem extends LocalFilesystem {
+export class LockingFilesystem extends GitGuardedFilesystem {
   private readonly lockContext: LockingFilesystemContext;
 
   constructor(
@@ -110,48 +144,142 @@ export class LockingFilesystem extends LocalFilesystem {
     this.lockContext = lockContext;
   }
 
+  /**
+   * `check` is the CALLER's under-lock judgement: it runs once the path's lock
+   * is held and before a byte lands — the same slot `validateWrite` uses,
+   * opened up so a caller whose verdict depends on what the path CURRENTLY
+   * holds (the write tools' `mode` gate: does this path exist?) reads a state
+   * nobody else can move. Judged before the lock instead, such a verdict is a
+   * guess: a human editor saving between the stat and the write would have its
+   * file replaced by a `create` that then reported `created`. Throwing refuses
+   * the write and releases the lock untouched; the caller gets what it threw.
+   */
   override async writeFile(
     inputPath: string,
     content: FileContent,
     options?: WriteOptions,
+    check?: () => void | Promise<void>,
   ): Promise<void> {
+    await this.assertNotGitInternals(inputPath);
     this.assertInsideRepo(inputPath);
     // Pre-disk gate (e.g. reject a roles.yaml edit that would lock out admins).
-    // Runs OUTSIDE the lock so a refusal never acquires/holds one.
-    this.lockContext.validateWrite?.(inputPath, content);
+    // Runs OUTSIDE the lock first so an ordinary refusal never acquires one,
+    // then again under the lock on the bytes that land (see withLock's check).
+    const validate = this.lockContext.validateWrite;
+    await validate?.(inputPath, content);
     // Creator read grant (see LockingFilesystemContext.creatorAccess): planned
-    // BEFORE the write so the topmost-new-directory detection sees the
-    // pre-creation tree. A subtree seed lands first in its own lock+commit
-    // cycle so the grant is on disk before the file it makes visible.
+    // BEFORE the write so the new-folder detection sees the pre-creation
+    // tree. The seed lands first in its own lock+commit cycle so the grant is
+    // on disk before the file it makes visible.
     const plan = await this.planCreate(inputPath, 'file');
     if (plan?.kind === 'seed-access-md') await this.seedAccessMd(plan);
-    const toWrite =
-      plan?.kind === 'frontmatter' && typeof content === 'string'
-        ? plan.apply(content)
-        : content;
-    return this.withLock(inputPath, () => super.writeFile(inputPath, toWrite, options));
+    const toWrite = content;
+    return this.withLock(
+      inputPath,
+      () => super.writeFile(inputPath, toWrite, options),
+      (check || validate) &&
+        (async () => {
+          // The caller's verdict first: it decides whether this write happens
+          // at all, so the content validator only judges bytes that will land.
+          await check?.();
+          await validate?.(inputPath, toWrite);
+        }),
+    );
   }
 
   override async appendFile(inputPath: string, content: FileContent): Promise<void> {
+    await this.assertNotGitInternals(inputPath);
     this.assertInsideRepo(inputPath);
-    return this.withLock(inputPath, () => super.appendFile(inputPath, content));
+    const candidate = async () =>
+      Buffer.concat([asBuffer((await this.readIfExists(inputPath)) ?? ''), asBuffer(content)]);
+    await this.validateResultingWrite(inputPath, candidate);
+    // Under the lock the resulting file is judged again and, when a validator
+    // claims the path, written whole — so the bytes that land are the ones judged.
+    let checked: Buffer | null = null;
+    return this.withLock(
+      inputPath,
+      () => (checked === null ? super.appendFile(inputPath, content) : super.writeFile(inputPath, checked)),
+      async () => {
+        checked = await this.validateResultingWrite(inputPath, candidate);
+      },
+    );
   }
 
   override async deleteFile(inputPath: string, options?: RemoveOptions): Promise<void> {
+    await this.assertNotGitInternals(inputPath);
     return this.withLock(inputPath, () => super.deleteFile(inputPath, options));
   }
 
   override async copyFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
+    await this.assertNotGitInternals(src);
+    await this.assertNotGitInternals(dest);
     this.assertInsideRepo(dest);
+    await this.validateResultingWrite(dest, () => this.readFile(src));
     // Lock on `dest`. `src` is read-only from this op's perspective — copy
-    // creates a new file at dest without disturbing src on disk.
-    return this.withLock(dest, () => super.copyFile(src, dest, options));
+    // creates a new file at dest without disturbing src on disk. Because `src`
+    // is not locked, a claimed destination gets the source bytes read and
+    // judged under the lock, and exactly those bytes are written.
+    //
+    // A copy lands bytes at a name of its own, so it never replaces what is
+    // already there — the rule a move follows. Unless the caller explicitly
+    // asks to overwrite, both landings below run exclusively: `copyFile` with
+    // `overwrite: false` uses `COPYFILE_EXCL` and `writeFile` the `wx` flag,
+    // each of which FAILS rather than replaces if the name was taken in the
+    // meantime. That is what makes the tool's own look at the destination a
+    // message rather than the whole guarantee.
+    const noReplace: CopyOptions = { ...options, overwrite: options?.overwrite === true };
+    let checked: FileContent | null = null;
+    return this.withLock(
+      dest,
+      () =>
+        this.asTakenRefusal(dest, () =>
+          checked === null
+            ? super.copyFile(src, dest, noReplace)
+            : super.writeFile(dest, checked, { overwrite: noReplace.overwrite }),
+        ),
+      async () => {
+        checked = await this.validateResultingWrite(dest, () => this.readFile(src));
+      },
+    );
+  }
+
+  /**
+   * Run `landing` and turn the filesystem's own "that name is taken" failure
+   * into the refusal every surface answers with — `A file named … already
+   * exists in ….` — so a copy that loses the race reads exactly like a copy
+   * that was refused by the look before it.
+   */
+  private async asTakenRefusal(dest: string, landing: () => Promise<void>): Promise<void> {
+    try {
+      await landing();
+    } catch (err) {
+      // Mastra's `FileExistsError` by name (this file avoids importing its
+      // error classes, and the name is its stable surface), plus the raw codes
+      // the exclusive flags answer with when the name is taken by something
+      // other than a plain file.
+      const name = (err as { name?: string } | null)?.name;
+      const code = (err as NodeJS.ErrnoException | null)?.code;
+      const taken = name === 'FileExistsError' || code === 'EEXIST' || code === 'EISDIR';
+      const absolute = taken ? this.resolveAbsolutePath(dest) : undefined;
+      // Only when something really is there: a code alone must not turn an
+      // unrelated failure into "already exists". `lstat`, not an existence
+      // probe that follows links — a DANGLING link holds the name against an
+      // exclusive create while resolving to nothing, and it is an entry the
+      // user can see, so it gets the clash sentence like any other.
+      if (absolute !== undefined && (await lstatOrNull(absolute)) !== null) {
+        throw await takenError(absolute, dest);
+      }
+      throw err;
+    }
   }
 
   override async moveFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
+    await this.assertNotGitInternals(src);
+    await this.assertNotGitInternals(dest);
     // Only the destination is gated: moving a stray INTO the repository is how
     // a file the old behaviour left beside the clone gets rescued.
     this.assertInsideRepo(dest);
+    await this.validateResultingWrite(dest, () => this.readFile(src));
     // A move mutates two paths: the source is deleted and the destination
     // is created. Only locking `dest` would let a concurrent writer hold
     // the source's lock and mutate it under us, and would also leave the
@@ -164,13 +292,64 @@ export class LockingFilesystem extends LocalFilesystem {
     // the inner lock's release commits its path — each move lands as two
     // single-file changes (one delete, one create). Git's rename
     // detection on log/blame still groups them visually after the fact.
+    //
+    // The destination is judged again once BOTH locks are held (the inner
+    // lock's check): the source cannot change under its lock, so the bytes
+    // judged there are the bytes the move lands.
+    const check = async () => {
+      await this.validateResultingWrite(dest, () => this.readFile(src));
+    };
+    const move = () => this.moveNoReplace(src, dest, options);
     if (src === dest) {
-      return this.withLock(dest, () => super.moveFile(src, dest, options));
+      return this.withLock(dest, move, check);
     }
     const [first, second] = src < dest ? [src, dest] : [dest, src];
-    return this.withLock(first, () =>
-      this.withLock(second, () => super.moveFile(src, dest, options)),
-    );
+    // The inner cycle is the raw one, so its refusal reaches the outer lock
+    // still marked as a refusal and both release untouched.
+    return this.withLock(first, () => this.lockedCycle(second, move, check));
+  }
+
+  /**
+   * The move itself, refusing a destination that is taken instead of replacing
+   * it — `fs.rename`, which `LocalFilesystem.moveFile` calls, replaces an
+   * existing file on every platform, and that is how a `.docx` renamed onto an
+   * existing `.md` handed the markdown file the Word bytes.
+   *
+   * The caller above (`move_file`) has already looked at the destination and
+   * refused a taken one with the sentence naming what is in the way. This runs
+   * with both paths' locks held and is the backstop under that look: a
+   * destination created in between — by a writer this process does not
+   * serialize with, the sidebar's own `moveEntry` among them — is refused
+   * atomically by the filesystem rather than overwritten. See
+   * `shared/rename-no-replace.ts`.
+   *
+   * `overwrite: true` is still honoured, for a caller that means it; nothing
+   * in the app passes it today.
+   */
+  private async moveNoReplace(src: string, dest: string, options?: CopyOptions): Promise<void> {
+    if (options?.overwrite === true) return super.moveFile(src, dest, options);
+    const srcAbsolute = this.resolveAbsolutePath(src);
+    const destAbsolute = this.resolveAbsolutePath(dest);
+    // A path this filesystem cannot resolve is not one to do raw `fs` calls
+    // on; the base class refuses it with the message it always has.
+    if (srcAbsolute === undefined || destAbsolute === undefined) {
+      return super.moveFile(src, dest, options);
+    }
+    // `LocalFilesystem.moveFile` makes the destination's parent, and callers
+    // rely on a move into a new folder working.
+    await fs.mkdir(path.dirname(destAbsolute), { recursive: true });
+    try {
+      return await renameNoReplace(srcAbsolute, destAbsolute, dest);
+    } catch (err) {
+      // Across a mount point inside the workspace nothing can be renamed at
+      // all; the base class's copy-then-remove is the only way through, and
+      // `overwrite: false` keeps it exclusive (`COPYFILE_EXCL`) so it cannot
+      // replace anything either.
+      if ((err as NodeJS.ErrnoException | null)?.code !== 'EXDEV') throw err;
+      return this.asTakenRefusal(dest, () =>
+        super.moveFile(src, dest, { ...options, overwrite: false }),
+      );
+    }
   }
 
   /**
@@ -193,41 +372,54 @@ export class LockingFilesystem extends LocalFilesystem {
    * `writes[].path` is workspace-relative (like `writeFile`). We do the disk
    * write here; `commitChanges` only stages + commits what's on disk (the git
    * layer never writes content).
+   *
+   * `check` is the batch counterpart of `writeFile`'s: it runs once EVERY
+   * path's lock is held and before any byte lands, is handed this batch's
+   * writes in the order it was given them, and returns the subset that may
+   * still land (the same objects — the creator-grant transform has already
+   * been applied to their content). It is where a per-path verdict that
+   * depends on what a path currently holds belongs, because only here is that
+   * state one no other writer can move. A write it drops is never written: its
+   * path releases untouched, stays out of the commit's scope, and takes its
+   * creator-grant seed with it when no surviving write still wants one. A
+   * `check` that THROWS refuses the whole batch, untouched.
    */
   async writeFiles(
     writes: { path: string; content: FileContent }[],
     summary: string,
     deletes: string[] = [],
+    check?: (
+      writes: readonly { path: string; content: FileContent }[],
+    ) => Promise<{ path: string; content: FileContent }[]>,
   ): Promise<Change | null> {
     const { workflow, workspaceId, branch, user } = this.lockContext;
     // Fail the whole batch before any plan, validator or lock: one stray path
     // must not let its siblings land while it silently misses git.
+    for (const w of writes) await this.assertNotGitInternals(w.path);
+    for (const d of deletes) await this.assertNotGitInternals(d);
     for (const w of writes) this.assertInsideRepo(w.path);
-    // Creator read grants for the batch: transform new markdown files'
-    // content in place, and fold any subtree access.md seeds into the SAME
-    // atomic batch (deduped — several files landing in one new folder share
-    // one seed). Plans are computed against the pre-batch disk state, which
-    // is exactly right: nothing below has hit disk yet. A seed whose path the
-    // caller explicitly writes in this batch is skipped — the caller's bytes
-    // win.
+    // Creator read grants for the batch: fold any new-root-folder access.md
+    // seeds into the SAME atomic batch (deduped — several files landing in
+    // one new folder share one seed). Plans are computed against the
+    // pre-batch disk state, which is exactly right: nothing below has hit
+    // disk yet. A seed whose path the caller explicitly writes in this batch
+    // is skipped — the caller's bytes win.
     const seeds = new Map<string, (current: string) => string>();
-    const grantedWrites: { path: string; content: FileContent }[] = [];
+    // Which of the caller's writes asked for each seed. A seed exists only to
+    // make the files below it visible to their creator, so one whose every
+    // origin `check` drops has nothing left to make visible and is dropped too.
+    const seedOrigins = new Map<string, string[]>();
     for (const w of writes) {
       const plan = await this.planCreate(w.path, 'file');
       if (plan?.kind === 'seed-access-md' && !writes.some((x) => x.path === plan.wsRelPath)) {
         seeds.set(plan.wsRelPath, plan.apply);
+        seedOrigins.set(plan.wsRelPath, [...(seedOrigins.get(plan.wsRelPath) ?? []), w.path]);
       }
-      grantedWrites.push(
-        plan?.kind === 'frontmatter' && typeof w.content === 'string'
-          ? { path: w.path, content: plan.apply(w.content) }
-          : w,
-      );
     }
-    writes = grantedWrites;
     // Pre-disk gate every file BEFORE acquiring any lock (fail-closed): a
     // refusal must not leave a lock held or a partial batch on disk.
     if (this.lockContext.validateWrite) {
-      for (const w of writes) this.lockContext.validateWrite(w.path, w.content);
+      for (const w of writes) await this.lockContext.validateWrite(w.path, w.content);
     }
     // Deterministic lock order (string sort) so two concurrent batch writes
     // can't deadlock by acquiring the same paths in opposite orders — the same
@@ -277,10 +469,7 @@ export class LockingFilesystem extends LocalFilesystem {
             await workflow.releaseLockUntouched(workspaceId, branch, p, user);
           }
         } catch (releaseErr) {
-          console.warn(
-            `[locking-fs] lock release failed for "${p}" during writeFiles:`,
-            releaseErr instanceof Error ? releaseErr.message : releaseErr,
-          );
+          log.warn(`lock release failed for "${p}" during writeFiles:`, { err: releaseErr });
         }
       }
     };
@@ -310,19 +499,58 @@ export class LockingFilesystem extends LocalFilesystem {
       acquired.push(p);
     }
 
-    // Creator-grant seed locks are BEST-EFFORT, single attempt, acquired
-    // after the caller's paths: a contended access.md must drop that seed
-    // (with a warning), never fail or stall the batch the caller asked for.
-    // Single non-blocking attempts also can't deadlock against another batch.
+    // Judge every file again now that its lock is held: a validator that reads
+    // the current file (the agent roles.yaml gate) must see the bytes this
+    // batch replaces, not the ones before the locks. Nothing is written yet,
+    // so a refusal leaves every locked path exactly as it was.
+    if (this.lockContext.validateWrite) {
+      try {
+        for (const w of writes) await this.lockContext.validateWrite(w.path, w.content);
+      } catch (err) {
+        await releaseAll(() => 'untouched');
+        throw err;
+      }
+    }
+
+    // The caller's own under-lock judgement (see the doc above): with every
+    // lock held, it decides which writes may still land. Nothing is on disk
+    // yet, so both a dropped write and an outright refusal leave every locked
+    // path exactly as it was.
+    if (check) {
+      try {
+        writes = await check(writes);
+      } catch (err) {
+        await releaseAll(() => 'untouched');
+        throw err;
+      }
+      for (const [seedPath, origins] of seedOrigins) {
+        if (!origins.some((o) => writes.some((w) => w.path === o))) seeds.delete(seedPath);
+      }
+      if (writes.length === 0 && deletes.length === 0) {
+        // Every write dropped and nothing to delete: no bytes, so no commit
+        // either. An unscoped one here would sweep in whatever another save
+        // left dirty on the paths we merely locked.
+        await releaseAll(() => 'untouched');
+        return null;
+      }
+    }
+
+    // Creator-grant seed locks: single attempt, acquired after the caller's
+    // paths (a single non-blocking attempt cannot deadlock against another
+    // batch). A contended access.md fails the batch the same way a contended
+    // caller path does, with nothing written: the seed exists to keep a new
+    // root folder visible to the person creating it, and a batch that landed
+    // without it would leave that folder invisible to them.
     for (const p of [...seeds.keys()].sort()) {
       if (paths.includes(p)) continue; // already locked as a caller path
       const result = await workflow.acquireLock(workspaceId, branch, p, user);
       if (result.acquired) {
         acquired.push(p);
       } else {
-        seeds.delete(p);
-        console.warn(
-          `[locking-fs] creator access.md seed skipped for "${p}" — locked by ${result.lock.holderName ?? 'another user'}`,
+        await releaseAll(() => 'untouched');
+        throw new Error(
+          `Skipped editing "${p}" — locked by ${result.lock.holderName ?? 'another user'}. ` +
+            `Continuing with other edits; try this one again later.`,
         );
       }
     }
@@ -333,7 +561,10 @@ export class LockingFilesystem extends LocalFilesystem {
     // we know whether the seed write happens, and scoping the commit to a
     // merely-locked path would sweep in another save's still-queued dirty
     // bytes on that path under this batch's author/summary.
-    const touched = [...paths];
+    // Normally every locked caller path; after a `check` drop, only the
+    // survivors — a path this batch does not write must stay out of the
+    // commit's scope, or the commit sweeps in another save's queued bytes.
+    const touched = [...new Set([...writes.map((w) => w.path), ...deletes])].sort();
     // Seeds whose bytes LANDED, with the pre-image read under their lock:
     // if the batch's commit then fails, these must be rolled back to that
     // pre-image (not to HEAD — the pre-image may be a prior save's queued
@@ -371,10 +602,7 @@ export class LockingFilesystem extends LocalFilesystem {
           next = apply(current);
         } catch (err) {
           // Plan failed before any bytes moved — the path is untouched.
-          console.warn(
-            `[locking-fs] creator access.md seed failed for "${p}":`,
-            err instanceof Error ? err.message : err,
-          );
+          log.warn(`creator access.md seed failed for "${p}":`, { err });
           continue;
         }
         if (next === current) continue;
@@ -394,10 +622,7 @@ export class LockingFilesystem extends LocalFilesystem {
           // that double-failure case a prior save's still-queued dirty bytes
           // on this path are lost to the discard — accepted, because the
           // alternative is committing known-corrupt bytes under their name.
-          console.warn(
-            `[locking-fs] creator access.md seed failed for "${p}":`,
-            err instanceof Error ? err.message : err,
-          );
+          log.warn(`creator access.md seed failed for "${p}":`, { err });
           let restored = false;
           try {
             if (existedBefore) {
@@ -413,9 +638,7 @@ export class LockingFilesystem extends LocalFilesystem {
           }
           if (!restored) {
             failedSeedDiscards.add(p);
-            console.warn(
-              `[locking-fs] could not restore pre-seed bytes for "${p}" — releasing with discard`,
-            );
+            log.warn(`could not restore pre-seed bytes for "${p}" — releasing with discard`);
           }
         }
       }
@@ -462,9 +685,7 @@ export class LockingFilesystem extends LocalFilesystem {
           }
         } catch {
           failedSeedDiscards.add(p);
-          console.warn(
-            `[locking-fs] could not roll back seed bytes for "${p}" after a failed batch — releasing with discard`,
-          );
+          log.warn(`could not roll back seed bytes for "${p}" after a failed batch — releasing with discard`);
         }
       }
       // The batch's own dirtied paths (and any failed-restore seed) release
@@ -499,6 +720,7 @@ export class LockingFilesystem extends LocalFilesystem {
   }
 
   override async mkdir(inputPath: string, options?: { recursive?: boolean }): Promise<void> {
+    await this.assertNotGitInternals(inputPath);
     this.assertInsideRepo(inputPath);
     // Creator read grant: planned BEFORE the dir exists (the plan's
     // new-directory detection needs the pre-creation tree), seeded right
@@ -540,8 +762,7 @@ export class LockingFilesystem extends LocalFilesystem {
     // Recursive directory removal would commit N file deletions in one
     // change — violates the one-change-per-file invariant. Force the
     // caller to delete files one at a time; each `deleteFile` lands as
-    // its own change. The empty parent directory disappears with the
-    // last file (git doesn't track empty folders).
+    // its own change.
     throw new Error(
       'Recursive directory removal is not supported through the lock-aware filesystem. ' +
         'Delete files individually so each removal lands as its own change.',
@@ -558,38 +779,62 @@ export class LockingFilesystem extends LocalFilesystem {
   }
 
   /**
+   * Validate an op whose resulting bytes at `dest` are not in hand (append,
+   * copy, move): `candidate` is read only when the validator claims `dest`.
+   * Runs before the lock, like `writeFile`'s gate, and again under it. Returns
+   * the bytes judged, or null when no validator claims `dest`.
+   */
+  private async validateResultingWrite<C extends FileContent>(
+    dest: string,
+    candidate: () => Promise<C>,
+  ): Promise<C | null> {
+    const validate = this.lockContext.validateWrite;
+    if (!validate?.appliesTo?.(dest)) return null;
+    const bytes = await candidate();
+    await validate(dest, bytes);
+    return bytes;
+  }
+
+  /** The bytes at `inputPath`, or null when nothing is there. */
+  private async readIfExists(inputPath: string): Promise<Buffer | null> {
+    const absolute = this.resolveAbsolutePath(inputPath);
+    if (!absolute) return null;
+    try {
+      return await fs.readFile(absolute);
+    } catch (err) {
+      if (isAbsence(err)) return null;
+      throw err;
+    }
+  }
+
+  /**
    * Land a `seed-access-md` creation-grant plan: under the access.md's own
    * lock (single acquire+release cycle → one commit), re-read the CURRENT
    * bytes and splice the grant into them — never a blind overwrite, so a
    * concurrent creator's just-landed grant on the same new directory
-   * survives. Best-effort by contract: a contended lock, read, write, or
-   * release failure here logs and returns — it must never fail the creation
-   * that triggered the seed.
+   * survives. A contended lock, read, write, or release failure here FAILS
+   * the creation that triggered the seed: the seed is planned only for a new
+   * folder at a root the acting user cannot read, and without the grant the
+   * folder would come into existence invisible to them — the very thing the
+   * read gate exists to prevent.
    */
   private async seedAccessMd(
     plan: Extract<CreationGrantPlan, { kind: 'seed-access-md' }>,
   ): Promise<void> {
-    try {
-      await this.withLock(plan.wsRelPath, async () => {
-        let current = '';
-        const absolute = this.resolveAbsolutePath(plan.wsRelPath);
-        if (absolute) {
-          try {
-            current = await fs.readFile(absolute, 'utf-8');
-          } catch {
-            // Not there yet — the normal case for a brand-new directory.
-          }
+    await this.withLock(plan.wsRelPath, async () => {
+      let current = '';
+      const absolute = this.resolveAbsolutePath(plan.wsRelPath);
+      if (absolute) {
+        try {
+          current = await fs.readFile(absolute, 'utf-8');
+        } catch {
+          // Not there yet — the normal case for a brand-new directory.
         }
-        const next = plan.apply(current);
-        if (next !== current) await super.writeFile(plan.wsRelPath, next);
-      });
-      this.lockContext.creatorAccess?.noteAccessFileWritten(this.lockContext.workspaceId);
-    } catch (err) {
-      console.warn(
-        `[locking-fs] creator access.md seed failed for "${plan.wsRelPath}":`,
-        err instanceof Error ? err.message : err,
-      );
-    }
+      }
+      const next = plan.apply(current);
+      if (next !== current) await super.writeFile(plan.wsRelPath, next);
+    });
+    this.lockContext.creatorAccess?.noteAccessFileWritten(this.lockContext.workspaceId);
   }
 
   /**
@@ -607,10 +852,7 @@ export class LockingFilesystem extends LocalFilesystem {
     try {
       return await creatorAccess.planForCreate(workspaceId, user, inputPath, kind);
     } catch (err) {
-      console.warn(
-        `[locking-fs] creator read-grant planning failed for "${inputPath}":`,
-        err instanceof Error ? err.message : err,
-      );
+      log.warn(`creator read-grant planning failed for "${inputPath}":`, { err });
       return null;
     }
   }
@@ -621,8 +863,36 @@ export class LockingFilesystem extends LocalFilesystem {
    * times before surfacing a structured failure — long enough to ride
    * out a human typing a quick edit, short enough that the agent doesn't
    * stall a whole turn waiting for someone to step away from a file.
+   *
+   * `check` runs once the lock is held and before `op`: a validator that
+   * depends on what is on disk judges the state the op will actually replace.
+   * A check refusal releases the lock UNTOUCHED — nothing was written, and the
+   * no-commit release would reset the path to HEAD, destroying a prior save's
+   * still-queued bytes — and so does every enclosing lock cycle it unwinds
+   * through. The caller receives exactly what `check` threw.
    */
-  private async withLock<T>(inputPath: string, op: () => Promise<T>): Promise<T> {
+  private async withLock<T>(
+    inputPath: string,
+    op: () => Promise<T>,
+    check?: () => Promise<void>,
+  ): Promise<T> {
+    try {
+      return await this.lockedCycle(inputPath, op, check);
+    } catch (err) {
+      throw err instanceof CheckRefusal ? err.reason : err;
+    }
+  }
+
+  /**
+   * `withLock` without the unwrap: a `check` refusal leaves as a
+   * {@link CheckRefusal}, so a cycle nested inside another (a move's second
+   * lock) tells the enclosing one to release untouched too.
+   */
+  private async lockedCycle<T>(
+    inputPath: string,
+    op: () => Promise<T>,
+    check?: () => Promise<void>,
+  ): Promise<T> {
     const { workflow, workspaceId, branch, user } = this.lockContext;
 
     let lastHolderName: string | null = null;
@@ -647,21 +917,37 @@ export class LockingFilesystem extends LocalFilesystem {
 
     let result: T;
     try {
+      if (check) {
+        try {
+          await check();
+        } catch (reason) {
+          throw new CheckRefusal(reason);
+        }
+      }
       result = await op();
     } catch (err) {
       // Op failed — drop the lock without committing, so a partial write
       // before the throw doesn't accidentally land as a committed change
       // (the normal `releaseLock` would `commitFile` whatever's on disk
-      // for `inputPath`, including the partial state). Best-effort: a
-      // failure to release here surfaces in logs but doesn't override
-      // the original op error the caller actually cares about.
+      // for `inputPath`, including the partial state). A check refusal wrote
+      // nothing, so it releases untouched instead — and so does a move or
+      // copy refused because the destination is taken: its no-clobber call
+      // (`link`, `mkdir`, `open` with `O_EXCL`) fails without creating
+      // anything. That one matters beyond tidiness. The discard resets the
+      // PATH rather than this call's changes, so on the destination of a lost
+      // race — where the winner's move has landed and its commit is still
+      // queued — discarding would throw the winner's file away on the way to
+      // reporting the loser's refusal. Best-effort: a failure to release here
+      // surfaces in logs but doesn't override the original op error the
+      // caller actually cares about.
       try {
-        await workflow.releaseLockNoCommit(workspaceId, branch, inputPath, user);
+        if (err instanceof CheckRefusal || err instanceof DestinationTakenError) {
+          await workflow.releaseLockUntouched(workspaceId, branch, inputPath, user);
+        } else {
+          await workflow.releaseLockNoCommit(workspaceId, branch, inputPath, user);
+        }
       } catch (releaseErr) {
-        console.warn(
-          `[locking-fs] releaseLockNoCommit failed for "${inputPath}" after op error:`,
-          releaseErr instanceof Error ? releaseErr.message : releaseErr,
-        );
+        log.warn(`lock release failed for "${inputPath}" after op error:`, { err: releaseErr });
       }
       throw err;
     }
@@ -674,6 +960,10 @@ export class LockingFilesystem extends LocalFilesystem {
     await workflow.releaseLock(workspaceId, branch, inputPath, user);
     return result;
   }
+}
+
+function asBuffer(content: FileContent): Buffer {
+  return typeof content === 'string' ? Buffer.from(content, 'utf-8') : Buffer.from(content);
 }
 
 function sleep(ms: number): Promise<void> {

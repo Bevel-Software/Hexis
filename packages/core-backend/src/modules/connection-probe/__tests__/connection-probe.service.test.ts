@@ -634,6 +634,84 @@ describe('ConnectionProbeService: what the probe concludes', () => {
 
       expect(r?.detail).toContain(accept);
     });
+
+    /**
+     * A SHORT credential is still the credential. Nothing stops someone
+     * storing a four-character key — a test account's token, a numeric
+     * customer id used as one — and the provider echoes it back in exactly the
+     * same sentence it echoes a long one in.
+     */
+    it('redacts a credential too short to be a prefix match', async () => {
+      const tiny = 'ab12';
+      const svc = build({ type: 'http', healthCheck: DECLARED_PROBE }, async () => tiny);
+      vi.mocked(fetch).mockResolvedValue(
+        new Response(`Incorrect API key provided: ${tiny}. Check your key at acme.test.`, { status: 401 }),
+      );
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      expect(r?.status).toBe('failed');
+      expect(r?.detail).not.toContain(tiny);
+      expect(r?.detail).toContain('[redacted]');
+      expect(r?.detail).toContain('Check your key at acme.test.');
+    });
+
+    /**
+     * The reason short values are matched as whole runs rather than anywhere:
+     * `substitute` reports every `${VAR}` a manual resolved, not only the
+     * credential ones, so a version or a region arrives here too. Blanking
+     * those wherever their characters fell would leave `rejected (401)` reading
+     * `rejected ([redacted]01)` — destroying the message the quote exists for.
+     */
+    it('leaves a short value alone inside a longer number, and still redacts it alone', async () => {
+      const svc = build(
+        {
+          type: 'http',
+          healthCheck: {
+            url: 'https://api.acme.test/v${VERSION}/me',
+            headers: { Authorization: 'Bearer ${API_KEY}' },
+          },
+        },
+        async (key) => (key.includes('VERSION') ? '1' : SECRET),
+      );
+      vi.mocked(fetch).mockResolvedValue(
+        new Response('Retry after 401 seconds; api version 1 is retired', { status: 401 }),
+      );
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      // The `1`s inside `401` are untouched: the message is still readable.
+      expect(r?.detail).toContain('Retry after 401 seconds');
+      // The one standing on its own is not — redaction does not get to decide
+      // which resolved values were really secrets.
+      expect(r?.detail).toContain('api version [redacted] is retired');
+    });
+
+    /**
+     * Not every short `${VAR}` a manual resolves is even word-shaped. A
+     * separator or a path fragment arrives here as a "secret" like any other,
+     * and a pattern with no boundary on either side matches every occurrence
+     * of that punctuation in the provider's message — which is the whole quote.
+     */
+    it('leaves ordinary punctuation alone when a resolved value IS punctuation', async () => {
+      const svc = build(
+        {
+          type: 'http',
+          healthCheck: {
+            url: 'https://api${SEP}acme.test/me',
+            headers: { Authorization: 'Bearer ${API_KEY}' },
+          },
+        },
+        async (key) => (key.includes('SEP') ? '.' : SECRET),
+      );
+      const body = 'Bad credentials. See https://docs.acme.test/rest for help.';
+      vi.mocked(fetch).mockResolvedValue(new Response(body, { status: 401 }));
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      // Every period survives: the sentence, the hostname, the trailing stop.
+      expect(r?.detail).toContain(body);
+    });
   });
 
   /**

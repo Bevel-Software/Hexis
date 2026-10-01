@@ -4,8 +4,9 @@ import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Button } from '../../../../shared/components';
-import { useWorkspace } from '../../state/workspace.context';
+import { useRendererWorkspaceId } from './rendererWorkspace';
 import { authFetch } from '../../../../lib/api';
+import { rawFileUrl } from '../../services/workspace.api';
 import { DownloadFileButton } from './DownloadFileButton';
 import type { FileRendererProps } from './types';
 
@@ -35,7 +36,7 @@ GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
  * `onSave` / `onValueChange` / `readOnly`.
  */
 export function PdfRenderer({ filePath }: FileRendererProps) {
-  const { workspaceId } = useWorkspace();
+  const workspaceId = useRendererWorkspaceId();
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [error, setError] = useState<string | null>(null);
@@ -76,9 +77,7 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
     let loadingTask: PDFDocumentLoadingTask | null = null;
     (async () => {
       try {
-        const res = await authFetch(
-          `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(filePath)}`,
-        );
+        const res = await authFetch(rawFileUrl(workspaceId, filePath));
         if (cancelled) return;
         if (!res.ok) {
           setError(`Failed to load PDF (HTTP ${res.status})`);

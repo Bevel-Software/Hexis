@@ -173,51 +173,51 @@ CREATE TABLE IF NOT EXISTS "users" (
 --> statement-breakpoint
 DO $$ BEGIN
 	IF NOT EXISTS (
-		SELECT 1 FROM pg_constraint WHERE conname = 'api_tokens_user_id_users_id_fk' AND conrelid = 'public.api_tokens'::regclass
+		SELECT 1 FROM pg_constraint WHERE conname = 'api_tokens_user_id_users_id_fk' AND conrelid = to_regclass('api_tokens')
 	) THEN
-		ALTER TABLE "api_tokens" ADD CONSTRAINT "api_tokens_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;
+		ALTER TABLE "api_tokens" ADD CONSTRAINT "api_tokens_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE no action ON UPDATE no action;
 	END IF;
 END $$;--> statement-breakpoint
 DO $$ BEGIN
 	IF NOT EXISTS (
-		SELECT 1 FROM pg_constraint WHERE conname = 'file_locks_holder_user_id_users_id_fk' AND conrelid = 'public.file_locks'::regclass
+		SELECT 1 FROM pg_constraint WHERE conname = 'file_locks_holder_user_id_users_id_fk' AND conrelid = to_regclass('file_locks')
 	) THEN
-		ALTER TABLE "file_locks" ADD CONSTRAINT "file_locks_holder_user_id_users_id_fk" FOREIGN KEY ("holder_user_id") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;
+		ALTER TABLE "file_locks" ADD CONSTRAINT "file_locks_holder_user_id_users_id_fk" FOREIGN KEY ("holder_user_id") REFERENCES "users"("id") ON DELETE no action ON UPDATE no action;
 	END IF;
 END $$;--> statement-breakpoint
 DO $$ BEGIN
 	IF NOT EXISTS (
-		SELECT 1 FROM pg_constraint WHERE conname = 'oauth_auth_codes_client_id_oauth_clients_client_id_fk' AND conrelid = 'public.oauth_auth_codes'::regclass
+		SELECT 1 FROM pg_constraint WHERE conname = 'oauth_auth_codes_client_id_oauth_clients_client_id_fk' AND conrelid = to_regclass('oauth_auth_codes')
 	) THEN
-		ALTER TABLE "oauth_auth_codes" ADD CONSTRAINT "oauth_auth_codes_client_id_oauth_clients_client_id_fk" FOREIGN KEY ("client_id") REFERENCES "public"."oauth_clients"("client_id") ON DELETE no action ON UPDATE no action;
+		ALTER TABLE "oauth_auth_codes" ADD CONSTRAINT "oauth_auth_codes_client_id_oauth_clients_client_id_fk" FOREIGN KEY ("client_id") REFERENCES "oauth_clients"("client_id") ON DELETE no action ON UPDATE no action;
 	END IF;
 END $$;--> statement-breakpoint
 DO $$ BEGIN
 	IF NOT EXISTS (
-		SELECT 1 FROM pg_constraint WHERE conname = 'oauth_auth_codes_user_id_users_id_fk' AND conrelid = 'public.oauth_auth_codes'::regclass
+		SELECT 1 FROM pg_constraint WHERE conname = 'oauth_auth_codes_user_id_users_id_fk' AND conrelid = to_regclass('oauth_auth_codes')
 	) THEN
-		ALTER TABLE "oauth_auth_codes" ADD CONSTRAINT "oauth_auth_codes_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;
+		ALTER TABLE "oauth_auth_codes" ADD CONSTRAINT "oauth_auth_codes_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE no action ON UPDATE no action;
 	END IF;
 END $$;--> statement-breakpoint
 DO $$ BEGIN
 	IF NOT EXISTS (
-		SELECT 1 FROM pg_constraint WHERE conname = 'oauth_tokens_client_id_oauth_clients_client_id_fk' AND conrelid = 'public.oauth_tokens'::regclass
+		SELECT 1 FROM pg_constraint WHERE conname = 'oauth_tokens_client_id_oauth_clients_client_id_fk' AND conrelid = to_regclass('oauth_tokens')
 	) THEN
-		ALTER TABLE "oauth_tokens" ADD CONSTRAINT "oauth_tokens_client_id_oauth_clients_client_id_fk" FOREIGN KEY ("client_id") REFERENCES "public"."oauth_clients"("client_id") ON DELETE no action ON UPDATE no action;
+		ALTER TABLE "oauth_tokens" ADD CONSTRAINT "oauth_tokens_client_id_oauth_clients_client_id_fk" FOREIGN KEY ("client_id") REFERENCES "oauth_clients"("client_id") ON DELETE no action ON UPDATE no action;
 	END IF;
 END $$;--> statement-breakpoint
 DO $$ BEGIN
 	IF NOT EXISTS (
-		SELECT 1 FROM pg_constraint WHERE conname = 'oauth_tokens_user_id_users_id_fk' AND conrelid = 'public.oauth_tokens'::regclass
+		SELECT 1 FROM pg_constraint WHERE conname = 'oauth_tokens_user_id_users_id_fk' AND conrelid = to_regclass('oauth_tokens')
 	) THEN
-		ALTER TABLE "oauth_tokens" ADD CONSTRAINT "oauth_tokens_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;
+		ALTER TABLE "oauth_tokens" ADD CONSTRAINT "oauth_tokens_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE no action ON UPDATE no action;
 	END IF;
 END $$;--> statement-breakpoint
 DO $$ BEGIN
 	IF NOT EXISTS (
-		SELECT 1 FROM pg_constraint WHERE conname = 'secrets_user_id_users_id_fk' AND conrelid = 'public.secrets'::regclass
+		SELECT 1 FROM pg_constraint WHERE conname = 'secrets_user_id_users_id_fk' AND conrelid = to_regclass('secrets')
 	) THEN
-		ALTER TABLE "secrets" ADD CONSTRAINT "secrets_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;
+		ALTER TABLE "secrets" ADD CONSTRAINT "secrets_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE cascade ON UPDATE no action;
 	END IF;
 END $$;--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "change_requests_number_unq" ON "change_requests" USING btree ("number");--> statement-breakpoint

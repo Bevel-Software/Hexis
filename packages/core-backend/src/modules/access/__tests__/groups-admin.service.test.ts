@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -106,7 +107,7 @@ describe('GroupsAdminService', () => {
     service = new GroupsAdminService(
       workspace,
       workflow.svc,
-      new AccessControlService(workspace as never, KB),
+      new AccessControlService(workspace as never, KB, new NodeFs()),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -182,6 +183,14 @@ describe('GroupsAdminService', () => {
       message: expect.stringContaining("role/"),
     });
     expect(await groupsYaml()).not.toContain('role/');
+  });
+
+  it("createGroup refuses the reserved 'plugin/' prefix — a group could otherwise pose as a plugin's members", async () => {
+    await expect(service.createGroup(ADMIN, 'plugin/GTM/read')).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining('plugin/'),
+    });
+    expect(await groupsYaml()).not.toContain('plugin/');
   });
 
   it('create → add → remove → delete lifecycle lands on disk', async () => {
@@ -293,7 +302,7 @@ describe('GroupsAdminService', () => {
     const svc = new GroupsAdminService(
       workspace,
       workflow.svc,
-      new AccessControlService(workspace as never, KB),
+      new AccessControlService(workspace as never, KB, new NodeFs()),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -339,7 +348,7 @@ describe('GroupsAdminService', () => {
     const svc = new GroupsAdminService(
       workspace,
       workflow.svc,
-      new AccessControlService(workspace as never, KB),
+      new AccessControlService(workspace as never, KB, new NodeFs()),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -378,7 +387,7 @@ describe('GroupsAdminService', () => {
     const svc = new GroupsAdminService(
       workspace,
       workflow.svc,
-      new AccessControlService(workspace as never, KB),
+      new AccessControlService(workspace as never, KB, new NodeFs()),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -426,7 +435,7 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
       const svc = new GroupsAdminService(
         workspace,
         stubWorkflow().svc,
-        new AccessControlService(workspace as never, KB),
+        new AccessControlService(workspace as never, KB, new NodeFs()),
         KB,
         () => DEFAULT_BRANCH,
       );

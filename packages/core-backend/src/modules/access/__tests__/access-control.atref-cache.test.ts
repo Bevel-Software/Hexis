@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -10,13 +11,14 @@ import { AccessControlService } from '../access-control.service.js';
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
 
 /**
- * Every git subprocess the service (and this file's own fixture helpers)
- * spawn through `execFile`, by argv. The service builds its at-ref model
- * with exactly one `git ls-tree -r` per build, so counting `ls-tree` argv
- * entries counts model builds — measured at the process boundary, which is
- * the cost this cache exists to remove. `injected.failNext` makes ONE
- * matching spawn fail the way a transient git error does, so the cache's
- * behaviour under a failed read can be pinned without a flaky fixture.
+ * Every git subprocess the service spawns through the git port (`spawn`) and
+ * this file's own fixture helpers run through `execFile`, by argv. The
+ * service builds its at-ref model with exactly one `git ls-tree -r` per
+ * build, so counting `ls-tree` argv entries counts model builds — measured at
+ * the process boundary, which is the cost this cache exists to remove.
+ * `injected.failNext` makes ONE matching spawn fail the way a transient git
+ * error does, so the cache's behaviour under a failed read can be pinned
+ * without a flaky fixture.
  */
 const { spawnLog, injected } = vi.hoisted(() => ({
   spawnLog: [] as string[][],
@@ -25,32 +27,54 @@ const { spawnLog, injected } = vi.hoisted(() => ({
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
+  const { EventEmitter } = await import('node:events');
+  const { PassThrough } = await import('node:stream');
   const { promisify: p } = await import('node:util');
   const original = actual.execFile as unknown as ((...a: unknown[]) => unknown) & {
     [p.custom]: (...a: unknown[]) => unknown;
   };
-  const wrapped = ((...args: unknown[]) => {
+  const execFile = ((...args: unknown[]) => {
     spawnLog.push((args[1] as string[]) ?? []);
     return original(...args);
   }) as unknown as typeof actual.execFile;
   // `promisify(execFile)` returns `execFile[promisify.custom]`, so the
-  // promisified path the service uses has to be wrapped too.
-  Object.defineProperty(wrapped, p.custom, {
+  // promisified path the fixtures use has to be wrapped too.
+  Object.defineProperty(execFile, p.custom, {
     value: (...args: unknown[]) => {
-      const argv = (args[1] as string[]) ?? [];
-      spawnLog.push(argv);
-      if (injected.failNext?.(argv)) {
-        injected.failNext = null;
-        return Promise.reject(
-          Object.assign(new Error('simulated transient git failure'), {
-            stderr: 'fatal: unable to read object (simulated)',
-          }),
-        );
-      }
+      spawnLog.push((args[1] as string[]) ?? []);
       return original[p.custom](...args);
     },
   });
-  return { ...actual, execFile: wrapped };
+  /** A child that exits 128 with the stderr a transient object read failure prints. */
+  const failing = () => {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 424242,
+      exitCode: null as number | null,
+      signalCode: null,
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: () => true,
+    });
+    process.nextTick(() => {
+      child.stderr.end('fatal: unable to read object (simulated)\n');
+      child.stdout.end();
+      child.exitCode = 128;
+      child.emit('close', 128, null);
+    });
+    return child as unknown as ReturnType<typeof actual.spawn>;
+  };
+  const spawn = ((file: string, args: string[], options: unknown) => {
+    if (file === 'git') {
+      spawnLog.push(args ?? []);
+      if (injected.failNext?.(args)) {
+        injected.failNext = null;
+        return failing();
+      }
+    }
+    return (actual.spawn as unknown as (...a: unknown[]) => unknown)(file, args, options);
+  }) as unknown as typeof actual.spawn;
+  return { ...actual, execFile, spawn };
 });
 
 const execFileAsync = promisify(execFile);
@@ -133,7 +157,7 @@ describe('AccessControlService — at-ref model cache', () => {
         await git(repo, 'fetch', '-q', 'origin');
       },
     } as unknown as WorkspaceService;
-    svc = new AccessControlService(stub, PROCESS_MAP_DIR);
+    svc = new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs());
     spawnLog.length = 0;
     injected.failNext = null;
   });

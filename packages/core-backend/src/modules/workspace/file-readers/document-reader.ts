@@ -1,6 +1,7 @@
 import type { DocExtractService } from './doc-extract.service.js';
 import type { ExtractFn } from './doc-extract.types.js';
 import { displayPath, oneLine, type FileReader, type ReadResult } from './file-reader.js';
+import { extensionMime } from './text-reader.js';
 
 /**
  * FileReader over one document format: a thin wrapper pairing the format's
@@ -23,6 +24,7 @@ export class DocumentReader implements FileReader {
    * uploading a new version).
    */
   readonly textEditable = false;
+  readonly fileKind = 'document' as const;
 
   constructor(
     extension: string,
@@ -54,6 +56,10 @@ export class DocumentReader implements FileReader {
           kind: 'refusal',
           message: `[${displayPath(path)} ${oneLine(res.message)} — the file may be corrupt or mislabeled. To fix it, replace the document by uploading a new version.]`,
         };
+  }
+
+  mimeFor(path: string): string | undefined {
+    return extensionMime(path);
   }
 
   /** The cached extraction (marker line included, so grep's line numbers match read_file's), or null when cold. */

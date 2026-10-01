@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { CoreConfig } from '../core-config.js';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { CoreConfig, withoutUserinfo } from '../core-config.js';
 
 /**
  * The public-shape derivation from `DOMAIN`.
@@ -88,5 +88,70 @@ describe('CoreConfig — DOMAIN derives the public shape', () => {
     process.env.PUBLIC_BACKEND_URL = 'https://bevel.example.com';
     const config = new CoreConfig();
     expect(config.publicFrontendUrl).toBe('https://bevel.example.com');
+  });
+});
+
+/**
+ * Change-request links an agent hands a person are built on the public
+ * frontend address only when one is configured — never on a localhost default.
+ */
+describe('CoreConfig — configuredPublicFrontendUrl', () => {
+  it('is the frontend address when PUBLIC_FRONTEND_URL is set', () => {
+    process.env.PUBLIC_FRONTEND_URL = 'https://example.com/hexis/';
+    expect(new CoreConfig().configuredPublicFrontendUrl).toBe('https://example.com/hexis');
+  });
+
+  it('is derived from DOMAIN', () => {
+    process.env.DOMAIN = 'bevel.example.com';
+    expect(new CoreConfig().configuredPublicFrontendUrl).toBe('https://bevel.example.com');
+  });
+
+  it('follows an explicit backend origin in production', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.PUBLIC_BACKEND_URL = 'https://bevel.example.com';
+    expect(new CoreConfig().configuredPublicFrontendUrl).toBe('https://bevel.example.com');
+  });
+
+  it('is null when nothing is configured, in development and production alike', () => {
+    expect(new CoreConfig().configuredPublicFrontendUrl).toBeNull();
+    process.env.NODE_ENV = 'production';
+    expect(new CoreConfig().configuredPublicFrontendUrl).toBeNull();
+  });
+});
+
+describe('CoreConfig — PUBLIC_BACKEND_URL never carries credentials', () => {
+  it('strips a proxy user:pass@ once, at parse time, and keeps every other byte', () => {
+    process.env.PUBLIC_BACKEND_URL = 'https://proxy:hunter2@Hexis.Example.com:443/base/';
+    expect(new CoreConfig().publicBackendUrl).toBe('https://Hexis.Example.com:443/base');
+  });
+
+  it('warns that the credentials were ignored, without ever printing them', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      process.env.PUBLIC_BACKEND_URL = 'https://proxy:hunter2@hexis.example.com';
+      new CoreConfig();
+      const printed = warn.mock.calls.map((args) => args.map(String).join(' ')).join('\n');
+      expect(printed).toMatch(/PUBLIC_BACKEND_URL contains credentials/);
+      expect(printed).not.toMatch(/hunter2|proxy:/);
+      warn.mockClear();
+      process.env.PUBLIC_BACKEND_URL = 'https://hexis.example.com';
+      new CoreConfig();
+      expect(warn.mock.calls.map((args) => args.join(' ')).join('\n')).not.toMatch(/credentials/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each([
+    ['https://user@host.example.com', 'https://host.example.com'],
+    ['http://u:p%40ss@localhost:3001', 'http://localhost:3001'],
+    // An unencoded `@` inside the password: the whole userinfo goes, not the head of it.
+    ['https://u:p@ss@host.example.com/cb', 'https://host.example.com/cb'],
+    ['https://u:p@ss@host.example.com?next=a@b', 'https://host.example.com?next=a@b'],
+    ['https://host.example.com/path@not-userinfo', 'https://host.example.com/path@not-userinfo'],
+    ['https://host.example.com?next=a@b', 'https://host.example.com?next=a@b'],
+    ['https://host.example.com', 'https://host.example.com'],
+  ])('withoutUserinfo(%s) is %s', (input, expected) => {
+    expect(withoutUserinfo(input)).toBe(expected);
   });
 });

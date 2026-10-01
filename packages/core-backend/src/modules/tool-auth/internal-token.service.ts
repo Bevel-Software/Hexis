@@ -37,6 +37,16 @@ export interface InternalTokenClaim {
    * expected to carry `sessionId` on the tool body, not in the token.
    */
   externalProxy?: boolean;
+  /**
+   * The agent connection (`agent_connections.id`) an external-proxy token
+   * stands in for. The LOCAL MCP server swaps its OAuth grant for one of these
+   * at `/api/mcp/local-token` and presents it everywhere the grant would have
+   * gone, so without this claim every call it makes would arrive with a user
+   * and no agent — unattributable in the Audit log. Carried, never decided:
+   * the exchange copies it from the verified grant. Absent on every other
+   * internal token.
+   */
+  connectionId?: string;
 }
 
 interface SignedPayload extends InternalTokenClaim {
@@ -99,8 +109,11 @@ export class InternalTokenService {
     return this.ttlMs;
   }
 
-  /** @param ttlMs Override the default lifetime — e.g. the MCP proxy mints
-   *   session-loopback tokens that must outlive its 4h session idle TTL. */
+  /** @param ttlMs Override the default lifetime — for a caller whose token
+   *   must live a different span than the default: the MCP proxy's loopback
+   *   bearer (`MCP_LOOPBACK_TOKEN_TTL_MS`, longer, so a long tool call is not
+   *   cut off mid-way) and the external-proxy token minted for a grant, whose
+   *   life is bounded by the grant's remaining time (`mcp.routes.ts`). */
   mint(claim: InternalTokenClaim, ttlMs?: number): string {
     const payload: SignedPayload = { ...claim, exp: this.now() + (ttlMs ?? this.ttlMs) };
     const body = b64url(Buffer.from(JSON.stringify(payload), 'utf8'));
@@ -134,6 +147,7 @@ export class InternalTokenService {
       ...(typeof payload.sessionId === 'string' ? { sessionId: payload.sessionId } : {}),
       ...(typeof payload.focusedBranch === 'string' ? { focusedBranch: payload.focusedBranch } : {}),
       ...(payload.externalProxy === true ? { externalProxy: true } : {}),
+      ...(typeof payload.connectionId === 'string' ? { connectionId: payload.connectionId } : {}),
     };
   }
 

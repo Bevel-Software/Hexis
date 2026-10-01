@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import {
   WorkspaceContext,
@@ -250,10 +250,13 @@ describe('AddToPluginDialog: starting an empty SKILL.md', () => {
 describe('AddToPluginDialog for an admin non-writer', () => {
   it('offers the same dialog, and tells the truth about review', () => {
     renderDialog('knowledge-base', false);
+    // Both clauses also appear on the hidden Tools panel, so this is scoped to
+    // the panel actually on screen.
+    const skills = within(screen.getByRole('tabpanel'));
     expect(
-      screen.getByText(/goes to GTM as a change request, and an owner reviews it/),
+      skills.getByText(/goes to GTM as a change request, and an owner reviews it/),
     ).toBeInTheDocument();
-    expect(screen.getByText(/send it to the plugin as a change request/)).toBeInTheDocument();
+    expect(skills.getByText(/send it to the plugin as a change request/)).toBeInTheDocument();
     expect(screen.queryByText(/no review step/)).not.toBeInTheDocument();
   });
 
@@ -306,8 +309,171 @@ describe('AddToPluginDialog for a non-admin', () => {
 
     expect(screen.queryByText('Start an empty SKILL.md')).not.toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Skill name' })).not.toBeInTheDocument();
-    expect(screen.getByText(/change request for an owner to review/)).toBeInTheDocument();
-    expect(screen.getByText(/send it to the plugin as a change request/)).toBeInTheDocument();
+    const skills = within(screen.getByRole('tabpanel'));
+    expect(skills.getByText(/change request for an owner to review/)).toBeInTheDocument();
+    expect(skills.getByText(/send it to the plugin as a change request/)).toBeInTheDocument();
     expect(apiMock.createEmptySkill).not.toHaveBeenCalled();
+  });
+});
+
+
+// ── the Tools tab ──
+// The dialog is titled "Add a skill or tool", and people looking for the tool
+// half found only skills. The Tools tab explains rather than creates, so what
+// is worth asserting is its prompt (verbatim, per plugin and per role), the
+// two declaration surfaces it names, and that it carries no form.
+//
+// Both panels are MOUNTED at all times and the inactive one is hidden, so the
+// Skills half never loses a half-typed name to a tab click. That makes every
+// text assertion below panel-scoped: `panel()` is the visible tabpanel, and
+// the hidden one is deliberately still in the document.
+describe('AddToPluginDialog: Skills and Tools tabs', () => {
+  beforeEach(() => {
+    writeText.mockReset();
+    writeText.mockResolvedValue(undefined);
+    apiMock.createEmptySkill.mockReset();
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+  });
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'clipboard');
+  });
+
+  const TOOL_PROMPT_WRITER =
+    'Help me build a new tool and add it to the GTM plugin at Bevel. ' +
+    'I run it, so it goes in directly. No review step.';
+  const TOOL_PROMPT_NON_OWNER =
+    'Help me build a new tool and add it to the GTM plugin at Bevel. ' +
+    'I am not an owner, so send it to the plugin as a change request for review.';
+  const TOOL_MANUAL_SENTENCE =
+    'To call an API without an MCP server, add a .tool manual describing it to the ' +
+    "GTM plugin's software.bevel.hexis/tools/ folder.";
+
+  /** The visible tabpanel. Role queries skip the hidden one. */
+  const panel = () => screen.getByRole('tabpanel');
+
+  it('opens on Skills, with the two tabs named Skills and Tools', () => {
+    renderDialog();
+    const tabs = screen.getAllByRole('tab');
+    expect(tabs.map((t) => t.textContent)).toEqual(['Skills', 'Tools']);
+    expect(screen.getByRole('tab', { name: 'Skills' })).toHaveAttribute('aria-selected', 'true');
+    expect(panel()).toHaveAccessibleName('Skills');
+    expect(within(panel()).getByText(ADD_PROMPT)).toBeInTheDocument();
+    // The Tools half is mounted but not shown.
+    expect(screen.getByText(TOOL_PROMPT_WRITER)).not.toBeVisible();
+  });
+
+  it('shows the tool prompt, the MCP and .tool sentences, and no form', () => {
+    renderDialog();
+    fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
+
+    expect(screen.getByRole('tab', { name: 'Tools' })).toHaveAttribute('aria-selected', 'true');
+    expect(panel()).toHaveAccessibleName('Tools');
+    expect(within(panel()).getByText(TOOL_PROMPT_WRITER)).toBeInTheDocument();
+    expect(
+      within(panel()).getByText(
+        'To connect an MCP server, add it to the mcp.json in the GTM plugin folder.',
+      ),
+    ).toBeInTheDocument();
+    expect(within(panel()).getByText(TOOL_MANUAL_SENTENCE)).toBeInTheDocument();
+    expect(
+      within(panel()).getByText(/it joins GTM\. Everyone in the plugin gets it/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(ADD_PROMPT)).not.toBeVisible();
+    // No form on this tab: the Skills panel's field is hidden, so no role query
+    // reaches it.
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Add a skill or tool to GTM' })).toBeInTheDocument();
+  });
+
+  // The regression the panels exist for: a name typed into the Skills half must
+  // survive a look at the Tools tab.
+  it('keeps a typed skill name across a tab round trip', () => {
+    const { field } = renderDialog();
+    fireEvent.change(field(), { target: { value: 'weekly-report' } });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Skills' }));
+
+    expect(field()).toHaveValue('weekly-report');
+  });
+
+  it('copies the prompt of the tab that is showing', async () => {
+    renderDialog();
+    fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Copy prompt' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(TOOL_PROMPT_WRITER));
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Skills' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Copy prompt' }));
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(ADD_PROMPT));
+  });
+
+  it('carries the change-request note and clause for a non-owner', () => {
+    renderDialog('knowledge-base', false, [], false);
+    fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
+    expect(within(panel()).getByText(TOOL_PROMPT_NON_OWNER)).toBeInTheDocument();
+    expect(
+      within(panel()).getByText(
+        /goes to GTM as a change request, and an owner reviews it before it joins/,
+      ),
+    ).toBeInTheDocument();
+    expect(within(panel()).queryByText(/No review step/)).not.toBeInTheDocument();
+  });
+
+  it('names whichever plugin it was opened on', () => {
+    render(
+      <MemoryRouter>
+        <AdminContext.Provider value={admin(false)}>
+          <WorkspaceContext.Provider value={workspace('knowledge-base')}>
+            <LibraryToastProvider>
+              {withAuth(
+                <AddToPluginDialog
+                  name="Finance"
+                  primaryPath="Plugins/Finance"
+                  canWrite
+                  existingSkills={[]}
+                  onClose={vi.fn()}
+                />,
+              )}
+            </LibraryToastProvider>
+          </WorkspaceContext.Provider>
+        </AdminContext.Provider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
+    expect(
+      within(panel()).getByText(
+        'Help me build a new tool and add it to the Finance plugin at Bevel. I run it, so it goes in directly. No review step.',
+      ),
+    ).toBeInTheDocument();
+    expect(within(panel()).getByText(/mcp\.json in the Finance plugin folder/)).toBeInTheDocument();
+    expect(
+      within(panel()).getByText(/Finance plugin's software\.bevel\.hexis\/tools\/ folder/),
+    ).toBeInTheDocument();
+  });
+
+  it('moves between tabs with the arrow keys, focus following', () => {
+    renderDialog();
+    const skills = screen.getByRole('tab', { name: 'Skills' });
+    fireEvent.keyDown(skills, { key: 'ArrowRight' });
+    const tools = screen.getByRole('tab', { name: 'Tools' });
+    expect(tools).toHaveAttribute('aria-selected', 'true');
+    expect(tools).toHaveFocus();
+    fireEvent.keyDown(tools, { key: 'Home' });
+    expect(screen.getByRole('tab', { name: 'Skills' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  // Each tab owns its own panel, so a screen reader following `aria-controls`
+  // lands on the half that tab describes rather than on one relabelled div.
+  it('gives each tab its own panel to control', () => {
+    renderDialog();
+    const ids = screen.getAllByRole('tab').map((t) => t.getAttribute('aria-controls'));
+    expect(new Set(ids).size).toBe(2);
+    for (const id of ids) {
+      const owned = document.getElementById(id!);
+      expect(owned).not.toBeNull();
+      expect(owned).toHaveAttribute('role', 'tabpanel');
+    }
   });
 });

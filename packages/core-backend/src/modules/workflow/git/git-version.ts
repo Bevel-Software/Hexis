@@ -16,6 +16,9 @@
  */
 
 import { execFile } from 'node:child_process';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('git');
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -40,8 +43,8 @@ export function assertSupportedGitVersion(stdout: string): void {
   const found = parseGitVersion(stdout);
   const [minMajor, minMinor] = MIN_GIT_VERSION;
   if (!found) {
-    console.warn(
-      `[git] could not read a version from "${stdout.trim()}" — ` +
+    log.warn(
+      `could not read a version from "${stdout.trim()}" — ` +
         `skipping the git ${minMajor}.${minMinor}+ check`,
     );
     return;

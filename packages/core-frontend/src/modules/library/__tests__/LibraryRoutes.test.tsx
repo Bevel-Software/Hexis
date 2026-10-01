@@ -12,13 +12,12 @@ import type { LibraryData } from '../hooks/useLibraryData';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import type { PluginSummary } from '../services/plugins.api';
 import type { ToolPageState } from '../hooks/useToolPage';
+import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 
 /**
- * The routing skeleton: what each URL renders, what the sidebar marks as
- * current, and where a click lands. The catalog is mocked at the hook (one
- * seam) rather than at six endpoints — what's under test is the route table,
- * not the fetching. The tool page's own data hook is mocked for the same
- * reason; `ToolPage.test.tsx` is where its behaviour lives.
+ * The Library's routes, end to end through the layout: URL in, page + lit
+ * sidebar row out. The catalog and the plugin index are stubbed at the data
+ * seam; everything from the router down is real.
  */
 
 const dataMock = vi.hoisted(() => ({ useLibraryData: vi.fn() }));
@@ -33,15 +32,20 @@ vi.mock('../services/plugins.api', () => ({
   listJoinRequests: pluginsMock.listJoinRequests,
   reconcileJoinRequest: vi.fn(),
   requestPluginAccess: vi.fn(),
+  // The plugin page repairs its links on open for a manager; these fixtures
+  // are members, so it never fires — but the module still has to export it.
+  repairPluginLinks: vi.fn().mockResolvedValue({ repaired: [], skipped: [] }),
   AlreadyReadableError: class AlreadyReadableError extends Error {},
 }));
+
+const teamsMock = vi.hoisted(() => ({ listTeams: vi.fn() }));
+vi.mock('../services/teams.api', () => ({ listTeams: teamsMock.listTeams }));
+// The sidebar's change-request dock pulls in git wiring these routes do not exercise.
+vi.mock('../../git/components/PullRequestsForMe', () => ({ PullRequestsForMe: () => null }));
 
 const toolPageMock = vi.hoisted(() => ({ useToolPage: vi.fn() }));
 vi.mock('../hooks/useToolPage', () => ({ useToolPage: toolPageMock.useToolPage }));
 
-// ManageAccessDialog (reachable from the plugin page's Share) fetches through
-// this module. Nothing opens it in a routing test, but the stub keeps any
-// accidental mount from waiting on a refused connection.
 vi.mock('../../access/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../access/api')>();
   return {
@@ -84,12 +88,11 @@ const CATALOG: LibraryData = {
     { name: 'scratch', description: 'A skill in no plugin.', path: 'Skills/scratch' },
   ],
   pendingSkills: [],
-  tools: [
-    tool({}),
-    // Ungrouped tool (`Tools/slack.tool` is two segments) — "Yours alone".
-    tool({ slug: 'slack', name: 'slack', path: 'Tools/slack.tool' }),
-  ],
+  pendingTools: [],
+  tools: [tool({}), tool({ slug: 'slack', name: 'slack', path: 'Tools/slack.tool' })],
   ownedSkills: new Set(['outreach']),
+  writableSkills: new Set(['outreach']),
+  ownedTools: new Set(),
   allowedToolsBySkill: new Map(),
   crs: [],
   myCrNumbers: new Set(),
@@ -102,7 +105,7 @@ const PLUGINS: PluginSummary[] = [
     folders: ['Plugins/GTM'],
     canRead: true,
     canWrite: true,
-    isOwner: false,
+    isOwner: true,
     skillCount: 1,
     toolCount: 1,
     owners: { roles: [], users: [{ name: 'Olga Ivanova', email: 'olga@bevel.software' }] },
@@ -111,6 +114,13 @@ const PLUGINS: PluginSummary[] = [
     hasRequested: false,
     requestNumber: null,
   },
+];
+
+const TEAMS = [
+  // The server opens with the org-wide entry: Product admits everyone here.
+  { name: 'Everyone', plugins: ['Product'], skills: ['roadmap'], tools: ['slack'] },
+  { name: 'GTM Team', plugins: ['GTM'], skills: ['outreach'], tools: ['heyreach'] },
+  { name: 'Everyone Else', plugins: [], skills: ['scratch'], tools: [] },
 ];
 
 const TOOL_PAGE_STATE: ToolPageState = {
@@ -125,20 +135,11 @@ const TOOL_PAGE_STATE: ToolPageState = {
   reload: vi.fn(),
 };
 
-/** Exposes the router's current pathname without a testid. */
 function LocationProbe() {
   const location = useLocation();
-  // Search and hash included so the `?server=` and OAuth-fragment redirects
-  // below are assertable; both are the empty string everywhere else.
   return <div aria-label="pathname">{location.pathname}{location.search}{location.hash}</div>;
 }
 
-/**
- * The shell's providers, which the Library sits inside for real
- * (`CoreAppShell` mounts both above every app surface). The tool page reads
- * `isAdmin` and `kbDirName` from them; the locked-plugin and request surfaces
- * read `kbDirName` to address `access.md`.
- */
 function wrap(children: ReactNode) {
   const adminValue = {
     isAdmin: false,
@@ -154,12 +155,9 @@ function wrap(children: ReactNode) {
     workspaceId: 'target-company-state',
     kbDirName: 'knowledge-base',
   } as unknown as WorkspaceContextValue;
-
   return (
     <AdminContext.Provider value={adminValue}>
-      <WorkspaceContext.Provider value={workspaceValue}>
-        {withAuth(children)}
-      </WorkspaceContext.Provider>
+      <WorkspaceContext.Provider value={workspaceValue}>{withAuth(children)}</WorkspaceContext.Provider>
     </AdminContext.Provider>
   );
 }
@@ -178,70 +176,144 @@ function renderAt(path: string) {
 }
 
 const pathname = () => screen.getByLabelText('pathname').textContent;
+const nav = () => screen.getByRole('navigation', { name: 'Library navigation' });
+const main = () => screen.getByRole('main');
 
 describe('LibraryRoutes', () => {
   beforeEach(() => {
     dataMock.useLibraryData.mockReturnValue(CATALOG);
     pluginsMock.listPlugins.mockResolvedValue(PLUGINS);
+    teamsMock.listTeams.mockResolvedValue(TEAMS);
     toolPageMock.useToolPage.mockReturnValue(TOOL_PAGE_STATE);
     pluginsMock.listJoinRequests.mockResolvedValue([]);
   });
 
-  it('opens on the all-plugins index at /skills-and-tools', async () => {
+  it('opens on Everything at /skills-and-tools — plugins as rows above the cards', async () => {
     renderAt('/skills-and-tools');
-    expect(
-      await screen.findByRole('heading', { name: 'All plugins', level: 1 }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^All plugins/ })).toHaveAttribute(
-      'aria-current',
-      'true',
-    );
-    // The lenses are lenses: landing home selects neither.
-    expect(screen.getByRole('button', { name: /^Everything/ })).toHaveAttribute(
-      'aria-current',
-      'false',
-    );
-    expect(screen.getByRole('button', { name: /^Owned by me/ })).toHaveAttribute(
-      'aria-current',
-      'false',
-    );
-  });
-
-  it('/skills-and-tools/everything is the whole catalog as cards', async () => {
-    renderAt('/skills-and-tools/everything');
     expect(await screen.findByRole('heading', { name: 'Everything', level: 1 })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Everything/ })).toHaveAttribute(
-      'aria-current',
-      'true',
-    );
+    expect(within(nav()).getByRole('button', { name: /^Everything/ })).toHaveAttribute('aria-current', 'true');
+    expect(within(nav()).getByRole('button', { name: /^Owned by me/ })).toHaveAttribute('aria-current', 'false');
+    // The plugin rows: the caller's own space first, then the index.
+    expect(await within(main()).findByRole('heading', { name: 'Plugins', level: 2 })).toBeInTheDocument();
+    expect(within(main()).getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeInTheDocument();
+    expect(within(main()).getByRole('button', { name: /^GTM/ })).toBeInTheDocument();
     expect(screen.getByTestId('library-card-skill-outreach')).toBeInTheDocument();
   });
 
+  it('sends the old /everything address to the root, where the same page lives', async () => {
+    renderAt('/skills-and-tools/everything');
+    await waitFor(() => expect(pathname()).toBe('/skills-and-tools'));
+    expect(await screen.findByRole('heading', { name: 'Everything', level: 1 })).toBeInTheDocument();
+  });
+
   it('/skills-and-tools/owned selects Owned by me', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([
+      ...PLUGINS,
+      // Managed (an Admin writes it) but not owner-listed: not theirs.
+      { ...PLUGINS[0]!, name: 'Ops', folders: ['Plugins/Ops'], canWrite: true, isOwner: false },
+    ]);
     renderAt('/skills-and-tools/owned');
     expect(await screen.findByRole('heading', { name: 'Owned by me' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Owned by me/ })).toHaveAttribute('aria-current', 'true');
+    expect(within(nav()).getByRole('button', { name: /^Owned by me/ })).toHaveAttribute('aria-current', 'true');
+    // GTM names the caller in its owner list (`isOwner`): it is theirs. Ops is
+    // only managed by them, and Product is neither.
+    expect(await within(main()).findByRole('button', { name: /^GTM/ })).toBeInTheDocument();
+    expect(within(main()).queryByRole('button', { name: /^Ops/ })).toBeNull();
+    expect(within(main()).queryByRole('button', { name: /^Product/ })).toBeNull();
   });
 
   it("/skills-and-tools/yours is the caller's own plugin, as a plugin page", async () => {
     renderAt('/skills-and-tools/yours');
-    expect(
-      await screen.findByRole('heading', { name: TEST_PERSONAL_GROUP, level: 1 }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toHaveAttribute(
-      'aria-current',
-      'true',
-    );
-    // The plugin-page furniture, not a filtered gallery: sections and a trail.
+    expect(await screen.findByRole('heading', { name: TEST_PERSONAL_GROUP, level: 1 })).toBeInTheDocument();
+    // Your own space is not a group: no nav row for it, and nothing else lights up.
+    expect(within(nav()).queryByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeNull();
+    expect(within(nav()).queryByRole('button', { current: true })).toBeNull();
     expect(screen.getByRole('heading', { name: 'Skills', level: 2 })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Tools', level: 2 })).toBeInTheDocument();
     expect(screen.getByRole('navigation', { name: 'Breadcrumb' })).toBeInTheDocument();
   });
 
-  it('a plugin you are in appears in the nav even when it is EMPTY', async () => {
-    // Membership is what puts a plugin in your MCP; content is not. Deriving
-    // the member rows from catalog items alone made a freshly created plugin
-    // vanish from the very list headed "Included in your MCP".
+  it('lists the teams in the nav, and a team row opens what that team can use', async () => {
+    renderAt('/skills-and-tools');
+    const row = await within(nav()).findByRole('button', { name: /^GTM Team/ });
+    fireEvent.click(row);
+    await waitFor(() => expect(pathname()).toBe('/skills-and-tools/teams/GTM%20Team'));
+    expect(await screen.findByRole('heading', { name: 'GTM Team', level: 1 })).toBeInTheDocument();
+    expect(within(nav()).getByRole('button', { name: /^GTM Team/ })).toHaveAttribute('aria-current', 'true');
+    // The server's slice: GTM's row, outreach and heyreach — nothing of Product's, and no personal row.
+    expect(await within(main()).findByRole('button', { name: /^GTM/ })).toBeInTheDocument();
+    expect(within(main()).queryByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeNull();
+    expect(screen.getByTestId('library-card-skill-outreach')).toBeInTheDocument();
+    expect(screen.getByTestId('library-card-integration-heyreach')).toBeInTheDocument();
+    expect(screen.queryByTestId('library-card-skill-roadmap')).toBeNull();
+    expect(screen.queryByTestId('library-card-integration-slack')).toBeNull();
+  });
+
+  it('Everyone leads the groups, right after the lenses, and opens what is org-wide', async () => {
+    renderAt('/skills-and-tools');
+    // "Everyone Else" is a team in the fixture: the org-wide row is the one
+    // whose whole label is the name plus its count.
+    await within(nav()).findByRole('button', { name: /^Everyone \d+$/ });
+    const rows = within(nav()).getAllByRole('button');
+    const names = rows.map((r) => r.textContent ?? '');
+    const owned = names.findIndex((n) => n.startsWith('Owned by me'));
+    const everyone = names.findIndex((n) => /^Everyone\d+$/.test(n));
+    const gtm = names.findIndex((n) => n.startsWith('GTM Team'));
+    expect(owned).toBeGreaterThan(-1);
+    expect(everyone).toBe(owned + 1);
+    expect(gtm).toBeGreaterThan(everyone);
+    // Your own space is a plugin, not a group: no row for it here.
+    expect(names.some((n) => n.startsWith(TEST_PERSONAL_GROUP))).toBe(false);
+
+    fireEvent.click(rows[everyone]!);
+    await waitFor(() => expect(pathname()).toBe('/skills-and-tools/teams/Everyone'));
+    expect(await screen.findByRole('heading', { name: 'Everyone', level: 1 })).toBeInTheDocument();
+    expect(screen.getByText(/^Org-wide: what every signed-in person/)).toBeInTheDocument();
+    // The server's slice: Product's row, roadmap and slack — nothing of GTM's.
+    expect(await within(main()).findByRole('button', { name: /^Product/ })).toBeInTheDocument();
+    expect(within(main()).queryByRole('button', { name: /^GTM/ })).toBeNull();
+    expect(screen.getByTestId('library-card-skill-roadmap')).toBeInTheDocument();
+    expect(screen.getByTestId('library-card-integration-slack')).toBeInTheDocument();
+    expect(screen.queryByTestId('library-card-skill-outreach')).toBeNull();
+  });
+
+  it('holds the org-wide line until the team list has settled and names Everyone', async () => {
+    let resolve: (teams: typeof TEAMS) => void = () => {};
+    teamsMock.listTeams.mockReturnValue(new Promise<typeof TEAMS>((r) => (resolve = r)));
+    renderAt('/skills-and-tools/teams/Everyone');
+    expect(await screen.findByText('Loading teams…')).toBeInTheDocument();
+    expect(screen.queryByText(/^Org-wide:/)).toBeNull();
+    resolve(TEAMS);
+    expect(await screen.findByText(/^Org-wide:/)).toBeInTheDocument();
+  });
+
+  it('keeps the org-wide line off a failed team list — the error is the whole story', async () => {
+    teamsMock.listTeams.mockRejectedValue(new Error("Couldn't load teams."));
+    renderAt('/skills-and-tools/teams/Everyone');
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load teams.");
+    expect(screen.queryByText(/^Org-wide:/)).toBeNull();
+  });
+
+  it('says so when nothing is shared with everyone yet', async () => {
+    teamsMock.listTeams.mockResolvedValue([{ name: 'Everyone', plugins: [], skills: [], tools: [] }]);
+    renderAt('/skills-and-tools/teams/Everyone');
+    expect(await screen.findByText('Nothing is shared with everyone yet.')).toBeInTheDocument();
+  });
+
+  it('a team deep link with a URL-hostile name lands, and an unknown team says so', async () => {
+    teamsMock.listTeams.mockResolvedValue([{ name: 'Sales & Ops', plugins: [], skills: ['scratch'], tools: [] }]);
+    renderAt(`/skills-and-tools/teams/${encodeURIComponent('Sales & Ops')}`);
+    expect(await screen.findByRole('heading', { name: 'Sales & Ops', level: 1 })).toBeInTheDocument();
+    expect(await screen.findByTestId('library-card-skill-scratch')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(nav()).getByRole('button', { name: /^Sales & Ops/ })).toHaveAttribute('aria-current', 'true'),
+    );
+
+    renderAt('/skills-and-tools/teams/Nope');
+    expect(await screen.findByText("There's no team called Nope.")).toBeInTheDocument();
+  });
+
+  it('a plugin you are in appears on Everything even when it is EMPTY', async () => {
     pluginsMock.listPlugins.mockResolvedValue([
       ...PLUGINS,
       {
@@ -259,28 +331,44 @@ describe('LibraryRoutes', () => {
       },
     ]);
     renderAt('/skills-and-tools');
-    const nav = await screen.findByRole('navigation', { name: 'Library plugins' });
-    // In the member half, with a zero count — never below the gap as locked.
-    expect(await within(nav).findByRole('button', { name: /^Fresh/ })).toBeInTheDocument();
-    expect(within(nav).queryByRole('button', { name: 'Fresh (locked)' })).toBeNull();
+    expect(await within(main()).findByRole('button', { name: /^Fresh/ })).toBeInTheDocument();
+    // And nowhere in the nav: plugins are reached through the page, not listed beside the teams.
+    expect(within(nav()).queryByRole('button', { name: /^Fresh/ })).toBeNull();
+    expect(within(nav()).queryByRole('button', { name: /^GTM$/ })).toBeNull();
   });
 
-  it('a sidebar plugin click navigates to /skills-and-tools/plugins/<name>', async () => {
+  it('a plugin row on Everything navigates to /skills-and-tools/plugins/<name>', async () => {
     renderAt('/skills-and-tools');
-    fireEvent.click(await screen.findByRole('button', { name: /^GTM/ }));
+    fireEvent.click(await within(main()).findByRole('button', { name: /^GTM/ }));
     await waitFor(() => expect(pathname()).toBe('/skills-and-tools/plugins/GTM'));
-    // The plugin page itself lands in a later work package; the ROUTE resolves
-    // now, which is why the sidebar can already point at it.
-    expect(screen.getByRole('button', { name: /^GTM/ })).toHaveAttribute('aria-current', 'true');
-    expect(screen.queryByRole('heading', { name: 'All plugins', level: 1 })).not.toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'GTM', level: 1 })).toBeInTheDocument();
+    // A plugin page lights no lens — it is a place, not a slice.
+    for (const button of within(nav()).getAllByRole('button')) {
+      expect(button).not.toHaveAttribute('aria-current', 'true');
+    }
   });
 
-  it('sends the old /plugins index path home, where the index lives now', async () => {
+  it('marks a plugin Private on its row when its access.md says so — and your own space always', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([
+      ...PLUGINS,
+      { ...PLUGINS[0]!, name: 'Mine', folders: ['Plugins/Mine'], canWrite: false, isOwner: false, isPrivate: true },
+    ]);
+    renderAt('/skills-and-tools');
+    const mine = await within(main()).findByRole('button', { name: /^Mine/ });
+    expect(within(mine).getByText('Private')).toBeInTheDocument();
+    // GTM's access.md makes no such statement: Owner, and nothing else.
+    const gtm = within(main()).getByRole('button', { name: /^GTM/ });
+    expect(within(gtm).getByText('Owner')).toBeInTheDocument();
+    expect(within(gtm).queryByText('Private')).toBeNull();
+    // The personal space is private by construction.
+    const own = within(main()).getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) });
+    expect(within(own).getByText('Private')).toBeInTheDocument();
+  });
+
+  it('sends the old /plugins index path home, where Everything lives now', async () => {
     renderAt('/skills-and-tools/plugins');
     await waitFor(() => expect(pathname()).toBe('/skills-and-tools'));
-    expect(
-      await screen.findByRole('heading', { name: 'All plugins', level: 1 }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Everything', level: 1 })).toBeInTheDocument();
   });
 
   it("a plugin deep link renders that plugin's cards and no others", async () => {
@@ -291,32 +379,38 @@ describe('LibraryRoutes', () => {
     expect(screen.queryByTestId('library-card-skill-roadmap')).not.toBeInTheDocument();
   });
 
-  // `/propose` was retired with the role fork it served. An unknown path under
-  // the Library falls back to the root, which is what this now asserts.
   it('sends the retired propose path back home', async () => {
     renderAt('/skills-and-tools/propose?plugin=GTM');
     await waitFor(() => expect(pathname()).toBe('/skills-and-tools'));
   });
 
-  it("reaches the index from a plugin page breadcrumb, at the root it lives at", async () => {
+  it('reaches Everything from a plugin page breadcrumb, at the root it lives at', async () => {
     renderAt('/skills-and-tools/plugins/GTM');
-    fireEvent.click(await screen.findByRole('link', { name: 'All plugins' }));
+    fireEvent.click(await screen.findByRole('link', { name: 'Everything' }));
     await waitFor(() => expect(pathname()).toBe('/skills-and-tools'));
-    expect(
-      await screen.findByRole('heading', { name: 'All plugins', level: 1 }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Everything', level: 1 })).toBeInTheDocument();
   });
 
-  it('leads the sidebar with All plugins, from anywhere in the Library', async () => {
+  it('carries the breadcrumb ON the title band, not in a row above it', async () => {
+    // The band's TOP EDGE is the seam it holds with the sidebar's header row
+    // (`shared/theme/header`). A breadcrumb in its own row above the band
+    // pushes the title bar down by that row's height, and the two headers
+    // stop lining up however exactly their heights agree — which is the
+    // whole bug. So the trail rides on the band, and this is what says so.
     renderAt('/skills-and-tools/plugins/GTM');
-    const allPlugins = await screen.findByRole('button', { name: /^All plugins/ });
-    expect(allPlugins).toHaveAttribute('aria-current', 'false');
-    fireEvent.click(allPlugins);
+    const band = await screen.findByTestId(PAGE_HEADER_TESTID);
+    expect(band).toContainElement(screen.getByRole('navigation', { name: 'Breadcrumb' }));
+    expect(band).toContainElement(screen.getByRole('heading', { name: 'GTM', level: 1 }));
+  });
+
+  it('leads the sidebar with Everything, from anywhere in the Library', async () => {
+    renderAt('/skills-and-tools/plugins/GTM');
+    const everything = await within(nav()).findByRole('button', { name: /^Everything/ });
+    expect(within(nav()).getAllByRole('button')[0]).toBe(everything);
+    expect(everything).toHaveAttribute('aria-current', 'false');
+    fireEvent.click(everything);
     await waitFor(() => expect(pathname()).toBe('/skills-and-tools'));
-    expect(screen.getByRole('button', { name: /^All plugins/ })).toHaveAttribute(
-      'aria-current',
-      'true',
-    );
+    expect(within(nav()).getByRole('button', { name: /^Everything/ })).toHaveAttribute('aria-current', 'true');
   });
 
   it('a plugin deep link with a URL-hostile name round-trips', async () => {
@@ -326,9 +420,8 @@ describe('LibraryRoutes', () => {
       tools: [],
     });
     renderAt(`/skills-and-tools/plugins/${encodeURIComponent('Sales & Ops')}`);
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: /^Sales & Ops/ })).toHaveAttribute('aria-current', 'true'),
-    );
+    expect(await screen.findByRole('heading', { name: 'Sales & Ops', level: 1 })).toBeInTheDocument();
+    expect(screen.getByTestId('library-card-skill-pricing')).toBeInTheDocument();
   });
 
   it('redirects a legacy /groups/:plugin deep link to the plugin page', async () => {
@@ -389,14 +482,12 @@ describe('LibraryRoutes', () => {
   it("/skills-and-tools/skills/:name redirects to the skill's canonical workspace URL", async () => {
     renderAt('/skills-and-tools/skills/outreach');
     await waitFor(() =>
-      expect(pathname()).toBe(
-        `/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/GTM/outreach/SKILL.md`,
-      ),
+      expect(pathname()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/GTM/outreach/SKILL.md`),
     );
   });
 
   it('an integration card navigates to the canonical workspace URL, not a dialog', async () => {
-    renderAt('/skills-and-tools/everything');
+    renderAt('/skills-and-tools');
     fireEvent.click(await screen.findByRole('button', { name: /^heyreach/ }));
 
     await waitFor(() =>
@@ -416,7 +507,7 @@ describe('LibraryRoutes', () => {
         tool({ slug: 'linear', name: 'linear', path: 'Plugins/Everyone/mcp.json', type: 'mcp' }),
       ],
     });
-    renderAt('/skills-and-tools/everything');
+    renderAt('/skills-and-tools');
     fireEvent.click(await screen.findByRole('button', { name: /^granola/ }));
     await waitFor(() =>
       expect(pathname()).toBe(
@@ -428,16 +519,63 @@ describe('LibraryRoutes', () => {
   it('an unknown subpath redirects home', async () => {
     renderAt('/skills-and-tools/nope');
     await waitFor(() => expect(pathname()).toBe('/skills-and-tools'));
-    expect(
-      await screen.findByRole('heading', { name: 'All plugins', level: 1 }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Everything', level: 1 })).toBeInTheDocument();
   });
 
-  it('renders the gallery even when the plugins endpoint fails', async () => {
+  it('renders the gallery, with its catalog-derived plugin rows, even when the plugins endpoint fails', async () => {
     pluginsMock.listPlugins.mockRejectedValue(new Error("Couldn't load plugins."));
-    renderAt('/skills-and-tools/everything');
+    renderAt('/skills-and-tools');
     expect(await screen.findByRole('heading', { name: 'Everything', level: 1 })).toBeInTheDocument();
-    // Sidebar plugins are catalog-derived, so they survive the endpoint being down.
-    expect(screen.getByRole('button', { name: /^GTM/ })).toBeInTheDocument();
+    // GTM is proven by the catalog (an item lives in its folder), so its row survives the endpoint being down.
+    expect(await within(main()).findByRole('button', { name: /^GTM/ })).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load plugins.");
+  });
+
+  it('keeps the Library up when the teams endpoint fails — the nav lists no teams, and a team page says why', async () => {
+    teamsMock.listTeams.mockRejectedValue(new Error("Couldn't load teams."));
+    renderAt('/skills-and-tools/teams/GTM%20Team');
+    // The failure is the settlement signal: once the page reports it, the
+    // request is over, and what the nav shows is the post-failure nav.
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load teams.");
+    expect(screen.queryByText(/There's no team called/)).toBeNull();
+    expect(await screen.findByRole('heading', { name: 'GTM Team', level: 1 })).toBeInTheDocument();
+    expect(within(nav()).getByRole('button', { name: /^Owned by me/ })).toBeInTheDocument();
+    expect(within(nav()).queryByRole('button', { name: /^GTM Team/ })).toBeNull();
+  });
+
+  it('says it is loading teams on a team page until the slice arrives — never "can use nothing" first', async () => {
+    let resolve: (teams: typeof TEAMS) => void = () => {};
+    teamsMock.listTeams.mockReturnValue(new Promise<typeof TEAMS>((r) => (resolve = r)));
+    renderAt('/skills-and-tools/teams/GTM%20Team');
+    expect(await screen.findByText('Loading teams…')).toBeInTheDocument();
+    expect(screen.queryByText(/can't use anything/)).toBeNull();
+    expect(screen.queryByText(/There's no team called/)).toBeNull();
+    resolve(TEAMS);
+    expect(await screen.findByTestId('library-card-skill-outreach')).toBeInTheDocument();
+  });
+
+  it('keeps the own-space row on screen while the plugin index is still loading', async () => {
+    pluginsMock.listPlugins.mockReturnValue(new Promise<PluginSummary[]>(() => {}));
+    renderAt('/skills-and-tools');
+    expect(await screen.findByText('Loading plugins…')).toBeInTheDocument();
+    expect(within(main()).getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeInTheDocument();
+    // And what the catalog proves is there is a row already: the index is not the only witness.
+    expect(within(main()).getByRole('button', { name: /^GTM/ })).toBeInTheDocument();
+  });
+
+  it('reports a teams failure that carries no message with the fallback, not as an empty team', async () => {
+    teamsMock.listTeams.mockRejectedValue(new Error(''));
+    renderAt('/skills-and-tools/teams/GTM%20Team');
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load teams.");
+    expect(screen.queryByText(/can't use anything/)).toBeNull();
+  });
+
+  it("a team row's counts are the team's slice, not the plugin's totals", async () => {
+    // GTM holds 1 skill + 1 tool by its summary; the team may use the skill only.
+    teamsMock.listTeams.mockResolvedValue([{ name: 'GTM Team', plugins: ['GTM'], skills: ['outreach'], tools: [] }]);
+    renderAt('/skills-and-tools/teams/GTM%20Team');
+    const row = await within(main()).findByRole('button', { name: /^GTM/ });
+    expect(row).toHaveTextContent('1 skills · 0 tools');
+    expect(screen.queryByTestId('library-card-integration-heyreach')).toBeNull();
   });
 });

@@ -3,6 +3,7 @@ import { render, screen, waitFor, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { useEffect, useState } from 'react';
+import { PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
 import type {
   BranchInfo,
   FileTreeEntry,
@@ -85,6 +86,9 @@ vi.mock('../../../change-requests/services/change-requests.api', () => ({
   listOpenChangeRequests: vi.fn(async () => []),
   listMyChangeRequests: myCrsMock,
   readFileOnBranch: readBranchMock,
+  // No fork point: the change boxes fall back to the default branch, which is
+  // what these tests diff against.
+  readFileAtForkPoint: vi.fn(async () => ({ content: null, forkSha: null })),
 }));
 
 // The access sheet is a 1200-line dialog with its own suite and its own
@@ -131,6 +135,7 @@ import { GitContext, type GitContextValue } from '../../../git/state/git.context
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
+import { OPEN_COMPARISON_EVENT } from '../../../../core/events';
 
 let injectPendingFromTest: ((value?: string) => void) | null = null;
 
@@ -152,12 +157,15 @@ const fetchFileHistoryMock = vi.fn(async () => [
   },
 ]);
 
-function makeGit(status: WorkingTreeStatus | null): GitContextValue {
+function makeGit(
+  status: WorkingTreeStatus | null,
+  availability: GitContextValue['availability'] = 'ready',
+): GitContextValue {
   const branches: BranchInfo[] = [];
   return {
     status,
     branches,
-    availability: 'ready',
+    availability,
     lastError: null,
     refreshStatus: async () => null,
     refreshBranches: async () => {},
@@ -194,8 +202,11 @@ function ViewerHarness({
   changeRequests = [],
   authUser = null,
   captureTyped = false,
+  gitAvailability = 'ready',
 }: {
   initialContent?: string;
+  /** What git reports about itself; the history views need `'ready'`. */
+  gitAvailability?: GitContextValue['availability'];
   pendingValue?: string;
   /** `null` = git status has not loaded (or failed) — there is no branch yet. */
   branch?: string | null;
@@ -248,6 +259,9 @@ function ViewerHarness({
     workspaceId: 'ws-1',
     kbDirName,
     fileTree,
+    bootstrapError: null,
+    workspaceBranch: 'main',
+    retryBootstrap: () => {},
     openTabs: tab ? [tab] : [],
     activeTab: tab,
     dirtyTabFilenames: [],
@@ -257,8 +271,8 @@ function ViewerHarness({
     hasUnsavedFileChanges: false,
     pendingFileContent,
     setActiveTabContent: captureTyped ? (v: string) => setOpenFileContent(v) : () => {},
-    uploadError: null,
-    uploadNotice: null,
+    uploadErrors: new Map(),
+    uploadNotices: new Map(),
     clearUploadNotice: () => {},
     isUploading: false,
     uploadProgress: null,
@@ -272,7 +286,7 @@ function ViewerHarness({
     activateTab: () => {},
     reorderTab: () => {},
     closeAllTabs: () => {},
-    hydrateTabs: async () => ({ surviving: [], dropped: [], denied: [] }),
+    hydrateTabs: async () => ({ surviving: [], dropped: [], denied: [], superseded: false }),
     createFile: async () => {},
     createDirectory: async () => {},
     unzipHere: async () => ({ extracted: 0, skipped: [], destination: '' }),
@@ -326,7 +340,7 @@ function ViewerHarness({
   const tree = (
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
-          <GitContext.Provider value={makeGit(branch ? makeStatus(branch) : null)}>
+          <GitContext.Provider value={makeGit(branch ? makeStatus(branch) : null, gitAvailability)}>
             <ReviewContext.Provider value={review}>
                 <OpenChangeRequestsContext.Provider
                   value={{
@@ -378,6 +392,10 @@ describe('FileViewer', () => {
       owners: EMPTY_ELIGIBLE,
     };
     accessMock.fetchFileAccess.mockClear();
+    // mockClear keeps the implementation: a test that parks the lookup
+    // in flight would park every test after it.
+    accessMock.fetchFileAccess.mockImplementation(async () => accessMock.result);
+    readBranchMock.mockImplementation(async () => '');
     // Restore the default "acquire succeeds" behaviour so a per-test 403
     // override doesn't leak into the next test.
     vi.mocked(acquireLockMock).mockImplementation(async () => ({
@@ -392,6 +410,41 @@ describe('FileViewer', () => {
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       },
     }));
+  });
+
+  /**
+   * The seam, in the page that broke it.
+   *
+   * `HeaderAlignment.test.tsx` measures the band's HEIGHT and checks that a
+   * document column opens on it. This checks the thing only the real page can
+   * say: that the file page actually hands its title bar to that slot. It
+   * used to render `<EditorTabs />` above `<KbPageHeader>` inside the column,
+   * so the title bar opened 54px below the sidebar header row it is supposed
+   * to line up with — at every width, unaffected by collapsing or resizing the
+   * sidebar, and invisible to a suite in which no test rendered the header
+   * anywhere near a tab strip. Staging found it; this is what would have.
+   *
+   * Structural, not measured: happy-dom has no layout engine, so "nothing is
+   * drawn above the band" is the checkable form of "the band's top edge is
+   * the column's top edge".
+   */
+  it('opens the document column with the title bar, above the tab strip', async () => {
+    render(<ViewerHarness initialContent="Base content" />);
+
+    const band = await screen.findByTestId(PAGE_HEADER_TESTID);
+    // The harness opens one tab, so the strip really is rendered — without it
+    // this test would pass on the broken code too.
+    const tabs = screen.getByRole('tablist', { name: 'Open files' });
+
+    // Nothing above the band inside its column — the checkable form of "its
+    // top edge is the column's top edge".
+    expect(band.previousElementSibling).toBeNull();
+    // And the strip did not leave the column to get there; it went below the
+    // title. One column still holds the title, the tabs and the text
+    // (proto:700-705) — this only changed the order inside it.
+    const column = band.parentElement!;
+    expect(column.contains(tabs)).toBe(true);
+    expect(band.compareDocumentPosition(tabs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('immediately enters review mode when pending arrives on a clean file', async () => {
@@ -680,17 +733,200 @@ describe('FileViewer', () => {
     expect(screen.queryByRole('button', { name: 'Compare' })).not.toBeInTheDocument();
   });
 
-  it('opens Version history from ⋯ and offers a way back to the document', async () => {
+  it('opens Version history from the clock-arrow beside Edit and offers a way back to the document', async () => {
     const user = userEvent.setup();
     render(<ViewerHarness initialContent="historic" />);
 
-    await user.click(screen.getByRole('button', { name: 'More actions' }));
-    await user.click(screen.getByRole('menuitem', { name: /Version history/ }));
+    // ONE clock: the prose pane bar carries it beside Edit, and the header
+    // stands down (`historyInPane`) rather than offering a second.
+    await user.click(screen.getByRole('button', { name: 'Version history' }));
 
     const back = await screen.findByRole('button', { name: /Back to the document/ });
     await user.click(back);
     // The document is back, and so is its Edit affordance.
     expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    // The Back button unmounted with the log. Keyboard focus lands on the
+    // bar's clock, the same handoff the header's pressed clock makes, rather
+    // than falling to `document`.
+    expect(screen.getByRole('button', { name: 'Version history' })).toHaveFocus();
+  });
+
+  /**
+   * Opening the log unmounts the editor. Coming back re-mounts it from its
+   * seed, while the buffer Send reads still holds the newer keystrokes: the
+   * page would show one text and submit another. So the clock goes away for
+   * exactly as long as a draft is open, the rule the skill page applies.
+   */
+  it('withdraws Version history while the editor is open, and returns it on Done', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="draft me" />);
+
+    expect(screen.getByRole('button', { name: 'Version history' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    await screen.findByRole('button', { name: 'Done' });
+    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Done' }));
+    expect(await screen.findByRole('button', { name: 'Version history' })).toBeInTheDocument();
+  });
+
+  /**
+   * The chat's "View full comparison" link lands whenever the agent answers,
+   * and `availability` starts 'loading' until the first status poll returns.
+   * The comparison is not gated on the log's availability: the panel asks git
+   * itself and reports what it gets. Cancelling the tab here instead dropped
+   * the click with nothing on screen to say so.
+   */
+  it('opens the comparison a chat link asks for before git has answered, and keeps it through a failed poll', async () => {
+    const { rerender } = render(<ViewerHarness initialContent="compared" gitAvailability="loading" />);
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(OPEN_COMPARISON_EVENT, {
+          detail: { path: 'knowledge-base/Knowledge/Foo.md', fromBranch: 'main', toBranch: 'alice/draft' },
+        }),
+      );
+    });
+    expect(await screen.findByRole('button', { name: /Back to the document/ })).toBeInTheDocument();
+    expect(screen.getByText('Compare versions')).toBeInTheDocument();
+
+    // A poll fails while the comparison is up. It stays up: the reader asked
+    // for it, and only the log closes when git stops answering.
+    rerender(<ViewerHarness initialContent="compared" gitAvailability="error" />);
+    expect(screen.getByRole('button', { name: /Back to the document/ })).toBeInTheDocument();
+    expect(screen.getByText('Compare versions')).toBeInTheDocument();
+  });
+
+  /**
+   * The comparison outliving `historyAvailable` is the case where the focus
+   * handoff has no clock to hand back to: both are withdrawn while git is
+   * silent. Leaving the comparison then would drop focus on `document`, the
+   * one outcome the handoff exists to prevent, so the document's own title is
+   * named last. Found by cubic on #135.
+   */
+  it('lands focus on the document title when leaving a comparison git cannot back with a clock', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="compared" gitAvailability="error" />);
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(OPEN_COMPARISON_EVENT, {
+          detail: { path: 'knowledge-base/Knowledge/Foo.md', fromBranch: 'main', toBranch: 'alice/draft' },
+        }),
+      );
+    });
+    const back = await screen.findByRole('button', { name: /Back to the document/ });
+    // Neither clock is on screen to catch the focus.
+    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+
+    await user.click(back);
+    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
+    const title = screen.getByRole('heading', { level: 1, name: 'Foo' });
+    expect(document.activeElement).toBe(title);
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  // With the log open the column goes full-bleed and the header carries the
+  // clock, pressed. Clicking it again is the other way back.
+  /**
+   * `availability` is re-derived from a POLLED status call, so one failed
+   * poll flips it off and the next good one flips it back. If `activeTab`
+   * survived that on 'history', the column would stay full-bleed with no
+   * panel in it (a bare document, no pane card, no way back but the next
+   * poll), and then put the log back over the file the moment git recovered.
+   * Found by cubic on #134; the skill page already had the rule.
+   */
+  it('puts the document back when git stops answering mid-read, and does not reopen the log when it recovers', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<ViewerHarness initialContent="historic" />);
+
+    await user.click(screen.getByRole('button', { name: 'Version history' }));
+    await screen.findByRole('button', { name: /Back to the document/ });
+
+    // A poll fails: the log goes, and the document is back in its pane card
+    // with its Edit, not stranded full-bleed.
+    rerender(<ViewerHarness initialContent="historic" gitAvailability="error" />);
+    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.getByTestId('file-pane-card')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+
+    // The next poll succeeds. The file is still what is on screen, and the
+    // clock is back, unpressed.
+    rerender(<ViewerHarness initialContent="historic" gitAvailability="ready" />);
+    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Version history' })).toBeInTheDocument();
+  });
+
+  /**
+   * The log stands in for the document, in the document's PLACE.
+   *
+   * It used to take the full-bleed contract — right about the height it
+   * needs, wrong about everything else: the column went with it, so the title
+   * ran into the pane's left edge and the timeline started flush against it,
+   * and going to history and coming back moved every row on the page.
+   * `panel` is the reading view's column with full-bleed's height, so the
+   * frame is the SAME frame and the assertion can say so without naming a
+   * single measurement.
+   */
+  it('keeps the document column when the log takes the place of the document', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="historic" />);
+
+    const frameOf = () =>
+      [...(screen.getByTestId('kb-document-shell').firstElementChild as HTMLElement).classList]
+        // The measure, the side margins and the offset the band opens on —
+        // everything that decides WHERE the column is. What the two modes are
+        // allowed to differ on is how the box below is sized: a document
+        // scrolls and ends on the bottom rhythm, a panel fills the pane.
+        .filter((cls) => /^(mx-auto|w-full|max-w-|px-|pt-|max-\[900px\]:px-)/.test(cls))
+        .sort();
+
+    const reading = frameOf();
+    // Non-empty, or the filter has stopped matching anything and the two
+    // empty lists below would agree about nothing.
+    expect(reading).toContain('max-w-[880px]');
+    expect(reading).toContain('px-[40px]');
+
+    await user.click(screen.getByRole('button', { name: 'Version history' }));
+    await screen.findByRole('button', { name: /Back to the document/ });
+    expect(screen.getByTestId('kb-document-shell').getAttribute('data-variant')).toBe('panel');
+    expect(frameOf()).toEqual(reading);
+
+    // The title is in that column, not beside it — the clipping Juan saw was
+    // a heading with no margin to stand on.
+    const column = screen.getByTestId('kb-document-shell').firstElementChild as HTMLElement;
+    expect(column).toContainElement(screen.getByRole('heading', { level: 1 }));
+    // So are the tab strip and the log itself.
+    expect(column).toContainElement(screen.getByRole('tablist', { name: 'Open files' }));
+    expect(column).toContainElement(screen.getByText(/Timeline:/));
+
+    // …and back: nothing about the frame moved.
+    await user.click(screen.getByRole('button', { name: /Back to the document/ }));
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(frameOf()).toEqual(reading);
+  });
+
+  it('closes Version history from the pressed clock in the header', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="historic" />);
+
+    await user.click(screen.getByRole('button', { name: 'Version history' }));
+    await screen.findByRole('button', { name: /Back to the document/ });
+    // The pane bar's clock unmounted with the bar; focus lands on the
+    // header's pressed clock rather than falling to `document`.
+    const pressed = screen.getByRole('button', { name: 'Version history' });
+    expect(pressed).toHaveAttribute('aria-pressed', 'true');
+    expect(document.activeElement).toBe(pressed);
+
+    await user.click(pressed);
+    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    // And back: the header's clock hid again, so focus lands on the bar's.
+    const paneClock = screen.getByRole('button', { name: 'Version history' });
+    expect(paneClock).not.toHaveAttribute('aria-pressed', 'true');
+    expect(document.activeElement).toBe(paneClock);
   });
 
   it('shares the file itself from Share, and the parent folder from the chevron', async () => {
@@ -745,6 +981,110 @@ describe('FileViewer', () => {
     expect(
       await screen.findByRole('dialog', { name: /Change request: Tighten the wording/ }),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * "Waiting on you and N others" counts the people who can APPROVE — the
+   * write: grants — not the owner: list. A file written by Bob and Carl (plus
+   * the inherited Admin role) with no owners must not tell Bob he is the only
+   * one it waits on.
+   */
+  it('counts the other approvers from the write grants, not the owners', async () => {
+    accessMock.result = {
+      canWrite: true,
+      canOwner: false,
+      eligible: {
+        roles: ['Admin'],
+        users: [
+          { name: 'Bob', email: 'bob@example.com' },
+          { name: 'Carl', email: 'carl@example.com' },
+        ],
+      },
+      owners: EMPTY_ELIGIBLE,
+    };
+    // The proposal must actually differ from the file, or the box reads
+    // "Already up to date" and has no verdict to wait on.
+    readBranchMock.mockImplementation((async (branch: string) =>
+      branch.startsWith('suggestions/') ? 'proposed' : 'current') as never);
+    render(
+      <ViewerHarness
+        initialContent="contested"
+        branch="target-company-state"
+        authUser={{ id: 'u-bob', email: 'bob@example.com', name: 'Bob' }}
+        changeRequests={[{ number: 33, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+
+    expect(await screen.findByText('Waiting on you and 2 others')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument();
+  });
+
+  /**
+   * A failed access lookup default-allows with an EMPTY grant list. That list
+   * is not the approver set, so the box must not claim "Waiting on you".
+   */
+  it('makes no waiting-on claim when the approver grants never loaded', async () => {
+    accessMock.fetchFileAccess.mockRejectedValueOnce(new Error('network down'));
+    readBranchMock.mockImplementation((async (branch: string) =>
+      branch.startsWith('suggestions/') ? 'proposed' : 'current') as never);
+    render(
+      <ViewerHarness
+        initialContent="contested"
+        branch="target-company-state"
+        authUser={{ id: 'u-bob', email: 'bob@example.com', name: 'Bob' }}
+        changeRequests={[{ number: 33, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+
+    expect(await screen.findByText('You can decide this.')).toBeInTheDocument();
+    expect(screen.queryByText(/Waiting on you/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * Switching files keeps the PREVIOUS file's grants in the access hook until
+   * the next lookup answers — which is why the "and N others" count is gated on
+   * `!access.loading`. The "Waiting on …" line is the same hazard: it names
+   * people, and naming the OUTGOING file's owners over the incoming file's box
+   * is a false statement about who decides this change. Mid-lookup it has to
+   * fall back to the anonymous wording.
+   */
+  it('never names the previous file’s owners while the next lookup is in flight', async () => {
+    accessMock.result = {
+      canWrite: false,
+      canOwner: false,
+      eligible: { roles: ['Docs'], users: [] },
+      owners: { roles: ['Docs'], users: [] },
+    };
+    readBranchMock.mockImplementation((async (branch: string) =>
+      branch.startsWith('suggestions/') ? 'proposed' : 'current') as never);
+    // The outgoing file's only job is to be the file we switch AWAY from,
+    // leaving its owners behind in the hook. It renders a box of its own —
+    // nothing is asserted on that one.
+    const { rerender } = render(
+      <ViewerHarness
+        initialContent="outgoing"
+        branch="target-company-state"
+        filePath="knowledge-base/Knowledge/Other.md"
+        changeRequests={[{ number: 34, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+    await waitFor(() => expect(accessMock.fetchFileAccess).toHaveBeenCalled());
+
+    // The incoming file's lookup never answers, so the box renders for the
+    // whole of the in-flight window.
+    accessMock.fetchFileAccess.mockImplementation(() => new Promise(() => {}));
+    rerender(
+      <ViewerHarness
+        initialContent="incoming"
+        branch="target-company-state"
+        filePath="knowledge-base/Knowledge/Foo.md"
+        changeRequests={[{ number: 34, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+
+    expect(await screen.findByText(/proposed a change/)).toBeInTheDocument();
+    expect(screen.getByText('Waiting on the owners')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting on Docs')).not.toBeInTheDocument();
   });
 
   it('says nothing on a file nobody has proposed a change to', () => {
@@ -937,6 +1277,37 @@ describe('FileViewer: proposing a change without write access', () => {
     expect(proposeMock).not.toHaveBeenCalled();
   });
 
+  /**
+   * The seeded case is where the clock did real damage: the editor re-mounts
+   * from `proposeSeed` on the way back from the log, while `proposeBufferRef`
+   * still holds the newer keystrokes — the old text on screen, the new text
+   * sent. No clock while a proposal is open.
+   */
+  it('withdraws Version history while a proposal is open, and returns it on Discard', async () => {
+    denyWrite();
+    myCrsMock.mockResolvedValue([
+      { number: 12, state: 'open', branch: 'suggestions/reader-u9/knowledge' },
+    ]);
+    readBranchMock.mockResolvedValue('first proposed paragraph');
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        authUser={reader}
+        captureTyped
+      />,
+    );
+
+    expect(await screen.findByRole('button', { name: 'Version history' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Propose changes' }));
+    await screen.findByRole('textbox');
+    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Discard' }));
+    expect(await screen.findByRole('button', { name: 'Version history' })).toBeInTheDocument();
+  });
+
   it('discard walks away without sending anything', async () => {
     denyWrite();
     const user = userEvent.setup();
@@ -971,7 +1342,15 @@ describe('FileViewer: proposing a change without write access', () => {
  * away from the pages it holds. It offers those pages now.
  */
 describe('FileViewer: nothing open', () => {
-  const TREE: FileTreeEntry = {
+  /** The workspace root the API returns, wrapping whatever the checkout holds. */
+  const workspace = (checkout: FileTreeEntry): FileTreeEntry => ({
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [checkout],
+  });
+
+  const CHECKOUT: FileTreeEntry = {
     name: 'knowledge-base',
     relativePath: 'knowledge-base',
     type: 'directory',
@@ -1020,6 +1399,22 @@ describe('FileViewer: nothing open', () => {
       { name: 'access.md', relativePath: 'knowledge-base/access.md', type: 'file' },
     ],
   };
+
+  const TREE = workspace(CHECKOUT);
+
+  /**
+   * The strays that sat beside the checkout on core-staging. Nothing here is
+   * the repository, so nothing here is ever offered as a page.
+   */
+  const STRAYS: FileTreeEntry[] = [
+    {
+      name: 'KnowledgeBase',
+      relativePath: 'KnowledgeBase',
+      type: 'directory',
+      children: [{ name: 'Planted.md', relativePath: 'KnowledgeBase/Planted.md', type: 'file' }],
+    },
+    { name: 'Stray.md', relativePath: 'Stray.md', type: 'file' },
+  ];
 
   it('does not send the reader off to an assistant', async () => {
     render(<ViewerHarness filePath={null} fileTree={TREE} />);
@@ -1105,6 +1500,30 @@ describe('FileViewer: nothing open', () => {
     expect(await screen.findByRole('button', { name: /Handbook/ })).toBeEnabled();
   });
 
+  /**
+   * The strays on core-staging put a `KnowledgeBase/` beside the checkout.
+   * The offer is the checkout's, so they change nothing — and when the
+   * checkout itself is gone there is nothing to offer, rather than whatever
+   * was written next to it.
+   */
+  it('offers the same pages with strays beside the checkout, and none without one', async () => {
+    const { unmount } = render(
+      <ViewerHarness
+        filePath={null}
+        fileTree={{ ...TREE, children: [...STRAYS, CHECKOUT] }}
+      />,
+    );
+    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Planted/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Stray/ })).toBeNull();
+    unmount();
+
+    render(<ViewerHarness filePath={null} fileTree={{ ...TREE, children: STRAYS }} />);
+    await screen.findByRole('heading', { name: /Open a page/ });
+    expect(screen.queryByRole('button', { name: /Planted/ })).toBeNull();
+    expect(screen.getByText('Pick anything from the file tree.')).toBeInTheDocument();
+  });
+
   /** A knowledge base with nothing in it has nothing to suggest, and says so. */
   it('promises nothing when there is nothing to open', async () => {
     render(<ViewerHarness filePath={null} fileTree={null} />);
@@ -1121,14 +1540,14 @@ describe('FileViewer: nothing open', () => {
     render(
       <ViewerHarness
         filePath={null}
-        fileTree={{
+        fileTree={workspace({
           name: 'knowledge-base',
           relativePath: 'knowledge-base',
           type: 'directory',
           children: [
             { name: 'Charter.md', relativePath: 'knowledge-base/Charter.md', type: 'file' },
           ],
-        }}
+        })}
       />,
     );
     expect(await screen.findByRole('button', { name: /Charter/ })).toBeInTheDocument();

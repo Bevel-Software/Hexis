@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import AdmZip from 'adm-zip';
 import type { HexisMcpConfig } from './config.js';
+import { ConnectionKeyRejectedError } from './deployment.js';
 
 /**
  * Local materialization of a plugin, per the Agent Plugins runtime contract.
@@ -188,6 +189,14 @@ export async function materializePlugin(
       signal: AbortSignal.timeout(60_000),
     },
   );
+  // Key mode's 401 is the same refusal `getJson` names: the key itself is
+  // dead, and it ends the process in the same words rather than as one
+  // skipped local server. A sign-in's 401 stays generic here — this request
+  // has no renewal of its own.
+  if (res.status === 401 && !config.renewConnectionKey) {
+    await res.body?.cancel().catch(() => {});
+    throw new ConnectionKeyRejectedError(config.baseUrl);
+  }
   if (!res.ok) {
     throw new Error(`could not fetch plugin "${folder}": HTTP ${res.status}`);
   }

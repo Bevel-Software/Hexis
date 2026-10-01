@@ -140,3 +140,19 @@ describe('PluginsSidebarMenu', () => {
     row.remove();
   });
 });
+
+describe('PluginsSidebarMenu: Manage members', () => {
+  it('is absent unless the caller passes it', () => {
+    renderMenu();
+    expect(screen.queryByRole('menuitem', { name: 'Manage members' })).toBeNull();
+  });
+
+  it('comes last when present, and closes the menu when chosen', () => {
+    const onManageMembers = vi.fn();
+    const { onClose } = renderMenu({ onAdd: undefined, onManageAccess: undefined, onManageMembers });
+    expect(items()).toEqual(['New plugin', 'Copy link', 'Manage members']);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Manage members' }));
+    expect(onManageMembers).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});

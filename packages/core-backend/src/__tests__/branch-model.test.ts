@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import {
   configureBranchModel,
+  currentBranchModel,
   isBranchModelConfigured,
   isProtectedBranch,
   protectedBranchDisplayName,
@@ -21,14 +22,14 @@ afterEach(() => configureBranchModel(PAIR));
 
 describe('configureBranchModel', () => {
   it('applies the model to every export', () => {
-    expect(isBranchModelConfigured()).toBe(true);
+    expect(isBranchModelConfigured(currentBranchModel())).toBe(true);
     expect(DEFAULT_BRANCH).toBe('target-company-state');
     expect([...PROTECTED_BRANCHES].sort()).toEqual([
       'current-company-state',
       'target-company-state',
     ]);
-    expect(isProtectedBranch('current-company-state')).toBe(true);
-    expect(isProtectedBranch('someone/draft')).toBe(false);
+    expect(isProtectedBranch(currentBranchModel(), 'current-company-state')).toBe(true);
+    expect(isProtectedBranch(currentBranchModel(), 'someone/draft')).toBe(false);
   });
 
   it('accepts the comma/space list the environment supplies', () => {
@@ -37,10 +38,10 @@ describe('configureBranchModel', () => {
   });
 
   it('derives display names from the slug', () => {
-    expect(protectedBranchDisplayName('target-company-state')).toBe('Target company state');
+    expect(protectedBranchDisplayName(currentBranchModel(), 'target-company-state')).toBe('Target company state');
     // Unknown names return null so the caller decides between the raw slug and
     // hiding the affordance — it must not invent a name for a feature branch.
-    expect(protectedBranchDisplayName('someone/draft')).toBeNull();
+    expect(protectedBranchDisplayName(currentBranchModel(), 'someone/draft')).toBeNull();
   });
 
   /**
@@ -74,6 +75,6 @@ describe('configureBranchModel', () => {
       configureBranchModel({ defaultBranch: 'nope', protectedBranches: ['other'] }),
     ).toThrow();
     expect(DEFAULT_BRANCH).toBe('target-company-state');
-    expect(isProtectedBranch('target-company-state')).toBe(true);
+    expect(isProtectedBranch(currentBranchModel(), 'target-company-state')).toBe(true);
   });
 });

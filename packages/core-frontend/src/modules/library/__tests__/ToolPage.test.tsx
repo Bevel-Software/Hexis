@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -46,6 +46,13 @@ vi.mock('../services/library.api', () => ({
   getSkill: libraryMock.getSkill,
 }));
 
+// The page resolves the tool's plugin through `useLibrary()`. With an empty
+// catalog the folder name stands in as the label — which is what the frame
+// tests assert on — and the provider's own fetches stay out of the picture.
+vi.mock('../state/library-data', () => ({
+  useLibrary: () => ({ pluginSummaries: [] }),
+}));
+
 const sourceMock = vi.hoisted(() => ({ readFileOnBranch: vi.fn() }));
 vi.mock('../../change-requests/services/change-requests.api', () => sourceMock);
 
@@ -53,6 +60,9 @@ vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolPage } from '../components/tool-page/ToolPage';
+import { NAME_MIN_WIDTH } from '../components/NameWithBadges';
+import { expectMenuAtTheEndOfTheTitleRow, expectTitleRowSpansTheDocumentColumn } from './title-row-actions';
+import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 
 const GITHUB: ToolSecrets = {
   slug: 'heyreach',
@@ -179,6 +189,65 @@ describe('ToolPage: frame', () => {
     expect(screen.getByText('Managed by the Admins.')).toBeInTheDocument();
   });
 
+  it('holds a long tool name to a readable width, and says the rest on hover', async () => {
+    // The card's rule, on the page header — the half of it a one-row band
+    // can keep. The name truncates and says the rest on hover; it does not
+    // take a floor, because the band has no second line to hand anything.
+    const long = 'disposable-weather-lookup-for-the-northern-hemisphere-v2beta';
+    secretsMock.listToolSecrets.mockResolvedValue([{ ...GITHUB, name: long }]);
+    toolsMock.getToolDetail.mockResolvedValue({ ...DETAIL, name: long });
+    renderPage();
+
+    // Whole in the DOM, so a screen reader reads all of it; whole in `title`,
+    // so the reader who only has the ellipsis can finish it.
+    const title = await screen.findByRole('heading', { name: long, level: 1 });
+    expect(title).toHaveAttribute('title', long);
+    expect(title.className).toContain('truncate');
+
+    // And NOT the floor. The band is one row tall, the same row the sidebar's
+    // header holds, so there is no second line for a floor to push anything
+    // onto — a floor here only made the title wider than the band and sent it
+    // out of the bottom of it at every phone width. The row says so itself:
+    // it cannot wrap, and it clips.
+    expect(title.className).not.toContain(NAME_MIN_WIDTH);
+    const row = title.parentElement as HTMLElement;
+    expect(row.className).toContain('flex-nowrap');
+    expect(row.className).toContain('overflow-hidden');
+  });
+
+  /**
+   * The `⋯` belongs at the right end of the title row, where the plugin page
+   * and the skill page put their trailing controls. It used to be the last
+   * child of this page's `<header>` — below the description, on a line of its
+   * own under the back link, left-aligned — so the one gesture the three item
+   * pages share was in a different place on one of them.
+   *
+   * Asserted through the shared helper, which `PluginPage.test.tsx` calls
+   * too: the criterion is a comparison, so it is written once.
+   */
+  // The owner's case — the same menu with `Delete tool` in it — is asserted
+  // in `DeleteToolDialog.test.tsx`, which is the file that can actually own
+  // the plugin holding this tool.
+  it('puts the ⋯ at the right end of the title row, where the plugin page has it', async () => {
+    renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    expectMenuAtTheEndOfTheTitleRow();
+  });
+
+  /**
+   * And the right end is the SAME right end. This page used to wrap itself in
+   * `max-w-3xl` — a 768px article centred inside the layout's 800px line — so
+   * its title row, and the `⋯` at the end of it, stopped 16px short of the
+   * plugin page's at every viewport while every structural assertion above
+   * passed on both pages.
+   */
+  it('runs its title row to the document column, not a narrower one of its own', async () => {
+    const { container } = renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    expectTitleRowSpansTheDocumentColumn();
+    expect(container.querySelector('article')!.className).not.toContain('max-w-');
+  });
+
   it('shows no kicker for a legacy ungrouped path either', async () => {
     secretsMock.listToolSecrets.mockResolvedValue([
       { ...GITHUB, slug: 'slack', name: 'slack', path: 'Tools/slack.tool' },
@@ -211,7 +280,7 @@ describe('ToolPage: frame', () => {
     expect(
       await screen.findByText("This tool doesn't exist, or you don't have access to it."),
     ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '‹ All skills & tools' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '‹ Everything' })).toBeInTheDocument();
   });
 
   it('offers Try again when the secrets listing fails, and refetches on click', async () => {
@@ -364,7 +433,12 @@ describe('ToolPage: OAuth round-trip', () => {
     window.history.replaceState(null, '', '/skills-and-tools/tools/heyreach#authorized=sec_1');
     renderPage();
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Signed in to heyreach.');
+    // Scoped by NAME: the `⋯` menu carries its own (empty) status region for
+    // the copy-link answer, so "the only status on the page" is no longer a
+    // way to name the sign-in banner.
+    expect(
+      (await screen.findAllByRole('status')).map((s) => s.textContent),
+    ).toContain('Signed in to heyreach.');
     // Consumed, so a refresh doesn't re-announce it.
     await waitFor(() => expect(window.location.hash).toBe(''));
     expect(window.location.pathname).toBe('/skills-and-tools/tools/heyreach');
@@ -396,12 +470,62 @@ describe('ToolPage: OAuth round-trip', () => {
     );
     renderPage();
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Signed in to heyreach.');
+    // Scoped by NAME: the `⋯` menu carries its own (empty) status region for
+    // the copy-link answer, so "the only status on the page" is no longer a
+    // way to name the sign-in banner.
+    expect(
+      (await screen.findAllByRole('status')).map((s) => s.textContent),
+    ).toContain('Signed in to heyreach.');
     await waitFor(() => expect(window.location.hash).toBe(''));
     expect(window.location.search).toBe('?server=heyreach');
     expect(window.location.pathname).toBe(
       '/workspace/main/knowledge-base/Plugins/Everyone/mcp.json',
     );
+  });
+
+  /**
+   * The Library is a second store, and the sign-in happened outside both of
+   * them. Everything that says "needs setup" — the cards, the plugin banner,
+   * the sidebar count — was loaded before the browser left for the provider,
+   * so the page the reader goes back to is the one that gets it wrong.
+   */
+  describe('telling the Library', () => {
+    const heard = vi.fn();
+    beforeEach(() => {
+      heard.mockReset();
+      window.addEventListener(TOOL_CREDENTIALS_STALE_EVENT, heard);
+    });
+    afterEach(() => window.removeEventListener(TOOL_CREDENTIALS_STALE_EVENT, heard));
+
+    it('announces a successful return', async () => {
+      window.history.replaceState(null, '', '/skills-and-tools/tools/heyreach#authorized=sec_1');
+      renderPage();
+
+      // `All`, because the page carries more than one live region (the
+      // sections announce their own loading) — the one this waits on is the
+      // sign-in's.
+      expect((await screen.findAllByRole('status')).map((s) => s.textContent)).toContain(
+        'Signed in to heyreach.',
+      );
+      await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
+    });
+
+    it('announces a failed one too — the page wrote nothing either way', async () => {
+      // Not a failed save: this page stored nothing, and the outcome it was
+      // handed is the only evidence about a grant somebody else decided. The
+      // honest move on both is to go and re-read.
+      window.history.replaceState(null, '', '/skills-and-tools/tools/heyreach#error=Access%20denied');
+      renderPage();
+
+      await screen.findByRole('alert');
+      await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
+    });
+
+    it('stays quiet on an ordinary visit, with no fragment to consume', async () => {
+      renderPage();
+      await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+      expect(heard).not.toHaveBeenCalled();
+    });
   });
 });
 

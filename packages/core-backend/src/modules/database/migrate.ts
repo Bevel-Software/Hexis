@@ -1,6 +1,10 @@
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { sql } from 'drizzle-orm';
-import type { Database } from './connection.js';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('database');
+import { DEFAULT_DB_SCHEMA, dbSchemaOf, type Database } from './connection.js';
+import { AdvisoryLock, withAdvisoryLock } from './advisory-lock.js';
 import { PII_CIPHERTEXT_PREFIX, blindIndex, decryptPii, encryptPii, isEncryptedBlob } from '../../shared/column-crypto.js';
 
 /*
@@ -24,13 +28,55 @@ import { PII_CIPHERTEXT_PREFIX, blindIndex, decryptPii, encryptPii, isEncryptedB
  * Note: drizzle-orm's node-postgres `migrate()` accepts `migrationsTable` (and
  * `migrationsSchema`) in the installed version (0.45.x) — see
  * `drizzle-orm/migrator.d.ts` (`MigrationConfig`).
+ *
+ * BOTH RUNNERS TAKE AN ADVISORY LOCK. Drizzle's migrator takes none of its own:
+ * it reads the newest applied migration, then opens a transaction and applies
+ * everything newer — so two processes booting at once read the same watermark
+ * and both apply. The idempotence described above covers a RE-run, which is a
+ * different thing from a CONCURRENT one, and it only covers the init migration
+ * anyway; 0002 onward are plain DDL, where the second process fails on an
+ * already-applied `ALTER TABLE` and crash-loops. Two processes booting at once
+ * is not hypothetical here — it is every redeploy, for as long as the outgoing
+ * container takes to exit. See `advisory-lock.ts` for the mechanism.
  */
+
+/**
+ * Where a handle's migration ledger lives, and which lock guards its runs.
+ *
+ * The default schema keeps drizzle's own `drizzle` schema for the ledger,
+ * where every existing deployment already has one: naming `public` here
+ * would make the next boot read an empty ledger and re-apply plain DDL that
+ * is already applied. A knowledge base on a schema of its own keeps its
+ * ledger IN that schema, so the schema is the whole of the tenant: what
+ * `pg_dump -n` carries out includes what has been applied to it, and the
+ * dedicated deployment it is restored into resumes from there rather than
+ * from nothing. The lock is keyed the same way, so two tenants of one
+ * database migrate side by side while two processes of one tenant still
+ * take turns.
+ */
+function ledgerOptions(db: Database): { migrationsSchema?: string; tenantKey: string } {
+  const schema = dbSchemaOf(db);
+  return schema === DEFAULT_DB_SCHEMA
+    ? { tenantKey: '' }
+    : { migrationsSchema: schema, tenantKey: schema };
+}
 
 /** Apply the CORE migration history from `folder`, tracked in `__drizzle_migrations_core`. */
 export async function runCoreMigrations(db: Database, folder: string): Promise<void> {
-  console.log('Running core database migrations...');
-  await migrate(db, { migrationsFolder: folder, migrationsTable: '__drizzle_migrations_core' });
-  console.log('Core migrations complete.');
+  const { migrationsSchema, tenantKey } = ledgerOptions(db);
+  await withAdvisoryLock(
+    db,
+    AdvisoryLock.Migrations,
+    async () => {
+      log.info('Running core database migrations...');
+      await migrate(db, { migrationsFolder: folder, migrationsTable: '__drizzle_migrations_core', migrationsSchema });
+      log.info('Core migrations complete.');
+      // Under the same lock, before anything reads or writes a PII column:
+      // the data half of migration 0014, which SQL cannot do (see below).
+      await runPiiEncryptionBackfill(db);
+    },
+    { tenantKey },
+  );
 }
 
 /**
@@ -39,45 +85,59 @@ export async function runCoreMigrations(db: Database, folder: string): Promise<v
  * enterprise tables FK into core tables.
  */
 export async function runEnterpriseMigrations(db: Database, folder: string): Promise<void> {
-  console.log('Running enterprise database migrations...');
-  await migrate(db, { migrationsFolder: folder, migrationsTable: '__drizzle_migrations_enterprise' });
-  console.log('Enterprise migrations complete.');
+  const { migrationsSchema, tenantKey } = ledgerOptions(db);
+  await withAdvisoryLock(
+    db,
+    AdvisoryLock.Migrations,
+    async () => {
+      log.info('Running enterprise database migrations...');
+      await migrate(db, {
+        migrationsFolder: folder,
+        migrationsTable: '__drizzle_migrations_enterprise',
+        migrationsSchema,
+      });
+      log.info('Enterprise migrations complete.');
+    },
+    { tenantKey },
+  );
 }
 
 /*
  * ── PII column encryption backfill ──────────────────────────────────────────
  *
- * Migration 0005 adds the `*_bidx` columns; the DATA change — rewriting
+ * Migration 0014 adds the `*_bidx` columns; the DATA change — rewriting
  * pre-existing plaintext PII to AES-256-GCM ciphertext and filling the blind
  * indexes — happens here, programmatically, because it needs the key from the
- * environment (SQL migrations cannot encrypt). Runs on every boot right after
- * `runCoreMigrations` and is idempotent: sealed rows carry the
- * `PII_CIPHERTEXT_PREFIX` marker and are excluded by the SELECT's own WHERE
- * clause, so a completed backfill degenerates to one cheap, empty-result
- * query per table.
+ * environment (SQL migrations cannot encrypt). Runs on every start right after
+ * the core history, under the migrations lock, and is idempotent: sealed rows
+ * carry the `PII_CIPHERTEXT_PREFIX` marker and are excluded by the SELECT's
+ * own WHERE clause, so a completed backfill degenerates to one cheap,
+ * empty-result query per table.
  *
- * Concurrency: the whole pass runs in ONE transaction that opens by taking
- * `pg_advisory_xact_lock` on a constant key, so two instances booting at once
- * serialize instead of interleaving. Each UPDATE is also compare-and-swap —
- * the WHERE clause pins every value the row was read with — so a writer that
- * slips in between the scan and the write (an old-version instance in a
- * mixed-version window) loses nothing: the CAS update matches zero rows and
- * the next boot's pass seals whatever that writer left behind. Deployments
- * should still stop the old app before starting the new one (see
- * UPGRADING.md); the lock and CAS make the failure mode of not doing so
- * "unsealed until next boot", never "silently overwritten".
+ * Concurrency: the migrations lock (keyed per tenant, like the history it
+ * guards) serialises two processes booting at once. Each UPDATE is also
+ * compare-and-swap — the WHERE clause pins every value the row was read with
+ * — so a writer that slips in between the scan and the write (an old-version
+ * instance in a mixed-version window) loses nothing: the CAS update matches
+ * zero rows and the next start's pass seals whatever that writer left
+ * behind. Deployments should still stop the old app before starting the new
+ * one (see UPGRADING.md); the lock and CAS make the failure mode of not doing
+ * so "unsealed until next start", never "silently overwritten".
  *
  * Once every row is sealed, the same transaction applies the constraints that
  * could not ship in the SQL migration: SET NOT NULL on the bidx columns and
- * the unique-index swap (`users_email_unique` on the now-randomized
- * ciphertext is meaningless, `users_email_bidx_unq` takes over; same for
- * `pr_file_approvals_unq` → `pr_file_approvals_bidx_unq`). The new unique
- * index goes up BEFORE the old one is dropped so duplicate protection never
- * has a gap. Legacy rows that collide under the normalized blind index are
- * handled first: duplicate approval rows (same logical approval, case-variant
- * email) are collapsed; duplicate USERS are a genuine account conflict and
- * abort the boot with the row ids so an operator can merge them deliberately.
- * All statements are IF-EXISTS-guarded — re-running is a no-op.
+ * the unique-index swaps (`users_email_unique` on the now-randomized
+ * ciphertext is meaningless, `users_email_bidx_unq` takes over; the same for
+ * the approvals and the join requests). The new unique index goes up BEFORE
+ * the old one is dropped so duplicate protection never has a gap. Legacy rows
+ * that collide under the normalized blind index are handled first: duplicate
+ * approval and join-request rows (the same logical row, a case-variant email)
+ * are collapsed; duplicate USERS are a genuine account conflict and abort the
+ * start with the row ids so an operator can merge them deliberately. All
+ * statements are IF-EXISTS-guarded — re-running is a no-op.
+ *
+ * Runs against whatever schema the handle searches first: a tenant's own, or
+ * `public`. Every table name is unqualified for that reason.
  */
 
 interface PiiBackfillTable {
@@ -98,18 +158,13 @@ const PII_BACKFILL_TABLES: PiiBackfillTable[] = [
   { table: 'change_requests', key: ['id'], encrypted: ['author_email', 'author_name', 'title', 'body'], bidx: { source: 'author_email', column: 'author_email_bidx' } },
   { table: 'pending_commits', key: ['id'], encrypted: ['author_email', 'author_name', 'last_error'], bidx: { source: 'author_email', column: 'author_email_bidx' } },
   { table: 'file_locks', key: ['workspace_id', 'branch', 'path'], encrypted: ['holder_name'] },
+  { table: 'plugin_join_requests', key: ['id'], encrypted: ['requester_email', 'requester_name', 'failure_reason'], bidx: { source: 'requester_email', column: 'requester_email_bidx' } },
 ];
 
 const ident = (name: string) => sql.raw(`"${name}"`);
 
 /** What the backfill needs from a drizzle client — the db or a transaction. */
 type Executor = Pick<Database, 'execute'>;
-
-/**
- * Constant key for `pg_advisory_xact_lock` serializing concurrent backfills.
- * Arbitrary but stable — never reuse it for another lock.
- */
-const PII_BACKFILL_LOCK_KEY = 7_458_392_017;
 
 /**
  * SQL approximation of `isEncryptedBlob`: the version prefix followed by
@@ -187,10 +242,11 @@ async function backfillTable(tx: Executor, t: PiiBackfillTable): Promise<number>
 /**
  * Legacy uniqueness was on the RAW email, so rows differing only by case or
  * whitespace could coexist; under the normalized blind index they collide and
- * the unique-index creation below would abort the boot. Approval rows are the
- * same logical approval — collapse them, keeping the earliest. Colliding USER
- * rows are distinct accounts; refuse loudly with the ids so an operator
- * resolves the conflict deliberately instead of the upgrade guessing.
+ * the unique-index creation below would abort the start. Approval rows and
+ * join-request rows are the same logical row — collapse them, keeping the
+ * earliest. Colliding USER rows are distinct accounts; refuse loudly with the
+ * ids so an operator resolves the conflict deliberately instead of the
+ * upgrade guessing.
  */
 async function resolveBidxCollisions(tx: Executor): Promise<void> {
   await tx.execute(sql.raw(`
@@ -198,6 +254,11 @@ async function resolveBidxCollisions(tx: Executor): Promise<void> {
     WHERE a."pr_number" = b."pr_number" AND a."path" = b."path"
       AND a."approver_email_bidx" = b."approver_email_bidx" AND a."head_sha" = b."head_sha"
       AND (a."approved_at" > b."approved_at" OR (a."approved_at" = b."approved_at" AND a."id" > b."id"))
+  `));
+  await tx.execute(sql.raw(`
+    DELETE FROM "plugin_join_requests" a USING "plugin_join_requests" b
+    WHERE a."plugin_key" = b."plugin_key" AND a."requester_email_bidx" = b."requester_email_bidx"
+      AND (a."created_at" > b."created_at" OR (a."created_at" = b."created_at" AND a."id" > b."id"))
   `));
   const dupes = await tx.execute(sql.raw(`
     SELECT array_agg("id") AS ids FROM "users" GROUP BY "email_bidx" HAVING count(*) > 1
@@ -223,25 +284,25 @@ const PII_FINALIZE_STATEMENTS = [
   'ALTER TABLE "pr_comments" ALTER COLUMN "author_email_bidx" SET NOT NULL',
   'ALTER TABLE "change_requests" ALTER COLUMN "author_email_bidx" SET NOT NULL',
   'ALTER TABLE "pending_commits" ALTER COLUMN "author_email_bidx" SET NOT NULL',
+  'ALTER TABLE "plugin_join_requests" ALTER COLUMN "requester_email_bidx" SET NOT NULL',
+  'CREATE UNIQUE INDEX IF NOT EXISTS "plugin_join_requests_requester_bidx_plugin_unq" ON "plugin_join_requests" ("requester_email_bidx","plugin_key")',
+  'DROP INDEX IF EXISTS "plugin_join_requests_requester_plugin_unq"',
 ];
 
 /**
  * Encrypt pre-existing plaintext PII rows, fill the blind-index columns, and
- * apply the constraints migration 0005 deferred. Idempotent; run on every
- * boot immediately after {@link runCoreMigrations}. Requires
- * `initColumnCrypto` to have run (CoreConfig's constructor does).
+ * apply the constraints migration 0014 deferred. Idempotent; `runCoreMigrations`
+ * runs it under the migrations lock right after the history. Requires
+ * `initColumnCrypto` to have run (CoreConfig's constructor and the tenant host
+ * do).
  */
 export async function runPiiEncryptionBackfill(db: Database): Promise<void> {
   await db.transaction(async (tx) => {
-    // One backfill at a time, released at commit/rollback. Transaction-scoped
-    // (not session-scoped) because the pool hands each statement its own
-    // connection outside a transaction.
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(${sql.raw(String(PII_BACKFILL_LOCK_KEY))})`);
     let rewritten = 0;
     for (const t of PII_BACKFILL_TABLES) {
       rewritten += await backfillTable(tx, t);
     }
-    if (rewritten > 0) console.log(`PII encryption backfill: rewrote ${rewritten} row(s).`);
+    if (rewritten > 0) log.info(`PII encryption backfill: rewrote ${rewritten} row(s).`);
     await resolveBidxCollisions(tx);
     for (const statement of PII_FINALIZE_STATEMENTS) {
       await tx.execute(sql.raw(statement));

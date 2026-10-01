@@ -1,17 +1,25 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button } from '../../../shared/components';
+import { cn } from '../../../lib/utils';
+import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
 import { useLibraryToast } from '../state/toast.context';
+import { isInPlugin, withLinkHealth } from '../utils/status';
 import {
   decodePluginSegment,
+  pathForPlugin,
   pathForPluginsIndex,
   urlForLibraryItem,
 } from '../routes/library-paths';
-import { primaryFolderOf } from '../utils/plugin-summary';
+import { pluginLabel, primaryFolderOf } from '../utils/plugin-summary';
+import { joinNames } from '../utils/names';
+import { repairPluginLinks, type LinkRepairReport, type UnrepairedLink } from '../services/plugins.api';
+import { RenamePluginDialog } from './RenamePluginDialog';
 import { PluginJoinRequests } from './PluginJoinRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
-import { ManifestButton, ClientExtensionsSection } from './PluginExtras';
+import { ManifestButton, ClientExtensionsSection, ManifestSection } from './PluginExtras';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { AddToPluginDialog } from './AddToPluginDialog';
 import { BandControls, EmptySkillsNudge, PluginBreadcrumb, PluginItemSections, PageNote,
@@ -21,7 +29,7 @@ import { DeletePluginDialog } from './DeletePluginDialog';
 import { PageActions } from './PageActions';
 import { copyToClipboard } from '../utils/clipboard';
 import { LockedPluginView } from './LockedPluginView';
-import { PendingSkillReview } from './PendingSkillReview';
+import { PendingItemReview } from './PendingItemReview';
 
 /**
  * One plugin, as a place: `/skills-and-tools/plugins/:plugin`.
@@ -55,11 +63,17 @@ export function PluginPage() {
   // neither is a place you would link someone to.
   const [filterOn, setFilterOn] = useState(false);
   const [refreshState, setRefreshState] = useState<'idle' | 'spin' | 'done'>('idle');
-  /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
-  const [manageFolder, setManageFolder] = useState<string | null>(null);
+  /**
+   * Which folder's `access.md` the Manage-access dialog is on, as the dialog
+   * itself addresses it. Held as the ENTRY rather than the repo-relative
+   * folder every opener here names, because retargeting at an ancestor hands
+   * back an entry — and the gallery and the skill page hold it the same way.
+   * `setManageFolder` is the openers' door in, and builds one from a folder.
+   */
+  const [manageTarget, setManageTarget] = useState<FileTreeEntry | null>(null);
   /** Bumped when an access edit lands, so the join-request surface refetches. */
   const [accessRevision, setAccessRevision] = useState(0);
-  /** The proposed skill being reviewed, if the reader opened one. */
+  /** The proposal — skill or tool — being reviewed, if the reader opened one. */
   const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
   /**
    * Whether the join-requests banner is actually on screen. The empty band's
@@ -111,17 +125,78 @@ export function PluginPage() {
     return () => window.clearTimeout(timer);
   }, [refreshState]);
 
+  /**
+   * What the page-open repair did — null until it has answered, and left null
+   * for a viewer who never runs one (see the effect below). Once it is in, it
+   * is the truth about this plugin's links: the served `brokenLinks` was
+   * counted before the repair wrote anything.
+   */
+  const [repairReport, setRepairReport] = useState<LinkRepairReport | null>(null);
+  /**
+   * The repair could not even be asked for. Then — and only then — the page
+   * falls back to the banner it showed before this existed: the served count
+   * is all anyone knows.
+   */
+  const [repairFailed, setRepairFailed] = useState(false);
   /** The card being removed, while its confirm dialog is up. */
   const [removing, setRemoving] = useState<LibraryItem | null>(null);
   /** Whether the plugin's own delete confirmation is up. */
   const [deleteOpen, setDeleteOpen] = useState(false);
+  /** Whether the rename dialog is up. */
+  const [renameOpen, setRenameOpen] = useState(false);
 
   const summary = useMemo(
     () => data.pluginSummaries.find((g) => g.name === plugin) ?? null,
     [data.pluginSummaries, plugin],
   );
+
+  /**
+   * THE automatic repair: opening this page as someone who may write the
+   * plugin writes back the grants of every link that lost them and that this
+   * person may also write. Silent — a repaired link shows nothing at all; what
+   * could not be repaired becomes the banner below.
+   *
+   * Why the page and not the server's read path: the commit lands in the
+   * VIEWER's name, so it needs a person, and a page open is the one moment a
+   * person with both verbs is known to be here. Why once — `repairedFor` keys
+   * the run on the plugin, so a re-render, a reload of the catalog (which this
+   * effect itself causes) or a summary arriving late cannot run it twice; the
+   * backend's link locks serialise two people opening the page at the same
+   * moment, and the second finds the lines already there and writes nothing.
+   *
+   * A failure is not the reader's problem to act on: the report stays null and
+   * the page falls back to the banner it has always shown.
+   */
+  const { reload, reloadPlugins } = data;
+  const repairedFor = useRef<string | null>(null);
+  const canRepairLinks = summary?.canWrite === true && summary.linksAreManaged !== false;
+  useEffect(() => {
+    if (!canRepairLinks || repairedFor.current === plugin) return;
+    repairedFor.current = plugin;
+    let live = true;
+    void repairPluginLinks(plugin)
+      .then((report) => {
+        if (!live) return;
+        setRepairReport(report);
+        // Only a write is worth a refetch: the catalog and the summaries carry
+        // the link health this just changed.
+        if (report.repaired.length > 0) {
+          reload();
+          reloadPlugins();
+        }
+      })
+      .catch(() => {
+        if (live) setRepairFailed(true);
+      });
+    return () => {
+      live = false;
+    };
+  }, [canRepairLinks, plugin, reload, reloadPlugins]);
+  // Inline AND linked: a shared skill linked from this plugin's manifest is
+  // one of its skills. A link whose grant went missing carries the amber
+  // "needs setup" foot note here — the one place the plugin's members look.
   const pluginItems = useMemo(
-    () => data.items.filter((i) => i.plugin === plugin),
+    () => data.items.filter((i) => isInPlugin(i, plugin)).map((i) => withLinkHealth(i, plugin)),
     [data.items, plugin],
   );
   /** For the add dialog's name check — global, because a skill's id is global. */
@@ -131,8 +206,24 @@ export function PluginPage() {
   );
 
   const skillItems = pluginItems.filter((i) => i.kind === 'skill');
+  const releasedSkillItems = skillItems.filter((i) => !i.pending);
   const toolItems = pluginItems.filter((i) => i.kind === 'integration');
-  const attention = attentionOf(data.items, plugin);
+  // Two kinds of attention, two banners: a link without its grant locks the
+  // plugin's members out of a skill NOW, so it outranks an integration the
+  // reader has not connected for themselves.
+  const { total: attention, brokenLinks, warnings: warningCount } = attentionOf(data.items, plugin, data.pluginSummaries);
+  /** Links the page-open repair could not put back — the banner's own list. */
+  const unrepairedLinks = repairReport?.skipped ?? [];
+  /**
+   * Whether the served count is still the best thing this page can say. It is
+   * not, for a plugin writer who is having their links repaired: the count was
+   * taken before the repair wrote anything, so printing it would name links
+   * that are already fixed. They get the report's list instead, once it lands.
+   */
+  const showServedBrokenLinks =
+    brokenLinks > 0 && (!canRepairLinks || repairFailed) && unrepairedLinks.length === 0;
+  const integrationsNeedingSetup = attention - brokenLinks - warningCount;
+  const definitionWarnings = summary?.warnings ?? [];
   // What the Skills band actually renders. The filter is a VIEW over the band,
   // not a different query — flipping it back must show exactly what was there.
   const shownSkills = filterOn ? skillItems.filter((i) => i.status.state !== 'ok') : skillItems;
@@ -141,8 +232,8 @@ export function PluginPage() {
    * Both kinds open a PAGE — `skills/:name` has landed, so the contract this
    * function used to carry is discharged and the dialog is gone. Kept identical
    * to `LibraryPage.openItem` on purpose: a card must do the same thing
-   * wherever you clicked it — including the proposed-skill case, which opens
-   * its change request because it has no page to open.
+   * wherever you clicked it — including the proposed case, skill or tool,
+   * which opens its change request because it has no page to open.
    */
   function openItem(item: LibraryItem) {
     if (item.pending) {
@@ -153,26 +244,52 @@ export function PluginPage() {
   }
 
   /**
+   * Open the access dialog on a repo-relative folder — what every opener on
+   * this page names, from the title row's `Share` to a skill card's.
+   *
+   * `kbDirName` gates it because the resolver addresses files repo-relative
+   * and the dialog strips that prefix — without it the path we would hand over
+   * is not the path we mean. Same guard the skill dialog uses.
+   */
+  const setManageFolder = useCallback(
+    (folder: string) => {
+      if (!kbDirName) return;
+      setManageTarget({
+        name: folder.split('/').pop() ?? folder,
+        relativePath: `${kbDirName}/${folder}`,
+        type: 'directory',
+      });
+    },
+    [kbDirName],
+  );
+
+  /**
    * THE access surface — one dialog, two openers: the title row's `Share` and
    * the Manage-access affordances. There is deliberately no read-only sibling:
    * the dialog itself degrades to read-only when the resolved verdict says the
    * caller cannot write, so a second "view access" panel would be the same
    * information twice.
-   *
-   * `kbDirName` gates it because the resolver addresses files repo-relative and
-   * the dialog strips that prefix — without it the path we would hand over is
-   * not the path we mean. Same guard the skill dialog uses.
    */
   const manageDialog =
-    manageFolder && kbDirName ? (
+    manageTarget ? (
       <ManageAccessDialog
-        entry={{
-          name: manageFolder.split('/').pop() ?? manageFolder,
-          relativePath: `${kbDirName}/${manageFolder}`,
-          type: 'directory',
-        }}
+        // Keyed on the path, so retargeting at an ancestor remounts it against
+        // that folder — the gallery's arrangement exactly.
+        key={manageTarget.relativePath}
+        // The Library speaks the DEFAULT branch: this page lists what is on
+        // it, so the rules it shares are edited where it read them, whatever
+        // branch the ambient workspace happens to be on. Same choice the
+        // gallery's Share and the skill page's make.
+        workspaceId={encodeURIComponent(DEFAULT_BRANCH)}
+        entry={manageTarget}
+        // The `Manage <Folder> →` walk. A skill card's Share lands on a folder
+        // that usually inherits its rules from this plugin, and without this
+        // the only act available on an inherited grant is the destructive one
+        // behind Remove — the skill page offers the walk, so its twin here
+        // must too.
+        onManageAncestor={setManageTarget}
         onClose={() => {
-          setManageFolder(null);
+          setManageTarget(null);
           // Granting through the dialog can settle a pending join request —
           // refresh the roster, the catalog and the request surface together.
           data.reloadPlugins();
@@ -217,18 +334,22 @@ export function PluginPage() {
           to={pathForPluginsIndex()}
           className="mt-2 inline-block rounded-xs text-ui font-semibold text-ink underline"
         >
-          All plugins
+          Everything
         </Link>
       </div>
     );
   }
 
   const primaryFolder = summary ? primaryFolderOf(summary) : null;
+  // What the page CALLS the plugin — its display name. `plugin` stays the
+  // identity: the URL, the grants, the API.
+  const label = pluginLabel(plugin, data.pluginSummaries);
+  // Where its files ARE, below the plugins root — what the manifest button
+  // and the extensions listing build paths from. The identity is not a path.
+  const folderBelowRoot = primaryFolder ? primaryFolder.slice(primaryFolder.indexOf('/') + 1) : plugin;
 
   return (
     <div className="pb-14">
-      <PluginBreadcrumb name={plugin} />
-
       {/* The title row carries the page's one persistent action. `Share` IS
           the manage-access dialog — not a doorway to it. It stays un-gated:
           for a non-writer the dialog renders read-only (its own `canWrite`
@@ -237,10 +358,30 @@ export function PluginPage() {
       {/* Three actions, beside the title, for everyone (proto:3012-3025).
           Share stays un-gated: for a non-writer the dialog renders read-only,
           which is exactly what "who is this shared with?" should answer. */}
-      <div className="flex items-start justify-between gap-4">
-        <h1 className="mt-1.5 text-display font-semibold">{plugin}</h1>
-        <div className="mt-1.5 flex items-center gap-1">
-          <ManifestButton kbDirName={kbDirName} folder={plugin} canWrite={summary?.canWrite === true} />
+      {/* On the shared band, the same height as the sidebar's header row, and
+          the FIRST row of the page — the breadcrumb rides on the band rather
+          than in a row above it, because a row above would push this one off
+          the line the sidebar's header row holds. The hand-tuned `mt-1.5`
+          that used to nudge the heading and the actions into agreement with
+          each other is gone too: the band centres both, and it is the only
+          thing deciding how tall this row is. */}
+      <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'justify-between gap-4')}>
+        {/* The trail and the title are the part of this row allowed to run out
+            of space; the actions beside them are not. `flex-1` + `min-w-0`
+            takes the row's shortfall from HERE, and `overflow-hidden` is what
+            makes that safe: the trail is a fixed width, so on a narrow
+            viewport a group that could only shrink would push its content
+            straight across the manifest and action buttons instead. Clipped,
+            the title truncates first, the trail goes last, and the controls
+            stay where they are and stay clickable. */}
+        <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+          <PluginBreadcrumb />
+          <h1 className="min-w-0 truncate text-display font-semibold" title={label}>
+            {label}
+          </h1>
+        </div>
+        <div className="flex flex-none items-center gap-1">
+          <ManifestButton kbDirName={kbDirName} folder={folderBelowRoot} canWrite={summary?.canWrite === true} />
           <PageActions
             onShare={primaryFolder ? () => setManageFolder(primaryFolder) : undefined}
             // The dialog needs both to mount (`addOpen && summary &&
@@ -255,10 +396,24 @@ export function PluginPage() {
             // route enforces, so the item appears for exactly the people the
             // backend will let through.
             onDelete={summary?.isOwner ? () => setDeleteOpen(true) : undefined}
-            addLabel={`Add a skill or tool to ${plugin}`}
+            // The MANAGER's verb: the same gate as linking and the join banner —
+            // and, like linking, only for a plugin this platform writes (an
+            // external format is renamed in its own repository).
+            onRename={summary?.canWrite && summary.linksAreManaged !== false ? () => setRenameOpen(true) : undefined}
+            addLabel={`Add a skill or tool to ${label}`}
           />
         </div>
       </div>
+      {/* Where it lives — the folder is no longer the name, so it is said
+          beneath the title bar, the way a file path sits under a document
+          title. Below the band rather than inside it: a second line in the
+          row would make the row taller than the band it shares with the
+          sidebar. */}
+      {primaryFolder && (
+        <p className="mt-0.5 truncate font-mono text-meta text-ink-faint" title={primaryFolder}>
+          {primaryFolder}
+        </p>
+      )}
 
       {/* Somebody is waiting on the person reading this. Rendered only for a
           plugin manager (canWrite) — every member can see the CRs elsewhere,
@@ -274,11 +429,60 @@ export function PluginPage() {
         />
       )}
 
-      {attention > 0 && (
+      {/* What the repair could not put back, one line per skill, naming the
+          people who can. A viewer whose repair is still in flight — or who
+          repaired everything — is shown nothing at all: the whole point of
+          repairing on open is that a link a writer can fix never becomes a
+          sentence somebody has to read. Everyone else (a reader, or a writer
+          whose repair could not even be asked for) gets the count that was
+          served, exactly as before. */}
+      {unrepairedLinks.length > 0 && (
+        <Banner role="status" tone="urgent" className="mt-4">
+          <ul className="grid gap-1">
+            {unrepairedLinks.flatMap((link) =>
+              link.skills.map((skill) => (
+                <li key={`${link.root}:${skill.path}`}>
+                  {unrepairedText(link, skill.name, label)}
+                </li>
+              )),
+            )}
+          </ul>
+        </Banner>
+      )}
+      {showServedBrokenLinks && (
+        <Banner role="status" tone="urgent" className="mt-4">
+          {`${brokenLinks} ${
+            brokenLinks === 1
+              ? `linked skill can't be read by ${label}'s members: its access rules no longer name them. Repair the link`
+              : `linked skills can't be read by ${label}'s members: their access rules no longer name them. Repair the links`
+          } from the skill page${brokenLinks === 1 ? '' : 's'}.`}
+        </Banner>
+      )}
+      {/* What the platform could not keep of the plugin's definition — a
+          server its profile selects that the registry rejected, a skill root
+          that is not a folder. Said HERE, in words, because the people who
+          can fix those files open this page; the server log is where it
+          used to go, and nobody who owned a plugin ever read it. */}
+      {definitionWarnings.length > 0 && (
+        <Banner role="status" tone="wait" className="mt-4">
+          <span className="font-semibold">
+            {definitionWarnings.length === 1
+              ? "Something in this plugin's definition was left out:"
+              : `${definitionWarnings.length} things in this plugin's definition were left out:`}
+          </span>
+          <ul className="mt-1 list-disc pl-5">
+            {definitionWarnings.map((w, i) => (
+              // Two warnings may read the same; the position tells them apart.
+              <li key={`${i}:${w}`}>{w}</li>
+            ))}
+          </ul>
+        </Banner>
+      )}
+      {integrationsNeedingSetup > 0 && (
         <Banner role="status" tone="wait" className="mt-4">
           <span>
-            {`${attention} ${
-              attention === 1
+            {`${integrationsNeedingSetup} ${
+              integrationsNeedingSetup === 1
                 ? 'integration needs setup: connect it'
                 : 'integrations need setup: connect them'
             } to unblock this plugin's skills.`}
@@ -289,14 +493,59 @@ export function PluginPage() {
         </Banner>
       )}
 
+      {/* Ownership decides readability, the plugin is a view: a linked skill
+          the caller may not read is simply absent from their list, and the
+          plugin's own total says how many. */}
+      {/* Against the RELEASED skills the caller sees: a pending proposal is
+          a card here but not in the plugin's total, and counting it would
+          hide one hidden skill per proposal. */}
+      {summary && summary.skillCount > releasedSkillItems.length && (
+        <p className="mb-2 text-detail text-ink-faint">
+          {summary.skillCount - releasedSkillItems.length === 1
+            ? '1 skill in this plugin is not shared with you.'
+            : `${summary.skillCount - releasedSkillItems.length} skills in this plugin are not shared with you.`}
+        </p>
+      )}
       <PluginItemSections
         skillItems={shownSkills}
         toolItems={toolItems}
         onOpen={openItem}
+        // This page is ONE plugin's, so a card here can be linked from it —
+        // and the ones that are say so, with the folder they live in on
+        // hover. The Advanced tree shows the disk and therefore does not list
+        // a linked skill under this folder; the pill is what stops the two
+        // views from looking like a contradiction.
+        linkedIn={plugin}
+        // The manifest's own roots, which is what the tooltip names — a
+        // manifest can link one skill folder outright, and only the summary
+        // says so (see `linkedHomeOf`). Absent while the summary loads, or
+        // when the plugins endpoint failed; the tooltip falls back rather
+        // than waiting.
+        linkedRoots={summary?.linkedRoots}
+        // A skill's OWN rules, from its card — the skill page's Share, on the
+        // skill's folder rather than the plugin's. It reuses this page's one
+        // access dialog (`manageTarget`), the same one the title row's Share
+        // and the join-request banner open, and that dialog wires
+        // `onManageAncestor`, so a rule the skill inherits from the plugin is
+        // managed by walking up to it from here rather than being read-only.
+        // `kbDirName` gates it for the reason the dialog itself does: the path
+        // we would hand over is not the path we mean without it.
+        onShare={kbDirName ? (item) => setManageFolder(item.path) : undefined}
         // Removal is the PLUGIN MANAGER's verb — the same canWrite that lets
         // them answer join requests. The backend's per-path gate enforces it
         // for real; this only decides who sees the affordance.
         onRemove={summary?.canWrite ? setRemoving : undefined}
+        // A LINK into a plugin whose links live in an external format cannot
+        // be removed here — the endpoint refuses it — so it is not offered.
+        canRemove={(item) => {
+          const linked = item.plugins?.some((m) => m.name === plugin && m.linked) ?? false;
+          // A TOOL reached through a linked root has no verb here at all: the
+          // unlink endpoint speaks skills (a root is linked, not the manual
+          // sitting in it), and deleting the file would take it from whoever
+          // the folder actually belongs to. It is removed where it lives.
+          if (linked && item.kind === 'integration') return false;
+          return summary?.linksAreManaged !== false || !linked;
+        }}
         emptySkills={
           filterOn ? (
             'Nothing in this band needs you right now.'
@@ -346,13 +595,14 @@ export function PluginPage() {
       />
 
       {reviewing && (
-        <PendingSkillReview
+        <PendingItemReview
           item={reviewing}
           onClose={() => setReviewing(null)}
           onResolved={() => {
             setReviewing(null);
-            // One reload moves it off the review shelf and into the catalog;
-            // the plugin index follows because its skill count just changed.
+            // One reload moves the proposal — skill or tool — off the review
+            // shelf and into the catalog; the plugin index follows because the
+            // plugin's own count just changed.
             data.reload();
             data.reloadPlugins();
           }}
@@ -367,7 +617,25 @@ export function PluginPage() {
           // Every skill, not just this plugin's: a skill's id is its name and
           // ids are global, so the collision that matters is with any of them.
           existingSkills={allSkillNames}
+          linkable={data.items}
+          onLinked={() => {
+            data.reload();
+            data.reloadPlugins();
+          }}
           onClose={() => setAddOpen(false)}
+        />
+      )}
+
+      {renameOpen && summary && (
+        <RenamePluginDialog
+          plugin={summary}
+          onClose={() => setRenameOpen(false)}
+          onRenamed={(next) => {
+            data.reload();
+            data.reloadPlugins();
+            // The identity is the URL: a renamed plugin lives at a new address.
+            if (next.name !== plugin) navigate(pathForPlugin(next.name));
+          }}
         />
       )}
 
@@ -392,9 +660,12 @@ export function PluginPage() {
         <RemoveLibraryItemDialog
           item={removing}
           place={plugin}
+          // In this plugin by LINK: the manifest entry goes, the skill stays.
+          linked={removing.plugins?.some((m) => m.name === plugin && m.linked) ?? false}
           onClose={() => setRemoving(null)}
           onRemoved={() => {
-            toast(`Removed ${removing.name} from ${plugin}.`);
+            const wasLinked = removing.plugins?.some((m) => m.name === plugin && m.linked) ?? false;
+            toast(wasLinked ? `Unlinked ${removing.name} from ${plugin}.` : `Removed ${removing.name} from ${plugin}.`);
             // Catalog for the card, plugin index for the counts.
             data.reload();
             data.reloadPlugins();
@@ -402,12 +673,49 @@ export function PluginPage() {
         />
       )}
 
-      <ClientExtensionsSection kbDirName={kbDirName} folder={plugin} />
+      <ClientExtensionsSection kbDirName={kbDirName} folder={folderBelowRoot} />
+      {/* Last, and closed by default: the file behind the page, for whoever
+          wants to see exactly what the plugin declares. Only once the SUMMARY
+          is in: it is what says where the plugin's folder is (a nested
+          plugin's is not `Plugins/<identity>`) and which manifest file it
+          carries — before it, `folderBelowRoot` is a guess from the URL. */}
+      {summary && (
+        <ManifestSection
+          kbDirName={kbDirName}
+          folder={folderBelowRoot}
+          managed={summary.linksAreManaged !== false}
+          canWrite={summary.canWrite}
+        />
+      )}
       {manageDialog}
     </div>
   );
 }
 
+/**
+ * Who the banner tells the reader to ask — the roles first, then the people,
+ * spoken the way a person lists them.
+ *
+ * "Its editors" is not a placeholder for a list that failed to load: a skill
+ * root whose access file names nobody is still writable by the platform's
+ * admins through the rescue on `access.md`, so the sentence stays true and
+ * stays actionable when the list comes back empty.
+ */
+function editorsText(link: UnrepairedLink): string {
+  return joinNames([...link.editors.roles, ...link.editors.users.map((u) => u.name)]) || 'Its editors';
+}
 
-
-
+/**
+ * The one line the banner says about a link the repair left broken. Two
+ * sentences, by what is actually wrong: a link whose grant lines are missing
+ * is repaired from the skill page; a link whose lines are there and denied
+ * beside them is not — Repair would write nothing, and the person who can
+ * act has to remove the deny.
+ */
+function unrepairedText(link: UnrepairedLink, skill: string, plugin: string): string {
+  const who = editorsText(link);
+  if (link.reason === 'denied') {
+    return `${skill} is denied to ${plugin}'s members in its access rules. ${who} can change that from the skill page.`;
+  }
+  return `${skill} can't be read by ${plugin}'s members. ${who} can repair the link from the skill page.`;
+}

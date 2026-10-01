@@ -1,9 +1,10 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef, useState, type Ref } from 'react';
 import {
   Check,
   ChevronDown,
   Clock4,
   Copy,
+  FileText,
   History,
   Link2,
   Pencil,
@@ -13,6 +14,8 @@ import {
 import { cn } from '../../../lib/utils';
 import { Badge, Button, IconButton, MenuItem, MenuPanel } from '../../../shared/components';
 import { useDismissableMenu } from '../../../shared/components';
+import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
+import { rootAnchoredPath } from '../utils/pasteLink';
 
 /**
  * The document's title, and the page's actions beside it.
@@ -24,7 +27,9 @@ import { useDismissableMenu } from '../../../shared/components';
  * Weight follows stakes, not frequency (proto:3781-3783). Share is the ONE
  * bounded button because it is the one action here with a consequence for
  * other people. Copy and Edit are icons — frequent, private, instantly
- * reversible. Everything monthly is behind `⋯`.
+ * reversible. Version history is the clock-arrow beside Edit, the placement
+ * Google Docs taught everyone; a ⋯ holding one item was a hiding place, not
+ * an overflow.
  */
 
 /** Extensions we strip from the `<h1>`. Anything else stays verbatim. */
@@ -68,6 +73,28 @@ export interface KbPageHeaderProps {
    * they have no bar to carry them.
    */
   writeActionInPane?: boolean;
+  /**
+   * The pane bar carries Version history beside its Edit, so the header
+   * renders none. True for prose documents — the ones that get a pane card.
+   * Separate from `writeActionInPane`, which `viewOnly` also raises: a
+   * view-only full-bleed file has no bar to carry the button, and its log is
+   * still worth reading.
+   */
+  historyInPane?: boolean;
+  /**
+   * The header's Version history clock, for the viewer to focus after a
+   * swap unmounts the control that was activated (see `FileViewer`).
+   */
+  historyButtonRef?: Ref<HTMLButtonElement>;
+  /**
+   * The document's own title, as the LAST place focus can land when a swap
+   * unmounts the control that was activated and both clocks are withdrawn
+   * (git not answering, or a draft open — see `FileViewer.backToDocument`).
+   * The heading is on screen in every one of those states and it names the
+   * thing the user just came back to, so a screen reader announces the
+   * document rather than nothing at all.
+   */
+  titleRef?: Ref<HTMLHeadingElement>;
   /** Disables Edit and explains why via `title`. */
   lockedBy: string | null;
   historyAvailable: boolean;
@@ -93,8 +120,8 @@ export interface KbPageHeaderProps {
   onShare(): void;
   /** The page as Markdown. Absent for a file that has no markdown to copy. */
   onCopyPage?: () => Promise<boolean>;
-  /** The canonical URL, via `useCanonicalFileUrl`. The only copy-a-reference
-   *  action on this page — see the note where the `⋯` menu is built. */
+  /** The canonical URL, via `useCanonicalFileUrl`. Its sibling, Copy path,
+   *  needs nothing from the caller: it is `path`, root-anchored. */
   onCopyLink(): Promise<boolean>;
 }
 
@@ -127,6 +154,9 @@ export function KbPageHeader({
   onSendProposal,
   onDiscardProposal,
   writeActionInPane = false,
+  historyInPane = false,
+  historyButtonRef,
+  titleRef,
   lockedBy,
   historyAvailable,
   isDirty,
@@ -141,22 +171,14 @@ export function KbPageHeader({
   onCopyLink,
 }: KbPageHeaderProps) {
   const [shareOpen, setShareOpen] = useState(false);
-  const [dotsOpen, setDotsOpen] = useState(false);
   const [copied, setCopied] = useState<Record<string, CopyState>>({});
   const shareTriggerRef = useRef<HTMLButtonElement>(null);
-  const dotsTriggerRef = useRef<HTMLButtonElement>(null);
 
   const closeShare = useCallback(() => setShareOpen(false), []);
-  const closeDots = useCallback(() => setDotsOpen(false), []);
   const shareRef = useDismissableMenu<HTMLDivElement>({
     open: shareOpen,
     onClose: closeShare,
     returnFocusTo: shareTriggerRef,
-  });
-  const dotsRef = useDismissableMenu<HTMLDivElement>({
-    open: dotsOpen,
-    onClose: closeDots,
-    returnFocusTo: dotsTriggerRef,
   });
 
   const report = useCallback(async (key: string, run: () => Promise<boolean>) => {
@@ -164,6 +186,18 @@ export function KbPageHeader({
     setCopied((prev) => ({ ...prev, [key]: ok ? 'ok' : 'fail' }));
     window.setTimeout(() => setCopied((prev) => ({ ...prev, [key]: null })), COPY_FEEDBACK_MS);
   }, []);
+
+  // The root-anchored `/<kbDirName>/…` form, the same text the tree row's
+  // Copy path gives: pasted into a Markdown link it works from any folder.
+  const copyPath = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(rootAnchoredPath(path));
+      return true;
+    } catch (err) {
+      console.error('Failed to copy path:', err);
+      return false;
+    }
+  }, [path]);
 
   const copyLabel = (key: string, idle: string) =>
     copied[key] === 'ok' ? 'Copied' : copied[key] === 'fail' ? "Couldn't copy" : idle;
@@ -182,20 +216,52 @@ export function KbPageHeader({
     !writeActionInPane && canWrite === false && !isReviewingPending && activeTab === 'content';
 
   return (
-    <div className="mb-2 flex flex-wrap items-center gap-3">
-      <h1 className="min-w-0 text-display font-semibold text-ink">{titleOf(path)}</h1>
+    // The shared header band: the same height as the sidebar's header row,
+    // from the same token, so the two rows under the toolbar read as one
+    // line. It used to be `flex-wrap` with no height at all — the row was as
+    // tall as whatever landed in it, which is why it could never agree with
+    // the sidebar. Wrapping is gone with the height: the title truncates
+    // instead (below), because a title bar that becomes two rows has already
+    // broken the seam this band exists to hold.
+    <div
+      data-testid={PAGE_HEADER_TESTID}
+      className={cn(HEADER_BAND, 'mb-2 w-full gap-3')}
+    >
+      {/* The title and its chips are the one part of this row allowed to run
+          out of space. They share a `min-w-0` group so that the row's
+          leftover width is taken from THEM and never from the actions: a
+          band cannot wrap, so something has to give first, and a file name
+          the reader can still hover for (`title`, below) is a far cheaper
+          loss than a Share button pushed off the side of the page. The
+          chips clip from the right in the order they are least urgent. */}
+      <div className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden">
+        {/* `tabIndex={-1}` keeps the heading out of the tab order while letting
+            `.focus()` land on it — the standard way to hand focus to a region
+            after a view swap. No focus ring: this is a programmatic landing
+            after the user's own click, not a control they are about to use. */}
+        <h1
+          ref={titleRef}
+          tabIndex={-1}
+          // `title` because `truncate` hides the rest of a long file name, and
+          // a heading you cannot finish reading needs somewhere to say it.
+          title={titleOf(path)}
+          className="min-w-0 truncate text-display font-semibold text-ink focus:outline-none"
+        >
+          {titleOf(path)}
+        </h1>
 
-      {/* The three chips the deleted strip used to carry. */}
-      {isDirty && <Badge tone="wait">Unsaved</Badge>}
-      {waitingOnAgentUpdate && (
-        <Badge tone="wait">
-          <Clock4 size={12} />
-          Agent update waiting
-        </Badge>
-      )}
-      {isReviewingPending && <Badge tone="ok">Reviewing agent update</Badge>}
+        {/* The three chips the deleted strip used to carry. */}
+        {isDirty && <Badge tone="wait">Unsaved</Badge>}
+        {waitingOnAgentUpdate && (
+          <Badge tone="wait">
+            <Clock4 size={12} />
+            Agent update waiting
+          </Badge>
+        )}
+        {isReviewingPending && <Badge tone="ok">Reviewing agent update</Badge>}
+      </div>
 
-      <div className="ml-auto flex flex-none items-center gap-1.5">
+      <div className="flex flex-none items-center gap-1.5">
         {/* Share: bounded, and split. Bounded because it is the one action on
             this page with a consequence for other people. The chevron carries
             the quieter sibling errand — copying a link to the page — so that
@@ -246,6 +312,19 @@ export function KbPageHeader({
                   <span className="flex items-center gap-2.5">
                     <Link2 size={14} />
                     {copyLabel('link', 'Copy link to this page')}
+                  </span>
+                </MenuItem>
+                {/* For linking this page from another one. */}
+                <MenuItem
+                  role="menuitem"
+                  onClick={async () => {
+                    await report('path', copyPath);
+                    window.setTimeout(closeShare, COPY_FEEDBACK_MS);
+                  }}
+                >
+                  <span className="flex items-center gap-2.5">
+                    <FileText size={14} />
+                    {copyLabel('path', 'Copy path')}
                   </span>
                 </MenuItem>
                 {/* "Share the whole folder" lived here and was cut. Sharing a
@@ -352,37 +431,23 @@ export function KbPageHeader({
             </IconButton>
           ))}
 
-        {/* Version history is the whole menu now, so the trigger goes where it
-            goes: git not ready means there is nothing behind ⋯, and an overflow
-            that opens onto an empty panel is worse than no overflow at all. */}
-        {historyAvailable && (
-          <div className="relative">
-            <IconButton
-              ref={dotsTriggerRef}
-              aria-label="More actions"
-              aria-haspopup="menu"
-              aria-expanded={dotsOpen}
-              active={dotsOpen}
-              onClick={() => setDotsOpen((v) => !v)}
-            >
-              <span aria-hidden className="text-strong leading-none">⋯</span>
-            </IconButton>
-            {dotsOpen && (
-              <div ref={dotsRef} className="absolute right-0 top-[calc(100%+5px)] z-40">
-                <MenuPanel role="menu" aria-label="More actions" className="min-w-[212px]">
-                  <MenuItem role="menuitem" onClick={() => { closeDots(); onOpenHistory(); }}>
-                    <span className="flex items-center gap-2.5"><History size={14} />Version history</span>
-                  </MenuItem>
-                  {/* "Copy path" is NOT here. Copying a reference to this page is
-                      one errand, and Share already owns it ("Copy link to this
-                      page"); two menus offering near-identical copies is how a
-                      user ends up pasting the wrong one. The tree's right-click
-                      menu keeps its own Copy path, because there it reaches rows
-                      that are not open — a different job. */}
-                </MenuPanel>
-              </div>
-            )}
-          </div>
+        {/* Version history, as the clock-arrow beside Edit. It was the lone
+            item behind a ⋯ here, and a menu with one entry is a hiding place,
+            not an overflow. Prose documents put Edit in the pane bar and carry
+            this beside it (`historyInPane`); full-bleed renderers have no bar,
+            so the header keeps both. Git not ready means there is no log to
+            show, and the button goes with it. */}
+        {historyAvailable && !historyInPane && (
+          <IconButton
+            ref={historyButtonRef}
+            aria-label="Version history"
+            title="Version history"
+            active={activeTab === 'history'}
+            aria-pressed={activeTab === 'history'}
+            onClick={onOpenHistory}
+          >
+            <History size={14} />
+          </IconButton>
         )}
       </div>
     </div>

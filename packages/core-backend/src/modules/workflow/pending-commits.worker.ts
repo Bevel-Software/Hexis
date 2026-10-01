@@ -7,24 +7,37 @@
  *
  * Design context: `lock-decoupling-plan.md`.
  *
- * One worker per backend process; we don't currently run multi-replica
- * backends, so a single drain loop is fine. The `claimNext` SQL uses
- * `FOR UPDATE SKIP LOCKED` so a future multi-replica deployment can run
- * multiple workers without double-processing rows.
+ * One worker DRAINS at a time across the deployment: the process holding the
+ * commit-worker lease (see `core/lifecycle.ts`) runs this loop, any other
+ * process serves requests and waits for the lease. The `claimNext` SQL uses
+ * `FOR UPDATE SKIP LOCKED` as a second line — two claimers can never take one
+ * row — but the lease is what keeps two processes out of one working tree.
  *
- * Concurrency: at most one commit in flight at a time across all
- * workspaces. We could parallelise across workspaces (different
- * `mutex.run` keys), but the current commit volume is comfortably
- * sequential and the simpler shape catches more potential bugs.
+ * Concurrency WITHIN the worker is across workspaces, never within one. Each
+ * workspace's rows drain in order, one commit in flight, because they share a
+ * clone and the mutex that serializes git on it; different workspaces are
+ * different clones, and up to {@link MAX_CONCURRENT_WORKSPACES} of them drain
+ * side by side. The point is containment: a remote that has stopped answering
+ * costs its own workspace the git deadline, and nobody else anything. It used
+ * to cost everyone — the loop was single-flight across all workspaces, so one
+ * stalled push parked every other user's save behind it.
  */
 
 import type { AuthUser } from '@bevel-software/platform-shared';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('pending-commits');
 import type {
   PendingCommit,
   PendingCommitsService,
   WorkspaceDescriptor,
 } from './pending-commits.service.js';
-import { BACKOFF_MS, N_RECOVERY, N_TRANSIENT } from './pending-commits.service.js';
+import {
+  BACKOFF_MS,
+  N_RECOVERY,
+  N_TRANSIENT,
+  canonicalWorkspaceId,
+} from './pending-commits.service.js';
 import { sanitizeError } from './sanitize-error.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 
@@ -46,7 +59,7 @@ export interface ISystemNoticeSink {
 /** Core default: terminal-failure notices go to stderr (no dashboard). */
 export const consoleSystemNoticeSink: ISystemNoticeSink = {
   async send(notice) {
-    console.error(`[system-notice] ${notice.user.email}: ${notice.message}`);
+    logger('system-notice').error(`${notice.user.email}: ${notice.message}`);
   },
 };
 
@@ -59,13 +72,25 @@ const POLL_INTERVAL_MS = 500;
 
 /**
  * Ceiling on rows drained from ONE workspace before the sweep moves on.
- * Fairness, not throughput: the loop holds the single in-flight commit slot,
- * so an unbounded drain would let one workspace's thousand-file migration
- * stall every other user's save until it finished. At this size a normal
- * bulk change (tens of files) still lands in one sweep, and a huge one gives
- * way after a bounded stretch and resumes on the next pass.
+ * Fairness, not throughput: a workspace being drained holds one of the
+ * in-flight slots, so an unbounded drain would let one workspace's
+ * thousand-file migration keep that slot from every other user's save until
+ * it finished. At this size a normal bulk change (tens of files) still lands
+ * in one sweep, and a huge one gives way after a bounded stretch and resumes
+ * on the next pass.
  */
 const MAX_BURST_PER_WORKSPACE = 50;
+
+/**
+ * How many WORKSPACES drain at once. Each in-flight commit is a git process
+ * (and, on push, a network round-trip), so this is also the ceiling on
+ * concurrent git the worker can spawn. Four is enough that one unresponsive
+ * remote — or four — leaves other workspaces draining, and small enough that
+ * a busy deployment's saves do not turn into a fork storm on the host that
+ * every other request shares. Within a workspace nothing changes: rows drain
+ * in order, because they share a clone.
+ */
+const MAX_CONCURRENT_WORKSPACES = 4;
 
 /**
  * The recovery-agent dispatcher the worker calls when a row exhausts its
@@ -204,45 +229,72 @@ export class PendingCommitsWorker {
    * hand the same row back within the same sweep.
    */
   async drainOnce(): Promise<void> {
-    for (const workspace of this.deps.workspaces.knownWorkspaces()) {
-      // Bail mid-sweep if stop() fired — the in-flight workspace gets
-      // to finish but we don't start a new one.
-      if (!this.running) return;
-      for (let drained = 0; drained < MAX_BURST_PER_WORKSPACE; drained += 1) {
-        if (!this.running) return;
-        const row = await this.deps.service.claimNext(workspace.id, this.deps.now());
-        if (!row) break;
-        // Is this the last commit of the burst? Everything before it can skip
-        // the advisory commit validator, which parses the whole KB to produce
-        // a report that is only logged. Running it per file made a bulk change
-        // pay one full parse per commit; running it on the last one reports
-        // the same end state once. Asked AFTER the claim, so the row in hand
-        // is already out of `pending` and cannot answer for itself.
-        //
-        // At the burst ceiling this IS the last commit of the pass, however
-        // many rows remain queued — so it must validate, or a backlog larger
-        // than the cap would end every sweep on a skipped validation. Known
-        // without asking, so the ceiling is checked BEFORE the peek rather
-        // than folded in after it: on a big backlog that would be one wasted
-        // round-trip per sweep, on the hot path this change exists to speed up.
-        let lastOfBurst = drained === MAX_BURST_PER_WORKSPACE - 1;
-        if (!lastOfBurst) {
-          // The peek is an OPTIMISATION, never a gate: the row is already
-          // claimed and `running`, and throwing here would abandon it in that
-          // state — nothing resets it, so the workspace would stop draining
-          // until the process restarted. A failed peek therefore means
-          // "assume last", costing one extra validation pass and nothing else.
+    // Distinct CLONES, under one spelling each. `knownWorkspaces()` reports
+    // encoded ids and the queue stores the canonical form, but the invariant
+    // the whole worker rests on — one clone is never worked by two drains at
+    // once — must not depend on where an id came from. Two spellings of one
+    // workspace here would be two concurrent drains of one working tree, which
+    // is exactly the interleaving the mutex exists to prevent and the reason
+    // the id is canonicalized BEFORE anything runs side by side.
+    const ids = [...new Set([...this.deps.workspaces.knownWorkspaces()].map((w) => canonicalWorkspaceId(w.id)))];
+    const queue = ids;
+    const slots = Math.min(MAX_CONCURRENT_WORKSPACES, queue.length);
+    await Promise.all(
+      Array.from({ length: slots }, async () => {
+        // Bail between workspaces if stop() fired — the in-flight workspace
+        // gets to finish but no new one is started.
+        while (this.running) {
+          const id = queue.shift();
+          if (id === undefined) return;
+          // Contained here, in the slot: a rejection that escaped would settle
+          // the `Promise.all` below while the other slots were still draining,
+          // and the loop would start the next pass — and possibly the same
+          // clone — alongside them. The failure is the workspace's, logged;
+          // the pass ends when every slot has.
           try {
-            lastOfBurst = !(await this.deps.service.hasReadyRow(workspace.id, this.deps.now()));
-          } catch (peekErr) {
-            console.warn(
-              `[pending-commits] ready-row peek failed for ws=${workspace.id}; validating this commit: ${sanitizeError(peekErr)}`,
-            );
-            lastOfBurst = true;
+            await this.drainWorkspace(id);
+          } catch (err) {
+            log.error(`drain failed for ws=${id}; its rows wait for the next pass:`, { err });
           }
         }
-        await this.processRow(row, { skipValidation: !lastOfBurst });
+      }),
+    );
+  }
+
+  /** Drain one workspace's ready rows, in order, up to the burst ceiling. */
+  private async drainWorkspace(workspaceId: string): Promise<void> {
+    for (let drained = 0; drained < MAX_BURST_PER_WORKSPACE; drained += 1) {
+      if (!this.running) return;
+      const row = await this.deps.service.claimNext(workspaceId, this.deps.now());
+      if (!row) break;
+      // Is this the last commit of the burst? Everything before it can skip
+      // the advisory commit validator, which parses the whole KB to produce
+      // a report that is only logged. Running it per file made a bulk change
+      // pay one full parse per commit; running it on the last one reports
+      // the same end state once. Asked AFTER the claim, so the row in hand
+      // is already out of `pending` and cannot answer for itself.
+      //
+      // At the burst ceiling this IS the last commit of the pass, however
+      // many rows remain queued — so it must validate, or a backlog larger
+      // than the cap would end every sweep on a skipped validation. Known
+      // without asking, so the ceiling is checked BEFORE the peek rather
+      // than folded in after it: on a big backlog that would be one wasted
+      // round-trip per sweep, on the hot path this change exists to speed up.
+      let lastOfBurst = drained === MAX_BURST_PER_WORKSPACE - 1;
+      if (!lastOfBurst) {
+        // The peek is an OPTIMISATION, never a gate: the row is already
+        // claimed and `running`, and throwing here would abandon it in that
+        // state — nothing resets it, so the workspace would stop draining
+        // until the process restarted. A failed peek therefore means
+        // "assume last", costing one extra validation pass and nothing else.
+        try {
+          lastOfBurst = !(await this.deps.service.hasReadyRow(workspaceId, this.deps.now()));
+        } catch (peekErr) {
+          log.warn(`ready-row peek failed for ws=${workspaceId}; validating this commit: ${sanitizeError(peekErr)}`);
+          lastOfBurst = true;
+        }
       }
+      await this.processRow(row, { skipValidation: !lastOfBurst });
     }
   }
 
@@ -254,10 +306,7 @@ export class PendingCommitsWorker {
         // A throw out of drainOnce means something inside the loop
         // itself failed — claimNext, processRow's outer scope, etc.
         // Log loudly and keep looping; the next pass may succeed.
-        console.error(
-          '[pending-commits] worker loop iteration threw:',
-          err instanceof Error ? err.stack ?? err.message : err,
-        );
+        log.error('worker loop iteration threw:', { err });
       }
       if (!this.running) break;
       await this.interruptibleSleep(POLL_INTERVAL_MS);
@@ -325,8 +374,8 @@ export class PendingCommitsWorker {
         // Transient — back off and retry on the next sweep that finds
         // the backoff elapsed.
         await this.deps.service.markTransientFailure(row.id, message);
-        console.warn(
-          `[pending-commits] transient failure ws=${row.workspaceId} branch=${row.branch} path=${row.path} attempt=${nextAttempts}/${N_TRANSIENT}: ${message}`,
+        log.warn(
+          `transient failure ws=${row.workspaceId} branch=${row.branch} path=${row.path} attempt=${nextAttempts}/${N_TRANSIENT}: ${message}`,
         );
         return;
       }
@@ -336,8 +385,8 @@ export class PendingCommitsWorker {
         // markRecoveryStarted resets `attempts` so the post-recovery
         // commits get a fresh transient budget.
         await this.deps.service.markRecoveryStarted(row.id);
-        console.warn(
-          `[pending-commits] transient budget exhausted ws=${row.workspaceId} branch=${row.branch} path=${row.path}; spawning recovery agent (run ${row.recoveryAgentRuns + 1}/${N_RECOVERY}): ${message}`,
+        log.warn(
+          `transient budget exhausted ws=${row.workspaceId} branch=${row.branch} path=${row.path}; spawning recovery agent (run ${row.recoveryAgentRuns + 1}/${N_RECOVERY}): ${message}`,
         );
         try {
           await this.deps.recoveryAgent.run({
@@ -353,10 +402,9 @@ export class PendingCommitsWorker {
           // the agent finishing without resolving the issue — the row
           // stays `pending` and the next worker pass will hit the same
           // underlying error or escalate after another recovery cycle.
-          console.error(
-            `[pending-commits] recovery agent threw for ws=${row.workspaceId} path=${row.path}:`,
-            sanitizeError(agentErr),
-          );
+          log.error(`recovery agent threw for ws=${row.workspaceId} path=${row.path}:`, {
+            detail: sanitizeError(agentErr),
+          });
         }
         return;
       }
@@ -373,9 +421,7 @@ export class PendingCommitsWorker {
    */
   private async escalate(row: PendingCommit, message: string, notice: string, why: string): Promise<void> {
     await this.deps.service.markNeedsAttention(row.id, message);
-    console.error(
-      `[pending-commits] TERMINAL ws=${row.workspaceId} branch=${row.branch} path=${row.path} ${why}: ${message}`,
-    );
+    log.error(`TERMINAL ws=${row.workspaceId} branch=${row.branch} path=${row.path} ${why}: ${message}`);
     try {
       await this.deps.feedback.send({
         source: 'system',
@@ -387,10 +433,9 @@ export class PendingCommitsWorker {
       // failure — the row is already `needs_attention` and the next
       // process restart will keep logging it. Just note that the
       // notice didn't reach the dashboard.
-      console.error(
-        `[pending-commits] failed to emit terminal-failure feedback notice for ws=${row.workspaceId} path=${row.path}:`,
-        sanitizeError(feedbackErr),
-      );
+      log.error(`failed to emit terminal-failure feedback notice for ws=${row.workspaceId} path=${row.path}:`, {
+        detail: sanitizeError(feedbackErr),
+      });
     }
   }
 }

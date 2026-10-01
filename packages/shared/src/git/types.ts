@@ -68,9 +68,21 @@ export interface ValidationReport {
   rawOutput: string;
 }
 
+/** What `IGitService.syncFromRemote` observed under its one hold of the clone. */
+export interface RemoteSyncPullResult {
+  /** HEAD before the pull; null when the clone had no commits yet. */
+  before: string | null;
+  /** HEAD after the pull; null only when origin is still empty too. */
+  after: string | null;
+  /** Whether the working tree's CONTENT differs — tree ids, not commit ids. */
+  treeChanged: boolean;
+  /** Repo-relative paths whose content changed; empty unless `treeChanged`. */
+  changedPaths: string[];
+}
+
 export interface IGitService {
   status(workspaceId: string): Promise<WorkingTreeStatus>;
-  listBranches(workspaceId: string, opts?: { freshFetch?: boolean }): Promise<BranchInfo[]>;
+  listBranches(workspaceId: string, opts?: { freshFetch?: boolean; strictFetch?: boolean }): Promise<BranchInfo[]>;
   createBranch(
     workspaceId: string,
     name: string,
@@ -129,7 +141,52 @@ export interface IGitService {
     },
   ): Promise<void>;
   fetch(workspaceId: string): Promise<void>;
-  pull(workspaceId: string): Promise<void>;
+  /**
+   * `treeChanged` is whether the pull left the working tree holding different
+   * CONTENT than before the call — tree ids compared, not commit ids, so a
+   * pull that only moves HEAD across content-identical commits (an empty
+   * commit, a rebase that replays to the same result) reports false. Only the
+   * pull itself can answer that (it holds the workspace mutex across the
+   * rebase; any before/after probe a caller ran around it would race), and
+   * callers that announce "this tree changed" to the rest of the process need
+   * the distinction: an "already up to date" pull that broadcast anyway would
+   * drop every catalog cache and reload every attached browser for nothing.
+   */
+  pull(
+    workspaceId: string,
+    opts?: {
+      /**
+       * Replay the local commits with `--rebase-merges`, so a merge commit
+       * the clone holds but origin has not seen survives the replay AS a
+       * merge instead of being flattened into cherry-picks of its second
+       * parent's commits. Only the change-request update asks for it: it is
+       * the one caller whose unpushed commit is deliberately a merge, and
+       * whose whole point is that the merge reaches the remote intact.
+       */
+      preserveMerges?: boolean;
+    },
+  ): Promise<{ treeChanged: boolean }>;
+  /**
+   * The remote sync's pull, observed as ONE serialized operation: where HEAD
+   * was, the pull, where HEAD is, and which repo-relative paths changed
+   * (rename-aware: both ends). `pull` bracketed by separate reads would let a
+   * concurrent save land between them and be announced as the sync's own.
+   *
+   * Tolerant of an unborn HEAD (a clone of an empty upstream): `before` is
+   * null, and paths are diffed against the empty tree. Throws the typed
+   * pull-conflict error like `pull`, and a typed "remote branch gone" error
+   * when origin no longer has the branch — including for an unborn clone,
+   * once origin has any branch at all. The one exception: an unborn clone
+   * against an origin with NO branches (a fresh deployment nobody has pushed
+   * to) resolves to `after: null`, since there is nothing to sync and nothing
+   * stale.
+   */
+  syncFromRemote(workspaceId: string): Promise<RemoteSyncPullResult>;
+  /**
+   * Whether origin still has `branch` right now (`ls-remote`). Used to
+   * revalidate that a clone is still stale before it is retired.
+   */
+  remoteBranchExists(workspaceId: string, branch: string): Promise<boolean>;
   diffStat(workspaceId: string, base?: string): Promise<string[]>;
   /**
    * Paths in the working tree that the next commit would include — the set
@@ -205,6 +262,55 @@ export interface IGitService {
    * Just the repo-relative paths a change request touches (three-dot diff,
    * no statuses, no patches): the cheap form behind change-request list
    * summaries and owner routing.
+   *
+   * `fetch: false` skips the per-request fetch of the two refs — for a caller
+   * that has just refreshed the whole clone's remote-tracking refs in one
+   * round trip, which is what a LIST does rather than paying one fetch per
+   * request. Pass it only when that is true; otherwise the diff can describe
+   * a stale head. It is a skip, not a promise: a branch the clone does not
+   * have yet is fetched anyway, since there is nothing to diff without it —
+   * so a list's first sight of a new request still costs one round trip.
    */
-  changedPathsForPr(workspaceId: string, baseBranch: string, headBranch: string): Promise<string[]>;
+  changedPathsForPr(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+    opts?: { fetch?: boolean },
+  ): Promise<string[]>;
+
+  /**
+   * A change request's fork point (merge base of the two resolved commits)
+   * and whether the target has commits the proposal does not contain. No
+   * fetch: `at` is what `resolvePrShas` just returned.
+   */
+  forkPointForPr(
+    workspaceId: string,
+    at: { baseSha: string; headSha: string },
+  ): Promise<{ mergeBaseSha: string | null; behind: boolean }>;
+
+  /**
+   * Every repo-relative path whose content differs between two commits, as a
+   * plain two-dot diff with rename detection OFF — so a rename reports both
+   * the path it left and the path it arrived at. Two callers want exactly
+   * that conservative answer: the approvals carry-forward (a path that
+   * appears loses its approval) and "did the target change a file this
+   * request also changes" (a request editing a file the target renamed has
+   * to count as affected).
+   */
+  pathsChangedBetween(
+    workspaceId: string,
+    fromSha: string,
+    toSha: string,
+  ): Promise<string[]>;
+
+  /**
+   * A file's content at a change request's fork point — a commit that must
+   * be on `baseBranch`'s history. `null` when the path did not exist there.
+   */
+  readFileAtForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    sha: string,
+    relativePath: string,
+  ): Promise<string | null>;
 }

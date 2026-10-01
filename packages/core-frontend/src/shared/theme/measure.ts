@@ -17,10 +17,13 @@
  * rather than moving the column. That is deliberate: hiding the nav should buy
  * margin, not line length.
  *
- * TOP padding is deliberately NOT here. It is the one measure the two surfaces
- * do not share: Knowledge opens on a tab strip and starts high (12px), Skills
- * opens on a heading and keeps the roomier default (34px). See
- * `plans/05-knowledge-ui.md` §1. Set it at the call site.
+ * TOP padding is NOT here either, but it is no longer the measure the two
+ * surfaces disagree about. It used to be — Knowledge opened on a tab strip at
+ * 12px, Skills on a heading at 34px (`plans/05-knowledge-ui.md` §1) — and
+ * those 22px were the reported seam: the Library's title bar sat a fifth of an
+ * inch below the sidebar header row beside it. Both columns now open on
+ * `HEADER_COLUMN_TOP` from `./header.ts`, which is where the shared band's
+ * geometry lives. Take it from there rather than restating a number here.
  */
 
 /** The default column: an 880px measure, centred. */
@@ -54,11 +57,32 @@ export const DOCUMENT_COLUMN_WIDE = 'mx-auto w-full max-w-[980px]';
  * drops the bottom rhythm from 110px to 90px (proto:623-632) — that part is a
  * genuine viewport rule and stays a media query.
  */
-const GUTTER_TAIL = 'pb-[110px] max-[900px]:px-[18px] max-[900px]:pb-[90px]';
+const BOTTOM_RHYTHM = 'pb-[110px] max-[900px]:pb-[90px]';
 
 /**
+ * The SIDES alone — the column's left and right margins, without the rhythm
+ * below the last paragraph.
+ *
+ * Split out for the column that is a VIEWPORT rather than a document: the
+ * file page in history or comparison mode fills the pane's height with a
+ * panel that scrolls inside itself, and 110px of padding under a panel like
+ * that is not breathing room after the text, it is 110px the timeline does
+ * not get. The margins are the part that has to agree with the reading view
+ * — they are what "switching to history moves nothing but the content" means
+ * — so they are what this returns, and the two callers differ in the bottom
+ * rhythm and in nothing else.
+ *
+ * @param roomy the nav beside this column is hidden, so the space it gave up
+ *              becomes margin on both sides rather than more line length.
+ */
+export const documentSideGutters = (roomy: boolean): string =>
+  `${roomy ? 'px-[64px]' : 'px-[40px]'} max-[900px]:px-[18px]`;
+
+/**
+ * The sides AND the bottom rhythm — a column of prose, which ends.
+ *
  * @param roomy the nav beside this column is hidden, so the space it gave up
  *              becomes margin on both sides rather than more line length.
  */
 export const documentGutters = (roomy: boolean): string =>
-  `${roomy ? 'px-[64px]' : 'px-[40px]'} ${GUTTER_TAIL}`;
+  `${documentSideGutters(roomy)} ${BOTTOM_RHYTHM}`;

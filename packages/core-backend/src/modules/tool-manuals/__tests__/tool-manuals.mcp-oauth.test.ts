@@ -1,4 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
+
+/** The one disk, as production wires it: the service and its discovery read the same one. */
+const disk = new NodeFs();
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +12,7 @@ import { ToolManualService, type McpAuthDiscoveryPort } from '../tool-manuals.se
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const KB_DIR = 'knowledge-base';
 const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
@@ -57,7 +63,7 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
   });
 
   function svcWith(discovery: McpAuthDiscoveryPort) {
-    const svc = new ToolManualService(workspaceService, allowAll, KB_DIR);
+    const svc = new ToolManualService(workspaceService, allowAll, testKbContext({ kbDirName: KB_DIR }), disk, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })));
     svc.setMcpAuthDiscovery(discovery);
     return svc;
   }

@@ -18,6 +18,10 @@ open-source core of the Bevel platform.
 
 ## Why Hexis?
 
+Used by companies such as [Unite](https://unite.eu) (formerly Mercateo), [osapiens](https://osapiens.com), [BEO](https://beo.energy), [Workpath](https://www.workpath.com) and others.
+
+Read more about the learnings that we made which led to Hexis here: [Our Medium Article](https://medium.com/@ali.raza_25708/how-do-you-distribute-and-collaborate-on-agent-skills-in-enterprise-settings-bdb7097dff60)
+
 ### For teams
 
 One place where engineers and non-technical people alike can browse and load
@@ -49,8 +53,10 @@ mid-task can suggest the fix, and a person decides whether it lands.
 - [Try the live demo](#try-it-first-the-live-demo)
 - [Managed hosting](#want-a-managed-instance)
 - [Deploy with Docker](#deploy-it-in-5-minutes-docker)
+- [Links and images in knowledge pages](#links-and-images-in-knowledge-pages)
 - [Local development](#local-development-run-from-source)
 - [Configuration reference](docs/configuration.md)
+- [Skills in Cowork and claude.ai](docs/claude-cowork.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Repository layout](#repository-layout)
 - [FAQ](#faq)
@@ -126,9 +132,9 @@ Grab the two deployment files — no clone needed:
 
 ```sh
 mkdir hexis && cd hexis
-# v0.10.0 below = the release this page was written against; replace with the latest release tag
-wget https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.10.0/docker-compose.yml
-wget -O .env https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.10.0/.env.example
+# v0.15.1 below = the release this page was written against; replace with the latest release tag
+wget https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.15.1/docker-compose.yml
+wget -O .env https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.15.1/.env.example
 ```
 
 (Working from a git clone works identically — both files sit at the repo root;
@@ -159,7 +165,7 @@ DOMAIN=bevel.your-domain.com
 
 Then start everything. Deploying **pulls the image CI publishes on every
 release** — nothing compiles on your server, so a small instance suffices.
-Pin the version in `.env` (`HEXIS_VERSION=0.10.0`) so a later `pull` can't
+Pin the version in `.env` (`HEXIS_VERSION=0.15.1`) so a later `pull` can't
 become an unplanned upgrade — [UPGRADING.md](UPGRADING.md) covers upgrades
 and backups. Building from source instead (a staging server tracking a
 branch, a fork) is
@@ -207,7 +213,7 @@ the app on localhost. A clone already has it; next to the wget'd files, fetch
 it too:
 
 ```sh
-wget https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.10.0/docker-compose.override.yml
+wget https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.15.1/docker-compose.override.yml
 docker compose up -d
 ```
 
@@ -239,6 +245,29 @@ Going to production? [Configuration reference](docs/configuration.md) covers
 single sign-on, the state you need to back up, health checks, and configuring
 by environment instead of the setup screen.
 
+## Links and images in knowledge pages
+
+Pages are markdown. A link to another page is a relative path, and Hexis opens
+it in the app:
+
+```md
+See the [approval process](../Processes/Approval.md#steps).
+```
+
+Images work the same way. Keep them in an `assets/` folder next to the pages
+that use them, and link them relatively:
+
+```md
+![Approval screen](./assets/approval-screen.png)
+```
+
+Access follows folders, so a person who may read the page may see its
+screenshots, and moving the folder keeps every link valid; one shared
+`Uploads/` folder gives up both. An export that arrives with a sibling
+`.assets/` folder (Microsoft Loop, for one) can be dropped into the knowledge
+base as it is, and the links resolve unchanged. Pasted base64 images are not
+supported: save the file and link it.
+
 ## Local development (run from source)
 
 You need: **Node 22.13 or newer** (`.nvmrc`; the engine range is `>=22.13 <23`),
@@ -263,6 +292,8 @@ dev or in production.
 
 - **[Configuration](docs/configuration.md)**: every environment variable, SSO
   setup, secret generation, backups and health.
+- **[Several knowledge bases in one process](docs/multi-tenant.md)**: the
+  tenants file, what is kept apart, and moving a tenant to its own deployment.
 - **[Troubleshooting](docs/troubleshooting.md)**: the failures you are most
   likely to hit, and what causes them.
 
@@ -289,10 +320,31 @@ narrow the field, `get_skill` returns one skill at call time.
 </details>
 
 <details>
+<summary><b>How does an agent know what is in the knowledge base?</b></summary>
+
+Every MCP session starts with instructions: a fixed platform header that says
+what Hexis is and to search the knowledge base before answering from memory,
+followed by `mcp-description.md` from the root of your repository, where an
+admin describes what the knowledge base holds and when to consult it. Clients
+that read the handshake (Claude Code, Claude Desktop, Cursor) put it in the
+system prompt; for the ones that do not, the first line is also shown on the
+four core tools. The External agent access page shows exactly what agents get.
+</details>
+
+<details>
 <summary><b>Which agents can connect?</b></summary>
 
 Any MCP-capable client, including Claude Code, Codex, Cursor, Cline and ChatGPT,
 each seeing only what its user's role allows.
+
+Agents that run on your own machine can instead start the workspace as a **local**
+MCP server (`npx -y @bevel-software/hexis-mcp`), which adds your plugins'
+local-only tools to everything the hosted endpoint serves. That command needs
+**Node 22.13+ or 24** — the versions its sandbox ships a prebuilt binary for —
+and a client launched from the Dock or a desktop icon may not see `npx` on PATH
+at all: run `which npx` (`where npx` on Windows) and use the full path it
+prints as the `"command"`. See
+[Troubleshooting](docs/troubleshooting.md#desktop-agents-the-local-mcp-server).
 </details>
 
 <details>

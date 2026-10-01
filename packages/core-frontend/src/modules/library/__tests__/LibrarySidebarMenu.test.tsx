@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import {
   WorkspaceContext,
@@ -63,8 +63,13 @@ vi.mock('../../access/api', async (importOriginal) => {
   };
 });
 
+const teamsMock = vi.hoisted(() => ({ listTeams: vi.fn() }));
+vi.mock('../services/teams.api', () => ({ listTeams: teamsMock.listTeams }));
+// The sidebar's change-request dock pulls in git wiring these routes do not exercise.
+vi.mock('../../git/components/PullRequestsForMe', () => ({ PullRequestsForMe: () => null }));
+
 import { LibraryRoutes } from '../routes/LibraryRoutes';
-import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
+import { withAuth } from './auth-harness';
 
 const CATALOG: LibraryData = {
   loading: false,
@@ -74,7 +79,10 @@ const CATALOG: LibraryData = {
     { name: 'scratch', description: 'A skill in no plugin.', path: 'Skills/scratch' },
   ],
   tools: [],
+  pendingTools: [],
   ownedSkills: new Set(['outreach']),
+  writableSkills: new Set(['outreach']),
+  ownedTools: new Set(),
   allowedToolsBySkill: new Map(),
   pendingSkills: [],
   crs: [],
@@ -105,9 +113,9 @@ const PLUGINS: PluginSummary[] = [
   summary({ name: 'Finance', folders: ['Plugins/Finance'], canRead: false, canWrite: false }),
 ];
 
-function wrap(children: ReactNode) {
+function wrap(children: ReactNode, isAdmin = false) {
   const adminValue = {
-    isAdmin: false,
+    isAdmin,
     unreadCount: 0,
     lastSeen: null,
     markSeen: vi.fn(),
@@ -130,19 +138,27 @@ function wrap(children: ReactNode) {
   );
 }
 
-function renderLibrary(path = '/skills-and-tools') {
+/** Stands in for the Groups & Members page: shows where "Manage members" landed. */
+function LandedOn() {
+  const { pathname, search } = useLocation();
+  return <div data-testid="landed">{`${pathname}${search}`}</div>;
+}
+
+function renderLibrary(path = '/skills-and-tools', { isAdmin = false } = {}) {
   return render(
     <MemoryRouter initialEntries={[path]}>
       {wrap(
         <Routes>
           <Route path="/skills-and-tools/*" element={<LibraryRoutes />} />
+          <Route path="/directory-groups" element={<LandedOn />} />
         </Routes>,
+        isAdmin,
       )}
     </MemoryRouter>,
   );
 }
 
-const nav = () => screen.getByRole('navigation', { name: 'Library plugins' });
+const nav = () => screen.getByRole('navigation', { name: 'Library navigation' });
 const menuItems = () =>
   within(screen.getByRole('menu'))
     .getAllByRole('menuitem')
@@ -169,6 +185,9 @@ describe('Library sidebar: right-click, end to end', () => {
     pluginsMock.listPlugins.mockResolvedValue(PLUGINS);
     pluginsMock.listJoinRequests.mockResolvedValue([]);
     pluginsMock.deletePlugin.mockResolvedValue(undefined);
+    teamsMock.listTeams.mockResolvedValue([
+      { name: 'GTM Team', plugins: ['GTM'], skills: ['outreach'], tools: [] },
+    ]);
   });
 
   // Only the globals this file stubs — NOT `restoreAllMocks`, which would strip
@@ -176,19 +195,21 @@ describe('Library sidebar: right-click, end to end', () => {
   // returning undefined for whichever test happens to run next.
   afterEach(() => vi.unstubAllGlobals());
 
-  it('gives a plugin row the full menu, titled after the plugin', async () => {
+  /**
+   * A team row, like a lens, is a slice of the catalog and not a folder —
+   * there is nothing to add a skill TO and no `access.md` behind it. The
+   * plugin verbs (add to, manage access, delete) live on the plugin page and
+   * on the plugin's folder in the Plugins tree; the nav answers only with
+   * what the nav can do.
+   */
+  it('gives a team row the verbs a slice of the catalog can answer, titled after the team', async () => {
     renderLibrary();
-    await openMenuOn(/^GTM/);
-    expect(screen.getByRole('menu', { name: 'Actions for GTM' })).toBeInTheDocument();
-    expect(menuItems()).toEqual(['Add a skill or tool', 'New plugin', 'Copy link', 'Manage access']);
+    await openMenuOn(/^GTM Team/);
+    expect(screen.getByRole('menu', { name: 'Actions for GTM Team' })).toBeInTheDocument();
+    expect(menuItems()).toEqual(['New plugin', 'Copy link']);
   });
 
-  /**
-   * A lens is a slice of the catalog, not a folder — there is nothing to add a
-   * skill TO and no `access.md` behind it. The same call the plugin page's
-   * `PageActions` makes when it hides `Share` on the personal page.
-   */
-  it('gives a lens row only the verbs a slice of the catalog can answer', async () => {
+  it('gives a lens row the same verbs', async () => {
     renderLibrary();
     await openMenuOn(/^Owned by me/);
     expect(menuItems()).toEqual(['New plugin', 'Copy link']);
@@ -196,57 +217,13 @@ describe('Library sidebar: right-click, end to end', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
 
-    await openMenuOn(new RegExp(`^${TEST_PERSONAL_GROUP}`));
+    await openMenuOn(/^Everything/);
     expect(menuItems()).toEqual(['New plugin', 'Copy link']);
-  });
-
-  /**
-   * `Manage access` is UNGATED on `canWrite`, exactly as the plugin page's
-   * `Share` is: for a non-writer the dialog renders read-only, which is
-   * precisely what "who is this shared with?" should answer — and for an admin
-   * locked out of a plugin it is the self-service way back in.
-   */
-  it('offers Manage access on a locked plugin too', async () => {
-    renderLibrary();
-    await openMenuOn('Finance (locked)');
-    expect(screen.getByRole('menu', { name: 'Actions for Finance' })).toBeInTheDocument();
-    expect(menuItems()).toContain('Manage access');
-  });
-
-  /**
-   * Delete is the OWNER's verb: `isOwner` is the same verdict the backend's
-   * DELETE route enforces, so the affordance appears for exactly the people
-   * the endpoint will let through. GTM's default summary here says
-   * `canWrite: true, isOwner: false` — the full-menu test above is therefore
-   * also the proof that a mere MANAGER does not see the item.
-   */
-  it('offers Delete plugin to an owner, and drives the confirm → delete round-trip', async () => {
-    pluginsMock.listPlugins.mockResolvedValue([summary({ isOwner: true })]);
-    renderLibrary();
-    await openMenuOn(/^GTM/);
-    expect(menuItems()).toEqual([
-      'Add a skill or tool',
-      'New plugin',
-      'Copy link',
-      'Manage access',
-      'Delete plugin',
-    ]);
-
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete plugin' }));
-    // The menu hands over to the confirmation — nothing is deleted yet.
-    const dialog = await screen.findByRole('dialog');
-    expect(screen.queryByRole('menu')).toBeNull();
-    expect(pluginsMock.deletePlugin).not.toHaveBeenCalled();
-
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete plugin' }));
-    await waitFor(() => expect(pluginsMock.deletePlugin).toHaveBeenCalledWith('GTM'));
-    // The layout says so — same voice as every other completed verb here.
-    expect(await screen.findByText('Deleted GTM.')).toBeInTheDocument();
   });
 
   it('gives the empty nav space the one verb that belongs to the nav itself', async () => {
     renderLibrary();
-    await navRow(/^GTM/);
+    await navRow(/^GTM Team/);
     fireEvent.contextMenu(nav(), { clientX: 40, clientY: 400 });
     await screen.findByRole('menu');
     expect(menuItems()).toEqual(['New plugin']);
@@ -254,39 +231,10 @@ describe('Library sidebar: right-click, end to end', () => {
 
   it('opens the new-plugin dialog from the menu', async () => {
     renderLibrary();
-    await openMenuOn(/^GTM/);
+    await openMenuOn(/^GTM Team/);
     fireEvent.click(screen.getByRole('menuitem', { name: 'New plugin' }));
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
     expect(screen.queryByRole('menu')).toBeNull();
-  });
-
-  it('opens the add dialog for the plugin that was clicked, not the page you are on', async () => {
-    renderLibrary('/skills-and-tools/owned');
-    await openMenuOn(/^GTM/);
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Add a skill or tool' }));
-    // The dialog titles itself with its plugin — proof the layout captured the
-    // ROW's plugin, and not the route it happened to be sitting on.
-    const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText('Add a skill or tool to GTM')).toBeInTheDocument();
-  });
-
-  it('opens Manage access on the plugin folder, under the KB dir', async () => {
-    const access = await import('../../access/api');
-    renderLibrary();
-    await openMenuOn(/^GTM/);
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Manage access' }));
-
-    await waitFor(() => expect(access.fetchFileAccess).toHaveBeenCalled());
-    /**
-     * The whole round trip, in one assertion. The layout hands the dialog a
-     * WORKSPACE path (`<kbDirName>/<folder>`), the dialog strips that prefix
-     * back off, and what reaches the resolver is the REPO-relative folder —
-     * which is the only address `access.md` is written at. Get either half
-     * wrong and this is `undefined/Plugins/GTM` or `knowledge-base/Plugins/GTM`,
-     * and the dialog silently resolves a folder that does not exist. It is the
-     * same handoff `PluginPage` makes, which is why it has to match exactly.
-     */
-    expect(vi.mocked(access.fetchFileAccess).mock.calls[0][1]).toBe('Plugins/GTM');
   });
 
   it("copies the clicked row's own URL, not the one you are standing on", async () => {
@@ -294,12 +242,12 @@ describe('Library sidebar: right-click, end to end', () => {
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
 
     renderLibrary('/skills-and-tools/owned');
-    await openMenuOn(/^GTM/);
+    await openMenuOn(/^GTM Team/);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }));
 
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(
-        `${window.location.origin}/skills-and-tools/plugins/GTM`,
+        `${window.location.origin}/skills-and-tools/teams/GTM%20Team`,
       ),
     );
     expect(await screen.findByText('Link copied.')).toBeInTheDocument();
@@ -313,7 +261,7 @@ describe('Library sidebar: right-click, end to end', () => {
     });
 
     renderLibrary();
-    await openMenuOn(/^GTM/);
+    await openMenuOn(/^GTM Team/);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }));
 
     // The pill itself, not `getByRole('status')` — the tree carries a second
@@ -329,19 +277,76 @@ describe('Library sidebar: right-click, end to end', () => {
 
   it('closes on an outside click, and a left click still navigates', async () => {
     renderLibrary();
-    await openMenuOn(/^GTM/);
+    await openMenuOn(/^GTM Team/);
     fireEvent.mouseDown(document.body);
     await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
 
-    fireEvent.click(await navRow(/^GTM/));
-    expect(await screen.findByRole('heading', { name: 'GTM', level: 1 })).toBeInTheDocument();
+    fireEvent.click(await navRow(/^GTM Team/));
+    expect(await screen.findByRole('heading', { name: 'GTM Team', level: 1 })).toBeInTheDocument();
   });
 
   it('hands focus back to the row on Escape', async () => {
     renderLibrary();
-    const row = await openMenuOn(/^GTM/);
+    const row = await openMenuOn(/^GTM Team/);
     fireEvent.keyDown(document, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
     expect(document.activeElement).toBe(row);
+  });
+});
+
+/**
+ * "Manage members" — an administrator's way from a group row to that group's
+ * roster. Everyone is not a group and has no roster; a non-admin cannot edit
+ * one, so neither sees the item.
+ */
+describe('Library sidebar: Manage members', () => {
+  beforeEach(() => {
+    dataMock.useLibraryData.mockReturnValue(CATALOG);
+    pluginsMock.listPlugins.mockResolvedValue(PLUGINS);
+    pluginsMock.listJoinRequests.mockResolvedValue([]);
+    teamsMock.listTeams.mockResolvedValue([
+      { name: 'Everyone', plugins: [], skills: [], tools: [] },
+      { name: 'GTM Team', plugins: ['GTM'], skills: ['outreach'], tools: [] },
+    ]);
+  });
+
+  it("gives an admin's group row Manage members, below the items it already had", async () => {
+    renderLibrary('/skills-and-tools', { isAdmin: true });
+    await openMenuOn(/^GTM Team/);
+    expect(menuItems()).toEqual(['New plugin', 'Copy link', 'Manage members']);
+  });
+
+  it("opens the group's card on the Groups page, the group carried in the URL", async () => {
+    renderLibrary('/skills-and-tools', { isAdmin: true });
+    await openMenuOn(/^GTM Team/);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Manage members' }));
+    expect(await screen.findByTestId('landed')).toHaveTextContent(
+      '/directory-groups?group=GTM+Team',
+    );
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('gives the Everyone row no Manage members, even for an admin', async () => {
+    renderLibrary('/skills-and-tools', { isAdmin: true });
+    await openMenuOn(/^Everyone/);
+    expect(menuItems()).toEqual(['New plugin', 'Copy link']);
+  });
+
+  it('gives no Manage members on a lens or the empty nav space', async () => {
+    renderLibrary('/skills-and-tools', { isAdmin: true });
+    await openMenuOn(/^Owned by me/);
+    expect(menuItems()).toEqual(['New plugin', 'Copy link']);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+
+    fireEvent.contextMenu(nav(), { clientX: 40, clientY: 400 });
+    await screen.findByRole('menu');
+    expect(menuItems()).toEqual(['New plugin']);
+  });
+
+  it("leaves a non-admin's group menu unchanged", async () => {
+    renderLibrary('/skills-and-tools', { isAdmin: false });
+    await openMenuOn(/^GTM Team/);
+    expect(menuItems()).toEqual(['New plugin', 'Copy link']);
   });
 });

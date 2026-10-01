@@ -33,6 +33,8 @@
  * change requests; only the UI dresses them up.
  */
 
+export type { PluginMembership } from '../skills/skills.contract.js';
+
 /** Access-rule principals as the resolver hands them back. */
 export interface ResolvedPrincipals {
   roles: string[];
@@ -45,10 +47,26 @@ export interface ResolvedReaders extends ResolvedPrincipals {
 
 /** One plugin as `GET /api/plugins` reports it, resolved for ONE caller. */
 export interface PluginSummary {
-  /** Plugin folder name, e.g. `GTM`. */
+  /** The plugin's identity — its manifest name, e.g. `gtm`. */
   name: string;
+  /** What a person sees it called, e.g. `GTM`. */
+  displayName: string;
   /** Repo-relative constituent folders, e.g. `['Plugins/GTM']`. */
   folders: string[];
+  /**
+   * Repo-relative roots the plugin LINKS — its manifest's linked-skill roots
+   * (`extensions["software.bevel.hexis"].skills`), or a bundle's
+   * `sourceSkillRoots`.
+   *
+   * Served because a plugin's page has to say which of its cards live
+   * somewhere else. A SKILL carries its own membership record (linked or
+   * inline); a TOOL carries none — a `.tool` sitting beside the skills under
+   * a linked root reaches the plugin exactly the way those skills do, and
+   * these roots are the only thing that says so.
+   */
+  linkedRoots: string[];
+  /** Whether this platform writes the plugin's links — see `PluginCatalogEntry`. */
+  linksAreManaged: boolean;
   /**
    * Per-caller: the caller can read the FOLDER (membership). Every returned
    * plugin has at least one of `canRead` / `canWrite` / discoverability; a
@@ -71,17 +89,43 @@ export interface PluginSummary {
   /** Caller-INDEPENDENT total (the plugin's whole content, not the caller's slice). */
   skillCount: number;
   toolCount: number;
+  /**
+   * Caller-INDEPENDENT: how many of the plugin's LINKED skills its members
+   * cannot read — the link is in the manifest, but the skill folder no
+   * longer grants the plugin's readers. Counted here, from the unfiltered
+   * link index, because the people who most need the warning are the
+   * plugin's managers, and they are exactly the people a missing grant
+   * locks out: a count derived from what the caller can read would be zero
+   * for them. Zero for a plugin whose links are not managed here.
+   */
+  brokenLinks: number;
   /** For display: "Run by …" (fallback chain: owners → writers → 'the workspace admins'). */
   owners: ResolvedPrincipals;
   writers: ResolvedPrincipals;
   readers: ResolvedReaders;
+  /** The plugin's access.md says of itself that it is private — see `PluginCatalogEntry.isPrivate`. */
+  isPrivate: boolean;
+  /** What discovery left out of this plugin and why — see `PluginCatalogEntry.warnings`. */
+  warnings: string[];
   /**
-   * The caller has an OPEN join change request for this plugin (their
-   * deterministic join branch has an open CR). Always false for a member.
+   * The caller has asked to join this plugin and the ask still stands: a
+   * recorded request that is pending, one whose change request is still
+   * open, or an open join change request on their deterministic join branch.
+   * The RECORD is what makes this true the moment the subscribe call is
+   * answered — the change request may still be seconds away. False again
+   * once that change request is declined or settled: the ask is over, and
+   * the person may make it again. Always false for a member.
    */
   hasRequested: boolean;
-  /** The open join CR's number when `hasRequested` (deep-links the UI). */
+  /** The join CR's number once it exists (deep-links the UI); null before that. */
   requestNumber: number | null;
+  /**
+   * Why the last recorded request could not be sent, in the words the git
+   * work used — set only when `hasRequested` is false because the record
+   * failed, which is when the page owes the person the button back and a
+   * reason. Null in every other case, including on a server without records.
+   */
+  requestFailure?: string | null;
 }
 
 /**
@@ -90,13 +134,44 @@ export interface PluginSummary {
  * appears at all) are resolved per request in the route.
  */
 export interface PluginCatalogEntry {
+  /** The plugin's identity — its manifest name. */
   name: string;
+  /** What a person sees it called — the manifest's `displayName`, else its `name`. */
+  displayName: string;
   folders: string[];
+  /** The roots it links skills from — see `PluginSummary.linkedRoots`. */
+  linkedRoots: string[];
+  /**
+   * Whether this platform writes the plugin's links (a native `plugin.json`)
+   * — false for a plugin read from an external format, whose links are
+   * edited in that repository and which the link endpoints refuse.
+   */
+  linksAreManaged: boolean;
   skillCount: number;
   toolCount: number;
+  /** Linked skills the members cannot read — see `PluginSummary.brokenLinks`. */
+  brokenLinks: number;
   owners: ResolvedPrincipals;
   writers: ResolvedPrincipals;
   readers: ResolvedReaders;
+  /**
+   * The folder's access.md FRONTMATTER denies `everyone` read and names
+   * nobody but people (`isPrivateAccessMd`) — the shape a personal space is
+   * seeded with, and what a person writes to keep a plugin to a few named
+   * colleagues. The Library marks such a plugin "Private". A statement the
+   * file makes about itself, not a verdict: `readers` says who can use it.
+   */
+  isPrivate: boolean;
+  /**
+   * What discovery left out of THIS plugin and why, in plain words: an MCP
+   * server its profile selects that the registry could not keep, a skill
+   * root that is not a folder, a profile that does not exist. Attributed by
+   * folder from the discovery warnings, with the folder prefix removed, so
+   * the plugin's page can list them for the people who can fix the files —
+   * the server log is not where a plugin's owner looks. Empty when nothing
+   * was left out.
+   */
+  warnings: string[];
 }
 
 export interface IPluginIndexService {

@@ -1,13 +1,13 @@
 import { useCallback, useRef, useState } from 'react';
-import { Link2, Plus, Trash2, Users } from 'lucide-react';
+import { Link2, Plus, Trash2, Pencil } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import {
-  Button,
   IconButton,
   MenuItem,
   MenuPanel,
   useDismissableMenu,
 } from '../../../shared/components';
+import { ShareButton } from './ShareButton';
 
 /**
  * The three actions beside a place's title — the prototype's `spaceActs`
@@ -58,8 +58,19 @@ export interface PageActionsProps {
    * 404s for everyone but the owner is a broken promise, not a consistency.
    */
   onDelete?: () => void;
+  /**
+   * Opens the rename dialog. Present only for a MANAGER (the same write
+   * verdict that lets them link and answer join requests).
+   */
+  onRename?: () => void;
   /** Names the thing, for the `+` tooltip and the accessible names. */
   addLabel?: string;
+  /**
+   * What the delete item CALLS the act. A place is deleted as a plugin; the
+   * tool page reuses this menu, and an item there reading "Delete plugin"
+   * would name the wrong thing entirely.
+   */
+  deleteLabel?: string;
 }
 
 export function PageActions({
@@ -67,7 +78,9 @@ export function PageActions({
   onAdd,
   onCopyLink,
   onDelete,
+  onRename,
   addLabel = 'Add a skill or tool',
+  deleteLabel = 'Delete plugin',
 }: PageActionsProps) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState<null | 'ok' | 'fail'>(null);
@@ -88,12 +101,7 @@ export function PageActions({
 
   return (
     <div className="relative flex flex-none items-center gap-1.5">
-      {onShare && (
-        <Button variant="outline" size="sm" onClick={onShare}>
-          <Users size={13} />
-          Share
-        </Button>
-      )}
+      {onShare && <ShareButton onClick={onShare} />}
 
       {onAdd && (
         <IconButton aria-label={addLabel} title={addLabel} onClick={onAdd}>
@@ -128,6 +136,20 @@ export function PageActions({
                   item that cannot do its job is worse than one that is not
                   there. The menu exists so it drops in without moving
                   anything. */}
+              {onRename && (
+                <MenuItem
+                  role="menuitem"
+                  onClick={() => {
+                    close();
+                    onRename();
+                  }}
+                >
+                  <span className="flex items-center gap-2.5">
+                    <Pencil size={14} />
+                    Rename plugin
+                  </span>
+                </MenuItem>
+              )}
               {onDelete && (
                 <MenuItem
                   role="menuitem"
@@ -139,7 +161,7 @@ export function PageActions({
                 >
                   <span className="flex items-center gap-2.5">
                     <Trash2 size={14} />
-                    Delete plugin
+                    {deleteLabel}
                   </span>
                 </MenuItem>
               )}

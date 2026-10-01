@@ -3,6 +3,7 @@ import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api'
 import {
   emptyMessageFor,
   filterLibraryItems,
+  linkedHomeOf,
   pluginCounts,
   neededToolsFor,
   skillStatus,
@@ -47,11 +48,32 @@ describe('toolStatus: stored vs working', () => {
     expect(s.hint).toMatch(/not verified/i);
   });
 
-  it('says Key saved when the probe could not reach a verdict', () => {
+  // `Key saved` and `Unverified` are not the same claim, and which one is true
+  // turns on whether anybody ASKED. With no verdict (above) nothing was
+  // attempted, so "a value is stored" is the whole of what is known. Here a
+  // probe ran and came back without an answer — the reader's question has been
+  // put to the provider and gone unanswered, and a row still saying "Key
+  // saved" would be reporting the storage rather than the attempt.
+  it('says Unverified — not Key saved — once a probe has run and reached no verdict', () => {
     const s = toolStatus(withKey(), { status: 'unverifiable', detail: 'Provider timed out.', checkedAt: new Date().toISOString() });
+    // Still green: the key is saved, nothing is broken, nobody has to act.
     expect(s.state).toBe('ok');
-    expect(s.text).toBe('Key saved');
+    expect(s.text).toBe('Unverified');
+    // And it carries WHY, which is the whole difference from the untested case.
     expect(s.hint).toBe('Provider timed out.');
+  });
+
+  // The commonest reason a probe reaches no verdict: the manual defines no
+  // health check, so there was never anything to call.
+  it('says Unverified with the reason when the manual defines no health check', () => {
+    const s = toolStatus(withKey(), {
+      status: 'unverifiable',
+      detail: "This tool doesn't offer a way to test its connection.",
+      checkedAt: new Date().toISOString(),
+    });
+    expect(s.state).toBe('ok');
+    expect(s.text).toBe('Unverified');
+    expect(s.hint).toBe("This tool doesn't offer a way to test its connection.");
   });
 
   it('earns Connected only from a passing probe, and shows when it was checked', () => {
@@ -205,6 +227,23 @@ describe('filterLibraryItems (sidebar selection + search)', () => {
     expect(filterLibraryItems(items, { kind: 'all' }, '')).toHaveLength(4);
   });
 
+  it("a team is the server's slice, by id — never a property of the items", () => {
+    const named = items.map((i) => ({ ...i, id: i.name.toLowerCase() }));
+    const teams = [{ name: 'Sales', plugins: ['gtm'], skills: ['rfi responder'], tools: ['slack'] }];
+    expect(filterLibraryItems(named, { kind: 'team', group: 'Sales' }, '', teams).map((i) => i.name)).toEqual([
+      'RFI responder',
+      'Slack',
+    ]);
+    // A skill's id is looked up among skills, a tool's among tools: a tool
+    // named like a listed skill is not in the team.
+    const crossed = [{ name: 'Sales', plugins: [], skills: ['slack'], tools: [] }];
+    expect(filterLibraryItems(named, { kind: 'team', group: 'Sales' }, '', crossed)).toEqual([]);
+    // No slice for the team, or no ids on the items: nothing, never everything.
+    expect(filterLibraryItems(named, { kind: 'team', group: 'Ops' }, '', teams)).toEqual([]);
+    expect(filterLibraryItems(items, { kind: 'team', group: 'Sales' }, '', teams)).toEqual([]);
+    expect(filterLibraryItems(named, { kind: 'team', group: 'Sales' }, '')).toEqual([]);
+  });
+
   it('search matches name or description within the selection, case-insensitively', () => {
     expect(filterLibraryItems(items, { kind: 'all' }, 'friday').map((i) => i.name)).toEqual([
       'Weekly newsletter',
@@ -290,5 +329,46 @@ describe('toastDuration', () => {
     const lengths = [0, 10, 40, 80, 160, 400];
     const times = lengths.map((n) => toastDuration('x'.repeat(n)));
     expect([...times].sort((a, b) => a - b)).toEqual(times);
+  });
+});
+
+describe('linkedHomeOf', () => {
+  /** A skill's `path` is its folder; a tool's is its file. */
+  const linked = (path: string) => ({ path, plugins: [{ name: 'GTM', linked: true }] });
+
+  it('names the ROOT the manifest links, for a skill and for a tool beside it', () => {
+    const roots = ['Skills/Testing', 'Plugins/Shared/observability'];
+    expect(linkedHomeOf(linked('Skills/Testing/test-shared-linking'), 'GTM', roots)).toBe('Skills/Testing');
+    expect(linkedHomeOf(linked('Plugins/Shared/observability/grafana.tool'), 'GTM', roots)).toBe(
+      'Plugins/Shared/observability',
+    );
+  });
+
+  // The root IS the skill folder. Naming its parent would point at a shelf
+  // nobody linked — and at skills this plugin cannot see.
+  it('names the skill folder itself when THAT is what the manifest links', () => {
+    expect(
+      linkedHomeOf(linked('Skills/Testing/test-shared-linking'), 'GTM', ['Skills/Testing/test-shared-linking']),
+    ).toBe('Skills/Testing/test-shared-linking');
+  });
+
+  it('answers with the deepest root that holds the item', () => {
+    const roots = ['Skills', 'Skills/Testing'];
+    expect(linkedHomeOf(linked('Skills/Testing/test-shared-linking'), 'GTM', roots)).toBe('Skills/Testing');
+  });
+
+  // The summary has not arrived, or the plugins endpoint failed: the parent
+  // folder is where a linked item lives in every case but the one above.
+  it('falls back to the parent folder when no root is known', () => {
+    expect(linkedHomeOf(linked('Skills/Testing/test-shared-linking'), 'GTM')).toBe('Skills/Testing');
+    expect(linkedHomeOf(linked('Skills/Testing/x'), 'GTM', ['Skills/Other'])).toBe('Skills/Testing');
+  });
+
+  it('is null for an INLINE item, and for one this plugin does not hold at all', () => {
+    const inline = { path: 'Plugins/GTM/outreach', plugins: [{ name: 'GTM', linked: false }] };
+    expect(linkedHomeOf(inline, 'GTM')).toBeNull();
+    // Linked into another plugin entirely — not this page's business.
+    expect(linkedHomeOf(linked('Skills/Testing/x'), 'Product')).toBeNull();
+    expect(linkedHomeOf({ path: 'Plugins/GTM/outreach' }, 'GTM')).toBeNull();
   });
 });

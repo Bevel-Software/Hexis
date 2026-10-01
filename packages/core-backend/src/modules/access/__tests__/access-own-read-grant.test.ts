@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -88,6 +89,7 @@ describe('a file-own read grant on a whole-document configuration file', () => {
     new AccessControlService(
       { getWorkspacePath: async () => path.join(root, ws) } as unknown as WorkspaceService,
       KB,
+      new NodeFs(),
     );
 
   it('the grantee reads the file (registered kinds)', async () => {

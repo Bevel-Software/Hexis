@@ -59,9 +59,7 @@ export async function mountMcpRoutes(deps: McpRoutesDeps = {}): Promise<string> 
   app.use(
     '/api',
     createMcpRoutes(
-      // `createMcpRoutes` calls `onSessionEvicted` at CONSTRUCTION, so unlike
-      // the others this one needs a real function even when unused.
-      (deps.mcpService ?? { onSessionEvicted: () => {} }) as never,
+      (deps.mcpService ?? stub) as never,
       (deps.externalApiKeyService ?? stub) as never,
       fakeAuth,
       fakeAuth,

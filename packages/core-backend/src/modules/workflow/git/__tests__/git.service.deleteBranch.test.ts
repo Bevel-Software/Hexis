@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -159,7 +160,7 @@ describe('GitService.deleteBranch — authorship + remote delete', () => {
     return new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
     );
   }
 
@@ -263,7 +264,7 @@ describe('GitService.deleteBranch — authorship + remote delete', () => {
     return new GitService(
       stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
       new WorkflowHooks(),
-      'knowledge-base',
+      testKbContext(),
       undefined,
       ac,
     );

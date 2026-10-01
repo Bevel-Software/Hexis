@@ -7,8 +7,11 @@ import {
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
 import { type WorkspaceService } from '../../workspace/workspace.service.js';
+import type { IAccessControl } from '../../access/access-control.interface.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { JoinRequestsService } from '../join-requests.service.js';
+import { folderTarget } from '../../access/access-requests.contract.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * The derived lifecycle: a join request is open exactly while its branch's
@@ -43,7 +46,7 @@ function cr(over: Partial<ChangeRequest> = {}): ChangeRequest {
 }
 
 /** `byRef[ref]` is the access.md content at that ref (undefined ⇒ absent). */
-function makeHarness(byRef: Record<string, string>) {
+function makeHarness(byRef: Record<string, string>, holds: Record<string, unknown> = {}) {
   const workspaceService = {
     ensureRemotesFetched: vi.fn(async () => undefined),
     readFileAtRef: vi.fn(async (_ws: string, ref: string, path: string) =>
@@ -54,7 +57,21 @@ function makeHarness(byRef: Record<string, string>) {
     rejectChangeRequest: vi.fn(async () => ({ number: 7, state: 'closed' })),
     deleteBranch: vi.fn(async () => undefined),
   } as unknown as IWorkflowService;
-  return { svc: new JoinRequestsService(workspaceService, workflow), workflow, workspaceService };
+  // Nobody holds anything by default: every proposal stands on the file diff
+  // alone, which is what these cases are about.
+  const accessControl = {
+    canRead: vi.fn(async () => false),
+    canWrite: vi.fn(async () => false),
+    canOwner: vi.fn(async () => false),
+    canDownload: vi.fn(async () => false),
+    ...holds,
+  } as unknown as IAccessControl;
+  return {
+    svc: new JoinRequestsService(workspaceService, workflow, testKbContext(), accessControl),
+    workflow,
+    workspaceService,
+    accessControl,
+  };
 }
 
 const refs = (branchMd: string | undefined, defaultMd = DEFAULT_MD) => ({
@@ -65,7 +82,7 @@ const refs = (branchMd: string | undefined, defaultMd = DEFAULT_MD) => ({
 describe('JoinRequestsService.list', () => {
   it('reports a request with its pending proposals, and leaves it open', async () => {
     const h = makeHarness(refs(PROPOSING_MD));
-    const out = await h.svc.list('GTM', FOLDER, [cr()], ACTOR);
+    const out = await h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR);
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({ number: 7, requesterName: 'Ali Baba' });
     expect(out[0].proposals.map((p) => p.label)).toEqual(['Ali Baba']);
@@ -75,7 +92,7 @@ describe('JoinRequestsService.list', () => {
   it('SETTLES a request whose proposals have all landed: closes it, deletes the branch, omits it', async () => {
     // The grant is on the default branch now, so the branch adds nothing.
     const h = makeHarness(refs(PROPOSING_MD, PROPOSING_MD));
-    const out = await h.svc.list('GTM', FOLDER, [cr()], ACTOR);
+    const out = await h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR);
     expect(out).toEqual([]);
     expect(h.workflow.rejectChangeRequest).toHaveBeenCalledWith(
       7,
@@ -113,7 +130,7 @@ describe('JoinRequestsService.list', () => {
       new Error('gh down'),
     );
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    await expect(h.svc.list('GTM', FOLDER, [cr()], ACTOR)).resolves.toEqual([]);
+    await expect(h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR)).resolves.toEqual([]);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
@@ -124,7 +141,7 @@ describe('JoinRequestsService.list', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     // The request still settles (omitted from the list) — the leftover branch
     // is cosmetic, and the failure is logged rather than swallowed.
-    await expect(h.svc.list('GTM', FOLDER, [cr()], ACTOR)).resolves.toEqual([]);
+    await expect(h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR)).resolves.toEqual([]);
     expect(h.workflow.rejectChangeRequest).toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('could not delete'));
     warn.mockRestore();
@@ -141,10 +158,10 @@ describe('JoinRequestsService.list', () => {
       [`origin/${DEFAULT_BRANCH}`]: DEFAULT_MD,
       [`origin/${joinBranchFor(ALI, 'Finance!')}`]: DEFAULT_MD,
     });
-    await expect(h.svc.list('finance', 'Plugins/finance', [other], ACTOR)).resolves.toEqual([]);
+    await expect(h.svc.list('finance', folderTarget('Plugins/finance'), [other], ACTOR)).resolves.toEqual([]);
     expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
     expect(h.workflow.deleteBranch).not.toHaveBeenCalled();
-    await expect(h.svc.reconcile('finance', 'Plugins/finance', other, ACTOR)).resolves.toBe(false);
+    await expect(h.svc.reconcile('finance', folderTarget('Plugins/finance'), other, ACTOR)).resolves.toBe(false);
     expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
   });
 });
@@ -152,21 +169,21 @@ describe('JoinRequestsService.list', () => {
 describe('JoinRequestsService.reconcile', () => {
   it('settles and reports true once nothing is pending', async () => {
     const h = makeHarness(refs(PROPOSING_MD, PROPOSING_MD));
-    await expect(h.svc.reconcile('GTM', FOLDER, cr(), ACTOR)).resolves.toBe(true);
+    await expect(h.svc.reconcile('GTM', folderTarget(FOLDER), cr(), ACTOR)).resolves.toBe(true);
     expect(h.workflow.rejectChangeRequest).toHaveBeenCalled();
     expect(h.workflow.deleteBranch).toHaveBeenCalled();
   });
 
   it('leaves a request alone while proposals remain', async () => {
     const h = makeHarness(refs(PROPOSING_MD));
-    await expect(h.svc.reconcile('GTM', FOLDER, cr(), ACTOR)).resolves.toBe(false);
+    await expect(h.svc.reconcile('GTM', folderTarget(FOLDER), cr(), ACTOR)).resolves.toBe(false);
     expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
   });
 
   it('refuses a change request that is not this plugin\'s join branch', async () => {
     const h = makeHarness(refs(PROPOSING_MD, PROPOSING_MD));
     await expect(
-      h.svc.reconcile('GTM', FOLDER, cr({ branch: 'ali/some-draft' }), ACTOR),
+      h.svc.reconcile('GTM', folderTarget(FOLDER), cr({ branch: 'ali/some-draft' }), ACTOR),
     ).resolves.toBe(false);
     expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
   });

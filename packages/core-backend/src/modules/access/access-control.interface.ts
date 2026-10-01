@@ -67,7 +67,27 @@ export type GrantPrincipal =
  * returns it, and payload consumers fall back to `roles` (all treated as
  * roles) when absent.
  */
-export type ResolvedPrincipal = { name: string; kind: 'role' | 'group' };
+export type ResolvedPrincipal = { name: string; kind: 'role' | 'group' | 'plugin' };
+
+/**
+ * The principals holding ONE verb at one path, in the shape every `eligible*`
+ * lookup answers in: the kinded collectives, the same names with their kind
+ * erased (for the name-only consumers), and the directly granted people.
+ */
+export type HolderList = {
+  principals?: ResolvedPrincipal[];
+  roles: string[];
+  users: { name: string; email: string }[];
+};
+
+/** Who can open and who can edit one path — the two verbs a move compares. */
+export type PathHolders = { read: HolderList; write: HolderList };
+
+/**
+ * One file's holders where it is now and where a move would put it — see
+ * {@link IAccessControl.prospectiveHolders}.
+ */
+export type ProspectiveHolders = { before: PathHolders; after: PathHolders };
 
 /**
  * Per-verb sources of a principal's access on a target. Only verbs the principal
@@ -77,6 +97,74 @@ export type ResolvedPrincipal = { name: string; kind: 'role' | 'group' };
  */
 export type GrantSources = Partial<Record<'read' | 'write' | 'download' | 'owner', VerbSources>>;
 
+/**
+ * ONE place a principal is DENIED a verb — the mirror of {@link GrantSource},
+ * over the same two editable locations: `direct` is a `deny` written in the
+ * target's OWN access file (a restriction made HERE), `ancestor` one written in
+ * a parent folder's `access.md` at `path`.
+ *
+ * A denial is a first-class entry, not the absence of a grant: it is what
+ * "restrict just this folder" writes, and the share dialog has to render it —
+ * otherwise a principal whose only entry here is a denial reads as ungoverned
+ * by this target and drops out of its "on this folder" list.
+ */
+export type DenialSource = GrantSource;
+
+/**
+ * EVERY scope that DENIES a principal one verb, ordered **closest-first**, up
+ * to (but not including) a closer own GRANT — which beats a farther deny under
+ * closest-wins and makes it dead. `[0]` is the effective denial. Only verbs the
+ * principal is actually denied appear; a verb with no denial is omitted.
+ *
+ * Deliberately a SEPARATE map from {@link GrantSources} rather than extra
+ * entries in it: every existing reader of `GrantSources` means "where their
+ * access comes from" and filters on `direct` / `ancestor` with no polarity
+ * check, so a denial smuggled in there would be read as a grant.
+ */
+export type DenialSources = Partial<
+  Record<'read' | 'write' | 'download' | 'owner', DenialSource[]>
+>;
+
+/**
+ * Where one verdict was decided, repo-relative: a folder's rules (its
+ * `access.md`; `''` is the repo root) or a file's own frontmatter.
+ * `inherited` is true when that place is not the target's own — an ancestor
+ * folder's rules — and false for the target's own frontmatter or, for a folder
+ * target, its own `access.md`.
+ */
+export type AccessDecisionSource = {
+  kind: 'folder' | 'frontmatter';
+  path: string;
+  inherited: boolean;
+};
+
+/**
+ * ONE caller's verdict on one verb, with its reason — what `canRead` /
+ * `canWrite` / `canDownload` / `canOwner` answer, explained. `source` is null
+ * when no access rule decided it: the admin rescue on `access.md` /
+ * `roles.yaml`, a machine-owned file, or default-deny (nothing grants it).
+ * `via` names the tier that matched and `principal` the display name of the
+ * group, role or plugin principal it matched on (the caller's own email for
+ * `person`, `everyone` for the built-in). `admin-floor` is Admin's write at
+ * the repository root, which no rule there can take away; its source is the
+ * root's rules, or null when the root has none.
+ */
+export interface AccessDecision {
+  allowed: boolean;
+  source: AccessDecisionSource | null;
+  via:
+    | 'person'
+    | 'group'
+    | 'role'
+    | 'plugin'
+    | 'everyone'
+    | 'admin-rescue'
+    | 'admin-floor'
+    | 'machine-owned'
+    | 'default-deny';
+  principal: string | null;
+}
+
 export interface IAccessControl {
   /** True iff `userEmail` has `write` on `relativePath` per the current access tree. */
   canWrite(workspaceId: string, userEmail: string, relativePath: string): Promise<boolean>;
@@ -84,13 +172,13 @@ export interface IAccessControl {
   /**
    * True iff `userEmail` may READ `relativePath` per the current access tree.
    *
-   * `read` is **default-deny**: a path with no effective `read:`, `write:`, or
-   * `owner:` grant is not readable. To make content public, declare the
-   * built-in role `everyone` under `read:`. Resolution is closeness-first then
-   * tier (email > role > everyone within a scope), folding `write:`/`owner:` in
-   * as implicit read grants (grant-only — a write/owner denial never strips a
-   * read grant). No admin rescue. The file viewer, embed surface, and the
-   * agent's read tools all gate on this.
+   * `read` is **default-deny**: a path with no effective `read:`, `write:`,
+   * `download:` or `owner:` grant is not readable. To make content public,
+   * declare the built-in role `everyone` under `read:`. Resolution is
+   * closeness-first then tier (email > role > everyone within a scope), folding
+   * `write:`/`download:`/`owner:` in as implicit read grants (grant-only — a
+   * write/download/owner denial never strips a read grant). No admin rescue.
+   * The file viewer, embed surface, and the agent's read tools all gate on this.
    */
   canRead(workspaceId: string, userEmail: string, relativePath: string): Promise<boolean>;
 
@@ -110,6 +198,37 @@ export interface IAccessControl {
   ): Promise<Map<string, boolean>>;
 
   /**
+   * Batched read for a GROUP rather than a person: what being in `group`
+   * (a `groups.yaml` display name, or the active group source's) confers on
+   * each path, through the same closeness-first walk `canReadBatch` runs —
+   * the group's own key, every role that lists the group, every plugin
+   * principal whose roster the group is part of, and the public keys every
+   * caller holds. No person is involved, so nothing a member holds for a
+   * reason of their own (a direct `Name <email>` grant, another role,
+   * deployment ownership) counts, and no admin rescue applies.
+   *
+   * `null` when no such group exists — distinct from a map of `false`s,
+   * which is a real group that can read none of the paths.
+   */
+  canReadAsGroupBatch(
+    workspaceId: string,
+    group: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean> | null>;
+
+  /**
+   * Batched read for EVERYONE — what a signed-in person who is in no group
+   * and holds no role reads on each path, through the same walk. This is
+   * the built-in `everyone` principal's own verdict: a `read: everyone`
+   * grant (or a public plugin's) at the closest scope that says anything,
+   * a `deny everyone` there withholds. Nothing person-shaped counts — no
+   * email entry, no role, no admin rescue — so the answer is what the
+   * organisation as a whole can use, which is what the "Everyone" lens
+   * lists.
+   */
+  canReadAsEveryoneBatch(workspaceId: string, relativePaths: string[]): Promise<Map<string, boolean>>;
+
+  /**
    * Batched canWrite for PR diffs and commit-time gating. Returns a map keyed
    * by the input paths, with `true` / `false` for each. Reuses one config
    * load per call.
@@ -127,7 +246,9 @@ export interface IAccessControl {
    * `access.md`'s `download:` list. Independent of `write` — granting
    * write does NOT imply download, mirroring the way the verbs are
    * separately listed in access.md. An `owner:` grant DOES imply download
-   * (owner is a superset of write + download).
+   * (owner is a superset of write + download). The reverse fold holds one
+   * level down: a `download:` grant confers `read` (see `canRead`), so a
+   * download-only grantee can open the file as well as save it.
    *
    * No admin override (unlike `canWrite` on `access.md` / `roles.yaml`,
    * which admin-rescues). Admins are only granted download if an
@@ -199,11 +320,14 @@ export interface IAccessControl {
   /**
    * Answers the file viewer's "who can see this?" affordance. `restricted` is
    * false only when `read: everyone` applies without an effective user-level
-   * denial — the node is readable by all signed-in users, and the role/user
-   * lists are empty because their content would be meaningless. When
-   * `restricted` is true the lists name the principals (roles + direct users)
-   * that may read, with owners folded in (an `owner:` grant confers read). The
-   * lists may be empty for a default-denied path with no grants.
+   * denial — the node is readable by all signed-in users. The lists name the
+   * principals (roles + direct users) granted read whether or not the node
+   * is public, with writers, downloaders and owners folded in (a `write:`,
+   * `download:` or `owner:` grant confers read); on a public node they
+   * include what makes it public. `publicVia` names the
+   * PUBLIC plugin principals granted read here — principals every signed-in
+   * user holds — so a caller can tell public-through-a-plugin from a literal
+   * `everyone` grant. The lists may be empty for a default-denied path.
    */
   eligibleReaders(
     workspaceId: string,
@@ -213,6 +337,7 @@ export interface IAccessControl {
     principals?: ResolvedPrincipal[];
     roles: string[];
     users: { name: string; email: string }[];
+    publicVia?: string[];
   }>;
 
   /**
@@ -231,6 +356,27 @@ export interface IAccessControl {
     roles: string[];
     users: { name: string; email: string }[];
   }>;
+
+  /**
+   * Who can open and who can edit one file where it IS, and where a move
+   * would put it. `toPath` names a path that does not exist yet — the point
+   * of the call is to answer before the move happens — so the resolution
+   * layers the file's OWN rules (its frontmatter, read from `fromPath`,
+   * which travels with the bytes) over the destination's folder chain.
+   *
+   * Writes nothing and moves nothing. The move confirmation diffs the two
+   * sides to name who loses and who gains access.
+   *
+   * A FILE question only: a `fromPath` that is a directory is refused with a
+   * 400. A folder's access is its own `access.md` — which moves with it and
+   * governs everything beneath it — so resolving it as a file would name the
+   * wrong principals with the same confidence as the right ones.
+   */
+  prospectiveHolders(
+    workspaceId: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<ProspectiveHolders>;
 
   /**
    * Finite expanded email set for configured users who could approve this path
@@ -292,6 +438,65 @@ export interface IAccessControl {
   ): Promise<GrantSources>;
 
   /**
+   * The polarity twin of {@link grantSources}: per verb, WHERE the principal is
+   * DENIED — a `deny` line in the target's own access file (`direct`) or in a
+   * parent folder's (`ancestor`). Same closeness-first walk, same `tokenMatch`
+   * pinning, same omit-what-does-not-apply shape.
+   *
+   * The share dialog needs this to say WHY a verb is off. "Restricted here" is a
+   * fact about this target that only a denial entry carries; without it, a
+   * principal restricted here is indistinguishable from one never granted, and
+   * the dialog cannot offer to lift the restriction.
+   *
+   * Optional so existing test doubles stay valid; the real service implements it.
+   */
+  denialSources?(
+    workspaceId: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+    principal: GrantPrincipal,
+    opts?: { tokenMatch?: 'exact' | 'name' },
+  ): Promise<DenialSources>;
+
+  /**
+   * Every principal DENIED some verb by the target's OWN access file — the
+   * folder's `access.md`, or a file node's own frontmatter.
+   *
+   * The eligible lists cannot report these, by construction: a principal denied
+   * every verb here holds nothing and appears in none of them, yet the
+   * restriction IS an entry on this target and the row it belongs to has to stay
+   * listed. Shaped like an eligible list so the view can union it in without a
+   * second code path.
+   *
+   * Only the target's OWN scope counts. A denial inherited from a parent is
+   * reported per-verb by {@link denialSources} against a row that already
+   * exists; it does not, by itself, put a new row on this target.
+   *
+   * Optional so existing test doubles stay valid; the real service implements it.
+   */
+  locallyDeniedPrincipals?(
+    workspaceId: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+  ): Promise<{ principals: ResolvedPrincipal[]; users: { name: string; email: string }[] }>;
+
+  /**
+   * The caller's own verdict on each verb at a target, and what decided it —
+   * computed by the SAME walk `canRead` / `canWrite` / `canDownload` /
+   * `canOwner` run (their booleans are its `allowed`), so an explanation never
+   * disagrees with an operation. `kind` only decides which scope counts as the
+   * target's own (`inherited: false`).
+   *
+   * Optional so existing test doubles stay valid; the real service implements it.
+   */
+  explainAccess?(
+    workspaceId: string,
+    userEmail: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+  ): Promise<Record<'read' | 'write' | 'download' | 'owner', AccessDecision>>;
+
+  /**
    * Drop a workspace's cached model. Call after operations that mutate
    * `roles.yaml` / `access.md` (commit, push, pull) or change which copy of
    * those files the working tree sees (branch switch).
@@ -300,7 +505,7 @@ export interface IAccessControl {
 
   /**
    * Validate a candidate `roles.yaml` text against the resolver's OWN loader,
-   * WITHOUT writing it. The single safety gate behind the admin Roles & Members
+   * WITHOUT writing it. The single safety gate behind the admin App roles
    * surface: `roles.yaml` has no admin-rescue and `loadModel` hard-throws on a
    * parse failure (which `isAdmin` swallows into `false` for everyone), so a
    * malformed write would be a permanent, app-wide, in-app-unrecoverable admin
@@ -323,9 +528,17 @@ export interface IAccessControl {
    * (named). The login-only `users` table is unioned in by the caller — this
    * method covers the KB-canonical people the users table misses.
    */
-  kbPrincipals(
-    workspaceId: string,
-  ): Promise<{ roles: string[]; groups: string[]; people: { name: string; email: string }[] }>;
+  kbPrincipals(workspaceId: string): Promise<{
+    roles: string[];
+    groups: string[];
+    /**
+     * Plugins whose `plugin/<Name>/<verb>` principals exist (personal folders
+     * excluded): the display name and the repo-relative folder, so a caller
+     * can apply the discoverability verdict (`canRead` on `<folder>/access.md`).
+     */
+    plugins: { name: string; folder: string }[];
+    people: { name: string; email: string }[];
+  }>;
 
   /**
    * Reverse-lookup an email by its SHA-256 hash (per `hashEmail` semantics)
@@ -397,6 +610,44 @@ export interface IAccessControl {
     ref: string,
     relativePath: string,
   ): Promise<{ roles: string[]; users: { name: string; email: string }[] } | null>;
+
+  /**
+   * Whether `userEmail` holds the Admin write floor at the repository root —
+   * a member of the Admin role or the deployment owner — in the working-tree
+   * model. The share dialog asks before restricting a PERSON's write at the
+   * root: the floor keeps it, so the deny could only be rolled back.
+   */
+  holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean>;
+
+  /**
+   * Whether `userEmail` may put a misplaced platform file back at
+   * `destinationRelativePath` — the ONE write that is allowed to land on a
+   * destination whose own rules would refuse it.
+   *
+   * A repository whose `access.md` or `roles.yaml` was moved out of the root
+   * is one nobody can repair through the app: the root then resolves to
+   * default-deny and the move that would fix it is the move the gate refuses.
+   * So an admin (the `Admin` role or the deployment owner) may move a file
+   * named `roles.yaml`, `.bevelignore` or the agent guide into the repository
+   * root, and a file named `access.md` into a folder that has none.
+   *
+   * Only where the file is MISSING: a destination that already holds it is
+   * false, because a move is a rename on disk and landing on the file would
+   * replace the very rules the exception exists to bring back.
+   *
+   * Narrow on purpose, and the narrowness lives here rather than in the
+   * caller: false for any other path, for any other destination, for a
+   * destination spelled with `..`, and for anyone who is not an admin. It
+   * grants no write anywhere else, and it is asked only about where a move
+   * LANDS — never about what a move takes away, which is why a caller that
+   * could take one away (the move route, the lock gate) also checks the
+   * SOURCE with `isPlatformRestoreShape`.
+   */
+  canRestorePlatformFile(
+    workspaceId: string,
+    userEmail: string,
+    destinationRelativePath: string,
+  ): Promise<boolean>;
 
   /**
    * Batched: resolve eligible writers + expanded emails for a list of paths

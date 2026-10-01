@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { AuthUser, Change } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
@@ -11,6 +12,7 @@ import { WorkflowEventBus } from '../event-bus.js';
 import { WorkflowService } from '../workflow.service.js';
 import type { Database } from '../../database/connection.js';
 import { WorkflowValidationError } from '../../../shared/domain-errors.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
 /**
  * `commitFileWhileLocked` (autosave checkpoint) has subtler semantics
@@ -83,6 +85,7 @@ function makeGit(overrides: Partial<{
     }),
     pull: vi.fn().mockImplementation(async () => {
       if (pullBehavior === 'fail') throw new Error('git pull failed: merge conflict');
+      return { treeChanged: true };
     }),
   } as unknown as GitService;
 }
@@ -111,7 +114,8 @@ function makeFacade(git: GitService, locks: FileLockService, events: WorkflowEve
     {} as IAccessControl,
     locks,
     pending,
-    'knowledge-base',
+    testKbContext(),
+    openChangeGate(),
     events,
   );
 }

@@ -6,6 +6,7 @@ import type {
 import type { ILlmUsageMeter } from '../modules/tool-auth/llm-usage-meter.js';
 import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { IErasureParticipant } from '../modules/auth/account-erasure.service.js';
+import type { IAccountAdmission } from '../modules/auth/account-admission.js';
 import type { OnServerStart } from '../modules/workspace/startup/on-server-start.js';
 
 /**
@@ -98,6 +99,24 @@ export interface CorePorts {
    * contract each step signs up to). Core default: `[]`.
    */
   kbStartupSteps?: readonly OnServerStart[];
+  /**
+   * Mirror this composition's branch model and knowledge-base layout onto the
+   * shared package's PROCESS-WIDE live bindings (`DEFAULT_BRANCH`,
+   * `PLUGINS_DIR`, …), for an overlay that still reads them. Core itself
+   * reads only `CoreServices.kb`. Default true, so an overlay behaves as it
+   * did; a host that serves several knowledge bases in one process passes
+   * false, since there is no single value to put there.
+   */
+  mirrorSharedBindings?: boolean;
+  /**
+   * Whether a NEW account may be provisioned, asked before the row is
+   * inserted on every path that creates one (a first SSO sign-in, an admin
+   * creating an account, the owner's bootstrap sign-in, an embed identity).
+   * Core default: everyone is admitted. A host that sells seats answers
+   * from its plan; a refusal carries the port's own words to the person or
+   * admin who asked. See `modules/auth/account-admission.ts`.
+   */
+  accountAdmission?: IAccountAdmission;
 }
 
 /**

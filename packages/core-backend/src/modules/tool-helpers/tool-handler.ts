@@ -1,5 +1,10 @@
 import type { Request, Response } from 'express';
-import { hasHttpStatus, type ToolHandler } from './tool.contract.js';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('tools');
+import { hasHttpStatus, ToolError, type ToolHandler } from './tool.contract.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { domainErrorBody } from '../../shared/http-errors.js';
 import type { ResolveToolContext } from './tool-context.js';
 import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
 
@@ -71,17 +76,30 @@ export function createToolHandlerFactory(resolve: ResolveToolContext) {
         // A handler can throw after streaming has begun (headers committed); in
         // that case we can only end the stream, not rewrite the status.
         if (res.headersSent) {
-          if (hasHttpStatus(err)) console.error('[tools] handler failed post-stream:', err.message);
-          else console.error('[tools] handler failed post-stream:', err instanceof Error ? err.message : err);
+          if (hasHttpStatus(err)) log.error('handler failed post-stream:', { detail: err.message });
+          else log.error('handler failed post-stream:', { err });
           res.end();
           return;
         }
         if (hasHttpStatus(err)) {
-          res.status(err.status).json({ error: err.message });
+          // Structured details ride beside `error`, never over it. A domain
+          // refusal brings its own payload exactly as it does on the HTTP
+          // routes — most subclasses carry a `kind` and whatever that kind
+          // brings with it, others carry their own keys (`AccessConfigError`
+          // carries an `accessConfigErrors` list; see each subclass for its
+          // payload) — so a tool caller
+          // switching on `branch-not-found` vs `remote-branch-gone` does not
+          // have to read the prose to tell them apart.
+          if (err instanceof WorkflowDomainError) {
+            res.status(err.status).json(domainErrorBody(err));
+            return;
+          }
+          const details = err instanceof ToolError ? err.details : undefined;
+          res.status(err.status).json({ ...details, error: err.message });
           return;
         }
         const msg = err instanceof Error ? err.message : 'Unknown error';
-        console.error('[tools] handler failed:', msg);
+        log.error('handler failed:', { detail: msg });
         res.status(500).json({ error: msg });
       }
     };

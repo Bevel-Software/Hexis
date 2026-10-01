@@ -2,6 +2,7 @@ import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createSecretsVaultRoutes } from '../secrets-vault.routes.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * THE OWNER GATE: a tool's shared (admin) secrets — plain values and OAuth
@@ -91,6 +92,7 @@ async function baseUrlAs(email: string): Promise<string> {
   app.use(
     '/api',
     createSecretsVaultRoutes({
+      kb: testKbContext(),
       secretsVault,
       toolManualService,
       accessControl,

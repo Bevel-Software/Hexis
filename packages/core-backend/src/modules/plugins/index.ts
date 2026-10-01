@@ -1,4 +1,4 @@
-export { PluginIndexService, pluginsWorkspaceId } from './plugins.service.js';
+export { PluginIndexService, pluginFolderBelowRoot } from './plugins.service.js';
 export {
   PluginProvisionService,
   PluginProvisionError,
@@ -6,11 +6,34 @@ export {
   personalAccessMd,
 } from './plugin-provision.service.js';
 export { JoinRequestsService, type JoinRequest } from './join-requests.service.js';
+export {
+  PluginJoinRequestJobs,
+  JoinRequestNotReadyError,
+  type JoinRequestJobsDeps,
+  type JoinRequestTarget,
+} from './join-request-jobs.service.js';
+export {
+  DbJoinRequestStore,
+  type JoinRequestRecord,
+  type JoinRequestStatus,
+  type JoinRequestStore,
+} from './join-request-records.store.js';
+export { PluginLinkIndex, type LinkMembership, type PluginLinks } from './plugin-links.js';
+export { PluginLinksService, PluginLinkError } from './plugin-links.service.js';
+export { PluginRenameService, PluginRenameError, renamePluginPrincipalInText } from './plugin-rename.service.js';
+export { compileMarketplace, type VirtualTree, type CompileInput, type MarketplaceOptions } from './compile/compile-marketplace.js';
+export { MarketplaceCompilerService, type CompileAudience } from './compile/marketplace-compiler.service.js';
+export type { PluginSource, PluginSourceWalk, DiscoveredPlugin, Discovery } from './discovery/plugin-source.js';
+export { KbPluginSource } from './discovery/kb-plugin-source.js';
+export { DEFAULT_REGISTRY_PATH } from './discovery/bundle-dialect/bundle.source.js';
 export { pendingProposals, type JoinProposal } from './join-proposals.js';
-export { createPluginsRoutes } from './plugins.routes.js';
+export { createPluginsRoutes, createPluginCreationRoutes } from './plugins.routes.js';
+export { createTeamsRoutes, type TeamAccess } from './teams.routes.js';
+export { registerPluginsTools } from './plugins.tools.js';
 export type {
   IPluginIndexService,
   PluginCatalogEntry,
+  PluginMembership,
   PluginSummary,
   ResolvedPrincipals,
   ResolvedReaders,

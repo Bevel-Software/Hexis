@@ -8,7 +8,13 @@ import {
   AlertTriangle,
   RefreshCw,
 } from 'lucide-react';
-import { protectedBranchDisplayName, isProtectedBranch, DEFAULT_BRANCH, type BranchInfo } from '@bevel-software/platform-shared';
+import {
+  protectedBranchDisplayName,
+  isProtectedBranch,
+  currentBranchModel,
+  DEFAULT_BRANCH,
+  type BranchInfo,
+} from '@bevel-software/platform-shared';
 import { useGit } from '../state/git.context';
 import { UnifiedDiffView } from './UnifiedDiffView';
 import { friendlyGitError } from '../services/error-messages';
@@ -84,7 +90,7 @@ function defaultFromForCurrent(
   // On a protected branch, prefer the default branch as the comparison base so
   // the picker opens on the canonical "official vs official" diff; if we're
   // already on the default branch, any other protected branch works.
-  if (isProtectedBranch(currentBranch)) {
+  if (isProtectedBranch(currentBranchModel(), currentBranch)) {
     if (currentBranch !== DEFAULT_BRANCH && others.some((b) => b.name === DEFAULT_BRANCH)) {
       return DEFAULT_BRANCH;
     }
@@ -313,7 +319,7 @@ function BranchPicker({ label, value, branches, onChange }: BranchPickerProps) {
   const valueIsProtected = !!value && (
     branches.find((b) => b.name === value)?.isProtected ?? false
   );
-  const valueDisplay = value ? protectedBranchDisplayName(value) ?? value : 'Select…';
+  const valueDisplay = value ? protectedBranchDisplayName(currentBranchModel(), value) ?? value : 'Select…';
 
   return (
     <div ref={ref} className="relative flex-1 min-w-0">
@@ -341,7 +347,7 @@ function BranchPicker({ label, value, branches, onChange }: BranchPickerProps) {
             <div className="px-3 py-2 text-xs text-ink-muted">No branches.</div>
           )}
           {branches.map((b) => {
-            const display = protectedBranchDisplayName(b.name);
+            const display = protectedBranchDisplayName(currentBranchModel(), b.name);
             const isSelected = b.name === value;
             return (
               <button

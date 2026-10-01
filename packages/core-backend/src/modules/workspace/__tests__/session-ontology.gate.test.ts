@@ -11,8 +11,10 @@ import type { ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ISessionOntologyService, OperationDecision } from '../../workflow/session-ontology.service.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ontologyOf } from '../../../shared/kb-layout.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const KB = 'knowledge-base';
+const kbContext = testKbContext({ kbDirName: KB });
 const P_FILE = 'KnowledgeBase/Product/Knowledge/Foo.md';
 const PL_FILE = 'KnowledgeBase/Platform/Knowledge/Bar.md';
 const NEUTRAL = 'access.md';
@@ -28,7 +30,7 @@ function makeFakeService(): ISessionOntologyService {
   const setFor = (s: string) => touched.get(s) ?? new Set<string>();
   return {
     async checkOperation(sessionId, wsPath, isWrite): Promise<OperationDecision> {
-      const ont = ontologyOf(wsPath, KB);
+      const ont = ontologyOf(wsPath, kbContext.layout, KB);
       const set = setFor(sessionId);
       if (ont === null) return { allow: true, touched: [...set].sort() };
       if (isWrite) {
@@ -63,7 +65,7 @@ function makeFakeService(): ISessionOntologyService {
 function makeGate(): SessionOntologyGate {
   const service = makeFakeService();
   const hooks = new WorkflowHooks();
-  return { service, enabled: true, kbDirName: KB, recoveryBotEmail: RECOVERY_EMAIL, hooks };
+  return { service, enabled: true, kb: kbContext, recoveryBotEmail: RECOVERY_EMAIL, hooks };
 }
 
 function ctx(overrides: Partial<ToolContext> = {}): ToolContext {

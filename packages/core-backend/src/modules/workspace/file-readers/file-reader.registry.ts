@@ -12,7 +12,7 @@ import { extractPptx } from './extract-pptx.js';
 import { extractXlsx } from './extract-xlsx.js';
 import { FileReaderRegistry } from './file-reader.js';
 import { ImageReader } from './image-reader.js';
-import { LegacyOfficeReader, TextReader } from './text-reader.js';
+import { BinaryReader, LegacyOfficeReader, TextReader } from './text-reader.js';
 
 /**
  * THE registry of file readers — the one place that says which reader owns
@@ -39,6 +39,14 @@ export function createFileReaderRegistry(docExtract: DocExtractService): FileRea
       new EmailReader('.msg', extractMsg, docExtract),
       new ImageReader(),
       new LegacyOfficeReader(),
+      // Bytes no text tool may write: the image formats read_file does not
+      // show as pictures, archives, and media/fonts/executables.
+      new BinaryReader(['.bmp', '.ico', '.tif', '.tiff', '.heic', '.avif'], 'image'),
+      new BinaryReader(['.zip', '.gz', '.tgz', '.tar', '.7z', '.rar'], 'archive'),
+      new BinaryReader(
+        ['.mp3', '.wav', '.ogg', '.m4a', '.mp4', '.mov', '.webm', '.woff', '.woff2', '.ttf', '.otf', '.wasm', '.exe', '.dll', '.so', '.bin'],
+        'binary',
+      ),
     ],
     new TextReader(),
   );

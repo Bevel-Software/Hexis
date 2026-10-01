@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -86,7 +87,7 @@ describe('GitService.commitFile with bytes beside the repository', () => {
 
   it('throws instead of returning null when the file exists at the workspace root and not in the clone', async () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), KB);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), testKbContext({ kbDirName: KB }));
     // The prefix-less write the agent made: beside the clone, not inside it.
     await fs.mkdir(path.join(workspaceDir, 'KnowledgeBase/Reviews'), { recursive: true });
     await fs.writeFile(path.join(workspaceDir, 'KnowledgeBase/Reviews/PR-12.html'), '<p>review</p>');
@@ -103,19 +104,19 @@ describe('GitService.commitFile with bytes beside the repository', () => {
 
   it('still returns null for a clean, committed path (the honest no-op)', async () => {
     const { workspaceDir } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), KB);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), testKbContext({ kbDirName: KB }));
     expect(await svc.commitFile(workspaceId, USER, `${KB}/Knowledge/A.md`)).toBeNull();
   });
 
   it('still returns null for a path that exists nowhere (a queued re-apply of a committed deletion)', async () => {
     const { workspaceDir } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), KB);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), testKbContext({ kbDirName: KB }));
     expect(await svc.commitFile(workspaceId, USER, `${KB}/Knowledge/Gone.md`)).toBeNull();
   });
 
   it('still returns null for a repo-relative path that is clean inside the clone (the form internal callers pass)', async () => {
     const { workspaceDir } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), KB);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), testKbContext({ kbDirName: KB }));
     expect(await svc.commitFile(workspaceId, USER, 'Knowledge/A.md')).toBeNull();
   });
 
@@ -124,7 +125,7 @@ describe('GitService.commitFile with bytes beside the repository', () => {
     // a repo-relative caller's no-op stays honest whatever else sits beside
     // the clone under the same name.
     const { workspaceDir } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), KB);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), testKbContext({ kbDirName: KB }));
     await fs.mkdir(path.join(workspaceDir, 'Knowledge'), { recursive: true });
     await fs.writeFile(path.join(workspaceDir, 'Knowledge/A.md'), 'a copy beside the clone\n');
     expect(await svc.commitFile(workspaceId, USER, 'Knowledge/A.md')).toBeNull();
@@ -137,7 +138,7 @@ describe('GitService.commitFile with bytes beside the repository', () => {
     // toggles read-only, so the stat below still succeeds): nothing to prove.
     if (process.getuid?.() === 0 || process.platform === 'win32') return;
     const { workspaceDir } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), KB);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), testKbContext({ kbDirName: KB }));
     const strayDir = path.join(workspaceDir, 'KnowledgeBase');
     await fs.mkdir(strayDir, { recursive: true });
     await fs.writeFile(path.join(strayDir, 'PR-12.html'), 'x');
@@ -152,7 +153,7 @@ describe('GitService.commitFile with bytes beside the repository', () => {
 
   it('still commits a prefixed path inside the clone', async () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
-    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), KB);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), testKbContext({ kbDirName: KB }));
     await fs.writeFile(path.join(repo, 'Knowledge/B.md'), 'b\n');
     const committed = await svc.commitFile(workspaceId, USER, `${KB}/Knowledge/B.md`);
     expect(committed).not.toBeNull();

@@ -1,3 +1,5 @@
+import { GIT_TOKEN_ENV, type GitCredentials } from '../../shared/git.contract.js';
+
 /**
  * The git configuration a per-branch workspace clone must carry: the tracking
  * config that pins its branch to exactly ONE upstream ref, and the credential
@@ -90,21 +92,22 @@ export function cloneTrackingConfigArgs(branch: string): string[][] {
 
 /**
  * The inline credential helper a workspace clone authenticates its remote
- * operations with, or null when the deployment has no git token configured.
+ * operations with, or null when the credentials carry no token.
  *
  * The snippet reads `$GITHUB_TOKEN` at CALL time, so the secret itself never
  * enters argv, the clone's `.git/config`, or any error message quoting either.
- * `GITHUB_TOKEN` is the normalised name — `CoreConfig` collapses `GIT_TOKEN` /
- * `GH_TOKEN` onto it at boot, and `DeploymentSettingsService.syncGitTokenEnv`
- * publishes a token supplied through the setup screen to the same place — so
- * this one name covers every way a token can arrive.
+ * The git runner puts the token there for every call it makes
+ * (`GIT_TOKEN_ENV` in `shared/git.contract.ts`), whichever way it arrived:
+ * the environment at boot, or the setup screen afterwards. Nothing else
+ * reads that variable, and nothing writes it into this process.
  *
  * The username is provider-specific (GitHub `x-access-token`, GitLab `oauth2`,
  * Bitbucket `x-token-auth`); the token is always the Basic-auth password,
  * which every major host accepts.
  */
-export function credentialHelperValue(gitUsername: string): string | null {
-  if (!process.env.GITHUB_TOKEN) return null;
+export function credentialHelperValue(credentials: GitCredentials): string | null {
+  if (!credentials.token()) return null;
+  const gitUsername = credentials.username();
   // Interpolated into a shell snippet that git will execute. `CoreConfig` and
   // `DeploymentSettingsService` both reject a username outside this charset
   // before it can get this far, so reaching the throw means an unvalidated
@@ -119,7 +122,7 @@ export function credentialHelperValue(gitUsername: string): string | null {
   // `password=$GITHUB_TOKEN` stays in the snippet, which is what
   // APP_HELPER_VALUE_PATTERN keys on — echo-era helpers stamped by earlier
   // builds still match it and get replaced on the next stamp.
-  return `!f() { printf '%s\\n' "username=${gitUsername}" "password=$GITHUB_TOKEN"; }; f`;
+  return `!f() { printf '%s\\n' "username=${gitUsername}" "password=$${GIT_TOKEN_ENV}"; }; f`;
 }
 
 /**
@@ -135,8 +138,8 @@ export function credentialHelperValue(gitUsername: string): string | null {
  * Empty when no token is configured, matching the un-authenticated clone the
  * rest of the layer already supports.
  */
-export function cloneCredentialArgs(gitUsername: string): string[] {
-  const helper = credentialHelperValue(gitUsername);
+export function cloneCredentialArgs(credentials: GitCredentials): string[] {
+  const helper = credentialHelperValue(credentials);
   return helper ? ['--config', `credential.helper=${helper}`] : [];
 }
 
@@ -165,8 +168,8 @@ export function cloneCredentialArgs(gitUsername: string): string[] {
  */
 const APP_HELPER_VALUE_PATTERN = 'password=\\$GITHUB_TOKEN';
 
-export function cloneCredentialConfigArgs(gitUsername: string): string[][] {
-  const helper = credentialHelperValue(gitUsername);
+export function cloneCredentialConfigArgs(credentials: GitCredentials): string[][] {
+  const helper = credentialHelperValue(credentials);
   // `--replace-all key value pattern` replaces every line MATCHING the
   // pattern with the one value (adding it when none match) and leaves
   // non-matching values — operator helpers — untouched. Same scoping on the

@@ -31,6 +31,9 @@ services:
 
   app:
     image: ghcr.io/bevel-software/hexis:${HEXIS_VERSION:-latest}
+    # Always pull, so a redeploy of `:latest` cannot start whatever build the
+    # host still holds under that tag. See the root docker-compose.yml.
+    pull_policy: always
     # Run node under a real init so PID 1 reaps orphaned git/shell
     # grandchildren; without it they accumulate as zombies until the
     # container's pid limit is hit. See the root docker-compose.yml.
@@ -43,7 +46,6 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - SOURCE_COMMIT
       - GIT_TOKEN
       - GIT_USERNAME
       - JWT_SECRET=${JWT_SECRET}
@@ -63,7 +65,12 @@ services:
       - KB_DIR_NAME
       - DEFAULT_BRANCH
       - PROTECTED_BRANCHES
+      - KB_SYNC_SECRET
+      - KB_KNOWLEDGE_BASE_DIR
+      - KB_SKILLS_DIR
+      - KB_PLUGINS_DIR
       - SECRETS_ENC_KEY=${SECRETS_ENC_KEY}
+      - INTERNAL_TOKEN_SECRET
       - UPDATE_CHECK
       - PUBLIC_BACKEND_URL
       - PUBLIC_FRONTEND_URL

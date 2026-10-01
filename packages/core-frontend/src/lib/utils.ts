@@ -55,6 +55,8 @@ const twMerge = extendTailwindMerge({
         'wait',
         'wait-soft',
         'wait-dot',
+        'urgent',
+        'urgent-soft',
         'danger',
         'danger-soft',
         'mark-del',

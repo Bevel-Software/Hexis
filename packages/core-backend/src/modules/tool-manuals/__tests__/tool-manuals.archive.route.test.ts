@@ -4,12 +4,14 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { createToolManualsAgentRoutes } from '../tool-manuals.routes.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { IToolManualService } from '../tool-manuals.contract.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * `GET /agent/plugins/:folder/archive` — error taxonomy of the plugin-folder
@@ -25,7 +27,7 @@ let httpServer: HttpServer | undefined;
 let root: string;
 let wsDir: string;
 
-async function baseUrl(): Promise<string> {
+async function baseUrl(pluginIndex?: { catalog(): Promise<{ name: string; folders: string[] }[]> }): Promise<string> {
   const app = express();
   const manualAuth: express.RequestHandler = (req, _res, next) => {
     req.toolAuth = { userId: 'u-1' } as never;
@@ -46,7 +48,7 @@ async function baseUrl(): Promise<string> {
       {} as unknown as IToolManualService,
       manualAuth,
       async () => 'ali@example.com',
-      { workspaceService, accessControl, kbDirName: KB },
+      { workspaceService, accessControl, kb: testKbContext({ kbDirName: KB }), disk: new NodeFs(), pluginIndex: pluginIndex as never },
     ),
   );
   httpServer = await new Promise<HttpServer>((resolve) => {
@@ -78,6 +80,24 @@ describe('GET /agent/plugins/:folder/archive', () => {
     const res = await fetch(`${base}/api/agent/plugins/GTM/archive`);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('application/zip');
+  });
+
+  it('zips a plugin nested below the root by its IDENTITY, which the index maps to its folder', async () => {
+    const pluginDir = path.join(wsDir, KB, 'Plugins', 'departments', 'engineering', 'ado');
+    await fs.mkdir(pluginDir, { recursive: true });
+    await fs.writeFile(path.join(pluginDir, 'plugin.bundle.json'), '{"name":"ado"}', 'utf-8');
+    await fs.writeFile(path.join(pluginDir, 'CONVENTIONS.md'), '# conventions', 'utf-8');
+    const base = await baseUrl({
+      catalog: async () => [{ name: 'ado', folders: ['Plugins/departments/engineering/ado'] }],
+    });
+    const res = await fetch(`${base}/api/agent/plugins/ado/archive`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('application/zip');
+    // A name the index does not know either is still an absence.
+    expect((await fetch(`${base}/api/agent/plugins/nope/archive`)).status).toBe(404);
+    // A stray FILE at the root name is not a plugin folder: the identity still resolves.
+    await fs.writeFile(path.join(wsDir, KB, 'Plugins', 'ado'), 'not a folder', 'utf-8');
+    expect((await fetch(`${base}/api/agent/plugins/ado/archive`)).status).toBe(200);
   });
 
   it('404s an absent plugin folder — ENOENT is an absence', async () => {

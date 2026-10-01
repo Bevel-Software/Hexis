@@ -328,19 +328,24 @@ export function claudeInstallUrl(mcpUrl: string, name: string): string {
 }
 
 /**
- * Where ChatGPT keeps its connector settings — the pane whose "Advanced"
- * section holds the Developer mode toggle and, once it is on, the "Create"
- * button for a custom MCP server.
+ * ChatGPT's settings — the root, not a pane inside it.
+ *
+ * This used to point at `#settings/Connectors`, the old "Apps & Connectors"
+ * pane. ChatGPT has since renamed that page Plugins, and people who followed
+ * that link and the old steps could not find their way. A pane anchor names a
+ * page ChatGPT can rename again without notice; the settings root is the one
+ * that survives, and the numbered steps beside the button (see
+ * `AGENT_CLIENTS`) start from exactly there and name both page names.
  *
  * Unlike Claude, ChatGPT publishes no install link: there is no query
- * parameter that prefills a connector's name or URL. So this is a shortcut to
- * the right settings pane and nothing more — the person still types the name
- * and pastes the endpoint, which is why every surface that offers this link
- * shows both right beside it. The settings pane is a hash route, so it takes
- * no parameters and there is nothing to encode.
+ * parameter that prefills a connector's name or URL. So this is a shortcut
+ * into settings and nothing more — the person still types the name and
+ * pastes the endpoint, which is why every surface that offers this link shows
+ * both right beside it. Settings is a hash route, so it takes no parameters
+ * and there is nothing to encode.
  */
 export function chatgptInstallUrl(): string {
-  return 'https://chatgpt.com/#settings/Connectors';
+  return 'https://chatgpt.com/#settings';
 }
 
 /* ------------------------------------------------------------------ *

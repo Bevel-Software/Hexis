@@ -7,6 +7,24 @@
  * bundled file's content (level 3).
  */
 
+/**
+ * One plugin a skill belongs to — by sitting INSIDE the plugin folder
+ * (`linked: false`) or by being LINKED from the plugin's manifest
+ * (`linked: true`). For a link, `granted` is the link's HEALTH: whether the
+ * plugin's members can read the skill through it. For a link this platform
+ * manages that is whether the skill's own access rules name the plugin's
+ * `plugin/<Name>/read` principal — the link service writes that grant with
+ * the link, so `false` means a hand edit took it away. A link read from an
+ * external plugin format needs no grant (the skill's own scope decides who
+ * reads it) and is always `true`; the flag never proves a principal exists.
+ */
+export interface PluginMembership {
+  /** The plugin folder name. */
+  name: string;
+  linked: boolean;
+  granted: boolean;
+}
+
 export interface SkillSummary {
   /** Canonical id = the skill's folder name (e.g. `rfi`). */
   name: string;
@@ -14,6 +32,12 @@ export interface SkillSummary {
   version?: string;
   /** Repo-root-relative skill folder, e.g. `Plugins/Everyone/rfi`. */
   path: string;
+  /**
+   * The plugins this skill belongs to, decorated onto the catalog by the
+   * browser route (the catalog itself is plugin-unaware). Absent on the agent
+   * surfaces, which load skills by name and never by plugin.
+   */
+  plugins?: PluginMembership[];
 }
 
 export interface Skill extends SkillSummary {
@@ -38,7 +62,43 @@ export interface SkillFileContent {
 export type GetSkillResult =
   | { ok: true; kind: 'skill'; skill: Skill }
   | { ok: true; kind: 'file'; file: SkillFileContent }
-  | { ok: false; error: 'not_found' | 'forbidden' | 'invalid_file' };
+  | { ok: false; error: 'not_found' | 'forbidden' | 'invalid_file' }
+  /**
+   * A `version` was asked for that no commit of the skill's `SKILL.md` on the
+   * default branch declared. `versions` is every version the history did
+   * declare, newest first — the caller picks from those or asks for the
+   * latest by leaving `version` out.
+   */
+  | { ok: false; error: 'version_not_found'; versions: string[] };
+
+/** What `getSkill` may be asked beyond a name and a file. */
+export interface GetSkillOptions {
+  /**
+   * The version the skill declared in the copy to load — its
+   * `metadata.version`, else a top-level `version`, else `lifecycle.version`.
+   * Omitted, the skill is loaded as it is now — the latest. Given, the
+   * default branch's history of the skill's `SKILL.md` is searched newest
+   * first for the most recent commit that declared exactly this version, and
+   * the skill (body, bundled files, or the one `file` asked for) is served as
+   * it was at that commit. Read access is the caller's access to the skill as
+   * it is now: a skill you may read, you may read the history of.
+   */
+  version?: string;
+}
+
+/**
+ * The slice of git the skill service reads history through — the default
+ * branch's own clone, never a caller's draft. Narrow on purpose: the catalog
+ * is a disk scan and needs none of this; only a `version` asks for history.
+ */
+export interface SkillHistorySource {
+  /** The commits (newest first) on `ref` that touched `repoRelativePath`, at most `limit`. */
+  pathHistory(workspaceId: string, ref: string, repoRelativePath: string, limit: number): Promise<string[]>;
+  /** The file's content at `ref`, or null when it is not there at that ref. */
+  readFileAtRef(workspaceId: string, ref: string, repoRelativePath: string): Promise<string | null>;
+  /** Every file under `folder` at `ref`, repo-root-relative. */
+  listFilesAtRef(workspaceId: string, ref: string, folder: string): Promise<string[]>;
+}
 
 /**
  * A skill that exists ONLY on an open change request's branch — proposed, not
@@ -78,8 +138,12 @@ export interface ISkillService {
    * compose the tool descriptions in the manual).
    */
   listSkills(userEmail?: string): Promise<SkillSummary[]>;
-  /** Load a skill's body (+ files), or a bundled file's content when `file` is given. */
-  getSkill(userEmail: string, name: string, file?: string): Promise<GetSkillResult>;
+  /**
+   * Load a skill's body (+ files), or a bundled file's content when `file` is
+   * given — as it is now, or as it was at the commit that declared
+   * `options.version` (see {@link GetSkillOptions}).
+   */
+  getSkill(userEmail: string, name: string, file?: string, options?: GetSkillOptions): Promise<GetSkillResult>;
   /** Drop the cached catalog (call after a merge to the default branch). */
   invalidate(): void;
 }
