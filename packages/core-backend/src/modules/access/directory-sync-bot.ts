@@ -31,7 +31,7 @@ export async function ensureDirectorySyncBot(db: Database): Promise<AuthUser> {
     .returning();
   if (inserted.length > 0) {
     const row = inserted[0];
-    log.info(`created sync-bot user id=${row.id} email=${row.email}`);
+    log.info(`created sync-bot user id=${row.id}`);
     return { id: row.id, email: row.email, name: row.name, avatarUrl: row.avatarUrl ?? undefined };
   }
   const [row] = await db

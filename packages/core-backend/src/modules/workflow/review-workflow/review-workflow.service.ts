@@ -468,7 +468,8 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           if (batch) viewerCanApproveByPath = batch;
         } catch (err) {
           if (err instanceof AccessUnreadableError) throw err;
-          log.warn(`canWriteBatchAtRef failed for PR #${prNumber} viewer=${viewerEmail}:`, { err });
+          // The viewer is not named: log lines carry no email addresses.
+          log.warn(`canWriteBatchAtRef failed for PR #${prNumber} (for the viewer):`, { err });
         }
       }
     }

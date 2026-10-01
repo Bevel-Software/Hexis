@@ -56,10 +56,15 @@ export interface ISystemNoticeSink {
   }): Promise<void>;
 }
 
-/** Core default: terminal-failure notices go to stderr (no dashboard). */
+/**
+ * Core default: terminal-failure notices go to stderr (no dashboard).
+ *
+ * Keyed by the user's id, never the email or the name: log lines carry no
+ * personal identifiers, and an operator can look the id up.
+ */
 export const consoleSystemNoticeSink: ISystemNoticeSink = {
   async send(notice) {
-    logger('system-notice').error(`${notice.user.email}: ${notice.message}`);
+    logger('system-notice').error(`user ${notice.user.id}: ${notice.message}`);
   },
 };
 
