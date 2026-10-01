@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   fetchGitHubRepositories: vi.fn(),
   startGitHubAppRegistration: vi.fn(),
   startGitHubAppInstallation: vi.fn(),
+  startGitHubAppRefresh: vi.fn(),
 }));
 vi.mock('../services/setup.api', async () => {
   const actual = await vi.importActual<typeof import('../services/setup.api')>('../services/setup.api');
