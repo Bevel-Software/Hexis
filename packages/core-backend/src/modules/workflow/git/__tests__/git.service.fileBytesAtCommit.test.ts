@@ -9,7 +9,7 @@ import {
   VERSION_NOT_ON_BRANCH_MESSAGE,
   WorkflowValidationError,
 } from '../../../../shared/domain-errors.js';
-import { GitRunError } from '../../../../shared/git.contract.js';
+import { GitRunError, assertOneSpecPerLine } from '../../../../shared/git.contract.js';
 import { runGit, gitOut, stubWorkflowHooks, stubWorkspaceService } from './git-test-helpers.js';
 
 /**
@@ -137,6 +137,38 @@ describe('GitService.fileBytesAtCommit', () => {
     await expect(
       svc.fileBytesAtCommit(workspaceId, 'knowledge-base/docs', addSha, 'after'),
     ).rejects.toThrow(/history is served per file/);
+  });
+
+  it('refuses a path carrying a LINE BREAK, which git would read as two object names', async () => {
+    // `cat-file --batch` takes one `<ref>:<path>` spec per LINE. Before the
+    // path validator refused control characters, `docs/child.md\nzzz` reached
+    // it as two specs: git answered about `docs/child.md` and those bytes came
+    // back as this path's — under the access gates of a name that exists
+    // nowhere, so the file's own rules were never the ones consulted. Verified
+    // against real git here, not a stub: the call must fail, and nothing of
+    // `child.md` may come back under the longer name.
+    for (const injected of [
+      'knowledge-base/docs/child.md\nzzz',
+      'knowledge-base/docs/child.md\rzzz',
+      'knowledge-base/docs/child.md\nknowledge-base/logo.png',
+    ]) {
+      await expect(
+        svc.fileBytesAtCommit(workspaceId, injected, addSha, 'after'),
+      ).rejects.toThrow(WorkflowValidationError);
+    }
+    // The refusal is the PATH's, decided before the sha is resolved or the
+    // workspace's git turn is taken — so a caller cannot reach git with one.
+    await expect(
+      svc.fileBytesAtCommit(workspaceId, 'knowledge-base/docs/child.md\nzzz', 'HEAD', 'after'),
+    ).rejects.toThrow(/control character/);
+  });
+
+  it('fences the batch protocol itself against a spec that is not one line', () => {
+    // The fence under `blobAtRef` and under the access resolver's batch read,
+    // for a spec assembled from somewhere the path validator does not cover.
+    expect(() => assertOneSpecPerLine([`${addSha}:logo.png`])).not.toThrow();
+    expect(() => assertOneSpecPerLine([`${addSha}:docs/child.md\nzzz`])).toThrow(/line break/);
+    expect(() => assertOneSpecPerLine(['a:b', 'c:d\re'])).toThrow(/line break/);
   });
 
   it('refuses a sha that is not a sha', async () => {

@@ -49,7 +49,20 @@ export function assertValidBranchName(name: string): void {
 export function assertValidRelativePath(relativePath: string): void {
   if (!relativePath) throw new WorkflowValidationError('path is required');
   if (relativePath.length > 1024) throw new WorkflowValidationError('path too long');
-  if (relativePath.includes('\0')) throw new WorkflowValidationError('path contains NUL');
+  // NUL, every other C0 control and DEL. A NUL is named on its own because it
+  // terminates a C string and git's `-z` output; the rest are refused with it
+  // because a LINE BREAK in a path is a separator in git's line-oriented stdin
+  // protocols — `cat-file --batch` reads one `<ref>:<path>` per line, so
+  // `Docs/secret.md\nzzz` is two object names while every gate upstream was
+  // asked about one string. See `CONTROL_CHARACTERS` in `repo-path.ts`, which
+  // refuses the same range at the normaliser; this is the same rule at the
+  // check every path handed to git as a pathspec passes through.
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1F\x7F]/.test(relativePath)) {
+    throw new WorkflowValidationError(
+      relativePath.includes('\0') ? 'path contains NUL' : 'path contains a control character',
+    );
+  }
   if (relativePath.includes('\\')) {
     throw new WorkflowValidationError('path must use forward slashes only');
   }

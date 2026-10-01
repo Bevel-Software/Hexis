@@ -45,6 +45,7 @@ interface Harness {
   baseUrl: string;
   fileBytesAtChange: ReturnType<typeof vi.fn>;
   readFileBinary: ReturnType<typeof vi.fn>;
+  canRead: ReturnType<typeof vi.fn>;
   canDownload: ReturnType<typeof vi.fn>;
 }
 
@@ -105,6 +106,7 @@ async function makeHarness(
     baseUrl: `http://127.0.0.1:${addr.port}`,
     fileBytesAtChange,
     readFileBinary,
+    canRead,
     canDownload,
   };
 }
@@ -153,6 +155,34 @@ describe('GET /workspace/:id/file/raw?ref= — one file at a past save', () => {
     }
     expect(h.readFileBinary).not.toHaveBeenCalled();
     expect(h.fileBytesAtChange).not.toHaveBeenCalled();
+  });
+
+  it('answers 400 for a path carrying a line break, before any gate is asked', async () => {
+    // `cat-file --batch` reads one `<ref>:<path>` object name per LINE, so
+    // `Docs/secret.md%0Azzz` would be TWO specs: git answers about
+    // `Docs/secret.md` and serves its bytes, while the read gate, the
+    // download gate and the not-a-directory check were all asked about the
+    // whole string — a name that exists nowhere, whose own frontmatter rules
+    // therefore never ran. Refused at the normaliser, which is before the
+    // gates, so neither gate is even consulted.
+    h = await makeHarness();
+    for (const injected of [
+      `${KB}/Docs/secret.md\nzzz`,
+      `${KB}/Docs/secret.md\rzzz`,
+      `${KB}/Docs/secret.md\n${KB}/Docs/logo.png`,
+      `${KB}/Docs/secret.md\u0000zzz`,
+    ]) {
+      const withRef = await raw(`path=${encodeURIComponent(injected)}&ref=${SHA}`);
+      expect(withRef.status).toBe(400);
+      expect(((await withRef.json()) as { error: string }).error).toMatch(/control character/);
+      // The same refusal without a ref: the rule is the path's, not the
+      // history feature's, so today's working-tree read is closed too.
+      expect((await raw(`path=${encodeURIComponent(injected)}`)).status).toBe(400);
+    }
+    expect(h.canRead).not.toHaveBeenCalled();
+    expect(h.canDownload).not.toHaveBeenCalled();
+    expect(h.fileBytesAtChange).not.toHaveBeenCalled();
+    expect(h.readFileBinary).not.toHaveBeenCalled();
   });
 
   it('answers 400 for an unknown side, and for a side with no ref', async () => {

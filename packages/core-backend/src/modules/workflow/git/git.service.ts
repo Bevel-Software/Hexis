@@ -40,6 +40,7 @@ import {
 } from '../../../shared/domain-errors.js';
 import {
   GitRunError,
+  assertOneSpecPerLine,
   isGitTimeout,
   redactGitToken,
   type GitCredentials,
@@ -3302,8 +3303,15 @@ export class GitService implements IGitService {
     ref: string,
     repoRelativePath: string,
   ): Promise<{ bytes: Buffer; blobId: string } | null> {
+    // The spec has to be ONE line: the path is refused a control character
+    // twice over before it gets here (at the route's normaliser and again at
+    // `assertValidRelativePath`), and this is the fence at the protocol —
+    // `--batch` would otherwise read `<sha>:Docs/x.md\nzzz` as two object
+    // names and answer about the first, under the gates of the second.
+    const spec = `${ref}:${repoRelativePath}`;
+    assertOneSpecPerLine([spec]);
     const { stdout } = await this.gitBytes(cwd, ['cat-file', '--batch'], {
-      input: `${ref}:${repoRelativePath}\n`,
+      input: `${spec}\n`,
     });
     const nl = stdout.indexOf(0x0a);
     if (nl < 0) throw new Error('unexpected end of git cat-file output');
