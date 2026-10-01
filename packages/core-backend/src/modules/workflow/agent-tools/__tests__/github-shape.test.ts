@@ -6,6 +6,8 @@ import type {
 } from '@bevel-software/platform-shared';
 import { hashEmail } from '../../../../shared/email-identity.js';
 import {
+  authorsDescription,
+  fileIsReadable,
   ghMerged,
   ghState,
   isAuthor,
@@ -14,6 +16,7 @@ import {
   maySeeChangeRequest,
   pageOf,
   pagingOf,
+  pathsOf,
   statesFor,
   toGhAccess,
   toGhChangeRequest,
@@ -433,5 +436,75 @@ describe('merge blockers never name a file the caller may not read', () => {
   it('keeps every blocker when nothing is withheld', () => {
     const reasons = ['This pull request has no file changes to approve.'];
     expect(visibleBlockers(reasons, [])).toEqual({ visible: reasons, withheld: 0 });
+  });
+});
+
+/**
+ * The leak Local Testing caught on the first attempt: `openChangeRequest`
+ * appends a generated `## Affected owners` block to the body, naming every
+ * changed path and its approvers, and the detail returned the body verbatim.
+ */
+describe('the body a caller is handed is the author\'s, not the machine\'s', () => {
+  const GENERATED = [
+    '## Affected owners',
+    '',
+    '- `KnowledgeBase/Engineering/Knowledge/Avi-Checkin.md` — Admin',
+    '- `KnowledgeBase/GTM/Notes.md` — GTM Team',
+  ].join('\n');
+
+  it('drops the generated owners block, keeping what the author typed', () => {
+    expect(authorsDescription(`Please take a look.\n\n${GENERATED}`)).toBe('Please take a look.');
+    expect(authorsDescription(GENERATED)).toBe('');
+  });
+
+  it('names no path of the generated block, readable or not', () => {
+    const out = authorsDescription(`Why this is needed.\n\n${GENERATED}`);
+    expect(out).not.toContain('Avi-Checkin');
+    expect(out).not.toContain('KnowledgeBase');
+    expect(out).not.toContain('Affected owners');
+  });
+
+  it('strips the hidden identity markers older bodies carry', () => {
+    expect(authorsDescription('<!-- bevel:author:abc123 -->\nMy reason.')).toBe('My reason.');
+  });
+
+  it('leaves a body that is only the author\'s prose alone', () => {
+    expect(authorsDescription('  A multi-line\nreason.  ')).toBe('A multi-line\nreason.');
+    expect(authorsDescription('')).toBe('');
+  });
+
+  it('cuts at the first generated heading, the same rule the app\'s dialog reads by', () => {
+    // `authorsReason` in ChangeRequestDialog.tsx splits on /^##\s+/m too, so a
+    // person and an agent are shown the same text. An author's own `##` heading
+    // is cut by both — one rule, not two that drift.
+    expect(authorsDescription('Lead.\n\n## My own heading\n\nmore')).toBe('Lead.');
+  });
+});
+
+/**
+ * A rename names TWO paths. The diff of a rename shows the content that was at
+ * the old one, so a file renamed out of a folder the caller may not read must
+ * not be listed under its new name either.
+ */
+describe('a renamed file is judged on both of its names', () => {
+  const renamed = {
+    path: 'Knowledge/Open.md',
+    previousPath: 'Payroll/Rates.md',
+  };
+
+  it('is readable only when both of its names are', () => {
+    expect(fileIsReadable(renamed, () => true)).toBe(true);
+    expect(fileIsReadable(renamed, (p) => p === 'Knowledge/Open.md')).toBe(false);
+    expect(fileIsReadable(renamed, (p) => p === 'Payroll/Rates.md')).toBe(false);
+  });
+
+  it('judges a file that was not renamed on its one name', () => {
+    expect(fileIsReadable({ path: 'A.md' }, (p) => p === 'A.md')).toBe(true);
+    expect(fileIsReadable({ path: 'A.md' }, () => false)).toBe(false);
+  });
+
+  it('offers both names for the access lookup, and one for a plain file', () => {
+    expect(pathsOf(renamed)).toEqual(['Knowledge/Open.md', 'Payroll/Rates.md']);
+    expect(pathsOf({ path: 'A.md' })).toEqual(['A.md']);
   });
 });

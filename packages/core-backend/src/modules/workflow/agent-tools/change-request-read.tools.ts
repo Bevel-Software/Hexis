@@ -9,8 +9,10 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import {
   PER_PAGE_DEFAULT,
   PER_PAGE_MAX,
+  fileIsReadable,
   isAuthor,
   matchesAuthor,
+  pathsOf,
   maySeeChangeRequest,
   pageOf,
   pagingOf,
@@ -49,10 +51,18 @@ import {
  *
  *   - every path is resolved at `origin/<base>` — the target's access tree, the
  *     one the request is asking to be judged against — in ONE batched lookup;
+ *   - BOTH names of a renamed file are resolved, and a file is readable only if
+ *     both are: the diff of a rename shows what was at the old path, so a file
+ *     renamed out of a closed folder stays closed, however open its new home;
  *   - files the caller may not read are left out and counted in
  *     `withheld_files`, never named (decision 2 on the ticket);
  *   - comments on a withheld file, and gate blockers naming one, go the same
  *     way, with their own counts;
+ *   - `body` is the author's own description. Hexis appends a generated
+ *     `## Affected owners` block to a change-request body, one line per changed
+ *     path, and returning the body verbatim named every file of the request —
+ *     the leak Local Testing found on the first attempt. `authorsDescription`
+ *     cuts it the way the app's own `authorsReason` always has;
  *   - a request with no readable file and no claim of authorship answers 404,
  *     indistinguishable from a number that was never issued.
  *
@@ -147,12 +157,20 @@ export function registerChangeRequestReadTools(
    */
   interface ScopedDetail {
     detail: ChangeRequestDetail;
-    /** Every path of the request (file or commented-on) the caller may read. */
-    readable: Set<string>;
+    /**
+     * Whether the caller may read one path of this request — the ONE verdict
+     * every tool below asks, so none of them can decide it a second way.
+     */
+    mayRead: (path: string) => boolean;
     /** The request's files the caller may read, in the request's own order. */
     readableFiles: ChangeRequestDetail['files'];
-    /** How many files are withheld, and their paths — for blocker filtering only. */
+    /**
+     * Every name the withheld files go by — for filtering the gate blockers and
+     * for nothing else. NEVER answered: use `withheldFileCount` to report them.
+     */
     withheldFilePaths: string[];
+    /** How many files are withheld. One per file, whatever its rename names. */
+    withheldFileCount: number;
     viewerIsAuthor: boolean;
   }
 
@@ -173,19 +191,27 @@ export function registerChangeRequestReadTools(
     // longer changes, and without a verdict of its own it would be withheld
     // from a caller who can read it perfectly well.
     const commentPaths = detail.comments.map((c) => c.path).filter((p): p is string => !!p);
+    // BOTH names of every file: a rename is judged on its old path as well as
+    // its new one, because the diff of a rename shows what was at the old one.
     const readable = await readablePaths(ctx, workspaceId, detail.base, [
-      ...detail.files.map((f) => f.path),
+      ...detail.files.flatMap(pathsOf),
       ...commentPaths,
     ]);
-    const readableFiles = detail.files.filter((f) => readable.has(f.path));
+    const mayRead = (path: string) => readable.has(path);
+    const readableFiles = detail.files.filter((f) => fileIsReadable(f, mayRead));
     if (!maySeeChangeRequest({ readableFiles: readableFiles.length, isAuthor: viewerIsAuthor })) {
       throw notFound(number);
     }
     return {
       detail,
-      readable,
+      mayRead,
       readableFiles,
-      withheldFilePaths: detail.files.filter((f) => !readable.has(f.path)).map((f) => f.path),
+      // Every name a withheld file goes by, so a gate warning quoting either
+      // spelling is caught by the blocker filter.
+      withheldFilePaths: detail.files
+        .filter((f) => !fileIsReadable(f, mayRead))
+        .flatMap(pathsOf),
+      withheldFileCount: detail.files.length - readableFiles.length,
       viewerIsAuthor,
     };
   };
@@ -337,7 +363,8 @@ export function registerChangeRequestReadTools(
   mount({
     name: 'get_change_request',
     description:
-      'Read one change request by `number` (GitHub: get a pull request) — its `title`, `body`, ' +
+      'Read one change request by `number` (GitHub: get a pull request) — its `title`, `body` ' +
+      "(what the author wrote, without the generated owners block Hexis appends), " +
       '`state`, `merged`, `mergeable`, `head`, `base` and `html_url`, plus an `access` block with ' +
       'the merge blockers and whether YOU may approve or apply it. Read-only. Answers 404 both ' +
       'for a number that does not exist and for a request you may not see.',
@@ -354,7 +381,7 @@ export function registerChangeRequestReadTools(
           ...changeRequestSchema,
           properties: {
             ...(changeRequestSchema as { properties: Record<string, JsonSchema> }).properties,
-            body: { type: 'string', description: 'The request description, verbatim.' },
+            body: { type: 'string', description: "What the AUTHOR wrote. The generated `## Affected owners` block Hexis appends — which names every changed path — is not part of it; read who must approve each file from `list_change_request_files`." },
             mergeable: { type: 'boolean', description: "Hexis's merge gate, which also waits on the per-file approvals." },
             access: {
               type: 'object',
@@ -382,11 +409,11 @@ export function registerChangeRequestReadTools(
     handler: async (args, ctx: ToolContext) => {
       const number = numberArg(args);
       const scoped = await scopedDetail(ctx, number, { patches: false });
-      const { detail, readableFiles, withheldFilePaths, viewerIsAuthor } = scoped;
+      const { detail, readableFiles, withheldFilePaths, withheldFileCount, viewerIsAuthor } = scoped;
       return {
         change_request: toGhChangeRequestDetail(
           detail,
-          { readable: readableFiles.length, withheld: withheldFilePaths.length },
+          { readable: readableFiles.length, withheld: withheldFileCount },
           toGhAccess(
             detail,
             visibleBlockers(detail.mergeBlockedReasons, withheldFilePaths),
@@ -484,7 +511,7 @@ export function registerChangeRequestReadTools(
       const { items, ...paging } = pageOf(scoped.readableFiles, perPage, page);
       return {
         files: items.map((f) => toGhFile(f, approvals.get(f.path), { patches })),
-        withheld_files: scoped.withheldFilePaths.length,
+        withheld_files: scoped.withheldFileCount,
         ...paging,
       };
     },
@@ -540,9 +567,7 @@ export function registerChangeRequestReadTools(
       // The read predicate goes IN rather than a pre-filtered list: a review is
       // grouped over every file the reviewer approved, so that it can count the
       // withheld ones under its own id and drop itself when they are all it has.
-      const { reviews, withheldReviews } = toGhReviews(scoped.detail.approvals, (path) =>
-        scoped.readable.has(path),
-      );
+      const { reviews, withheldReviews } = toGhReviews(scoped.detail.approvals, scoped.mayRead);
       const { items, ...paging } = pageOf(reviews, perPage, page);
       return { reviews: items, withheld_reviews: withheldReviews, ...paging };
     },
@@ -599,7 +624,7 @@ export function registerChangeRequestReadTools(
       // A comment with no path is about the request as a whole — visible to
       // anyone the request itself is visible to. One with a path is as readable
       // as that path.
-      const visible = scoped.detail.comments.filter((c) => !c.path || scoped.readable.has(c.path));
+      const visible = scoped.detail.comments.filter((c) => !c.path || scoped.mayRead(c.path));
       const { items, ...paging } = pageOf(visible, perPage, page);
       return {
         comments: items.map(toGhComment),

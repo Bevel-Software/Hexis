@@ -860,3 +860,179 @@ describe('list_change_request_comments', () => {
     expect((await call(base, 'list_change_request_comments', { number: 12 })).status).toBe(404);
   });
 });
+
+/**
+ * Reproductions of what Local Testing found on sha ae2f49d9, through the HTTP
+ * tool surface it found them on — not just the pure mapper underneath.
+ */
+describe('a mixed-access caller is never handed a path they may not read', () => {
+  /** A body exactly as `openChangeRequest` builds it: prose, then the block. */
+  const bodyWithOwnersBlock = [
+    'Please review the check-in note.',
+    '',
+    '## Affected owners',
+    '',
+    '- `KnowledgeBase/Engineering/Knowledge/Avi-Checkin.md` — Admin',
+    '- `KnowledgeBase/GTM/Notes.md` — GTM Team',
+  ].join('\n');
+
+  /** The reader of one folder of a two-folder request — john.newcomer's case. */
+  function mixedAccessRequest(): void {
+    readable = ['KnowledgeBase/GTM/Notes.md'];
+    const waiting = [
+      'Waiting on approval for KnowledgeBase/Engineering/Knowledge/Avi-Checkin.md from Admin.',
+      'Waiting on approval for KnowledgeBase/GTM/Notes.md from GTM Team.',
+    ];
+    details.set(
+      1,
+      detail({
+        number: 1,
+        body: bodyWithOwnersBlock,
+        files: [
+          file('KnowledgeBase/Engineering/Knowledge/Avi-Checkin.md'),
+          file('KnowledgeBase/GTM/Notes.md'),
+        ],
+        approvals: [
+          approval('KnowledgeBase/Engineering/Knowledge/Avi-Checkin.md', {
+            eligibleApprovers: { roles: ['Admin'], users: [] },
+          }),
+          approval('KnowledgeBase/GTM/Notes.md', {
+            eligibleApprovers: { roles: ['GTM Team'], users: [] },
+          }),
+        ],
+        mergeBlockedReasons: waiting,
+        mergeWarnings: waiting,
+      }),
+    );
+  }
+
+  it('get_change_request answers the author\'s reason and names no withheld file anywhere', async () => {
+    const base = await start();
+    mixedAccessRequest();
+    const { status, json } = await call(base, 'get_change_request', { number: 1 });
+    expect(status).toBe(200);
+    expect(json.change_request).toMatchObject({
+      body: 'Please review the check-in note.',
+      changed_files: 1,
+      withheld_files: 1,
+    });
+    // The whole payload, not just `body` — this is the assertion whose absence
+    // let the leak through the first time.
+    const whole = JSON.stringify(json);
+    expect(whole).not.toContain('Avi-Checkin');
+    expect(whole).not.toContain('KnowledgeBase/Engineering');
+    expect(whole).not.toContain('Affected owners');
+    // The file they CAN read is still named, and its blocker still readable.
+    expect(whole).toContain('KnowledgeBase/GTM/Notes.md');
+    expect(json.change_request).toMatchObject({
+      access: { withheld_merge_blockers: 1 },
+    });
+  });
+
+  it('no tool of the five names the withheld file, in any field', async () => {
+    const base = await start();
+    mixedAccessRequest();
+    summaries = [details.get(1)!];
+    for (const tool of TOOLS) {
+      const { status, json } = await call(
+        base,
+        tool,
+        tool === 'list_change_requests' ? {} : { number: 1, include: ['patches'] },
+      );
+      expect(status, tool).toBe(200);
+      const whole = JSON.stringify(json);
+      expect(whole, tool).not.toContain('Avi-Checkin');
+      expect(whole, tool).not.toContain('KnowledgeBase/Engineering');
+    }
+  });
+
+  it('the author sees their own body too — the cut is the same for everyone', async () => {
+    const base = await start();
+    mixedAccessRequest();
+    callerEmail = AUTHOR;
+    readable = [
+      'KnowledgeBase/GTM/Notes.md',
+      'KnowledgeBase/Engineering/Knowledge/Avi-Checkin.md',
+    ];
+    const { json } = await call(base, 'get_change_request', { number: 1 });
+    // A caller who may read everything gets the same author text, not the
+    // machine block — one body nobody has to reason about.
+    expect(json.change_request).toMatchObject({
+      body: 'Please review the check-in note.',
+      changed_files: 2,
+      withheld_files: 0,
+    });
+    expect(JSON.stringify(json)).not.toContain('Affected owners');
+  });
+});
+
+describe('a file renamed out of a folder the caller may not read', () => {
+  /**
+   * Two files: one renamed out of a closed folder, one plainly readable. The
+   * readable one keeps the REQUEST visible, so what this suite measures is the
+   * rename's own treatment rather than the 404 that an all-withheld request
+   * already gets (covered above).
+   */
+  function renameRequest(): void {
+    readable = ['Knowledge/Open.md', 'Knowledge/Plain.md'];
+    details.set(
+      12,
+      detail({
+        files: [
+          file('Knowledge/Open.md', { status: 'renamed', previousPath: 'Payroll/Rates.md' }),
+          file('Knowledge/Plain.md'),
+        ],
+        approvals: [approval('Knowledge/Open.md'), approval('Knowledge/Plain.md')],
+      }),
+    );
+  }
+
+  it('is withheld whole, so `previous_filename` can never name the closed path', async () => {
+    const base = await start();
+    renameRequest();
+    const { json } = await call(base, 'list_change_request_files', {
+      number: 12,
+      include: ['patches'],
+    });
+    // `Knowledge/Open.md` is readable by its new name, but its diff shows what
+    // was at `Payroll/Rates.md` — so it is withheld, counted, and neither of
+    // its two names appears. The plainly readable file is unaffected.
+    expect((json.files as unknown as { filename: string }[]).map((f) => f.filename)).toEqual([
+      'Knowledge/Plain.md',
+    ]);
+    expect(json.withheld_files).toBe(1);
+    const whole = JSON.stringify(json);
+    expect(whole).not.toContain('Payroll');
+    expect(whole).not.toContain('Rates');
+    expect(whole).not.toContain('Knowledge/Open.md');
+  });
+
+  it('is listed, with `previous_filename`, once both of its names are readable', async () => {
+    const base = await start();
+    renameRequest();
+    readable = ['Knowledge/Open.md', 'Knowledge/Plain.md', 'Payroll/Rates.md'];
+    const { json } = await call(base, 'list_change_request_files', { number: 12 });
+    expect(json.files).toHaveLength(2);
+    expect(json.files[0]).toMatchObject({
+      filename: 'Knowledge/Open.md',
+      previous_filename: 'Payroll/Rates.md',
+      status: 'renamed',
+    });
+    expect(json.withheld_files).toBe(0);
+  });
+
+  it('counts a withheld rename ONCE, though it goes by two names', async () => {
+    const base = await start();
+    readable = [];
+    details.set(
+      12,
+      detail({
+        files: [file('Knowledge/Open.md', { status: 'renamed', previousPath: 'Payroll/Rates.md' })],
+        approvals: [approval('Knowledge/Open.md')],
+      }),
+    );
+    callerEmail = AUTHOR;
+    const { json } = await call(base, 'list_change_request_files', { number: 12 });
+    expect(json.withheld_files).toBe(1);
+  });
+});

@@ -326,10 +326,47 @@ export function toGhChangeRequestDetail(
     ...toGhChangeRequest(detail, counts),
     head: { ref: detail.branch, sha: detail.headSha },
     base: { ref: detail.base, sha: detail.baseSha },
-    body: detail.body,
+    body: authorsDescription(detail.body),
     mergeable: detail.mergeableInBevel,
     access,
   };
+}
+
+/**
+ * The part of a change-request body its AUTHOR wrote.
+ *
+ * A Hexis body is part human and part machine: `openChangeRequest` appends an
+ * `## Affected owners` block — one line per changed path, naming that path and
+ * its eligible approvers — to whatever the author typed, and the propose flow
+ * types nothing at all, so the body is usually pure machinery. Returning it
+ * verbatim NAMED every file of the request, including the ones this caller may
+ * not read: Local Testing caught a GTM-team reader being handed
+ * `- \`KnowledgeBase/Engineering/…\` — Admin` out of a request whose file list
+ * had correctly withheld that very path.
+ *
+ * So the rule here is the app's own, character for character: everything from
+ * the first generated `##` heading on is dropped, and HTML comments (the hidden
+ * identity markers older bodies carry) go with it. `authorsReason` in
+ * `ChangeRequestDialog.tsx` has read a body this way all along — "a routing
+ * table is not the reason someone wants this change" — so a person in the app
+ * and an agent over MCP now see the same text, and GitHub's `body` means what
+ * it means on GitHub: what the author wrote.
+ *
+ * Who must approve each file is NOT lost by this — it is what
+ * `list_change_request_files` answers under `required_approvers`, per file and
+ * access-filtered, which is where a caller should read it from anyway.
+ *
+ * Two things this deliberately does not do. It does not vary by caller: one
+ * body for everyone is a body nobody has to reason about. And it does not touch
+ * the author's own prose, which may mention any path they chose to write about —
+ * that is a person's sentence, shown to every viewer in the app, not Hexis
+ * naming a file it was asked to withhold.
+ */
+export function authorsDescription(body: string): string {
+  return body
+    .split(/^##\s+/m)[0]
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .trim();
 }
 
 /**
@@ -381,6 +418,30 @@ export function visibleBlockers(
   if (withheldPaths.length === 0) return { visible: [...reasons], withheld: 0 };
   const visible = reasons.filter((r) => !withheldPaths.some((p) => r.includes(p)));
   return { visible, withheld: reasons.length - visible.length };
+}
+
+/**
+ * Whether the caller may read a changed file AT ALL.
+ *
+ * Both of its names must be readable. A rename carries its old path in
+ * `previousPath`, and the diff of a rename shows the content that was at that
+ * old path — so a file renamed OUT of a folder the caller may not read is not
+ * readable here either, however open its new home is, and `previous_filename`
+ * can never name a path they were refused. Fail-closed in the one direction
+ * that matters: a file with nowhere to hide is listed, a file with a hidden
+ * side is withheld and counted.
+ */
+export function fileIsReadable(
+  file: Pick<ChangedFile, 'path' | 'previousPath'>,
+  mayRead: (path: string) => boolean,
+): boolean {
+  if (!mayRead(file.path)) return false;
+  return file.previousPath === undefined || mayRead(file.previousPath);
+}
+
+/** Every path a changed file names — both sides of a rename. */
+export function pathsOf(file: Pick<ChangedFile, 'path' | 'previousPath'>): string[] {
+  return file.previousPath === undefined ? [file.path] : [file.path, file.previousPath];
 }
 
 /** A changed file plus its approval state, GitHub-shaped. */
