@@ -81,7 +81,7 @@ const ALWAYS_WRITABLE: readonly RegExp[] = [
 /** Whether a request may go ahead while the deployment is read-only, without asking. */
 export function isAlwaysWritable(method: string, path: string, hostPaths: readonly string[] = []): boolean {
   if (!MUTATING_METHODS.has(method.toUpperCase())) return true;
-  if (!path.startsWith('/api/')) return true;
+  if (path !== '/api' && !path.startsWith('/api/')) return true;
   return ALWAYS_WRITABLE.some((rule) => rule.test(path)) || hostPaths.some((prefix) => path.startsWith(prefix));
 }
 

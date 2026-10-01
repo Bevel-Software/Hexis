@@ -42,6 +42,12 @@ export function createToolHandlerFactory(resolve: ResolveToolContext, writeAcces
         res.status(403).json({ error: 'This tool requires write access.' });
         return;
       }
+      // Before anything is awaited: a client that goes away during the
+      // write-access check below must still abort the call.
+      const abort = new AbortController();
+      req.on('close', () => {
+        if (!res.writableEnded) abort.abort();
+      });
       // The tool layer's half of the read-only gate: the HTTP gate lets every
       // tool call through, since only here is a write tool told from a read.
       if (opts.write) {
@@ -50,11 +56,8 @@ export function createToolHandlerFactory(resolve: ResolveToolContext, writeAcces
           res.status(403).json({ error: refusal, code: READ_ONLY_CODE });
           return;
         }
+        if (abort.signal.aborted) return;
       }
-      const abort = new AbortController();
-      req.on('close', () => {
-        if (!res.writableEnded) abort.abort();
-      });
       const body: unknown = req.body;
       if (body !== undefined && body !== null && (typeof body !== 'object' || Array.isArray(body))) {
         res.status(400).json({ error: 'Request body must be a JSON object.' });

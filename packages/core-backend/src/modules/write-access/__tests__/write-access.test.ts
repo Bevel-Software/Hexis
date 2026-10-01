@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
+import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Request, Response } from 'express';
 import {
@@ -16,8 +17,14 @@ import type { ResolveToolContext } from '../../tool-helpers/tool-context.js';
 const READ_ONLY_MESSAGE = 'This workspace has 5 people switched on and room for 3.';
 const readOnly: IWriteAccess = { canWrite: async () => ({ ok: false, message: READ_ONLY_MESSAGE }) };
 
+const servers: Server[] = [];
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map((s) => new Promise<void>((resolve) => s.close(() => resolve()))));
+});
+
 async function listen(app: express.Express): Promise<string> {
   const server = app.listen(0);
+  servers.push(server);
   await new Promise<void>((resolve) => server.once('listening', () => resolve()));
   const { port } = server.address() as AddressInfo;
   return `http://127.0.0.1:${port}`;
@@ -57,6 +64,8 @@ describe('isAlwaysWritable', () => {
     ['POST', '/api/workspace/w1/access/batch/extra'],
     // A route nobody listed is refused by default.
     ['POST', '/api/some-new-route'],
+    // The API root is inside the gated namespace too.
+    ['POST', '/api'],
   ])('holds %s %s for the port', (method, path) => {
     expect(isAlwaysWritable(method, path)).toBe(false);
   });
@@ -137,6 +146,29 @@ describe('the tool layer', () => {
     expect(handler).not.toHaveBeenCalled();
     expect(status).toHaveBeenCalledWith(403);
     expect(json).toHaveBeenCalledWith({ error: READ_ONLY_MESSAGE, code: READ_ONLY_CODE });
+  });
+
+  it('listens for the client going away before it waits on the write-access verdict', async () => {
+    let listening = false;
+    const writeAccess: IWriteAccess = {
+      canWrite: async () => {
+        expect(listening).toBe(true);
+        return { ok: true };
+      },
+    };
+    const resolve = vi.fn(async () => ({})) as unknown as ResolveToolContext;
+    const toolHandler = createToolHandlerFactory(resolve, writeAccess);
+    const req = {
+      toolAuth: { source: 'external', userId: 'u1', scope: 'write' },
+      body: {},
+      on: vi.fn(() => {
+        listening = true;
+      }),
+    } as unknown as Request;
+    const json = vi.fn();
+    const res = { status: vi.fn(() => ({ json })), json, writableEnded: false } as unknown as Response;
+    await toolHandler(vi.fn(async () => ({})) as never, { write: true })(req, res);
+    expect(req.on).toHaveBeenCalledWith('close', expect.any(Function));
   });
 
   it('still runs a read tool', async () => {
