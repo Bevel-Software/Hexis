@@ -3,6 +3,7 @@ import { logger } from '../../../shared/logging.js';
 
 const log = logger('cr');
 import type {
+  ChangedPathPair,
   FileApprovalState,
   IPullRequestService,
   PrReviewComment,
@@ -164,7 +165,11 @@ export class PullRequestService implements IPullRequestService {
     return this.workspaceService.findAnyWorkspaceId();
   }
 
-  private rowToSummary(row: ChangeRequestRow, touchedNodePaths: string[]): PullRequestSummary {
+  private rowToSummary(
+    row: ChangeRequestRow,
+    touchedNodePaths: string[],
+    touchedNodeFiles: ChangedPathPair[],
+  ): PullRequestSummary {
     return {
       number: row.number,
       title: row.title,
@@ -186,6 +191,7 @@ export class PullRequestService implements IPullRequestService {
       // does write it.
       updatedAt: latestRowMoment(row),
       touchedNodePaths,
+      touchedNodeFiles,
       // Provider reviews are gone; the real approval state lives in the detail
       // view (per-file, DB-backed). The summary badge is derived there.
       review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
@@ -213,10 +219,10 @@ export class PullRequestService implements IPullRequestService {
     row: ChangeRequestRow,
     workspaceId: string | null,
     opts: { fetch?: boolean } = {},
-  ): Promise<string[]> {
-    if (!workspaceId) return [];
+  ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }> {
+    if (!workspaceId) return { paths: [], pairs: [] };
     return this.gitService
-      .changedPathsForPr(workspaceId, row.targetBranch, row.sourceBranch, opts)
+      .changedPathsAndPairsForPr(workspaceId, row.targetBranch, row.sourceBranch, opts)
       .catch((err) => {
         // Best-effort, but log it: an empty result silently hides a CR from the
         // owner-routing match in `listPrsForOwnerEmail`, so a swallowed failure
@@ -225,7 +231,7 @@ export class PullRequestService implements IPullRequestService {
           `changedPathsForPr failed for #${row.number} (${row.sourceBranch} → ${row.targetBranch}) in ${workspaceId}:`,
           { err },
         );
-        return [] as string[];
+        return { paths: [] as string[], pairs: [] as ChangedPathPair[] };
       });
   }
 
@@ -241,8 +247,14 @@ export class PullRequestService implements IPullRequestService {
     opts: { fetch?: boolean } = {},
   ): Promise<PullRequestSummary> {
     const touched = await this.touchedPathsFor(row, workspaceId, opts);
-    const summary = this.rowToSummary(row, touched.filter((p) => !isFolderPlaceholder(p)));
-    this.routingPaths.set(summary, touched);
+    const summary = this.rowToSummary(
+      row,
+      touched.paths.filter((p) => !isFolderPlaceholder(p)),
+      // Already placeholder-free and roles.yaml-free (see `changedPathPairs`),
+      // so the pairs need no filtering of their own here.
+      touched.pairs,
+    );
+    this.routingPaths.set(summary, touched.paths);
     return summary;
   }
 
@@ -584,7 +596,17 @@ export class PullRequestService implements IPullRequestService {
       return cached.value;
     }
 
-    const summary = this.rowToSummary(row, files.map((f) => f.path));
+    // The detail has the real file list, so its pairs come straight off it —
+    // the same shape the list builds from its own diff, so a reader gating on
+    // `touchedNodeFiles` gets the same verdict from a summary and a detail.
+    const summary = this.rowToSummary(
+      row,
+      files.map((f) => f.path),
+      files.map((f) => ({
+        path: f.path,
+        ...(f.previousPath ? { previousPath: f.previousPath } : {}),
+      })),
+    );
 
     // Comments + approvals come from our own DB via the review-workflow service.
     // The enricher is optional — if it isn't wired yet (startup ordering,

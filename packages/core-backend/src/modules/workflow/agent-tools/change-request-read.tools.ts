@@ -1,5 +1,10 @@
 import type { Router, RequestHandler } from 'express';
-import type { ChangeRequestDetail, FileApproval } from '@bevel-software/platform-shared';
+import type {
+  ChangeRequest,
+  ChangeRequestDetail,
+  ChangedPathPair,
+  FileApproval,
+} from '@bevel-software/platform-shared';
 import type { IToolRegistry, JsonSchema } from '../../tool-registry/tool.contract.js';
 import { ToolError, type ToolContext, type ToolHandler } from '../../tool-helpers/tool.contract.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
@@ -53,7 +58,11 @@ import {
  *     one the request is asking to be judged against — in ONE batched lookup;
  *   - BOTH names of a renamed file are resolved, and a file is readable only if
  *     both are: the diff of a rename shows what was at the old path, so a file
- *     renamed out of a closed folder stays closed, however open its new home;
+ *     renamed out of a closed folder stays closed, however open its new home.
+ *     The LIST decides this over the same `touchedNodeFiles` pairs the detail
+ *     does — a list that judged the flat `touchedNodePaths` could not see a
+ *     rename's old side, and advertised requests its own by-number tools
+ *     answered 404 for;
  *   - files the caller may not read are left out and counted in
  *     `withheld_files`, never named (decision 2 on the ticket);
  *   - comments on a withheld file, and gate blockers naming one, go the same
@@ -223,6 +232,19 @@ export function registerChangeRequestReadTools(
   const notFound = (number: number): ToolError =>
     new ToolError(`Change request #${number} not found.`, 404);
 
+  /**
+   * The changed files of a SUMMARY, as the pairs a read gate decides over.
+   *
+   * Absent `touchedNodeFiles` means no summary builder filled it, and that is
+   * answered with no files rather than by falling back to `touchedNodePaths`:
+   * the fallback cannot pair a rename, which is the whole reason this field
+   * exists, and a silent one would restore the list-versus-detail disagreement
+   * the next time a summary reached here from somewhere new. No files means
+   * nothing proven, which means author-only — the same fail-closed reading an
+   * empty path set already gets.
+   */
+  const filesOf = (cr: ChangeRequest): ChangedPathPair[] => cr.touchedNodeFiles ?? [];
+
   /** `approvals` is one entry per file, same order; index it by path. */
   const approvalsByPath = (detail: ChangeRequestDetail): Map<string, FileApproval> =>
     new Map(detail.approvals.map((a) => [a.path, a]));
@@ -324,11 +346,19 @@ export function registerChangeRequestReadTools(
       // One access lookup per distinct target branch, not per request: the
       // access tree is read at `origin/<base>`, and a list is usually a dozen
       // requests into the same two or three targets.
+      //
+      // Over `touchedNodeFiles`, NOT `touchedNodePaths`. The flat list reports a
+      // rename under its new name alone, so a file moved out of a folder this
+      // caller cannot open looked readable here while the detail — which pairs
+      // the two names — refused it: the list advertised a change request that
+      // all four by-number tools answered 404 for, and counted its withheld
+      // file as zero. One notion of a readable file, shared with the detail
+      // through the same `fileIsReadable`, is what stops the two disagreeing.
       const workspaceId = await repoGlobalWorkspaceId(ctx);
       const byBase = new Map<string, string[]>();
       for (const cr of matching) {
         const bucket = byBase.get(cr.base) ?? [];
-        bucket.push(...cr.touchedNodePaths);
+        bucket.push(...filesOf(cr).flatMap(pathsOf));
         byBase.set(cr.base, bucket);
       }
       const readableByBase = new Map<string, Set<string>>();
@@ -341,13 +371,16 @@ export function registerChangeRequestReadTools(
       const visible = [];
       for (const cr of matching) {
         const readable = readableByBase.get(cr.base) ?? new Set<string>();
-        const readableCount = cr.touchedNodePaths.filter((p) => readable.has(p)).length;
+        const mayRead = (path: string) => readable.has(path);
+        const files = filesOf(cr);
+        const readableCount = files.filter((f) => fileIsReadable(f, mayRead)).length;
         const mine = isAuthor(cr, ctx.user.email);
         if (!maySeeChangeRequest({ readableFiles: readableCount, isAuthor: mine })) continue;
         visible.push(
           toGhChangeRequest(cr, {
             readable: readableCount,
-            withheld: cr.touchedNodePaths.length - readableCount,
+            // One per withheld FILE, whatever its rename names it.
+            withheld: files.length - readableCount,
           }),
         );
       }

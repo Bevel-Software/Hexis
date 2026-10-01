@@ -265,7 +265,10 @@ describe('PullRequestService.listPrsByState', () => {
       findAnyWorkspaceId: async () => 'ws',
     } as unknown as WorkspaceService;
     const git = {
-      changedPathsForPr: vi.fn(async () => changedPaths),
+      changedPathsAndPairsForPr: vi.fn(async () => ({
+        paths: changedPaths,
+        pairs: changedPaths.map((path) => ({ path })),
+      })),
     } as unknown as GitService;
     const svc = new PullRequestService(db, workspace, makeAccessControl({}), git);
     return { svc, select };
@@ -322,7 +325,7 @@ describe('PullRequestService.listPrsByState', () => {
       findAnyWorkspaceId: async () => 'ws',
     } as unknown as WorkspaceService;
     const git = {
-      changedPathsForPr: vi.fn(async () => {
+      changedPathsAndPairsForPr: vi.fn(async () => {
         throw new Error('unknown branch');
       }),
     } as unknown as GitService;

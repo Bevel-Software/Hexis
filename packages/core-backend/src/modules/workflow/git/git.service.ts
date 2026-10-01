@@ -4,6 +4,7 @@ import { logger } from '../../../shared/logging.js';
 import type {
   AuthUser,
   BranchInfo,
+  ChangedPathPair,
   CommitAttribution,
   IGitService,
   RemoteSyncPullResult,
@@ -2692,32 +2693,60 @@ export class GitService implements IGitService {
     headRef: string,
     opts: { forAccessCheck?: boolean } = {},
   ): Promise<string[]> {
+    return flattenChangedPaths(await this.prChangedEntriesAt(cwd, baseRef, headRef), opts);
+  }
+
+  /**
+   * The same diff, left as parsed ENTRIES: each changed file with the path it
+   * came from when git detected a rename.
+   *
+   * The flat path list cannot express that pairing, and a caller deciding what
+   * someone may READ needs it. A file renamed out of a folder the caller cannot
+   * open is readable under neither of its names — the diff of a rename shows
+   * the old side's content — and a flat list that offers both paths unlabelled
+   * cannot say which new file the closed old path belongs to. `forAccessCheck`
+   * solves the write side of this by taking the union; a read gate needs the
+   * pairing itself.
+   */
+  private async prChangedEntriesAt(
+    cwd: string,
+    baseRef: string,
+    headRef: string,
+  ): Promise<NameStatusEntry[]> {
     const { stdout } = await this.git(cwd, [
       'diff', '-M', '-z', '--name-status', `${baseRef}...${headRef}`,
     ]);
-    // Deduped: both sides of a rename can collide with another entry's path.
-    return [
-      ...new Set(
-        parseNameStatusZ(stdout)
-          // A rename onto or off the placeholder is a real file removed or
-          // added (see `withoutPlaceholderRename`): both of its paths are
-          // touched, or filtering the placeholder would lose the file.
-          //
-          // Authorizing the change needs both sides of EVERY rename, not just
-          // the placeholder's: git reports a rename under its new name alone,
-          // and the old name is a path the change deletes.
-          .flatMap((s) =>
-            s.previousPath &&
-            (opts.forAccessCheck || isFolderPlaceholder(s.path) || isFolderPlaceholder(s.previousPath))
-              ? [s.previousPath, s.path]
-              : [s.path],
-          )
-          // Same rule as `changedFilesForPr`: a roles.yaml change never
-          // survives a merge, so it is not a touched path for routing or
-          // summaries either.
-          .filter((p) => opts.forAccessCheck || p !== 'roles.yaml'),
-      ),
-    ];
+    return parseNameStatusZ(stdout);
+  }
+
+  /**
+   * One diff, both views of it: the flat touched-path list every existing
+   * caller reads, and the rename-aware pairs a read gate needs. The change-
+   * request summary builder wants both, and must not pay for two `git diff`s
+   * to get them — it is on the list path that is polled every 60s.
+   */
+  async changedPathsAndPairsForPr(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+    opts: { fetch?: boolean } = {},
+  ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }> {
+    assertValidBranchName(baseBranch);
+    assertValidBranchName(headBranch);
+    const cwd = await this.repoDir(workspaceId);
+    // Same ref pinning and the same fetch skip as `changedPathsForPr`, for the
+    // same reasons spelled out there.
+    const pinned =
+      opts.fetch === false ? await this.publishedPrCommits(cwd, baseBranch, headBranch) : null;
+    if (!pinned) {
+      await this.fetchPrRefs(cwd, baseBranch, headBranch);
+    }
+    return this.mutex.run(workspaceId, async () => {
+      const baseRef = pinned ? pinned.base : await this.resolvePublishedBranchRef(cwd, baseBranch);
+      const headRef = pinned ? pinned.head : await this.resolvePublishedBranchRef(cwd, headBranch);
+      const entries = await this.prChangedEntriesAt(cwd, baseRef, headRef);
+      return { paths: flattenChangedPaths(entries, {}), pairs: changedPathPairs(entries) };
+    });
   }
 
   /**
@@ -3402,6 +3431,67 @@ interface NameStatusEntry {
  * Parse `git diff -M -z --name-status` output. NUL-separated tokens: each record
  * is `<statusLetter>\0<path>`, or for a rename/copy `<Rxxx|Cxxx>\0<old>\0<new>`.
  */
+/**
+ * The flat touched-path list of a parsed `--name-status` diff. Lifted out of
+ * `prChangedPathsAt` unchanged, so the pair-returning reader can share one
+ * diff with it rather than running a second.
+ */
+function flattenChangedPaths(
+  entries: NameStatusEntry[],
+  opts: { forAccessCheck?: boolean } = {},
+): string[] {
+  // Deduped: both sides of a rename can collide with another entry's path.
+  return [
+    ...new Set(
+      entries
+        // A rename onto or off the placeholder is a real file removed or
+        // added (see `withoutPlaceholderRename`): both of its paths are
+        // touched, or filtering the placeholder would lose the file.
+        //
+        // Authorizing the change needs both sides of EVERY rename, not just
+        // the placeholder's: git reports a rename under its new name alone,
+        // and the old name is a path the change deletes.
+        .flatMap((s) =>
+          s.previousPath &&
+          (opts.forAccessCheck || isFolderPlaceholder(s.path) || isFolderPlaceholder(s.previousPath))
+            ? [s.previousPath, s.path]
+            : [s.path],
+        )
+        // Same rule as `changedFilesForPr`: a roles.yaml change never
+        // survives a merge, so it is not a touched path for routing or
+        // summaries either.
+        .filter((p) => opts.forAccessCheck || p !== 'roles.yaml'),
+    ),
+  ];
+}
+
+/**
+ * The changed files of a diff as read-gate pairs: every file the request
+ * proposes, carrying the path it was renamed from when it has one.
+ *
+ * Normalised and filtered EXACTLY as `changedFilesForPr` does it, through the
+ * same `withoutPlaceholderRename` and the same two drops — because this is the
+ * file set a change-request LIST decides visibility over and that one is the
+ * file set its DETAIL decides over, and the two answering differently is how a
+ * list comes to advertise a request its own detail refuses (or to hide one the
+ * detail serves). Any future change to one filter belongs in both.
+ */
+function changedPathPairs(entries: NameStatusEntry[]): ChangedPathPair[] {
+  const byPath = new Map<string, ChangedPathPair>();
+  for (const raw of entries) {
+    // A rename between a real file and the placeholder is a removal or an
+    // addition of the real side; after this, the placeholder filter below
+    // cannot take the file with it.
+    const entry = withoutPlaceholderRename(raw);
+    if (isFolderPlaceholder(entry.path) || entry.path === 'roles.yaml') continue;
+    byPath.set(entry.path, {
+      path: entry.path,
+      ...(entry.previousPath ? { previousPath: entry.previousPath } : {}),
+    });
+  }
+  return [...byPath.values()];
+}
+
 export function parseNameStatusZ(out: string): NameStatusEntry[] {
   const tokens = out.split('\0');
   const entries: NameStatusEntry[] = [];

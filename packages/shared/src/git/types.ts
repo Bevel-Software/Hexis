@@ -1,5 +1,5 @@
 import type { AuthUser } from '../auth/types.js';
-import type { PullRequestFile } from './pr.types.js';
+import type { ChangedPathPair, PullRequestFile } from './pr.types.js';
 
 export interface BranchInfo {
   name: string;
@@ -277,6 +277,27 @@ export interface IGitService {
     headBranch: string,
     opts?: { fetch?: boolean },
   ): Promise<string[]>;
+
+  /**
+   * `changedPathsForPr`'s answer AND the same diff left as rename-aware pairs,
+   * from ONE `git diff`.
+   *
+   * The flat list cannot pair a rename's two paths: git reports a rename under
+   * its new name, and `forAccessCheck` adds the old name to the same
+   * undifferentiated set. That union is enough to authorize a WRITE ("may they
+   * touch everything this lands?"), but not to decide a READ — a file renamed
+   * out of a folder the caller cannot open is readable under neither of its
+   * names, since the diff of a rename shows the old side's content, and
+   * deciding that needs to know which old path belongs to which new file. The
+   * change-request read tools gate their file lists on exactly this, and the
+   * list of requests must reach the same verdict as the detail of one.
+   */
+  changedPathsAndPairsForPr(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+    opts?: { fetch?: boolean },
+  ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }>;
 
   /**
    * A change request's fork point (merge base of the two resolved commits)

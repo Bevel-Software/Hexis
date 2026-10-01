@@ -47,8 +47,13 @@ function harness(rows = [row(1, 'suggestions/a/knowledge'), row(2, 'suggestions/
       }),
     }),
   } as unknown as Database;
-  const changedPathsForPr = vi.fn(async () => ['Shared/one.pdf']);
-  const git = { changedPathsForPr } as unknown as GitService;
+  // The summary builder asks for the flat paths AND the rename-aware pairs in
+  // one call, so this is the method the per-request cost now lands on.
+  const changedPathsForPr = vi.fn(async () => ({
+    paths: ['Shared/one.pdf'],
+    pairs: [{ path: 'Shared/one.pdf' }],
+  }));
+  const git = { changedPathsAndPairsForPr: changedPathsForPr } as unknown as GitService;
   const ensureRemotesFetched = vi.fn(async () => undefined);
   const workspace = {
     findAnyWorkspaceId: async () => 'ws-main',

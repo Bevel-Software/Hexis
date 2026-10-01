@@ -53,6 +53,20 @@ export interface PullRequestSummary {
   updatedAt?: string;
   /** Relative paths within `knowledge-base/`. Empty if not yet computed. */
   touchedNodePaths: string[];
+  /**
+   * The same changed files as {@link touchedNodePaths}, paired with the path
+   * each was renamed from — what a READ gate has to decide over, since
+   * `touchedNodePaths` reports a rename under its new name alone and so cannot
+   * say that a readable-looking file came out of a folder its reader cannot
+   * open.
+   *
+   * Absent when no summary builder filled it (a test double, a caller that
+   * constructs a summary by hand). A read gate must treat absence as "nothing
+   * proven" rather than falling back to `touchedNodePaths` — that fallback is
+   * precisely the disagreement between a list and a detail this field exists to
+   * remove, and it would come back silently.
+   */
+  touchedNodeFiles?: ChangedPathPair[];
   review: PullRequestReviewStatus;
   /**
    * Link to the change request: absolute (`<public frontend address>/change-requests/<number>`)
@@ -87,6 +101,23 @@ export interface ChangeRequestApplyFailure {
   at: string;
   /** Display name of whoever attempted the apply. */
   byName: string;
+}
+
+/**
+ * One changed file of a change request, named on both sides: where it is now
+ * and, for a rename, where it came from.
+ *
+ * The minimum a READ gate needs. A plain path list says a rename's new name and
+ * (with `forAccessCheck`) its old one, but not that the two are the same file —
+ * and the diff of a rename shows the old side's content, so a file moved out of
+ * a folder its reader cannot open must not be offered under its new name
+ * either. Both the list of change requests and the detail of one decide
+ * readability over these, so the two cannot disagree about whether a request is
+ * visible.
+ */
+export interface ChangedPathPair {
+  path: string;
+  previousPath?: string;
 }
 
 export type PrFileStatus =

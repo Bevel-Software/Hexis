@@ -40,8 +40,14 @@ describe('PullRequestService summaries — folder placeholder', () => {
         }),
       }),
     } as unknown as Database;
-    const changedPathsForPr = vi.fn(async () => paths);
-    const git = { changedPathsForPr } as unknown as GitService;
+    // The real `changedPathPairs` drops the placeholder (it is never a file
+    // anybody reads) while the flat list keeps it for the empty-request check,
+    // so the double answers both the way the service does.
+    const changedPathsForPr = vi.fn(async () => ({
+      paths,
+      pairs: paths.filter((p) => !p.endsWith('/.gitkeep')).map((path) => ({ path })),
+    }));
+    const git = { changedPathsAndPairsForPr: changedPathsForPr } as unknown as GitService;
     const workspace = {
       findAnyWorkspaceId: async () => 'ws-main',
       ensureRemotesFetched: async () => undefined,

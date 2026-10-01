@@ -72,8 +72,16 @@ function approvedBy(email: string, name: string, at: string, isStale = false) {
   return { email, name, approvedAt: at, isStale, isSelfApproval: false };
 }
 
+/**
+ * A summary as `PullRequestService.summaryOf` builds one — `touchedNodeFiles`
+ * included, derived from `touchedNodePaths` unless a test overrides it. A
+ * fixture that left it out would be testing a summary no builder produces, and
+ * would hide whether the list reads it at all.
+ */
 function summary(over: Partial<ChangeRequest> = {}): ChangeRequest {
+  const paths = over.touchedNodePaths ?? ['Knowledge/A.md'];
   return {
+    touchedNodeFiles: paths.map((path) => ({ path })),
     number: 12,
     title: 'Rework the onboarding note',
     authorId: hashEmail(AUTHOR),
@@ -95,6 +103,12 @@ function detail(over: Partial<ChangeRequestDetail> = {}): ChangeRequestDetail {
   const files = over.files ?? [file('Knowledge/A.md')];
   return {
     ...summary(over),
+    // `getPrDetail` pairs the summary off its real file list, so a detail used
+    // as a list row carries the same files its own file tool would answer.
+    touchedNodeFiles: files.map((f) => ({
+      path: f.path,
+      ...(f.previousPath ? { previousPath: f.previousPath } : {}),
+    })),
     body: 'Why this change is needed.',
     headSha: 'head-1',
     baseSha: 'base-1',
@@ -163,9 +177,13 @@ const workflowService = {
   },
 } as never;
 
+/** Every path the access tree was asked about, across the call under test. */
+let accessAskedFor: string[] = [];
+
 const accessControl = {
   canReadBatchAtRef: async (ws: string, ref: string, email: string, paths: string[]) => {
     calls.push(['canReadBatchAtRef', ws, ref, email]);
+    accessAskedFor.push(...paths);
     if (readable === null) return null;
     return new Map(paths.map((p) => [p, readable!.includes(p)]));
   },
@@ -227,6 +245,7 @@ beforeEach(() => {
   summaries = [];
   details = new Map();
   calls = [];
+  accessAskedFor = [];
   callerEmail = VIEWER;
 });
 afterEach(async () => {
@@ -1034,5 +1053,116 @@ describe('a file renamed out of a folder the caller may not read', () => {
     callerEmail = AUTHOR;
     const { json } = await call(base, 'list_change_request_files', { number: 12 });
     expect(json.withheld_files).toBe(1);
+  });
+});
+
+/**
+ * The contradiction Local Testing found on sha 45f18939: `list_change_requests`
+ * advertised change request #3 to a caller for whom all four by-number tools
+ * answered 404, and reported `withheld_files: 0` where it was 1. The list judged
+ * the flat `touchedNodePaths`, which names a rename by its new path alone.
+ */
+describe('the list and the by-number tools never disagree about a request', () => {
+  const OLD = 'KnowledgeBase/Engineering/Knowledge/Avi-Checkin.md';
+  const NEW = 'KnowledgeBase/GTM/Knowledge/Moved-From-Engineering.md';
+
+  /**
+   * CR#3 from the report: one file, renamed out of Engineering (which john
+   * cannot read) into GTM (which he can). `touchedNodePaths` carries the new
+   * path only — exactly as `changedPathsForPr` reports a detected rename.
+   */
+  function renamedOutOfReach(): ChangeRequest {
+    return summary({
+      number: 3,
+      title: 'Local test: rename out of a folder john cannot read',
+      touchedNodePaths: [NEW],
+      touchedNodeFiles: [{ path: NEW, previousPath: OLD }],
+    });
+  }
+
+  beforeEach(() => {
+    readable = [NEW];
+  });
+
+  it('does not list a request whose every file the by-number tools withhold', async () => {
+    const base = await start();
+    const cr = renamedOutOfReach();
+    summaries = [cr];
+    details.set(3, detail({ ...cr, files: [file(NEW, { status: 'renamed', previousPath: OLD })] }));
+
+    const listed = await call(base, 'list_change_requests', {});
+    expect(listed.json.change_requests).toEqual([]);
+    expect(listed.json.total_count).toBe(0);
+
+    // ...and the four by-number tools agree, as they already did.
+    for (const tool of TOOLS.filter((t) => t !== 'list_change_requests')) {
+      const { status, json } = await call(base, tool, { number: 3 });
+      expect(status, tool).toBe(404);
+      expect(json.error, tool).toBe('Change request #3 not found.');
+    }
+  });
+
+  it('names neither side of the rename in the list it does answer', async () => {
+    const base = await start();
+    summaries = [renamedOutOfReach(), summary({ number: 2, touchedNodePaths: [NEW] })];
+    const { json } = await call(base, 'list_change_requests', {});
+    // #2 touches the readable file plainly, so it is listed; #3 is not, and
+    // nothing of it — not its title, not either of its paths — comes back.
+    expect((json.change_requests as unknown as { number: number }[]).map((c) => c.number)).toEqual([2]);
+    const whole = JSON.stringify(json);
+    expect(whole).not.toContain('Avi-Checkin');
+    expect(whole).not.toContain('rename out of a folder');
+  });
+
+  it('counts the withheld rename as one file for its author, who may see it', async () => {
+    const base = await start();
+    callerEmail = AUTHOR;
+    summaries = [renamedOutOfReach()];
+    const { json } = await call(base, 'list_change_requests', {});
+    expect(json.change_requests).toHaveLength(1);
+    // The author may SEE their request; they still may not read the file, and
+    // the count says so — one file, not two, though it goes by two names.
+    expect(json.change_requests[0]).toMatchObject({ changed_files: 0, withheld_files: 1 });
+    expect(JSON.stringify(json)).not.toContain('Avi-Checkin');
+  });
+
+  it('lists the request once both of the rename\'s names are readable', async () => {
+    const base = await start();
+    readable = [NEW, OLD];
+    summaries = [renamedOutOfReach()];
+    const { json } = await call(base, 'list_change_requests', {});
+    expect(json.change_requests).toHaveLength(1);
+    expect(json.change_requests[0]).toMatchObject({ changed_files: 1, withheld_files: 0 });
+  });
+
+  it('asks the access tree about both of a rename\'s names', async () => {
+    const base = await start();
+    summaries = [renamedOutOfReach()];
+    callerEmail = AUTHOR;
+    await call(base, 'list_change_requests', {});
+    // One lookup for the target branch, carrying both paths — the old side is
+    // what the previous implementation never asked about.
+    const asked = calls.filter((c) => c[0] === 'canReadBatchAtRef');
+    expect(asked).toHaveLength(1);
+    expect(asked[0][2]).toBe('origin/main');
+    expect(accessAskedFor).toEqual(expect.arrayContaining([NEW, OLD]));
+  });
+
+  /**
+   * A summary from somewhere that never filled `touchedNodeFiles` proves
+   * nothing, rather than silently falling back to the flat paths — the fallback
+   * is what this whole class of bug was.
+   */
+  it('treats a summary with no paired files as proving no read access', async () => {
+    const base = await start();
+    const bare = summary({ number: 5 });
+    delete bare.touchedNodeFiles;
+    summaries = [bare];
+    const strangers = await call(base, 'list_change_requests', {});
+    expect(strangers.json.change_requests).toEqual([]);
+
+    callerEmail = AUTHOR;
+    const mine = await call(base, 'list_change_requests', {});
+    expect(mine.json.change_requests).toHaveLength(1);
   });
 });
