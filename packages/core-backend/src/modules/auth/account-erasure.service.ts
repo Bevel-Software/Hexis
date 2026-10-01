@@ -324,6 +324,20 @@ export class AccountErasureService implements IAccountErasureService {
         ),
       );
 
+    // And the refusal note, for the apply this person was inside when the
+    // commit landed: recording it takes no lock and names no user row, so it
+    // can write their name after the rewrite above. Same statement, same
+    // guard, same reason.
+    await this.db
+      .update(changeRequests)
+      .set({ applyFailedByName: target.erasedName, applyFailedByEmailBidx: erasedBidx })
+      .where(
+        and(
+          eq(changeRequests.applyFailedByEmailBidx, emailBidx),
+          notExists(this.db.select({ id: users.id }).from(users).where(eq(users.emailBidx, emailBidx))),
+        ),
+      );
+
     // Post-commit callbacks (e.g. Mastra memory cleanup for chat threads
     // captured inside the transaction).
     for (const cb of postCommit) await cb();

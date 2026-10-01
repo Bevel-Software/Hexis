@@ -192,8 +192,9 @@ describe.skipIf(!ADMIN_URL)('the personal-data backfill, on a real Postgres', ()
       expect(opened(requests[0]!.failure_reason)).toBe('git refused Ada');
       expect(requests[0]!.requester_email_bidx).toBe(blindIndex('ada@example.com'));
 
-      // Nothing a dump would show names anyone.
-      expect(await stored(q)).not.toMatch(/example\.com|Ada|Bo /);
+      // Nothing a dump would show names anyone. The blobs themselves are
+      // masked first: random base64 spells "Ada" by chance often enough.
+      expect((await stored(q)).replace(/"pii:v1:[^"]*"/g, '"sealed"')).not.toMatch(/example\.com|Ada|Bo /);
 
       // Uniqueness moved from the raw columns to the blind indexes.
       const indexes = (

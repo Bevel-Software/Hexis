@@ -179,8 +179,9 @@ describe('AccountErasureService: approvals are rewritten under the approval lock
     const committed = h.order.indexOf('delete:users');
     const sweep = h.order.indexOf('after-commit:pr_file_approvals');
     expect(sweep).toBeGreaterThan(committed);
-    // The change requests get the same treatment, and did before this.
-    expect(h.order).toContain('after-commit:change_requests');
+    // The change requests get the same treatment, twice: once for the
+    // authorship, once for the refusal note of an apply that was in flight.
+    expect(h.order.filter((step) => step === 'after-commit:change_requests')).toHaveLength(2);
     // Both guarded on `users`: the marker is only recorded for a clause that
     // names it, so a sweep that dropped the `notExists` lands here instead.
     expect(h.order.filter((step) => step.startsWith('unguarded:'))).toEqual([]);

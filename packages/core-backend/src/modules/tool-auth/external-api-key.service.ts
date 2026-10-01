@@ -170,6 +170,8 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     // The email half of that order is applied in-process: the column is
     // ciphertext in the database, where ORDER BY would sort by IV noise. The
     // sort is stable, so the database's newest-first survives within an owner.
+    // By code unit, not by locale: a collation can call two different
+    // addresses equal, and equal here means "the same owner's group".
     const rows = await this.db
       .select({
         key: externalApiKeys,
@@ -180,7 +182,7 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
       .from(externalApiKeys)
       .innerJoin(users, eq(externalApiKeys.userId, users.id))
       .orderBy(desc(externalApiKeys.createdAt));
-    rows.sort((a, b) => a.email.localeCompare(b.email));
+    rows.sort((a, b) => (a.email < b.email ? -1 : a.email > b.email ? 1 : 0));
     return rows.map((row) => ({
       ...toSummary(row.key),
       user: { id: row.userId, email: row.email, name: row.name },
