@@ -182,7 +182,6 @@ export class AgentUploadStore {
    * until the sweep drops it.
    */
   issue(user: { id: string }): IssuedUpload {
-    this.startSweeping();
     const token = this.tokenPrefix + randomBytes(32).toString('base64url');
     const expiresAt = Date.now() + this.ttlMs;
     this.records.set(hash(token), {
@@ -192,6 +191,10 @@ export class AgentUploadStore {
       attaching: false,
       claimed: false,
     });
+    // AFTER the record exists, not before. The first sweep runs the moment the
+    // timer starts, and started from an empty map it would be a sweep that
+    // believes nothing is live — this token's own id included.
+    this.startSweeping();
     return {
       uploadUrl: this.uploadUrlFor(token),
       token,
@@ -247,6 +250,19 @@ export class AgentUploadStore {
       // with the same one rather than ask for another.
       record.attaching = false;
       throw err;
+    }
+    // THE TTL MAY HAVE PASSED while the bytes were arriving — a 40 MB upload
+    // over a slow link takes real time, and the token was issued before it
+    // started. The record was pinned against the sweep throughout (see
+    // {@link pinned}), so neither it nor the file could be deleted under the
+    // write; but an expired token cannot be applied, so answering "received"
+    // would hand the sender a success it can do nothing with. The refusal is
+    // the honest answer, and the bytes go with it rather than waiting for a
+    // sweep to notice.
+    if (record.expiresAt <= Date.now()) {
+      this.records.delete(hash(token));
+      await this.remove(record.id);
+      throw new UploadTokenError(UPLOAD_TOKEN_REFUSAL, 404);
     }
     record.received = received;
     return received;
@@ -342,16 +358,24 @@ export class AgentUploadStore {
       this.records.delete(key);
       await this.remove(record.id);
     }
-    // Every id a live record is holding — including one whose bytes have not
-    // arrived yet, so an upload in flight is never swept out from under itself,
-    // and one an apply has pinned past its expiry.
-    const live = new Set([...this.records.values()].map((r) => r.id));
     let names: string[];
     try {
       names = await fs.readdir(this.root);
     } catch {
       return; // root not created yet, or unreadable — nothing to reclaim
     }
+    // Every id a live record is holding — including one whose bytes have not
+    // arrived yet, so an upload in flight is never swept out from under itself,
+    // and one an apply has pinned past its expiry.
+    //
+    // Read AFTER the directory, never before. The gap between the two is a
+    // real one — the readdir is a filesystem round-trip, and this process
+    // serves other requests across it — so a token issued and uploaded during
+    // that gap would appear in `names` while a set taken earlier had never
+    // heard of it, and the sweep would delete bytes somebody had just been
+    // told were received. Taken afterwards, the set is a superset of what the
+    // listing could possibly name.
+    const live = new Set([...this.records.values()].map((r) => r.id));
     for (const name of names) {
       // Asked again per name: a stop (an evicted tenant, a shutdown) that
       // landed while this sweep was reading the directory must not go on to
@@ -361,8 +385,22 @@ export class AgentUploadStore {
     }
   }
 
-  /** Whether an expired record is held open by an apply that is still running. */
+  /**
+   * Whether an expired record is held open by work that is still running:
+   * an UPLOAD still writing its bytes, or an APPLY still reading them.
+   *
+   * Both windows can outlast a TTL — a large upload over a slow link, an apply
+   * that clones a branch before it reads — and in both the record's own file is
+   * being written or read right now. A sweep that deleted either would leave a
+   * file no map mentions (the upload writes after the delete) or an apply
+   * reading a path that has gone. The apply's pin has a grace, because a claim
+   * can be abandoned by a process that dies; the upload's needs none, because
+   * `attach` always ends — it clears `attaching` on failure and sets `received`
+   * on success, and an attach whose TTL passed meanwhile deletes the record
+   * itself rather than leaving it pinned.
+   */
   private pinned(record: UploadRecord, now: number): boolean {
+    if (record.attaching && record.received === undefined) return true;
     return record.claimed && now - (record.claimedAt ?? now) < CLAIM_GRACE_MS;
   }
 

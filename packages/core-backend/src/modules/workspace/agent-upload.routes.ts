@@ -56,32 +56,35 @@ export function createAgentUploadRoutes(deps: AgentUploadRouteDeps): express.Rou
 
   router.post(AGENT_UPLOAD_ROUTE, async (req, res) => {
     const token = req.params.token;
-    const filename = fileNameOf(req);
-    if (filename === null) {
-      res.status(400).json({
-        error:
-          'Name the file you are sending: add `?filename=<name>` to the upload URL (or send it as the ' +
-          '`x-upload-filename` header). A single file lands under that name, and a name ending in `.zip` is ' +
-          'read as an archive.',
-      });
-      return;
-    }
-    const invalid = validateFilename(filename);
-    if (invalid !== null || filename.includes('/')) {
-      res.status(400).json({
-        error: `"${filename}" is not a usable file name: ${invalid ?? 'a name cannot contain "/"'}. Send one plain file name.`,
-      });
-      return;
-    }
     try {
-      // The TOKEN first — before the limit is quoted and before a single byte
-      // of the body is held. This route is authenticated by the token and
-      // nothing else: without this check anyone could make the process buffer
-      // the deployment's whole upload limit per request against tokens they
-      // invented, as many at a time as they liked, and nobody without a token
-      // is owed any other answer than the one refusal. `attach` below asks
-      // again, under the same record, because that is where it is spent.
+      // THE TOKEN FIRST, before anything about the request is read, parsed,
+      // judged or quoted back. This route is authenticated by the token and
+      // nothing else, which cuts two ways. Without the check up here, anyone
+      // could make the process buffer the deployment's whole upload limit per
+      // request against tokens they invented, as many at a time as they liked;
+      // and a caller holding no token could learn which of its OTHER guesses
+      // were well formed — "that is not a usable file name" is an answer only
+      // somebody entitled to send a file should get. One refusal, nothing else.
+      // `attach` below asks again, under the same record, because that is where
+      // the token is actually spent.
       uploads.assertOpen(token);
+      const filename = fileNameOf(req);
+      if (filename === null) {
+        res.status(400).json({
+          error:
+            'Name the file you are sending: add `?filename=<name>` to the upload URL (or send it as the ' +
+            '`x-upload-filename` header). A single file lands under that name, and a name ending in `.zip` is ' +
+            'read as an archive.',
+        });
+        return;
+      }
+      const invalid = validateFilename(filename);
+      if (invalid !== null || filename.includes('/')) {
+        res.status(400).json({
+          error: `"${filename}" is not a usable file name: ${invalid ?? 'a name cannot contain "/"'}. Send one plain file name.`,
+        });
+        return;
+      }
       // Then the declared length, so a caller sending something far too large
       // is told the limit before it spends the bandwidth. The real total is
       // checked again below — `content-length` is the sender's claim, not a fact.
@@ -164,9 +167,14 @@ function fileNameOf(req: express.Request): string | null {
  * only one where the encoding is part of the grammar. A plain `filename=` value
  * is the name itself, so `50%20off.md` stays `50%20off.md` rather than losing
  * its `%20` to a decode nobody asked for.
+ *
+ * The parameter name is matched at a boundary — the start of the header or a
+ * `;` — because `filename` is a suffix of other perfectly legal parameter
+ * names: without it, `inline; xfilename=wrong.md` read `wrong.md` as the name
+ * the sender gave, from a parameter that says nothing of the kind.
  */
 export function dispositionFilename(disposition: string): string | null {
-  const match = /filename(\*?)\s*=\s*(?:"([^"]*)"|([^;]*))/i.exec(disposition);
+  const match = /(?:^|;)\s*filename(\*?)\s*=\s*(?:"([^"]*)"|([^;]*))/i.exec(disposition);
   if (!match) return null;
   const extended = match[1] === '*';
   const raw = (match[2] ?? match[3] ?? '').trim();

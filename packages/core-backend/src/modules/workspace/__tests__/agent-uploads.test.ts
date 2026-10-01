@@ -426,6 +426,37 @@ describe('the upload route', () => {
     expect((await json<{ error: string }>(res)).error).toBe(UPLOAD_TOKEN_REFUSAL);
   });
 
+  it('tells an unknown token nothing about its OTHER mistakes either', async () => {
+    const base = await start();
+    // No file name at all, and a name no filesystem would keep — both
+    // ordinarily a 400 that says which. Against a token that does not exist
+    // they get the one refusal instead: "that is not a usable file name" is an
+    // answer only somebody entitled to send a file should be able to collect.
+    for (const url of [
+      `${base}/api/agent/uploads/bevel-up_nope`,
+      `${base}/api/agent/uploads/bevel-up_nope?filename=${encodeURIComponent('../escape.md')}`,
+    ]) {
+      const res = await fetch(url, { method: 'POST', body: Buffer.from('x') });
+      expect(res.status).toBe(404);
+      expect((await json<{ error: string }>(res)).error).toBe(UPLOAD_TOKEN_REFUSAL);
+    }
+  });
+
+  it('does not read a parameter that merely ENDS in "filename" as the name', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    // `xfilename` is a parameter of its own, and `filename` is its suffix. The
+    // name is asked for instead of taken from it.
+    const res = await fetch(`${base}/api/agent/uploads/${encodeURIComponent(token)}`, {
+      method: 'POST',
+      headers: { 'content-disposition': 'inline; xfilename=wrong.md' },
+      body: Buffer.from('x'),
+    });
+    expect(res.status).toBe(400);
+    expect((await json<{ error: string }>(res)).error).toContain('filename');
+    expect(await readdir(uploadsDir)).toEqual([]);
+  });
+
   it('asks for a file name when none was given', async () => {
     const base = await start();
     const { token } = await request(base);
@@ -1016,6 +1047,51 @@ describe('a token is good once, for one user, for a limited time', () => {
 });
 
 describe('the sweep', () => {
+  it('leaves alone the bytes of a token issued while it was listing the directory', async () => {
+    const base = await start({ sweepEveryMs: 60_000 });
+    const first = await request(base);
+    await send(base, first.token, 'first.md', Buffer.from('first'));
+    // A sweep in flight and a brand-new token's upload landing across it. The
+    // sweep reads the directory and only THEN asks which ids are live, so a
+    // record that came into being during the listing is one it has heard of;
+    // a set taken beforehand would have called this file an orphan.
+    const sweeping = uploads.sweepNow();
+    const second = await request(base);
+    const landed = await send(base, second.token, 'second.md', Buffer.from('second'));
+    await sweeping;
+    expect(landed.status).toBe(200);
+    expect(await readdir(uploadsDir)).toHaveLength(2);
+    // And both are still applicable — the sweep took neither record with it.
+    expect((await apply(base, { branch: DRAFT, token: first.token, destination: `${KB_DIR}/A` })).count).toBe(1);
+    expect((await apply(base, { branch: DRAFT, token: second.token, destination: `${KB_DIR}/B` })).count).toBe(1);
+  });
+
+  it('refuses an upload whose token expired while the body was still arriving', async () => {
+    // The TTL passes mid-request, and the periodic sweep fires inside it. The
+    // answer is the one refusal rather than a success the sender could do
+    // nothing with — and nothing is left staged.
+    const base = await start({ ttlMs: 250, sweepEveryMs: 20 });
+    const { token } = await request(base);
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3]));
+        await new Promise((r) => setTimeout(r, 600));
+        controller.enqueue(new Uint8Array([4, 5, 6]));
+        controller.close();
+      },
+    });
+    const res = await fetch(`${base}/api/agent/uploads/${encodeURIComponent(token)}?filename=slow.bin`, {
+      method: 'POST',
+      body,
+      // Node's fetch requires this for a streamed request body.
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+    expect(res.status).toBe(404);
+    expect((await json<{ error: string }>(res)).error).toBe(UPLOAD_TOKEN_REFUSAL);
+    await uploads.drainSweep();
+    expect(await readdir(uploadsDir)).toEqual([]);
+  });
+
   it('leaves the bytes an apply is holding alone, even past the expiry', async () => {
     const base = await start({ ttlMs: 1_000 });
     const { token } = await request(base);
