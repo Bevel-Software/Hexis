@@ -26,10 +26,9 @@ import { validateFilename } from './filename.js';
  * fold it into Knowledge as a stray directory.
  *
  * These names are the single source of truth for both sides of the app:
- *  - Backend: the graph parser discovers ontologies under the
- *    {@link ontologyRoots} (`KnowledgeBase/` and `Data/`); `Plugins/`,
- *    `Agents/`, `Pipelines/` (and anything else at the root) are ignored by
- *    parsing, validation, and the diagram.
+ *  - Backend: the graph parser discovers its content under `KnowledgeBase/`
+ *    and `Data/`; `Plugins/`, `Agents/`, `Pipelines/` (and anything else at
+ *    the root) are ignored by parsing, validation, and the diagram.
  *  - Frontend: the file tree renders these root folders as distinct
  *    top-level sections.
  *
@@ -854,16 +853,6 @@ export const AGENTS_DIR = 'Agents';
 export const PIPELINES_DIR = 'Pipelines';
 
 /**
- * The roots whose subfolders are discovered as ontologies by the graph parser
- * (each subfolder with both `NodeTypes/` and `Knowledge/` is an ontology).
- * A function of the layout, not a constant: the knowledge-base root is
- * configurable per deployment.
- */
-export function ontologyRoots(layout: KbLayout): readonly string[] {
-  return [layout.knowledgeBaseDir, DATA_DIR];
-}
-
-/**
  * Every reserved root name under `layout` — the set the file tree renders as
  * its own sections rather than folding into Knowledge.
  */
@@ -901,7 +890,6 @@ export const ONTOLOGY_MARKERS = new Set([KNOWLEDGE_DIR, NODETYPE_DIR]);
  */
 export type Ontology = string | null;
 
-// The implementation that resolves a path to its `Ontology` (`ontologyOf`) is
-// backend-only — it lives in `packages/backend/src/shared/kb-layout.ts`, built
-// from the `KNOWLEDGE_BASE_DIR` / `ONTOLOGY_MARKERS` constants above. This
-// package holds only the cross-cutting constants and types, not logic.
+// Resolving a path to its `Ontology` is no longer done here or anywhere else
+// in these packages: this package holds the cross-cutting constants and types
+// a distribution's graph parser builds on, not logic of its own.

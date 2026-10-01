@@ -1,5 +1,20 @@
 # TODOS
 
+## Database
+
+### Drop the table `session_ontology_touches`
+
+**What:** Remove `sessionOntologyTouches` from `packages/core-backend/src/modules/database/core-schema.ts` and ship the drop migration.
+
+**Why:** Nothing in these packages reads or writes it since the per-conversation boundary moved out of core, behind the agent read/write hooks. It is kept for exactly one release so that no deployment runs a version in which neither side has the table.
+
+**Context:** Do it in the release AFTER the one that carries "Hexis offers neutral session hooks". A distribution that took the boundary over creates and owns its own table; rows are not copied, so nothing here has to migrate data — the drop is the whole change.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** the release that removed the session-ontology gate, service and policy
+
+
 ## Knowledge rendering
 
 ### Render the images inside a markdown diff at their own revision

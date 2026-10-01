@@ -41,6 +41,9 @@ import {
   isMissingRemoteBranchFailure,
 } from '../../shared/domain-errors.js';
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
+import { normalizeRepositoryAddress, sameRepository } from '../kb-fs/remote-url.js';
+import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
+import { setAsideClone, setAsideRootFor, setAsideStamp } from './set-aside-clone.js';
 import {
   cloneCredentialArgs,
   cloneCredentialConfigArgs,
@@ -307,6 +310,15 @@ export class WorkspaceService implements IWorkspaceService {
      * constructed service.
      */
     private readonly gitRunner: IGitRunner = new NodeGitRunner(),
+    /**
+     * Where a working copy of a repository that is no longer the configured
+     * one is kept. THE SAME VALUE THE KB STARTUP PHASE IS GIVEN — what the two
+     * of them move must end up in one place, and omitting it here falls back to
+     * a directory that does not survive a deployment's next recreate.
+     *
+     * Why, in one place: `setAsideRootFor` in `set-aside-clone.ts`.
+     */
+    private readonly setAsideRoot?: string,
   ) {
     this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
   }
@@ -617,22 +629,65 @@ export class WorkspaceService implements IWorkspaceService {
 
     // Check disk — the clone may have been bootstrapped by a previous
     // process and survived a restart.
-    try {
-      await fs.access(path.join(repoDir, '.git'));
-      // Migration for clones already on disk: re-stamp the tracking config the
-      // first time this process opens them, so a clone whose config drifted
-      // (duplicate fetch refspec / merge ref) is repaired before anything
-      // pulls it. Once per branch per process — the cached paths above return
-      // before reaching here.
-      await this.normalizeCloneConfig(repoDir, branch);
-      this.registerBranchDir(branch, workspaceDir);
-      return this.buildWorkspaceInfo(branch, workspaceDir);
-    } catch {
-      // Not on disk — bootstrap below.
+    const onDisk = await fs.access(path.join(repoDir, '.git')).then(() => true, () => false);
+    // A clone fetches and pushes through the address stored in its OWN
+    // `remote.origin.url`, which nothing rewrites when the configured
+    // repository changes. Adopting one of the repository that was replaced is
+    // how every later fetch answers "repository not found" — so it is set
+    // aside here and cloned fresh below, the same rule, and the same
+    // destination, as the KB startup phase applies to the whole workspaces
+    // root.
+    //
+    // SET ASIDE, never deleted. The phase sweeps only AFTER it has reached the
+    // configured remote, so that a typo in the address cannot cost anyone
+    // their work. This path has reached nothing: it is a branch being opened,
+    // and it runs in exactly the states where the address is stored but
+    // unproven — a gated boot, a break-glass start, a save that changed the
+    // address before the phase got to it. Deleting on a string difference
+    // there would throw away commits that exist nowhere else because somebody
+    // mistyped a host name.
+    //
+    // OUTSIDE the adoption `try` below, deliberately: a clone that cannot be
+    // moved must fail this call with that reason. Swallowed into "bootstrap
+    // below", it would be found again by the clone step, which sees a
+    // directory with a `.git` in it, calls that already-cloned, and hands back
+    // the very working copy this refused to adopt.
+    if (onDisk && (await this.isCloneOfAnotherRepository(repoDir))) {
+      const kept = path.join(
+        setAsideRootFor(this.workspacesRoot, this.setAsideRoot),
+        setAsideStamp(),
+        workspaceIdForBranch(branch),
+      );
+      await setAsideClone(repoDir, kept);
+      log.warn(
+        `the "${branch}" working copy was a clone of another repository. Set aside at ${kept}; nothing was ` +
+          'deleted, and it is being cloned fresh from the configured one. Work that was never pushed is in that ' +
+          'folder: `git log` there shows it.',
+      );
+    } else if (onDisk) {
+      try {
+        // Migration for clones already on disk: re-stamp the tracking config
+        // the first time this process opens them, so a clone whose config
+        // drifted (duplicate fetch refspec / merge ref) is repaired before
+        // anything pulls it. Once per branch per process — the cached paths
+        // above return before reaching here.
+        await this.normalizeCloneConfig(repoDir, branch);
+        this.registerBranchDir(branch, workspaceDir);
+        return this.buildWorkspaceInfo(branch, workspaceDir);
+      } catch {
+        // No longer worth adopting — bootstrap below.
+      }
     }
 
     // Single-flight bootstrap. Concurrent callers for the same branch
     // share the first one's promise instead of stacking clones.
+    //
+    // Recorded before any of it: a clone takes seconds, and the save that
+    // replaces the repository can land in the middle of one. Whatever this
+    // bootstrap produces is about the repository configured NOW, so if the
+    // working copy is taken away while it runs (`forgetClone`) the result must
+    // not be published — see `adoptBootstrapped`.
+    const discardsAtBootstrap = this.discardsOf(workspaceIdForBranch(branch));
     let resolveBootstrap!: () => void;
     let rejectBootstrap!: (err: unknown) => void;
     const bootstrap = new Promise<void>((res, rej) => {
@@ -644,7 +699,7 @@ export class WorkspaceService implements IWorkspaceService {
     const existingBootstrap = this.inFlightBootstraps.get(branch);
     if (existingBootstrap) {
       await existingBootstrap;
-      this.registerBranchDir(branch, workspaceDir);
+      this.adoptBootstrapped(branch, workspaceDir, discardsAtBootstrap);
       return this.buildWorkspaceInfo(branch, workspaceDir);
     }
     this.inFlightBootstraps.set(branch, bootstrap);
@@ -659,7 +714,7 @@ export class WorkspaceService implements IWorkspaceService {
       // naturally; seeding the remote is the KB startup phase's job, at boot.
       createdWorkspaceDir = await fs.mkdir(workspaceDir, { recursive: true });
       await this.cloneProcessMapForBranch(workspaceDir, branch);
-      this.registerBranchDir(branch, workspaceDir);
+      this.adoptBootstrapped(branch, workspaceDir, discardsAtBootstrap);
       resolveBootstrap();
     } catch (err) {
       this.branchDirs.delete(branch);
@@ -707,6 +762,33 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
+   * Publish a finished bootstrap's working copy to the branch→directory cache
+   * — unless the copy was taken out from under it while it ran.
+   *
+   * The save that replaces the knowledge-base repository sets every working
+   * copy aside and clears this cache (`forgetClone`), and a clone takes
+   * seconds: a bootstrap already in flight when that happens finishes
+   * afterwards, and a plain `registerBranchDir` would put the path back. The
+   * directory is gone (set aside), so every reader from then on gets an
+   * ENOENT off the fast path and nothing ever re-clones it — a cache entry
+   * is exactly what stops that.
+   *
+   * Refused rather than retried here: the address this bootstrap cloned from
+   * is not the one configured now, so there is nothing to salvage. The caller
+   * is told, and opening the branch again clones it from the new address.
+   */
+  private adoptBootstrapped(branch: string, workspaceDir: string, discardsAtStart: number): void {
+    if (this.discardsOf(workspaceIdForBranch(branch)) !== discardsAtStart) {
+      this.branchDirs.delete(branch);
+      throw new Error(
+        `The knowledge-base repository was replaced while the "${branch}" working copy was being created, so ` +
+          'that copy was set aside instead of being used. Open it again to get one of the new repository.',
+      );
+    }
+    this.registerBranchDir(branch, workspaceDir);
+  }
+
+  /**
    * Await the in-flight bootstrap for a branch (if any). On reject —
    * meaning the clone rolled back — drop the branch→dir mapping so the
    * next caller re-bootstraps.
@@ -729,6 +811,98 @@ export class WorkspaceService implements IWorkspaceService {
    */
   isBootstrapInFlight(branch: string): boolean {
     return this.inFlightBootstraps.has(branch);
+  }
+
+  /**
+   * Whether the clone at `repoDir` belongs to a repository OTHER than the
+   * configured one.
+   *
+   * Errs towards NO — "could not tell" must never delete someone's work:
+   * an address that cannot be read (no `origin`, a git that would not run)
+   * leaves the clone alone, and only two addresses that are read and differ
+   * in more than their spelling count as different repositories (see
+   * `kb-fs/remote-url.ts`). An UNCONFIGURED address answers no as well: a
+   * process that does not know where the repository is has no business
+   * declaring a clone stale.
+   */
+  private async isCloneOfAnotherRepository(repoDir: string): Promise<boolean> {
+    const configured = this.kbRepoUrl().trim();
+    if (configured === '') return false;
+    let origin: string;
+    try {
+      const { stdout } = await this.gitRunner.run(repoDir, ['config', '--get', 'remote.origin.url']);
+      origin = stdout.trim();
+    } catch {
+      return false;
+    }
+    if (origin === '' || sameRepository(origin, configured)) return false;
+    // Normalizing strips the userinfo but KEEPS the query string, and the
+    // knowledge-base address is one that may carry its credential there (a
+    // signed URL — see `urlQuerySecrets`). So the address is scrubbed on the
+    // way into the log, exactly as the startup phase scrubs its own.
+    log.warn(
+      `the "${path.basename(path.dirname(repoDir))}" working copy is a clone of another repository ` +
+        `(${redactSecret(normalizeRepositoryAddress(origin), urlQuerySecrets(origin))}).`,
+    );
+    return true;
+  }
+
+  /**
+   * How many times each working copy has been taken out from under this
+   * process — see {@link forgetClone}. Deleting from the caches is not enough
+   * on a RUNNING server: work already in flight against the copy that went
+   * away finishes afterwards and writes its result back into those very
+   * caches. So every such reader records the count it started with and checks
+   * it before publishing: a count that moved means what it learned is about a
+   * working copy that no longer exists, and is dropped.
+   *
+   * Keyed by workspace id, which is what the phase announces and what both
+   * readers can derive (`workspaceIdForBranch`).
+   */
+  private readonly discardCount = new Map<string, number>();
+
+  /**
+   * Both readers and `forgetClone` go through this, so a caller's spelling of
+   * a workspace id can never make them disagree about which working copy is
+   * meant: the id is taken back to its branch and spelled afresh, which is the
+   * one form the phase announces.
+   */
+  private discardKey(workspaceId: string): string {
+    return workspaceIdForBranch(branchForWorkspaceId(workspaceId));
+  }
+
+  private discardsOf(workspaceId: string): number {
+    return this.discardCount.get(this.discardKey(workspaceId)) ?? 0;
+  }
+
+  /**
+   * Forget everything this process remembers about a working copy that was
+   * taken away underneath it — the KB startup phase setting aside a clone of a
+   * repository that was replaced.
+   *
+   * At boot there is nothing to forget; this is for the save that changes the
+   * address on a RUNNING server, where `branchDirs` would otherwise keep
+   * answering with the path of a directory that is gone and no later caller
+   * would ever re-clone it. The branch NAME is deliberately left in
+   * `branchesEverHeardOf` — the branch was real, and that record outlives
+   * its clone.
+   */
+  forgetClone(workspaceId: string): void {
+    const branch = branchForWorkspaceId(workspaceId);
+    const workspaceDir = path.join(this.workspacesRoot, workspaceId);
+    const repoDir = path.join(workspaceDir, this.kbDirName);
+    this.discardCount.set(this.discardKey(workspaceId), this.discardsOf(workspaceId) + 1);
+    this.branchDirs.delete(branch);
+    this.lastFetchAt.delete(repoDir);
+    this.lastFetchOk.delete(repoDir);
+    // Dropped as well as un-stamped: the promise still running belongs to the
+    // working copy that went away, so a caller that joined it would be told a
+    // fetch of a directory that is gone refreshed the one that replaced it.
+    // The count above is what stops that promise re-stamping the TTL when it
+    // finally settles.
+    this.inFlightFetches.delete(repoDir);
+    // Keyed by branch, not by directory — see `stampCredentialHelper`.
+    this.stampedCredentialFingerprint.delete(branch);
   }
 
   /**
@@ -1266,14 +1440,23 @@ export class WorkspaceService implements IWorkspaceService {
     // This driver runs outside the git layer's per-workspace mutex, so it may
     // only run the safe implicit-fetch shape — see `SAFE_IMPLICIT_FETCH_ARGS`
     // in `kb-fs/clone-config.ts` for the full rationale.
+    // What this fetch is ABOUT: the working copy in that directory as it is
+    // now. Should the repository be replaced while the fetch runs, the copy is
+    // set aside and a fresh one is cloned to the SAME path — so stamping the
+    // result afterwards would hand the new clone a freshness it never earned
+    // (or a failure that was the old one's), and the next reader would skip
+    // refreshing it for the whole TTL.
+    const discardsAtFetch = this.discardsOf(workspaceId);
+    const stillTheSameClone = (): boolean => this.discardsOf(workspaceId) === discardsAtFetch;
     const promise = this.gitRunner
       .run(repoDir, [...SAFE_IMPLICIT_FETCH_ARGS])
       .then(() => {
+        if (!stillTheSameClone()) return;
         this.lastFetchAt.set(repoDir, Date.now());
         this.lastFetchOk.set(repoDir, true);
       })
       .catch((err) => {
-        this.lastFetchOk.set(repoDir, false);
+        if (stillTheSameClone()) this.lastFetchOk.set(repoDir, false);
         log.warn('git fetch origin failed:', { detail: redactError(err, this.gitRunner.credentials.token()) });
       })
       .finally(() => {
@@ -1689,10 +1872,10 @@ export class WorkspaceService implements IWorkspaceService {
     zipWsPath: string,
     destDirWsPath?: string,
     /**
-     * Per-extracted-path write guard (ontology-session boundary). Called with
-     * each entry's workspace-relative target before it is written; if it throws,
-     * the entry is skipped (with the thrown message as the reason) rather than
-     * aborting the whole extraction. Omitted by non-agent / human callers.
+     * Per-extracted-path write guard. Called with each entry's
+     * workspace-relative target before it is written; if it throws, the entry
+     * is skipped (with the thrown message as the reason) rather than aborting
+     * the whole extraction. Omitted by non-agent / human callers.
      */
     guardWrite?: (wsRelativePath: string) => Promise<void>,
   ): Promise<UnzipResult> {
@@ -1813,17 +1996,17 @@ export class WorkspaceService implements IWorkspaceService {
       const relForReport = path
         .relative(workspaceDir, targetAbsolute)
         .replace(/\\/g, '/');
-      // Ontology-session boundary: a write-blocked (or cross-ontology) entry is
-      // skipped, not extracted, so an archive can't be a write path around it.
-      // Runs before any filesystem side effect — including directory creation —
-      // so a blocked entry leaves nothing behind on disk.
+      // An entry the write guard refuses is skipped, not extracted, so an
+      // archive can't be a way around whatever the guard enforces. Runs before
+      // any filesystem side effect — including directory creation — so a
+      // refused entry leaves nothing behind on disk.
       const allowEntry = async (): Promise<boolean> => {
         if (!guardWrite) return true;
         try {
           await guardWrite(relForReport);
           return true;
         } catch (err) {
-          skipped.push({ path: rawName, reason: err instanceof Error ? err.message : 'Blocked by the ontology-session boundary' });
+          skipped.push({ path: rawName, reason: err instanceof Error ? err.message : 'Refused before it was written' });
           return false;
         }
       };

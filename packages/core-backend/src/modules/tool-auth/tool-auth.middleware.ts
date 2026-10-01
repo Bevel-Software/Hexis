@@ -79,10 +79,10 @@ export const requireInternalSource: RequestHandler = (req, res, next) => {
 
 /**
  * Mirror of `requireInternalSource` for surfaces that must admit ONLY external
- * callers. `start_session` mints a fresh chat thread as the caller's
- * ontology-session id; an internal (in-process agent) token already carries
- * its run's `sessionId`, so letting it mint a new thread mid-run would
- * silently reset the one-ontology-per-conversation boundary.
+ * callers. `start_session` mints a fresh chat thread as the caller's session
+ * id; an internal (in-process agent) token already carries its run's
+ * `sessionId`, so letting it mint a new thread mid-run would silently split
+ * one conversation in two.
  *
  * "External" is decided by the VERIFIER, not by which credential shape
  * authenticated: a `bevel_…` connection key resolves external, and so does an

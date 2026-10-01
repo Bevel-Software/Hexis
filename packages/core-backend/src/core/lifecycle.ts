@@ -1,7 +1,7 @@
 import type { Server } from 'node:http';
 import { closeDb, type Database } from '../modules/database/connection.js';
 import type { AdvisoryLease } from '../modules/database/advisory-lock.js';
-import { KbRemoteUnreachableError, type KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
+import { bootMaySurvive, type KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
 import { noteBesideCheckout } from '../modules/workspace/startup/beside-checkout.js';
 import { unregisterBevelSecretsVariableLoader } from '../modules/secrets-vault/secrets-variable-loader.js';
 import type { WorkflowService } from '../modules/workflow/workflow.service.js';
@@ -202,6 +202,67 @@ export function withStartupTask(
   };
 }
 
+/** A worker the lease loop drives, which something else may hold still for a while. */
+export interface HoldableWorker extends LeasedWorker {
+  /**
+   * Run `work` with the worker stopped, and start it again afterwards if the
+   * lease loop still wants it running. A hold waits for the commit in flight
+   * to finish, as a stop does. Holds may overlap; the worker starts again
+   * when the last one ends, whether `work` resolved or threw.
+   */
+  whileHeld<T>(work: () => Promise<T>): Promise<T>;
+}
+
+/**
+ * A worker that can be HELD STILL without the lease loop knowing.
+ *
+ * The lease loop decides whether this process is the one draining the commit
+ * queue; it starts the worker when the lease is taken and stops it when the
+ * lease is lost. Moving the deployment to another repository needs a second,
+ * independent reason for the worker not to run: while working copies are
+ * being set aside and cloned again, a queued commit must not be written into
+ * a directory that is being renamed away, nor into the fresh clone of a
+ * repository it was never meant for. Stopping the loop itself would release
+ * the lease, and another process would take the queue over mid-move.
+ *
+ * So the two reasons are kept apart. `wanted` is the lease loop's word,
+ * `holds` counts the moves in flight, and the worker runs exactly when it is
+ * wanted and nothing holds it.
+ *
+ * A stop waits for the holds in flight as well as for the worker. Shutdown
+ * awaits this stop (bounded by its own budget) before it ends the database
+ * pool, and a move still setting copies aside and cloning needs that pool:
+ * it is either finished, or known to have been cut.
+ */
+export function holdable(worker: LeasedWorker): HoldableWorker {
+  let wanted = false;
+  const inFlight = new Set<Promise<unknown>>();
+  return {
+    start() {
+      wanted = true;
+      if (inFlight.size === 0) worker.start();
+    },
+    async stop() {
+      wanted = false;
+      await worker.stop();
+      await Promise.allSettled([...inFlight]);
+    },
+    whileHeld<T>(work: () => Promise<T>): Promise<T> {
+      const held = (async () => {
+        await worker.stop();
+        return work();
+      })();
+      inFlight.add(held);
+      const ended = (): void => {
+        inFlight.delete(held);
+        if (inFlight.size === 0 && wanted) worker.start();
+      };
+      held.then(ended, ended);
+      return held;
+    },
+  };
+}
+
 /**
  * What one knowledge base's graph needs of itself to be STARTED: the boot
  * side effects that used to run inside `createCoreServer`, named so a host
@@ -228,7 +289,8 @@ export interface BootableCore {
  * jobs. `createCoreServer` runs this for a single-tenant deployment; a host
  * serving several knowledge bases runs it when a tenant is activated.
  *
- * Throws to stop the boot on every failure but an unreachable remote — the
+ * Throws to stop the boot on every failure but the ones the host answered
+ * about the repository or the credentials (see `bootMaySurvive`) — the
  * container's restart policy is the retry — see `kb-startup-runner.ts`.
  */
 export async function startCore<C extends BootableCore>(
@@ -267,18 +329,22 @@ export async function startCore<C extends BootableCore>(
   try {
     await core.kbStartupRunner.runAll();
   } catch (err) {
-    // The one failure a boot survives: the remote cannot be reached. That
-    // says nothing about the knowledge base — what we would write is not
-    // known to be wrong, we cannot get there — so refusing to boot only took
-    // away the login and setup screens an operator needs to fix it (a
-    // rotated token, say). The deployment comes up GATED: the setup routes
+    // The failures a boot survives: the host ANSWERED about the repository or
+    // the credentials, or could not be reached at all. None of them says
+    // anything about the knowledge base — what we would write is not known to
+    // be wrong — and every one of them is fixed somewhere else: the host comes
+    // back, the repository is created, the token is granted access, a rotated
+    // token is typed into the setup screen. Refusing to boot took away the
+    // login and setup screens the fix is entered on, and on 2026-09-28 a
+    // repository that had been replaced crash-looped a deployment for exactly
+    // that reason. The deployment comes up GATED instead: the setup routes
     // read the runner's standing failure and keep the app shut, the setup
-    // screen shows why, saving it retries, and the runner keeps trying on
-    // its own. Every other failure still stops the boot, because it means
-    // the template or a step would write something wrong.
-    if (!(err instanceof KbRemoteUnreachableError)) throw err;
-    startupLog.error('booting UNMAINTAINED and gated — the knowledge-base remote could not be reached:', {
-      detail: err.message,
+    // screen shows why, saving it retries, and the runner keeps trying on its
+    // own. Every other failure still stops the boot, because it means the
+    // template or a step would write something wrong. See `bootMaySurvive`.
+    if (!bootMaySurvive(err)) throw err;
+    startupLog.error('booting UNMAINTAINED and gated — the knowledge base could not be initialized:', {
+      detail: err instanceof Error ? err.message : String(err),
     });
     // Kept on the graph so that stopping the graph stops the asking: a
     // retry that outlived its graph would clone into a workspaces folder
