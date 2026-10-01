@@ -53,18 +53,6 @@
 **Priority:** P3
 **Depends on:** feat/kb-images (the Cache-Control header lands there)
 
-### Let agents in core create image files
-
-**What:** Give core MCP agents a way to write binary image files into the KB: either port `request_upload_token` and `apply_upload` from the enterprise tool set into core, or accept base64 content in `write_file` for image extensions (png, jpg, jpeg, gif, webp) with a size cap.
-
-**Why:** `write_file` is text-only and the upload-token tools exist only in enterprise, so an agent asked to "add the screenshot to the page" cannot, and an agent that spots missing knowledge cannot attach evidence. feat/kb-images adds a sentence to the tool descriptions telling agents where images go; this adds the ability to act on it.
-
-**Context:** Base64 inflates payloads by a third and needs a hard cap; a ported upload-token flow is more code but streams and matches enterprise. Either way it is a new write surface for agents and belongs in its own review. Decide base64 versus upload token with the enterprise maintainers first. The MCP image-read allow-list (`image-read.ts`) is the natural allow-list for what agents may write.
-
-**Effort:** M
-**Priority:** P3
-**Depends on:** feat/kb-images (rendering and the documented convention)
-
 ## Backend
 
 ### One extension-to-MIME table with per-consumer allow-lists
