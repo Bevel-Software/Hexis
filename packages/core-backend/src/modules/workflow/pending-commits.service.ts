@@ -34,7 +34,7 @@
  *                                                    (status='needs_attention')
  */
 
-import { and, eq, inArray, isNull, min, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, min, or, sql, type SQL } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('pending-commits');
@@ -404,6 +404,11 @@ export class PendingCommitsService {
    * changed under it.
    */
   async markNeedsAttentionOnBranch(branch: string, error: string): Promise<number> {
+    return this.escalateQueued(eq(pendingCommits.branch, branch), error);
+  }
+
+  /** Every commit still queued that `which` selects goes to a person, with the reason. Answers how many. */
+  private async escalateQueued(which: SQL, error: string): Promise<number> {
     const moved = await this.db
       .update(pendingCommits)
       .set({
@@ -411,12 +416,7 @@ export class PendingCommitsService {
         lastError: error,
         lastAttemptedAt: new Date(),
       })
-      .where(
-        and(
-          eq(pendingCommits.branch, branch),
-          inArray(pendingCommits.status, ['pending', 'running']),
-        ),
-      )
+      .where(and(which, inArray(pendingCommits.status, ['pending', 'running'])))
       .returning({ id: pendingCommits.id });
     return moved.length;
   }
@@ -437,21 +437,9 @@ export class PendingCommitsService {
    * repository, moved) keeps its queue, and is never passed here.
    */
   async markNeedsAttentionInWorkspace(workspaceId: string, error: string): Promise<number> {
-    const moved = await this.db
-      .update(pendingCommits)
-      .set({
-        status: 'needs_attention',
-        lastError: error,
-        lastAttemptedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(pendingCommits.workspaceId, workspaceId),
-          inArray(pendingCommits.status, ['pending', 'running']),
-        ),
-      )
-      .returning({ id: pendingCommits.id });
-    return moved.length;
+    // The canonical form `enqueue` stores (see `canonicalWorkspaceId`), so the
+    // caller's spelling of the id cannot make this match nothing.
+    return this.escalateQueued(eq(pendingCommits.workspaceId, canonicalWorkspaceId(workspaceId)), error);
   }
 
   /**

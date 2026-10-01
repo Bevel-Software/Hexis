@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import type { Database } from '../../database/connection.js';
 
@@ -74,6 +76,31 @@ describe('PendingCommitsService.markNeedsAttentionInWorkspace', () => {
     expect(sets[0]?.status).toBe('needs_attention');
     expect(sets[0]?.lastError).toBe('The repository was replaced.');
     expect(sets[0]?.lastAttemptedAt).toBeInstanceOf(Date);
+  });
+
+  /**
+   * Rows are stored under the encoded id, whichever spelling the caller
+   * enqueued with. The predicate is rendered and read, since the stub does
+   * not evaluate it: the id it compares must be the stored spelling, and the
+   * statuses the two a worker could still write.
+   */
+  it('looks for the working copy under the id the queue stores, and only for commits still queued', async () => {
+    const wheres: SQL[] = [];
+    const db = {
+      update: () => ({
+        set: () => ({
+          where: (predicate: SQL) => {
+            wheres.push(predicate);
+            return { returning: async () => [] };
+          },
+        }),
+      }),
+    } as unknown as Database;
+    await new PendingCommitsService(db).markNeedsAttentionInWorkspace('alice/feature', 'whatever');
+
+    const { sql: text, params } = new PgDialect().sqlToQuery(wheres[0]!);
+    expect(text).toContain('"workspace_id" =');
+    expect(params).toEqual(['alice%2Ffeature', 'pending', 'running']);
   });
 
   it('answers zero when nothing was queued for it', async () => {

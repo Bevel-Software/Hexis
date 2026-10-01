@@ -132,11 +132,16 @@ way you move to. Opening a tab moves nothing either.
 - The deployment moves to the other repository, which starts without what
   the current one holds.
 - Nothing is deleted. The repository you leave is untouched.
-- The deployment's working copies of the repository it left are set aside
-  under `replaced-working-copies/` in the backups volume, with any work
-  that was never pushed. Changes that were still waiting to be committed to
-  them are held for an admin to look at, not committed to the new
-  repository.
+- What happens to the deployment's working copies depends on the
+  repository you move to, not on your answers:
+  - If it holds the same history (the same repository at a new address),
+    the working copies are kept and pointed at it, with any work that was
+    never pushed.
+  - If it is a different repository, the working copies are set aside
+    under `replaced-working-copies/` in the backups volume, with any work
+    that was never pushed. Changes that were still waiting to be committed
+    to them are held for an admin to look at, not committed to the new
+    repository.
 - If change requests are open, you choose: keep them open, when the same
   repository only moved, or close them as "repository replaced".
 

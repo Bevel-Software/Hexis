@@ -502,11 +502,47 @@ describe('holdable', () => {
   it('leaves it stopped when the lease loop stopped it during the work', async () => {
     const { events, worker } = recorded();
     worker.start();
+    // The loop's stop waits for the hold, so it is not awaited from inside it.
+    let stopping: Promise<void> = Promise.resolve();
     await worker.whileHeld(async () => {
-      await worker.stop();
+      stopping = worker.stop();
+      await settle();
     });
+    await stopping;
     expect(events.at(-1)).toBe('stop');
     expect(events.filter((e) => e === 'start')).toHaveLength(1);
+  });
+
+  /**
+   * Shutdown awaits this stop before it ends the database pool. A move still
+   * setting copies aside needs that pool, so the stop does not come back
+   * while a hold is in flight.
+   */
+  it('does not finish stopping while a hold is still in flight', async () => {
+    const { worker } = recorded();
+    worker.start();
+    let finishMove: () => void = () => undefined;
+    const move = worker.whileHeld(() => new Promise<void>((resolve) => (finishMove = resolve)));
+    await settle();
+    let stopped = false;
+    const stopping = worker.stop().then(() => (stopped = true));
+    await settle();
+    expect(stopped).toBe(false);
+    finishMove();
+    await move;
+    await stopping;
+    expect(stopped).toBe(true);
+  });
+
+  it('finishes stopping when the hold in flight fails', async () => {
+    const { worker } = recorded();
+    let failMove: (err: Error) => void = () => undefined;
+    const move = worker.whileHeld(() => new Promise<void>((_, reject) => (failMove = reject)));
+    move.catch(() => undefined);
+    await settle();
+    const stopping = worker.stop();
+    failMove(new Error('the move failed'));
+    await expect(stopping).resolves.toBeUndefined();
   });
 
   it('waits for the last of two overlapping holds before it starts again', async () => {

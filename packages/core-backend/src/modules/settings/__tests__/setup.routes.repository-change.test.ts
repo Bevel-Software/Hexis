@@ -68,6 +68,8 @@ function listen(openChangeRequests: number) {
   /** Every run of the KB startup phase — the thing that replaces the clones. */
   const phaseRuns = { count: 0 };
   const closes = { count: 0 };
+  /** Set by the one test about a move whose startup phase fails. */
+  const phase = { fail: false };
   /** What happened, in order: the commit worker held and let go, and the phase between. */
   const events: string[] = [];
   const changeRequests: RepositoryChangeRequests = {
@@ -80,7 +82,8 @@ function listen(openChangeRequests: number) {
       return openChangeRequests;
     },
     async whileCommitsHeld(work) {
-      events.push('commits held');
+      // What was stored at the moment the hold began: the hold must come first.
+      events.push(`commits held on ${settings.resolve('kbRepoUrl')}`);
       try {
         return await work();
       } finally {
@@ -104,6 +107,7 @@ function listen(openChangeRequests: number) {
         async runAll() {
           phaseRuns.count += 1;
           events.push('phase');
+          if (phase.fail) throw new Error('git fetch failed: repository not found');
         },
       },
       testKbContext(),
@@ -121,7 +125,7 @@ function listen(openChangeRequests: number) {
   );
   server = app.listen(0);
   const { port } = server.address() as AddressInfo;
-  return { base: `http://127.0.0.1:${port}`, settings, phaseRuns, closes, events };
+  return { base: `http://127.0.0.1:${port}`, settings, phaseRuns, closes, events, phase };
 }
 
 const post = (base: string, body: unknown) =>
@@ -225,6 +229,61 @@ describe('a save that changes the knowledge-base repository', () => {
   });
 });
 
+/**
+ * An answer stands for the count it was given about. The screen sends "keep"
+ * when there was nothing to choose; a request opened while the question
+ * stood must not be decided by that.
+ */
+describe('an answer given about a count that has since changed', () => {
+  it('is asked again, with the count as it is now', async () => {
+    const { base, settings, phaseRuns } = await configured(1);
+    const res = await post(base, {
+      settings: { kbRepoUrl: 'https://example.com/acme/replacement.git', gitToken: 'ghp_new' },
+      confirmRepositoryChange: 'keep',
+      seenOpenChangeRequests: 0,
+    });
+    expect(res.status).toBe(409);
+    expect((await res.json()).repositoryChange.openChangeRequests).toBe(1);
+    expect(settings.resolve('kbRepoUrl')).toBe(REPO);
+    expect(phaseRuns.count).toBe(0);
+  });
+
+  it('goes through when the count is the one the answer was given about', async () => {
+    const { base } = await configured(1);
+    const res = await post(base, {
+      settings: { kbRepoUrl: 'https://example.com/acme/replacement.git', gitToken: 'ghp_new' },
+      confirmRepositoryChange: 'keep',
+      seenOpenChangeRequests: 1,
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
+/**
+ * A move that fails part-way leaves the deployment gated with the failure
+ * standing. It has served all the same, and its open change requests are the
+ * proof: the save that tries again must still ask what becomes of them.
+ */
+describe('a move tried again after one that failed part-way', () => {
+  it('still asks, because change requests are open', async () => {
+    const { base, phase } = await configured(2);
+    phase.fail = true;
+    const failed = await post(base, {
+      settings: { kbRepoUrl: 'https://example.com/acme/replacement.git', gitToken: 'ghp_new' },
+      confirmRepositoryChange: 'keep',
+    });
+    expect(failed.status).toBe(500);
+    expect(await failed.json()).toHaveProperty('kbInit');
+
+    phase.fail = false;
+    const again = await post(base, {
+      settings: { kbRepoUrl: 'https://example.com/acme/third.git', gitToken: 'ghp_new' },
+    });
+    expect(again.status).toBe(409);
+    expect((await again.json()).repositoryChange.openChangeRequests).toBe(2);
+  });
+});
+
 describe('a save that does NOT change the repository', () => {
   it('goes straight through, and runs no startup phase', async () => {
     const { base, phaseRuns, closes } = await configured(2);
@@ -284,7 +343,13 @@ describe('first-run setup', () => {
  * into the fresh clone of a repository the commit was never meant for.
  */
 describe('the commit worker, while a deployment is moved', () => {
-  it('is held for exactly as long as the startup phase runs', async () => {
+  /**
+   * Held BEFORE the new address is stored, not only around the phase. The
+   * way chosen takes effect with the store, and a worker still running in
+   * between would push a queued commit from a copy of the repository being
+   * left with the credential of the one moved to.
+   */
+  it('is held from before the address is stored until the startup phase has run', async () => {
     const { base, events } = await configured(0);
     events.length = 0;
     const res = await post(base, {
@@ -292,7 +357,19 @@ describe('the commit worker, while a deployment is moved', () => {
       confirmRepositoryChange: 'keep',
     });
     expect(res.status).toBe(200);
-    expect(events).toEqual(['commits held', 'phase', 'commits released']);
+    expect(events).toEqual([`commits held on ${REPO}`, 'phase', 'commits released']);
+  });
+
+  it('is let go when the confirmed move is refused after all', async () => {
+    const { base, events } = await configured(2);
+    events.length = 0;
+    failTheClose = true;
+    const res = await post(base, {
+      settings: { kbRepoUrl: 'https://example.com/acme/another.git', gitToken: 'ghp_new' },
+      confirmRepositoryChange: 'close',
+    });
+    expect(res.status).toBe(500);
+    expect(events).toEqual([`commits held on ${REPO}`, 'commits released']);
   });
 
   it('is not touched by a save that moves nothing', async () => {

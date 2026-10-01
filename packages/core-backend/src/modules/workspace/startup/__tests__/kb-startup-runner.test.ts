@@ -320,6 +320,49 @@ it('tells the workspace layer about every working copy it deletes', async () => 
     );
   });
 
+  /**
+   * Holding back the queue of a working copy is a precondition of setting it
+   * aside. A phase that carried on past a failure there would clone the
+   * replacement over an untouched queue, and the worker would commit those
+   * bytes into a repository they were never meant for.
+   */
+  it('stops, with the working copy still in place, when its queue cannot be held back first', async () => {
+    await bootedOnTheOldRepository();
+    const replacement = await replacementUpstream();
+    const before = (await git(cloneDir(DEFAULT_BRANCH), ['config', '--get', 'remote.origin.url'])).trim();
+    const discarded: string[] = [];
+
+    await expect(
+      makeRunner([touchDefault], {
+        kbRepoUrl: () => replacement,
+        beforeCloneSetAside: async () => {
+          throw new Error('pending_commits is down');
+        },
+        onCloneDiscarded: (id: string) => discarded.push(id),
+      }).runAll(),
+    ).rejects.toThrow(/pending_commits is down/);
+
+    // Nothing moved: the next run finds the same copy and asks again.
+    expect((await git(cloneDir(DEFAULT_BRANCH), ['config', '--get', 'remote.origin.url'])).trim()).toBe(before);
+    expect(discarded).toEqual([]);
+  });
+
+  it('holds back the queue of each working copy before it sets that copy aside', async () => {
+    await bootedOnTheOldRepository();
+    const replacement = await replacementUpstream();
+    const order: string[] = [];
+
+    await makeRunner([touchDefault], {
+      kbRepoUrl: () => replacement,
+      beforeCloneSetAside: async (id: string) => void order.push(`queue ${id}`),
+      onCloneDiscarded: (id: string) => void order.push(`aside ${id}`),
+    }).runAll();
+
+    const main = encodeURIComponent(DEFAULT_BRANCH);
+    expect(order.indexOf(`queue ${main}`)).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf(`queue ${main}`)).toBeLessThan(order.indexOf(`aside ${main}`));
+  });
+
   it('tells the git layer that each working copy it cloned is freshly fetched', async () => {
     // A clone holds every ref, so it IS a successful fetch. Unsaid, the git
     // layer keeps the per-workspace record that drove the replacement — a

@@ -562,19 +562,15 @@ export async function createCoreServices(
     steps: kbStartupSteps,
     buildSeedTree: buildSeedTree(disk, config.kbTemplateDir, extraDirs, [config.adminEmail], kb),
     gitRunner,
-    // A working copy the phase sets aside for belonging to another repository
-    // must leave the workspace service's cache with it: on the SAVE that
-    // moves the deployment the process is already running, and a cached path
-    // to a directory that is gone is how the next reader gets an ENOENT
-    // instead of a fresh clone.
-    //
-    // And its queue goes with it. Whatever is still waiting to be committed
-    // into that copy was written against the repository that was left; the
-    // path it names is about to hold a fresh clone of another one. Held for a
-    // person, on every branch, never written and never deleted. Reaches
-    // FORWARD to `pendingCommitsService`, like `gitService` below.
-    onCloneDiscarded: async (workspaceId) => {
-      workspaceService.forgetClone(workspaceId);
+    // The queue of a working copy that is about to be set aside goes first.
+    // Whatever is still waiting to be committed into that copy was written
+    // against the repository that was left; the path it names is about to
+    // hold a fresh clone of another one. Held for a person, on every branch,
+    // never written and never deleted. A failure here stops the phase before
+    // the copy moves: a replacement cloned over an untouched queue is how
+    // those bytes would land in the wrong repository. Reaches FORWARD to
+    // `pendingCommitsService`, like `gitService` below.
+    beforeCloneSetAside: async (workspaceId) => {
       const held = await pendingCommitsService.markNeedsAttentionInWorkspace(
         workspaceId,
         'The knowledge-base repository was replaced while this commit was still queued, so it was never ' +
@@ -587,6 +583,11 @@ export async function createCoreServices(
         );
       }
     },
+    // And once it is set aside it must leave the workspace service's cache:
+    // on the SAVE that moves the deployment the process is already running,
+    // and a cached path to a directory that is gone is how the next reader
+    // gets an ENOENT instead of a fresh clone.
+    onCloneDiscarded: (workspaceId) => workspaceService.forgetClone(workspaceId),
     // And the replacement it cloned in its place: a fresh clone holds every
     // ref, so the git layer's per-workspace fetch record is told so. Without
     // it that record still holds the FAILED fetch of the repository that was

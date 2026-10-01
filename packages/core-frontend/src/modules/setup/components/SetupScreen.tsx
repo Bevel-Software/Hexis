@@ -1169,7 +1169,7 @@ export function SetupScreen({
       // no `confirmRepositoryChange` in the body. Only the save that answers
       // the repository-change confirmation carries the answer.
       const result = confirmRepositoryChange
-        ? await saveSettings(payload, confirmRepositoryChange)
+        ? await saveSettings(payload, confirmRepositoryChange, moveAsked?.openChangeRequests)
         : await saveSettings(payload);
       // A save while a failure stands re-ran the initialization, and it held.
       setClearedFailure(initFailure);
@@ -1875,8 +1875,9 @@ export function SetupScreen({
                 : 'Move this deployment to another repository?'}
             </p>
             <p className="mt-1">
-              The move happens as soon as you confirm, with no restart. Every working copy on this server
-              stops being used and is cloned fresh from the new repository. Anything committed here and not
+              The move happens as soon as you confirm, with no restart. Unless the new repository holds the
+              same history, every working copy on this server stops being used and is cloned fresh from the
+              new repository. Anything committed here and not
               yet pushed from this server goes out of the app with it. Nothing is deleted, but it is only
               recoverable from the
               <code className="mx-1">replaced-working-copies</code>
@@ -1920,7 +1921,8 @@ export function SetupScreen({
                 type="button"
                 size="sm"
                 onClick={() => void saveNow(moveAsked.openChangeRequests > 0 ? changeChoice : 'keep')}
-                disabled={saving || testing}
+                // The same things that stop a save: a click must never do nothing.
+                disabled={saving || testing || retrying || oidcTesting}
               >
                 {saving ? 'Moving…' : 'Move the deployment'}
               </Button>

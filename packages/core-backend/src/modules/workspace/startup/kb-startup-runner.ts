@@ -82,16 +82,27 @@ export interface KbStartupRunnerOptions {
       from the commit. */
   buildSeedTree: (dir: string) => Promise<string[]>;
   /**
+   * Called with the workspace id of each working copy the phase is ABOUT TO
+   * set aside for being a clone of another repository, and awaited first.
+   * Whatever is still queued to be committed into that copy was written
+   * against the repository that was left, so it must be held back before a
+   * fresh clone of another repository appears at the same path.
+   *
+   * A PRECONDITION, so a failure here STOPS THE PHASE with the copy still
+   * where it was. Carrying on would clone the replacement with the queue
+   * untouched, and the worker would then commit those bytes into a
+   * repository they were never meant for. Stopped before anything moved, the
+   * next run finds the same copy and asks again. Optional: a minimal graph
+   * has no queue.
+   */
+  beforeCloneSetAside?: (workspaceId: string) => Promise<void>;
+  /**
    * Called with the workspace id of each working copy the phase SET ASIDE for
-   * being a clone of another repository, and AWAITED before the phase goes
-   * on. Two things have to follow such a copy out, on a RUNNING server — the
-   * save that moves the deployment to another repository. The workspace
-   * service keeps a branch→directory cache and adopts whatever is on disk,
-   * so the copy would otherwise stay in that cache as a path to nothing. And
-   * whatever is still queued to be committed into it was written against the
-   * repository that was left: it must be held back before a fresh clone of
-   * another repository appears at the same path. Optional: at boot nothing
-   * has been cached yet, and a minimal graph has neither.
+   * being a clone of another repository. The workspace service keeps a
+   * branch→directory cache and adopts whatever is on disk, so on a RUNNING
+   * server (the save that moves the deployment to another repository) the
+   * copy would otherwise stay in that cache as a path to nothing. Optional:
+   * at boot nothing has been cached yet.
    *
    * Never throws into the phase: a listener that fails must not stop a boot.
    */
@@ -655,6 +666,9 @@ export class KbStartupRunner {
         continue;
       }
       const kept = path.join(setAsideRoot, stamp, entry.name);
+      // First, and allowed to stop the phase: see `beforeCloneSetAside`. The
+      // directory name IS the workspace id (`workspaceIdForBranch`).
+      await this.opts.beforeCloneSetAside?.(entry.name);
       await setAsideClone(repoDir, kept);
       startupLog.warn(
         `working copy "${entry.name}" is a clone of another repository (${was}). Set aside at ${kept}; nothing was ` +
@@ -663,8 +677,7 @@ export class KbStartupRunner {
       );
       // Setting it aside already removed it from the workspaces root, so the
       // cached handle the workspace service holds for it now points at
-      // nothing. The directory name IS the workspace id
-      // (`workspaceIdForBranch`).
+      // nothing.
       try {
         await this.opts.onCloneDiscarded?.(entry.name);
       } catch (err) {

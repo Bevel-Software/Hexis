@@ -284,7 +284,7 @@ describe('SetupScreen: moving a deployment to another repository', () => {
     await save();
     await question();
     await confirmMove();
-    await waitFor(() => expect(api.saveSettings).toHaveBeenLastCalledWith({ gitMode: 'managed' }, 'keep'));
+    await waitFor(() => expect(api.saveSettings).toHaveBeenLastCalledWith({ gitMode: 'managed' }, 'keep', 0));
     expect(api.testConnection).not.toHaveBeenCalled();
     // Moved on the save: said so, with no restart owed.
     expect(await screen.findByTestId('repository-changed')).toHaveTextContent('now works on the new repository');
@@ -303,10 +303,67 @@ describe('SetupScreen: moving a deployment to another repository', () => {
     await userEvent.click(tab('Managed for you'));
     await save();
     await question();
-    // The question was about the move to "Managed for you". Another tab is another move.
+    await confirmMove();
+    await screen.findByTestId('repository-changed');
+    expect(api.saveSettings).toHaveBeenCalledTimes(2);
+
+    // Another move, after a yes: its save carries no answer, and is asked.
+    await userEvent.click(tab('Address and token'));
+    await save();
+    await question();
+    expect(api.saveSettings).toHaveBeenCalledTimes(3);
+    expect(api.saveSettings.mock.calls[2]).toHaveLength(1);
+  });
+
+  it('takes the question down when another tab is opened: it was about another move', async () => {
+    asksFirst();
+    render(
+      <SetupScreen
+        settings={settingsOf(true)}
+        onSaved={() => {}}
+        variant="settings"
+        repository={{ mode: 'token', chosen: 'token', modes: ['managed', 'github-app', 'token'] }}
+      />,
+    );
+    await userEvent.click(tab('Managed for you'));
+    await save();
+    await question();
     await userEvent.click(tab('GitHub'));
     expect(screen.queryByTestId('repository-change-confirm')).toBeNull();
     expect(api.saveSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the open change requests when the admin picks that, and says so', async () => {
+    asksFirst(2);
+    show({ configured: true, variant: 'settings' });
+    await userEvent.click(tab('Managed for you'));
+    await save();
+    await question();
+    await userEvent.click(screen.getByRole('radio', { name: /Close them as/ }));
+    await confirmMove();
+    await waitFor(() => expect(api.saveSettings).toHaveBeenLastCalledWith({ gitMode: 'managed' }, 'close', 2));
+    expect(await screen.findByTestId('repository-changed')).toHaveTextContent(
+      '2 change requests were closed as “repository replaced”.',
+    );
+  });
+
+  it('asks again when the count of open change requests changed while the question stood', async () => {
+    let open = 0;
+    api.saveSettings.mockImplementation(async (_settings: unknown, confirm?: string, seen?: number) => {
+      if (!confirm || seen !== open) throw new RepositoryChangeNeedsConfirmation(open, 'token', 'managed');
+      return { ...saved('managed', true), repositoryChange: { choice: confirm, closedChangeRequests: 0 } };
+    });
+    show({ configured: true, variant: 'settings' });
+    await userEvent.click(tab('Managed for you'));
+    await save();
+    await question();
+    expect(screen.queryAllByRole('radio')).toEqual([]);
+
+    // A request is opened before the admin answers.
+    open = 1;
+    await confirmMove();
+    await waitFor(() => expect(screen.getByTestId('repository-change-confirm')).toHaveTextContent('There is 1 open change request.'));
+    expect(screen.queryByTestId('repository-changed')).toBeNull();
   });
 
   it('cancelling leaves the deployment where it is', async () => {

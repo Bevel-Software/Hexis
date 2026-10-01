@@ -357,7 +357,11 @@ export function createSetupRoutes(
       settings?: Record<string, unknown>;
       /** The admin's answer to the repository-change confirmation, when they have given one. */
       confirmRepositoryChange?: unknown;
+      /** The count of open change requests that answer was given about. */
+      seenOpenChangeRequests?: unknown;
     };
+    /** Lets the commit worker go again, once a move has held it. */
+    let releaseCommits: (() => void) | undefined;
     const entries: Record<string, string> = {};
     for (const [key, value] of Object.entries(body.settings ?? {})) {
       if (typeof value !== 'string') {
@@ -391,8 +395,20 @@ export function createSetupRoutes(
       // setup, and a question about leaving a repository nobody ever worked
       // on would be a question with nothing behind it.
       const hasServed = wasComplete && kbInit === null;
-      const repositoryChange = await repositoryChangeFor(entries, body.confirmRepositoryChange, hasServed, res);
+      const repositoryChange = await repositoryChangeFor(
+        entries,
+        body.confirmRepositoryChange,
+        body.seenOpenChangeRequests,
+        hasServed,
+        res,
+      );
       if (!repositoryChange) return;
+      // HELD FROM HERE, before anything is stored. The way chosen takes
+      // effect a few lines down, and with it the credential git is handed; a
+      // commit worker still running in between would push a queued commit
+      // from a working copy of the repository being left, with the
+      // credential of the one moved to. Let go in the `finally` below.
+      if (repositoryChange.changing) releaseCommits = await holdCommits();
       const oidc = await signInHoldsFor(entries, res);
       if (!oidc) return;
       // Recorded BEFORE the save: the record is keyed by the values it is
@@ -553,13 +569,10 @@ export function createSetupRoutes(
           // One run at a time. The save chain already serializes handlers
           // whole, so no second run can start while one executes; the `??=`
           // is defense in depth should another invoker ever appear.
-          // A move runs with the commit worker held: nothing queued is
-          // written while working copies are set aside and cloned again.
-          const run = (): Promise<void> => kbStartupRunner.runAll();
-          kbInitInFlight ??=
-            repositoryChange.changing && changeRequests.whileCommitsHeld
-              ? changeRequests.whileCommitsHeld<void>(run)
-              : run();
+          // A move runs with the commit worker held (see `holdCommits`
+          // above): nothing queued is written while working copies are set
+          // aside and cloned again.
+          kbInitInFlight ??= kbStartupRunner.runAll();
           await kbInitInFlight;
           // Under KB_SAFE_BOOT a run that abandoned the phase still resolves
           // and opens the gate DELIBERATELY — booting unmaintained so the
@@ -622,9 +635,25 @@ export function createSetupRoutes(
       // the schema or the connection string.
       log.error('save failed:', { err });
       res.status(500).json({ error: 'Could not save these settings.' });
+    } finally {
+      releaseCommits?.();
     }
   }
 
+  /**
+   * Stop the commit worker until the function this resolves to is called.
+   * The hold the composition root offers runs a piece of work with the
+   * worker stopped; a move spans the store, the way taking effect and the
+   * startup phase, with refusals in between, so the hold is taken here and
+   * let go in the handler's `finally`. A mount without a worker holds
+   * nothing.
+   */
+  function holdCommits(): Promise<() => void> {
+    if (!changeRequests.whileCommitsHeld) return Promise.resolve(() => {});
+    return new Promise((held, failed) => {
+      changeRequests.whileCommitsHeld!<void>(() => new Promise<void>((release) => held(release))).catch(failed);
+    });
+  }
 
   /**
    * What this save does to the knowledge-base repository, and whether the
@@ -657,7 +686,9 @@ export function createSetupRoutes(
   async function repositoryChangeFor(
     entries: Record<string, string>,
     confirmation: unknown,
-    /** Whether the deployment has served on the repository in effect: only then is there a question. */
+    /** How many open change requests the screen showed when the answer was given, when it says. */
+    seenOpenChangeRequests: unknown,
+    /** Whether the deployment is serving on the repository in effect. One that never served and has no open request is not asked. */
     hasServed: boolean,
     res: express.Response,
   ): Promise<{ changing: boolean; choice: RepositoryChangeChoice | null } | null> {
@@ -666,14 +697,23 @@ export function createSetupRoutes(
     const now = (source ? source.url() : settings.resolve('kbRepoUrl')).trim();
     const next = (source ? source.url(after) : after('kbRepoUrl')).trim();
     if (now === '' || next === '' || sameRepository(now, next)) return unchanged;
-    if (confirmation === 'keep' || confirmation === 'close') return { changing: true, choice: confirmation };
-    // A move all the same, and the phase treats it as one; nobody is asked.
-    if (!hasServed) return { changing: true, choice: null };
     // The count is what the choice is ABOUT, so it is read here rather than
     // left for the screen to ask for separately: the two questions would
     // otherwise be answered a round trip apart, and the number on screen
     // would be the one from before whatever happened in between.
     const openChangeRequests = await changeRequests.countOpen();
+    // An answer stands for the count it was given about. A request opened
+    // while the question stood was never offered "close", and the "keep" the
+    // screen sends when there is nothing to choose would decide it unasked:
+    // the question is put again, with the count as it is now.
+    const answered = confirmation === 'keep' || confirmation === 'close';
+    const answerIsCurrent = typeof seenOpenChangeRequests !== 'number' || seenOpenChangeRequests === openChangeRequests;
+    if (answered && answerIsCurrent) return { changing: true, choice: confirmation };
+    // A move all the same, and the phase treats it as one; nobody is asked.
+    // Open change requests are themselves proof that the deployment served,
+    // whatever `hasServed` says: a move that failed part-way leaves it gated
+    // with a failure standing, and the next save must still ask about them.
+    if (!answered && !hasServed && openChangeRequests === 0) return { changing: true, choice: null };
     res.status(409).json({
       error: 'This moves the deployment to another repository.',
       repositoryChange: {

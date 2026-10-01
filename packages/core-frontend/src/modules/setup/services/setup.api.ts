@@ -291,11 +291,19 @@ export async function fetchSetupStatus(): Promise<SetupStatus> {
 export async function saveSettings(
   settings: Record<string, string>,
   confirmRepositoryChange?: RepositoryChangeChoice,
+  /**
+   * How many open change requests the question showed when it was answered.
+   * The server asks again when the count has changed since, so a request
+   * opened while the question stood is not decided unasked.
+   */
+  seenOpenChangeRequests?: number,
 ): Promise<SaveResult> {
   const res = await authFetch('/api/setup/settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(confirmRepositoryChange ? { settings, confirmRepositoryChange } : { settings }),
+    body: JSON.stringify(
+      confirmRepositoryChange ? { settings, confirmRepositoryChange, seenOpenChangeRequests } : { settings },
+    ),
   });
   if (!res.ok) await readError(res);
   return (await res.json()) as SaveResult;

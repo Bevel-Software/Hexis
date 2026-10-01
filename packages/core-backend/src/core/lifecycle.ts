@@ -228,28 +228,37 @@ export interface HoldableWorker extends LeasedWorker {
  * So the two reasons are kept apart. `wanted` is the lease loop's word,
  * `holds` counts the moves in flight, and the worker runs exactly when it is
  * wanted and nothing holds it.
+ *
+ * A stop waits for the holds in flight as well as for the worker. Shutdown
+ * awaits this stop (bounded by its own budget) before it ends the database
+ * pool, and a move still setting copies aside and cloning needs that pool:
+ * it is either finished, or known to have been cut.
  */
 export function holdable(worker: LeasedWorker): HoldableWorker {
   let wanted = false;
-  let holds = 0;
+  const inFlight = new Set<Promise<unknown>>();
   return {
     start() {
       wanted = true;
-      if (holds === 0) worker.start();
+      if (inFlight.size === 0) worker.start();
     },
     async stop() {
       wanted = false;
       await worker.stop();
+      await Promise.allSettled([...inFlight]);
     },
-    async whileHeld<T>(work: () => Promise<T>): Promise<T> {
-      holds += 1;
-      try {
+    whileHeld<T>(work: () => Promise<T>): Promise<T> {
+      const held = (async () => {
         await worker.stop();
-        return await work();
-      } finally {
-        holds -= 1;
-        if (holds === 0 && wanted) worker.start();
-      }
+        return work();
+      })();
+      inFlight.add(held);
+      const ended = (): void => {
+        inFlight.delete(held);
+        if (inFlight.size === 0 && wanted) worker.start();
+      };
+      held.then(ended, ended);
+      return held;
     },
   };
 }
