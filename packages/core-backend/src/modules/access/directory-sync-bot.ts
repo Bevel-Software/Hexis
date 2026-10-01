@@ -5,7 +5,6 @@ const log = logger('directory-sync');
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/core-schema.js';
-import { blindIndex } from '../../shared/column-crypto.js';
 
 /**
  * Synthetic identity for the synced-groups materializer's commits: every
@@ -29,7 +28,7 @@ export async function ensureDirectorySyncBot(db: Database): Promise<AuthUser> {
     .insert(users)
     .values({
       email: DIRECTORY_SYNC_BOT_EMAIL,
-      emailBidx: blindIndex(DIRECTORY_SYNC_BOT_EMAIL),
+      emailBidx: DIRECTORY_SYNC_BOT_EMAIL,
       name: DIRECTORY_SYNC_BOT_NAME,
     })
     .onConflictDoNothing({ target: users.emailBidx })
@@ -42,7 +41,7 @@ export async function ensureDirectorySyncBot(db: Database): Promise<AuthUser> {
   const [row] = await db
     .select()
     .from(users)
-    .where(eq(users.emailBidx, blindIndex(DIRECTORY_SYNC_BOT_EMAIL)))
+    .where(eq(users.emailBidx, DIRECTORY_SYNC_BOT_EMAIL))
     .limit(1);
   if (!row) {
     throw new Error(

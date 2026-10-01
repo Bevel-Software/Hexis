@@ -23,7 +23,6 @@ const log = logger('pending-commits');
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
-import { blindIndex } from '../../shared/column-crypto.js';
 
 export const RECOVERY_BOT_EMAIL = (
   process.env.RECOVERY_BOT_EMAIL ?? 'recovery-bot@bevel.local'
@@ -44,7 +43,7 @@ export async function ensureRecoveryBotUser(db: Database): Promise<AuthUser> {
     .insert(users)
     .values({
       email: RECOVERY_BOT_EMAIL,
-      emailBidx: blindIndex(RECOVERY_BOT_EMAIL),
+      emailBidx: RECOVERY_BOT_EMAIL,
       name: RECOVERY_BOT_NAME,
     })
     .onConflictDoNothing({ target: users.emailBidx })
@@ -62,7 +61,7 @@ export async function ensureRecoveryBotUser(db: Database): Promise<AuthUser> {
   const [row] = await db
     .select()
     .from(users)
-    .where(eq(users.emailBidx, blindIndex(RECOVERY_BOT_EMAIL)))
+    .where(eq(users.emailBidx, RECOVERY_BOT_EMAIL))
     .limit(1);
   if (!row) {
     // Vanishingly unlikely: the row exists for the conflict to fire but is

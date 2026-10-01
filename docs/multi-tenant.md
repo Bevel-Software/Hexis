@@ -136,17 +136,11 @@ A tenant leaves as data a single-tenant deployment reads unchanged:
 4. Set the new deployment's `JWT_SECRET`, `SECRETS_ENC_KEY` and
    `INTERNAL_TOKEN_SECRET` to the values derived for the tenant, so its
    stored secrets and git credential still decrypt. The derivation is
-   exposed by the platform package (`deriveTenantSecrets`).
-   **The personal-data columns are the exception.** A host seals them for
-   every tenant with one key derived from `TENANT_MASTER_KEY`
-   (`deriveHostPiiKey`), because the column type that seals a value has one
-   key per process. The dump's emails, names and change-request text open
-   with that key, not with the tenant's secrets key, and must be re-sealed
-   under the tenant's key before the hand-over. The tool that does that is
-   the hosted distribution's to provide; until it exists, the new deployment
-   can be started with `SECRETS_ENC_KEY` set to the host key's value, which
-   also opens every other tenant's columns, so it is not a hand-over to a
-   third party.
+   exposed by the platform package (`deriveTenantSecrets`). The same
+   `SECRETS_ENC_KEY` opens the tenant's personal-data columns (emails,
+   names, change-request text): a host seals each tenant's rows under that
+   tenant's own key, so the dump opens whole with the one key and says
+   nothing about any other tenant.
 5. Point the new deployment's `ADMIN_EMAIL` and `TENANT_ID` at the same
    values the tenant record used.
 

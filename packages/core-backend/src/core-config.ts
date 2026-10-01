@@ -3,7 +3,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultKbTemplateDir } from './assets.js';
 import { assertKeyDecodesTo32Bytes } from './shared/token-crypto.js';
-import { initColumnCrypto } from './shared/column-crypto.js';
 import { DEFAULT_GIT_TIMEOUT_MS } from './modules/workflow/git/node-git-runner.js';
 import { DEFAULT_DB_SCHEMA, assertSchemaName } from './modules/database/connection.js';
 import { logger } from './shared/logging.js';
@@ -497,13 +496,6 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
     // SECRETS_ENC_KEY by default, which is only certainly right because a bad
     // key never gets past this line.
     assertKeyDecodesTo32Bytes(this.secretsEncKey, secretsKeySource);
-    // Install the derived PII column-encryption + blind-index keys the moment
-    // the secrets key is known to be valid. The schema module's encryptedText
-    // columns read this module-level state, so it must be in place before the
-    // first query — config construction always is. A process that serves
-    // several knowledge bases never constructs this class; its host installs
-    // one key for all of them (see `tenancy/tenant-host.ts`).
-    initColumnCrypto(this.secretsEncKey);
     this.internalTokenSecret = (process.env.INTERNAL_TOKEN_SECRET || '').trim();
     // Setting DOMAIN declares "the bundled Caddy `https` profile fronts this
     // deployment" — one proxy hop, and the public origin IS that domain. The

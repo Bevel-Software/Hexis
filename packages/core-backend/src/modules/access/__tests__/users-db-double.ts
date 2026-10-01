@@ -1,7 +1,6 @@
 import { Param } from 'drizzle-orm';
 
 import type { Database } from '../../database/connection.js';
-import { blindIndex } from '../../../shared/column-crypto.js';
 
 /**
  * Every literal bound into a drizzle condition, in order — for
@@ -33,20 +32,22 @@ function boundValues(node: unknown, depth = 0): string[] {
  *
  * The `where` clause IS evaluated: the values bound into it are matched
  * against the roster the same way Postgres would. The email column is
- * randomized ciphertext, so what the routes bind — and what a stored row
- * carries beside its email — is the blind index (`email_bidx`), which is
- * deterministic over the canonical address. A caller that stopped lowering
- * the emails it asks about would still match here, as it does in Postgres,
- * because the index canonicalises; one that bound the plaintext would match
- * nothing, exactly as in Postgres.
+ * randomized ciphertext, so the routes compare its blind index
+ * (`email_bidx`), which they bind the ADDRESSES to — the database handle
+ * turns each into its index, over the canonical (trimmed, lowercased)
+ * address. The double does what the index does: a caller that stopped
+ * lowering the emails it asks about still matches here, as it does in
+ * Postgres.
  */
+const canonical = (email: string) => email.trim().toLowerCase();
+
 export function usersDbDouble(
   accounts: readonly (string | { email: string; name?: string })[] = [],
 ): Database {
   const rows = accounts.map((a) => {
     const email = typeof a === 'string' ? a : a.email;
     const name = typeof a === 'string' ? undefined : a.name;
-    return { id: `u-${email}`, email, emailBidx: blindIndex(email), name: name ?? email.split('@')[0] };
+    return { id: `u-${email}`, email, name: name ?? email.split('@')[0] };
   });
   const from = () => {
     // Thenable so a bare `await db.select().from(users)` resolves, with
@@ -56,8 +57,8 @@ export function usersDbDouble(
       where: (condition: unknown) => Promise<typeof rows>;
     };
     query.where = async (condition: unknown) => {
-      const asked = new Set(boundValues(condition));
-      return rows.filter((r) => asked.has(r.emailBidx));
+      const asked = new Set(boundValues(condition).map(canonical));
+      return rows.filter((r) => asked.has(canonical(r.email)));
     };
     return query;
   };

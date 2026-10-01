@@ -12,7 +12,7 @@ export {
   type TenantDescriptor,
   type TenantSource,
 } from './tenant-source.contract.js';
-export { deriveHostPiiKey, deriveTenantSecrets, type TenantSecrets } from './tenant-secrets.js';
+export { deriveTenantSecrets, type TenantSecrets } from './tenant-secrets.js';
 export {
   StaticTenantSource,
   tenantConfigFrom,

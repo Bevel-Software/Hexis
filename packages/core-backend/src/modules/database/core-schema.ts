@@ -14,12 +14,14 @@
  * `encryptedText` — AES-256-GCM ciphertext in the database, transparently
  * decrypted on read (see `shared/column-crypto.ts`). Because the ciphertext is
  * randomized, equality lookups and unique constraints on those columns go
- * through their deterministic `*_bidx` companions (HMAC-SHA256 blind indexes)
- * — never `eq()` an encrypted column directly.
+ * through their deterministic `*_bidx` companions (HMAC-SHA256 blind indexes,
+ * `blindIndexText`) — never `eq()` an encrypted column directly. A `*_bidx`
+ * column is written and compared WITH THE ADDRESS ITSELF; the database handle
+ * the statement runs on turns it into the index, under that handle's key.
  */
 import { sql } from 'drizzle-orm';
 import { boolean, check, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
-import { encryptedText } from '../../shared/column-crypto.js';
+import { blindIndexText, encryptedText } from '../../shared/column-crypto.js';
 
 export const users = pgTable('users', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -27,10 +29,10 @@ export const users = pgTable('users', {
   /**
    * Blind index of the lowercased email — carries the uniqueness constraint
    * and every lookup-by-email (login, upsert conflict target), which the
-   * randomized `email` ciphertext cannot. Populate with `blindIndex(email)`
-   * on every insert.
+   * randomized `email` ciphertext cannot. Write the email into it on every
+   * insert, and compare it with the email.
    */
-  emailBidx: text('email_bidx').notNull(),
+  emailBidx: blindIndexText('email_bidx').notNull(),
   name: encryptedText('name').notNull(),
   avatarUrl: encryptedText('avatar_url'),
   /**
@@ -75,7 +77,7 @@ export const prFileApprovals = pgTable('pr_file_approvals', {
   path: text('path').notNull(),
   approverEmail: encryptedText('approver_email').notNull(),  // lowercased at insert
   /** Blind index of `approver_email` — the uniqueness key and eq() lookup. */
-  approverEmailBidx: text('approver_email_bidx').notNull(),
+  approverEmailBidx: blindIndexText('approver_email_bidx').notNull(),
   approverName: encryptedText('approver_name').notNull(),
   headSha: text('head_sha').notNull(),
   approvedAt: timestamp('approved_at').defaultNow().notNull(),
@@ -100,7 +102,7 @@ export const prMergeLog = pgTable('pr_merge_log', {
   prNumber: integer('pr_number').notNull(),
   triggeredByEmail: encryptedText('triggered_by_email').notNull(),
   /** Blind index of `triggered_by_email` — GDPR-erasure lookup. */
-  triggeredByEmailBidx: text('triggered_by_email_bidx').notNull(),
+  triggeredByEmailBidx: blindIndexText('triggered_by_email_bidx').notNull(),
   triggeredByName: encryptedText('triggered_by_name').notNull(),
   headShaAtMerge: text('head_sha_at_merge').notNull(),
   mergeMethod: text('merge_method').notNull(),
@@ -132,7 +134,7 @@ export const prComments = pgTable('pr_comments', {
   prNumber: integer('pr_number').notNull(),
   authorEmail: encryptedText('author_email').notNull(),
   /** Blind index of `author_email` — GDPR-erasure lookup. */
-  authorEmailBidx: text('author_email_bidx').notNull(),
+  authorEmailBidx: blindIndexText('author_email_bidx').notNull(),
   authorName: encryptedText('author_name').notNull(),
   path: text('path'),
   line: integer('line'),
@@ -175,7 +177,7 @@ export const changeRequests = pgTable('change_requests', {
   body: encryptedText('body').notNull().default(''),
   authorEmail: encryptedText('author_email').notNull(), // lowercased at insert
   /** Blind index of `author_email` — GDPR-erasure lookup. */
-  authorEmailBidx: text('author_email_bidx').notNull(),
+  authorEmailBidx: blindIndexText('author_email_bidx').notNull(),
   authorName: encryptedText('author_name').notNull(),
   state: text('state').notNull().default('open'), // 'open' | 'merged' | 'closed'
   mergedSha: text('merged_sha'),
@@ -194,7 +196,7 @@ export const changeRequests = pgTable('change_requests', {
    * finds their name by. Written and cleared with the name. NULL on a refusal
    * recorded before the encryption release, which kept no address.
    */
-  applyFailedByEmailBidx: text('apply_failed_by_email_bidx'),
+  applyFailedByEmailBidx: blindIndexText('apply_failed_by_email_bidx'),
   /** What refused the last apply: 'gate' (approvals), 'conflicts' (git), 'error' (anything else). */
   applyFailureKind: text('apply_failure_kind'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -348,7 +350,7 @@ export const pendingCommits = pgTable('pending_commits', {
   // the human who triggered the save, not the worker.
   authorEmail: encryptedText('author_email').notNull(),  // lowercased at insert
   /** Blind index of `author_email` — GDPR-erasure lookup. */
-  authorEmailBidx: text('author_email_bidx').notNull(),
+  authorEmailBidx: blindIndexText('author_email_bidx').notNull(),
   authorName: encryptedText('author_name').notNull(),
   queuedAt: timestamp('queued_at').defaultNow().notNull(),
   // `running` is set while the worker is mid-commit so a second worker
@@ -755,7 +757,7 @@ export const pluginJoinRequests = pgTable('plugin_join_requests', {
   id: uuid('id').defaultRandom().primaryKey(),
   requesterEmail: encryptedText('requester_email').notNull(), // lowercased at insert
   /** Blind index of `requester_email` — the uniqueness key, the by-requester read and the erasure delete. */
-  requesterEmailBidx: text('requester_email_bidx').notNull(),
+  requesterEmailBidx: blindIndexText('requester_email_bidx').notNull(),
   /** Denormalised for the commit/change-request authorship, like `file_locks.holder_name`. */
   requesterName: encryptedText('requester_name').notNull(),
   pluginKey: text('plugin_key').notNull(),

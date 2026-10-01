@@ -106,9 +106,11 @@ That first start refuses to come up in two cases, and says which:
   stops instead of locking everyone out. Restore the key that sealed the
   data.
 
-A process that serves several knowledge bases (`TENANTS_FILE`) seals every
-tenant's rows with one key derived from `TENANT_MASTER_KEY`; see
-docs/multi-tenant.md for what that means when a tenant leaves.
+A process that serves several knowledge bases (`TENANTS_FILE`) seals each
+tenant's rows with that tenant's own key, the one derived for it from
+`TENANT_MASTER_KEY` that already seals its stored credentials. Nothing new
+to set, and a tenant that leaves takes a dump its one key opens
+(docs/multi-tenant.md).
 
 What it changes for operations:
 

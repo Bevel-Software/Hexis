@@ -51,7 +51,6 @@ import { RolesAdminService } from './roles-admin.service.js';
 import type { Principal } from '../access-model/access-splice.js';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
-import { blindIndex } from '../../shared/column-crypto.js';
 import '../auth/auth.middleware.js';
 
 /** Verbs the share UI may grant. Verbs are independent — `download` is grantable on its own. */
@@ -728,11 +727,12 @@ export function createAccessRoutes(
     // `inArray` refuses an empty list, and there is nothing to ask anyway.
     if (emails.length === 0) return new Set();
     // Through the blind index: `email` is randomized ciphertext, and the
-    // index is what the unique constraint and every lookup key on.
+    // index is what the unique constraint and every lookup key on. It is
+    // compared with the addresses themselves.
     const rows = await db
       .select({ email: users.email })
       .from(users)
-      .where(inArray(users.emailBidx, emails.map((email) => blindIndex(email))));
+      .where(inArray(users.emailBidx, emails));
     return new Set(rows.map((r) => r.email.trim().toLowerCase()));
   }
 

@@ -4,7 +4,6 @@ import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
-import { blindIndex } from '../../shared/column-crypto.js';
 import {
   AccountAdmissionRefusedError,
   admitEveryone,
@@ -126,7 +125,7 @@ export class AuthService {
     const [existing] = await this.db
       .select({ id: users.id })
       .from(users)
-      .where(eq(users.emailBidx, blindIndex(normalizedEmail)))
+      .where(eq(users.emailBidx, normalizedEmail))
       .limit(1);
     if (existing) return;
     const verdict = await this.admission.canProvision(normalizedEmail, reason);
@@ -176,7 +175,7 @@ export class AuthService {
     const [user] = await this.db
       .select()
       .from(users)
-      .where(eq(users.emailBidx, blindIndex(normalizedEmail)))
+      .where(eq(users.emailBidx, normalizedEmail))
       .limit(1);
 
     if (this.isEnvAdminEmail(normalizedEmail)) {
@@ -290,7 +289,7 @@ export class AuthService {
     // fallback. `returning()` yields the authoritative row either way.
     const [row] = await this.db
       .insert(users)
-      .values({ email: normalizedEmail, emailBidx: blindIndex(normalizedEmail), name: displayName, passwordHash })
+      .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName, passwordHash })
       .onConflictDoUpdate({
         target: users.emailBidx,
         set: suppliedName
@@ -455,7 +454,7 @@ export class AuthService {
   private async upsertUserByEmail(email: string, name: string) {
     const [user] = await this.db
       .insert(users)
-      .values({ email, emailBidx: blindIndex(email), name })
+      .values({ email, emailBidx: email, name })
       .onConflictDoUpdate({ target: users.emailBidx, set: { updatedAt: new Date() } })
       .returning();
     return user;
@@ -519,7 +518,7 @@ export class AuthService {
     const [user] = await this.db
       .select()
       .from(users)
-      .where(eq(users.emailBidx, blindIndex(canonicalEmail(email ?? ''))))
+      .where(eq(users.emailBidx, canonicalEmail(email ?? '')))
       .limit(1);
 
     if (!user) return null;

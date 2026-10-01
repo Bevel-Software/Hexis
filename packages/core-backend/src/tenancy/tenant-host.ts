@@ -4,8 +4,6 @@ import { isIP } from 'node:net';
 import type { ProcessConfig } from '../core-config.js';
 import { GIT_SHA } from '../version.js';
 import { logger } from '../shared/logging.js';
-import { initColumnCrypto } from '../shared/column-crypto.js';
-import { deriveHostPiiKey } from './tenant-secrets.js';
 import { TenantRuntime, type TenantRuntimeDeps } from './tenant-runtime.js';
 import { TENANT_SLUG_PATTERN, normalizeHost, type TenantDescriptor, type TenantSource } from './tenant-source.contract.js';
 
@@ -72,13 +70,7 @@ export function selectTenant(req: {
 
 export interface TenantHostOptions {
   source: TenantSource;
-  /**
-   * The process facts every tenant's graph carries, and the master key its
-   * PII column key is derived from — what `tenantHostEnv()` answers. Without
-   * the key no column key is installed, which only a suite's fake graphs can
-   * live with.
-   */
-  process: ProcessConfig & { masterKey?: string };
+  process: ProcessConfig;
   /** The built SPA, served once for every resolved tenant. */
   staticDir?: string;
   /** Minutes without a request after which a tenant's graph is stopped. Default 30; 0 never evicts. */
@@ -124,13 +116,6 @@ function within<T>(promise: Promise<T>, ms: number): Promise<T | null> {
  * built by the same composition root a single-tenant deployment uses.
  */
 export function createTenantHost(opts: TenantHostOptions): TenantHost {
-  // One PII column key for every tenant this process serves, derived from
-  // the master key and installed before the first tenant is built: the
-  // column type runs inside the database driver and has one key per process
-  // (see `deriveHostPiiKey`). A host built without a master key — a suite's
-  // fake graphs — leaves whatever is installed, and the composition root
-  // refuses to build a real graph without one.
-  if (opts.process.masterKey) initColumnCrypto(deriveHostPiiKey(opts.process.masterKey));
   const runtimes = new Map<string, TenantRuntime>();
   const activationWaitMs = opts.activationWaitMs ?? DEFAULT_ACTIVATION_WAIT_MS;
   const idleMs = (opts.idleMinutes ?? DEFAULT_IDLE_MINUTES) * 60_000;

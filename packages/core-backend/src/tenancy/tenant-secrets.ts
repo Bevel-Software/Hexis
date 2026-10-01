@@ -4,7 +4,7 @@ import { hkdfSync } from 'node:crypto';
 export interface TenantSecrets {
   /** Signs the tenant's login sessions and OAuth state. */
   jwtSecret: string;
-  /** 32 bytes, base64: encrypts the tenant's vault values, MCP OAuth tokens and stored git credential. */
+  /** 32 bytes, base64: encrypts the tenant's vault values, MCP OAuth tokens, stored git credential and personal-data columns. */
   secretsEncKey: string;
   /** HMAC key for the tenant's internal (loopback) tool tokens. */
   internalTokenSecret: string;
@@ -25,27 +25,11 @@ const MIN_MASTER_KEY_LENGTH = 32;
  * export, and nothing per tenant has to be kept safe in the meantime. The
  * cloud app's registry calls this with the same inputs and gets the same
  * answer.
- */
-/**
- * The ONE key under which a host seals the PII columns of every tenant it
- * serves, derived from the master key with no slug in it.
  *
- * Per tenant is not possible: the column type that seals and opens a value
- * (`shared/column-crypto.ts`) runs inside the database driver, where nothing
- * says which tenant's row is going by, and a process has one such key. So
- * every tenant's rows are sealed with this one. Decided with Razvan on
- * 2026-10-01. What follows for a tenant that leaves for a deployment of its
- * own: its dump's PII columns open with this key, not with the secrets key
- * derived for it, and have to be re-sealed under that key on the way out —
- * a tool the hosted distribution owes.
+ * The personal-data columns are sealed under `secretsEncKey` too (each
+ * tenant's database handle is built with it), so the same one key opens the
+ * whole of a tenant's dump.
  */
-export function deriveHostPiiKey(masterKey: string): string {
-  if (masterKey.length < MIN_MASTER_KEY_LENGTH) {
-    throw new Error(`TENANT_MASTER_KEY must be at least ${MIN_MASTER_KEY_LENGTH} characters of random text`);
-  }
-  return Buffer.from(hkdfSync('sha256', masterKey, 'hexis-host', 'pii-column-key', 32)).toString('base64');
-}
-
 export function deriveTenantSecrets(masterKey: string, slug: string): TenantSecrets {
   if (masterKey.length < MIN_MASTER_KEY_LENGTH) {
     throw new Error(`TENANT_MASTER_KEY must be at least ${MIN_MASTER_KEY_LENGTH} characters of random text`);

@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ReviewWorkflowService } from '../review-workflow.service.js';
 import type { ApprovalTx } from '../review-workflow.interface.js';
-import { blindIndex } from '../../../../shared/column-crypto.js';
 
 /**
  * `eraseApprover` is the review workflow's half of account erasure: the rows
@@ -81,11 +80,12 @@ describe('ReviewWorkflowService.eraseApprover', () => {
     expect(h.lockSql[0]).not.toMatch(/pg_advisory_lock\b/);
     // And the rewrite is to the placeholder identity it was given.
     // The blind index is rewritten with the email: nothing keyed to the
-    // erased address may survive, and the email itself is ciphertext.
+    // erased address may survive, and the email itself is ciphertext. The
+    // index column is written with the address; the handle indexes it.
     expect(h.sets).toEqual([
       {
         approverEmail: 'deleted-1@erased.invalid',
-        approverEmailBidx: blindIndex('deleted-1@erased.invalid'),
+        approverEmailBidx: 'deleted-1@erased.invalid',
         approverName: 'Deleted user',
       },
     ]);

@@ -1,62 +1,55 @@
-import { describe, expect, it, beforeAll, afterEach, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { randomBytes } from 'node:crypto';
+import { PgDialect, pgTable, uuid } from 'drizzle-orm/pg-core';
+import { eq, inArray } from 'drizzle-orm';
 import {
+  IndexOnWrite,
   PII_CIPHERTEXT_PREFIX,
   PII_SEALED_SHAPE_SQL_REGEX,
-  blindIndex,
-  decryptPii,
-  encryptPii,
-  initColumnCrypto,
+  SealOnWrite,
+  blindIndexText,
+  derivePiiKeys,
+  encryptedText,
   isEncryptedBlob,
-  openPii,
 } from '../column-crypto.js';
 import { TokenCrypto } from '../token-crypto.js';
 
 const KEY = randomBytes(32).toString('base64');
+const keys = derivePiiKeys(KEY);
+const otherKeys = derivePiiKeys(randomBytes(32).toString('base64'));
 
-beforeAll(() => {
-  initColumnCrypto(KEY);
-});
-
-// The key is module-global: a test that re-keys and then fails must not leak
-// its key into the tests after it.
-afterEach(() => {
-  initColumnCrypto(KEY);
-});
-
-describe('encryptPii / decryptPii', () => {
+describe('derivePiiKeys: seal / open / read', () => {
   it('round-trips a value through ciphertext', () => {
-    const sealed = encryptPii('razvan@bevel.software');
+    const sealed = keys.seal('razvan@bevel.software');
     expect(sealed).not.toContain('razvan');
     expect(sealed.startsWith(PII_CIPHERTEXT_PREFIX)).toBe(true);
     expect(isEncryptedBlob(sealed)).toBe(true);
-    expect(decryptPii(sealed)).toBe('razvan@bevel.software');
+    expect(keys.read(sealed)).toBe('razvan@bevel.software');
   });
 
   it('stores the empty string as itself (no unparseable empty-ciphertext blob)', () => {
-    expect(encryptPii('')).toBe('');
-    expect(decryptPii('')).toBe('');
+    expect(keys.seal('')).toBe('');
+    expect(keys.read('')).toBe('');
     expect(isEncryptedBlob('')).toBe(false);
   });
 
   it('is randomized — the same plaintext never encrypts to the same blob', () => {
-    expect(encryptPii('alice')).not.toBe(encryptPii('alice'));
+    expect(keys.seal('alice')).not.toBe(keys.seal('alice'));
   });
 
   it('passes legacy plaintext through unchanged (pre-backfill rows)', () => {
-    expect(decryptPii('plain old email@example.com')).toBe('plain old email@example.com');
-    expect(decryptPii('')).toBe('');
+    expect(keys.read('plain old email@example.com')).toBe('plain old email@example.com');
   });
 
   it('passes through plaintext that merely resembles ciphertext', () => {
     // Blob-shaped but unprefixed (the legacy TokenCrypto shape) → plaintext.
     const shapeOnly = new TokenCrypto(KEY).encrypt('not-a-pii-blob');
     expect(isEncryptedBlob(shapeOnly)).toBe(false);
-    expect(decryptPii(shapeOnly)).toBe(shapeOnly);
+    expect(keys.read(shapeOnly)).toBe(shapeOnly);
     // Prefixed but malformed → still not a blob.
     const impostor = `${PII_CIPHERTEXT_PREFIX}abc:def:ghi`;
     expect(isEncryptedBlob(impostor)).toBe(false);
-    expect(decryptPii(impostor)).toBe(impostor);
+    expect(keys.read(impostor)).toBe(impostor);
   });
 
   it('the SQL shape regex agrees with isEncryptedBlob on what a sealed value is', () => {
@@ -65,7 +58,7 @@ describe('encryptPii / decryptPii', () => {
     // to the prefix, IV or tag width in one place fails this test.
     const regex = new RegExp(PII_SEALED_SHAPE_SQL_REGEX);
     for (const plain of ['a@b.co', 'razvan@bevel.software', 'x'.repeat(500)]) {
-      const sealed = encryptPii(plain);
+      const sealed = keys.seal(plain);
       expect(isEncryptedBlob(sealed)).toBe(true);
       expect(regex.test(sealed)).toBe(true);
     }
@@ -75,61 +68,89 @@ describe('encryptPii / decryptPii', () => {
     }
   });
 
-  it('a re-init with a different key cannot decrypt: fallback returns the blob', () => {
-    const sealed = encryptPii('secret-person@example.com');
-    initColumnCrypto(randomBytes(32).toString('base64'));
-    // Wrong key → GCM auth failure → plaintext fallback returns the blob as-is.
-    expect(decryptPii(sealed)).toBe(sealed);
-    initColumnCrypto(KEY);
-    expect(decryptPii(sealed)).toBe('secret-person@example.com');
+  it("another key cannot open it: the lenient read hands the blob back, open says so", () => {
+    const sealed = keys.seal('secret-person@example.com');
+    expect(otherKeys.read(sealed)).toBe(sealed);
+    expect(otherKeys.open(sealed)).toEqual({ ok: false });
+    expect(keys.open(sealed)).toEqual({ ok: true, plain: 'secret-person@example.com' });
   });
 
-  it('openPii tells a blob the key does not open from a plaintext shaped like one', () => {
+  it('open tells a blob the key does not open from a plaintext shaped like one', () => {
     // A value whose PLAINTEXT is itself a well-formed blob: opened correctly,
     // the result still looks sealed. Only the explicit outcome tells the two
     // apart — the shape of what the lenient read returns cannot.
-    const inner = encryptPii('inner@example.com');
-    const outer = encryptPii(inner);
-    expect(openPii(outer)).toEqual({ ok: true, plain: inner });
-    expect(openPii('plain@example.com')).toEqual({ ok: true, plain: 'plain@example.com' });
-    initColumnCrypto(randomBytes(32).toString('base64'));
-    expect(openPii(outer)).toEqual({ ok: false });
-  });
-
-  it('use before initColumnCrypto throws instead of handing back the blob', async () => {
-    // A fresh module instance has no key. The decrypt fallback is for a
-    // different key, not for no key: that would read sealed rows as blobs.
-    vi.resetModules();
-    const fresh = await import('../column-crypto.js');
-    const sealed = encryptPii('secret-person@example.com');
-    expect(fresh.isColumnCryptoInitialised()).toBe(false);
-    expect(() => fresh.decryptPii(sealed)).toThrow(/initColumnCrypto/);
-    expect(() => fresh.encryptPii('x')).toThrow(/initColumnCrypto/);
-    expect(() => fresh.blindIndex('x')).toThrow(/initColumnCrypto/);
+    const inner = keys.seal('inner@example.com');
+    const outer = keys.seal(inner);
+    expect(keys.open(outer)).toEqual({ ok: true, plain: inner });
+    expect(keys.open('plain@example.com')).toEqual({ ok: true, plain: 'plain@example.com' });
+    expect(otherKeys.open(outer)).toEqual({ ok: false });
   });
 
   it('domain-separates from the raw secrets key via HKDF', () => {
     // The column key is DERIVED from KEY — a TokenCrypto built from the raw
     // KEY itself must not be able to open a PII blob's body.
-    const sealed = encryptPii('secret-person@example.com');
-    const body = sealed.slice(PII_CIPHERTEXT_PREFIX.length);
+    const body = keys.seal('secret-person@example.com').slice(PII_CIPHERTEXT_PREFIX.length);
     expect(() => new TokenCrypto(KEY).decrypt(body)).toThrow();
+  });
+
+  it('refuses a key that is not 32 bytes', () => {
+    expect(() => derivePiiKeys('too-short')).toThrow();
   });
 });
 
-describe('blindIndex', () => {
+describe('derivePiiKeys: index', () => {
   it('is deterministic and case/whitespace-insensitive', () => {
-    expect(blindIndex('Alice@Example.com ')).toBe(blindIndex('alice@example.com'));
-    expect(blindIndex('alice@example.com')).toMatch(/^[0-9a-f]{64}$/);
+    expect(keys.index('Alice@Example.com ')).toBe(keys.index('alice@example.com'));
+    expect(keys.index('alice@example.com')).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('differs across values', () => {
-    expect(blindIndex('a@example.com')).not.toBe(blindIndex('b@example.com'));
+    expect(keys.index('a@example.com')).not.toBe(keys.index('b@example.com'));
   });
 
-  it('differs across keys', () => {
-    const first = blindIndex('a@example.com');
-    initColumnCrypto(randomBytes(32).toString('base64'));
-    expect(blindIndex('a@example.com')).not.toBe(first);
+  it('differs across keys, so one tenant’s index says nothing about another’s', () => {
+    expect(otherKeys.index('a@example.com')).not.toBe(keys.index('a@example.com'));
+  });
+});
+
+/**
+ * The column types hold no key: what they hand the driver is a mark for the
+ * database handle's connection to replace. Pinned through drizzle itself —
+ * the statement a service writes, rendered — because that is where the mark
+ * has to survive to.
+ */
+describe('the column types mark values for the handle', () => {
+  const people = pgTable('people', {
+    id: uuid('id').primaryKey(),
+    email: encryptedText('email').notNull(),
+    emailBidx: blindIndexText('email_bidx').notNull(),
+  });
+  const paramsOf = (clause: unknown) => new PgDialect().sqlToQuery(clause as never).params;
+
+  it('a comparison on an index column binds the address, marked to be indexed', () => {
+    const [bound] = paramsOf(eq(people.emailBidx, 'Ada@Example.com'));
+    expect(bound).toBeInstanceOf(IndexOnWrite);
+    expect((bound as IndexOnWrite).stored(keys)).toBe(keys.index('ada@example.com'));
+    expect(paramsOf(inArray(people.emailBidx, ['a@x.co', 'b@x.co'])).every((p) => p instanceof IndexOnWrite)).toBe(true);
+  });
+
+  it('a value for an encrypted column is marked to be sealed; the empty string is stored as it is', () => {
+    const [bound] = paramsOf(eq(people.email, 'Ada@Example.com'));
+    expect(bound).toBeInstanceOf(SealOnWrite);
+    expect(keys.read((bound as SealOnWrite).stored(keys))).toBe('Ada@Example.com');
+    expect(paramsOf(eq(people.email, ''))).toEqual(['']);
+  });
+
+  it('a mark that reaches a connection holding no key refuses to be written', () => {
+    // `pg` serialises an object parameter through its `toPostgres`. Anything
+    // else here — JSON of the object, say — would store the plaintext.
+    const [bound] = paramsOf(eq(people.email, 'Ada@Example.com'));
+    expect(() => (bound as SealOnWrite).toPostgres()).toThrow(/holds no key/);
+  });
+
+  it('refuses a stored index written back into an index column', () => {
+    // Reading the column gives the stored index; writing that back would
+    // index the index and the row would answer to no address.
+    expect(() => paramsOf(eq(people.emailBidx, keys.index('ada@example.com')))).toThrow(/stored index/);
   });
 });

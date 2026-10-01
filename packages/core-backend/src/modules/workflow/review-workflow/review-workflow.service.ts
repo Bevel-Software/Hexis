@@ -26,7 +26,6 @@ import {
 } from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
-import { blindIndex } from '../../../shared/column-crypto.js';
 import type {
   IReviewWorkflowService,
   MergeGateInput,
@@ -344,7 +343,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .values({
         prNumber,
         authorEmail: canonicalEmail(user.email),
-        authorEmailBidx: blindIndex(user.email),
+        authorEmailBidx: user.email,
         authorName: user.name,
         path: input.path ?? null,
         line: input.line ?? null,
@@ -602,7 +601,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           prNumber,
           path,
           approverEmail: callerEmail,
-          approverEmailBidx: blindIndex(callerEmail),
+          approverEmailBidx: callerEmail,
           approverName: user.name,
           headSha,
         })
@@ -633,8 +632,8 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     // value keyed to the erased address survives.
     await tx
       .update(prFileApprovals)
-      .set({ approverEmail: erased.email, approverEmailBidx: blindIndex(erased.email), approverName: erased.name })
-      .where(eq(prFileApprovals.approverEmailBidx, blindIndex(email)));
+      .set({ approverEmail: erased.email, approverEmailBidx: erased.email, approverName: erased.name })
+      .where(eq(prFileApprovals.approverEmailBidx, email));
   }
 
   /**
@@ -720,7 +719,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .values({
         prNumber,
         triggeredByEmail,
-        triggeredByEmailBidx: blindIndex(triggeredByEmail),
+        triggeredByEmailBidx: triggeredByEmail,
         triggeredByName: user.name,
         headShaAtMerge: headSha,
         mergeMethod: MERGE_METHOD,
@@ -937,7 +936,9 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           prNumber,
           path: r.path,
           approverEmail: r.approverEmail,
-          approverEmailBidx: r.approverEmailBidx,
+          // The address, not the stored index read back beside it: an index
+          // column is written with what it is the index of.
+          approverEmailBidx: r.approverEmail,
           approverName: r.approverName,
           headSha: toHeadSha,
           approvedAt: r.approvedAt,
@@ -1021,7 +1022,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           and(
             eq(prFileApprovals.prNumber, prNumber),
             eq(prFileApprovals.path, path),
-            eq(prFileApprovals.approverEmailBidx, blindIndex(callerEmail)),
+            eq(prFileApprovals.approverEmailBidx, callerEmail),
           ),
         );
     });

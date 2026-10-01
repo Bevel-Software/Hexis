@@ -3,7 +3,7 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('account-erasure');
 import { and, eq, inArray, isNotNull, isNull, notExists } from 'drizzle-orm';
-import { blindIndex, isEncryptedBlob } from '../../shared/column-crypto.js';
+import { isEncryptedBlob } from '../../shared/column-crypto.js';
 import type { Database } from '../database/connection.js';
 import type { IReviewWorkflowService } from '../workflow/review-workflow/review-workflow.interface.js';
 import {
@@ -170,8 +170,10 @@ export class AccountErasureService implements IAccountErasureService {
     // Every email-keyed row below is matched through its blind index — the
     // email columns are randomized ciphertext — and the index is rewritten to
     // the placeholder's too, so no value keyed to the erased address survives.
-    const emailBidx = blindIndex(target.email);
-    const erasedBidx = blindIndex(target.erasedEmail);
+    // An index column is compared and written with the address it is the
+    // index of; the handle the statement runs on makes the index.
+    const emailBidx = target.email;
+    const erasedBidx = target.erasedEmail;
 
     const postCommit: Array<() => Promise<void>> = [];
     await this.db.transaction(async (tx) => {

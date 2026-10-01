@@ -2,7 +2,6 @@ import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import type { ChangeRequestState } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
 import { changeRequests, pluginJoinRequests } from '../database/schema.js';
-import { blindIndex } from '../../shared/column-crypto.js';
 
 /**
  * A join request as the platform recorded it — the durable "this person
@@ -145,11 +144,11 @@ export class DbJoinRequestStore implements JoinRequestStore {
   }): Promise<JoinRequestRecord> {
     const requesterEmail = input.requesterEmail.toLowerCase();
     // Keyed by the blind index throughout: the email column is randomized
-    // ciphertext, so the uniqueness and every lookup go through its index.
-    const requesterEmailBidx = blindIndex(requesterEmail);
+    // ciphertext, so the uniqueness and every lookup go through its index,
+    // which is written and compared with the address.
     const [inserted] = await this.db
       .insert(pluginJoinRequests)
-      .values({ requesterEmail, requesterEmailBidx, requesterName: input.requesterName, pluginKey: input.pluginKey })
+      .values({ requesterEmail, requesterEmailBidx: requesterEmail, requesterName: input.requesterName, pluginKey: input.pluginKey })
       .onConflictDoNothing({
         target: [pluginJoinRequests.requesterEmailBidx, pluginJoinRequests.pluginKey],
       })
@@ -174,7 +173,7 @@ export class DbJoinRequestStore implements JoinRequestStore {
       })
       .where(
         and(
-          eq(pluginJoinRequests.requesterEmailBidx, requesterEmailBidx),
+          eq(pluginJoinRequests.requesterEmailBidx, requesterEmail),
           eq(pluginJoinRequests.pluginKey, input.pluginKey),
         ),
       )
@@ -195,7 +194,7 @@ export class DbJoinRequestStore implements JoinRequestStore {
     const rows = await this.db
       .select()
       .from(pluginJoinRequests)
-      .where(eq(pluginJoinRequests.requesterEmailBidx, blindIndex(requesterEmail)));
+      .where(eq(pluginJoinRequests.requesterEmailBidx, requesterEmail));
     return rows.map(toRecord);
   }
 

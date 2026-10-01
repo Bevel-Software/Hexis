@@ -40,7 +40,6 @@ import { logger } from '../../shared/logging.js';
 const log = logger('pending-commits');
 import type { Database } from '../database/connection.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
-import { blindIndex } from '../../shared/column-crypto.js';
 import { pendingCommits } from '../database/schema.js';
 
 /**
@@ -196,7 +195,7 @@ export class PendingCommitsService {
       .set({
         queuedAt: new Date(),
         authorEmail: email,
-        authorEmailBidx: blindIndex(email),
+        authorEmailBidx: email,
         authorName: input.authorName,
         // Reset transient counters — this is effectively a fresh enqueue.
         attempts: 0,
@@ -218,7 +217,7 @@ export class PendingCommitsService {
       branch: input.branch,
       path: input.path,
       authorEmail: email,
-      authorEmailBidx: blindIndex(email),
+      authorEmailBidx: email,
       authorName: input.authorName,
     });
   }
@@ -258,7 +257,7 @@ export class PendingCommitsService {
       branch: input.branch,
       path: input.path,
       authorEmail: email,
-      authorEmailBidx: blindIndex(email),
+      authorEmailBidx: email,
       authorName: input.authorName,
     });
     return true;

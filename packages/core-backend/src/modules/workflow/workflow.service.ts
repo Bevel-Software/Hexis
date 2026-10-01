@@ -82,7 +82,6 @@ import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { WorkflowHooks } from './workflow-hooks.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
-import { blindIndex } from '../../shared/column-crypto.js';
 import {
   ChangeRequestConflictsError,
   DuplicateChangeRequestError,
@@ -1755,7 +1754,7 @@ export class WorkflowService implements IWorkflowService {
       .from(changeRequests)
       .where(
         and(
-          eq(changeRequests.authorEmailBidx, blindIndex(email)),
+          eq(changeRequests.authorEmailBidx, email),
           eq(changeRequests.sourceBranch, sourceBranch),
           ne(changeRequests.state, 'open'),
         ),
@@ -1895,7 +1894,7 @@ export class WorkflowService implements IWorkflowService {
           title: input.title.trim(),
           body,
           authorEmail: canonicalEmail(user.email),
-          authorEmailBidx: blindIndex(user.email),
+          authorEmailBidx: user.email,
           authorName: user.name,
         })
         .returning({ number: changeRequests.number });
@@ -3462,7 +3461,7 @@ export class WorkflowService implements IWorkflowService {
         applyFailureKind: failure.kind,
         applyFailedAt: at,
         applyFailedByName: user.name,
-        applyFailedByEmailBidx: blindIndex(user.email),
+        applyFailedByEmailBidx: user.email,
       })
       // The write itself refuses to go backwards: the attempt map above is an
       // early exit within this process, but an older UPDATE still in flight (or

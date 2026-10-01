@@ -59,24 +59,27 @@ export {
   createDb,
   closeDb,
   dbSchemaOf,
+  piiKeysOf,
   assertSchemaName,
   DEFAULT_DB_SCHEMA,
   type Database,
   type DbOptions,
 } from './modules/database/connection.js';
 
-// PII column encryption (see shared/column-crypto.ts). `encryptedText` and
-// `blindIndex` are exported so an enterprise overlay can seal its own schema's
-// PII columns with the same keys; `initColumnCrypto` for entry points that
-// build a Database without constructing CoreConfig.
+// PII column encryption (see shared/column-crypto.ts). The key belongs to the
+// database handle (`createDb(url, { piiKey })`), so an overlay seals its own
+// schema's columns by declaring them `encryptedText` / `blindIndexText` and
+// running on the handle the composition root built. `derivePiiKeys` and
+// `piiKeysOf` are for code that handles the stored form itself: SQL written
+// by hand, or a process that reads a knowledge base's tables without a handle
+// of this package's.
 export {
-  initColumnCrypto,
-  isColumnCryptoInitialised,
   encryptedText,
-  blindIndex,
-  encryptPii,
-  decryptPii,
+  blindIndexText,
+  derivePiiKeys,
   isEncryptedBlob,
+  PII_CIPHERTEXT_PREFIX,
+  type PiiKeys,
 } from './shared/column-crypto.js';
 
 // Build identity surfaced by GET /api/health.

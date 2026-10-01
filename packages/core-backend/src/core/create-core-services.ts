@@ -14,7 +14,6 @@ import { DEFAULT_SECRETS_SCOPE } from '../modules/secrets-vault/secrets-variable
 import { KbContext } from '../shared/kb-context.js';
 import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
-import { isColumnCryptoInitialised } from '../shared/column-crypto.js';
 import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
@@ -350,7 +349,11 @@ export async function createCoreServices(
   // the default schema, so a single-tenant deployment keeps the lock ids and
   // the ledger it always had.
   const tenantKey = config.dbSchema === DEFAULT_DB_SCHEMA ? '' : config.dbSchema;
-  const db = getDb(config.databaseUrl, { schema: config.dbSchema });
+  // The handle holds this knowledge base's key for its personal-data columns:
+  // the same `SECRETS_ENC_KEY` that seals its stored credentials — its own
+  // derived one, for a tenant — so everything in the schema opens with one
+  // key and nothing in it opens with another tenant's.
+  const db = getDb(config.databaseUrl, { schema: config.dbSchema, piiKey: config.secretsEncKey });
   // A schema of its own is created on first use, so a tenant's first
   // activation needs nothing done by hand; `public` always exists. Then the
   // server is asked whether the connections really search that schema: a
@@ -370,16 +373,6 @@ export async function createCoreServices(
   // package runs its own squashed idempotent CORE history from the packaged
   // `migrations/` folder, tracked in `__drizzle_migrations_core`. An
   // enterprise overlay runs its own history AFTER this (see migrate.ts).
-  // The PII column keys must be in place before the first row is read or
-  // written: `CoreConfig`'s constructor installs them for a deployment that
-  // serves one knowledge base, the tenant host for one that serves several.
-  // A graph built without them would seal nothing and read every sealed row
-  // as its ciphertext, so it is refused here, by name.
-  if (!isColumnCryptoInitialised()) {
-    throw new Error(
-      'PII column encryption is not initialised: construct CoreConfig, or call initColumnCrypto(), before createCoreServices.',
-    );
-  }
   // `runCoreMigrations` also seals any pre-encryption plaintext PII rows and
   // swaps the unique constraints onto the blind-index columns (see
   // migrate.ts), under the same lock, before any service reads or writes a

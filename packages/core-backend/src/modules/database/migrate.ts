@@ -3,15 +3,9 @@ import { sql } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('database');
-import { DEFAULT_DB_SCHEMA, dbSchemaOf, type Database } from './connection.js';
+import { DEFAULT_DB_SCHEMA, dbSchemaOf, piiKeysOf, type Database } from './connection.js';
 import { AdvisoryLock, withAdvisoryLock } from './advisory-lock.js';
-import {
-  PII_SEALED_SHAPE_SQL_REGEX,
-  blindIndex,
-  encryptPii,
-  isEncryptedBlob,
-  openPii,
-} from '../../shared/column-crypto.js';
+import { PII_SEALED_SHAPE_SQL_REGEX, isEncryptedBlob, type PiiKeys } from '../../shared/column-crypto.js';
 
 /*
  * ── Per-tier migration folders ──────────────────────────────────────────────
@@ -113,8 +107,8 @@ export async function runEnterpriseMigrations(db: Database, folder: string): Pro
  *
  * Migration 0014 adds the `*_bidx` columns; the DATA change — rewriting
  * pre-existing plaintext PII to AES-256-GCM ciphertext and filling the blind
- * indexes — happens here, programmatically, because it needs the key from the
- * environment (SQL migrations cannot encrypt). Runs on every start right after
+ * indexes — happens here, programmatically, because it needs the key the
+ * handle holds (SQL migrations cannot encrypt). Runs on every start right after
  * the core history, under the migrations lock, and is idempotent: sealed rows
  * carry the `PII_CIPHERTEXT_PREFIX` marker and are excluded by the SELECT's
  * own WHERE clause, so a completed backfill degenerates to one cheap,
@@ -143,7 +137,14 @@ export async function runEnterpriseMigrations(db: Database, folder: string): Pro
  * statements are IF-EXISTS-guarded — re-running is a no-op.
  *
  * Runs against whatever schema the handle searches first: a tenant's own, or
- * `public`. Every table name is unqualified for that reason.
+ * `public`, under that handle's key. Every table name is unqualified for that
+ * reason.
+ *
+ * This is the one place that works on the STORED form. The handle's
+ * connection opens every sealed value of a result, which here would hide
+ * exactly what has to be told apart — so the columns are read as bytes
+ * ({@link asStored}), which it leaves alone, and written as ready-made
+ * ciphertext, which it passes through.
  */
 
 interface PiiBackfillTable {
@@ -172,6 +173,12 @@ const ident = (name: string) => sql.raw(`"${name}"`);
 /** What the backfill needs from a drizzle client — the db or a transaction. */
 type Executor = Pick<Database, 'execute'>;
 
+/** A text column as it is stored: bytes, so the handle's connection does not open it. */
+const asStored = (col: string) => sql`convert_to(${ident(col)}, 'UTF8') AS ${ident(col)}`;
+
+/** What {@link asStored} selected, back as text; anything else as it came. */
+const storedText = (value: unknown): unknown => (Buffer.isBuffer(value) ? value.toString('utf8') : value);
+
 /**
  * A column "needs sealing" when it holds non-empty text that isn't a blob.
  * The shape regex is deliberately used as a NEGATIVE filter: anything failing
@@ -193,25 +200,25 @@ function needsSealing(col: string) {
  * rows of a deployment are sealed under one key. Refusing the start is the
  * loud failure; re-keying a database is a deliberate operation, not a boot.
  */
-async function assertKeyOpensSealedRows(tx: Executor): Promise<void> {
+async function assertKeyOpensSealedRows(tx: Executor, keys: PiiKeys): Promise<void> {
   for (const t of PII_BACKFILL_TABLES) {
     const col = t.bidx?.source ?? t.encrypted[0]!;
     const sample = await tx.execute(
-      sql`SELECT ${ident(col)} AS value FROM ${ident(t.table)} WHERE ${ident(col)} ~ ${PII_SEALED_SHAPE_SQL_REGEX} LIMIT 1`,
+      sql`SELECT ${asStored(col)} FROM ${ident(t.table)} WHERE ${ident(col)} ~ ${PII_SEALED_SHAPE_SQL_REGEX} LIMIT 1`,
     );
-    const value = (sample.rows[0] as { value?: unknown } | undefined)?.value;
-    if (typeof value === 'string' && !openPii(value).ok) {
+    const value = storedText((sample.rows[0] as Record<string, unknown> | undefined)?.[col]);
+    if (typeof value === 'string' && !keys.open(value).ok) {
       throw new Error(
         `PII encryption: ${t.table}.${col} is sealed with a key the configured SECRETS_ENC_KEY ` +
-          '(or TENANT_MASTER_KEY) does not open — refusing to start. Restore the key that sealed it; ' +
-          'changing the key is a re-keying of the database, not a configuration change.',
+          '(for a tenant: the one derived from TENANT_MASTER_KEY) does not open — refusing to start. ' +
+          'Restore the key that sealed it; changing the key is a re-keying of the database, not a configuration change.',
       );
     }
   }
 }
 
-async function backfillTable(tx: Executor, t: PiiBackfillTable): Promise<number> {
-  const cols = [...t.key, ...t.encrypted, ...(t.bidx ? [t.bidx.column] : [])];
+async function backfillTable(tx: Executor, keys: PiiKeys, t: PiiBackfillTable): Promise<number> {
+  const cols = [...t.key.map(ident), ...t.encrypted.map(asStored), ...(t.bidx ? [ident(t.bidx.column)] : [])];
   // Only rows with work left: the ciphertext prefix makes "unsealed" a plain
   // SQL predicate, so a fully-sealed table costs one empty-result query.
   const pending = [
@@ -219,10 +226,11 @@ async function backfillTable(tx: Executor, t: PiiBackfillTable): Promise<number>
     ...(t.bidx ? [sql`${ident(t.bidx.column)} IS NULL`] : []),
   ];
   const result = await tx.execute(
-    sql`SELECT ${sql.join(cols.map(ident), sql`, `)} FROM ${ident(t.table)} WHERE ${sql.join(pending, sql` OR `)}`,
+    sql`SELECT ${sql.join(cols, sql`, `)} FROM ${ident(t.table)} WHERE ${sql.join(pending, sql` OR `)}`,
   );
   let rewritten = 0;
-  for (const row of result.rows as Array<Record<string, unknown>>) {
+  for (const read of result.rows as Array<Record<string, unknown>>) {
+    const row = Object.fromEntries(Object.entries(read).map(([col, value]) => [col, storedText(value)]));
     const sets = [];
     // Compare-and-swap: pin every value this row was read with, so a write
     // that lands between scan and update makes this UPDATE match zero rows
@@ -231,7 +239,7 @@ async function backfillTable(tx: Executor, t: PiiBackfillTable): Promise<number>
     for (const col of t.encrypted) {
       const value = row[col];
       if (typeof value === 'string' && value !== '' && !isEncryptedBlob(value)) {
-        sets.push(sql`${ident(col)} = ${encryptPii(value)}`);
+        sets.push(sql`${ident(col)} = ${keys.seal(value)}`);
         where.push(sql`${ident(col)} = ${value}`);
       }
     }
@@ -247,7 +255,7 @@ async function backfillTable(tx: Executor, t: PiiBackfillTable): Promise<number>
       const stored = row[t.bidx.column];
       const sealingSource = typeof source === 'string' && source !== '' && !isEncryptedBlob(source);
       if (sealingSource || stored == null) {
-        const opened = openPii(typeof source === 'string' ? source : '');
+        const opened = keys.open(typeof source === 'string' ? source : '');
         if (!opened.ok) {
           throw new Error(
             `PII encryption backfill: ${t.table}.${t.bidx.source} cannot be decrypted with the ` +
@@ -255,7 +263,7 @@ async function backfillTable(tx: Executor, t: PiiBackfillTable): Promise<number>
               'Restore the key that sealed it, then restart.',
           );
         }
-        sets.push(sql`${ident(t.bidx.column)} = ${blindIndex(opened.plain)}`);
+        sets.push(sql`${ident(t.bidx.column)} = ${keys.index(opened.plain)}`);
         // Pin the index AND its source: if a concurrent writer replaces the
         // email between scan and write, the CAS must not attach the OLD
         // email's blind index to the NEW value.
@@ -325,16 +333,17 @@ const PII_FINALIZE_STATEMENTS = [
 /**
  * Encrypt pre-existing plaintext PII rows, fill the blind-index columns, and
  * apply the constraints migration 0014 deferred. Idempotent; `runCoreMigrations`
- * runs it under the migrations lock right after the history. Requires
- * `initColumnCrypto` to have run (CoreConfig's constructor and the tenant host
- * do).
+ * runs it under the migrations lock right after the history. The handle must
+ * hold the knowledge base's key (`createDb(url, { piiKey })`; the composition
+ * root's does): one that holds none is refused before anything is read.
  */
 export async function runPiiEncryptionBackfill(db: Database): Promise<void> {
+  const keys = piiKeysOf(db);
   await db.transaction(async (tx) => {
-    await assertKeyOpensSealedRows(tx);
+    await assertKeyOpensSealedRows(tx, keys);
     let rewritten = 0;
     for (const t of PII_BACKFILL_TABLES) {
-      rewritten += await backfillTable(tx, t);
+      rewritten += await backfillTable(tx, keys, t);
     }
     if (rewritten > 0) log.info(`PII encryption backfill: rewrote ${rewritten} row(s).`);
     await resolveBidxCollisions(tx);
