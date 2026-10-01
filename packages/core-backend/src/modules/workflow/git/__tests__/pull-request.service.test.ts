@@ -309,6 +309,19 @@ describe('PullRequestService.listPrsByState', () => {
     expect(summary.updatedAt).toBe('2026-04-03T09:30:00.000Z');
   });
 
+  it('reads the table for a set that contains `open` ALONGSIDE another state', async () => {
+    // Only a deduplicated singleton `['open']` may delegate: a guard loosened to
+    // `states.includes('open')` would answer `['open', 'merged']` with the open
+    // rows alone and silently drop the merged ones. `listOpenPrs` is spied so
+    // delegation would be visible rather than merely wrong.
+    const { svc, select } = svcOver([row({ number: 9, state: 'merged' })], ['Knowledge/A.md']);
+    const spy = vi.spyOn(svc, 'listOpenPrs').mockResolvedValue([]);
+    const summaries = await svc.listPrsByState(['open', 'closed', 'merged']);
+    expect(spy).not.toHaveBeenCalled();
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(summaries.map((s) => s.number)).toEqual([9]);
+  });
+
   it('falls back to the creation time when the row records nothing later', async () => {
     const { svc } = svcOver([row({ state: 'closed', closedAt: null })]);
     const [summary] = await svc.listPrsByState(['closed']);

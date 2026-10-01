@@ -68,6 +68,18 @@ function approval(path: string, over: Partial<FileApproval> = {}): FileApproval 
   };
 }
 
+/** A comment as the detail carries one. Module-level: the rename suite needs it too. */
+function comment(over: Partial<ChangeRequestComment>): ChangeRequestComment {
+  return {
+    id: 'c-1',
+    author: { email: VIEWER, name: 'Mia' },
+    body: 'This line is out of date.',
+    headSha: 'head-1',
+    createdAt: '2026-09-29T08:00:00.000Z',
+    ...over,
+  };
+}
+
 function approvedBy(email: string, name: string, at: string, isStale = false) {
   return { email, name, approvedAt: at, isStale, isSelfApproval: false };
 }
@@ -771,15 +783,6 @@ describe('list_change_request_reviews', () => {
 // ── Scenario: comments ──────────────────────────────────────────────────────
 
 describe('list_change_request_comments', () => {
-  const comment = (over: Partial<ChangeRequestComment>): ChangeRequestComment => ({
-    id: 'c-1',
-    author: { email: VIEWER, name: 'Mia' },
-    body: 'This line is out of date.',
-    headSha: 'head-1',
-    createdAt: '2026-09-29T08:00:00.000Z',
-    ...over,
-  });
-
   // WHEN a reviewer left an inline comment and a reply followed THEN
   // `list_change_request_comments` returns both, the reply with `in_reply_to`.
   it('returns the inline comment and its reply, the reply carrying in_reply_to', async () => {
@@ -1038,6 +1041,99 @@ describe('a file renamed out of a folder the caller may not read', () => {
       status: 'renamed',
     });
     expect(json.withheld_files).toBe(0);
+  });
+
+  it('keeps a comment anchored to the withheld rename out of the comment list', async () => {
+    const base = await start();
+    renameRequest();
+    details.set(
+      12,
+      detail({
+        files: [
+          file('Knowledge/Open.md', { status: 'renamed', previousPath: 'Payroll/Rates.md' }),
+          file('Knowledge/Plain.md'),
+        ],
+        approvals: [approval('Knowledge/Open.md'), approval('Knowledge/Plain.md')],
+        comments: [
+          comment({ id: 'c-1', path: 'Knowledge/Plain.md', line: 4 }),
+          comment({ id: 'c-2', path: 'Knowledge/Open.md', line: 9, body: 'Rate band looks off.' }),
+        ],
+      }),
+    );
+    const { json } = await call(base, 'list_change_request_comments', { number: 12 });
+    // `Knowledge/Open.md` passes a bare read check — it is the file's new name —
+    // but the file is withheld whole, so a comment on it is withheld too. Were
+    // it kept, it would print the name the files tool refuses to print.
+    expect((json.comments as unknown as { id: string }[]).map((c) => c.id)).toEqual(['c-1']);
+    expect(json.withheld_comments).toBe(1);
+    const whole = JSON.stringify(json);
+    expect(whole).not.toContain('Knowledge/Open.md');
+    expect(whole).not.toContain('Payroll');
+    expect(whole).not.toContain('Rate band');
+  });
+
+  it('keeps the withheld rename out of the files a review names, and counts it', async () => {
+    const base = await start();
+    renameRequest();
+    details.set(
+      12,
+      detail({
+        files: [
+          file('Knowledge/Open.md', { status: 'renamed', previousPath: 'Payroll/Rates.md' }),
+          file('Knowledge/Plain.md'),
+        ],
+        approvals: [
+          approval('Knowledge/Open.md', {
+            approvedBy: [approvedBy('ali@bevel.software', 'Ali', '2026-09-30T11:00:00.000Z')],
+          }),
+          approval('Knowledge/Plain.md', {
+            approvedBy: [approvedBy('ali@bevel.software', 'Ali', '2026-09-30T09:00:00.000Z')],
+          }),
+        ],
+      }),
+    );
+    const { json } = await call(base, 'list_change_request_reviews', { number: 12 });
+    expect(json.reviews).toHaveLength(1);
+    expect(json.reviews[0]).toMatchObject({
+      user: { name: 'Ali' },
+      files: ['Knowledge/Plain.md'],
+      withheld_files: 1,
+      // Taken from the readable approval alone — the later one is withheld.
+      submitted_at: '2026-09-30T09:00:00.000Z',
+    });
+    const whole = JSON.stringify(json);
+    expect(whole).not.toContain('Knowledge/Open.md');
+    expect(whole).not.toContain('Payroll');
+    expect(whole).not.toContain('11:00:00');
+  });
+
+  it('answers may_approve false when the only approvable file is the withheld one', async () => {
+    const base = await start();
+    renameRequest();
+    details.set(
+      12,
+      detail({
+        files: [
+          file('Knowledge/Open.md', { status: 'renamed', previousPath: 'Payroll/Rates.md' }),
+          file('Knowledge/Plain.md'),
+        ],
+        // A write grant at `origin/<base>` can hold for a file the read verdict
+        // withholds, so the request's whole approval set says the caller may
+        // approve something — but not anything they are shown.
+        approvals: [
+          approval('Knowledge/Open.md', { viewerCanApprove: true }),
+          approval('Knowledge/Plain.md', { viewerCanApprove: false }),
+        ],
+      }),
+    );
+    const first = await call(base, 'get_change_request', { number: 12 });
+    expect(first.json.change_request).toMatchObject({ withheld_files: 1 });
+    expect((first.json.change_request as unknown as { access: { may_approve: boolean } }).access.may_approve).toBe(false);
+    // Readable, and the answer turns true — the filter is the read verdict, not
+    // a blanket false.
+    readable = ['Knowledge/Open.md', 'Knowledge/Plain.md', 'Payroll/Rates.md'];
+    const second = await call(base, 'get_change_request', { number: 12 });
+    expect((second.json.change_request as unknown as { access: { may_approve: boolean } }).access.may_approve).toBe(true);
   });
 
   it('counts a withheld rename ONCE, though it goes by two names', async () => {

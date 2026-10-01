@@ -377,22 +377,31 @@ export function authorsDescription(body: string): string {
  * may bypass what is. Deriving it here rather than asking a second time keeps
  * the answer and the enforcement reading the same gate.
  *
+ * `may_approve` answers over `readableApprovals` — the approvals of the files
+ * this caller is SHOWN — and not over the request's whole approval set, which
+ * is why the set is passed in rather than read off `detail`. The two differ:
+ * `viewerCanApprove` is a WRITE grant at `origin/<base>`, and a write grant can
+ * hold for a file whose read verdict withholds it. Answering true off such a
+ * file would both contradict the contract ("at least one file they can read")
+ * and tell the caller something about a file they were refused.
+ *
  * `blockers` arrive already filtered — see {@link visibleBlockers}.
  */
 export function toGhAccess(
   detail: Pick<
     ChangeRequestDetail,
-    'state' | 'mergeBlockedReasons' | 'mergeWarnings' | 'viewerCanBypassMerge' | 'approvals'
+    'state' | 'mergeBlockedReasons' | 'mergeWarnings' | 'viewerCanBypassMerge'
   >,
   blockers: { visible: string[]; withheld: number },
   viewerIsAuthor: boolean,
+  readableApprovals: Pick<FileApproval, 'viewerCanApprove'>[],
 ): GhAccess {
   const warnings = new Set(detail.mergeWarnings);
   const hard = detail.mergeBlockedReasons.filter((r) => !warnings.has(r));
   return {
     merge_blockers: blockers.visible,
     withheld_merge_blockers: blockers.withheld,
-    may_approve: detail.approvals.some((a) => a.viewerCanApprove),
+    may_approve: readableApprovals.some((a) => a.viewerCanApprove),
     may_merge:
       detail.state === 'open' &&
       hard.length === 0 &&

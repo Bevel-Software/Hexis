@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { isFolderPlaceholder } from '@bevel-software/platform-shared';
 
 import { PullRequestService } from '../pull-request.service.js';
 import type { Database } from '../../../database/connection.js';
@@ -42,10 +43,15 @@ describe('PullRequestService summaries — folder placeholder', () => {
     } as unknown as Database;
     // The real `changedPathPairs` drops the placeholder (it is never a file
     // anybody reads) while the flat list keeps it for the empty-request check,
-    // so the double answers both the way the service does.
+    // so the double answers both the way the service does. It borrows the
+    // production predicate rather than spelling one out: `isFolderPlaceholder`
+    // matches on the BASENAME, so a root-level `.gitkeep` is a placeholder too,
+    // and both of the real readers drop `roles.yaml`.
     const changedPathsForPr = vi.fn(async () => ({
-      paths,
-      pairs: paths.filter((p) => !p.endsWith('/.gitkeep')).map((path) => ({ path })),
+      paths: paths.filter((p) => p !== 'roles.yaml'),
+      pairs: paths
+        .filter((p) => !isFolderPlaceholder(p) && p !== 'roles.yaml')
+        .map((path) => ({ path })),
     }));
     const git = { changedPathsAndPairsForPr: changedPathsForPr } as unknown as GitService;
     const workspace = {
@@ -81,5 +87,15 @@ describe('PullRequestService summaries — folder placeholder', () => {
   it('a folder-only request outside the viewer\'s scope does not route to them', async () => {
     const { svc } = harness(['Elsewhere/.gitkeep']);
     expect(await svc.listPrsForOwnerEmail('ws-main', 'bob@bevel.software', { fresh: true })).toEqual([]);
+  });
+
+  it('a placeholder at the ROOT is a placeholder too, on both views of the summary', async () => {
+    // `isFolderPlaceholder` matches the basename, so `.gitkeep` with no folder
+    // in front of it is the same non-file — the corner a filter spelled
+    // `endsWith('/.gitkeep')` would get wrong on both the paths and the pairs.
+    const { svc } = harness(['.gitkeep', 'Reports/q3.md']);
+    const [summary] = await svc.listOpenPrs({ fresh: true });
+    expect(summary.touchedNodePaths).toEqual(['Reports/q3.md']);
+    expect(summary.touchedNodeFiles).toEqual([{ path: 'Reports/q3.md' }]);
   });
 });

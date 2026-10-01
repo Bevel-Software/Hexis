@@ -167,15 +167,29 @@ export function registerChangeRequestReadTools(
   interface ScopedDetail {
     detail: ChangeRequestDetail;
     /**
-     * Whether the caller may read one path of this request — the ONE verdict
-     * every tool below asks, so none of them can decide it a second way.
+     * Whether the caller may read one path of this request — the raw per-path
+     * verdict, as the access tree gives it at `origin/<base>`.
      */
     mayRead: (path: string) => boolean;
+    /**
+     * Whether this request may NAME `path` to the caller — `mayRead`, minus
+     * every name a withheld file goes by. The ONE verdict the tools below ask
+     * about a path, so none of them can decide it a second way.
+     *
+     * The two differ on exactly one shape, and it is the shape that leaks: a
+     * file renamed out of a folder the caller may not read is readable under
+     * its NEW name, yet `fileIsReadable` withholds it whole (its diff shows the
+     * old path's content). Anything keyed on that new path — an approval, a
+     * comment anchored to it — would otherwise say the request touches a file
+     * the file tool refuses to list, under a name it refuses to print.
+     */
+    mayShow: (path: string) => boolean;
     /** The request's files the caller may read, in the request's own order. */
     readableFiles: ChangeRequestDetail['files'];
     /**
      * Every name the withheld files go by — for filtering the gate blockers and
-     * for nothing else. NEVER answered: use `withheldFileCount` to report them.
+     * for deciding `mayShow`. NEVER answered: use `withheldFileCount` to report
+     * them.
      */
     withheldFilePaths: string[];
     /** How many files are withheld. One per file, whatever its rename names. */
@@ -211,15 +225,19 @@ export function registerChangeRequestReadTools(
     if (!maySeeChangeRequest({ readableFiles: readableFiles.length, isAuthor: viewerIsAuthor })) {
       throw notFound(number);
     }
+    // Every name a withheld file goes by, so a gate warning quoting either
+    // spelling is caught by the blocker filter — and so `mayShow` catches
+    // whichever spelling an approval or a comment happens to use.
+    const withheldFilePaths = detail.files
+      .filter((f) => !fileIsReadable(f, mayRead))
+      .flatMap(pathsOf);
+    const withheldNames = new Set(withheldFilePaths);
     return {
       detail,
       mayRead,
+      mayShow: (path: string) => mayRead(path) && !withheldNames.has(path),
       readableFiles,
-      // Every name a withheld file goes by, so a gate warning quoting either
-      // spelling is caught by the blocker filter.
-      withheldFilePaths: detail.files
-        .filter((f) => !fileIsReadable(f, mayRead))
-        .flatMap(pathsOf),
+      withheldFilePaths,
       withheldFileCount: detail.files.length - readableFiles.length,
       viewerIsAuthor,
     };
@@ -422,7 +440,7 @@ export function registerChangeRequestReadTools(
               properties: {
                 merge_blockers: { type: 'array', items: { type: 'string' }, description: 'Why it cannot be applied yet.' },
                 withheld_merge_blockers: { type: 'integer', description: 'Blockers naming a file you may not read.' },
-                may_approve: { type: 'boolean', description: 'Whether you may approve at least one of its files.' },
+                may_approve: { type: 'boolean', description: 'Whether you may approve at least one of the files you are shown.' },
                 may_merge: { type: 'boolean', description: 'Whether an Apply by you would be accepted right now.' },
                 is_author: { type: 'boolean', description: 'Whether you opened it (your agent counts as you).' },
               },
@@ -451,6 +469,9 @@ export function registerChangeRequestReadTools(
             detail,
             visibleBlockers(detail.mergeBlockedReasons, withheldFilePaths),
             viewerIsAuthor,
+            // `may_approve` over the approvals of the SHOWN files alone: an
+            // approval keyed on a withheld file must not answer for it.
+            detail.approvals.filter((a) => scoped.mayShow(a.path)),
           ),
         ),
       };
@@ -600,7 +621,8 @@ export function registerChangeRequestReadTools(
       // The read predicate goes IN rather than a pre-filtered list: a review is
       // grouped over every file the reviewer approved, so that it can count the
       // withheld ones under its own id and drop itself when they are all it has.
-      const { reviews, withheldReviews } = toGhReviews(scoped.detail.approvals, scoped.mayRead);
+      // `mayShow` keeps a withheld rename out of the files a review names.
+      const { reviews, withheldReviews } = toGhReviews(scoped.detail.approvals, scoped.mayShow);
       const { items, ...paging } = pageOf(reviews, perPage, page);
       return { reviews: items, withheld_reviews: withheldReviews, ...paging };
     },
@@ -656,8 +678,10 @@ export function registerChangeRequestReadTools(
       const scoped = await scopedDetail(ctx, number, { patches: false });
       // A comment with no path is about the request as a whole — visible to
       // anyone the request itself is visible to. One with a path is as readable
-      // as that path.
-      const visible = scoped.detail.comments.filter((c) => !c.path || scoped.mayRead(c.path));
+      // as that path is NAMEABLE here: `mayShow`, not `mayRead`, so a comment
+      // anchored to the new name of a file withheld for its old one goes with
+      // the file rather than announcing it.
+      const visible = scoped.detail.comments.filter((c) => !c.path || scoped.mayShow(c.path));
       const { items, ...paging } = pageOf(visible, perPage, page);
       return {
         comments: items.map(toGhComment),

@@ -149,5 +149,9 @@ describe('AccessControlService — at-ref batch reads (git cat-file --batch)', (
   it('canReadBatchAtRef answers an empty map for no paths, and null for a ref it cannot resolve', async () => {
     expect(await svc.canReadBatchAtRef(workspaceId, 'main', admin, [])).toEqual(new Map());
     expect(await svc.canReadBatchAtRef(workspaceId, 'no-such-ref', admin, ['Knowledge/plain.md'])).toBeNull();
+    // The null-semantics hold for the empty set too: the ref is validated
+    // whatever was asked about, so no caller can read an empty map as proof
+    // that the ref resolved.
+    expect(await svc.canReadBatchAtRef(workspaceId, 'no-such-ref', admin, [])).toBeNull();
   });
 });

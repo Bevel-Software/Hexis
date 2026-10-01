@@ -1972,7 +1972,9 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePaths: string[],
   ): Promise<Map<string, boolean> | null> {
-    if (relativePaths.length === 0) return new Map();
+    // No shortcut for an empty path set: the null-semantics are the contract,
+    // so an unresolvable ref must answer null however many paths were asked
+    // about. Returning an empty map early would tell a caller the ref resolved.
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);

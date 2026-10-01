@@ -384,7 +384,7 @@ describe('the access block', () => {
     }) as ChangeRequestDetail;
 
   it('may_merge is true when the gate waits on nothing', () => {
-    expect(toGhAccess(detail(), { visible: [], withheld: 0 }, false)).toEqual({
+    expect(toGhAccess(detail(), { visible: [], withheld: 0 }, false, [])).toEqual({
       merge_blockers: [],
       withheld_merge_blockers: 0,
       may_approve: false,
@@ -396,13 +396,14 @@ describe('the access block', () => {
   it('may_merge is false on a missing approval, and true for an admin who may bypass it', () => {
     const waiting = ['Waiting on approval for A.md from Engineering.'];
     expect(
-      toGhAccess(detail({ mergeBlockedReasons: waiting, mergeWarnings: waiting }), { visible: waiting, withheld: 0 }, false).may_merge,
+      toGhAccess(detail({ mergeBlockedReasons: waiting, mergeWarnings: waiting }), { visible: waiting, withheld: 0 }, false, []).may_merge,
     ).toBe(false);
     expect(
       toGhAccess(
         detail({ mergeBlockedReasons: waiting, mergeWarnings: waiting, viewerCanBypassMerge: true }),
         { visible: waiting, withheld: 0 },
         false,
+        [],
       ).may_merge,
     ).toBe(true);
   });
@@ -410,14 +411,32 @@ describe('the access block', () => {
   it('may_merge is false on a hard block, bypass or not', () => {
     const hard = ['This pull request is closed.'];
     expect(
-      toGhAccess(detail({ state: 'closed', mergeBlockedReasons: hard, viewerCanBypassMerge: true }), { visible: hard, withheld: 0 }, false).may_merge,
+      toGhAccess(detail({ state: 'closed', mergeBlockedReasons: hard, viewerCanBypassMerge: true }), { visible: hard, withheld: 0 }, false, []).may_merge,
     ).toBe(false);
   });
 
-  it('may_approve is true when the caller may approve any one file', () => {
+  it('may_approve is true when the caller may approve any one file they are shown', () => {
     expect(
-      toGhAccess(detail({ approvals: [approval(), approval({ path: 'B.md', viewerCanApprove: true })] }), { visible: [], withheld: 0 }, false)
-        .may_approve,
+      toGhAccess(detail(), { visible: [], withheld: 0 }, false, [
+        approval(),
+        approval({ path: 'B.md', viewerCanApprove: true }),
+      ]).may_approve,
+    ).toBe(true);
+  });
+
+  it('may_approve answers over the SHOWN approvals, not the request\'s whole set', () => {
+    // A write grant can outlive a read refusal — `viewerCanApprove` is decided
+    // at `origin/<base>` and says nothing about reading. The only approvable
+    // file here is one the caller is not shown, so the honest answer is false:
+    // true would promise an approval they cannot make and would say a withheld
+    // file is theirs to approve.
+    const shown = [approval({ path: 'Knowledge/A.md' })];
+    expect(toGhAccess(detail(), { visible: [], withheld: 0 }, false, shown).may_approve).toBe(false);
+    expect(
+      toGhAccess(detail(), { visible: [], withheld: 0 }, false, [
+        ...shown,
+        approval({ path: 'Knowledge/A.md', viewerCanApprove: true }),
+      ]).may_approve,
     ).toBe(true);
   });
 });
