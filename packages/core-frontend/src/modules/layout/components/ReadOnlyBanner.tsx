@@ -20,11 +20,16 @@ export function ReadOnlyBanner() {
 
   useEffect(() => {
     let cancelled = false;
+    // Only the latest check may decide: a slow answer to an earlier one must
+    // not overwrite what a newer one said.
+    let latest = 0;
     const check = () => {
+      const mine = ++latest;
       authFetch('/api/write-access')
         .then((res) => (res.ok ? res.json() : { writable: true }))
         .then((body: { writable?: boolean; message?: string }) => {
-          if (!cancelled) setMessage(body.writable === false ? (body.message ?? 'This workspace is read-only.') : null);
+          if (cancelled || mine !== latest) return;
+          setMessage(body.writable === false ? (body.message ?? 'This workspace is read-only.') : null);
         })
         // An unanswered check says nothing about the workspace; keep what we knew.
         .catch(() => undefined);
