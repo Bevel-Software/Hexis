@@ -3462,6 +3462,7 @@ export class WorkflowService implements IWorkflowService {
         applyFailureKind: failure.kind,
         applyFailedAt: at,
         applyFailedByName: user.name,
+        applyFailedByEmailBidx: blindIndex(user.email),
       })
       // The write itself refuses to go backwards: the attempt map above is an
       // early exit within this process, but an older UPDATE still in flight (or
@@ -3522,6 +3523,7 @@ export class WorkflowService implements IWorkflowService {
           applyFailureConflicts: null,
           applyFailedAt: null,
           applyFailedByName: null,
+          applyFailedByEmailBidx: null,
           applyFailureKind: null,
         })
         .where(

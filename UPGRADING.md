@@ -78,9 +78,21 @@ queued commits and plugin join requests, including every copy of a name or
 email kept beside an approval, comment, lock or merge — is encrypted with a
 key derived from `SECRETS_ENC_KEY`, in addition to the secrets vault it
 already sealed. The first boot after the upgrade rewrites existing rows
-automatically. Upgrade with a single app instance (the normal
-`docker compose pull app && up -d` flow already replaces the container) —
-don't run old and new versions against the same database side by side.
+automatically.
+
+Two things are different about this upgrade:
+
+- **Stop the old version before the new one starts.** The normal
+  `docker compose pull app && up -d` flow already replaces the container. A
+  deployer that starts the new container, waits for it to be healthy and only
+  then stops the old one (a rolling update) leaves the old version running on
+  a sealed database: it reads names and addresses as ciphertext, so a save it
+  accepts in that window can be committed to the knowledge base's git history
+  with `pii:v1:…` as its author, and every first sign-in it handles fails.
+  Turn rolling updates off for this one release, or stop the app first.
+- **There is no way back without a backup.** An older version reads every
+  name and address as ciphertext, so a downgrade after the first start means
+  restoring the database as it was before. Take a database backup first.
 
 That first start refuses to come up in two cases, and says which:
 

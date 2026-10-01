@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('account-erasure');
-import { and, eq, notExists } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, notExists } from 'drizzle-orm';
 import { blindIndex, isEncryptedBlob } from '../../shared/column-crypto.js';
 import type { Database } from '../database/connection.js';
 import type { IReviewWorkflowService } from '../workflow/review-workflow/review-workflow.interface.js';
@@ -231,6 +231,26 @@ export class AccountErasureService implements IAccountErasureService {
         .update(changeRequests)
         .set({ authorEmail: target.erasedEmail, authorEmailBidx: erasedBidx, authorName: target.erasedName })
         .where(eq(changeRequests.authorEmailBidx, emailBidx));
+      // The refusal a still-open request shows ("<name> could not apply
+      // this"), on requests of any author. One recorded before the encryption
+      // release kept no address to find it by, so those few are matched on
+      // the name itself, read back in-process: renaming a namesake's note to
+      // the placeholder loses nothing, leaving this person's name would.
+      await tx
+        .update(changeRequests)
+        .set({ applyFailedByName: target.erasedName, applyFailedByEmailBidx: erasedBidx })
+        .where(eq(changeRequests.applyFailedByEmailBidx, emailBidx));
+      const unindexed = await tx
+        .select({ id: changeRequests.id, name: changeRequests.applyFailedByName })
+        .from(changeRequests)
+        .where(and(isNotNull(changeRequests.applyFailedByName), isNull(changeRequests.applyFailedByEmailBidx)));
+      const namesakes = unindexed.filter((r) => r.name === user.name).map((r) => r.id);
+      if (namesakes.length > 0) {
+        await tx
+          .update(changeRequests)
+          .set({ applyFailedByName: target.erasedName, applyFailedByEmailBidx: erasedBidx })
+          .where(inArray(changeRequests.id, namesakes));
+      }
       // Queued-but-uncommitted saves: the eventual git commit is authored with
       // the placeholder instead of the erased identity. The file content still
       // lands — erasing an account must not lose other people's KB state.

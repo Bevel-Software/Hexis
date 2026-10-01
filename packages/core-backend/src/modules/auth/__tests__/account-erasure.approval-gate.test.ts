@@ -70,6 +70,9 @@ function harness(opts: { participants?: IErasureParticipant[] } = {}) {
       locked.push((statement.queryChunks ?? []).filter((c) => typeof c === 'number'));
       return { rows: [] };
     },
+    // The one read the transaction makes: the refusals recorded before the
+    // encryption release, which it matches by name. None here.
+    select: () => ({ from: () => ({ where: async () => [] }) }),
     delete: (table: unknown) => ({
       where: () => {
         order.push(`delete:${tableOf(table)}`);

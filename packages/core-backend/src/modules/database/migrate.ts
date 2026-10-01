@@ -161,7 +161,7 @@ const PII_BACKFILL_TABLES: PiiBackfillTable[] = [
   { table: 'pr_file_approvals', key: ['id'], encrypted: ['approver_email', 'approver_name'], bidx: { source: 'approver_email', column: 'approver_email_bidx' } },
   { table: 'pr_merge_log', key: ['id'], encrypted: ['triggered_by_email', 'triggered_by_name', 'error'], bidx: { source: 'triggered_by_email', column: 'triggered_by_email_bidx' } },
   { table: 'pr_comments', key: ['id'], encrypted: ['author_email', 'author_name', 'body'], bidx: { source: 'author_email', column: 'author_email_bidx' } },
-  { table: 'change_requests', key: ['id'], encrypted: ['author_email', 'author_name', 'title', 'body'], bidx: { source: 'author_email', column: 'author_email_bidx' } },
+  { table: 'change_requests', key: ['id'], encrypted: ['author_email', 'author_name', 'title', 'body', 'apply_failure_reason', 'apply_failed_by_name'], bidx: { source: 'author_email', column: 'author_email_bidx' } },
   { table: 'pending_commits', key: ['id'], encrypted: ['author_email', 'author_name', 'last_error'], bidx: { source: 'author_email', column: 'author_email_bidx' } },
   { table: 'file_locks', key: ['workspace_id', 'branch', 'path'], encrypted: ['holder_name'] },
   { table: 'plugin_join_requests', key: ['id'], encrypted: ['requester_email', 'requester_name', 'failure_reason'], bidx: { source: 'requester_email', column: 'requester_email_bidx' } },

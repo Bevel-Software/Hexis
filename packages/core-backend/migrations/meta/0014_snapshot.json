@@ -447,6 +447,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "apply_failed_by_email_bidx": {
+          "name": "apply_failed_by_email_bidx",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "apply_failure_kind": {
           "name": "apply_failure_kind",
           "type": "text",

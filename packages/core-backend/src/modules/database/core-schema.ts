@@ -183,10 +183,18 @@ export const changeRequests = pgTable('change_requests', {
   // input it depended on changed). Persisted rather than only pushed to the
   // clicker so every viewer of the still-open request — its author first —
   // sees the refusal.
-  applyFailureReason: text('apply_failure_reason'),
+  // Encrypted: the reason can quote identities the way the merge log's error
+  // does, and the name is a person's.
+  applyFailureReason: encryptedText('apply_failure_reason'),
   applyFailureConflicts: boolean('apply_failure_conflicts'),
   applyFailedAt: timestamp('apply_failed_at'),
-  applyFailedByName: text('apply_failed_by_name'),
+  applyFailedByName: encryptedText('apply_failed_by_name'),
+  /**
+   * Blind index of the email of the person named above — what account erasure
+   * finds their name by. Written and cleared with the name. NULL on a refusal
+   * recorded before the encryption release, which kept no address.
+   */
+  applyFailedByEmailBidx: text('apply_failed_by_email_bidx'),
   /** What refused the last apply: 'gate' (approvals), 'conflicts' (git), 'error' (anything else). */
   applyFailureKind: text('apply_failure_kind'),
   createdAt: timestamp('created_at').defaultNow().notNull(),

@@ -15,5 +15,6 @@ ALTER TABLE "pr_file_approvals" ADD COLUMN IF NOT EXISTS "approver_email_bidx" t
 ALTER TABLE "pr_merge_log" ADD COLUMN IF NOT EXISTS "triggered_by_email_bidx" text;--> statement-breakpoint
 ALTER TABLE "pr_comments" ADD COLUMN IF NOT EXISTS "author_email_bidx" text;--> statement-breakpoint
 ALTER TABLE "change_requests" ADD COLUMN IF NOT EXISTS "author_email_bidx" text;--> statement-breakpoint
+ALTER TABLE "change_requests" ADD COLUMN IF NOT EXISTS "apply_failed_by_email_bidx" text;--> statement-breakpoint
 ALTER TABLE "pending_commits" ADD COLUMN IF NOT EXISTS "author_email_bidx" text;--> statement-breakpoint
 ALTER TABLE "plugin_join_requests" ADD COLUMN IF NOT EXISTS "requester_email_bidx" text;
