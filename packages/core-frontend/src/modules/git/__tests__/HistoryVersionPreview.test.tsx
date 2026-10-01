@@ -342,6 +342,11 @@ describe('HistoryVersionPreview — the viewer is bound to the selected save', (
     expect(await screen.findByText('No file changes in this save.')).toBeInTheDocument();
     expect(screen.queryByRole('img')).toBeNull();
     expect(screen.queryByText('No preview for this format.')).toBeNull();
+    // …and no download either: there is no version of this file at that save
+    // to hand over, so the button would only ever answer with a 404.
+    expect(screen.queryByRole('button', { name: 'Download this version' })).toBeNull();
+    // The header still says WHICH save is selected.
+    expect(screen.getByText(/As saved .* by Alice/)).toBeInTheDocument();
   });
 
   it('hands focus to the pane when a viewer\'s own Try again unmounts it', async () => {

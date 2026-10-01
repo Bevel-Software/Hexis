@@ -225,6 +225,20 @@ export function HistoryVersionPreview({ filePath, commit }: HistoryVersionPrevie
    */
   const access = useFileAccess(filePath, status?.branch ?? null);
 
+  /**
+   * Which side of the save "this version" is: the save's own, or — for the save
+   * that DELETED the file — the one before it, which is the only side with any
+   * bytes.
+   *
+   * `after` before the patch has answered, deliberately, and NOT a `null` the
+   * ref waits for. Nothing reads a provisional side (the body renders its
+   * loading state until `loaded` is non-null, so no viewer is mounted, and the
+   * header's download is `pending` until then), but a `null` ref would mean
+   * `rawFileUrl` omitted `ref=` and served TODAY's bytes under a past save's
+   * name — silently wrong, which is the one answer this whole pane exists to
+   * rule out. A provisional side can only ever be wrong LOUDLY: the after side
+   * of a deleting save is a 404.
+   */
   const side: 'after' | 'before' = loaded?.deleted ? 'before' : 'after';
   /**
    * What binds every viewer in this pane to the selected save. Memoized so a
@@ -246,6 +260,15 @@ export function HistoryVersionPreview({ filePath, commit }: HistoryVersionPrevie
   const fileName = filePath.slice(filePath.lastIndexOf('/') + 1);
   const kind = loaded === null ? null : previewKind(filePath, loaded.patch);
   const canToggleSource = kind === 'viewer' && SOURCE_TOGGLE_EXTENSIONS.has(ext);
+  /**
+   * The save did not touch this path: nothing to preview AND nothing to
+   * download. The empty patch is the whole signal — see {@link previewKind} —
+   * and the panel's own answer for it has always been the one sentence and no
+   * controls, which is what a save with no version of the file can honestly
+   * offer. `logForFile` lists commits that touched the path, so this is the
+   * save that turns out not to have (a rename elsewhere in the commit).
+   */
+  const untouched = loaded !== null && loaded.patch.trim() === '';
 
   const header = (
     <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2 shrink-0">
@@ -276,13 +299,16 @@ export function HistoryVersionPreview({ filePath, commit }: HistoryVersionPrevie
       {/* Inside the providers, so it downloads THIS save's bytes and is
           disabled with its reason for a reader who may not download — and
           idle until the patch has said which SIDE of the save "this version"
-          means, which for a deleting save is the one before it. */}
-      <DownloadFileButton
-        filePath={filePath}
-        size="tiny"
-        label="Download this version"
-        pending={loaded === null}
-      />
+          means, which for a deleting save is the one before it. Absent
+          altogether for a save with no version of this file to hand over. */}
+      {!untouched && (
+        <DownloadFileButton
+          filePath={filePath}
+          size="tiny"
+          label="Download this version"
+          pending={loaded === null}
+        />
+      )}
     </div>
   );
 

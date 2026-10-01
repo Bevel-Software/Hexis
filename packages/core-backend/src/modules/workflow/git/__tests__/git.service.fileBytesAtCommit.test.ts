@@ -9,6 +9,7 @@ import {
   VERSION_NOT_ON_BRANCH_MESSAGE,
   WorkflowValidationError,
 } from '../../../../shared/domain-errors.js';
+import { GitRunError } from '../../../../shared/git.contract.js';
 import { runGit, gitOut, stubWorkflowHooks, stubWorkspaceService } from './git-test-helpers.js';
 
 /**
@@ -180,7 +181,12 @@ describe('GitService.fileBytesAtCommit', () => {
     const err: unknown = await svc
       .fileBytesAtCommit(workspaceId, 'knowledge-base/logo.png', addSha, 'after')
       .catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(Error);
+    // `GitRunError` specifically, not just `Error`: the route reads the error's
+    // TYPE to decide its status, so a future re-wrap into
+    // `WorkflowValidationError` would turn this into a 400 about the caller's
+    // request rather than the logged 500 a broken repository earns, and a bare
+    // `toBeInstanceOf(Error)` would not notice.
+    expect(err).toBeInstanceOf(GitRunError);
     expect(err).not.toBeInstanceOf(VersionNotOnBranchError);
   });
 
