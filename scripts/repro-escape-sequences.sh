@@ -46,36 +46,65 @@ WSID=$(printf '%s' "$BRANCH" | sed 's/\//%2F/g')
 
 # ── the three request bodies, literal — a quoted heredoc interprets nothing ──
 
-cat > "$WORK/1-tool-route.json" <<'EOF'
+cat > "$WORK/1-tool-route.tmpl" <<'EOF'
 {"branch":"__BRANCH__","path":"__DIR__/route-tool.md","content":"\\u0041|\\\"|\\\\|\\n|—"}
 EOF
 
-cat > "$WORK/2-mcp.json" <<'EOF'
+cat > "$WORK/2-mcp.tmpl" <<'EOF'
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_file","arguments":{"body":{"branch":"__BRANCH__","path":"__DIR__/route-mcp.md","content":"\\u0041|\\\"|\\\\|\\n|—"}}}}
 EOF
 
 # The chain's `code` is itself a JSON string, so the JS string literal inside it
 # is escaped twice: `\\\\u0041` on the wire is `\\u0041` in the JavaScript
 # source, which is the six characters at runtime.
-cat > "$WORK/3-chain.json" <<'EOF'
+cat > "$WORK/3-chain.tmpl" <<'EOF'
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"call_tool_chain","arguments":{"code":"return KNOWLEDGE_BASE.write_file({ body: { branch: \"__BRANCH__\", path: \"__DIR__/route-chain.md\", content: \"\\\\u0041|\\\\\\\"|\\\\\\\\|\\\\n|—\" } });"}}}
 EOF
 
-for f in "$WORK"/*.json; do
-  sed -i "s|__BRANCH__|$BRANCH|g; s|__DIR__|$DIR|g" "$f"
+# Rendered to a NEW file rather than edited in place: `sed -i` with no suffix
+# is GNU-only and `sed -i ''` is BSD-only, so neither spelling runs on both.
+for f in "$WORK"/*.tmpl; do
+  sed "s|__BRANCH__|$BRANCH|g; s|__DIR__|$DIR|g" "$f" > "${f%.tmpl}.json"
 done
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
+# Aborts the run on a refused write, so the closing "how to read this" block
+# with its expected sha256 can never follow a route that stored nothing.
+# `curl --fail` alone would not do: a JSON-RPC answer is HTTP 200 even when the
+# call failed, so the body is checked as well.
 send() { # send <body-file> <url>
   echo "--- request body on the wire ($(basename "$1")) ---"
   od -c "$1"
-  curl -sS -X POST "$2" \
+  local status
+  status=$(curl -sS -X POST "$2" \
     -H "Authorization: Bearer $KEY" \
     -H 'Content-Type: application/json' \
     -H 'Accept: application/json, text/event-stream' \
-    --data-binary "@$1"
+    --data-binary "@$1" \
+    -o "$WORK/answer.txt" -w '%{http_code}')
+  cat "$WORK/answer.txt"
   echo
+  if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+    echo "ABORT: $2 answered HTTP $status — the body above is the refusal, nothing was stored" >&2
+    exit 1
+  fi
+  # Quotes may be backslash-escaped: a tool's own answer travels as JSON text
+  # nested inside the JSON-RPC answer, where `"success":false` arrives as
+  # `\"success\":false`.
+  if grep -Eq '\\?"error\\?"[[:space:]]*:|\\?"isError\\?"[[:space:]]*:[[:space:]]*true|\\?"success\\?"[[:space:]]*:[[:space:]]*false' "$WORK/answer.txt"; then
+    echo "ABORT: $2 answered HTTP $status but the body above reports an error" >&2
+    exit 1
+  fi
+}
+
+# macOS ships `shasum`, Linux images ship `sha256sum`; few ship both.
+sha256_of() { # sha256_of <file>
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum < "$1" | awk '{print $1}'
+  else
+    shasum -a 256 < "$1" | awk '{print $1}'
+  fi
 }
 
 read_bytes() { # read_bytes <workspace path>
@@ -86,7 +115,7 @@ read_bytes() { # read_bytes <workspace path>
       --get "$BASE/api/workspace/$WSID/file/raw" --data-urlencode "path=$1" \
       -o "$WORK/stored.bin"
     od -c "$WORK/stored.bin"
-    echo "sha256: $(sha256sum < "$WORK/stored.bin")  bytes: $(wc -c < "$WORK/stored.bin")"
+    echo "sha256: $(sha256_of "$WORK/stored.bin")  bytes: $(wc -c < "$WORK/stored.bin")"
   else
     echo '(no JWT — raw text of the read_file answer; `\\u0041` here means the six characters are stored)'
     curl -sS -X POST "$BASE/api/agent/tools/read_file" \
