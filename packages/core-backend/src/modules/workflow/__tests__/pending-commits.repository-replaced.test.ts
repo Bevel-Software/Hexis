@@ -81,8 +81,9 @@ describe('PendingCommitsService.markNeedsAttentionInWorkspace', () => {
   /**
    * Rows are stored under the encoded id, whichever spelling the caller
    * enqueued with. The predicate is rendered and read, since the stub does
-   * not evaluate it: the id it compares must be the stored spelling, and the
-   * statuses the two a worker could still write.
+   * not evaluate it: the id it compares must be the stored spelling, and it
+   * must match only the two statuses a worker could still write, `pending`
+   * and `running`.
    */
   it('looks for the working copy under the id the queue stores, and only for commits still queued', async () => {
     const wheres: SQL[] = [];
