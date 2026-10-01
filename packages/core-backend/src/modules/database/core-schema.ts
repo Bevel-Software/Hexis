@@ -160,6 +160,18 @@ export const changeRequests = pgTable('change_requests', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at'),
   closedAt: timestamp('closed_at'),
+  /**
+   * Why a closed request was closed, when something other than a person
+   * closed it. Today the one value is 'repository-replaced': the admin
+   * pointed the deployment at a different knowledge-base repository and chose
+   * to close the requests rather than keep them. Null for every request
+   * closed the ordinary way — by its author, or by the deleted-branch sweep —
+   * so the column reads as "nobody recorded a reason", not as a default.
+   *
+   * The row is never deleted: a replaced repository loses the branches, not
+   * the record of what people asked for.
+   */
+  closedReason: text('closed_reason'),
 }, (t) => ({
   numberUnq: uniqueIndex('change_requests_number_unq').on(t.number),
   // Enforce the "A→B blocks A→B while open" uniqueness rule at the DB level —

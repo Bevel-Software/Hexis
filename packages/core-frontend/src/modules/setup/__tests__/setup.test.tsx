@@ -298,11 +298,13 @@ describe('SetupScreen', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
 
     await waitFor(() => expect(api.testConnection).toHaveBeenCalled());
-    expect(await screen.findByRole('alert')).toHaveTextContent(/Not saved/);
+    // The refusal carries the host's OWN words: "fix the connection above" on
+    // its own leaves an admin rereading a form that looks perfectly correct.
+    const refusal = await screen.findByRole('alert');
+    expect(refusal).toHaveTextContent(/Not saved/);
+    expect(refusal).toHaveTextContent('No repository at that URL — or the token cannot see it.');
     expect(api.saveSettings).not.toHaveBeenCalled();
     expect(reload).not.toHaveBeenCalled();
-    // And the host's own words are on screen, not just the refusal.
-    expect(screen.getByText(/No repository at that URL/)).toBeInTheDocument();
   });
 
   /**

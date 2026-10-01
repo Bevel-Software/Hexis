@@ -721,6 +721,15 @@ export async function createCoreServer(
         ensureManaged: (branch) => core.managedRepository.ensure(core.gitRunner, branch),
         githubApp: core.githubApp,
       },
+      // What a move to another repository has to decide about, and what it
+      // runs under. Bound here rather than handed the whole workflow service:
+      // the setup routes ask two questions, hold the commit worker for the
+      // move, and know nothing else about a request or a commit.
+      {
+        countOpen: () => core.workflowService.countOpenChangeRequests(),
+        closeAsRepositoryReplaced: () => core.workflowService.closeOpenChangeRequestsAsRepositoryReplaced(),
+        whileCommitsHeld: (work) => core.whileCommitsHeld(work),
+      },
     ),
   );
   // Connecting a repository on GitHub through a GitHub App: the round trips
