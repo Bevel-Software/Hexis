@@ -58,13 +58,45 @@ EOF
 # is escaped twice: `\\\\u0041` on the wire is `\\u0041` in the JavaScript
 # source, which is the six characters at runtime.
 cat > "$WORK/3-chain.tmpl" <<'EOF'
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"call_tool_chain","arguments":{"code":"return KNOWLEDGE_BASE.write_file({ body: { branch: \"__BRANCH__\", path: \"__DIR__/route-chain.md\", content: \"\\\\u0041|\\\\\\\"|\\\\\\\\|\\\\n|—\" } });"}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"call_tool_chain","arguments":{"code":"return KNOWLEDGE_BASE.write_file({ body: { branch: \"__BRANCH_JS__\", path: \"__DIR_JS__/route-chain.md\", content: \"\\\\u0041|\\\\\\\"|\\\\\\\\|\\\\n|—\" } });"}}}
 EOF
 
-# Rendered to a NEW file rather than edited in place: `sed -i` with no suffix
-# is GNU-only and `sed -i ''` is BSD-only, so neither spelling runs on both.
+# Escapes a value for use as the CONTENTS of a JSON string (no quotes added).
+json_esc() { # json_esc <value>
+  local v=$1
+  v=${v//\\/\\\\}
+  v=${v//\"/\\\"}
+  printf '%s' "$v"
+}
+
+json_str() { # json_str <value> — the value as a complete JSON string
+  printf '"%s"' "$(json_esc "$1")"
+}
+
+# Substituted with bash's own `${var//pat/repl}`, which interprets NOTHING in
+# the replacement, rather than with sed: sed expands `&` in a replacement to the
+# whole match, and `&` is legal in a git branch name, so a branch called `a&b`
+# rendered as `a__BRANCH__b`. Escaping sed's metacharacters (`&`, `\\`, the `|`
+# delimiter) is strictly harder than not interpreting them; it also sidesteps
+# `sed -i`, whose no-suffix form is GNU-only and whose `-i ''` form is BSD-only.
+#
+# Every placeholder sits inside a JSON string, so the value is JSON-escaped:
+# git forbids a backslash in a ref but allows a quote, and an unescaped quote
+# would make the body malformed rather than merely wrong. In the chain template
+# the value sits inside a JavaScript string literal that is ITSELF inside a JSON
+# string, so there it is escaped twice — hence the `_JS` placeholders.
+render() { # render <template> <output>
+  local text
+  text=$(cat "$1")
+  text=${text//__BRANCH_JS__/"$(json_esc "$(json_esc "$BRANCH")")"}
+  text=${text//__DIR_JS__/"$(json_esc "$(json_esc "$DIR")")"}
+  text=${text//__BRANCH__/"$(json_esc "$BRANCH")"}
+  text=${text//__DIR__/"$(json_esc "$DIR")"}
+  printf '%s\n' "$text" > "$2"
+}
+
 for f in "$WORK"/*.tmpl; do
-  sed "s|__BRANCH__|$BRANCH|g; s|__DIR__|$DIR|g" "$f" > "${f%.tmpl}.json"
+  render "$f" "${f%.tmpl}.json"
 done
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -107,20 +139,39 @@ sha256_of() { # sha256_of <file>
   fi
 }
 
+# Checks the status before hashing, for the same reason `send` does: a 401 from
+# an expired JWT or a 404 from a wrong path would otherwise be dumped and
+# hashed as though it were the file's own content, and the run would end
+# looking complete.
 read_bytes() { # read_bytes <workspace path>
   echo "--- stored bytes of $1 ---"
+  local status
   if [ -n "$JWT" ]; then
     # The raw file route serves the file's own bytes, nothing JSON-encoded.
-    curl -sS -H "Authorization: Bearer $JWT" \
+    status=$(curl -sS -H "Authorization: Bearer $JWT" \
       --get "$BASE/api/workspace/$WSID/file/raw" --data-urlencode "path=$1" \
-      -o "$WORK/stored.bin"
+      -o "$WORK/stored.bin" -w '%{http_code}')
+    if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+      echo "ABORT: the raw-file read of $1 answered HTTP $status, so what follows is that refusal, not the stored bytes:" >&2
+      cat "$WORK/stored.bin" >&2
+      echo >&2
+      exit 1
+    fi
     od -c "$WORK/stored.bin"
     echo "sha256: $(sha256_of "$WORK/stored.bin")  bytes: $(wc -c < "$WORK/stored.bin")"
   else
     echo '(no JWT — raw text of the read_file answer; `\\u0041` here means the six characters are stored)'
-    curl -sS -X POST "$BASE/api/agent/tools/read_file" \
+    status=$(curl -sS -X POST "$BASE/api/agent/tools/read_file" \
       -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-      -d "{\"branch\":\"$BRANCH\",\"path\":\"$1\"}" | od -c
+      -d "{\"branch\":$(json_str "$BRANCH"),\"path\":$(json_str "$1")}" \
+      -o "$WORK/stored.txt" -w '%{http_code}')
+    if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+      echo "ABORT: the read_file call for $1 answered HTTP $status, so what follows is that refusal, not the stored bytes:" >&2
+      cat "$WORK/stored.txt" >&2
+      echo >&2
+      exit 1
+    fi
+    od -c "$WORK/stored.txt"
   fi
   echo
 }
