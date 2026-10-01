@@ -17,6 +17,7 @@ import { PullRebaseConflictError, WorkflowDomainError } from '../../../shared/do
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
+import { hashEmail } from '../../../shared/email-identity.js';
 
 // `deleteBranch`'s open-request guard is the only DB touch these tests
 // exercise. The stub ANSWERS FROM THE WHERE-CLAUSE rather than returning the
@@ -375,7 +376,7 @@ describe('WorkflowService — change request delegation + cache invalidation', (
     expect(outcome).toEqual({ kind: 'merged', result: mergeResult });
     // The target branch's workspace is pulled so it doesn't fall behind origin.
     expect(workspaceService.getOrCreateForBranch).toHaveBeenCalledWith('main');
-    expect(git.pull).toHaveBeenCalledWith('main');
+    expect(git.pull).toHaveBeenCalledWith('main', {});
     expect(reviewWorkflow.mergePr).toHaveBeenCalledWith(
       4,
       expect.objectContaining({ email: 'alice@example.com' }),
@@ -784,8 +785,13 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
   });
 });
 
-describe('WorkflowService — deleteChangeRequest (admin moderation verb)', () => {
-  function makeDeleteHarness(opts: { isAdmin?: boolean; prState?: string } = {}) {
+describe('WorkflowService — deleteChangeRequest (the author’s and the admin’s verb)', () => {
+  const AUTHOR_EMAIL = 'alice@example.com'; // makeUser()'s default caller
+  const STRANGER_AUTHOR = 'mallory@example.com';
+
+  function makeDeleteHarness(
+    opts: { isAdmin?: boolean; prState?: string; authorEmail?: string | null } = {},
+  ) {
     const git = Object.assign(makeGit(), {
       changedPathsForPr: vi.fn().mockResolvedValue(['Docs/a.md']),
     }) as unknown as GitService;
@@ -795,26 +801,83 @@ describe('WorkflowService — deleteChangeRequest (admin moderation verb)', () =
       base: 'main',
       branch: 'mallory/spam',
       state: opts.prState ?? 'open',
+      // Authorship as the server reads it: the stored hash, never the caller's
+      // claim. Defaults to someone OTHER than makeUser(), so a test that says
+      // nothing about authorship is testing the admin grant alone.
+      // `null` means a request with no stored author (opened outside this
+      // backend); undefined means "someone, just not the caller".
+      authorId:
+        opts.authorEmail === null ? undefined : hashEmail(opts.authorEmail ?? STRANGER_AUTHOR),
     });
     const access = makeAccessControl();
     (access.canWriteAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(opts.isAdmin ?? false);
     const chain: Record<string, unknown> = {};
+    // Two different selects run under one chain mock: the branch-retirement
+    // lookup asks for `{ sourceBranch }`, and `openChangeRequestOn` asks for
+    // `{ number, sourceBranch }`. Answer by projection rather than call order,
+    // so the retirement path is exercised (a branch to retire, and no other
+    // open request holding it) without the test depending on call sequence.
+    let projection: Record<string, unknown> = {};
     Object.assign(chain, {
-      select: vi.fn(() => chain),
+      select: vi.fn((proj?: Record<string, unknown>) => {
+        projection = proj ?? {};
+        return chain;
+      }),
       from: vi.fn(() => chain),
       where: vi.fn(() => chain),
-      limit: vi.fn(async () => []),
+      limit: vi.fn(async () =>
+        'number' in projection ? [] : [{ sourceBranch: 'mallory/spam' }],
+      ),
       update: vi.fn(() => chain),
       set: vi.fn(() => chain),
       returning: vi.fn(async () => [{ id: 1 }]),
     });
     const workspaces = makeWorkspaceService();
     const svc = new WorkflowService(chain as unknown as Database, git, prs, makeReviewWorkflow(), workspaces, access, makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());
-    return { svc, prs, db: chain, access, workspaces };
+    return { svc, prs, db: chain, access, workspaces, git };
   }
 
-  it('refuses a non-admin with 403 and touches nothing', async () => {
-    const { svc, db } = makeDeleteHarness({ isAdmin: false });
+  it('refuses a non-admin who is not the author, with 403 and the author-or-admin message', async () => {
+    const { svc, db, git } = makeDeleteHarness({ isAdmin: false });
+    await expect(svc.deleteChangeRequest(9, makeUser())).rejects.toMatchObject({
+      status: 403,
+      message: "Only the request's author or an admin can delete it.",
+    });
+    // "Changes nothing" is the whole promise of the refusal: no row flipped,
+    // no branch removed.
+    expect(db.update).not.toHaveBeenCalled();
+    expect(git.deleteBranch).not.toHaveBeenCalled();
+  });
+
+  it('lets the AUTHOR delete their own request without admin rights: closes it and retires the branch', async () => {
+    const { svc, prs, db, git } = makeDeleteHarness({
+      isAdmin: false,
+      authorEmail: AUTHOR_EMAIL,
+    });
+    await svc.deleteChangeRequest(9, makeUser());
+    expect(db.update).toHaveBeenCalled();
+    expect(prs.invalidateDetailCache).toHaveBeenCalledWith(9);
+    expect(git.deleteBranch).toHaveBeenCalledWith(
+      expect.any(String),
+      'mallory/spam',
+      expect.objectContaining({ email: AUTHOR_EMAIL }),
+      expect.objectContaining({ systemCleanup: true }),
+    );
+  });
+
+  it('matches the author case-insensitively, as hashEmail does', async () => {
+    // The stored hash is of the normalized address; a caller signed in as
+    // `Alice@Example.com` is the same person and must not be refused.
+    const { svc, db } = makeDeleteHarness({ isAdmin: false, authorEmail: AUTHOR_EMAIL });
+    await svc.deleteChangeRequest(9, makeUser({ email: '  Alice@Example.com  ' }));
+    expect(db.update).toHaveBeenCalled();
+  });
+
+  it('refuses a request with no stored author to a non-admin', async () => {
+    // Opened outside this backend: nobody can claim authorship of it, so the
+    // admin grant is the only one left. An absent hash must never read as a
+    // match.
+    const { svc, db } = makeDeleteHarness({ isAdmin: false, authorEmail: null });
     await expect(svc.deleteChangeRequest(9, makeUser())).rejects.toMatchObject({ status: 403 });
     expect(db.update).not.toHaveBeenCalled();
   });
@@ -830,6 +893,94 @@ describe('WorkflowService — deleteChangeRequest (admin moderation verb)', () =
     const { svc, db } = makeDeleteHarness({ isAdmin: true, prState: 'merged' });
     await expect(svc.deleteChangeRequest(9, makeUser())).rejects.toMatchObject({ status: 422 });
     expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it('refuses the AUTHOR on an applied request with 422 and the applied message', async () => {
+    // Applied between opening the dialog and confirming. The author's new
+    // grant does not reach applied history either.
+    const { svc, db, git } = makeDeleteHarness({
+      isAdmin: false,
+      prState: 'merged',
+      authorEmail: AUTHOR_EMAIL,
+    });
+    await expect(svc.deleteChangeRequest(9, makeUser())).rejects.toMatchObject({
+      status: 422,
+      message: 'This change request has already been applied.',
+    });
+    expect(db.update).not.toHaveBeenCalled();
+    expect(git.deleteBranch).not.toHaveBeenCalled();
+  });
+
+  it('refuses the AUTHOR with 409 when the base cannot be verified, and changes nothing', async () => {
+    // The strict base fetch is NOT skipped for an author, even though their
+    // grant needs no roles.yaml read: an unreachable origin means the branch
+    // removal would fail silently, and the delete must refuse whole rather
+    // than close the request and leave the branch.
+    const { svc, db, git, workspaces } = makeDeleteHarness({
+      isAdmin: false,
+      authorEmail: AUTHOR_EMAIL,
+    });
+    (workspaces.ensureRemotesFetched as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('origin unreachable'),
+    );
+    await expect(svc.deleteChangeRequest(9, makeUser())).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('Retry in a moment.'),
+    });
+    expect(db.update).not.toHaveBeenCalled();
+    expect(git.deleteBranch).not.toHaveBeenCalled();
+  });
+
+  it('refuses the AUTHOR with 409 when the base ref does not resolve', async () => {
+    const { svc, db, access } = makeDeleteHarness({
+      isAdmin: false,
+      authorEmail: AUTHOR_EMAIL,
+    });
+    (access.canWriteAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    await expect(svc.deleteChangeRequest(9, makeUser())).rejects.toMatchObject({ status: 409 });
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it('a request already closed elsewhere still has its branch retired', async () => {
+    // Withdrawn in another tab: the guarded update flips no row, the request
+    // is not merged, so the delete finishes the job the withdraw left undone.
+    const { svc, db, git } = makeDeleteHarness({
+      isAdmin: false,
+      prState: 'closed',
+      authorEmail: AUTHOR_EMAIL,
+    });
+    // The update is guarded on `state = 'open'`, so it flips nothing here.
+    (db.returning as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    await expect(svc.deleteChangeRequest(9, makeUser())).resolves.toBeUndefined();
+    expect(git.deleteBranch).toHaveBeenCalledWith(
+      expect.any(String),
+      'mallory/spam',
+      expect.anything(),
+      expect.objectContaining({ systemCleanup: true }),
+    );
+  });
+
+  it('keeps a branch another open request still uses, and closes the request silently', async () => {
+    const { svc, db, git } = makeDeleteHarness({
+      isAdmin: false,
+      authorEmail: AUTHOR_EMAIL,
+    });
+    // `openChangeRequestOn` finds a live request on the branch (the
+    // `{ number, sourceBranch }` projection), so retirement backs off.
+    let projection: Record<string, unknown> = {};
+    (db.select as ReturnType<typeof vi.fn>).mockImplementation((proj?: Record<string, unknown>) => {
+      projection = proj ?? {};
+      return db;
+    });
+    (db.limit as ReturnType<typeof vi.fn>).mockImplementation(async () =>
+      'number' in projection
+        ? [{ number: 11, sourceBranch: 'mallory/spam' }]
+        : [{ sourceBranch: 'mallory/spam' }],
+    );
+    // No throw, no message: the request closes and the branch survives.
+    await expect(svc.deleteChangeRequest(9, makeUser())).resolves.toBeUndefined();
+    expect(db.update).toHaveBeenCalled();
+    expect(git.deleteBranch).not.toHaveBeenCalled();
   });
 
   it('kicks the deleted-branch sweep when the base workspace cannot be resolved', async () => {

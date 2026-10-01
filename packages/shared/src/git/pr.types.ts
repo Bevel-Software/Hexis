@@ -277,16 +277,67 @@ export interface PullRequestDetail extends PullRequestSummary {
    */
   mergeBaseSha: string | null;
   /**
-   * True iff the target holds commits the proposal does not contain — the
-   * request needs updating. False for anything not open.
+   * True iff the target holds commits the proposal does not contain. False
+   * for anything not open.
+   *
+   * This is the honest git fact and nothing more — it says the two branches
+   * have diverged, NOT that anything about this request has gone stale. On a
+   * knowledge base where every shared save commits to the default branch,
+   * it is true again minutes after any update. What the dialog acts on is
+   * `needsUpdate`.
    */
   behind: boolean;
+  /**
+   * True iff the request is `behind` AND at least one of the files it
+   * changes was also changed on the target since the fork point — the only
+   * case where the proposal's diff describes text that has moved under it,
+   * and so the only case worth merging the target in for.
+   *
+   * A target that moved in files this request does not contain leaves the
+   * request's diff exactly as true as it was: every "before" side is read at
+   * the fork point, and the apply merges against the latest target whether an
+   * update ran or not. So a request that is `behind` but not `needsUpdate`
+   * opens straight to its files.
+   *
+   * Rename-safe in the conservative direction: the target's change list is
+   * computed without rename detection, so a file the target renamed appears
+   * under both names and a request holding either name counts as affected.
+   * False whenever `behind` is false, and true (with `behind`) when the two
+   * branches share no history at all — there is no fork point to intersect
+   * against, so nothing may be assumed unaffected.
+   */
+  needsUpdate: boolean;
   /**
    * True iff the viewer may Update the request (merge its target into it):
    * the request is open AND the viewer is its author or may apply it. A UX
    * hint — the update route re-checks the same predicate server-side.
    */
   viewerCanUpdate: boolean;
+  /**
+   * True iff the viewer is this request's author — the person who opened it,
+   * hash-matched against the stored `authorId` so the client never has to
+   * hash an email (and no raw email is exposed to do it with). A request a
+   * person's agent opened belongs to that person. Drives wording that speaks
+   * to the author directly ("You can delete it below.") rather than naming
+   * them in the third person. False when no viewer was passed, and for a
+   * request opened outside this backend (no `authorId`).
+   */
+  viewerIsAuthor: boolean;
+  /**
+   * True iff the viewer may delete this request (close it AND retire its
+   * branch): the request is not applied AND the viewer is either its author
+   * or an admin (`viewerCanBypassMerge` is the proxy — the same
+   * `canWriteAtRef('roles.yaml')` predicate the DELETE route enforces).
+   * Deliberately NOT `viewerCanCancel`: that one also grants the changed
+   * files' owners, who may decline a request but must not destroy someone
+   * else's text and branch.
+   *
+   * Note this is true on a CLOSED request too, mirroring the server: a
+   * request withdrawn in another tab still has a leftover branch for the
+   * delete to retire. Only an applied one is nobody's to delete. A UX hint —
+   * `DELETE /api/workflow/change-requests/:number` re-checks server-side.
+   */
+  viewerCanDelete: boolean;
 }
 
 /**

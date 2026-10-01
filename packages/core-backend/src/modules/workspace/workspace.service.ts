@@ -649,15 +649,31 @@ export class WorkspaceService implements IWorkspaceService {
     }
     this.inFlightBootstraps.set(branch, bootstrap);
 
+    // `mkdir --recursive` answers with the first path it CREATED, or undefined
+    // when the directory was already there. That is the only honest signal for
+    // what the rollback below may remove: a directory this attempt made is ours
+    // to take back, one that predates us belongs to whatever put it there.
+    let createdWorkspaceDir: string | undefined;
     try {
       // A clone with `-b <branch>` against a never-seeded remote fails
       // naturally; seeding the remote is the KB startup phase's job, at boot.
-      await fs.mkdir(workspaceDir, { recursive: true });
+      createdWorkspaceDir = await fs.mkdir(workspaceDir, { recursive: true });
       await this.cloneProcessMapForBranch(workspaceDir, branch);
       this.registerBranchDir(branch, workspaceDir);
       resolveBootstrap();
     } catch (err) {
       this.branchDirs.delete(branch);
+      // A bootstrap that failed leaves NOTHING behind. The clone rolls its own
+      // target back, but the workspace directory around it would survive as an
+      // empty shell named after the branch — and a directory named after a
+      // branch is read as the platform having known that branch: by
+      // `hasHeardOfBranch`, which would turn the next attempt's honest 404 into
+      // "no longer exists on the remote" (410), and by anyone reading the
+      // workspaces root. Best-effort: a rollback that cannot delete must not
+      // replace the real failure (the clone's) with its own.
+      if (createdWorkspaceDir !== undefined) {
+        await fs.rm(workspaceDir, { recursive: true, force: true }).catch(() => {});
+      }
       rejectBootstrap(err);
       throw err;
     } finally {

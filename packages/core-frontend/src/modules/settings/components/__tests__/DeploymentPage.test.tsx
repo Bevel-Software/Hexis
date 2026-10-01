@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
 import { KbInitFailed } from '../../../setup/services/setup.api';
+import { AppRegistryContext, EMPTY_REGISTRY, type AppRegistry } from '../../../../core/registry';
 
 /**
  * The deployment settings page — first-run setup with a permanent address.
@@ -50,13 +51,21 @@ const COMPLETE_STATUS = {
   ],
 };
 
-function renderPage(value: AdminContextValue) {
+function renderPage(value: AdminContextValue, registry: AppRegistry = EMPTY_REGISTRY) {
   return render(
-    <AdminContext.Provider value={value}>
-      <DeploymentPage />
-    </AdminContext.Provider>,
+    <AppRegistryContext.Provider value={registry}>
+      <AdminContext.Provider value={value}>
+        <DeploymentPage />
+      </AdminContext.Provider>
+    </AppRegistryContext.Provider>,
   );
 }
+
+/** What a distribution would put at the foot of the page. */
+function WorkspacePanel() {
+  return <section aria-label="Workspace">Delete this workspace</section>;
+}
+const WITH_PANEL: AppRegistry = { ...EMPTY_REGISTRY, deploymentPanel: WorkspacePanel };
 
 describe('DeploymentPage', () => {
   beforeEach(() => {
@@ -108,6 +117,65 @@ describe('DeploymentPage', () => {
     expect(save).toHaveAttribute('form', 'setup-settings-form');
     expect(await screen.findByRole('button', { name: 'Mark as registered' })).toBeInTheDocument();
     expect(facadeMock.fetchGitHubFacade).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The distribution's slot: what a deployment is beyond its settings (a
+   * hosted workspace's plan, its deletion) is not core's to know, so the page
+   * gives it a place and nothing more.
+   */
+  it('renders the distribution panel last on the page, after the form and its save button', async () => {
+    renderPage(admin(true), WITH_PANEL);
+    const panel = await screen.findByRole('region', { name: 'Workspace' });
+    const save = await screen.findByRole('button', { name: 'Save and continue' });
+    expect(save.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByTestId('deployment-panel')).toContainElement(panel);
+  });
+
+  it('keeps the distribution panel when the settings cannot be loaded', async () => {
+    apiMock.fetchSetupStatus.mockRejectedValueOnce(new Error('down'));
+    renderPage(admin(true), WITH_PANEL);
+    expect(await screen.findByText(/Couldn't load the deployment settings/)).toBeInTheDocument();
+    // A way out of the deployment must not depend on its settings being readable.
+    expect(screen.getByRole('region', { name: 'Workspace' })).toBeInTheDocument();
+  });
+
+  it('shows the distribution panel to admins only, and nothing in its place without one', async () => {
+    renderPage(admin(false), WITH_PANEL);
+    expect(screen.getByText(/Admins only/)).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Workspace' })).toBeNull();
+    expect(screen.queryByTestId('deployment-panel')).toBeNull();
+  });
+
+  it('ends with the form when no distribution panel is registered', async () => {
+    renderPage(admin(true));
+    await screen.findByText('Provider address');
+    expect(screen.queryByTestId('deployment-panel')).toBeNull();
+  });
+
+  /**
+   * The other direction of the same independence: the panel is code core did
+   * not write, and a throw in it must cost the panel's own place, not the
+   * form an admin came here to use.
+   */
+  it('keeps the settings form when the distribution panel throws, and says so in its place', async () => {
+    function BrokenPanel(): never {
+      throw new Error('the distribution has a bug');
+    }
+    // React reports a caught render error on the console, and so does the
+    // boundary; both are expected here and neither belongs in the run's output.
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      renderPage(admin(true), { ...EMPTY_REGISTRY, deploymentPanel: BrokenPanel });
+      expect(await screen.findByText('Provider address')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Save and continue' })).toBeInTheDocument();
+      const slot = screen.getByTestId('deployment-panel');
+      expect(slot).toHaveTextContent(/workspace panel couldn.t be shown/);
+      expect(slot).toHaveTextContent(/rest of this page is unaffected/);
+      expect(quiet).toHaveBeenCalled();
+    } finally {
+      quiet.mockRestore();
+    }
   });
 
   it('tells a non-admin this is not theirs, and never fetches the settings', () => {

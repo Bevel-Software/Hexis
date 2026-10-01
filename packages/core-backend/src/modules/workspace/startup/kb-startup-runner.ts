@@ -18,6 +18,7 @@ import {
   type GitFailure,
 } from '../../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
+import { normalizeRepositoryAddress, sameRepository } from '../../kb-fs/remote-url.js';
 
 /**
  * The KB startup phase: run every registered {@link OnServerStart} step, in
@@ -51,6 +52,16 @@ export interface KbStartupRunnerOptions {
   gitRunner: IGitRunner;
   kbRepoUrl: () => string;
   workspacesRoot: string;
+  /**
+   * Where a working copy of a repository that is no longer the configured
+   * one is moved to, under a folder named for the moment it happened — see
+   * `reconcileClonesWithConfiguredRepository`. NOT under `workspacesRoot`:
+   * the workspace service's orphan sweep removes every folder there that is
+   * not a known branch's, and what is set aside has to outlive that sweep.
+   * The composition root names a folder under the backups root, which is a
+   * persistent volume of its own. Default: a sibling of `workspacesRoot`.
+   */
+  setAsideRoot?: string;
   kbDirName: string;
   templateDir: string;
   defaultBranch: () => string;
@@ -301,6 +312,10 @@ export class KbStartupRunner {
         );
       }
       const heads = await this.ensureRemote();
+      // AFTER the remote answered: the configured address is known to be a
+      // repository we can reach, so a clone of a different one is stale, not
+      // a casualty of a typo in the address.
+      await this.reconcileClonesWithConfiguredRepository();
       const ctx = this.buildContext(heads, handles);
 
       for (const step of this.opts.steps) {
@@ -499,6 +514,150 @@ export class KbStartupRunner {
       protectedBranches: async () => this.opts.protectedBranches().map(handleFor),
       allBranches: async () => [...heads].sort().map(handleFor),
     };
+  }
+
+  /**
+   * Bring every working copy on disk into line with the configured
+   * repository, WITHOUT DELETING ANYTHING.
+   *
+   * A clone fetches and pushes through the address stored in its own
+   * `remote.origin.url`, which nothing updates when the configured address
+   * changes. After an operator replaced the repository (2026-09-28: the old
+   * one deleted, a new one saved on the setup screen) every surviving clone
+   * kept asking the old address: Save and Retry failed, and the restart
+   * stopped the boot on `repository … not found`, taking the setup screen
+   * with it.
+   *
+   * A clone whose address differs from the configured one is one of two
+   * things, and the histories say which:
+   *
+   *  - THE SAME REPOSITORY AT A NEW ADDRESS — moved, renamed, mirrored. The
+   *    one change the setup screen tells an admin to make ("only change this
+   *    if the same repository was moved or renamed"). Its history is on the
+   *    configured remote, so the clone is pointed at the new address and
+   *    kept, unpushed commits included: they are pushed where they belonged
+   *    all along.
+   *  - ANOTHER REPOSITORY. Re-pointing it would push one repository's
+   *    commits into the other, so it cannot stay where the workspace service
+   *    would adopt it. It is MOVED to {@link KbStartupRunnerOptions.setAsideRoot}
+   *    and the log says where. Never removed: when the old repository is gone
+   *    — as it was that day — these clones are the last copy of the
+   *    knowledge base that exists, and the unpushed work in them exists
+   *    nowhere else at all.
+   *
+   * Every clone under the workspaces root, not only the branches this phase
+   * touches: the workspace service adopts whatever it finds there. A clone
+   * whose address cannot be read is left where it is — "could not tell" is
+   * no reason to move someone's work. One that cannot be set aside stops the
+   * boot with the reason: leaving it would fail the boot a step later with
+   * git's words about a repository nobody configured.
+   */
+  private async reconcileClonesWithConfiguredRepository(): Promise<void> {
+    const configured = this.opts.kbRepoUrl();
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await fs.readdir(this.opts.workspacesRoot, { withFileTypes: true });
+    } catch {
+      return; // no workspaces yet
+    }
+    // One folder per run, so what was set aside together stays together.
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const setAsideRoot =
+      this.opts.setAsideRoot ?? path.resolve(this.opts.workspacesRoot, '..', 'replaced-working-copies');
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const repoDir = path.join(this.opts.workspacesRoot, entry.name, this.opts.kbDirName);
+      const hasGit = await fs.access(path.join(repoDir, '.git')).then(() => true, () => false);
+      if (!hasGit) continue;
+      let origin: string;
+      try {
+        origin = (await git(this.opts.gitRunner, repoDir, ['config', '--get', 'remote.origin.url'])).trim();
+      } catch {
+        continue;
+      }
+      if (origin === '' || sameRepository(origin, configured)) continue;
+      // The normalized form carries no userinfo, and the scrub covers the rest.
+      const was = this.redact(normalizeRepositoryAddress(origin));
+      if (await this.sharesHistoryWithConfigured(repoDir, configured)) {
+        await git(this.opts.gitRunner, repoDir, ['remote', 'set-url', 'origin', configured]);
+        startupLog.warn(
+          `working copy "${entry.name}" was cloned from ${was}, whose history the configured repository holds: ` +
+            'the same repository at a new address. Pointed at the configured address and kept, unpushed work included.',
+        );
+        continue;
+      }
+      const kept = path.join(setAsideRoot, stamp, entry.name);
+      await this.setAside(repoDir, kept);
+      startupLog.warn(
+        `working copy "${entry.name}" is a clone of another repository (${was}). Set aside at ${kept}; nothing was ` +
+          'deleted, and it will be cloned fresh from the configured one. Work that was never pushed is in that ' +
+          'folder: `git log` there shows it, and `git push <address> <branch>` from there sends it to a repository.',
+      );
+    }
+  }
+
+  /**
+   * Whether the configured repository holds history this clone has too —
+   * asked of git, not guessed from the two addresses. The configured
+   * remote's branches are fetched under a namespace of their own and the
+   * clone's HEAD is tested for a common ancestor with any of them.
+   *
+   * "Could not tell" answers false: a fetch that fails, a clone with no
+   * commit to compare. False sets the clone aside, which loses nothing, where
+   * a wrong true would push a stranger's commits into the configured
+   * repository.
+   */
+  private async sharesHistoryWithConfigured(repoDir: string, configured: string): Promise<boolean> {
+    const probe = 'refs/hexis-probe';
+    let theirs: string[] = [];
+    try {
+      await git(this.opts.gitRunner, repoDir, ['fetch', '--no-tags', '--quiet', configured, `+refs/heads/*:${probe}/*`]);
+      theirs = (await git(this.opts.gitRunner, repoDir, ['for-each-ref', '--format=%(refname)', `${probe}/`]))
+        .split('\n')
+        .map((ref) => ref.trim())
+        .filter(Boolean);
+      if (theirs.length === 0) return false;
+      // One question for all of them: a common ancestor of HEAD and ANY of
+      // their branches is a common ancestor of HEAD and their merge. Capped,
+      // so a remote with thousands of branches cannot outgrow a command line.
+      await git(this.opts.gitRunner, repoDir, ['merge-base', 'HEAD', ...theirs.slice(0, 200)]);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      // The probe leaves nothing behind in a clone that stays in use.
+      for (const ref of theirs) {
+        await git(this.opts.gitRunner, repoDir, ['update-ref', '-d', ref]).catch(() => undefined);
+      }
+    }
+  }
+
+  /**
+   * Move a working copy out of the workspaces root, whole. A rename where
+   * the two folders share a volume; a copy and then a removal where they do
+   * not (the backups root is a volume of its own in the shipped compose
+   * files), with the original removed only once the copy is complete.
+   */
+  private async setAside(repoDir: string, dest: string): Promise<void> {
+    await fs.mkdir(path.dirname(dest), { recursive: true });
+    try {
+      await fs.rename(repoDir, dest);
+      return;
+    } catch {
+      // Another volume, or a handle held open on it: copy instead.
+    }
+    try {
+      await fs.cp(repoDir, dest, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+    } catch (err) {
+      await fs.rm(dest, { recursive: true, force: true }).catch(() => undefined);
+      throw new Error(
+        `Could not set aside the working copy at ${repoDir}, a clone of a repository that is no longer the ` +
+          `configured one, into ${dest}: ${err instanceof Error ? err.message : String(err)}. Nothing was deleted. ` +
+          'Make room there, or move that folder away by hand, and start again.',
+        { cause: err },
+      );
+    }
+    await fs.rm(repoDir, { recursive: true, force: true });
   }
 
   /**

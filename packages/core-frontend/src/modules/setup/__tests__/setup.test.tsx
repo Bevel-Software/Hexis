@@ -146,23 +146,18 @@ describe('SetupScreen', () => {
   });
 
   /**
-   * The first-run host of the Marketplace section: marked optional and never
-   * in the way — setup finishes without anyone touching it, and nothing in it
-   * is fetched or saved on the way. There is no skip control to press: an
-   * admin ignores the section the way they ignore single sign-on, by leaving
-   * it alone. Because "Save and continue" now sits BELOW this section and is
-   * tied to the form by `form=`, this also proves that out-of-form submit
-   * still saves.
+   * The first run asks for the repository and for sign-in, and nothing else:
+   * Marketplace is a preference set on the Deployment page. Setup finishes
+   * without it, and nothing of it is fetched or saved on the way. Because
+   * "Save and continue" sits outside the form and is tied to it by `form=`,
+   * this also proves that out-of-form submit still saves.
    */
-  it('offers the Marketplace section as optional, and finishes setup having ignored it', async () => {
+  it('leaves Marketplace to the Deployment page, and finishes setup without it', async () => {
     facade.fetchGitHubFacade.mockClear();
     facade.setMarketplaceRegistration.mockClear();
     await renderScreen();
-    const section = await screen.findByTestId('marketplace-deployment-section');
-    expect(section).toHaveTextContent('Optional');
-    expect(screen.getByRole('heading', { name: 'Marketplace' })).toBeInTheDocument();
-    expect(screen.getByText('Register this deployment with your Claude organization')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Skip for now' })).toBeNull();
+    expect(screen.queryByTestId('marketplace-deployment-section')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Marketplace' })).toBeNull();
 
     api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
     await userEvent.type(screen.getByLabelText('Repository address'), 'https://example.com/kb.git');
@@ -804,7 +799,6 @@ describe('SetupScreen', () => {
   /** Single sign-on is skippable, and the screen has to say so. */
   it('marks the optional section optional', async () => {
     await renderScreen();
-    // Scoped: the Marketplace section below the form is optional too.
     const signIn = screen.getByRole('heading', { name: 'Single sign-on' }).closest('section')!;
     expect(within(signIn).getByText('Optional')).toBeInTheDocument();
   });

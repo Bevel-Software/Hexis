@@ -30,7 +30,10 @@ import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
 import { NodeFs } from '../modules/kb-fs/node-fs.js';
 import { assertKbDirNameFree } from '../modules/kb-fs/repo-path.js';
 import type { IFsProbe, ITreeWalker } from '../shared/fs.contract.js';
-import { gitCredentials, type IGitRunner } from '../shared/git.contract.js';
+import type { IGitRunner } from '../shared/git.contract.js';
+import { ManagedRepository, MANAGED_DEFAULT_BRANCH } from '../modules/settings/managed-repository.js';
+import { RepositorySource } from '../modules/settings/repository-source.js';
+import { GitHubAppConnection } from '../modules/github-app/index.js';
 import { AdvisoryLease, AdvisoryLock } from '../modules/database/advisory-lock.js';
 import { holdCommitWorkerLease, withStartupTask, type LeaseLoopHandle } from './lifecycle.js';
 
@@ -186,6 +189,15 @@ export interface CoreServices {
    * first-time setup completion — and never again while the process serves.
    */
   kbStartupRunner: KbStartupRunner;
+  /**
+   * Where the knowledge base's repository is and what git presents to it,
+   * whichever way the deployment was given one (see `RepositorySource`).
+   */
+  repositorySource: RepositorySource;
+  /** The repository the deployment keeps for itself, when that is the way it chose. */
+  managedRepository: ManagedRepository;
+  /** The connection to GitHub through a GitHub App, when that is the way it chose. */
+  githubApp: GitHubAppConnection;
   /**
    * The startup phase's retry when the boot survived an unreachable remote
    * — set by `startCore`, stopped by `stopCore` (see `core/lifecycle.ts`);
@@ -434,18 +446,49 @@ export async function createCoreServices(
   // settings catalogue knows `GIT_TOKEN` alone. Handed to the runner, which
   // puts the token into each child's environment — never into this
   // process's, which several knowledge bases may share.
-  const gitCredentialsInEffect = gitCredentials(
-    () => settings.resolve('gitUsername') || config.gitUsername,
-    () => settings.resolve('gitToken') || config.gitToken || null,
-  );
+  //
+  // Both come from the repository source, which is the one place that knows
+  // a deployment can be given its repository in more than one way; what
+  // comes back is the address and the credential, as it always was.
+  const managedRepository = new ManagedRepository(path.join(config.backupsRoot, 'managed-repository'));
+  const githubApp = new GitHubAppConnection({
+    read: (key) => settings.resolve(key),
+    sourceOf: (key) => settings.sourceOf(key),
+  });
+  const repositorySource = new RepositorySource({
+    read: (key) => settings.resolve(key),
+    fallback: { username: config.gitUsername, token: config.gitToken },
+    managed: managedRepository,
+    githubApp,
+  });
+  const gitCredentialsInEffect = repositorySource.credentials;
   // How git is run, for every module that runs it: one environment, one buffer
   // ceiling, one error shape, and — the reason it exists — one deadline, so a
   // git that never returns cannot hold a workspace (and with it the commit
   // queue) open indefinitely. See `shared/git.contract.ts`.
   const gitRunner = new NodeGitRunner(config.gitTimeoutMs, gitCredentialsInEffect);
+  // A deployment that keeps its own repository has it before anything asks
+  // for it: one that chose the mode through the environment never passes
+  // through the save that would have created it, and the startup phase's
+  // first question would be asked of a folder that is not there. Left to
+  // that phase to report if it cannot be made: its failures are classified
+  // and shown on the setup screen, where a throw here would take the screen
+  // down with the boot.
+  if (repositorySource.mode() === 'managed') {
+    await managedRepository
+      .ensure(gitRunner, settings.resolve('defaultBranch') || MANAGED_DEFAULT_BRANCH)
+      .catch((err: unknown) => logger('setup').error('the managed repository could not be created:', { err }));
+  }
+  // One reached through a GitHub App has a token in hand before anything
+  // reads it: a working copy's credential helper is stamped according to
+  // whether there is a token, by code that cannot wait for one. A failure is
+  // the startup phase's to report, for the same reason as above.
+  if (repositorySource.mode() === 'github-app') {
+    await githubApp.prepare().catch(() => undefined);
+  }
   const workspaceService = new WorkspaceService(
     config.workspacesRoot,
-    () => settings.resolve('kbRepoUrl'),
+    () => repositorySource.url(),
     kb,
     disk,
     gitRunner,
@@ -484,8 +527,12 @@ export async function createCoreServices(
     // Getters, not values: the remote and the branch model can arrive from the
     // setup screen after this object exists, and the setup-completion run is
     // the first thing that needs them.
-    kbRepoUrl: () => settings.resolve('kbRepoUrl'),
+    kbRepoUrl: () => repositorySource.url(),
     workspacesRoot: config.workspacesRoot,
+    // Under the backups root, a persistent volume of its own and one nothing
+    // sweeps: a working copy of a repository that was replaced is kept there,
+    // never deleted (see the runner's `reconcileClonesWithConfiguredRepository`).
+    setAsideRoot: path.join(config.backupsRoot, 'replaced-working-copies'),
     kbDirName,
     templateDir: config.kbTemplateDir,
     defaultBranch: () => kb.defaultBranch,
@@ -693,7 +740,14 @@ export async function createCoreServices(
   // (the request's branch vs the default branch), so it holds no state — it
   // only needs to read files at refs and to close a request whose proposals
   // have all landed.
-  const joinRequestsService = new JoinRequestsService(workspaceService, workflowService, kb);
+  const joinRequestsService = new JoinRequestsService(
+    workspaceService,
+    workflowService,
+    kb,
+    // Read-only: the one question a request asks of the resolver is whether
+    // the person it names already holds what it proposes.
+    accessControl,
+  );
   // The OTHER half of a join request: the row the subscribe endpoint writes
   // before it answers, and the branch/clone/commit/push/change-request work
   // that runs against it afterwards. The row is what lets the click be
@@ -1237,6 +1291,9 @@ export async function createCoreServices(
     toolDeleteService,
     workspaceService,
     kbStartupRunner,
+    repositorySource,
+    managedRepository,
+    githubApp,
     settings,
     kb,
     kbDirName,

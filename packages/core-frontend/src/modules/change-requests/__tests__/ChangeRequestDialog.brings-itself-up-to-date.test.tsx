@@ -11,9 +11,18 @@ import type { FileApprovalState, PullRequestSummary } from '@bevel-software/plat
  * outside engineering knows what `main` is, and nobody should have to press a
  * button to get a proposal that merges cleanly back into shape.
  *
+ * What it does NOT do any more is make the reader wait. The update runs
+ * behind the files, which are on screen from the first render; only Approve
+ * and Apply — the two verbs the merge can change the answer to — wait for it.
+ * And it only runs at all when the target changed a file THIS request also
+ * changes (`needsUpdate`), not merely when the two branches have diverged
+ * (`behind`), which on a live knowledge base is true again within minutes of
+ * every update.
+ *
  * What these pin: the automatic update for the three viewers who may run it,
- * silence for the one who may not, the conflict path, once-per-open, and the
- * guard that no state of this dialog ever prints the default branch name.
+ * silence for the one who may not, silence for a target that moved elsewhere,
+ * the files being readable throughout, the conflict path, once-per-open, and
+ * the guard that no state of this dialog ever prints the default branch name.
  */
 
 const detailMock = vi.hoisted(() => ({ fetchPrDetail: vi.fn() }));
@@ -102,12 +111,17 @@ function detail(over: Record<string, unknown> = {}) {
     viewerCanCancel: false,
     mergeBaseSha: FORK,
     behind: true,
+    // The two are separate answers, and only this one makes the dialog act.
+    // A test that wants "diverged, but not in this request's files" sets
+    // `needsUpdate: false` and leaves `behind` alone.
+    needsUpdate: true,
+    updatedPaths: ['Sales/deal.yaml'],
     viewerCanUpdate: true,
     ...over,
   };
 }
 
-const RUNNING = 'Bringing this up to date with what everyone sees…';
+const RUNNING = 'Checking against the latest version…';
 const DONE = 'Brought up to date with what everyone sees.';
 const READER_NOTICE =
   'What everyone sees has changed since this was proposed. Its author, or someone who can apply it, brings it up to date by opening it.';
@@ -121,7 +135,11 @@ const conflict = () =>
 
 beforeEach(() => {
   detailMock.fetchPrDetail.mockReset();
-  mergeApi.refreshChangeRequestFromTarget.mockReset().mockResolvedValue({});
+  // The Update's own answer IS the fresh detail — the dialog takes it as one
+  // and does not read the detail again.
+  mergeApi.refreshChangeRequestFromTarget
+    .mockReset()
+    .mockResolvedValue(detail({ behind: false, needsUpdate: false }));
   filesApi.readFileAtForkPoint
     .mockReset()
     .mockImplementation(async (_n: number, sha: string) => ({ content: BEFORE, forkSha: sha }));
@@ -149,9 +167,10 @@ const MAY_UPDATE: [string, Record<string, unknown>][] = [
 
 describe('ChangeRequestDialog: a stale request brings itself up to date', () => {
   it.each(MAY_UPDATE)('updates itself on open for %s — no button, no confirmation', async (_who, over) => {
-    detailMock.fetchPrDetail
-      .mockResolvedValueOnce(detail(over))
-      .mockResolvedValue(detail({ ...over, behind: false }));
+    mergeApi.refreshChangeRequestFromTarget.mockResolvedValue(
+      detail({ ...over, behind: false, needsUpdate: false }),
+    );
+    detailMock.fetchPrDetail.mockResolvedValue(detail(over));
 
     const { container } = render(
       <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />,
@@ -167,32 +186,117 @@ describe('ChangeRequestDialog: a stale request brings itself up to date', () => 
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('shows the status line and NO file content while the update runs', async () => {
+  it('shows the files AT ONCE while the update runs, with the note above them', async () => {
+    // The ticket, in one test. The proposal is readable from the first
+    // render; the note says a check is happening; nobody waits out a merge to
+    // see what was proposed.
     let land: (v: unknown) => void = () => {};
     mergeApi.refreshChangeRequestFromTarget.mockImplementation(
       () => new Promise((resolve) => (land = resolve)),
     );
-    detailMock.fetchPrDetail
-      .mockResolvedValueOnce(detail())
-      .mockResolvedValue(detail({ behind: false }));
+    // A viewer whose authority covers the request, so Apply is on screen to
+    // be held in the first place.
+    const canApply = { approvals: [{ ...approval, inMergeGate: true, viewerCanApprove: true }] };
+    detailMock.fetchPrDetail.mockResolvedValue(detail(canApply));
 
     const { container } = render(
       <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />,
     );
 
     expect(await screen.findByText(RUNNING)).toBeInTheDocument();
-    // Not the pre-update text, and not a diff of it: the proposal on screen
-    // must never be the one against text that has already moved.
-    expect(container.textContent).not.toContain('price: 120');
-    expect(container.querySelector('ins')).toBeNull();
-    expect(filesApi.readFileOnBranch).not.toHaveBeenCalled();
-    expect(filesApi.readFileAtForkPoint).not.toHaveBeenCalled();
-    expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
+    // The files are read and drawn, not withheld.
+    await waitFor(() => expect(container.querySelector('ins')?.textContent).toBe('price: 120'));
+    expect(filesApi.readFileOnBranch).toHaveBeenCalledWith(CR.branch, 'Sales/deal.yaml');
+    expect(filesApi.readFileAtForkPoint).toHaveBeenCalled();
 
-    land({});
+    // What DOES wait is the verdict: the merge can move the text these two
+    // verbs would act on, so both are on screen and both are held.
+    const apply = screen.getByRole('button', { name: /Apply changes|Bypass approval and apply/ });
+    expect(apply).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Approve this file/ })).toBeDisabled();
+
+    land(detail({ ...canApply, behind: false, needsUpdate: false }));
     expect(await screen.findByText(DONE)).toBeInTheDocument();
     expect(screen.queryByText(RUNNING)).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /Apply changes|Bypass approval and apply/ }),
+      ).toBeEnabled(),
+    );
+  });
+
+  it('does NOT update when the target moved in files this request does not change', async () => {
+    // The everyday case on a live knowledge base: somebody saved something
+    // else. The request is `behind`, and nothing about it has gone stale.
+    detailMock.fetchPrDetail.mockResolvedValue(detail({ behind: true, needsUpdate: false }));
+
+    const { container } = render(
+      <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />,
+    );
+
     await waitFor(() => expect(container.querySelector('ins')?.textContent).toBe('price: 120'));
+    expect(mergeApi.refreshChangeRequestFromTarget).not.toHaveBeenCalled();
+    expect(screen.queryByText(RUNNING)).not.toBeInTheDocument();
+    expect(screen.queryByText(DONE)).not.toBeInTheDocument();
+    expect(screen.queryByText(READER_NOTICE)).not.toBeInTheDocument();
+  });
+
+  it('re-opened with nothing changed, it runs no update and says nothing about one', async () => {
+    // Opening the same request a second time, with no change to the shared
+    // version and none to the request in between.
+    detailMock.fetchPrDetail.mockResolvedValue(detail({ behind: false, needsUpdate: false }));
+
+    const first = render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    await waitFor(() => expect(first.container.querySelector('ins')).not.toBeNull());
+    first.unmount();
+
+    const { container } = render(
+      <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />,
+    );
+    await waitFor(() => expect(container.querySelector('ins')?.textContent).toBe('price: 120'));
+    expect(mergeApi.refreshChangeRequestFromTarget).not.toHaveBeenCalled();
+    expect(screen.queryByText(RUNNING)).not.toBeInTheDocument();
+    expect(screen.queryByText(DONE)).not.toBeInTheDocument();
+  });
+
+  it('after the update, only the files the update changed are read again', async () => {
+    // `updatedPaths` is git's own answer to "what did this merge move". A
+    // dialog that forgot everything would blank the pane the reader is
+    // mid-sentence in and re-read the whole request to replace one file.
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detail({
+        files: [
+          { path: 'Sales/deal.yaml', status: 'modified' as const, additions: 1, deletions: 1, isBinary: false, sha: '', rawUrl: '' },
+          { path: 'Sales/untouched.yaml', status: 'modified' as const, additions: 1, deletions: 1, isBinary: false, sha: '', rawUrl: '' },
+        ],
+      }),
+    );
+    mergeApi.refreshChangeRequestFromTarget.mockResolvedValue(
+      detail({ behind: false, needsUpdate: false, updatedPaths: ['Sales/deal.yaml'] }),
+    );
+
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    expect(await screen.findByText(DONE)).toBeInTheDocument();
+
+    await waitFor(() =>
+      expect(
+        filesApi.readFileOnBranch.mock.calls.filter((c) => c[1] === 'Sales/deal.yaml').length,
+      ).toBe(2),
+    );
+    // The file the merge did not touch keeps the copy already on screen.
+    expect(
+      filesApi.readFileOnBranch.mock.calls.filter((c) => c[1] === 'Sales/untouched.yaml').length,
+    ).toBeLessThanOrEqual(1);
+  });
+
+  it('takes the update\'s own answer as the fresh detail — no second detail read', async () => {
+    // One detail read after the merge, on the server. A dialog that re-fetched
+    // here would make the server build a second one saying the same thing.
+    detailMock.fetchPrDetail.mockResolvedValue(detail());
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    expect(await screen.findByText(DONE)).toBeInTheDocument();
+    expect(detailMock.fetchPrDetail).toHaveBeenCalledTimes(1);
   });
 
   it('never runs for a viewer who may not update it — they get the plain-words notice, no button', async () => {
@@ -208,7 +312,9 @@ describe('ChangeRequestDialog: a stale request brings itself up to date', () => 
   });
 
   it('never runs on a request that is no longer open', async () => {
-    detailMock.fetchPrDetail.mockResolvedValue(detail({ state: 'merged', behind: true }));
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detail({ state: 'merged', behind: true, needsUpdate: false }),
+    );
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
 
     await waitFor(() => expect(screen.getByText(/1 file/)).toBeInTheDocument());
@@ -218,7 +324,7 @@ describe('ChangeRequestDialog: a stale request brings itself up to date', () => 
   });
 
   it('says nothing at all about updating when the request is already up to date', async () => {
-    detailMock.fetchPrDetail.mockResolvedValue(detail({ behind: false }));
+    detailMock.fetchPrDetail.mockResolvedValue(detail({ behind: false, needsUpdate: false }));
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
 
     await waitFor(() => expect(screen.getByText(/1 file/)).toBeInTheDocument());
@@ -250,18 +356,16 @@ describe('ChangeRequestDialog: a stale request brings itself up to date', () => 
     expect(mergeApi.refreshChangeRequestFromTarget).toHaveBeenCalledTimes(1);
   });
 
-  it('opened ABOUT a file, it reads nothing until the update has settled', async () => {
+  it('opened ABOUT a file, it reads that file while the update runs', async () => {
     // A dialog opened from a file surface knows its selection before the
-    // detail arrives (`initialPath`). That must not become a read: until the
-    // detail says whether this request is behind, the branch copy it would
-    // fetch is the one the update is about to replace.
+    // detail arrives (`initialPath`). It still waits for the DETAIL — the
+    // pane cannot draw a diff before the fork point is named — but not for
+    // the update: that is the wait this ticket removed.
     let land: (v: unknown) => void = () => {};
     mergeApi.refreshChangeRequestFromTarget.mockImplementation(
       () => new Promise((resolve) => (land = resolve)),
     );
-    detailMock.fetchPrDetail
-      .mockResolvedValueOnce(detail())
-      .mockResolvedValue(detail({ behind: false }));
+    detailMock.fetchPrDetail.mockResolvedValue(detail());
 
     render(
       <ChangeRequestDialog
@@ -273,24 +377,29 @@ describe('ChangeRequestDialog: a stale request brings itself up to date', () => 
     );
 
     expect(await screen.findByText(RUNNING)).toBeInTheDocument();
-    expect(filesApi.readFileOnBranch).not.toHaveBeenCalled();
-    expect(filesApi.readFileAtForkPoint).not.toHaveBeenCalled();
-
-    land({});
-    expect(await screen.findByText(DONE)).toBeInTheDocument();
-    // And afterwards it reads the file it was opened about — against the head
-    // the merge left.
     await waitFor(() =>
       expect(filesApi.readFileOnBranch).toHaveBeenCalledWith(CR.branch, 'Sales/deal.yaml'),
+    );
+    expect(filesApi.readFileAtForkPoint).toHaveBeenCalled();
+
+    land(detail({ behind: false, needsUpdate: false }));
+    expect(await screen.findByText(DONE)).toBeInTheDocument();
+    // Read again afterwards, against the head the merge left — the file is on
+    // `updatedPaths`.
+    await waitFor(() =>
+      expect(
+        filesApi.readFileOnBranch.mock.calls.filter((c) => c[1] === 'Sales/deal.yaml').length,
+      ).toBe(2),
     );
   });
 
   it('two people opening the same stale request at once: the second finds nothing to merge, and neither sees an error', async () => {
     // The server answers an already-merged update with a plain, successful
     // detail — nothing merged, nothing to report.
-    detailMock.fetchPrDetail
-      .mockResolvedValueOnce(detail())
-      .mockResolvedValue(detail({ behind: false }));
+    detailMock.fetchPrDetail.mockResolvedValue(detail());
+    mergeApi.refreshChangeRequestFromTarget.mockResolvedValue(
+      detail({ behind: false, needsUpdate: false, updatedPaths: [] }),
+    );
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
 
     expect(await screen.findByText(DONE)).toBeInTheDocument();
@@ -325,6 +434,23 @@ describe('ChangeRequestDialog: an update that cannot be combined', () => {
     expect(mergeApi.refreshChangeRequestFromTarget).toHaveBeenCalledTimes(1);
     // The failed attempt never re-read the detail either.
     expect(detailMock.fetchPrDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports the conflict the background update found, with the files still on screen', async () => {
+    // The update now runs behind the files, so a conflict arrives over a
+    // dialog the reader is already reading. It is reported exactly as before.
+    mergeApi.refreshChangeRequestFromTarget.mockRejectedValue(conflict());
+    detailMock.fetchPrDetail.mockResolvedValue(detail());
+    const { container } = render(
+      <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />,
+    );
+
+    const banner = await screen.findByRole('alert');
+    expect(banner.textContent).toContain("the two can't be combined automatically");
+    expect(screen.getByText(/Fastest fix: ask your agent to resolve it/)).toBeInTheDocument();
+    // The request is still readable: the conflict is news about applying it,
+    // not a reason to take the proposal off the screen.
+    expect(container.textContent).toContain('deal.yaml');
   });
 
   it('any other refusal is reported as itself, without the conflict help', async () => {
@@ -378,6 +504,13 @@ describe('ChangeRequestDialog: never names the default branch to a business user
   it('while it is bringing itself up to date', async () => {
     mergeApi.refreshChangeRequestFromTarget.mockImplementation(() => new Promise(() => {}));
     const c = await rendered({}, () => screen.findByText(RUNNING));
+    expect(prose(c)).not.toMatch(NAMES_TARGET);
+  });
+
+  it('when the target moved on but this request needs nothing', async () => {
+    const c = await rendered({ behind: true, needsUpdate: false }, () =>
+      screen.findByText(/1 file/),
+    );
     expect(prose(c)).not.toMatch(NAMES_TARGET);
   });
 

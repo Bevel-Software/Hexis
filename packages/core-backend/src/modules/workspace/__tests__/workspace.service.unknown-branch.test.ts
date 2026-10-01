@@ -77,6 +77,49 @@ describe('WorkspaceService — a branch origin does not have', () => {
     });
   });
 
+  /**
+   * The second defect on this ticket. A bootstrap that fails to clone used to
+   * leave its workspace directory behind, and a directory named after a branch
+   * is one of the ways the platform remembers having KNOWN a branch. So the
+   * first attempt at a typo answered 404 and then quietly created the evidence
+   * that turned every later attempt into 410 — the reader was told a branch
+   * they had invented "no longer exists on the remote".
+   */
+  it('leaves nothing on disk when the clone fails, so a second attempt is still a 404', async () => {
+    const svc = service();
+
+    await expect(svc.getOrCreateForBranch('nobody/never-made-this')).rejects.toMatchObject({
+      name: 'BranchNotFoundError',
+      status: 404,
+    });
+    // The failed bootstrap rolled back completely — not the clone directory,
+    // not the workspace shell around it.
+    expect(await fs.readdir(workspacesRoot)).toEqual([]);
+
+    // The same name again, on the same instance that has now already failed on
+    // it once. Nothing about the first failure may change this answer.
+    await expect(svc.getOrCreateForBranch('nobody/never-made-this')).rejects.toMatchObject({
+      name: 'BranchNotFoundError',
+      status: 404,
+      message: 'There is no branch named nobody/never-made-this.',
+      payload: { kind: 'branch-not-found', branch: 'nobody/never-made-this' },
+    });
+    expect(await fs.readdir(workspacesRoot)).toEqual([]);
+  });
+
+  it('does not count a bare directory with no clone in it as a branch it knew', async () => {
+    // A shell left by an older process (one that crashed mid-bootstrap, or that
+    // predates the rollback above). The "have I heard of this branch" probe asks
+    // for a COMPLETED clone, so a directory with no `.git` under it is absence:
+    // the honest 404 survives whatever is lying around the workspaces root.
+    await fs.mkdir(path.join(workspacesRoot, workspaceIdForBranch('nobody/never-made-this')), { recursive: true });
+
+    await expect(service().getOrCreateForBranch('nobody/never-made-this')).rejects.toMatchObject({
+      name: 'BranchNotFoundError',
+      status: 404,
+    });
+  });
+
   it('a name a listing showed us, and origin no longer has, stays a 410', async () => {
     const svc = service();
     // What the branch selector saw while the draft still existed.
