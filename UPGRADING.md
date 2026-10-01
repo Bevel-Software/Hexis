@@ -72,13 +72,27 @@ took before upgrading.
 
 ### Personal data in the database is encrypted (0.23+)
 
-From 0.23, personal data in the database — emails, display names, and
-change-request/review text — is encrypted with a key derived from
-`SECRETS_ENC_KEY`, in addition to the secrets vault it already sealed. The
-first boot after the upgrade rewrites existing rows automatically; nothing
-to do. Upgrade with a single app instance (the normal
+From 0.23, personal data in the database — emails, display names, avatar
+URLs, change-request and review text, and the error messages of merges,
+queued commits and plugin join requests, including every copy of a name or
+email kept beside an approval, comment, lock or merge — is encrypted with a
+key derived from `SECRETS_ENC_KEY`, in addition to the secrets vault it
+already sealed. The first boot after the upgrade rewrites existing rows
+automatically. Upgrade with a single app instance (the normal
 `docker compose pull app && up -d` flow already replaces the container) —
 don't run old and new versions against the same database side by side.
+
+That first start refuses to come up in two cases, and says which:
+
+- Two accounts share one address up to case and whitespace
+  (`Alice@example.com` and `alice@example.com` could both exist before).
+  The log names the conflicting user ids; merge or delete the duplicates,
+  then start again.
+- A sealed row does not open with the configured key. From then on, every
+  start checks this: changing `SECRETS_ENC_KEY` is no longer a configuration
+  change but a re-keying of the database, and a start under a different key
+  stops instead of locking everyone out. Restore the key that sealed the
+  data.
 
 A process that serves several knowledge bases (`TENANTS_FILE`) seals every
 tenant's rows with one key derived from `TENANT_MASTER_KEY`; see

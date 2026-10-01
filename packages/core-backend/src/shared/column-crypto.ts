@@ -81,6 +81,16 @@ export function isEncryptedBlob(value: string): boolean {
 }
 
 /**
+ * The SQL (POSIX regex) counterpart of {@link isEncryptedBlob}: the version
+ * prefix followed by base64 segments of the exact widths GCM produces
+ * (12-byte IV → 16 chars, 16-byte tag → 22 chars + `==`). Lets the backfill
+ * find unsealed rows with a `!~` predicate instead of scanning every row in
+ * the app. Lives beside the blob format it mirrors — and is pinned to it by
+ * `column-crypto.test.ts` — so the two cannot drift apart.
+ */
+export const PII_SEALED_SHAPE_SQL_REGEX = `^${PII_CIPHERTEXT_PREFIX}[A-Za-z0-9+/]{16}:[A-Za-z0-9+/]{22}==:[A-Za-z0-9+/]+={0,2}$`;
+
+/**
  * Encrypt a PII value for storage (fresh random IV — NOT equality-comparable).
  *
  * The empty string is stored as itself: it carries no personal data, GCM of an
@@ -98,12 +108,14 @@ export function encryptPii(value: string): string {
  * Decrypt a stored PII value. A value that does not carry the ciphertext
  * prefix — or fails to decrypt (a different key) — is returned as-is: rows
  * written before the encryption release stay readable until the boot-time
- * backfill rewrites them.
+ * backfill rewrites them. Use before {@link initColumnCrypto} is NOT a
+ * decrypt failure and is not swallowed: it throws like every other use.
  */
 export function decryptPii(value: string): string {
   if (!isEncryptedBlob(value)) return value;
+  const crypto = requireCrypto();
   try {
-    return requireCrypto().decrypt(value.slice(PII_CIPHERTEXT_PREFIX.length));
+    return crypto.decrypt(value.slice(PII_CIPHERTEXT_PREFIX.length));
   } catch {
     return value;
   }

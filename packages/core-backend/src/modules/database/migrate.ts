@@ -5,7 +5,13 @@ import { logger } from '../../shared/logging.js';
 const log = logger('database');
 import { DEFAULT_DB_SCHEMA, dbSchemaOf, type Database } from './connection.js';
 import { AdvisoryLock, withAdvisoryLock } from './advisory-lock.js';
-import { PII_CIPHERTEXT_PREFIX, blindIndex, decryptPii, encryptPii, isEncryptedBlob } from '../../shared/column-crypto.js';
+import {
+  PII_SEALED_SHAPE_SQL_REGEX,
+  blindIndex,
+  decryptPii,
+  encryptPii,
+  isEncryptedBlob,
+} from '../../shared/column-crypto.js';
 
 /*
  * ── Per-tier migration folders ──────────────────────────────────────────────
@@ -167,20 +173,41 @@ const ident = (name: string) => sql.raw(`"${name}"`);
 type Executor = Pick<Database, 'execute'>;
 
 /**
- * SQL approximation of `isEncryptedBlob`: the version prefix followed by
- * base64 segments with the exact widths GCM produces (12-byte IV → 16 chars,
- * 16-byte tag → 22 chars + `==`). Deliberately a NEGATIVE filter: anything
- * failing it — including plaintext that merely BEGINS with the prefix — is
- * selected and re-examined app-side by `isEncryptedBlob`, so only values
- * byte-for-byte indistinguishable from a well-formed blob are trusted as
- * sealed. Sealed rows all match, keeping the steady-state scan an
- * empty-result query.
+ * A column "needs sealing" when it holds non-empty text that isn't a blob.
+ * The shape regex is deliberately used as a NEGATIVE filter: anything failing
+ * it — including plaintext that merely BEGINS with the prefix — is selected
+ * and re-examined app-side by `isEncryptedBlob`, so only values byte-for-byte
+ * indistinguishable from a well-formed blob are trusted as sealed. Sealed rows
+ * all match, keeping the steady-state scan an empty-result query.
  */
-const SEALED_SHAPE_REGEX = `^${PII_CIPHERTEXT_PREFIX}[A-Za-z0-9+/]{16}:[A-Za-z0-9+/]{22}==:[A-Za-z0-9+/]+={0,2}$`;
-
-/** A column "needs sealing" when it holds non-empty text that isn't a blob. */
 function needsSealing(col: string) {
-  return sql`(${ident(col)} IS NOT NULL AND ${ident(col)} <> '' AND ${ident(col)} !~ ${SEALED_SHAPE_REGEX})`;
+  return sql`(${ident(col)} IS NOT NULL AND ${ident(col)} <> '' AND ${ident(col)} !~ ${PII_SEALED_SHAPE_SQL_REGEX})`;
+}
+
+/**
+ * The configured key must open what earlier starts sealed. A rotated or
+ * mistyped `SECRETS_ENC_KEY` would otherwise go unnoticed here — sealed rows
+ * are exactly the ones the scan skips — and surface only as every login
+ * failing and every lookup by email missing, because the blind indexes would
+ * be computed under the new key. One sealed value per table is enough: all
+ * rows of a deployment are sealed under one key. Refusing the start is the
+ * loud failure; re-keying a database is a deliberate operation, not a boot.
+ */
+async function assertKeyOpensSealedRows(tx: Executor): Promise<void> {
+  for (const t of PII_BACKFILL_TABLES) {
+    const col = t.bidx?.source ?? t.encrypted[0]!;
+    const sample = await tx.execute(
+      sql`SELECT ${ident(col)} AS value FROM ${ident(t.table)} WHERE ${ident(col)} ~ ${PII_SEALED_SHAPE_SQL_REGEX} LIMIT 1`,
+    );
+    const value = (sample.rows[0] as { value?: unknown } | undefined)?.value;
+    if (typeof value === 'string' && isEncryptedBlob(decryptPii(value))) {
+      throw new Error(
+        `PII encryption: ${t.table}.${col} is sealed with a key the configured SECRETS_ENC_KEY ` +
+          '(or TENANT_MASTER_KEY) does not open — refusing to start. Restore the key that sealed it; ' +
+          'changing the key is a re-keying of the database, not a configuration change.',
+      );
+    }
+  }
 }
 
 async function backfillTable(tx: Executor, t: PiiBackfillTable): Promise<number> {
@@ -208,27 +235,33 @@ async function backfillTable(tx: Executor, t: PiiBackfillTable): Promise<number>
         where.push(sql`${ident(col)} = ${value}`);
       }
     }
-    if (t.bidx && row[t.bidx.column] == null) {
-      // The source may already be ciphertext (a partial earlier run) — the
-      // blind index is always computed over the plaintext. If the source is
-      // ciphertext the configured key cannot open, refuse rather than derive
-      // a blind index from ciphertext (it would never match a real lookup).
+    if (t.bidx) {
+      // The blind index is derived from its source, so it is (re)computed
+      // whenever the source is being sealed in this pass — a legacy writer
+      // that put a NEW plaintext email on an already-indexed row left a stale
+      // index behind, and sealing the email alone would freeze that mismatch
+      // — and whenever it was never filled. The source may already be
+      // ciphertext (a partial earlier run); the index is always computed
+      // over the plaintext, never over a blob the key cannot open.
       const source = row[t.bidx.source];
-      const raw = typeof source === 'string' ? source : '';
-      const plain = decryptPii(raw);
-      if (isEncryptedBlob(plain)) {
-        throw new Error(
-          `PII encryption backfill: ${t.table}.${t.bidx.source} cannot be decrypted with the ` +
-            'configured SECRETS_ENC_KEY — refusing to derive a blind index from ciphertext. ' +
-            'Restore the key that sealed it, then restart.',
-        );
+      const stored = row[t.bidx.column];
+      const sealingSource = typeof source === 'string' && source !== '' && !isEncryptedBlob(source);
+      if (sealingSource || stored == null) {
+        const plain = decryptPii(typeof source === 'string' ? source : '');
+        if (isEncryptedBlob(plain)) {
+          throw new Error(
+            `PII encryption backfill: ${t.table}.${t.bidx.source} cannot be decrypted with the ` +
+              'configured SECRETS_ENC_KEY — refusing to derive a blind index from ciphertext. ' +
+              'Restore the key that sealed it, then restart.',
+          );
+        }
+        sets.push(sql`${ident(t.bidx.column)} = ${blindIndex(plain)}`);
+        // Pin the index AND its source: if a concurrent writer replaces the
+        // email between scan and write, the CAS must not attach the OLD
+        // email's blind index to the NEW value.
+        where.push(sql`${ident(t.bidx.column)} IS NOT DISTINCT FROM ${stored ?? null}`);
+        where.push(sql`${ident(t.bidx.source)} IS NOT DISTINCT FROM ${source ?? null}`);
       }
-      sets.push(sql`${ident(t.bidx.column)} = ${blindIndex(plain)}`);
-      where.push(sql`${ident(t.bidx.column)} IS NULL`);
-      // Pin the source too: if a concurrent writer replaces the email between
-      // scan and write, the CAS must not attach the OLD email's blind index
-      // to the NEW value.
-      where.push(sql`${ident(t.bidx.source)} IS NOT DISTINCT FROM ${source ?? null}`);
     }
     if (sets.length === 0) continue;
     const updated = await tx.execute(
@@ -298,6 +331,7 @@ const PII_FINALIZE_STATEMENTS = [
  */
 export async function runPiiEncryptionBackfill(db: Database): Promise<void> {
   await db.transaction(async (tx) => {
+    await assertKeyOpensSealedRows(tx);
     let rewritten = 0;
     for (const t of PII_BACKFILL_TABLES) {
       rewritten += await backfillTable(tx, t);
