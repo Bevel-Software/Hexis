@@ -1135,7 +1135,7 @@ export async function createCoreServices(
     loadActiveGroups,
   });
   const toolHandlerFactory = createToolHandlerFactory(resolveToolContext);
-  const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService);
+  const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService);
   // Read-only manual endpoints accept the above PLUS a browser JWT, so a
   // logged-in user can browse the catalog with their session. Execution routes
   // keep `toolAuthMiddleware` (no JWT), so a session can read but not invoke.

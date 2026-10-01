@@ -45,7 +45,7 @@ export interface KbSyncRouteDeps {
   kbSync: IKbSyncService;
   /** The configured secret, read per request so a setup-screen save applies at once. */
   syncSecret: () => string;
-  authService: { verifyToken(token: string): { userId: string; email: string } };
+  authService: { resolveSession(token: string): Promise<{ userId: string; email: string }> };
   adminAccess: IAdminAccessService;
 }
 
@@ -117,9 +117,9 @@ export function createKbSyncRoutes(deps: KbSyncRouteDeps): express.Router {
         rawBody: raw,
       },
       {
-        verifyJwt: (token) => {
+        verifyJwt: async (token) => {
           try {
-            return { email: deps.authService.verifyToken(token).email };
+            return { email: (await deps.authService.resolveSession(token)).email };
           } catch {
             return null;
           }

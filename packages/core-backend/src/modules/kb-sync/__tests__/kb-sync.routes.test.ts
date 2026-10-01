@@ -44,7 +44,7 @@ async function mount(opts: {
       kbSync,
       syncSecret: () => opts.secret ?? SECRET,
       authService: {
-        verifyToken: (token: string) => {
+        resolveSession: async (token: string) => {
           if (token !== 'jwt-ok') throw new Error('bad token');
           return { userId: 'u1', email: 'person@example.com' };
         },

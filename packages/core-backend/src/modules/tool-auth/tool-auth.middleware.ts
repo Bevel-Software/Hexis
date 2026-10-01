@@ -4,6 +4,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('tools');
 import type { IExternalApiKeyService } from './external-api-key.interface.js';
 import type { AuthService } from '../auth/auth.service.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE } from '../auth/account-admission.js';
 import { InternalTokenService } from './internal-token.service.js';
 import { INVALID_CONNECTION_KEY_CHALLENGE, INVALID_CONNECTION_KEY_MESSAGE } from './connection-key-rejection.js';
 
@@ -122,6 +123,15 @@ export type VerifyResult =
 export function createTokenVerifier(
   externalApiKeyService: IExternalApiKeyService,
   internalTokenService: InternalTokenService,
+  /**
+   * Whether the account an internal token was minted for is still on. An
+   * internal token carries only a user id and lives up to an hour (longer
+   * for the MCP loopback), so without this a switched-off account's running
+   * agent would keep working until it expired. Connection keys need no
+   * second look: their lookup reads the account. Every deployment passes
+   * it; absent, internal tokens are judged on their signature alone.
+   */
+  accounts?: Pick<AuthService, 'isActive'>,
 ): (token: string | undefined) => Promise<VerifyResult> {
   const missing = { ok: false as const, status: 401, message: 'A connection key or internal token is required' };
   return async (token) => {
@@ -136,6 +146,9 @@ export function createTokenVerifier(
     if (internalTokenService.looksLikeInternalToken(token)) {
       const claim = internalTokenService.verify(token);
       if (!claim) return { ok: false, status: 401, message: 'Invalid or expired internal token' };
+      if (accounts && !(await accounts.isActive(claim.userId))) {
+        return { ok: false, status: 401, message: ACCOUNT_DEACTIVATED_MESSAGE };
+      }
       return claim.externalProxy
         ? {
             ok: true,
@@ -170,8 +183,9 @@ export function createTokenVerifier(
 export function createToolAuthMiddleware(
   externalApiKeyService: IExternalApiKeyService,
   internalTokenService: InternalTokenService,
+  accounts?: Pick<AuthService, 'isActive'>,
 ): RequestHandler {
-  const verify = createTokenVerifier(externalApiKeyService, internalTokenService);
+  const verify = createTokenVerifier(externalApiKeyService, internalTokenService, accounts);
   return async (req: Request, res: Response, next: NextFunction) => {
     const header = req.headers.authorization;
     if (!header || !header.toLowerCase().startsWith('bearer ')) {
@@ -210,9 +224,9 @@ export function createToolAuthMiddleware(
 export function createManualAuthMiddleware(
   externalApiKeyService: IExternalApiKeyService,
   internalTokenService: InternalTokenService,
-  authService: AuthService,
+  authService: Pick<AuthService, 'isActive' | 'resolveSession'>,
 ): RequestHandler {
-  const verify = createTokenVerifier(externalApiKeyService, internalTokenService);
+  const verify = createTokenVerifier(externalApiKeyService, internalTokenService, authService);
   return async (req: Request, res: Response, next: NextFunction) => {
     const header = req.headers.authorization;
     if (!header || !header.toLowerCase().startsWith('bearer ')) {
@@ -241,13 +255,15 @@ export function createManualAuthMiddleware(
     }
 
     // Otherwise treat the bearer as a browser session JWT.
+    let userId: string;
     try {
-      const { userId } = authService.verifyToken(token);
-      req.toolAuth = { source: 'session', userId, scope: 'write' };
-      next();
+      ({ userId } = await authService.resolveSession(token));
     } catch {
       res.setHeader('WWW-Authenticate', WWW_AUTH);
       res.status(401).json({ error: 'Invalid or expired token' });
+      return;
     }
+    req.toolAuth = { source: 'session', userId, scope: 'write' };
+    next();
   };
 }

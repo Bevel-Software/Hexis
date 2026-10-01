@@ -7,7 +7,7 @@ import type { AuthProviderPlugin } from './auth.routes.js';
 import { AUTH_COOKIE_MAX_AGE_S } from './auth.routes.js';
 import { AUTH_COOKIE_NAME } from './auth.middleware.js';
 import type { AuthService } from './auth.service.js';
-import { AccountAdmissionRefusedError } from './account-admission.js';
+import { AccountAdmissionRefusedError, AccountDeactivatedError } from './account-admission.js';
 import { normalizeIssuerUrl } from '../settings/oidc-check.js';
 
 // Short-lived CSRF state + PKCE verifier for the OAuth round-trip: set before
@@ -325,7 +325,11 @@ export class OidcAuthProvider implements AuthProviderPlugin {
         // screen can say so instead of "try again".
         if (error instanceof AccountAdmissionRefusedError) {
           log.warn('OIDC sign-in refused by the account admission port:', { detail: error.message });
-          fail('admission');
+          fail(error.waitingForAdmin ? 'waiting' : 'admission');
+          return;
+        }
+        if (error instanceof AccountDeactivatedError) {
+          fail('deactivated');
           return;
         }
         log.error('OIDC callback error:', { err: error });

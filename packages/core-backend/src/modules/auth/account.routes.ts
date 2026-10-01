@@ -26,7 +26,7 @@ import './auth.middleware.js'; // Express Request augmentation
  * bootstrap admin (always-admin, see AdminAccessService).
  */
 export function createAccountRoutes(
-  authService: Pick<AuthService, 'listAccounts' | 'createAccount' | 'getUserById'>,
+  authService: Pick<AuthService, 'listAccounts' | 'createAccount' | 'getUserById' | 'deactivate' | 'reactivate'>,
   adminAccess: IAdminAccessService,
   accountErasure: Pick<IAccountErasureService, 'eraseUser'>,
   accessRemoval?: Pick<UserAccessRemovalService, 'report' | 'assertRemovable' | 'remove' | 'filesNaming'>,
@@ -47,17 +47,18 @@ export function createAccountRoutes(
     res.json({ accounts: await authService.listAccounts() });
   });
 
-  // POST /api/admin/accounts { email, name?, password } — create an account
+  // POST /api/admin/accounts { email, name?, password? } — create an account
   // (or reset the password of an existing one; upsert-by-email is deliberate,
-  // see AuthService.createAccount).
+  // see AuthService.createAccount). Without a password the account is for
+  // single sign-on: the person finds it waiting when they first sign in.
   router.post('/admin/accounts', requireAdmin, async (req, res) => {
     const { email, name, password } = req.body as {
       email?: string;
       name?: string;
       password?: string;
     };
-    if (!email || !password) {
-      res.status(400).json({ error: 'email and password are required' });
+    if (!email) {
+      res.status(400).json({ error: 'email is required' });
       return;
     }
     try {
@@ -67,6 +68,47 @@ export function createAccountRoutes(
       const msg = error instanceof Error ? error.message : 'Unknown error';
       // The deployment has no place for the account (a seat limit, say): the
       // port's own words, as a refusal rather than a malformed request.
+      res.status(error instanceof AccountAdmissionRefusedError ? 403 : 400).json({ error: msg });
+    }
+  });
+
+  // POST /api/admin/accounts/:userId/deactivate — switch an account off. It
+  // keeps its row, history and place in roles and groups; nothing it holds
+  // signs in any more (see AuthService.isActive). An admin's own account is
+  // refused, so whoever does this is still an admin who is on afterwards —
+  // the deployment is never left with no admin able to sign in.
+  router.post('/admin/accounts/:userId/deactivate', requireAdmin, async (req, res) => {
+    const userId = String(req.params.userId);
+    if (userId === req.userId) {
+      res.status(400).json({ error: 'You cannot switch off your own account. Ask another admin.' });
+      return;
+    }
+    try {
+      if (!(await authService.deactivate(userId))) {
+        res.status(404).json({ error: 'No such user' });
+        return;
+      }
+      log.info('account audit:', { action: 'deactivate', actorUserId: req.userId, targetUserId: userId });
+      res.status(204).end();
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    }
+  });
+
+  // POST /api/admin/accounts/:userId/reactivate — switch it back on, if the
+  // deployment has room: the admission port is asked, as for a new account
+  // (a host that sells seats answers from its plan; 403 with its words).
+  router.post('/admin/accounts/:userId/reactivate', requireAdmin, async (req, res) => {
+    const userId = String(req.params.userId);
+    try {
+      if (!(await authService.reactivate(userId))) {
+        res.status(404).json({ error: 'No such user' });
+        return;
+      }
+      log.info('account audit:', { action: 'reactivate', actorUserId: req.userId, targetUserId: userId });
+      res.status(204).end();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
       res.status(error instanceof AccountAdmissionRefusedError ? 403 : 400).json({ error: msg });
     }
   });

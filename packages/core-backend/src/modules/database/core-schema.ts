@@ -37,6 +37,19 @@ export const users = pgTable('users', {
    * backfill would need, and being shown the setup once costs a click.
    */
   onboardingDone: boolean('onboarding_done').default(false).notNull(),
+  /**
+   * When an admin switched this account off; NULL while it is on. A
+   * deactivated account keeps its row, its history and its place in roles
+   * and groups, but nothing it holds is honoured: it cannot sign in, and its
+   * session, connection keys, agent tokens and internal tokens are refused
+   * the next time they are presented (see `AuthService.isActive`). Turning it
+   * back on restores all of them as they were.
+   *
+   * The off switch a host that sells seats needs — a seat is an account that
+   * is on — and the one an admin uses for someone who left without erasing
+   * what they did.
+   */
+  deactivatedAt: timestamp('deactivated_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });

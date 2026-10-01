@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import type { AuthService } from './auth.service.js';
+import { AccountDeactivatedError } from './account-admission.js';
 
 // Augment Express Request so userId/userEmail are available after auth middleware
 declare global {
@@ -46,8 +47,8 @@ function readAuthCookie(req: Request): string | null {
   return null;
 }
 
-export function createAuthMiddleware(authService: AuthService) {
-  return (req: Request, res: Response, next: NextFunction) => {
+export function createAuthMiddleware(authService: Pick<AuthService, 'resolveSession'>) {
+  return async (req: Request, res: Response, next: NextFunction) => {
     // Bearer is the primary path — every JSON API call in the frontend
     // attaches it via `authFetch`. Cookie is the fallback for transports
     // that can't carry headers (EventSource, image tags), set at login by
@@ -66,13 +67,17 @@ export function createAuthMiddleware(authService: AuthService) {
       return;
     }
 
+    let session: { userId: string; email: string };
     try {
-      const { userId, email } = authService.verifyToken(token);
-      req.userId = userId;
-      req.userEmail = email;
-      next();
-    } catch {
-      res.status(401).json({ error: 'Invalid or expired token' });
+      session = await authService.resolveSession(token);
+    } catch (err) {
+      // A 401 either way, so the app drops the session and shows the login
+      // page; a switched-off account is told why there.
+      res.status(401).json({ error: err instanceof AccountDeactivatedError ? err.message : 'Invalid or expired token' });
+      return;
     }
+    req.userId = session.userId;
+    req.userEmail = session.email;
+    next();
   };
 }

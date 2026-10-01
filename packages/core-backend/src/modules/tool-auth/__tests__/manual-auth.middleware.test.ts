@@ -25,10 +25,11 @@ const fakeExternalApiKeys = {
 } as unknown as IExternalApiKeyService;
 
 const fakeAuth = {
-  verifyToken: (t: string) => {
+  resolveSession: async (t: string) => {
     if (t === JWT) return { userId: 'u-jwt', email: 'jwt@x' };
     throw new Error('bad jwt');
   },
+  isActive: async () => true,
 } as unknown as AuthService;
 
 let server: HttpServer | undefined;

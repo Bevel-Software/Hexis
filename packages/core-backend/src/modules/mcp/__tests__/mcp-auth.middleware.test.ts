@@ -19,10 +19,14 @@ function makeReqRes(authorization?: string) {
 }
 
 function makeAuthService(verify?: (t: string) => { userId: string; email: string }) {
+  const verifyToken = vi.fn(verify ?? (() => {
+    throw new Error('invalid');
+  }));
   return {
-    verifyToken: vi.fn(verify ?? (() => {
-      throw new Error('invalid');
-    })),
+    verifyToken,
+    // The session path checks the account is still on; every account here is.
+    resolveSession: vi.fn(async (t: string) => verifyToken(t)),
+    isActive: vi.fn(async () => true),
   } as unknown as AuthService;
 }
 

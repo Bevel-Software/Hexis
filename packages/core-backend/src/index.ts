@@ -103,6 +103,8 @@ export type { AuthProviderPlugin } from './modules/auth/auth.routes.js';
 export type { IErasureParticipant } from './modules/auth/account-erasure.service.js';
 export {
   AccountAdmissionRefusedError,
+  AccountDeactivatedError,
+  ACCOUNT_DEACTIVATED_MESSAGE,
   admitEveryone,
   type AccountAdmissionVerdict,
   type AccountProvisionReason,

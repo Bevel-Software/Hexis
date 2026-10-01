@@ -5,9 +5,11 @@ import { useAdmin } from '../state/admin.context';
 import { useAuth } from '../../auth/state/auth.context';
 import {
   createAccount,
+  deactivateAccount,
   deleteAccount,
   getAccountReferences,
   listAccounts,
+  reactivateAccount,
   type AccountReferences,
   type AccountSummary,
 } from '../../auth/services/account.api';
@@ -155,6 +157,8 @@ export function UserAccountsPage() {
   const [addPassword, setAddPassword] = useState('');
   const [addError, setAddError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  // The account being switched off or on, while the request is in flight.
+  const [switching, setSwitching] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     listAccounts()
@@ -266,6 +270,21 @@ export function UserAccountsPage() {
     }
   }
 
+  async function toggleActive(account: AccountSummary) {
+    if (switching) return;
+    setSwitching(account.id);
+    setError(null);
+    try {
+      if (account.deactivatedAt) await reactivateAccount(account.id);
+      else await deactivateAccount(account.id);
+      refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't change this account.");
+    } finally {
+      setSwitching(null);
+    }
+  }
+
   async function handleAdd(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (adding) return;
@@ -308,9 +327,11 @@ export function UserAccountsPage() {
           <p className="text-xs text-ink-muted leading-snug">
             Everyone with an account on this deployment. Deleting an account permanently removes
             the person&apos;s data and anonymizes their past review activity; their saves in the
-            knowledge base keep their history. Setting a password lets someone sign in with
-            email + password (existing accounts keep everything else); resetting one replaces
-            the password they have now.
+            knowledge base keep their history. Switching an account off keeps all of that but
+            stops them signing in, and their keys and agent connections stop working until it is
+            switched back on. Setting a password lets someone sign in with email + password
+            (existing accounts keep everything else); resetting one replaces the password they
+            have now.
           </p>
 
           {error && (
@@ -366,6 +387,9 @@ export function UserAccountsPage() {
                         {isSelf && (
                           <span className="ml-1.5 text-meta font-normal text-ink-muted">(you)</span>
                         )}
+                        {account.deactivatedAt && (
+                          <span className="ml-1.5 text-meta font-normal text-ink-muted">(switched off)</span>
+                        )}
                       </div>
                       <div className="text-meta text-ink-muted truncate">
                         {account.email} · Joined {new Date(account.createdAt).toLocaleDateString()} ·{' '}
@@ -393,6 +417,25 @@ export function UserAccountsPage() {
                           {passwordAction(account).label}
                         </button>
                       ))}
+                    {!isSelf && !account.isEnvAdmin && (
+                      // Not for your own account (the backend refuses it, so
+                      // an admin always remains who can sign in) nor the
+                      // deployment admin's (its environment password is the
+                      // way back in).
+                      <button
+                        onClick={() => toggleActive(account)}
+                        disabled={switching !== null}
+                        className="text-xs px-2 py-1 rounded-sm text-ink hover:bg-hover border border-line disabled:opacity-50"
+                        title={
+                          account.deactivatedAt
+                            ? 'Let this person sign in again.'
+                            : 'Stop this person signing in, without deleting anything.'
+                        }
+                        aria-label={`${account.deactivatedAt ? 'Switch on' : 'Switch off'} ${account.email}`}
+                      >
+                        {account.deactivatedAt ? 'Switch on' : 'Switch off'}
+                      </button>
+                    )}
                     {!isSelf && (
                       <button
                         onClick={() => openDeleteDialog(account)}
@@ -440,13 +483,16 @@ export function UserAccountsPage() {
               <span className="text-xs text-ink-muted">Password</span>
               <input
                 type="password"
-                required
                 autoComplete="new-password"
+                aria-describedby="add-account-password-hint"
                 value={addPassword}
                 onChange={(e) => setAddPassword(e.target.value)}
                 className={inputClass}
               />
             </label>
+            <p id="add-account-password-hint" className="text-meta text-ink-faint">
+              Optional. Leave it empty and they sign in with single sign-on.
+            </p>
             {addError && (
               <div className="text-xs text-red-600" role="alert">
                 {addError}

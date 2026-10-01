@@ -177,7 +177,7 @@ export function createMcpAuthMiddleware(
         res.status(500).json({ error: 'Authentication backend unavailable' });
         return;
       }
-      if (!user) {
+      if (!user || !(await authService.isActive(user.id))) {
         unauthorized(res, 'Invalid or expired internal token');
         return;
       }
@@ -214,13 +214,15 @@ export function createMcpAuthMiddleware(
     // JWT path — same logic as `createAuthMiddleware` in modules/auth, kept
     // duplicated rather than imported because that one writes its own 401
     // body shape and we want the WWW-Authenticate header set.
+    let session: { userId: string; email: string };
     try {
-      const { userId, email } = authService.verifyToken(token);
-      req.userId = userId;
-      req.userEmail = email;
-      next();
+      session = await authService.resolveSession(token);
     } catch {
       unauthorized(res, 'Invalid or expired token');
+      return;
     }
+    req.userId = session.userId;
+    req.userEmail = session.email;
+    next();
   };
 }

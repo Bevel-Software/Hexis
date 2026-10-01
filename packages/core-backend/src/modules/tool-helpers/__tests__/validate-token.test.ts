@@ -18,7 +18,7 @@ const externalApiKeyService = {
   verifyAndLoadToken: async (t: string) =>
     t === 'bevel_ok' ? { user: { id: 'u-ext', email: 'e@x', name: 'Ext' }, tokenId: 'tk-1' } : null,
 } as never;
-const authService = { getUserById: async (id: string) => ({ id, email: 'e@x', name: 'N' }) } as never;
+const authService = { getUserById: async (id: string) => ({ id, email: 'e@x', name: 'N' }), isActive: async () => true } as never;
 
 let tempDir = '';
 const workspaceService = {
