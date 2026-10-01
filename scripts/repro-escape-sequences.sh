@@ -73,26 +73,57 @@ json_str() { # json_str <value> — the value as a complete JSON string
   printf '"%s"' "$(json_esc "$1")"
 }
 
-# Substituted with bash's own `${var//pat/repl}`, which interprets NOTHING in
-# the replacement, rather than with sed: sed expands `&` in a replacement to the
-# whole match, and `&` is legal in a git branch name, so a branch called `a&b`
-# rendered as `a__BRANCH__b`. Escaping sed's metacharacters (`&`, `\\`, the `|`
-# delimiter) is strictly harder than not interpreting them; it also sidesteps
-# `sed -i`, whose no-suffix form is GNU-only and whose `-i ''` form is BSD-only.
+# Substitutes with bash's own string operators rather than with sed, which
+# expands `&` in a replacement to the whole match — and `&` is legal in a git
+# branch name, so a branch `a&b` used to render as `a__BRANCH__b`. Escaping
+# sed's metacharacters (`&`, `\\`, the `|` delimiter) is strictly harder than not
+# interpreting them, and this also sidesteps `sed -i`, whose no-suffix form is
+# GNU-only and whose `-i ''` form is BSD-only.
 #
-# Every placeholder sits inside a JSON string, so the value is JSON-escaped:
-# git forbids a backslash in a ref but allows a quote, and an unescaped quote
-# would make the body malformed rather than merely wrong. In the chain template
-# the value sits inside a JavaScript string literal that is ITSELF inside a JSON
+# Every placeholder sits inside a JSON string, so the value is JSON-escaped: git
+# forbids a backslash in a ref but allows a quote, and an unescaped quote would
+# make the body malformed rather than merely wrong. In the chain template the
+# value sits inside a JavaScript string literal that is ITSELF inside a JSON
 # string, so there it is escaped twice — hence the `_JS` placeholders.
+#
+# ONE pass, left to right: a substituted value is copied to the output and never
+# looked at again. Four sequential `${text//…}` replacements would each re-scan
+# what the previous one inserted, so a branch legally named `feature__DIR__docs`
+# would have its own text rewritten by the `__DIR__` round and the script would
+# write to a branch nobody asked for.
 render() { # render <template> <output>
-  local text
+  local text out pre len token best_token best_len
   text=$(cat "$1")
-  text=${text//__BRANCH_JS__/"$(json_esc "$(json_esc "$BRANCH")")"}
-  text=${text//__DIR_JS__/"$(json_esc "$(json_esc "$DIR")")"}
-  text=${text//__BRANCH__/"$(json_esc "$BRANCH")"}
-  text=${text//__DIR__/"$(json_esc "$DIR")"}
-  printf '%s\n' "$text" > "$2"
+  out=
+
+  while :; do
+    best_token=
+    best_len=
+    # The earliest placeholder still ahead of us wins. No two of these can match
+    # at the same position (`__BRANCH_JS__` and `__BRANCH__` differ at the 10th
+    # character), so first-by-position is unambiguous.
+    for token in __BRANCH_JS__ __DIR_JS__ __BRANCH__ __DIR__; do
+      pre=${text%%"$token"*}
+      [ "$pre" = "$text" ] && continue   # this placeholder is not in what is left
+      len=${#pre}
+      if [ -z "$best_len" ] || [ "$len" -lt "$best_len" ]; then
+        best_len=$len
+        best_token=$token
+      fi
+    done
+    [ -z "$best_token" ] && break
+
+    out=$out${text:0:$best_len}
+    case $best_token in
+      __BRANCH_JS__) out=$out$(json_esc "$(json_esc "$BRANCH")") ;;
+      __DIR_JS__)    out=$out$(json_esc "$(json_esc "$DIR")") ;;
+      __BRANCH__)    out=$out$(json_esc "$BRANCH") ;;
+      __DIR__)       out=$out$(json_esc "$DIR") ;;
+    esac
+    text=${text:$((best_len + ${#best_token}))}
+  done
+
+  printf '%s\n' "$out$text" > "$2"
 }
 
 for f in "$WORK"/*.tmpl; do
