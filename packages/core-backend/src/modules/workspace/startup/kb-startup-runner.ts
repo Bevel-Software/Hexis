@@ -57,13 +57,12 @@ export interface KbStartupRunnerOptions {
   kbRepoUrl: () => string;
   workspacesRoot: string;
   /**
-   * Where a working copy of a repository that is no longer the configured
-   * one is moved to, under a folder named for the moment it happened — see
-   * `reconcileClonesWithConfiguredRepository`. NOT under `workspacesRoot`:
-   * the workspace service's orphan sweep removes every folder there that is
-   * not a known branch's, and what is set aside has to outlive that sweep.
-   * The composition root names a folder under the backups root, which is a
-   * persistent volume of its own. Default: a sibling of `workspacesRoot`.
+   * Where a working copy of a repository that is no longer the configured one
+   * is moved to, under a folder named for the moment it happened — see
+   * `reconcileClonesWithConfiguredRepository`. THE SAME VALUE THE WORKSPACE
+   * SERVICE IS GIVEN.
+   *
+   * Why, in one place: `setAsideRootFor` in `set-aside-clone.ts`.
    */
   setAsideRoot?: string;
   kbDirName: string;

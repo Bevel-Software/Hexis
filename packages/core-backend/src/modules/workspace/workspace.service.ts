@@ -312,18 +312,11 @@ export class WorkspaceService implements IWorkspaceService {
     private readonly gitRunner: IGitRunner = new NodeGitRunner(),
     /**
      * Where a working copy of a repository that is no longer the configured
-     * one is kept — see `set-aside-clone.ts`.
+     * one is kept. THE SAME VALUE THE KB STARTUP PHASE IS GIVEN — what the two
+     * of them move must end up in one place, and omitting it here falls back to
+     * a directory that does not survive a deployment's next recreate.
      *
-     * THE SAME VALUE THE KB STARTUP PHASE IS GIVEN, and the composition root
-     * hands both of them one variable, because the two find the same clones
-     * for the same reason and what they move must end up in one place. It
-     * also has to be a location that OUTLIVES THE CONTAINER: a deployment
-     * runs from an image whose filesystem is replaced on every recreate, so
-     * the default below — beside the workspaces root — is a persistent
-     * directory only when the workspaces root's parent is a mounted volume,
-     * which in the shipped compose file it is not. Left to that default here,
-     * a working copy this service set aside was gone at the next ordinary
-     * `docker compose up`, having promised the admin it was kept.
+     * Why, in one place: `setAsideRootFor` in `set-aside-clone.ts`.
      */
     private readonly setAsideRoot?: string,
   ) {
