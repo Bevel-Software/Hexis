@@ -119,7 +119,7 @@ export interface SetupStatus {
 }
 
 /**
- * What the admin must decide before a save changes the knowledge-base
+ * What the admin must decide before a save moves the deployment to another
  * repository: `keep` — it only moved, so the open change requests still mean
  * something — or `close` — it was replaced, so they are closed as "repository
  * replaced". Nothing is deleted either way.
@@ -127,19 +127,27 @@ export interface SetupStatus {
 export type RepositoryChangeChoice = 'keep' | 'close';
 
 /**
- * The server refused the save until the repository change is confirmed (409).
+ * The server refused the save until the move to another repository is
+ * confirmed (409). The one question every move is asked: another address,
+ * another repository on GitHub, another way of having one.
  *
  * Not an error to show as one: nothing was saved, nothing was destroyed, and
  * the answer is a decision only the admin can make. `openChangeRequests` is
- * the count the choice is about, read at the moment of the refusal.
+ * the count the choice is about, read at the moment of the refusal. `from`
+ * and `to` are the way left and the way moved to: equal for a move within
+ * one way, absent from a server that knows one way only.
  */
 export class RepositoryChangeNeedsConfirmation extends Error {
   readonly openChangeRequests: number;
+  readonly from?: GitMode;
+  readonly to?: GitMode;
 
-  constructor(openChangeRequests: number) {
-    super('This changes the knowledge-base repository.');
+  constructor(openChangeRequests: number, from?: GitMode, to?: GitMode) {
+    super('This moves the deployment to another repository.');
     this.name = 'RepositoryChangeNeedsConfirmation';
     this.openChangeRequests = openChangeRequests;
+    this.from = from;
+    this.to = to;
   }
 }
 
@@ -204,7 +212,7 @@ async function readError(res: Response): Promise<never> {
     error?: string;
     problems?: Record<string, string>;
     kbInit?: KbInitFailure;
-    repositoryChange?: { openChangeRequests?: number };
+    repositoryChange?: { openChangeRequests?: number; from?: GitMode; to?: GitMode };
   };
   if (data.problems) throw new SettingsProblems(data.problems);
   if (data.kbInit) throw new KbInitFailed(data.kbInit);
@@ -212,7 +220,8 @@ async function readError(res: Response): Promise<never> {
   // the generic throw so the form gets the decision to put to the admin, not
   // a sentence in a red box that nothing can be done about.
   if (res.status === 409 && data.repositoryChange) {
-    throw new RepositoryChangeNeedsConfirmation(data.repositoryChange.openChangeRequests ?? 0);
+    const { openChangeRequests, from, to } = data.repositoryChange;
+    throw new RepositoryChangeNeedsConfirmation(openChangeRequests ?? 0, from, to);
   }
   throw new Error(data.error || `Request failed (${res.status})`);
 }

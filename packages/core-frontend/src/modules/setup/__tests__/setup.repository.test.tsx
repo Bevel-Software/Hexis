@@ -21,7 +21,7 @@ vi.mock('../../settings/services/github-facade.api', () => ({
 }));
 
 import { SetupScreen } from '../components/SetupScreen';
-import { SettingsProblems, type GitMode, type RepositoryStatus, type SettingStatus } from '../services/setup.api';
+import { RepositoryChangeNeedsConfirmation, SettingsProblems, type GitMode, type RepositoryStatus, type SettingStatus } from '../services/setup.api';
 
 const KB = 'knowledge-base' as const;
 const setting = (key: string, extra: Partial<SettingStatus> = {}): SettingStatus => ({
@@ -242,41 +242,56 @@ describe('SetupScreen: moving a deployment to another repository', () => {
     expect(screen.queryByTestId('moves-repository')).toBeNull();
   });
 
-  const moveButton = () => screen.getByRole('button', { name: 'Save and move' });
-  const agree = () => userEvent.click(screen.getByRole('checkbox', { name: /Move this deployment from/ }));
+  /** The server's refusal of a save that moves, until the admin has answered. */
+  const asksFirst = (openChangeRequests = 0, to: GitMode = 'managed') =>
+    api.saveSettings.mockImplementation(async (_settings: unknown, confirm?: string) => {
+      if (!confirm) throw new RepositoryChangeNeedsConfirmation(openChangeRequests, 'token', to);
+      return {
+        ...saved(to, true),
+        repositoryChange: { choice: confirm, closedChangeRequests: confirm === 'close' ? openChangeRequests : 0 },
+      };
+    });
+  const question = () => screen.findByTestId('repository-change-confirm');
+  const confirmMove = () => userEvent.click(screen.getByRole('button', { name: 'Move the deployment' }));
 
   /**
    * The tab is the choice, and the tab is a screen above the button. An
    * admin who opens another way to read about it, changes a sign-in field
    * and saves must not have moved the deployment to an empty repository.
+   * The server refuses that save, and the screen puts the question.
    */
   it('does not move on a save the admin was not asked about', async () => {
-    api.saveSettings.mockResolvedValue({ ...saved('token', true), repository: offering('token', 'managed') });
+    asksFirst();
     show({ configured: true, variant: 'settings' });
     await userEvent.click(tab('Managed for you'));
     await userEvent.type(screen.getByLabelText('Knowledge folder', { exact: false }), 'Docs');
+    await save();
 
     // Asked at the button, naming what is left and what is moved to.
-    const asked = screen.getByTestId('confirm-move');
-    expect(asked).toHaveTextContent('Move this deployment from “Address and token” to “Managed for you”');
+    const asked = await question();
+    expect(asked).toHaveTextContent('Move this deployment from “Address and token” to “Managed for you”?');
     expect(asked).toHaveTextContent('Nothing is deleted');
-    expect(screen.queryByRole('button', { name: 'Save and continue' })).toBeNull();
-    expect(moveButton()).toBeDisabled();
-    await userEvent.click(moveButton());
-    expect(api.saveSettings).not.toHaveBeenCalled();
+    expect(asked).toHaveTextContent('with no restart');
+    // One refused attempt, and the save button waits for the answer.
+    expect(api.saveSettings).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Save and continue' })).toBeDisabled();
   });
 
   it('sends the move once the admin has said yes, and nothing of the repository it leaves', async () => {
-    api.saveSettings.mockResolvedValue({ ...saved('token', true), restartRequired: true, repository: offering('token', 'managed') });
+    asksFirst();
     show({ configured: true, variant: 'settings' });
     await userEvent.click(tab('Managed for you'));
-    await agree();
-    await userEvent.click(moveButton());
-    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({ gitMode: 'managed' }));
+    await save();
+    await question();
+    await confirmMove();
+    await waitFor(() => expect(api.saveSettings).toHaveBeenLastCalledWith({ gitMode: 'managed' }, 'keep'));
     expect(api.testConnection).not.toHaveBeenCalled();
+    // Moved on the save: said so, with no restart owed.
+    expect(await screen.findByTestId('repository-changed')).toHaveTextContent('now works on the new repository');
   });
 
   it('asks again for another move: a yes to one is not a yes to the next', async () => {
+    asksFirst();
     render(
       <SetupScreen
         settings={settingsOf(true)}
@@ -286,11 +301,24 @@ describe('SetupScreen: moving a deployment to another repository', () => {
       />,
     );
     await userEvent.click(tab('Managed for you'));
-    await agree();
-    expect(moveButton()).toBeEnabled();
+    await save();
+    await question();
+    // The question was about the move to "Managed for you". Another tab is another move.
     await userEvent.click(tab('GitHub'));
-    expect(screen.getByRole('checkbox', { name: /to “GitHub”/ })).not.toBeChecked();
-    expect(moveButton()).toBeDisabled();
+    expect(screen.queryByTestId('repository-change-confirm')).toBeNull();
+    expect(api.saveSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancelling leaves the deployment where it is', async () => {
+    asksFirst(2);
+    show({ configured: true, variant: 'settings' });
+    await userEvent.click(tab('Managed for you'));
+    await save();
+    expect(await question()).toHaveTextContent('There are 2 open change requests.');
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByTestId('repository-change-confirm')).toBeNull();
+    expect(api.saveSettings).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Save and continue' })).toBeEnabled();
   });
 
   it('asks nothing of a save that stays where the deployment is', async () => {
@@ -298,10 +326,10 @@ describe('SetupScreen: moving a deployment to another repository', () => {
     show({ configured: true, variant: 'settings' });
     await userEvent.click(tab('Managed for you'));
     await userEvent.click(tab('Address and token'));
-    expect(screen.queryByTestId('confirm-move')).toBeNull();
     await userEvent.type(screen.getByLabelText('Knowledge folder', { exact: false }), 'Docs');
     await save();
     await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({ knowledgeBaseDir: 'Docs' }));
+    expect(screen.queryByTestId('repository-change-confirm')).toBeNull();
   });
 
   it('asks nothing on a deployment that has no repository to leave', async () => {
@@ -309,14 +337,19 @@ describe('SetupScreen: moving a deployment to another repository', () => {
     show();
     await userEvent.click(tab('Address and token'));
     expect(screen.queryByTestId('moves-repository')).toBeNull();
-    expect(screen.queryByTestId('confirm-move')).toBeNull();
     await userEvent.click(tab('Managed for you'));
     await save();
     await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({ gitMode: 'managed' }));
+    expect(screen.queryByTestId('repository-change-confirm')).toBeNull();
   });
 });
 
-describe('SetupScreen: between a move and the restart it owes', () => {
+/**
+ * A confirmed move takes effect on its save, so this state is not one a move
+ * leaves behind any more. It is still one a server can report (a way chosen
+ * that it has not put in effect), and the screen must read it truthfully.
+ */
+describe('SetupScreen: a way chosen that is not in effect yet', () => {
   it('opens on the way chosen, and says the deployment is still on the one it has', () => {
     show({ configured: true, mode: 'token', chosen: 'managed', variant: 'settings' });
     expect(tab('Managed for you')).toHaveAttribute('aria-selected', 'true');
@@ -325,7 +358,7 @@ describe('SetupScreen: between a move and the restart it owes', () => {
     expect(pending).toHaveTextContent('still working on “Address and token”');
     // The move was made: it is not offered again, and not asked about again.
     expect(screen.queryByTestId('moves-repository')).toBeNull();
-    expect(screen.queryByTestId('confirm-move')).toBeNull();
+    expect(screen.queryByTestId('repository-change-confirm')).toBeNull();
   });
 
   it('does not send the move a second time with a save about something else', async () => {
@@ -341,7 +374,7 @@ describe('SetupScreen: between a move and the restart it owes', () => {
     show({ configured: true, mode: 'token', chosen: 'managed', variant: 'settings' });
     await userEvent.click(tab('Address and token'));
     expect(screen.getByTestId('move-taken-back')).toHaveTextContent('Saving takes the move back');
-    expect(screen.queryByTestId('confirm-move')).toBeNull();
+    expect(screen.queryByTestId('repository-change-confirm')).toBeNull();
     await save();
     await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({ gitMode: 'token' }));
   });
@@ -362,7 +395,7 @@ describe('SetupScreen: a way chosen by the environment', () => {
     expect(screen.getByTestId('repository-pinned')).toHaveTextContent('Set by the GIT_MODE environment variable');
     await userEvent.click(tab('Address and token'));
     expect(tab('Managed for you')).toHaveAttribute('aria-selected', 'true');
-    expect(screen.queryByTestId('confirm-move')).toBeNull();
+    expect(screen.queryByTestId('repository-change-confirm')).toBeNull();
   });
 
   it('says nothing of the kind when the admin chose', () => {

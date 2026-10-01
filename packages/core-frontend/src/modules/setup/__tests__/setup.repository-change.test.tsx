@@ -66,7 +66,7 @@ function serverWith(openChangeRequests: number) {
       const body = JSON.parse(String(init?.body ?? '{}')) as { confirmRepositoryChange?: string };
       if (!body.confirmRepositoryChange) {
         return json(409, {
-          error: 'This changes the knowledge-base repository.',
+          error: 'This moves the deployment to another repository.',
           repositoryChange: { openChangeRequests },
         });
       }
@@ -130,14 +130,14 @@ describe('a changed repository address, with change requests open', () => {
     await typeTheNewAddressAndSave();
     await screen.findByTestId('repository-change-confirm');
 
-    await userEvent.click(screen.getByRole('button', { name: 'Replace the repository' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Move the deployment' }));
 
     await waitFor(() => expect(saveBodies()).toHaveLength(2));
     expect(saveBodies()[1]).toMatchObject({
       confirmRepositoryChange: 'keep',
       settings: { kbRepoUrl: REPLACEMENT },
     });
-    expect(await screen.findByTestId('repository-changed')).toHaveTextContent(/working copies were replaced/i);
+    expect(await screen.findByTestId('repository-changed')).toHaveTextContent(/now works on the new repository/i);
   });
 
   it('closes them as “repository replaced” when the admin picks that, and says so', async () => {
@@ -147,7 +147,7 @@ describe('a changed repository address, with change requests open', () => {
     await screen.findByTestId('repository-change-confirm');
 
     await userEvent.click(screen.getAllByRole('radio')[1]!);
-    await userEvent.click(screen.getByRole('button', { name: 'Replace the repository' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Move the deployment' }));
 
     await waitFor(() => expect(saveBodies()).toHaveLength(2));
     expect(saveBodies()[1]).toMatchObject({ confirmRepositoryChange: 'close' });
@@ -181,7 +181,7 @@ describe('a changed repository address with nothing open', () => {
     expect(confirm).toHaveTextContent(/stops being used and is cloned fresh/i);
     expect(screen.queryAllByRole('radio')).toEqual([]);
 
-    await userEvent.click(screen.getByRole('button', { name: 'Replace the repository' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Move the deployment' }));
     await waitFor(() => expect(saveBodies()).toHaveLength(2));
     expect(saveBodies()[1]).toMatchObject({ confirmRepositoryChange: 'keep' });
   });
@@ -204,7 +204,7 @@ describe('a CONFIRMED save the server refuses', () => {
         const body = JSON.parse(String(init?.body ?? '{}')) as { confirmRepositoryChange?: string };
         if (!body.confirmRepositoryChange) {
           return json(409, {
-            error: 'This changes the knowledge-base repository.',
+            error: 'This moves the deployment to another repository.',
             repositoryChange: { openChangeRequests: 2 },
           });
         }
@@ -221,7 +221,7 @@ describe('a CONFIRMED save the server refuses', () => {
     await screen.findByTestId('repository-change-confirm');
 
     await userEvent.click(screen.getAllByRole('radio')[1]!);
-    await userEvent.click(screen.getByRole('button', { name: 'Replace the repository' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Move the deployment' }));
 
     expect(
       await screen.findByText(/The open change requests could not be closed/),
@@ -246,7 +246,7 @@ describe('a CONFIRMED save the server refuses', () => {
         const body = JSON.parse(String(init?.body ?? '{}')) as { confirmRepositoryChange?: string };
         if (!body.confirmRepositoryChange) {
           return json(409, {
-            error: 'This changes the knowledge-base repository.',
+            error: 'This moves the deployment to another repository.',
             repositoryChange: { openChangeRequests: 1 },
           });
         }
@@ -261,12 +261,12 @@ describe('a CONFIRMED save the server refuses', () => {
     await typeTheNewAddressAndSave();
     await screen.findByTestId('repository-change-confirm');
 
-    await userEvent.click(screen.getByRole('button', { name: 'Replace the repository' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Move the deployment' }));
 
     await waitFor(() =>
       expect(screen.queryByTestId('repository-change-confirm')).not.toBeInTheDocument(),
     );
-    expect(screen.queryByRole('button', { name: 'Replace the repository' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Move the deployment' })).toBeNull();
     expect(await screen.findByText(/There is no repository at that address\./)).toBeInTheDocument();
     // Two requests went out; nothing re-sent the answered confirmation.
     expect(saveBodies()).toHaveLength(2);

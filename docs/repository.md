@@ -120,22 +120,28 @@ access, and press **Test connection**. See
 
 ## Moving to another repository
 
-Open another tab, tick the confirmation above the button, and press **Save
-and move**. Opening a tab moves nothing: the screen asks at the button,
-naming the way you leave and the way you move to.
+A move is any save that puts the deployment on a different repository:
+another tab, another address, or another repository on GitHub. Every move
+works the same way.
 
+Make the change and press **Save and continue**. Nothing moves yet: the
+screen asks you to confirm at the button, naming the way you leave and the
+way you move to. Opening a tab moves nothing either.
+
+- **The move takes effect when you confirm.** No restart is needed.
 - The deployment moves to the other repository, which starts without what
   the current one holds.
 - Nothing is deleted. The repository you leave is untouched.
-- **The move takes effect at the next restart.** Until then the deployment
-  goes on working on the repository it has, and the tab says a restart is
-  pending.
-- At that restart, the deployment's working copies of the repository it
-  left are set aside under `replaced-working-copies/` in the backups
-  volume, with any work that was never pushed.
+- The deployment's working copies of the repository it left are set aside
+  under `replaced-working-copies/` in the backups volume, with any work
+  that was never pushed. Changes that were still waiting to be committed to
+  them are held for an admin to look at, not committed to the new
+  repository.
+- If change requests are open, you choose: keep them open, when the same
+  repository only moved, or close them as "repository replaced".
 
-To take the move back before the restart, open the tab of the way the
-deployment is on and save.
+Cancel the question to stay where you are. To go back after a move, move
+again to the repository you left.
 
 To take history with you, push the old repository into the new one with
 git before you move.
