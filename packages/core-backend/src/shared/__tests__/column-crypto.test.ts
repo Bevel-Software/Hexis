@@ -8,6 +8,7 @@ import {
   encryptPii,
   initColumnCrypto,
   isEncryptedBlob,
+  openPii,
 } from '../column-crypto.js';
 import { TokenCrypto } from '../token-crypto.js';
 
@@ -81,6 +82,18 @@ describe('encryptPii / decryptPii', () => {
     expect(decryptPii(sealed)).toBe(sealed);
     initColumnCrypto(KEY);
     expect(decryptPii(sealed)).toBe('secret-person@example.com');
+  });
+
+  it('openPii tells a blob the key does not open from a plaintext shaped like one', () => {
+    // A value whose PLAINTEXT is itself a well-formed blob: opened correctly,
+    // the result still looks sealed. Only the explicit outcome tells the two
+    // apart — the shape of what the lenient read returns cannot.
+    const inner = encryptPii('inner@example.com');
+    const outer = encryptPii(inner);
+    expect(openPii(outer)).toEqual({ ok: true, plain: inner });
+    expect(openPii('plain@example.com')).toEqual({ ok: true, plain: 'plain@example.com' });
+    initColumnCrypto(randomBytes(32).toString('base64'));
+    expect(openPii(outer)).toEqual({ ok: false });
   });
 
   it('use before initColumnCrypto throws instead of handing back the blob', async () => {

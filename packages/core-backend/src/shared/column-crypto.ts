@@ -112,12 +112,24 @@ export function encryptPii(value: string): string {
  * decrypt failure and is not swallowed: it throws like every other use.
  */
 export function decryptPii(value: string): string {
-  if (!isEncryptedBlob(value)) return value;
+  const opened = openPii(value);
+  return opened.ok ? opened.plain : value;
+}
+
+/**
+ * {@link decryptPii} that SAYS whether a blob opened, for the callers that
+ * must tell "the key does not open this" from a value: the lenient read hands
+ * the blob back on failure, and the shape of its result proves nothing — a
+ * plaintext may itself be shaped like a blob. A value that is not a blob is
+ * its own plaintext.
+ */
+export function openPii(value: string): { ok: true; plain: string } | { ok: false } {
+  if (!isEncryptedBlob(value)) return { ok: true, plain: value };
   const crypto = requireCrypto();
   try {
-    return crypto.decrypt(value.slice(PII_CIPHERTEXT_PREFIX.length));
+    return { ok: true, plain: crypto.decrypt(value.slice(PII_CIPHERTEXT_PREFIX.length)) };
   } catch {
-    return value;
+    return { ok: false };
   }
 }
 

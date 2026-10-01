@@ -8,9 +8,9 @@ import { AdvisoryLock, withAdvisoryLock } from './advisory-lock.js';
 import {
   PII_SEALED_SHAPE_SQL_REGEX,
   blindIndex,
-  decryptPii,
   encryptPii,
   isEncryptedBlob,
+  openPii,
 } from '../../shared/column-crypto.js';
 
 /*
@@ -200,7 +200,7 @@ async function assertKeyOpensSealedRows(tx: Executor): Promise<void> {
       sql`SELECT ${ident(col)} AS value FROM ${ident(t.table)} WHERE ${ident(col)} ~ ${PII_SEALED_SHAPE_SQL_REGEX} LIMIT 1`,
     );
     const value = (sample.rows[0] as { value?: unknown } | undefined)?.value;
-    if (typeof value === 'string' && isEncryptedBlob(decryptPii(value))) {
+    if (typeof value === 'string' && !openPii(value).ok) {
       throw new Error(
         `PII encryption: ${t.table}.${col} is sealed with a key the configured SECRETS_ENC_KEY ` +
           '(or TENANT_MASTER_KEY) does not open — refusing to start. Restore the key that sealed it; ' +
@@ -247,15 +247,15 @@ async function backfillTable(tx: Executor, t: PiiBackfillTable): Promise<number>
       const stored = row[t.bidx.column];
       const sealingSource = typeof source === 'string' && source !== '' && !isEncryptedBlob(source);
       if (sealingSource || stored == null) {
-        const plain = decryptPii(typeof source === 'string' ? source : '');
-        if (isEncryptedBlob(plain)) {
+        const opened = openPii(typeof source === 'string' ? source : '');
+        if (!opened.ok) {
           throw new Error(
             `PII encryption backfill: ${t.table}.${t.bidx.source} cannot be decrypted with the ` +
               'configured SECRETS_ENC_KEY — refusing to derive a blind index from ciphertext. ' +
               'Restore the key that sealed it, then restart.',
           );
         }
-        sets.push(sql`${ident(t.bidx.column)} = ${blindIndex(plain)}`);
+        sets.push(sql`${ident(t.bidx.column)} = ${blindIndex(opened.plain)}`);
         // Pin the index AND its source: if a concurrent writer replaces the
         // email between scan and write, the CAS must not attach the OLD
         // email's blind index to the NEW value.
