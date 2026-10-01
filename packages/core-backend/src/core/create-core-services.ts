@@ -110,7 +110,6 @@ import { WorkflowEventBus } from '../modules/workflow/event-bus.js';
 import { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
 import { WorkflowService } from '../modules/workflow/workflow.service.js';
 import { WorkflowHooks } from '../modules/workflow/workflow-hooks.js';
-import { SessionOntologyService } from '../modules/workflow/session-ontology.service.js';
 import { PendingCommitsService } from '../modules/workflow/pending-commits.service.js';
 import {
   PendingCommitsWorker,
@@ -218,7 +217,6 @@ export interface CoreServices {
   creatorAccess: CreatorAccessService;
   /** Read-before-write, for the surfaces that ask ahead of the lock (see `access-model/change-gate.ts`). */
   changeGate: ChangeReadGate;
-  sessionOntologyService: SessionOntologyService;
   routineWritePolicy: RoutineWritePolicyService;
   skillService: SkillService;
   pendingSkillsService: PendingSkillsService;
@@ -574,14 +572,10 @@ export async function createCoreServices(
   // except that new folder at a root (see `access-model/change-gate.ts`).
   const changeGate = new ChangeReadGate(workspaceService, accessControl, kb, disk);
 
-  // Ontology-session boundary: records each agent run's touched ontologies and
-  // blocks writes once a run has crossed ontologies. Postgres-backed so the
-  // boundary survives a restart.
-  const sessionOntologyService = new SessionOntologyService(db, kb);
   // Per-run write restriction (by file extension). Shared by the workspace tool
   // surface (which enforces it) and the routine runner (which sets it for
-  // dashboard-only `watchlist_check` runs). In-memory: a restriction lives only for
-  // one run, unlike the Postgres-backed ontology touched-set above.
+  // dashboard-only `watchlist_check` runs). In-memory: a restriction lives only
+  // for one run.
   const routineWritePolicy = new RoutineWritePolicyService();
   // Skills: discovered from the default-branch workspace only (global catalog).
   const skillService = new SkillService(workspaceService, accessControl, kb, disk);
@@ -632,11 +626,11 @@ export async function createCoreServices(
   // against each other — a backup-reseed races a concurrent commit otherwise.
   const workspaceMutex = new WorkspaceMutex();
   // Workflow lifecycle hooks — the ONE registry this composition shares
-  // between GitService (advisory commit validation), the session-ontology
-  // gate (blocking preWrite), and the enterprise composition root, which
-  // registers module-owned handlers on `workflowService.hooks` right after
-  // this function returns. Core registers none: no commit-time validation
-  // (advisory anyway) and no ontology write block.
+  // between GitService (advisory commit validation), the agent-access gate
+  // (the blocking agentRead / preWrite hooks), and the composition root,
+  // which registers module-owned handlers on `workflowService.hooks` right
+  // after this function returns. Core registers none: no commit-time
+  // validation (advisory anyway) and nothing that refuses an agent call.
   const workflowHooks = new WorkflowHooks();
   const gitService = new GitService(
     workspaceService,
@@ -731,7 +725,7 @@ export async function createCoreServices(
     eventBus,
     fileChangeNotifier,
     // Exposed as `workflowService.hooks` — the SAME instance GitService and
-    // the session-ontology gate consult, so enterprise registrations against
+    // the agent-access gate consult, so a deployment's registrations against
     // it reach every hook point.
     workflowHooks,
   );
@@ -1302,7 +1296,6 @@ export async function createCoreServices(
     accessControl,
     creatorAccess,
     changeGate,
-    sessionOntologyService,
     routineWritePolicy,
     skillService,
     pendingSkillsService,

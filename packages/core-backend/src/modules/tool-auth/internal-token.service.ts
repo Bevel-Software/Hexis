@@ -12,9 +12,9 @@ export interface InternalTokenClaim {
   /**
    * The agent run / conversation id (the Mastra thread id) this token is scoped
    * to, when minted per-run. Surfaced as `ToolContext.sessionId` so the
-   * ontology-session boundary can scope to one run for the in-process agent
-   * (the external/MCP path carries `sessionId` on the tool body instead).
-   * Absent for identity-only tokens.
+   * agent-access hooks can tell the in-process agent's run apart (the
+   * external/MCP path carries `sessionId` on the tool body instead). Absent
+   * for identity-only tokens.
    */
   sessionId?: string;
   /**

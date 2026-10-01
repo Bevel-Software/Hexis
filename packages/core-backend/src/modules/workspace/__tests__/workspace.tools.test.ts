@@ -11,12 +11,13 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import type { ToolContext } from '../../tool-helpers/tool.contract.js';
+import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { CONTENT_RULE, registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workflow-hooks.js';
+import { SESSION_ID_DESCRIPTION, ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
@@ -76,6 +77,14 @@ let fs: LocalFilesystem;
 let workspacePathCalls: string[] = [];
 /** Every `(archive, destination)` pair `unzip` handed the service. */
 let unzipCalls: [string, string | undefined][] = [];
+/**
+ * Workspace-relative targets the `unzipFile` stand-in pretends the archive
+ * holds. Empty by default (the stub extracts nothing); a test that is about
+ * the per-entry write guard sets it, and the stand-in then runs the guard once
+ * per entry the way the real service does — which is asserted where it lives,
+ * in `workspace.service.test.ts`.
+ */
+let unzipEntries: string[] = [];
 /** Every folder turn a tool took, as `workspaceId:dir`. */
 let folderTurns: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
@@ -88,6 +97,21 @@ let writePolicy: RoutineWritePolicyService;
 let focusedBranch: string | undefined;
 /** The registry the tools were mounted into, so a test can inspect their defs. */
 let toolRegistry: ToolRegistry;
+/** The hook registry the tools were mounted against, so a test can register one. */
+let hooks: WorkflowHooks;
+/** The note registry the tools were mounted against, so a test can register a note. */
+let notes: ToolDescriptionNotes;
+/**
+ * The recovery/merge bot's address, as the mounted gate knows it — the one
+ * identity that never reaches a hook.
+ */
+const RECOVERY_BOT = 'recovery-bot@bevel.local';
+/**
+ * What the auth layer resolves this caller's source to. `internal` (the
+ * in-process agent) unless a test is about a person in the app (`session`) or
+ * an external agent.
+ */
+let callerSource: 'internal' | 'external' | 'session' = 'internal';
 /**
  * Another writer getting to a path in the window the real `LockingFilesystem`
  * closes: the stand-ins below run it where that filesystem would be acquiring
@@ -103,6 +127,9 @@ async function start(
   userEmail = 'e@x',
 ): Promise<string> {
   raceHook = null;
+  hooks = new WorkflowHooks();
+  notes = new ToolDescriptionNotes();
+  callerSource = 'internal';
   tempDir = await mkdtemp(join(tmpdir(), 'ws-tools-'));
   docCacheDir = await mkdtemp(join(tmpdir(), 'ws-doc-cache-'));
   fs = new LocalFilesystem({ basePath: tempDir, contained: true });
@@ -163,6 +190,7 @@ async function start(
   await fs.writeFile('a.md', 'hello\nworld\n');
   workspacePathCalls = [];
   unzipCalls = [];
+  unzipEntries = [];
   folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
   focusedBranch = undefined;
@@ -195,7 +223,12 @@ async function start(
       // shapes is absence, and the real service raises exactly this error for
       // it (asserted in workspace.service.test.ts). Extraction itself lives
       // there too — none of it is the tool's to decide.
-      unzipFile: async (_id: string, zipRel: string, destRel?: string) => {
+      unzipFile: async (
+        _id: string,
+        zipRel: string,
+        destRel?: string,
+        guardWrite?: (wsRelativePath: string) => Promise<void>,
+      ) => {
         // Recorded so a test can assert the PATHS the tool handed over — both
         // ends normalised into the repository.
         unzipCalls.push([zipRel, destRel]);
@@ -204,7 +237,17 @@ async function start(
         } catch {
           throw new PathNotFoundError(zipRel);
         }
-        return { destination: '', extracted: [], skipped: [] };
+        const extracted: string[] = [];
+        const skipped: { path: string; reason: string }[] = [];
+        for (const entry of unzipEntries) {
+          try {
+            await guardWrite?.(entry);
+            extracted.push(entry);
+          } catch (err) {
+            skipped.push({ path: entry, reason: err instanceof Error ? err.message : 'refused' });
+          }
+        }
+        return { destination: '', extracted, skipped };
       },
     } as never,
     workflowService: {} as never,
@@ -213,18 +256,19 @@ async function start(
   });
   const toolHandler = createToolHandlerFactory(resolve);
   const fakeAuth = (req: express.Request, _res: express.Response, next: express.NextFunction) => {
-    req.toolAuth = { source: 'internal', userId: 'u', scope };
+    req.toolAuth = { source: callerSource, userId: 'u', scope };
     next();
   };
   const app = express();
   app.use(express.json());
   const router = express.Router();
   registerWorkspaceTools(registry, router, fakeAuth, toolHandler, new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(docCacheDir), access, testKbContext({ kbDirName: KB_DIR }), {
-    service: {} as never,
-    enabled: false, // these tests predate and don't exercise the ontology boundary
-    kb: testKbContext({ kbDirName: KB_DIR }),
-    recoveryBotEmail: 'recovery-bot@bevel.local',
-    hooks: new WorkflowHooks(),
+    // The hooks and the notes a test registers against; with neither
+    // registered (the default, and every Hexis-only deployment) the gate
+    // refuses nothing and the descriptions say nothing extra.
+    recoveryBotEmail: RECOVERY_BOT,
+    hooks,
+    notes,
   }, writePolicy, {} as never /* sessionSink — start_session not exercised here */);
   app.use('/api', router);
   httpServer = await new Promise<HttpServer>((r) => {
@@ -1816,7 +1860,7 @@ describe('images', () => {
 /**
  * start_session must mint a REAL chat thread and return its id (not a bare
  * random UUID), so the same id works for KB reads AND for `ask` (whose
- * sessionId IS a chat thread). This is what unifies the ontology boundary
+ * sessionId IS a chat thread). This is what unifies the conversation
  * across reads + ask — see workspace.tools.ts start_session comment.
  */
 describe('start_session', () => {
@@ -1863,7 +1907,7 @@ describe('start_session', () => {
     registerWorkspaceTools(
       registry, router, auth, toolHandler,
       new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, testKbContext({ kbDirName: KB_DIR }),
-      { service: {} as never, enabled: false, kb: testKbContext({ kbDirName: KB_DIR }), recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+      { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       sink ?? fakeSessionSink,
     );
@@ -1988,7 +2032,7 @@ describe('start_session', () => {
     registerWorkspaceTools(
       registry, router, noopAuth, (() => () => {}) as never,
       new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, testKbContext({ kbDirName: KB_DIR }),
-      { service: {} as never, enabled: false, kb: testKbContext({ kbDirName: KB_DIR }), recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+      { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
     );
@@ -2030,7 +2074,7 @@ describe('branch is a required parameter in the tool contract', () => {
       new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')),
       allowAll,
       testKbContext({ kbDirName: KB_DIR }),
-      { service: {} as never, enabled: false, kb: testKbContext({ kbDirName: KB_DIR }), recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+      { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
     );
@@ -3716,5 +3760,350 @@ describe('a path with nothing at it answers 404 not_found on every file tool', (
     } finally {
       readFileSpy.mockRestore();
     }
+  });
+});
+
+/**
+ * The neutral session hooks, through the tool routes.
+ *
+ * Hexis decides nothing about which paths a conversation may touch: it calls a
+ * registered hook before every agent read and every agent write of a
+ * knowledge-base path, hands it what it knows about the call, and lets a hook
+ * that throws refuse the operation with its own message and status. With no
+ * hook registered — every Hexis-only deployment — nothing is refused, nothing
+ * is recorded, and a call without a `sessionId` is an ordinary call.
+ */
+describe('agent read/write hooks', () => {
+  /** Every call the read hook saw, in order. */
+  let reads: AgentOperationContext[];
+  /** Every call the write hook saw, in order. */
+  let writes: AgentOperationContext[];
+
+  /** Register recording hooks on the mounted registry (after `start()`). */
+  const record = (): void => {
+    reads = [];
+    writes = [];
+    hooks.onAgentRead(async (op) => {
+      reads.push(op);
+    });
+    hooks.onPreWrite(async (op) => {
+      writes.push(op);
+    });
+  };
+
+  /** Register a write hook that refuses `path` (or every path) with a 403. */
+  const refuseWrites = (message: string, path?: string): void => {
+    hooks.onPreWrite(async (op) => {
+      if (path === undefined || op.wsPath === path) throw new ToolError(message, 403);
+    });
+  };
+
+  beforeEach(() => {
+    reads = [];
+    writes = [];
+  });
+
+  it('read_file calls the read hook once with the session, path, branch, user and source', async () => {
+    const base = await start();
+    record();
+    await fs.mkdir(`${KB_DIR}/KnowledgeBase/Product/Knowledge`, { recursive: true });
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Product/Knowledge/Roadmap.md`, 'plans');
+    const res = await post(`${base}/api/agent/tools/read_file`, {
+      branch: 'draft-1',
+      path: `${KB_DIR}/KnowledgeBase/Product/Knowledge/Roadmap.md`,
+      sessionId: 's1',
+    });
+    expect(res.status).toBe(200);
+    expect(reads).toEqual([
+      {
+        sessionId: 's1',
+        wsPath: `${KB_DIR}/KnowledgeBase/Product/Knowledge/Roadmap.md`,
+        branch: 'draft-1',
+        user: { id: 'u', email: 'e@x', name: 'N' },
+        source: 'internal',
+      },
+    ]);
+    expect(writes).toEqual([]);
+  });
+
+  it('the read hook covers list_files, file_stat, grep, delete_file and delete_folder', async () => {
+    const base = await start();
+    record();
+    await fs.mkdir(`${KB_DIR}/Folder`, { recursive: true });
+    await fs.writeFile(`${KB_DIR}/Folder/one.md`, 'needle');
+    await fs.writeFile(`${KB_DIR}/gone.md`, 'x');
+    await post(`${base}/api/agent/tools/list_files`, { path: `${KB_DIR}/Folder`, sessionId: 's1' });
+    await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/Folder/one.md`, sessionId: 's1' });
+    await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: `${KB_DIR}/Folder`, sessionId: 's1' });
+    await post(`${base}/api/agent/tools/delete_file`, { path: `${KB_DIR}/gone.md`, sessionId: 's1' });
+    await post(`${base}/api/agent/tools/delete_folder`, { path: `${KB_DIR}/Folder`, confirm: true, sessionId: 's1' });
+    const paths = reads.map((r) => r.wsPath);
+    expect(paths).toContain(`${KB_DIR}/Folder`);
+    expect(paths).toContain(`${KB_DIR}/Folder/one.md`);
+    expect(paths).toContain(`${KB_DIR}/gone.md`);
+    // A delete carries no bytes from elsewhere, so it is a read, never a write.
+    expect(writes).toEqual([]);
+  });
+
+  it('grep tells the read hook about every file the walk opens, not only its root', async () => {
+    const base = await start();
+    record();
+    await fs.mkdir(`${KB_DIR}/KnowledgeBase/Product/Knowledge`, { recursive: true });
+    await fs.mkdir(`${KB_DIR}/KnowledgeBase/Legal/Knowledge`, { recursive: true });
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Product/Knowledge/P.md`, 'needle');
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/L.md`, 'needle');
+    await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: KB_DIR, sessionId: 's1' });
+    const paths = reads.map((r) => r.wsPath);
+    expect(paths).toContain(`${KB_DIR}/KnowledgeBase/Product/Knowledge/P.md`);
+    expect(paths).toContain(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/L.md`);
+  });
+
+  it('the write hook covers write_file, edit_file and mkdir, once per path', async () => {
+    const base = await start();
+    record();
+    await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/new.md`, content: 'hi', sessionId: 's1' });
+    await post(`${base}/api/agent/tools/edit_file`, { path: `${KB_DIR}/a.md`, old_string: 'world', new_string: 'earth', sessionId: 's1' });
+    await post(`${base}/api/agent/tools/mkdir`, { path: `${KB_DIR}/dir`, sessionId: 's1' });
+    expect(writes.map((w) => w.wsPath)).toEqual([`${KB_DIR}/new.md`, `${KB_DIR}/a.md`, `${KB_DIR}/dir`]);
+    expect(writes.every((w) => w.sessionId === 's1' && w.branch === 'main')).toBe(true);
+  });
+
+  it('move_file and copy_file call the write hook for the source path AND the destination', async () => {
+    const base = await start();
+    record();
+    await fs.writeFile(`${KB_DIR}/src.md`, 'body');
+    await fs.writeFile(`${KB_DIR}/copy-me.md`, 'body');
+    await post(`${base}/api/agent/tools/move_file`, { src: `${KB_DIR}/src.md`, dest: `${KB_DIR}/moved.md`, confirm: true, sessionId: 's1' });
+    await post(`${base}/api/agent/tools/copy_file`, { src: `${KB_DIR}/copy-me.md`, dest: `${KB_DIR}/copied.md`, sessionId: 's1' });
+    expect(writes.map((w) => w.wsPath)).toEqual([
+      `${KB_DIR}/src.md`,
+      `${KB_DIR}/moved.md`,
+      `${KB_DIR}/copy-me.md`,
+      `${KB_DIR}/copied.md`,
+    ]);
+  });
+
+  it('unzip reads the archive and calls the write hook once per extracted entry', async () => {
+    const base = await start();
+    record();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/one.md`, `${KB_DIR}/out/two.md`];
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    expect(reads.map((r) => r.wsPath)).toEqual([`${KB_DIR}/a.zip`]);
+    expect(writes.map((w) => w.wsPath)).toEqual([`${KB_DIR}/out/one.md`, `${KB_DIR}/out/two.md`]);
+  });
+
+  it('execute_command calls the write hook once, with no path', async () => {
+    const base = await start();
+    record();
+    await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: 'echo hi', sessionId: 's1' });
+    expect(writes).toHaveLength(1);
+    expect(writes[0].wsPath).toBeUndefined();
+    expect(writes[0]).toMatchObject({ sessionId: 's1', branch: 'main', source: 'internal' });
+    expect(reads).toEqual([]);
+  });
+
+  it('a write hook that throws refuses the write with its own message and status, and the file is unchanged', async () => {
+    const base = await start();
+    record();
+    refuseWrites('Not in this conversation.');
+    const res = await post(`${base}/api/agent/tools/write_file`, {
+      path: `${KB_DIR}/a.md`,
+      // `overwrite`, so the unchanged file below is the hook's doing: with no
+      // hook this call WOULD replace `a.md`.
+      mode: 'overwrite',
+      content: 'clobbered',
+      sessionId: 's1',
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe('Not in this conversation.');
+    expect(await readFile(join(tempDir, `${KB_DIR}/a.md`), 'utf8')).toBe('hello\nworld\n');
+  });
+
+  it('a read hook that throws refuses the read with its own message and status', async () => {
+    const base = await start();
+    hooks.onAgentRead(async () => {
+      throw new ToolError('Not in this conversation.', 403);
+    });
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md`, sessionId: 's1' });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe('Not in this conversation.');
+  });
+
+  it('write_files reports the refused path only; the other two land', async () => {
+    const base = await start();
+    record();
+    refuseWrites('Not in this conversation.', `${KB_DIR}/two.md`);
+    const res = await post(`${base}/api/agent/tools/write_files`, {
+      files: [
+        { path: `${KB_DIR}/one.md`, content: '1' },
+        { path: `${KB_DIR}/two.md`, content: '2' },
+        { path: `${KB_DIR}/three.md`, content: '3' },
+      ],
+      sessionId: 's1',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { count: number; files: { path: string; outcome: string; message?: string }[] };
+    expect(body.files.map((f) => f.outcome)).toEqual(['created', 'refused', 'created']);
+    expect(body.files[1].message).toBe('Not in this conversation.');
+    expect(body.count).toBe(2);
+    expect(await readFile(join(tempDir, `${KB_DIR}/one.md`), 'utf8')).toBe('1');
+    expect(await readFile(join(tempDir, `${KB_DIR}/three.md`), 'utf8')).toBe('3');
+  });
+
+  it('a write hook that fails unexpectedly fails the whole write_files batch, rather than reading as a refusal', async () => {
+    const base = await start();
+    record();
+    // Not a ToolError: the hook did not JUDGE this path, the gate itself
+    // broke. Reporting that as `refused` would let the other paths commit
+    // past a gate that never ran.
+    hooks.onPreWrite(async (op) => {
+      if (op.wsPath === `${KB_DIR}/two.md`) throw new Error('the hook store is down');
+    });
+    const res = await post(`${base}/api/agent/tools/write_files`, {
+      files: [
+        { path: `${KB_DIR}/one.md`, content: '1' },
+        { path: `${KB_DIR}/two.md`, content: '2' },
+        { path: `${KB_DIR}/three.md`, content: '3' },
+      ],
+      sessionId: 's1',
+    });
+    expect(res.status).toBe(500);
+    for (const name of ['one.md', 'two.md', 'three.md']) {
+      await expect(readFile(join(tempDir, `${KB_DIR}/${name}`), 'utf8')).rejects.toThrow();
+    }
+  });
+
+  it('unzip skips the refused entry with the hook\'s message and extracts the others', async () => {
+    const base = await start();
+    record();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/keep.md`, `${KB_DIR}/out/blocked.md`, `${KB_DIR}/out/also-keep.md`];
+    refuseWrites('Not in this conversation.', `${KB_DIR}/out/blocked.md`);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
+    expect(body.extracted).toEqual([`${KB_DIR}/out/keep.md`, `${KB_DIR}/out/also-keep.md`]);
+    expect(body.skipped).toEqual([{ path: `${KB_DIR}/out/blocked.md`, reason: 'Not in this conversation.' }]);
+  });
+
+  it('a hook is called with no session id when the call carried none — what happens next is its decision', async () => {
+    const base = await start();
+    record();
+    await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` });
+    await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/fresh.md`, content: 'x' });
+    expect(reads).toHaveLength(1);
+    expect(reads[0].sessionId).toBeUndefined();
+    expect(writes).toHaveLength(1);
+    expect(writes[0].sessionId).toBeUndefined();
+  });
+
+  it('a person saving in the app never reaches the hooks', async () => {
+    const base = await start();
+    record();
+    callerSource = 'session';
+    await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md`, sessionId: 's1' });
+    await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/fresh.md`, content: 'x', sessionId: 's1' });
+    expect(reads).toEqual([]);
+    expect(writes).toEqual([]);
+  });
+
+  it('the recovery bot never reaches the hooks', async () => {
+    const base = await start('write', allowAll, RECOVERY_BOT);
+    record();
+    refuseWrites('Not in this conversation.');
+    const res = await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/fresh.md`, content: 'x', sessionId: 's1' });
+    expect(res.status).toBe(200);
+    expect(reads).toEqual([]);
+    expect(writes).toEqual([]);
+  });
+
+  /**
+   * The Hexis-only deployment: nothing registered at all. No call is refused,
+   * and a file tool call without a `sessionId` succeeds — including one that
+   * read under two different folders first.
+   */
+  it('with no hook registered, reads and writes without a sessionId all succeed', async () => {
+    const base = await start();
+    await fs.mkdir(`${KB_DIR}/KnowledgeBase/Product/Knowledge`, { recursive: true });
+    await fs.mkdir(`${KB_DIR}/KnowledgeBase/Legal/Knowledge`, { recursive: true });
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Product/Knowledge/P.md`, 'p');
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/L.md`, 'l');
+    expect((await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/KnowledgeBase/Product/Knowledge/P.md` })).status).toBe(200);
+    expect((await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/KnowledgeBase/Legal/Knowledge/L.md` })).status).toBe(200);
+    const wrote = await post(`${base}/api/agent/tools/write_file`, {
+      path: `${KB_DIR}/KnowledgeBase/Product/Knowledge/New.md`,
+      content: 'fresh',
+    });
+    expect(wrote.status).toBe(200);
+    expect(await readFile(join(tempDir, `${KB_DIR}/KnowledgeBase/Product/Knowledge/New.md`), 'utf8')).toBe('fresh');
+  });
+});
+
+/**
+ * What an agent READS about these tools. A Hexis-only deployment names no
+ * boundary and no ontology; a deployment that has one registers the wording
+ * for it, and it lands on the gated tools and on the `sessionId` input.
+ */
+describe('tool descriptions and the deployment note', () => {
+  /** Every tool def on the external surface, by name. */
+  const defs = async (): Promise<Map<string, { description: string; inputs: unknown }>> =>
+    new Map((await toolRegistry.listExternal()).map((t) => [t.name, t as unknown as { description: string; inputs: unknown }]));
+
+  /** The `sessionId` input's description on a built def, or undefined. */
+  const sessionIdDescriptionOf = (def: { inputs: unknown }): string | undefined =>
+    (def.inputs as { properties?: { body?: { properties?: Record<string, { description?: string }> } } })
+      .properties?.body?.properties?.sessionId?.description;
+
+  it('no tool description and no input description contains the word "ontology"', async () => {
+    await start();
+    for (const tool of await toolRegistry.listExternal()) {
+      expect(tool.description.toLowerCase(), `${tool.name} description`).not.toContain('ontolog');
+      expect(JSON.stringify(tool.inputs).toLowerCase(), `${tool.name} inputs`).not.toContain('ontolog');
+    }
+  });
+
+  it('start_session says what the id is — the conversation\'s, shared with `ask` — and names no ontology', async () => {
+    await start();
+    const description = (await defs()).get('start_session')?.description ?? '';
+    expect(description).toMatch(/conversation/i);
+    expect(description).toContain('`ask`');
+    expect(description.toLowerCase()).not.toContain('ontolog');
+  });
+
+  it('the file tools still accept a sessionId, described as this conversation\'s id', async () => {
+    await start();
+    const all = await defs();
+    for (const name of ['read_file', 'write_file', 'edit_file', 'grep', 'unzip']) {
+      expect(sessionIdDescriptionOf(all.get(name)!), name).toBe(SESSION_ID_DESCRIPTION);
+    }
+  });
+
+  it('a Hexis-only deployment registers no note, so nothing is appended', async () => {
+    await start();
+    const all = await defs();
+    expect(notes.gatedToolNote()).toBe('');
+    expect(all.get('read_file')!.description).not.toContain('Stay within one');
+  });
+
+  it('a registered note lands at the END of every gated tool\'s description and on the sessionId input', async () => {
+    await start();
+    notes.registerGatedToolNote(' One folder per conversation.');
+    notes.registerSessionIdNote(' It also pins that folder.');
+    const all = await defs();
+    for (const name of ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'delete_folder', 'mkdir', 'move_file', 'copy_file', 'unzip']) {
+      expect(all.get(name)!.description.endsWith(' One folder per conversation.'), name).toBe(true);
+      expect(sessionIdDescriptionOf(all.get(name)!), name).toBe(`${SESSION_ID_DESCRIPTION} It also pins that folder.`);
+    }
+    // `execute_command` is internal-only, so it is checked on that surface.
+    const internal = new Map((await toolRegistry.listInternal()).map((t) => [t.name, t]));
+    expect(internal.get('execute_command')!.description.endsWith(' One folder per conversation.')).toBe(true);
+  });
+
+  it('a tool that is not gated carries no note', async () => {
+    await start();
+    notes.registerGatedToolNote(' One folder per conversation.');
+    const description = (await defs()).get('start_session')?.description ?? '';
+    expect(description).not.toContain('One folder per conversation.');
   });
 });

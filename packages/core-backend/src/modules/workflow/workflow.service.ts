@@ -324,9 +324,9 @@ export class WorkflowService implements IWorkflowService {
      * the composition root registers module-owned behavior against it
      * (`core.workflowService.hooks.onCommitValidation(…)` /
      * `.onPreWrite(…)`) after `createCoreServices` returns. The composition
-     * root passes the SAME instance `GitService` and the session-ontology
-     * gate consult; the default keeps test constructions (which don't
-     * exercise hooks) unchanged.
+     * root passes the SAME instance `GitService` and the agent-access gate
+     * consult; the default keeps test constructions (which don't exercise
+     * hooks) unchanged.
      */
     public readonly hooks: WorkflowHooks = new WorkflowHooks(),
   ) {

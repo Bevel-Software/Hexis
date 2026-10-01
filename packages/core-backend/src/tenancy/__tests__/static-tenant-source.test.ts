@@ -12,7 +12,6 @@ const settings: TenantHostSettings = {
   workspacesRoot: path.resolve('/srv/hexis/workspaces'),
   kbTemplateDir: '/srv/hexis/template',
   gitTimeoutMs: 120_000,
-  ontologySessionBlock: true,
   updateCheckEnabled: false,
   masterKey: 'a-master-key-that-is-long-enough-to-count-as-random',
 };
