@@ -109,6 +109,8 @@ async function makeHarness(opts: {
       return { userId: USER_ID, email: USER.email };
     }) as unknown as AuthService['verifyToken'],
   };
+  // A session is accepted only for an account that is on; this one is.
+  authServiceMock.resolveSession = vi.fn(async (token: string) => authServiceMock.verifyToken!(token));
   const authService = authServiceMock as AuthService;
 
   const workflowService = {} as unknown as IWorkflowService;
