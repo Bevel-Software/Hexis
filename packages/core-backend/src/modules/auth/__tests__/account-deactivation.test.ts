@@ -5,6 +5,7 @@ import { AuthService } from '../auth.service.js';
 import {
   AccountAdmissionRefusedError,
   AccountDeactivatedError,
+  AuthBackendError,
   type AccountProvisionReason,
   type IAccountAdmission,
 } from '../account-admission.js';
@@ -107,6 +108,16 @@ describe('a session that outlives a deactivation', () => {
     await expect(svc.resolveSession(token)).rejects.toBeInstanceOf(AccountDeactivatedError);
   });
 
+  it('is told apart from a refusal when the account cannot be looked up', async () => {
+    const { db } = makeFakeDb([[ROW]]);
+    const svc = new AuthService(db, makeConfig());
+    const { token } = await svc.loginWithSso('alice@example.com', 'Alice');
+    vi.mocked(db.select).mockImplementationOnce(() => {
+      throw new Error('db down');
+    });
+    await expect(svc.resolveSession(token)).rejects.toBeInstanceOf(AuthBackendError);
+  });
+
   it('is accepted while the account is on', async () => {
     const { db } = makeFakeDb([[ROW], [{ deactivatedAt: null }]]);
     const svc = new AuthService(db, makeConfig());
@@ -122,6 +133,12 @@ describe('AuthService.isActive', () => {
     expect(await svc.isActive('user-1')).toBe(true);
     expect(await svc.isActive('user-1')).toBe(true);
     expect(vi.mocked(db.select)).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats the deployment admin as on whatever its row says, so its rescue session works', async () => {
+    const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
+    const { db } = makeFakeDb([[{ email: 'root@example.com', deactivatedAt: new Date() }]]);
+    expect(await new AuthService(db, config).isActive('root-id')).toBe(true);
   });
 
   it('treats an account that no longer exists as off', async () => {

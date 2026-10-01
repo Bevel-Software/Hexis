@@ -4,6 +4,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('mcp-auth');
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { AuthService } from '../auth/auth.service.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE, AccountDeactivatedError, AuthBackendError } from '../auth/account-admission.js';
 import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
 import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
 import { rejectConnectionKey } from '../tool-auth/connection-key-rejection.js';
@@ -170,15 +171,21 @@ export function createMcpAuthMiddleware(
         return;
       }
       let user;
+      let active = false;
       try {
         user = await authService.getUserById(claim.userId);
+        if (user) active = await authService.isActive(user.id);
       } catch (err) {
         log.error('internal-token user lookup failed:', { err });
         res.status(500).json({ error: 'Authentication backend unavailable' });
         return;
       }
-      if (!user || !(await authService.isActive(user.id))) {
+      if (!user) {
         unauthorized(res, 'Invalid or expired internal token');
+        return;
+      }
+      if (!active) {
+        unauthorized(res, ACCOUNT_DEACTIVATED_MESSAGE);
         return;
       }
       req.userId = user.id;
@@ -217,8 +224,13 @@ export function createMcpAuthMiddleware(
     let session: { userId: string; email: string };
     try {
       session = await authService.resolveSession(token);
-    } catch {
-      unauthorized(res, 'Invalid or expired token');
+    } catch (err) {
+      if (err instanceof AuthBackendError) {
+        log.error('session account lookup failed:', { err: err.cause });
+        res.status(500).json({ error: 'Authentication backend unavailable' });
+        return;
+      }
+      unauthorized(res, err instanceof AccountDeactivatedError ? err.message : 'Invalid or expired token');
       return;
     }
     req.userId = session.userId;

@@ -7,6 +7,7 @@ import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
   AccountAdmissionRefusedError,
   AccountDeactivatedError,
+  AuthBackendError,
   admitEveryone,
   type AccountProvisionReason,
   type IAccountAdmission,
@@ -532,7 +533,15 @@ export class AuthService {
    */
   async resolveSession(token: string): Promise<{ userId: string; email: string }> {
     const claim = this.verifyToken(token);
-    if (!(await this.isActive(claim.userId))) throw new AccountDeactivatedError();
+    let active: boolean;
+    try {
+      active = await this.isActive(claim.userId);
+    } catch (err) {
+      // The token is fine; the database is not. Said apart from a refusal, so
+      // an outage is a 500 and not a sign-out (see `AuthBackendError`).
+      throw new AuthBackendError(err);
+    }
+    if (!active) throw new AccountDeactivatedError();
     return claim;
   }
 
@@ -546,17 +555,23 @@ export class AuthService {
    * this process forgets its entry at once.
    *
    * A missing row is not on either — an erased account's tokens die with it.
+   *
+   * The deployment admin's account is always on, whatever its row says: its
+   * environment password signs it in regardless (see `loginWithPassword`),
+   * and a session that sign-in mints must then be usable too, or the way
+   * back into a deployment would lead nowhere. {@link deactivate} refuses
+   * the account, but a host may write the column itself.
    */
   async isActive(userId: string): Promise<boolean> {
     const now = Date.now();
     const hit = this.activeCache.get(userId);
     if (hit && now - hit.at < ACTIVE_CACHE_MS) return hit.active;
     const [row] = await this.db
-      .select({ deactivatedAt: users.deactivatedAt })
+      .select({ email: users.email, deactivatedAt: users.deactivatedAt })
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
-    const active = row !== undefined && !row.deactivatedAt;
+    const active = row !== undefined && (!row.deactivatedAt || this.isEnvAdminEmail(row.email ?? ''));
     this.activeCache.set(userId, { active, at: now });
     return active;
   }

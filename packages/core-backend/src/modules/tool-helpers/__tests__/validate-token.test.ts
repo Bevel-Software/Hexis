@@ -18,7 +18,11 @@ const externalApiKeyService = {
   verifyAndLoadToken: async (t: string) =>
     t === 'bevel_ok' ? { user: { id: 'u-ext', email: 'e@x', name: 'Ext' }, tokenId: 'tk-1' } : null,
 } as never;
-const authService = { getUserById: async (id: string) => ({ id, email: 'e@x', name: 'N' }), isActive: async () => true } as never;
+// Every account is on except `u-off`, which an admin switched off.
+const authService = {
+  getUserById: async (id: string) => ({ id, email: 'e@x', name: 'N' }),
+  isActive: async (id: string) => id !== 'u-off',
+} as never;
 
 let tempDir = '';
 const workspaceService = {
@@ -64,6 +68,12 @@ describe('validateToken (tool-author SDK entry)', () => {
     const tok = internalToken.mint({ userId: 'u1' });
     const fs = await (await validateToken(tok)).getFilesystem('some/draft');
     expect((await fs.readFile('a.md')).toString()).toBe('hi');
+  });
+
+  it('throws a 401 ToolError for a valid internal token whose account was switched off', async () => {
+    const err = await validateToken(internalToken.mint({ userId: 'u-off' })).catch((e) => e);
+    expect(hasHttpStatus(err) && err.status).toBe(401);
+    expect((err as Error).message).toContain('switched off');
   });
 
   it('throws a 401 ToolError on a bad token and an empty token', async () => {

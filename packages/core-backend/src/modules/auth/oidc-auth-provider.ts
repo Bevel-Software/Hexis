@@ -329,6 +329,7 @@ export class OidcAuthProvider implements AuthProviderPlugin {
           return;
         }
         if (error instanceof AccountDeactivatedError) {
+          log.warn('OIDC sign-in refused: the account is switched off');
           fail('deactivated');
           return;
         }

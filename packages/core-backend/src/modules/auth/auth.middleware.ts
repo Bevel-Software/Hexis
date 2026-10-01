@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import type { AuthService } from './auth.service.js';
-import { AccountDeactivatedError } from './account-admission.js';
+import { AccountDeactivatedError, AuthBackendError } from './account-admission.js';
 
 // Augment Express Request so userId/userEmail are available after auth middleware
 declare global {
@@ -71,7 +71,13 @@ export function createAuthMiddleware(authService: Pick<AuthService, 'resolveSess
     try {
       session = await authService.resolveSession(token);
     } catch (err) {
-      // A 401 either way, so the app drops the session and shows the login
+      // The account could not be looked up: not the caller's doing, and a
+      // 401 here would sign every valid session out during an outage.
+      if (err instanceof AuthBackendError) {
+        res.status(500).json({ error: 'Authentication backend unavailable' });
+        return;
+      }
+      // A 401 otherwise, so the app drops the session and shows the login
       // page; a switched-off account is told why there.
       res.status(401).json({ error: err instanceof AccountDeactivatedError ? err.message : 'Invalid or expired token' });
       return;

@@ -82,5 +82,18 @@ export class AccountDeactivatedError extends Error {
   }
 }
 
+/**
+ * Whether the account behind a credential is on could not be asked — the
+ * database failed. Not the caller's fault and not a verdict on them: a
+ * route answers it with a 500, never with the 401 that would sign a valid
+ * caller out during an outage.
+ */
+export class AuthBackendError extends Error {
+  constructor(readonly cause: unknown) {
+    super('The account could not be looked up');
+    this.name = 'AuthBackendError';
+  }
+}
+
 /** What a person with a deactivated account is told, wherever they knock. */
 export const ACCOUNT_DEACTIVATED_MESSAGE = 'Your account on this workspace is switched off. Ask its admin to turn it back on.';
