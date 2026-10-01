@@ -93,6 +93,8 @@ interface StartOptions {
   maxBytes?: number;
   /** Start the periodic sweep at this interval BEFORE any token is issued. */
   sweepEveryMs?: number;
+  /** The store's listing seam, for a test that needs to hold a sweep open. */
+  listRoot?: (root: string) => Promise<string[]>;
   /**
    * Mount against a store that is already running, so a second server can
    * stand for a second caller — a different connection key, the same server's
@@ -145,6 +147,7 @@ async function start(options: StartOptions = {}): Promise<string> {
       tokenPrefix: 'bevel-up_',
       ...(options.ttlMs !== undefined ? { ttlMs: options.ttlMs } : {}),
       ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
+      ...(options.listRoot !== undefined ? { listRoot: options.listRoot } : {}),
     });
   if (options.sweepEveryMs !== undefined) uploads.startSweeping(options.sweepEveryMs);
 
@@ -1048,17 +1051,48 @@ describe('a token is good once, for one user, for a limited time', () => {
 
 describe('the sweep', () => {
   it('leaves alone the bytes of a token issued while it was listing the directory', async () => {
-    const base = await start({ sweepEveryMs: 60_000 });
+    // THE WINDOW, HELD OPEN. Whether a sweep running alongside a brand-new
+    // upload deletes its bytes turns on the order of two steps — the listing
+    // of the staging root, and the set of ids the live records hold — and in
+    // production the gap between them is a filesystem round-trip no test can
+    // time. So the listing is the seam: this one is paused on its way in, a
+    // whole token-issue-and-upload happens inside the pause, and only then is
+    // the directory read and the live set taken.
+    //
+    // That ordering is what makes this a test and not a hope. A sweep that
+    // took its live set BEFORE listing would have taken it before the second
+    // record existed, then listed a directory holding the second file, and
+    // deleted bytes whose sender had just been answered "received".
+    let reached: () => void = () => undefined;
+    const listing = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let release: () => void = () => undefined;
+    let barrier: Promise<void> | null = null;
+    const base = await start({
+      listRoot: async (root) => {
+        if (barrier !== null) {
+          const held = barrier;
+          barrier = null; // one-shot: only the sweep this test arms is held
+          reached();
+          await held;
+        }
+        return readdir(root);
+      },
+    });
     const first = await request(base);
     await send(base, first.token, 'first.md', Buffer.from('first'));
-    // A sweep in flight and a brand-new token's upload landing across it. The
-    // sweep reads the directory and only THEN asks which ids are live, so a
-    // record that came into being during the listing is one it has heard of;
-    // a set taken beforehand would have called this file an orphan.
+
+    barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     const sweeping = uploads.sweepNow();
+    await listing;
     const second = await request(base);
     const landed = await send(base, second.token, 'second.md', Buffer.from('second'));
+    release();
     await sweeping;
+
     expect(landed.status).toBe(200);
     expect(await readdir(uploadsDir)).toHaveLength(2);
     // And both are still applicable — the sweep took neither record with it.

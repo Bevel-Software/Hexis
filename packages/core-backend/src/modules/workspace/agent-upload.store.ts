@@ -118,6 +118,17 @@ export interface AgentUploadStoreOptions {
   tokenPrefix?: string;
   ttlMs?: number;
   maxBytes?: number;
+  /**
+   * How the staging root is listed. Test seam — defaults to `fs.readdir`.
+   *
+   * The ONE thing about the sweep a suite needs to control. Whether a token
+   * issued and uploaded while the sweep is running survives depends on the
+   * order of two steps inside {@link AgentUploadStore.sweepNow} — the listing
+   * and the live-id set — and the gap between them is a filesystem round-trip
+   * no test can otherwise sit inside. Given a listing it can hold open, a test
+   * can put a whole upload in that gap and assert the bytes are still there.
+   */
+  listRoot?: (root: string) => Promise<string[]>;
 }
 
 /**
@@ -156,6 +167,7 @@ export class AgentUploadStore {
   private readonly publicBaseUrl: string;
   private readonly tokenPrefix: string;
   private readonly ttlMs: number;
+  private readonly listRoot: (root: string) => Promise<string[]>;
   readonly maxBytes: number;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   /** The sweep in flight, so a shutdown can wait for it — see {@link drainSweep}. */
@@ -168,6 +180,7 @@ export class AgentUploadStore {
     this.publicBaseUrl = options.publicBaseUrl.replace(/\/+$/, '');
     this.tokenPrefix = options.tokenPrefix ?? '';
     this.ttlMs = options.ttlMs ?? UPLOAD_TOKEN_TTL_MS;
+    this.listRoot = options.listRoot ?? ((root) => fs.readdir(root));
     this.maxBytes = options.maxBytes ?? MAX_UPLOAD_BYTES;
   }
 
@@ -360,7 +373,7 @@ export class AgentUploadStore {
     }
     let names: string[];
     try {
-      names = await fs.readdir(this.root);
+      names = await this.listRoot(this.root);
     } catch {
       return; // root not created yet, or unreadable — nothing to reclaim
     }
