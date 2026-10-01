@@ -1042,3 +1042,25 @@ export function parseOwnAccessEntries(text: string): OwnEntries | null {
   }
   return sawVerb ? entries : null;
 }
+
+/**
+ * Whether a node file's frontmatter could be READ at all, which
+ * {@link parseOwnAccessEntries} does not say: its null covers a file with no
+ * frontmatter, one that names no access verb, and one whose frontmatter is
+ * broken, and only the last of those is a failure to read.
+ *
+ * Readable: no frontmatter block at all (the file grants nothing), or a
+ * block that parses to a mapping. Not readable: a block that is never
+ * closed, or one that does not parse to a mapping. For a caller that must
+ * not take "could not tell" for "grants nothing".
+ */
+export function ownAccessReadable(text: string): boolean {
+  const scan = scanFrontmatter(text);
+  if (scan.kind === 'none') return true;
+  if (scan.kind === 'unterminated') return false;
+  const block = scan.fm.join('\n');
+  // An empty block says nothing, and says it readably.
+  if (!block.trim()) return true;
+  const root = ownEntriesRoot(block);
+  return root != null && typeof root === 'object' && !Array.isArray(root);
+}

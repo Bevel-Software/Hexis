@@ -51,7 +51,7 @@ import { ownersTextOf, pluginLabel } from '../../utils/plugin-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
 import { StatusDot } from '../StatusDot';
 import { SharedViaPlugins } from './SharedViaPlugins';
-import { AccessRequestsBanner } from '../AccessRequestsBanner';
+import { AccessRequestsBanner } from '../../../access/components/AccessRequestsBanner';
 import { useJoinRequests, type JoinRequestsApi } from '../../hooks/useJoinRequests';
 import { listSkillAccessRequests, reconcileSkillAccessRequest } from '../../services/library.api';
 import { ManageAccessDialog } from '../../../access/components/ManageAccessDialog';
@@ -710,7 +710,7 @@ export function SkillPage({
           Manage access opens it, and both are no-ops against ''. */}
       {canWrite && skillFolderEntry && (
         <AccessRequestsBanner
-          plugin={name}
+          itemName={name}
           folders={[skillPath]}
           requests={accessRequests.requests}
           onManage={() => setManageTarget(skillFolderEntry)}

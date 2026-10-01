@@ -321,6 +321,12 @@ export class FileLockService {
    *
    * Deliberately NOT a release in the ordinary sense — nothing is committed
    * and nothing is enqueued. The bytes belonged to a repository that is gone.
+   *
+   * What an ORDINARY release already enqueued is a different matter, and not
+   * this method's to fix: a release queues the bytes and only then drops its
+   * lock, so rows can be waiting for a branch whose locks this deletes. The
+   * caller takes those out of the worker's reach in the same breath — see
+   * `PendingCommitsService.markNeedsAttentionOnBranch`.
    */
   async releaseAllOnBranch(branch: string): Promise<number> {
     const gone = await this.db

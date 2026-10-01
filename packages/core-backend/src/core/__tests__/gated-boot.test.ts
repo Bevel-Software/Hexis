@@ -86,6 +86,13 @@ describe('startCore over a repository the host will not serve', () => {
       throw new ClassifiedFailure('git push failed: Authentication failed', gitFailure('credentials-rejected'));
     });
     await expect(startCore(core)).resolves.toBeUndefined();
+    // The same gated contract as the sibling above: the boot hands the retry
+    // handle to the runner rather than leaving the deployment to a restart.
+    // (Handle CREATION is what this pins — the stub counts
+    // `retryUntilMaintained` calls, which cannot tell a handle being made from
+    // a retry loop actually running; that semantics is
+    // `kb-startup-runner.degraded.test.ts`'s.)
+    expect(core.startupRetry).not.toBeNull();
   });
 
   it('still STOPS the boot when the failure is about what a step would write', async () => {

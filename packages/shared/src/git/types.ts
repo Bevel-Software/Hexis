@@ -152,7 +152,20 @@ export interface IGitService {
    * the distinction: an "already up to date" pull that broadcast anyway would
    * drop every catalog cache and reload every attached browser for nothing.
    */
-  pull(workspaceId: string): Promise<{ treeChanged: boolean }>;
+  pull(
+    workspaceId: string,
+    opts?: {
+      /**
+       * Replay the local commits with `--rebase-merges`, so a merge commit
+       * the clone holds but origin has not seen survives the replay AS a
+       * merge instead of being flattened into cherry-picks of its second
+       * parent's commits. Only the change-request update asks for it: it is
+       * the one caller whose unpushed commit is deliberately a merge, and
+       * whose whole point is that the merge reaches the remote intact.
+       */
+      preserveMerges?: boolean;
+    },
+  ): Promise<{ treeChanged: boolean }>;
   /**
    * The remote sync's pull, observed as ONE serialized operation: where HEAD
    * was, the pull, where HEAD is, and which repo-relative paths changed
@@ -274,6 +287,21 @@ export interface IGitService {
     workspaceId: string,
     at: { baseSha: string; headSha: string },
   ): Promise<{ mergeBaseSha: string | null; behind: boolean }>;
+
+  /**
+   * Every repo-relative path whose content differs between two commits, as a
+   * plain two-dot diff with rename detection OFF — so a rename reports both
+   * the path it left and the path it arrived at. Two callers want exactly
+   * that conservative answer: the approvals carry-forward (a path that
+   * appears loses its approval) and "did the target change a file this
+   * request also changes" (a request editing a file the target renamed has
+   * to count as affected).
+   */
+  pathsChangedBetween(
+    workspaceId: string,
+    fromSha: string,
+    toSha: string,
+  ): Promise<string[]>;
 
   /**
    * A file's content at a change request's fork point — a commit that must

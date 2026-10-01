@@ -6,10 +6,10 @@ import userEvent from '@testing-library/user-event';
  * Pointing the deployment at a DIFFERENT knowledge-base repository.
  *
  * The server refuses such a save until it is confirmed, because confirming it
- * is the only warning anyone gets: every working copy on the server is
- * deleted and cloned fresh, and anything committed there and never pushed is
- * lost. When change requests are open the same confirmation says how many and
- * asks what to do with them.
+ * is the only warning anyone gets: every working copy on the server stops
+ * being used and is cloned fresh, and anything committed there and never
+ * pushed goes out of the app with it. When change requests are open the same
+ * confirmation says how many and asks what to do with them.
  *
  * Only the transport is mocked, so what is under test is the whole path from
  * the button to the request bodies the form sends.
@@ -110,8 +110,12 @@ describe('a changed repository address, with change requests open', () => {
     await typeTheNewAddressAndSave();
 
     const confirm = await screen.findByTestId('repository-change-confirm');
-    expect(confirm).toHaveTextContent(/deleted and cloned fresh/i);
-    expect(confirm).toHaveTextContent(/not yet pushed from this server is lost/i);
+    expect(confirm).toHaveTextContent(/stops being used and is cloned fresh/i);
+    // The warning has to name the cost, and name it truthfully: the copies are
+    // set aside on the server, so the work is out of the app but not destroyed.
+    expect(confirm).toHaveTextContent(/not yet pushed from this server goes out of the app/i);
+    expect(confirm).toHaveTextContent(/nothing is deleted/i);
+    expect(confirm).toHaveTextContent(/replaced-working-copies/);
     expect(confirm).toHaveTextContent('There are 2 open change requests.');
     // Two choices, and keeping them is the one already selected: nothing
     // closes by hesitating.
@@ -174,12 +178,98 @@ describe('a changed repository address with nothing open', () => {
     await typeTheNewAddressAndSave();
 
     const confirm = await screen.findByTestId('repository-change-confirm');
-    expect(confirm).toHaveTextContent(/deleted and cloned fresh/i);
+    expect(confirm).toHaveTextContent(/stops being used and is cloned fresh/i);
     expect(screen.queryAllByRole('radio')).toEqual([]);
 
     await userEvent.click(screen.getByRole('button', { name: 'Replace the repository' }));
     await waitFor(() => expect(saveBodies()).toHaveLength(2));
     expect(saveBodies()[1]).toMatchObject({ confirmRepositoryChange: 'keep' });
+  });
+});
+
+describe('a CONFIRMED save the server refuses', () => {
+  /**
+   * The probe passed and the confirmation was answered, and the store step
+   * still failed — a token revoked in between, a repository that went away, a
+   * close that could not be done. The admin has just agreed to lose their
+   * working copies; being told only that it "did not save" is the worst moment
+   * for that.
+   */
+  it('shows the reason the server gave for refusing the confirmed save', async () => {
+    transport.authFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/setup/test-connection') {
+        return json(200, { ok: true, outcome: 'connected', branches: ['main'], defaultBranch: 'main', empty: false });
+      }
+      if (url === '/api/setup/settings') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { confirmRepositoryChange?: string };
+        if (!body.confirmRepositoryChange) {
+          return json(409, {
+            error: 'This changes the knowledge-base repository.',
+            repositoryChange: { openChangeRequests: 2 },
+          });
+        }
+        return json(500, {
+          error:
+            'The open change requests could not be closed, so the repository was not changed. ' +
+            'Nothing was saved and no working copy was touched. Try again.',
+        });
+      }
+      return json(404, { error: 'not mocked' });
+    });
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} variant="settings" />);
+    await typeTheNewAddressAndSave();
+    await screen.findByTestId('repository-change-confirm');
+
+    await userEvent.click(screen.getAllByRole('radio')[1]!);
+    await userEvent.click(screen.getByRole('button', { name: 'Replace the repository' }));
+
+    expect(
+      await screen.findByText(/The open change requests could not be closed/),
+    ).toBeInTheDocument();
+    // And nothing claims the repository was replaced.
+    expect(screen.queryByTestId('repository-changed')).not.toBeInTheDocument();
+  });
+
+  /**
+   * The address IS stored and it is the initialization that failed. The
+   * confirmation has been answered and must go: left standing over a cleared
+   * draft, its Replace button would re-send the stored address, change
+   * nothing, and lose the "requests closed" outcome for good. The init banner
+   * owns the retry from here.
+   */
+  it('takes the confirmation down when the save stored the address but initialization failed', async () => {
+    transport.authFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/setup/test-connection') {
+        return json(200, { ok: true, outcome: 'connected', branches: ['main'], defaultBranch: 'main', empty: false });
+      }
+      if (url === '/api/setup/settings') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { confirmRepositoryChange?: string };
+        if (!body.confirmRepositoryChange) {
+          return json(409, {
+            error: 'This changes the knowledge-base repository.',
+            repositoryChange: { openChangeRequests: 1 },
+          });
+        }
+        return json(500, {
+          error: 'The knowledge base could not be initialized.',
+          kbInit: { kind: 'not-found', cause: 'There is no repository at that address.' },
+        });
+      }
+      return json(404, { error: 'not mocked' });
+    });
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} variant="settings" />);
+    await typeTheNewAddressAndSave();
+    await screen.findByTestId('repository-change-confirm');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Replace the repository' }));
+
+    await waitFor(() =>
+      expect(screen.queryByTestId('repository-change-confirm')).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByRole('button', { name: 'Replace the repository' })).toBeNull();
+    expect(await screen.findByText(/There is no repository at that address\./)).toBeInTheDocument();
+    // Two requests went out; nothing re-sent the answered confirmation.
+    expect(saveBodies()).toHaveLength(2);
   });
 });
 

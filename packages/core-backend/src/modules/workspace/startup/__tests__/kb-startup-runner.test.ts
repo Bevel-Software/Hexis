@@ -79,6 +79,7 @@ function runnerOpts(steps: OnServerStart[], overrides: Record<string, unknown> =
     gitRunner: new NodeGitRunner(undefined, credentials),
     kbRepoUrl: () => upstream,
     workspacesRoot,
+    setAsideRoot: path.join(root, 'set-aside'),
     kbDirName: 'knowledge-base',
     templateDir: path.join(root, 'template'),
     defaultBranch: () => DEFAULT_BRANCH,
@@ -140,7 +141,14 @@ describe('KbStartupRunner — the repository was replaced', () => {
     await git(root, ['clone', '-b', DEFAULT_BRANCH, upstream, cloneDir('someone/draft')]);
   }
 
-  it('deletes the clones of the old repository and clones the new one, even with the old one gone', async () => {
+  /** Where one run set its working copies aside: the single dated folder under the root. */
+  async function setAside(): Promise<string> {
+    const runs = await fs.readdir(path.join(root, 'set-aside'));
+    expect(runs).toHaveLength(1);
+    return path.join(root, 'set-aside', runs[0]!);
+  }
+
+  it('clones the new repository in place of the old one\'s clones, even with the old one gone', async () => {
     await bootedOnTheOldRepository();
     const replacement = await replacementUpstream();
     // Gone, as it was in production: any fetch through the old address fails.
@@ -151,9 +159,118 @@ describe('KbStartupRunner — the repository was replaced', () => {
     const repo = cloneDir(DEFAULT_BRANCH);
     expect((await git(repo, ['config', '--get', 'remote.origin.url'])).trim()).toBe(replacement);
     expect(await fs.readFile(path.join(repo, 'marker.txt'), 'utf8')).toBe('replacement');
-    // A clone this boot had no reason to touch is swept too: the workspace
-    // service would otherwise adopt it and fetch from the old address.
+    // A clone this boot had no reason to touch leaves the workspaces root
+    // too: the workspace service would otherwise adopt it and fetch from the
+    // old address.
     await expect(fs.access(cloneDir('someone/draft'))).rejects.toThrow();
+  });
+
+  /**
+   * The old repository is GONE, so its clones are the last copy of what it
+   * held, and the commit nobody pushed exists nowhere else at all. They
+   * leave the workspaces root and nothing else happens to them.
+   */
+  it('sets the old repository\'s clones aside whole, unpushed work included, and deletes nothing', async () => {
+    await bootedOnTheOldRepository();
+    const old = cloneDir(DEFAULT_BRANCH);
+    await fs.writeFile(path.join(old, 'unpushed.md'), 'the only copy', 'utf8');
+    await git(old, ['add', '-A']);
+    await git(old, ['commit', '-m', 'never pushed']);
+    const head = (await git(old, ['rev-parse', 'HEAD'])).trim();
+    const replacement = await replacementUpstream();
+    await fs.rm(upstream, { recursive: true, force: true });
+
+    await makeRunner([touchDefault], { kbRepoUrl: () => replacement }).runAll();
+
+    const kept = await setAside();
+    const keptDefault = path.join(kept, encodeURIComponent(DEFAULT_BRANCH));
+    expect((await git(keptDefault, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    expect(await fs.readFile(path.join(keptDefault, 'unpushed.md'), 'utf8')).toBe('the only copy');
+    expect(await fs.readFile(path.join(keptDefault, 'marker.txt'), 'utf8')).toBe('seeded');
+    // The draft's clone too, under its own workspace's name.
+    await expect(fs.access(path.join(kept, encodeURIComponent('someone/draft'), '.git'))).resolves.toBeUndefined();
+    // And the probe that compared the histories left no refs behind in it.
+    expect((await git(keptDefault, ['for-each-ref', 'refs/hexis-probe/'])).trim()).toBe('');
+  });
+
+  /**
+   * The shipped compose files mount the backups root as a volume of its own,
+   * where a rename across to it is refused. That is the path production
+   * takes: a copy, and the original removed only once the copy is whole.
+   */
+  it('sets a clone aside across volumes, by copying it whole', async () => {
+    await bootedOnTheOldRepository();
+    const old = cloneDir(DEFAULT_BRANCH);
+    await fs.writeFile(path.join(old, 'unpushed.md'), 'the only copy', 'utf8');
+    await git(old, ['add', '-A']);
+    await git(old, ['commit', '-m', 'never pushed']);
+    const head = (await git(old, ['rev-parse', 'HEAD'])).trim();
+    const replacement = await replacementUpstream();
+    await fs.rm(upstream, { recursive: true, force: true });
+    const crossDevice = Object.assign(new Error('EXDEV: cross-device link not permitted'), { code: 'EXDEV' });
+    const rename = vi.spyOn(fs, 'rename').mockRejectedValue(crossDevice);
+    try {
+      await makeRunner([touchDefault], { kbRepoUrl: () => replacement }).runAll();
+    } finally {
+      rename.mockRestore();
+    }
+
+    const keptDefault = path.join(await setAside(), encodeURIComponent(DEFAULT_BRANCH));
+    expect((await git(keptDefault, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    expect(await fs.readFile(path.join(keptDefault, 'unpushed.md'), 'utf8')).toBe('the only copy');
+    expect(await fs.readFile(path.join(cloneDir(DEFAULT_BRANCH), 'marker.txt'), 'utf8')).toBe('replacement');
+  });
+
+  /**
+   * A clone that cannot be set aside stays exactly where it is, and the boot
+   * stops saying why: deleting it to get past would be the one outcome this
+   * whole path exists to rule out.
+   */
+  it('deletes nothing when a clone cannot be set aside, and says why', async () => {
+    await bootedOnTheOldRepository();
+    const old = cloneDir(DEFAULT_BRANCH);
+    const head = (await git(old, ['rev-parse', 'HEAD'])).trim();
+    const replacement = await replacementUpstream();
+    await fs.rm(upstream, { recursive: true, force: true });
+    const rename = vi.spyOn(fs, 'rename').mockRejectedValue(Object.assign(new Error('EXDEV'), { code: 'EXDEV' }));
+    const cp = vi.spyOn(fs, 'cp').mockRejectedValue(Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }));
+    try {
+      await expect(makeRunner([touchDefault], { kbRepoUrl: () => replacement }).runAll()).rejects.toThrow(
+        /Could not set aside the working copy.*no space left.*Nothing was deleted/s,
+      );
+    } finally {
+      rename.mockRestore();
+      cp.mockRestore();
+    }
+    expect((await git(old, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+  });
+
+  /**
+   * The one change the setup screen tells an admin to make: the same
+   * repository, moved. The clone is pointed at the new address and kept, and
+   * the commit that was never pushed goes on to be pushed there.
+   */
+  it('keeps a clone of the same repository at a new address, and points it there', async () => {
+    await bootedOnTheOldRepository();
+    const repo = cloneDir(DEFAULT_BRANCH);
+    await fs.writeFile(path.join(repo, 'unpushed.md'), 'local work', 'utf8');
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-m', 'local work']);
+    const head = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+    // Moved: everything the old address held is at the new one, and the old
+    // one answers nothing any more.
+    const moved = path.join(root, 'moved.git');
+    await git(root, ['clone', '--bare', upstream, moved]);
+    await fs.rm(upstream, { recursive: true, force: true });
+
+    await makeRunner([touchDefault], { kbRepoUrl: () => moved }).runAll();
+
+    expect((await git(repo, ['config', '--get', 'remote.origin.url'])).trim()).toBe(moved);
+    expect((await git(repo, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    expect((await git(cloneDir('someone/draft'), ['config', '--get', 'remote.origin.url'])).trim()).toBe(moved);
+    expect((await git(repo, ['for-each-ref', 'refs/hexis-probe/'])).trim()).toBe('');
+    // Nothing was another repository's, so nothing was set aside.
+    await expect(fs.access(path.join(root, 'set-aside'))).rejects.toThrow();
   });
 
   it('leaves a clone of the configured repository alone, unpushed work included', async () => {
@@ -187,8 +304,8 @@ describe('KbStartupRunner — the repository was replaced', () => {
 
 it('tells the workspace layer about every working copy it deletes', async () => {
     // On a SAVE the process is already running, and the workspace service
-    // caches branch→directory. A deleted clone left in that cache is a path
-    // to nothing, and nothing would ever re-clone it.
+    // caches branch→directory. A clone that was set aside, left in that cache,
+    // is a path to nothing, and nothing would ever re-clone it.
     await bootedOnTheOldRepository();
     const replacement = await replacementUpstream();
     const discarded: string[] = [];
@@ -201,6 +318,24 @@ it('tells the workspace layer about every working copy it deletes', async () => 
     expect(discarded.sort()).toEqual(
       [encodeURIComponent(DEFAULT_BRANCH), encodeURIComponent('someone/draft')].sort(),
     );
+  });
+
+  it('tells the git layer that each working copy it cloned is freshly fetched', async () => {
+    // A clone holds every ref, so it IS a successful fetch. Unsaid, the git
+    // layer keeps the per-workspace record that drove the replacement — a
+    // FAILED fetch of the repository that is gone — and a strict branch
+    // listing inside its TTL refuses the new clone's refs as unproven.
+    await bootedOnTheOldRepository();
+    const replacement = await replacementUpstream();
+    const announced: string[] = [];
+
+    await makeRunner([touchDefault], {
+      kbRepoUrl: () => replacement,
+      onCloneCreated: (id: string) => announced.push(id),
+    }).runAll();
+
+    // Every working copy the phase made in place of one it set aside.
+    expect(announced).toContain(encodeURIComponent(DEFAULT_BRANCH));
   });
 
   it('says nothing about a working copy it keeps', async () => {

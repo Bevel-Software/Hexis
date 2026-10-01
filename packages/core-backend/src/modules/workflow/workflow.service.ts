@@ -43,6 +43,7 @@ import type {
   ChangeRequestApplyFailureKind,
   ChangeRequestComment,
   ChangeRequestDetail,
+  ChangeRequestUpdateResult,
   ChangeRequestState,
   ChangedFile,
   FileApproval,
@@ -62,7 +63,7 @@ import {
   isPlatformRestoreShape,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import { and, eq, inArray, isNotNull, isNull, lt, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
 import type { GitService } from './git/git.service.js';
@@ -576,8 +577,11 @@ export class WorkflowService implements IWorkflowService {
    * and nothing else. The pull itself reports the change, since it is the
    * only code that can observe it under the workspace mutex.
    */
-  private async pullWorkspace(workspaceId: string): Promise<boolean> {
-    const { treeChanged } = await this.git.pull(workspaceId);
+  private async pullWorkspace(
+    workspaceId: string,
+    opts: { preserveMerges?: boolean } = {},
+  ): Promise<boolean> {
+    const { treeChanged } = await this.git.pull(workspaceId, opts);
     const defaultBranch = this.kb.defaultBranch;
     if (treeChanged && branchForWorkspaceId(workspaceId) === defaultBranch) {
       this.events?.emit({ kind: 'fs-tree-changed', workspaceId, branch: defaultBranch });
@@ -1729,6 +1733,38 @@ export class WorkflowService implements IWorkflowService {
     return this.prs.getPr(number);
   }
 
+  /**
+   * The newest non-open change request from `sourceBranch` by `authorEmail`.
+   *
+   * Read straight off `change_requests` rather than through the PR listing,
+   * which serves OPEN requests only: the whole point here is the closed ones.
+   * `author_email` is stored lowercased at insert, so the needle is too.
+   * Ordered by `closed_at` with `created_at` as the tiebreak, because a row
+   * closed before the column existed (or by a path that forgot to stamp it)
+   * still has a creation time and must not sort as the oldest.
+   */
+  async latestClosedChangeRequest(
+    authorEmail: string,
+    sourceBranch: string,
+  ): Promise<{ number: number; state: ChangeRequestState } | null> {
+    const email = authorEmail.trim().toLowerCase();
+    if (!email || !sourceBranch) return null;
+    const [row] = await this.db
+      .select({ number: changeRequests.number, state: changeRequests.state })
+      .from(changeRequests)
+      .where(
+        and(
+          eq(changeRequests.authorEmail, email),
+          eq(changeRequests.sourceBranch, sourceBranch),
+          ne(changeRequests.state, 'open'),
+        ),
+      )
+      .orderBy(desc(changeRequests.closedAt), desc(changeRequests.createdAt))
+      .limit(1);
+    if (!row) return null;
+    return { number: row.number, state: row.state as ChangeRequestState };
+  }
+
   getChangeRequestDetail(
     number: number,
     opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string; patches?: boolean },
@@ -1953,13 +1989,29 @@ export class WorkflowService implements IWorkflowService {
    * the enforcement read one predicate. A conflicting merge is aborted
    * inside `mergeFromOrigin`: nothing is committed or pushed, and the branch
    * is exactly what it was.
+   *
+   * ONE detail read after the merge. The read before it exists only to
+   * decide authority and to name the two branches, so it asks for no patches
+   * — that is one git subprocess per changed file it does not spend. The
+   * approvals carry-forward runs BEFORE the final read rather than after it,
+   * against a head resolved with `resolvePrShas` (two rev-parses) instead of
+   * a whole second detail, so the detail that goes back already describes the
+   * approvals it carried. What used to be three detail reads is now one.
    */
   async updateFromTarget(
     workspaceId: string,
     user: AuthUser,
     number: number,
-  ): Promise<ChangeRequestDetail> {
-    const detail = await this.prs.getPrDetail(number, { fresh: true, workspaceId, viewerEmail: user.email });
+  ): Promise<ChangeRequestUpdateResult> {
+    // No patches: all this read decides is authority, state and the two
+    // branch names. Asking for patch text here would diff every changed file
+    // in a request that is about to be merged and read in full anyway.
+    const detail = await this.prs.getPrDetail(number, {
+      fresh: true,
+      workspaceId,
+      viewerEmail: user.email,
+      patches: false,
+    });
     if (!detail) {
       throw new WorkflowValidationError(
         `Change request #${number} not found.`,
@@ -1987,8 +2039,15 @@ export class WorkflowService implements IWorkflowService {
     // merge commit that then cannot push, stranding it in the workspace. A
     // rebase conflict hands the stranded saves to recovery, as every other
     // pull does, before the refusal reaches the caller.
+    //
+    // `preserveMerges`: this is the one pull whose unpushed commit may be a
+    // MERGE — the update that ran before this one and could not push. A plain
+    // rebase replays it as cherry-picks of the target's commits, which drops
+    // the target as a parent, so the branch never contains the target's head
+    // however many times the update runs. Replayed with `--rebase-merges` it
+    // stays a merge and the next push ends the loop.
     try {
-      await this.pullWorkspace(workspaceId);
+      await this.pullWorkspace(workspaceId, { preserveMerges: true });
     } catch (err) {
       if (err instanceof PullRebaseConflictError) {
         await this.queuePullConflictRecovery(workspaceId, err, user);
@@ -2026,12 +2085,102 @@ export class WorkflowService implements IWorkflowService {
     if (outcome.kind === 'conflicts') {
       throw new ChangeRequestConflictsError(detail.branch, detail.base, outcome.paths);
     }
-    // If a new merge commit landed, push so the CR picks it up. When
-    // already up to date there's nothing to share — short-circuit the push.
-    if (!outcome.alreadyUpToDate) {
+    // Push whenever the CLONE holds a commit origin has not seen — not when
+    // THIS merge authored one. The two differ in exactly the case that keeps
+    // a request behind for good: an earlier update merged, its push failed,
+    // and the merge is sitting in the workspace. That merge already contains
+    // the target, so this call's `mergeFromOrigin` reports
+    // `alreadyUpToDate` and the old gate skipped the push — leaving the
+    // request behind on the remote, and the next open with the same work to
+    // do. Asking git what is unpushed retries it instead.
+    //
+    // A failed probe falls back to the old gate rather than to "push
+    // anyway": `trackedPush` on a clone with nothing to push is a wasted
+    // round trip on every single update.
+    const hasUnpushed = await this.git
+      .hasUnpushedCommits(workspaceId)
+      .catch((err: unknown) => {
+        log.warn(
+          `could not tell whether change request #${number} has unpushed commits; falling back to whether this merge authored one`,
+          { err },
+        );
+        return !outcome.alreadyUpToDate;
+      });
+    if (hasUnpushed) {
       await this.trackedPush(workspaceId, user);
-      // The source head moved: the refusal described a revision that is gone.
+    }
+    // Where the branch ended up, as PUBLISHED — two rev-parses, not a second
+    // detail read. Everything below needs only the sha, and the detail that
+    // goes back to the caller is read once, at the end, after the approvals
+    // it should describe have been carried.
+    let headAfterMerge = headBeforeMerge;
+    try {
+      const at = await this.git.resolvePrShas(workspaceId, detail.base, detail.branch);
+      headAfterMerge = at.headSha;
+    } catch (err) {
+      log.warn(
+        `could not resolve the published head of change request #${number} after updating it from target`,
+        { err },
+      );
+    }
+    const headMoved = Boolean(headBeforeMerge) && headAfterMerge !== headBeforeMerge;
+    // The source head moved: the refusal described a revision that is gone.
+    // `hasUnpushed` counts as well as the sha comparison, and deliberately —
+    // a push that just landed moved the published head by definition, and
+    // reading the sha to confirm it is a call that can fail. A refusal left
+    // standing over a revision nobody can apply any more is the worse error.
+    if (headMoved || hasUnpushed) {
       await this.clearApplyFailure(number, { recordedBefore: headMovedAfter });
+    }
+    // The merge is a commit the APPROVERS did not make. Re-pin their
+    // approvals onto the new head for every file whose bytes it left alone —
+    // git's own two-dot diff between the two heads is the verdict on which
+    // those are. Best effort: a request that IS up to date is worth far more
+    // than the bookkeeping, so a failure here is logged and the fresh detail
+    // still goes back.
+    //
+    // The head moving is the real gate: nothing moved, nothing moved under
+    // anyone. It also covers the sha that is not a sha — a resolve that
+    // failed onto a detail with no head — which `pathsChangedBetween` and
+    // `carryApprovalsForward` would refuse anyway.
+    //
+    // This runs BEFORE the detail read, not after it. The rows it writes are
+    // what the caller's `approvals` must describe, so doing it first means
+    // the one read at the end is already correct — where carrying afterwards
+    // needed a THIRD read to correct a detail assembled before the rows
+    // existed.
+    //
+    // The same list answers the caller's `updatedPaths`: "which files did
+    // this merge change" is one question, and the two answers must not be
+    // allowed to differ — a file whose approval was carried (so: untouched)
+    // that the dialog then re-read would be the dialog discarding content the
+    // server just called unchanged.
+    let updatedPaths: string[] = [];
+    if (headMoved) {
+      try {
+        updatedPaths = await this.git.pathsChangedBetween(
+          workspaceId,
+          headBeforeMerge,
+          headAfterMerge,
+        );
+        await this.reviewWorkflow.carryApprovalsForward(
+          number,
+          headBeforeMerge,
+          headAfterMerge,
+          updatedPaths,
+        );
+      } catch (err) {
+        log.warn(
+          `could not carry approvals forward on change request #${number} after updating from target`,
+          { err },
+        );
+        // The diff is what failed, so which files moved is unknown. Say so as
+        // "every file this request had", which is every file a caller can
+        // already be showing: slow beats a dialog that goes on presenting
+        // pre-merge text as current. Anything the merge ADDED is not on the
+        // list and does not need to be — no caller has read it yet.
+        updatedPaths = (detail.files ?? []).map((f) => f.path);
+      }
     }
     this.prs.invalidateDetailCache(number);
     const refreshed = await this.prs.getPrDetail(number, {
@@ -2044,52 +2193,7 @@ export class WorkflowService implements IWorkflowService {
         `Refreshed change request #${number} but could not re-fetch its detail.`,
       );
     }
-    // The merge is a commit the APPROVERS did not make. Re-pin their
-    // approvals onto the new head for every file whose bytes it left alone —
-    // git's own two-dot diff between the two heads is the verdict on which
-    // those are. Best effort: a request that IS up to date is worth far more
-    // than the bookkeeping, so a failure here is logged and the fresh detail
-    // still goes back.
-    //
-    // `alreadyUpToDate` is the real gate: no merge commit, no head to compare,
-    // nothing moved under anyone. The other two conditions are belt-and-braces
-    // over a sha that is not a sha — a resolve that failed onto a detail with
-    // no head, or two heads that somehow read equal — both of which
-    // `pathsChangedBetween` and `carryApprovalsForward` would refuse anyway.
-    // A merge that authored a commit cannot leave the head where it was.
-    if (!outcome.alreadyUpToDate && headBeforeMerge && refreshed.headSha !== headBeforeMerge) {
-      try {
-        const changedPaths = await this.git.pathsChangedBetween(
-          workspaceId,
-          headBeforeMerge,
-          refreshed.headSha,
-        );
-        const carried = await this.reviewWorkflow.carryApprovalsForward(
-          number,
-          headBeforeMerge,
-          refreshed.headSha,
-          changedPaths,
-        );
-        // The detail above was assembled before those rows existed, so its
-        // `approvals` (and the merge gate derived from them) still describe
-        // the pre-merge head. Only re-read when something actually carried.
-        if (carried > 0) {
-          this.prs.invalidateDetailCache(number);
-          const withApprovals = await this.prs.getPrDetail(number, {
-            fresh: true,
-            workspaceId,
-            viewerEmail: user.email,
-          });
-          if (withApprovals) return withApprovals;
-        }
-      } catch (err) {
-        log.warn(
-          `could not carry approvals forward on change request #${number} after updating from target`,
-          { err },
-        );
-      }
-    }
-    return refreshed;
+    return { ...refreshed, updatedPaths };
   }
 
   listComments(number: number): Promise<ChangeRequestComment[]> {
@@ -2651,11 +2755,16 @@ export class WorkflowService implements IWorkflowService {
   /**
    * DELETE a change request outright: close it (whatever its diff says) and
    * retire its source branch — the request, its proposal, and the branch that
-   * carried it are gone in one verb. Admin-only, resolved the same way every
-   * other admin check here is (write on `roles.yaml` at `origin/<base>`,
-   * never a local ref): this is the moderation verb for a shared deployment,
-   * stronger than reject (which the author or the files' owners can do, and
-   * which leaves the branch for a second round).
+   * carried it are gone in one verb. The request's AUTHOR or an admin, and
+   * nobody else: it is the author's own proposal and their own branch to throw
+   * away, and it is the moderation verb for a shared deployment. Admin rights
+   * resolve the same way every other admin check here does (write on
+   * `roles.yaml` at `origin/<base>`, never a local ref); authorship is the
+   * STORED `authorId` hash, never anything the caller sends.
+   *
+   * Stronger than reject, which the changed files' owners may also do and which
+   * leaves the branch for a second round. They keep reject and do not get this:
+   * an owner must not be able to destroy someone else's text and branch.
    */
   async deleteChangeRequest(number: number, user: AuthUser): Promise<void> {
     const summary = await this.prs.getPr(number);
@@ -2714,8 +2823,17 @@ export class WorkflowService implements IWorkflowService {
         409,
       );
     }
-    if (isAdmin !== true) {
-      throw new WorkflowDomainError('Only an admin can delete a change request.', 403);
+    // Authorship is decided from the STORED author hash, never from anything
+    // the caller sends. Note what is deliberately NOT short-circuited for an
+    // author: the strict fetch and the `null` check above still run. An
+    // author's grant needs no `roles.yaml` read, so skipping them would look
+    // free — but it would let a delete close the request while the branch
+    // removal silently failed against an unreachable origin, and "the shared
+    // repository was down, so nothing changed" is the one refusal that has to
+    // stay honest.
+    const callerIsAuthor = !!(summary.authorId && summary.authorId === hashEmail(user.email));
+    if (!callerIsAuthor && isAdmin !== true) {
+      throw new WorkflowDomainError("Only the request's author or an admin can delete it.", 403);
     }
 
     // Close first (idempotent: an already-closed request just skips to the
@@ -2915,11 +3033,11 @@ export class WorkflowService implements IWorkflowService {
    * just as well for a repository that is already gone.
    */
   async countOpenChangeRequests(): Promise<number> {
-    const open = await this.db
-      .select({ number: changeRequests.number })
+    const [row] = await this.db
+      .select({ open: sql<number>`count(*)::int` })
       .from(changeRequests)
       .where(eq(changeRequests.state, 'open'));
-    return open.length;
+    return row?.open ?? 0;
   }
 
   /**
@@ -2939,37 +3057,67 @@ export class WorkflowService implements IWorkflowService {
    * refusing the path until its TTL ran out — and a still-connected client's
    * heartbeat keeps pushing that out.
    *
-   * Each close is guarded on `state = 'open'`, so a merge or a withdrawal
-   * racing this call wins and its request is left alone.
+   * The close is ONE statement per pass — `update … where state = 'open'
+   * returning` — not a count followed by a row-at-a-time loop. Read first and
+   * then written, every request opened while the loop ran would be missed and
+   * left open against a branch the new repository does not have. One
+   * set-shaped statement cannot miss a row that exists when it runs, and the
+   * guard is the statement's own `where`, so a merge or a withdrawal racing it
+   * wins and its request is simply not in the returned set.
+   *
+   * Repeated while a pass still finds something, because a request can be
+   * opened BETWEEN passes: the caller has not saved the new address yet, so
+   * the deployment is still live and `POST /change-requests` is still being
+   * served. Bounded, so a client opening requests in a loop cannot hold the
+   * save open forever — what survives the last pass is a request opened after
+   * the repository was replaced, which the deleted-branch sweep closes on its
+   * own terms.
    */
   async closeOpenChangeRequestsAsRepositoryReplaced(): Promise<number> {
-    const open = await this.db
-      .select({ number: changeRequests.number, sourceBranch: changeRequests.sourceBranch })
-      .from(changeRequests)
-      .where(eq(changeRequests.state, 'open'));
     let closed = 0;
-    for (const cr of open) {
+    for (let pass = 0; pass < 5; pass++) {
       const now = new Date();
-      const updated = await this.db
+      const justClosed = await this.db
         .update(changeRequests)
         .set({ state: 'closed', closedAt: now, updatedAt: now, closedReason: 'repository-replaced' })
-        .where(and(eq(changeRequests.number, cr.number), eq(changeRequests.state, 'open')))
-        .returning({ id: changeRequests.id });
-      if (updated.length === 0) continue;
-      // Best effort, per branch: a lock table that will not answer must not
-      // leave the requests half closed — the close is the decision the admin
-      // made, and the locks expire on their own within the minute.
-      try {
-        const released = await this.fileLocks.releaseAllOnBranch(cr.sourceBranch);
-        if (released > 0) {
-          crLog.info(`released ${released} file lock(s) held on "${cr.sourceBranch}"`);
+        .where(eq(changeRequests.state, 'open'))
+        .returning({ number: changeRequests.number, sourceBranch: changeRequests.sourceBranch });
+      if (justClosed.length === 0) break;
+      for (const cr of justClosed) {
+        // Best effort, per branch: a lock table that will not answer must not
+        // leave the requests half closed — the close is the decision the admin
+        // made, and the locks expire on their own within the minute.
+        try {
+          const released = await this.fileLocks.releaseAllOnBranch(cr.sourceBranch);
+          if (released > 0) {
+            crLog.info(`released ${released} file lock(s) held on "${cr.sourceBranch}"`);
+          }
+        } catch (err) {
+          crLog.warn(`could not release the file locks on "${cr.sourceBranch}":`, { err });
         }
-      } catch (err) {
-        crLog.warn(`could not release the file locks on "${cr.sourceBranch}":`, { err });
+        // The bytes a release already enqueued belong to the repository that
+        // is gone — see `markNeedsAttentionOnBranch`. Taken out of the
+        // worker's reach in the same breath as the locks, because dropping a
+        // lock is precisely what leaves a row behind.
+        try {
+          const quarantined = await this.pendingCommits.markNeedsAttentionOnBranch(
+            cr.sourceBranch,
+            'The knowledge-base repository was replaced while this commit was still queued, so it was never ' +
+              'written. The bytes are kept here: the branch it was meant for belongs to the previous repository.',
+          );
+          if (quarantined > 0) {
+            crLog.warn(
+              `${quarantined} queued commit(s) on "${cr.sourceBranch}" need attention: the repository was replaced ` +
+                'before they landed, so they were not written to the new one.',
+            );
+          }
+        } catch (err) {
+          crLog.warn(`could not set aside the queued commits on "${cr.sourceBranch}":`, { err });
+        }
+        this.prs.invalidateDetailCache(cr.number);
+        this.events?.emit({ kind: 'change-request-rejected', number: cr.number });
+        closed++;
       }
-      this.prs.invalidateDetailCache(cr.number);
-      this.events?.emit({ kind: 'change-request-rejected', number: cr.number });
-      closed++;
     }
     if (closed > 0) {
       crLog.info(`closed ${closed} change request(s): the knowledge-base repository was replaced`);

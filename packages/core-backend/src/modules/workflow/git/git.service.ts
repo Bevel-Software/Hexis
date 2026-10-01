@@ -1760,7 +1760,12 @@ export class GitService implements IGitService {
    * conflict into the typed error the workflow layer queues recovery for.
    * Shared by `pull` and `syncFromRemote` so the two cannot drift.
    */
-  private async rebaseOntoRemote(cwd: string, branch: string, remoteRef: string): Promise<void> {
+  private async rebaseOntoRemote(
+    cwd: string,
+    branch: string,
+    remoteRef: string,
+    opts: { preserveMerges?: boolean } = {},
+  ): Promise<void> {
     // An UNBORN HEAD (a clone of an upstream that was empty when cloned) has
     // no commit to replay and `git rebase` refuses to start from it, so the
     // branch is moved to the remote commit instead. That is only safe while
@@ -1798,7 +1803,20 @@ export class GitService implements IGitService {
       // the local commits onto origin, then reapplies them, so the retry
       // push can fast-forward. Untracked files don't block rebase and are
       // left untouched.
-      await this.git(cwd, ['rebase', '--autostash', remoteRef]);
+      // `--rebase-merges` is what keeps an unpushed MERGE a merge. Plain
+      // rebase replays `--no-merges upstream..HEAD`, which turns a merge
+      // commit the clone holds but origin has not seen into cherry-picks of
+      // the commits it merged — the merged branch stops being a parent, so
+      // "does the published head contain the target's head" answers no
+      // however many times the update runs. Only the change-request update
+      // asks for it; every other pull replays plain saves, where the two
+      // spellings produce the same history.
+      await this.git(cwd, [
+        'rebase',
+        '--autostash',
+        ...(opts.preserveMerges ? ['--rebase-merges'] : []),
+        remoteRef,
+      ]);
     } catch (err) {
       // Capture the contested paths BEFORE the abort wipes the rebase
       // state — `--diff-filter=U` lists exactly the files whose replay
@@ -1922,7 +1940,10 @@ export class GitService implements IGitService {
     });
   }
 
-  async pull(workspaceId: string): Promise<{ treeChanged: boolean }> {
+  async pull(
+    workspaceId: string,
+    opts: { preserveMerges?: boolean } = {},
+  ): Promise<{ treeChanged: boolean }> {
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
       const branch = await this.checkedOutBranch(cwd);
@@ -1935,7 +1956,7 @@ export class GitService implements IGitService {
       // Refresh WITHOUT `git pull`, and without touching `FETCH_HEAD` — see
       // `refreshRemoteBranchRef` for why both halves are load-bearing.
       const remoteRef = await this.refreshRemoteBranchRef(cwd, branch);
-      await this.rebaseOntoRemote(cwd, branch, remoteRef);
+      await this.rebaseOntoRemote(cwd, branch, remoteRef, opts);
       this.accessControl?.invalidate(workspaceId);
       const treeAfter = (await this.revParseOrNull(cwd, 'HEAD^{tree}')) ?? '';
       return { treeChanged: treeAfter !== treeBefore };

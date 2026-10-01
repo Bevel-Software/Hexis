@@ -30,8 +30,11 @@ const REPO = 'https://example.com/acme/kb.git';
 
 let server: HttpServer | null = null;
 let savedEnv: Partial<Record<(typeof KB_ENV)[number], string | undefined>> = {};
+/** Set by the one test about a close the database will not do. Reset per test. */
+let failTheClose = false;
 
 beforeEach(() => {
+  failTheClose = false;
   savedEnv = {};
   for (const k of KB_ENV) {
     savedEnv[k] = process.env[k];
@@ -71,6 +74,7 @@ function listen(openChangeRequests: number) {
     },
     async closeAsRepositoryReplaced() {
       closes.count += 1;
+      if (failTheClose) throw new Error('change_requests is down');
       return openChangeRequests;
     },
   };
@@ -97,6 +101,9 @@ function listen(openChangeRequests: number) {
       undefined,
       undefined,
       undefined,
+      undefined,
+      // No alternative way of being given a repository: this suite is about the
+      // one that has always been there, an address and a token.
       undefined,
       changeRequests,
     ),
@@ -180,6 +187,30 @@ describe('a save that changes the knowledge-base repository', () => {
     });
     expect(closes.count).toBe(1);
     expect(phaseRuns.count).toBe(1);
+  });
+
+  /**
+   * A close that cannot be done is a PRECONDITION that failed, not a detail of
+   * an otherwise successful save. Stored anyway, the address would now match,
+   * so the next save would see no change, ask nothing, and never retry the
+   * close — leaving those requests open on branches the new repository does not
+   * have, their file locks refusing paths to everyone, with nothing the admin
+   * could press to fix it.
+   */
+  it('refuses the whole save, saying why, when the requests cannot be closed', async () => {
+    const { base, settings, phaseRuns } = await configured(3);
+    failTheClose = true;
+
+    const res = await post(base, {
+      settings: { kbRepoUrl: 'https://example.com/acme/replacement.git', gitToken: 'ghp_new' },
+      confirmRepositoryChange: 'close',
+    });
+
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toMatch(/could not be closed/);
+    // Nothing stored, no working copy touched: the admin can press Save again.
+    expect(settings.resolve('kbRepoUrl')).toBe(REPO);
+    expect(phaseRuns.count).toBe(0);
   });
 });
 

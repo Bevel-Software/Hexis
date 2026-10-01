@@ -72,6 +72,28 @@ export interface KbInitFailure {
   cause: string;
 }
 
+/**
+ * A way a deployment can have the repository its knowledge base lives in:
+ * one it keeps itself, one on GitHub reached through a GitHub App, or one on
+ * any git host reached by its address and a token.
+ */
+export type GitMode = 'managed' | 'github-app' | 'token';
+
+/** The ways this deployment offers, in the order they are shown, and the one it is on. */
+export interface RepositoryStatus {
+  /** The way IN EFFECT: the one the running deployment is on. Null on a deployment that has no repository yet. */
+  mode: GitMode | null;
+  /**
+   * The way the settings say, which a restart puts in effect. Differs from
+   * `mode` between a move and the restart it owes. Absent from a server
+   * that does not tell the two apart.
+   */
+  chosen?: GitMode | null;
+  /** The environment variable that chose for the deployment, when one did: the choice is then not the screen's to make. */
+  pinned?: string;
+  modes: GitMode[];
+}
+
 export interface SetupStatus {
   /** Reachable knowledge base AND a process that can serve it. */
   complete: boolean;
@@ -92,6 +114,8 @@ export interface SetupStatus {
   sync?: SyncStatus;
   /** Admins only. Absent from an older server. */
   oidcVerification?: OidcVerification;
+  /** Admins only. Absent from a server that knows one way of having a repository. */
+  repository?: RepositoryStatus;
 }
 
 /**
@@ -122,8 +146,12 @@ export class RepositoryChangeNeedsConfirmation extends Error {
 /** What a save that changed the repository did about the open change requests. */
 export interface RepositoryChangeResult {
   choice: RepositoryChangeChoice | null;
-  /** How many were closed as "repository replaced"; null when that could not be done and they are still open. */
-  closedChangeRequests: number | null;
+  /**
+   * How many were closed as "repository replaced". `keep` answers 0. A close
+   * that could not be done refuses the whole save, so this never reports on
+   * requests that are still open.
+   */
+  closedChangeRequests: number;
 }
 
 export interface SaveResult {
@@ -132,6 +160,7 @@ export interface SaveResult {
   awaitingRestart?: boolean;
   settings: SettingStatus[];
   oidcVerification?: OidcVerification;
+  repository?: RepositoryStatus;
   /** Only on the save that changed the knowledge-base repository. */
   repositoryChange?: RepositoryChangeResult;
 }
@@ -372,4 +401,72 @@ export async function testOidc(fields: Record<string, string>): Promise<OidcTest
   }
   if (!res.ok) await readError(res);
   return (await res.json()) as OidcTest;
+}
+
+/** Where a deployment's connection to GitHub through a GitHub App stands. */
+export interface GitHubAppStatus {
+  /** Who supplied the app. Null: there is none yet, and this deployment can register its own. */
+  registeredBy: 'environment' | 'setup' | null;
+  app: { slug: string; url: string } | null;
+  /** The installation, and the account it is on, once the app is installed. */
+  installation: { id: string; account: string } | null;
+  /** `owner/name`, once one is chosen. */
+  repository: string | null;
+}
+
+/** A repository the installation reaches. */
+export interface GitHubRepository {
+  fullName: string;
+  private: boolean;
+  defaultBranch: string;
+  writable: boolean;
+}
+
+export async function fetchGitHubApp(): Promise<GitHubAppStatus> {
+  const res = await authFetch('/api/setup/github-app');
+  if (!res.ok) await readError(res);
+  return (await res.json()) as GitHubAppStatus;
+}
+
+/** The manifest of this deployment's own app, and the address on GitHub the browser posts it to. */
+export async function startGitHubAppRegistration(
+  organization: string,
+): Promise<{ action: string; manifest: Record<string, unknown> }> {
+  const res = await authFetch('/api/setup/github-app/manifest', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(organization ? { organization } : {}),
+  });
+  if (!res.ok) await readError(res);
+  return (await res.json()) as { action: string; manifest: Record<string, unknown> };
+}
+
+export async function fetchGitHubRepositories(): Promise<{ repositories: GitHubRepository[]; more: boolean }> {
+  const res = await authFetch('/api/setup/github-app/repositories');
+  if (!res.ok) await readError(res);
+  return (await res.json()) as { repositories: GitHubRepository[]; more: boolean };
+}
+
+/**
+ * Where on GitHub the app is installed, for the browser to be sent to. Asked
+ * for, never linked to: asking is what starts the round trip, and a link
+ * would let anyone start one in an admin's browser.
+ */
+export async function startGitHubAppInstallation(): Promise<string> {
+  const res = await authFetch('/api/setup/github-app/install', { method: 'POST' });
+  if (!res.ok) await readError(res);
+  return ((await res.json()) as { url: string }).url;
+}
+
+/**
+ * Where to sign in on GitHub so the deployment can read again which
+ * repositories may be connected. Nothing is installed: GitHub sends the
+ * browser straight back. It is how a repository added to the installation
+ * on GitHub gets into the list, since GitHub sends nobody back from the
+ * page it is added on.
+ */
+export async function startGitHubAppRefresh(): Promise<string> {
+  const res = await authFetch('/api/setup/github-app/refresh', { method: 'POST' });
+  if (!res.ok) await readError(res);
+  return ((await res.json()) as { url: string }).url;
 }

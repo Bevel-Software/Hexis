@@ -140,8 +140,6 @@ describe('SetupScreen', () => {
           kbRepoUrl: 'https://example.com/kb.git',
           gitToken: 'ghp_secret',
         }),
-        // No repository-change confirmation: this is a first-run save.
-        undefined,
       ),
     );
     await waitFor(() => expect(reload).toHaveBeenCalled());
@@ -714,7 +712,6 @@ describe('SetupScreen', () => {
     await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
     expect(api.saveSettings).toHaveBeenCalledWith(
       expect.objectContaining({ defaultBranch: 'main', protectedBranches: 'main' }),
-      undefined,
     );
   });
 
@@ -776,7 +773,6 @@ describe('SetupScreen', () => {
     await waitFor(() =>
       expect(api.saveSettings).toHaveBeenCalledWith(
         expect.objectContaining({ defaultBranch: 'main', protectedBranches: 'main' }),
-        undefined,
       ),
     );
   });
@@ -1338,7 +1334,6 @@ describe('SetupScreen — the agent guide file', () => {
     await waitFor(() =>
       expect(api.saveSettings).toHaveBeenCalledWith(
         expect.objectContaining({ agentsFile: 'HEXIS.md', agentsFileLink: 'false' }),
-        undefined,
       ),
     );
   });

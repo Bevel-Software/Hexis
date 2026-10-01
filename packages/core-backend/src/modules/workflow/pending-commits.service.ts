@@ -385,6 +385,43 @@ export class PendingCommitsService {
   }
 
   /**
+   * Take every commit still queued for `branch` out of the worker's reach and
+   * onto the admin surface, and answer how many moved.
+   *
+   * The one caller is the knowledge-base repository being REPLACED. A release
+   * ENQUEUES the bytes and only then drops its lock, so the moment the locks
+   * on a branch are dropped there may be rows already waiting — bytes that
+   * were written against a working copy of the repository that is gone. Left
+   * `pending`, the worker would pick them up after the re-clone and commit
+   * them onto a same-named branch of a DIFFERENT repository: someone else's
+   * file, overwritten by a change nobody made to it.
+   *
+   * `needs_attention`, not deleted — the same rule as everything else about a
+   * replacement. The bytes are still in the row, the reason is on it, and they
+   * show up on the pending-commit admin surface for a person to decide about.
+   * `running` rows go too: the worker checks the row back in when it finishes,
+   * and a row it is mid-flight with is exactly one whose destination just
+   * changed under it.
+   */
+  async markNeedsAttentionOnBranch(branch: string, error: string): Promise<number> {
+    const moved = await this.db
+      .update(pendingCommits)
+      .set({
+        status: 'needs_attention',
+        lastError: error,
+        lastAttemptedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(pendingCommits.branch, branch),
+          inArray(pendingCommits.status, ['pending', 'running']),
+        ),
+      )
+      .returning({ id: pendingCommits.id });
+    return moved.length;
+  }
+
+  /**
    * When the oldest commit still waiting to land was queued, or null when
    * nothing waits — the readiness answer's one number. `pending` and
    * `running` both count: a row the worker holds is still not in git, and a
