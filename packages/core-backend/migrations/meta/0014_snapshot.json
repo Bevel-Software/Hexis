@@ -1,5 +1,5 @@
 {
-  "id": "e7605356-5a11-46ea-b598-f723eeb7e5b0",
+  "id": "71f8e883-be7d-41a5-aa81-728d1788d7db",
   "prevId": "0da96c5a-8feb-47e2-9c97-f3698eb56c05",
   "version": "7",
   "dialect": "postgresql",
@@ -463,6 +463,12 @@
         "closed_at": {
           "name": "closed_at",
           "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "closed_reason": {
+          "name": "closed_reason",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         }
@@ -2212,12 +2218,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
-        },
-        "deactivated_at": {
-          "name": "deactivated_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
         },
         "created_at": {
           "name": "created_at",

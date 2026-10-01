@@ -35,7 +35,7 @@ import type { OnServerStart } from '../modules/workspace/startup/on-server-start
  *   enterprise root overwrites the `CoreServices` fields (or pushes into the
  *   `authProviders` array) after construction, before the server is built.
  *
- * (Commit-time KB validation and the ontology write block are NOT ports:
+ * (Commit-time KB validation and the agent read/write hooks are NOT ports:
  * they are workflow lifecycle HOOKS the enterprise root registers on
  * `workflowService.hooks` after construction — see
  * `modules/workflow/workflow-hooks.ts`.)

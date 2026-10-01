@@ -120,6 +120,7 @@ export {
   WorkflowHooks,
   type CommitValidationHook,
   type CommitValidationContext,
+  type AgentOperationContext,
+  type AgentReadHook,
   type PreWriteHook,
-  type PreWriteContext,
 } from './modules/workflow/workflow-hooks.js';

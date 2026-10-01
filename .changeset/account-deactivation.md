@@ -21,7 +21,7 @@ The deployment admin (`ADMIN_EMAIL` while `ADMIN_PASSWORD` is set) cannot be swi
 - A refusing verdict may carry `waitForAdmin: true`. On a first single sign-on sign-in, the person is then created switched off, so an admin finds them waiting on the accounts list, and the sign-in is refused with the port's words. Everywhere else it is a plain refusal.
 
 New:
-- column `users.deactivated_at` (migration `0014`);
+- column `users.deactivated_at` (migration `0015`);
 - `AuthService.isActive`, `resolveSession`, `deactivate` and `reactivate`;
 - routes `POST /api/admin/accounts/:userId/deactivate` and `/reactivate`;
 - exported from the package root: `AccountDeactivatedError` and `ACCOUNT_DEACTIVATED_MESSAGE`.

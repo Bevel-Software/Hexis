@@ -23,7 +23,6 @@ export interface TenantHostSettings {
   readonly workspacesRoot: string;
   readonly kbTemplateDir: string;
   readonly gitTimeoutMs: number;
-  readonly ontologySessionBlock: boolean;
   readonly updateCheckEnabled: boolean;
   /** See `tenant-secrets.ts`. */
   readonly masterKey: string;
@@ -182,7 +181,6 @@ export function tenantConfigFrom(record: TenantRecord, settings: TenantHostSetti
     gitUsername,
     gitToken: (record.gitToken ?? '').trim(),
     kbTemplateDir: settings.kbTemplateDir,
-    ontologySessionBlock: settings.ontologySessionBlock,
     updateCheckEnabled: settings.updateCheckEnabled,
     allowedEmailDomains,
     trustProxy: settings.trustProxy,
@@ -289,7 +287,6 @@ export function tenantHostEnv(env: NodeJS.ProcessEnv = process.env): TenantHostE
     kbTemplateDir: env.KB_TEMPLATE_DIR || defaultKbTemplateDir(),
     gitTimeoutMs:
       Number.isFinite(gitTimeout) && gitTimeout > 0 && gitTimeout <= MAX_TIMER_MS ? gitTimeout : DEFAULT_GIT_TIMEOUT_MS,
-    ontologySessionBlock: (env.ONTOLOGY_SESSION_BLOCK ?? 'true').trim().toLowerCase() !== 'false',
     updateCheckEnabled: (env.UPDATE_CHECK ?? 'true').trim().toLowerCase() !== 'false',
     idleMinutes: Number.isFinite(idle) && idle > 0 ? idle : 30,
   };

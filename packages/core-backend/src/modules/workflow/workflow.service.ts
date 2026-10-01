@@ -63,7 +63,7 @@ import {
   isPlatformRestoreShape,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
 import type { GitService } from './git/git.service.js';
@@ -324,9 +324,9 @@ export class WorkflowService implements IWorkflowService {
      * the composition root registers module-owned behavior against it
      * (`core.workflowService.hooks.onCommitValidation(…)` /
      * `.onPreWrite(…)`) after `createCoreServices` returns. The composition
-     * root passes the SAME instance `GitService` and the session-ontology
-     * gate consult; the default keeps test constructions (which don't
-     * exercise hooks) unchanged.
+     * root passes the SAME instance `GitService` and the agent-access gate
+     * consult; the default keeps test constructions (which don't exercise
+     * hooks) unchanged.
      */
     public readonly hooks: WorkflowHooks = new WorkflowHooks(),
   ) {
@@ -3020,6 +3020,107 @@ export class WorkflowService implements IWorkflowService {
       this.events?.emit({ kind: 'change-request-rejected', number: cr.number });
       crLog.info(`closed change request #${cr.number}: branch "${missing}" no longer exists`);
       closed++;
+    }
+    return closed;
+  }
+
+  /**
+   * How many change requests are open right now.
+   *
+   * Read by the setup screen's repository-change confirmation, which has to
+   * say how many requests the admin is deciding about BEFORE the address is
+   * saved. A plain count — nothing here reaches the repository, so it answers
+   * just as well for a repository that is already gone.
+   */
+  async countOpenChangeRequests(): Promise<number> {
+    const [row] = await this.db
+      .select({ open: sql<number>`count(*)::int` })
+      .from(changeRequests)
+      .where(eq(changeRequests.state, 'open'));
+    return row?.open ?? 0;
+  }
+
+  /**
+   * Close every open change request because the knowledge-base REPOSITORY was
+   * replaced, and answer how many were closed.
+   *
+   * The admin's own choice on the setup screen: a repository that merely
+   * MOVED keeps its requests (the branches came along), while a repository
+   * that was REPLACED has none of those branches, so every request points at
+   * something this deployment can no longer fetch. Nothing is deleted — the
+   * rows stay, closed, carrying `closed_reason = 'repository-replaced'` so
+   * the reason survives the person who chose it.
+   *
+   * Locks held on those branches go with them. Their holder cannot publish
+   * the bytes (the branch is not in the new repository) and cannot release
+   * the lock by finishing (the request is closed), so the row would sit there
+   * refusing the path until its TTL ran out — and a still-connected client's
+   * heartbeat keeps pushing that out.
+   *
+   * The close is ONE statement per pass — `update … where state = 'open'
+   * returning` — not a count followed by a row-at-a-time loop. Read first and
+   * then written, every request opened while the loop ran would be missed and
+   * left open against a branch the new repository does not have. One
+   * set-shaped statement cannot miss a row that exists when it runs, and the
+   * guard is the statement's own `where`, so a merge or a withdrawal racing it
+   * wins and its request is simply not in the returned set.
+   *
+   * Repeated while a pass still finds something, because a request can be
+   * opened BETWEEN passes: the caller has not saved the new address yet, so
+   * the deployment is still live and `POST /change-requests` is still being
+   * served. Bounded, so a client opening requests in a loop cannot hold the
+   * save open forever — what survives the last pass is a request opened after
+   * the repository was replaced, which the deleted-branch sweep closes on its
+   * own terms.
+   */
+  async closeOpenChangeRequestsAsRepositoryReplaced(): Promise<number> {
+    let closed = 0;
+    for (let pass = 0; pass < 5; pass++) {
+      const now = new Date();
+      const justClosed = await this.db
+        .update(changeRequests)
+        .set({ state: 'closed', closedAt: now, updatedAt: now, closedReason: 'repository-replaced' })
+        .where(eq(changeRequests.state, 'open'))
+        .returning({ number: changeRequests.number, sourceBranch: changeRequests.sourceBranch });
+      if (justClosed.length === 0) break;
+      for (const cr of justClosed) {
+        // Best effort, per branch: a lock table that will not answer must not
+        // leave the requests half closed — the close is the decision the admin
+        // made, and the locks expire on their own within the minute.
+        try {
+          const released = await this.fileLocks.releaseAllOnBranch(cr.sourceBranch);
+          if (released > 0) {
+            crLog.info(`released ${released} file lock(s) held on "${cr.sourceBranch}"`);
+          }
+        } catch (err) {
+          crLog.warn(`could not release the file locks on "${cr.sourceBranch}":`, { err });
+        }
+        // The bytes a release already enqueued belong to the repository that
+        // is gone — see `markNeedsAttentionOnBranch`. Taken out of the
+        // worker's reach in the same breath as the locks, because dropping a
+        // lock is precisely what leaves a row behind.
+        try {
+          const quarantined = await this.pendingCommits.markNeedsAttentionOnBranch(
+            cr.sourceBranch,
+            'The knowledge-base repository was replaced while this commit was still queued, so it was never ' +
+              'written. The bytes are kept here: the branch it was meant for belongs to the previous repository.',
+          );
+          if (quarantined > 0) {
+            crLog.warn(
+              `${quarantined} queued commit(s) on "${cr.sourceBranch}" need attention: the repository was replaced ` +
+                'before they landed, so they were not written to the new one.',
+            );
+          }
+        } catch (err) {
+          crLog.warn(`could not set aside the queued commits on "${cr.sourceBranch}":`, { err });
+        }
+        this.prs.invalidateDetailCache(cr.number);
+        this.events?.emit({ kind: 'change-request-rejected', number: cr.number });
+        closed++;
+      }
+    }
+    if (closed > 0) {
+      crLog.info(`closed ${closed} change request(s): the knowledge-base repository was replaced`);
     }
     return closed;
   }
