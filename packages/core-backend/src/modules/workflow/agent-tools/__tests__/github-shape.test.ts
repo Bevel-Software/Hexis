@@ -424,12 +424,15 @@ describe('the access block', () => {
     ).toBe(true);
   });
 
-  it('may_approve answers over the SHOWN approvals, not the request\'s whole set', () => {
-    // A write grant can outlive a read refusal — `viewerCanApprove` is decided
-    // at `origin/<base>` and says nothing about reading. The only approvable
-    // file here is one the caller is not shown, so the honest answer is false:
-    // true would promise an approval they cannot make and would say a withheld
-    // file is theirs to approve.
+  it('may_approve follows exactly the approval set it is given', () => {
+    // What this pins is the narrow thing the signature can pin: the answer is a
+    // function of the SHOWN approvals and of nothing else. The leak it exists to
+    // prevent — a write grant outliving a read refusal, so the only approvable
+    // file is one the caller is not shown — cannot be staged here at all, since
+    // `toGhAccess` no longer receives the request's whole approval set (its
+    // `Pick` excludes `approvals` for exactly that reason). That case is driven
+    // end to end by 'answers may_approve false when the only approvable file is
+    // the withheld one' in change-request-read.tools.test.ts.
     const shown = [approval({ path: 'Knowledge/A.md' })];
     expect(toGhAccess(detail(), { visible: [], withheld: 0 }, false, shown).may_approve).toBe(false);
     expect(
