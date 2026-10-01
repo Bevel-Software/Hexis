@@ -110,6 +110,7 @@ export {
 export {
   AccountAdmissionRefusedError,
   AccountDeactivatedError,
+  AccountChangeRefusedError,
   AuthBackendError,
   ACCOUNT_DEACTIVATED_MESSAGE,
   admitEveryone,

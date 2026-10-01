@@ -537,7 +537,7 @@ describe('AuthService.listAccounts', () => {
     expect(json).not.toContain('sup3r-secret');
     for (const account of [...withHash, ...withoutHash]) {
       expect(Object.keys(account).sort()).toEqual(
-        ['createdAt', 'deactivatedAt', 'email', 'hasPassword', 'id', 'isEnvAdmin', 'name'],
+        ['createdAt', 'deactivatedAt', 'email', 'hasPassword', 'id', 'isEnvAdmin', 'isSystem', 'name'],
       );
     }
   });

@@ -14,6 +14,8 @@ export interface AccountSummary {
   isEnvAdmin: boolean;
   /** When an admin switched the account off; null while it is on. */
   deactivatedAt: string | null;
+  /** One of the accounts the platform runs its own work as: it is never switched off. */
+  isSystem: boolean;
   createdAt: string;
 }
 

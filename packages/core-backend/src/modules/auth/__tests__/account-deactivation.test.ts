@@ -4,6 +4,7 @@ import type { CoreConfig } from '../../../core-config.js';
 import { AuthService } from '../auth.service.js';
 import {
   AccountAdmissionRefusedError,
+  AccountChangeRefusedError,
   AccountDeactivatedError,
   AuthBackendError,
   type AccountProvisionReason,
@@ -170,7 +171,7 @@ describe('AuthService.deactivate', () => {
   it('refuses the deployment admin, whose environment password is the way back in', async () => {
     const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
     const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
-    await expect(new AuthService(db, config).deactivate(ROW.id)).rejects.toThrow('deployment admin');
+    await expect(new AuthService(db, config).deactivate(ROW.id)).rejects.toBeInstanceOf(AccountChangeRefusedError);
     expect(vi.mocked(db.update)).not.toHaveBeenCalled();
   });
 

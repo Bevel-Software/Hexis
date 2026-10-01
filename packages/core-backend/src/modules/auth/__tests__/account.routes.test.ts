@@ -3,7 +3,7 @@ import express from 'express';
 import type { Server } from 'node:http';
 import { createAccountRoutes } from '../account.routes.js';
 import { AuthService } from '../auth.service.js';
-import { AccountAdmissionRefusedError } from '../account-admission.js';
+import { AccountAdmissionRefusedError, AccountChangeRefusedError } from '../account-admission.js';
 import { hashPassword } from '../password-hash.js';
 import type { Database } from '../../database/connection.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
@@ -371,10 +371,36 @@ describe('account routes — switching an account off and on', () => {
   });
 
   it('answers a refused deactivation (the deployment admin, say) with 400 and the reason', async () => {
-    vi.mocked(authService.deactivate).mockRejectedValueOnce(new Error('The deployment admin cannot be switched off'));
+    vi.mocked(authService.deactivate).mockRejectedValueOnce(new AccountChangeRefusedError('The deployment admin cannot be switched off'));
     const base = await listen(makeApp({ admin: true }));
     const res = await post(base, 'u2/deactivate');
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain('deployment admin');
+  });
+
+  it('answers an unexpected failure with a 500 that names nothing of it', async () => {
+    vi.mocked(authService.deactivate).mockRejectedValueOnce(new Error('relation "users" does not exist'));
+    vi.mocked(authService.reactivate).mockRejectedValueOnce(new Error('relation "users" does not exist'));
+    const base = await listen(makeApp({ admin: true }));
+    const off = await post(base, 'u2/deactivate');
+    expect(off.status).toBe(500);
+    expect(JSON.stringify(await off.json())).not.toContain('relation');
+    const on = await post(base, 'u2/reactivate');
+    expect(on.status).toBe(500);
+    expect(JSON.stringify(await on.json())).not.toContain('relation');
+  });
+
+  it('refuses a password that is not a string, rather than making an account for single sign-on', async () => {
+    vi.mocked(authService.createAccount).mockClear();
+    const base = await listen(makeApp({ admin: true }));
+    for (const password of [false, null, 0]) {
+      const res = await fetch(`${base}/api/admin/accounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'b@example.com', password }),
+      });
+      expect(res.status).toBe(400);
+    }
+    expect(authService.createAccount).not.toHaveBeenCalled();
   });
 });

@@ -6,7 +6,7 @@ import { printable } from '../../shared/printable.js';
 const log = logger('accounts');
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { AuthService } from './auth.service.js';
-import { AccountAdmissionRefusedError } from './account-admission.js';
+import { AccountAdmissionRefusedError, AccountChangeRefusedError } from './account-admission.js';
 import { erasedAccountId, type IAccountErasureService } from './account-erasure.service.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import type { UserAccessRemovalService } from '../access/user-access-removal.service.js';
@@ -55,10 +55,15 @@ export function createAccountRoutes(
     const { email, name, password } = req.body as {
       email?: string;
       name?: string;
-      password?: string;
+      password?: unknown;
     };
     if (!email) {
       res.status(400).json({ error: 'email is required' });
+      return;
+    }
+    // Absent means single sign-on; anything else that is not text is a mistake, not that.
+    if (password !== undefined && typeof password !== 'string') {
+      res.status(400).json({ error: 'password must be a string' });
       return;
     }
     try {
@@ -91,7 +96,12 @@ export function createAccountRoutes(
       log.info('account audit:', { action: 'deactivate', actorUserId: req.userId, targetUserId: userId });
       res.status(204).end();
     } catch (error) {
-      res.status(400).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+      if (error instanceof AccountChangeRefusedError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      log.error('switching an account off failed:', { err: error });
+      res.status(500).json({ error: 'Could not switch this account off' });
     }
   });
 
@@ -108,8 +118,12 @@ export function createAccountRoutes(
       log.info('account audit:', { action: 'reactivate', actorUserId: req.userId, targetUserId: userId });
       res.status(204).end();
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      res.status(error instanceof AccountAdmissionRefusedError ? 403 : 400).json({ error: msg });
+      if (error instanceof AccountAdmissionRefusedError) {
+        res.status(403).json({ error: error.message });
+        return;
+      }
+      log.error('switching an account on failed:', { err: error });
+      res.status(500).json({ error: 'Could not switch this account on' });
     }
   });
 

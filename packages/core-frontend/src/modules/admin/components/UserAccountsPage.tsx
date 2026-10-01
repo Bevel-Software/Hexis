@@ -157,11 +157,13 @@ export function UserAccountsPage() {
   const [addPassword, setAddPassword] = useState('');
   const [addError, setAddError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
-  // The account being switched off or on, while the request is in flight.
+  // The account being switched off or on, while the request and the refresh after it are in flight.
   const [switching, setSwitching] = useState<string | null>(null);
+  // The account awaiting confirmation before it is switched off; non-null drives that Dialog.
+  const [pendingDeactivate, setPendingDeactivate] = useState<AccountSummary | null>(null);
 
   const refresh = useCallback(() => {
-    listAccounts()
+    return listAccounts()
       .then((rows) => {
         setAccounts(rows);
         setError(null);
@@ -277,11 +279,14 @@ export function UserAccountsPage() {
     try {
       if (account.deactivatedAt) await reactivateAccount(account.id);
       else await deactivateAccount(account.id);
-      refresh();
+      // Busy until the list shows the new state, so a second click cannot
+      // ask for the same change again from the old one.
+      await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't change this account.");
     } finally {
       setSwitching(null);
+      setPendingDeactivate(null);
     }
   }
 
@@ -417,13 +422,14 @@ export function UserAccountsPage() {
                           {passwordAction(account).label}
                         </button>
                       ))}
-                    {!isSelf && !account.isEnvAdmin && (
+                    {!isSelf && !account.isEnvAdmin && !account.isSystem && (
                       // Not for your own account (the backend refuses it, so
-                      // an admin always remains who can sign in) nor the
+                      // an admin always remains who can sign in), nor the
                       // deployment admin's (its environment password is the
-                      // way back in).
+                      // way back in), nor one the platform runs its own work
+                      // as. Switching off asks first; switching on does not.
                       <button
-                        onClick={() => toggleActive(account)}
+                        onClick={() => (account.deactivatedAt ? toggleActive(account) : setPendingDeactivate(account))}
                         disabled={switching !== null}
                         className="text-xs px-2 py-1 rounded-sm text-ink hover:bg-hover border border-line disabled:opacity-50"
                         title={
@@ -635,6 +641,42 @@ export function UserAccountsPage() {
             </p>
           )}
         </div>
+      </Dialog>
+
+      <Dialog
+        open={pendingDeactivate !== null}
+        onClose={() => setPendingDeactivate(null)}
+        title="Switch off account"
+        size="sm"
+        busy={switching !== null}
+        footer={
+          <>
+            <button
+              onClick={() => setPendingDeactivate(null)}
+              disabled={switching !== null}
+              className="px-3 py-1.5 text-sm rounded-sm text-ink hover:bg-hover border border-line disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => pendingDeactivate && toggleActive(pendingDeactivate)}
+              disabled={switching !== null}
+              className="px-3 py-1.5 text-sm rounded-sm bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 disabled:hover:bg-red-600"
+            >
+              {switching !== null ? 'Switching off…' : 'Switch off'}
+            </button>
+          </>
+        }
+      >
+        <p className="text-xs text-ink leading-snug">
+          Switch off{' '}
+          <span className="font-medium">
+            {pendingDeactivate?.name} ({pendingDeactivate?.email})
+          </span>
+          ? Nothing is deleted: they keep their history and their place in roles and groups. But
+          they can no longer sign in, and their connection keys and agent connections stop working,
+          until the account is switched back on.
+        </p>
       </Dialog>
     </>
   );

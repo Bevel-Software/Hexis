@@ -95,5 +95,19 @@ export class AuthBackendError extends Error {
   }
 }
 
+/**
+ * An admin's change to an account that the deployment refuses on purpose
+ * (switching off the deployment admin, or an account the platform runs its
+ * own work as). Its message is for the admin; a route answers it with 400.
+ */
+export class AccountChangeRefusedError extends Error {
+  readonly status = 400;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'AccountChangeRefusedError';
+  }
+}
+
 /** What a person with a deactivated account is told, wherever they knock. */
 export const ACCOUNT_DEACTIVATED_MESSAGE = 'Your account on this workspace is switched off. Ask its admin to turn it back on.';

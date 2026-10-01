@@ -6,6 +6,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
   AccountAdmissionRefusedError,
+  AccountChangeRefusedError,
   AccountDeactivatedError,
   AuthBackendError,
   admitEveryone,
@@ -295,7 +296,7 @@ export class AuthService {
    * Password sign-in refuses it until a password is set. For an address that
    * already has an account it changes nothing but an explicitly given name.
    *
-   * The deployment admin is the one target this refuses, for the reason
+   * WITH a password, the deployment admin is the one target this refuses, for the reason
    * {@link changePassword} refuses it: that account's password is the
    * environment's, so a stored hash would not replace it but ADD a second
    * credential — one that keeps signing in after `ADMIN_PASSWORD` is rotated,
@@ -456,6 +457,8 @@ export class AuthService {
       isEnvAdmin: boolean;
       /** When an admin switched the account off; null while it is on. */
       deactivatedAt: Date | null;
+      /** One of the accounts the platform runs its own work as: never switched off, nobody signs in with it. */
+      isSystem: boolean;
       createdAt: Date;
     }>
   > {
@@ -467,6 +470,7 @@ export class AuthService {
       hasPassword: row.passwordHash != null,
       isEnvAdmin: this.reportsAsEnvAdmin(row.email),
       deactivatedAt: row.deactivatedAt,
+      isSystem: SYSTEM_ACCOUNT_EMAILS.includes(row.email),
       createdAt: row.createdAt,
     }));
   }
@@ -594,10 +598,10 @@ export class AuthService {
     const [row] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!row) return false;
     if (this.isEnvAdminEmail(row.email)) {
-      throw new Error('The deployment admin cannot be switched off: its password in the environment is the way back in.');
+      throw new AccountChangeRefusedError('The deployment admin cannot be switched off: its password in the environment is the way back in.');
     }
     if (SYSTEM_ACCOUNT_EMAILS.includes(row.email)) {
-      throw new Error('This account belongs to the platform itself and cannot be switched off.');
+      throw new AccountChangeRefusedError('This account belongs to the platform itself and cannot be switched off.');
     }
     await this.db
       .update(users)
