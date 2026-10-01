@@ -21,4 +21,4 @@ An agent that wants more asks by name: `include: ["patches"]` gives each listed 
 
 Nothing below the tool changed. `IWorkflowService.openChangeRequest` still returns the full `ChangeRequestDetail`, the app's dialog and its routes serve exactly what they served, and the shaping is a pure function (`summarizeChangeRequest`) beside the tool. The `change-request-conflicts` error is unchanged.
 
-For integrators: a caller that read `changeRequest.url` or `changeRequest.number` off this tool reads `url` and `number` at the top level now, and one that read `changeRequest.files[].patch` or `.body` asks for `include: ["patches"]` (nothing in this repository read either).
+For integrators: a caller that read `changeRequest.url` or `changeRequest.number` off this tool reads `url` and `number` at the top level now; one that read `changeRequest.files[].patch` gets those diffs back with `include: ["patches"]`; and `changeRequest.body` — the request's description — is gone from the answer entirely, with no `include` restoring it (nothing in this repository read any of these).

@@ -449,6 +449,15 @@ describe('registerWorkflowTools', () => {
       expect((await open(base)).approvals).toEqual([
         { path: 'KnowledgeBase/Opaque.md', roles: [], users: [], approved: false, inMergeGate: false, approversUnknown: true },
       ]);
+
+      // A detail that carries no verdict at all reads the same way: absent is
+      // not resolved, so the emptiness still means "not known".
+      const legacy = { ...(opened.approvals as Record<string, unknown>[])[0] };
+      delete legacy.eligibilityResolved;
+      opened.approvals = [legacy];
+      expect((await open(base)).approvals).toEqual([
+        { path: 'KnowledgeBase/Opaque.md', roles: [], users: [], approved: false, inMergeGate: false, approversUnknown: true },
+      ]);
     });
 
     it('surfaces the `change-request-conflicts` error as before', async () => {

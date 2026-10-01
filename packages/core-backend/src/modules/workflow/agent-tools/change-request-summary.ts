@@ -72,8 +72,9 @@ export interface ChangeRequestApprovers {
   /** False when the merge gate does not bind this path — then nobody has to approve it. */
   inMergeGate: boolean;
   /**
-   * Present when the access tree could not be resolved for this path. Then
-   * empty `roles`/`users` means "not known", NOT "nobody has to approve".
+   * Present when the access tree could not be resolved for this path — which
+   * includes a detail that carries no verdict at all. Then empty
+   * `roles`/`users` means "not known", NOT "nobody has to approve".
    */
   approversUnknown?: true;
 }
@@ -125,7 +126,11 @@ function approversOf(approval: FileApproval): ChangeRequestApprovers {
     users: (eligible.users ?? []).map((u) => u.name),
     approved: approval.isApproved,
     inMergeGate: approval.inMergeGate,
-    ...(approval.eligibilityResolved === false ? { approversUnknown: true as const } : {}),
+    // Anything but an explicit `true` is unresolved — a detail built before
+    // the flag existed carries no flag at all, and reading that as "resolved"
+    // would turn an empty approver set into "nobody must approve". Same
+    // fail-closed reading as `computeViewerCanUpdate`.
+    ...(approval.eligibilityResolved !== true ? { approversUnknown: true as const } : {}),
   };
 }
 
