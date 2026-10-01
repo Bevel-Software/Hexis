@@ -36,7 +36,9 @@ describe('a viewer\'s retry hands focus to its host pane', () => {
     // `closest` simply finds nothing.
     const onRetry = vi.fn();
     render(<RetryReadButton onRetry={onRetry} />);
-    expect(() => fireEvent.click(screen.getByRole('button', { name: 'Try again' }))).not.toThrow();
+    const activeBefore = document.activeElement;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(document.activeElement).toBe(activeBefore);
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 

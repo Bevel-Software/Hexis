@@ -241,6 +241,17 @@ describe('HistoryVersionPreview — the viewer is bound to the selected save', (
       expect(rawUrls()).toContain(`${refUrl('Docs/old-logo.png')}&side=before`),
     );
     expect(await screen.findByRole('img', { name: `${KB}/Docs/old-logo.png` })).toBeInTheDocument();
+    // EVERY read of this file is that one: no viewer is mounted while the pane
+    // still has to learn the save deleted the file, so there is no first read
+    // of the after side to throw away and no re-mount when the side settles.
+    // Pinned rather than argued, because the `side` the pane starts with is
+    // provisional by design — see the comment on it — and what makes that safe
+    // is precisely that nothing reads it.
+    const reads = rawUrls().filter((u) => u.includes(encodeURIComponent('Docs/old-logo.png')));
+    expect(reads.length).toBeGreaterThan(0);
+    for (const url of reads) {
+      expect(url).toContain(`&ref=${SHA}&side=before`);
+    }
   });
 
   it('names the formats no viewer renders, and still offers the bytes', async () => {
