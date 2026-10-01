@@ -25,6 +25,8 @@ describe('AccessControlService — at-ref batch reads (git cat-file --batch)', (
   let svc: AccessControlService;
   const workspaceId = 'ws-atref-1';
   const admin = 'razvan@bevel.software';
+  /** In no role and named nowhere — read is default-deny for them. */
+  const stranger = 'mia@bevel.software';
 
   async function git(...args: string[]): Promise<void> {
     await execFileAsync('git', ['-C', repo, ...args]);
@@ -44,6 +46,10 @@ describe('AccessControlService — at-ref batch reads (git cat-file --batch)', (
       '---\nwrite:\n  - deny razvan <razvan@bevel.software>\n---\n# denied\n',
     );
     await fs.writeFile(path.join(repo, 'Knowledge/with space.md'), '# spaced\n');
+    // For the read batch: a folder the whole organisation may open.
+    await fs.mkdir(path.join(repo, 'Knowledge/shared'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'Knowledge/shared/access.md'), '---\nread:\n  - everyone\n---\n');
+    await fs.writeFile(path.join(repo, 'Knowledge/shared/note.md'), '# shared\n');
 
     await execFileAsync('git', ['init', '-b', 'main', repo]);
     await git('config', 'user.email', 'test@example.com');
@@ -95,5 +101,53 @@ describe('AccessControlService — at-ref batch reads (git cat-file --batch)', (
     // The per-user deny strips razvan from the expanded email set.
     expect(map!.get('Knowledge/denied.md')!.emails.has(admin)).toBe(false);
     expect(map!.get('Knowledge/plain.md')!.emails.has(admin)).toBe(true);
+  });
+
+  /**
+   * The read side of the same batch, used by the change-request read tools to
+   * decide which of a request's files their caller may see. The verdicts must
+   * be identical to the single-path `canReadAtRef` the app's own content routes
+   * gate on — a batch that answered even one path differently would show an
+   * agent a file the app refuses to open.
+   */
+  it('canReadBatchAtRef answers default-deny, an `everyone` grant, and write-implies-read in one pass', async () => {
+    const paths = [
+      'Knowledge/plain.md',
+      'Knowledge/shared/note.md',
+      'Knowledge/with space.md',
+      'Knowledge/not-there.md',
+    ];
+    const forStranger = await svc.canReadBatchAtRef(workspaceId, 'main', stranger, paths);
+    expect(forStranger).not.toBeNull();
+    // Nothing names them, so read is refused — except where the folder says everyone.
+    expect(forStranger!.get('Knowledge/plain.md')).toBe(false);
+    expect(forStranger!.get('Knowledge/shared/note.md')).toBe(true);
+    expect(forStranger!.get('Knowledge/with space.md')).toBe(false);
+    expect(forStranger!.get('Knowledge/not-there.md')).toBe(false);
+
+    // The Admin write grant folds into read.
+    const forAdmin = await svc.canReadBatchAtRef(workspaceId, 'main', admin, paths);
+    expect([...forAdmin!.values()]).toEqual([true, true, true, true]);
+  });
+
+  it('canReadBatchAtRef matches the single-path read verdict on every path', async () => {
+    const paths = [
+      'Knowledge/plain.md',
+      'Knowledge/shared/note.md',
+      'Knowledge/with space.md',
+      'Knowledge/not-there.md',
+    ];
+    for (const who of [admin, stranger]) {
+      const batch = await svc.canReadBatchAtRef(workspaceId, 'main', who, paths);
+      for (const path of paths) {
+        const single = await svc.canReadAtRef(workspaceId, 'main', who, path);
+        expect(batch!.get(path), `${who} on ${path}`).toBe(single);
+      }
+    }
+  });
+
+  it('canReadBatchAtRef answers an empty map for no paths, and null for a ref it cannot resolve', async () => {
+    expect(await svc.canReadBatchAtRef(workspaceId, 'main', admin, [])).toEqual(new Map());
+    expect(await svc.canReadBatchAtRef(workspaceId, 'no-such-ref', admin, ['Knowledge/plain.md'])).toBeNull();
   });
 });

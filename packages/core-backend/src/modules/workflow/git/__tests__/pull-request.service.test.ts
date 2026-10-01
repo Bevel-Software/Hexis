@@ -6,6 +6,7 @@ import type { Database } from '../../../database/connection.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
 import { hashEmail as hash } from '../../../../shared/email-identity.js';
+import { WorkflowValidationError } from '../../../../shared/domain-errors.js';
 
 function pr(overrides: Partial<PullRequestSummary>): PullRequestSummary {
   return {
@@ -37,6 +38,7 @@ function makeAccessControl(byRef: WritersByRefAndPath): IAccessControl {
     canReadBatch: async () => new Map(),
     eligibleReaders: async () => ({ restricted: false, roles: [], users: [] }),
     canReadAtRef: async () => null,
+    canReadBatchAtRef: async () => null,
     canDownload: async () => false,
     canOwner: async () => false,
     eligibleOwners: async () => ({ roles: [], users: [] }),
@@ -220,5 +222,179 @@ describe('PullRequestService.listPrsForOwnerEmail', () => {
     const out = await svc.listPrsForOwnerEmail('ws', USER);
     expect(out).toEqual([]);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `listPrsByState` — what the agent read tools call so a reader can catch up on
+ * requests that have already been applied or declined. The open-only path is
+ * delegated (and keeps its cache); every other state set is read from the table.
+ */
+describe('PullRequestService.listPrsByState', () => {
+  /** A `change_requests` row as drizzle hands it back. */
+  function row(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      number: 1,
+      sourceBranch: 'feature/x',
+      targetBranch: 'main',
+      title: 'A proposal',
+      body: 'why',
+      authorEmail: 'juan@bevel.software',
+      authorName: 'Juan',
+      state: 'merged',
+      createdAt: new Date('2026-04-01T00:00:00Z'),
+      updatedAt: null,
+      closedAt: new Date('2026-04-03T09:30:00Z'),
+      applyFailureReason: null,
+      applyFailureConflicts: null,
+      applyFailedAt: null,
+      applyFailedByName: null,
+      applyFailureKind: null,
+      closedReason: null,
+      ...over,
+    };
+  }
+
+  /** The service over a drizzle-shaped select that answers `rows`. */
+  function svcOver(rows: Record<string, unknown>[], changedPaths: string[] = []) {
+    const orderBy = vi.fn(async () => rows);
+    const select = vi.fn(() => ({ from: () => ({ where: () => ({ orderBy }) }) }));
+    const db = { select } as unknown as Database;
+    const workspace = {
+      ensureRemotesFetched: vi.fn(async () => undefined),
+      findAnyWorkspaceId: async () => 'ws',
+    } as unknown as WorkspaceService;
+    const git = {
+      changedPathsForPr: vi.fn(async () => changedPaths),
+    } as unknown as GitService;
+    const svc = new PullRequestService(db, workspace, makeAccessControl({}), git);
+    return { svc, select };
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('delegates the open-only case so the list the app polls keeps its cache', async () => {
+    const { svc, select } = svcOver([]);
+    const open = [pr({ number: 7 })];
+    const spy = vi.spyOn(svc, 'listOpenPrs').mockResolvedValue(open);
+    expect(await svc.listPrsByState(['open'])).toBe(open);
+    expect(await svc.listPrsByState(['open', 'open'])).toBe(open);
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(select).not.toHaveBeenCalled();
+  });
+
+  it('answers nothing, and asks nothing, for an empty state set', async () => {
+    const { svc, select } = svcOver([row()]);
+    expect(await svc.listPrsByState([])).toEqual([]);
+    expect(select).not.toHaveBeenCalled();
+  });
+
+  it('reads the closed and merged rows from the table', async () => {
+    const { svc, select } = svcOver([row({ number: 9, state: 'merged' })], ['Knowledge/A.md']);
+    const [summary] = await svc.listPrsByState(['closed', 'merged']);
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(summary).toMatchObject({
+      number: 9,
+      state: 'merged',
+      branch: 'feature/x',
+      base: 'main',
+      touchedNodePaths: ['Knowledge/A.md'],
+    });
+    // The close time is the latest moment the row records, so it is `updatedAt`.
+    expect(summary.updatedAt).toBe('2026-04-03T09:30:00.000Z');
+  });
+
+  it('falls back to the creation time when the row records nothing later', async () => {
+    const { svc } = svcOver([row({ state: 'closed', closedAt: null })]);
+    const [summary] = await svc.listPrsByState(['closed']);
+    expect(summary.updatedAt).toBe('2026-04-01T00:00:00.000Z');
+  });
+
+  it('degrades to no touched paths when a retired branch makes the diff uncomputable', async () => {
+    const orderBy = vi.fn(async () => [row()]);
+    const db = {
+      select: () => ({ from: () => ({ where: () => ({ orderBy }) }) }),
+    } as unknown as Database;
+    const workspace = {
+      ensureRemotesFetched: vi.fn(async () => undefined),
+      findAnyWorkspaceId: async () => 'ws',
+    } as unknown as WorkspaceService;
+    const git = {
+      changedPathsForPr: vi.fn(async () => {
+        throw new Error('unknown branch');
+      }),
+    } as unknown as GitService;
+    const svc = new PullRequestService(db, workspace, makeAccessControl({}), git);
+    const [summary] = await svc.listPrsByState(['merged']);
+    // Empty, not thrown — and a caller gating on these paths must read an empty
+    // set as "cannot prove read access", never as "nothing to protect".
+    expect(summary.touchedNodePaths).toEqual([]);
+  });
+});
+
+/**
+ * `getPrDetail` when the two branches can no longer be diffed — the state every
+ * applied request ends in, since merging retires its source branch.
+ */
+describe('PullRequestService.getPrDetail with a retired branch', () => {
+  function svcFor(state: string) {
+    const row = {
+      number: 4,
+      sourceBranch: 'feature/x',
+      targetBranch: 'main',
+      title: 'A proposal',
+      body: 'why it was needed',
+      authorEmail: 'juan@bevel.software',
+      authorName: 'Juan',
+      state,
+      createdAt: new Date('2026-04-01T00:00:00Z'),
+      updatedAt: null,
+      closedAt: new Date('2026-04-03T09:30:00Z'),
+      applyFailureReason: null,
+      applyFailureConflicts: null,
+      applyFailedAt: null,
+      applyFailedByName: null,
+      applyFailureKind: null,
+      closedReason: null,
+    };
+    const db = {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [row] }) }) }),
+    } as unknown as Database;
+    const workspace = {
+      ensureRemotesFetched: async () => undefined,
+      findAnyWorkspaceId: async () => 'ws',
+    } as unknown as WorkspaceService;
+    const git = {
+      resolvePrShas: async () => {
+        throw new WorkflowValidationError('unknown branch: feature/x');
+      },
+    } as unknown as GitService;
+    return new PullRequestService(db, workspace, makeAccessControl({}), git);
+  }
+
+  it('answers an applied request from its row alone, rather than failing', async () => {
+    const detail = await svcFor('merged').getPrDetail(4);
+    expect(detail).toMatchObject({
+      number: 4,
+      state: 'merged',
+      title: 'A proposal',
+      body: 'why it was needed',
+      files: [],
+      headSha: '',
+      baseSha: '',
+      mergeBaseSha: null,
+      behind: false,
+      needsUpdate: false,
+    });
+  });
+
+  it('answers a withdrawn request the same way', async () => {
+    expect(await svcFor('closed').getPrDetail(4)).toMatchObject({ state: 'closed', files: [] });
+  });
+
+  it('still fails loudly on an OPEN request, so no live proposal reads as empty', async () => {
+    await expect(svcFor('open').getPrDetail(4)).rejects.toThrow('unknown branch');
   });
 });

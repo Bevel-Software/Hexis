@@ -1966,6 +1966,25 @@ export class AccessControlService implements IAccessControl {
     return result;
   }
 
+  async canReadBatchAtRef(
+    workspaceId: string,
+    ref: string,
+    userEmail: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean> | null> {
+    if (relativePaths.length === 0) return new Map();
+    const loaded = await this.loadModelAtRef(workspaceId, ref);
+    if (!loaded) return null;
+    const repoDir = await this.repoDir(workspaceId);
+    // One `git cat-file --batch` for the whole set — see canWriteBatchAtRef.
+    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths);
+    const result = new Map<string, boolean>();
+    for (const p of relativePaths) {
+      result.set(p, canReadResolved(loaded.model, userEmail, p, owns.get(p) ?? null));
+    }
+    return result;
+  }
+
   async eligibleWritersAtRef(
     workspaceId: string,
     ref: string,

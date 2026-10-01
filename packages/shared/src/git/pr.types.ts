@@ -41,6 +41,16 @@ export interface PullRequestSummary {
   base: string;
   state: PullRequestState;
   createdAt: string;
+  /**
+   * The latest moment the change-request ROW records: its close time when it
+   * has one, else its creation time. GitHub's `updated_at` on a pull request
+   * means "when it last changed"; Hexis stamps no such column on a change
+   * request (comments and approvals carry their own times), so this is as
+   * close as the row can honestly answer — never a time guessed from
+   * elsewhere. Absent only on a summary built by something other than a
+   * change-request row (test doubles).
+   */
+  updatedAt?: string;
   /** Relative paths within `knowledge-base/`. Empty if not yet computed. */
   touchedNodePaths: string[];
   review: PullRequestReviewStatus;
@@ -368,6 +378,17 @@ export interface IPullRequestService {
    * via `gh pr create`) and the user expects to see the update immediately.
    */
   listOpenPrs(opts?: { fresh?: boolean }): Promise<PullRequestSummary[]>;
+  /**
+   * PRs in ANY of `states`, newest first — what `listOpenPrs` answers for the
+   * open ones, widened to the closed and merged rows it filters out. Only the
+   * `['open']` case goes through that method's 30s list cache; a read that
+   * asks for closed rows is rare (a reader catching up on what happened) and
+   * is served straight from the table.
+   */
+  listPrsByState(
+    states: PullRequestState[],
+    opts?: { fresh?: boolean; workspaceId?: string },
+  ): Promise<PullRequestSummary[]>;
   listPrsAuthoredBy(githubLoginOrEmail: string): Promise<PullRequestSummary[]>;
   /**
    * PRs whose touched paths have an owner with the given email.

@@ -601,6 +601,21 @@ export interface IAccessControl {
   ): Promise<Map<string, boolean> | null>;
 
   /**
+   * Batched variant of `canReadAtRef`, with the same null-semantics (the whole
+   * call returns null when the ref or its `roles.yaml` can't be resolved, and
+   * the caller must read that as deny). One access-tree load and one
+   * `git cat-file --batch` for the path set, the way `canWriteBatchAtRef`
+   * does it — a change request with forty files would otherwise cost forty
+   * single-path lookups to decide which of them its reader may see.
+   */
+  canReadBatchAtRef(
+    workspaceId: string,
+    ref: string,
+    userEmail: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean> | null>;
+
+  /**
    * The set of principals with `write` on this path as of `ref`. Used by PR
    * reviewer routing and the per-file approval UI rendered against the PR
    * head. Returns null with the same null-semantics as `canWriteAtRef`.

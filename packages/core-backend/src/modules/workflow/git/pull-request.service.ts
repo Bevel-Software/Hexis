@@ -1,4 +1,4 @@
-import { desc, eq } from 'drizzle-orm';
+import { desc, eq, inArray } from 'drizzle-orm';
 import { logger } from '../../../shared/logging.js';
 
 const log = logger('cr');
@@ -21,6 +21,25 @@ import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import { WorkflowValidationError } from '../../../shared/domain-errors.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import { changeRequestLink, changeRequestLinkBase } from './change-request-link.js';
+
+/**
+ * The latest moment a change-request row records — its close time when it has
+ * one, else its creation time, with `updated_at` folded in for the day
+ * something writes it. Deliberately derived from the ROW alone: a time taken
+ * from the newest comment or approval would make the same request report
+ * different "last changed" moments to a list (which reads no comments) and a
+ * detail (which does).
+ */
+function latestRowMoment(row: {
+  createdAt: Date;
+  updatedAt: Date | null;
+  closedAt: Date | null;
+}): string {
+  const times = [row.createdAt, row.updatedAt, row.closedAt]
+    .filter((d): d is Date => d instanceof Date)
+    .map((d) => d.getTime());
+  return new Date(Math.max(...times)).toISOString();
+}
 
 const LIST_PR_CACHE_TTL_MS = 30_000;
 const DETAIL_CACHE_TTL_MS = 30_000;
@@ -160,6 +179,12 @@ export class PullRequestService implements IPullRequestService {
       base: row.targetBranch,
       state: row.state as PullRequestState,
       createdAt: row.createdAt.toISOString(),
+      // The latest moment the ROW records. Nothing stamps `updated_at` on a
+      // change request today, so in practice this is the close time of a
+      // closed request and the creation time of an open one — the honest
+      // answer from the row, with the column folded in for the day something
+      // does write it.
+      updatedAt: latestRowMoment(row),
       touchedNodePaths,
       // Provider reviews are gone; the real approval state lives in the detail
       // view (per-file, DB-backed). The summary badge is derived there.
@@ -272,6 +297,40 @@ export class PullRequestService implements IPullRequestService {
       this.cachedList.set(cacheKey, { at: now, value: summaries });
     }
     return summaries;
+  }
+
+  /**
+   * Every request in `states`, newest first. `['open']` is delegated so the
+   * list the app polls keeps its cache; any other set is read straight from
+   * the table, because a closed-request read is rare and a second cache keyed
+   * on a state set would mostly hold misses.
+   *
+   * Touched paths are best-effort exactly as on the open list: a merged
+   * request's source branch has been retired, so its diff can no longer be
+   * computed and it reports no touched paths. A caller that gates on those
+   * paths must therefore treat an empty set as "cannot prove", never as
+   * "nothing to protect".
+   */
+  async listPrsByState(
+    states: PullRequestState[],
+    opts: { fresh?: boolean; workspaceId?: string } = {},
+  ): Promise<PullRequestSummary[]> {
+    const wanted = [...new Set(states)];
+    if (wanted.length === 0) return [];
+    if (wanted.length === 1 && wanted[0] === 'open') return this.listOpenPrs(opts);
+    const workspaceId = await this.resolveWorkspaceId(opts.workspaceId);
+    const rows = await this.db
+      .select()
+      .from(changeRequests)
+      .where(inArray(changeRequests.state, wanted))
+      .orderBy(desc(changeRequests.createdAt));
+    // ONE fetch for the whole list, for the reason spelled out on listOpenPrs.
+    if (workspaceId && rows.length > 0) {
+      await this.workspaceService
+        .ensureRemotesFetched(workspaceId, { force: opts.fresh === true })
+        .catch(() => undefined);
+    }
+    return Promise.all(rows.map((row) => this.summaryOf(row, workspaceId, { fetch: false })));
   }
 
   async listPrsAuthoredBy(
@@ -448,42 +507,68 @@ export class PullRequestService implements IPullRequestService {
     };
     /** Did the target change, since the fork point, a file this request changes? */
     let targetChangedShared = false;
-    if (workspaceId) {
-      const shas = await this.gitService.resolvePrShas(
-        workspaceId,
-        row.targetBranch,
-        row.sourceBranch,
+    try {
+      if (workspaceId) {
+        const shas = await this.gitService.resolvePrShas(
+          workspaceId,
+          row.targetBranch,
+          row.sourceBranch,
+        );
+        baseSha = shas.baseSha;
+        headSha = shas.headSha;
+        // The file list is pinned to the SHAs just resolved (`at`), so it and
+        // the `headSha` approvals pin against describe the same commits even if
+        // another fetch lands on this workspace in between, and the second
+        // fetch of the same two refs is gone. `patches: false` is for the
+        // internal detail an approve / withdraw / revert fetches to pin its
+        // work: those never read `files[].patch`, and generating it cost one git
+        // subprocess per changed file per click. The detail served to clients
+        // keeps its patches, so the published payload is unchanged.
+        files = await this.gitService.changedFilesForPr(
+          workspaceId,
+          row.targetBranch,
+          row.sourceBranch,
+          { at: { baseSha, headSha }, ...(opts.patches === false ? { patchCap: 0 } : {}) },
+        );
+        // Pinned to the same two commits as the file list, so "needs updating"
+        // and the diff it qualifies can never describe different heads.
+        forkPoint = await this.gitService.forkPointForPr(workspaceId, { baseSha, headSha });
+        // Only a target that moved in a file THIS request also changes makes the
+        // proposal's diff describe text that has moved. One extra
+        // `diff --name-only` (and only when the branches have diverged at all)
+        // buys the difference between opening instantly and paying for a merge,
+        // a push and a second detail read.
+        targetChangedShared = await this.targetTouchesRequestFiles(
+          workspaceId,
+          forkPoint,
+          baseSha,
+          files,
+        );
+      }
+    } catch (err) {
+      // A request that is NO LONGER OPEN has had its source branch retired, so
+      // there are no two refs left to diff and `resolvePublishedBranch` answers
+      // `unknown branch`. Everything the ROW records — title, body, state,
+      // author, times — is still true, and this is the degradation the
+      // no-workspace case above already takes: no shas and no files, rather than
+      // no answer at all. Without it, reading a request back after it was
+      // applied fails, which is exactly what someone catching up on a review
+      // asks for.
+      //
+      // An OPEN request still fails loudly. There, an unresolvable branch means
+      // a branch not yet published or a clone not yet caught up, and presenting
+      // a live proposal as one that changes nothing would tell a reviewer the
+      // opposite of the truth.
+      if (!(err instanceof WorkflowValidationError) || row.state === 'open') throw err;
+      log.warn(
+        `change request #${prNumber} is ${row.state} and can no longer be diffed; answering from its row alone:`,
+        { err },
       );
-      baseSha = shas.baseSha;
-      headSha = shas.headSha;
-      // The file list is pinned to the SHAs just resolved (`at`), so it and
-      // the `headSha` approvals pin against describe the same commits even if
-      // another fetch lands on this workspace in between, and the second
-      // fetch of the same two refs is gone. `patches: false` is for the
-      // internal detail an approve / withdraw / revert fetches to pin its
-      // work: those never read `files[].patch`, and generating it cost one git
-      // subprocess per changed file per click. The detail served to clients
-      // keeps its patches, so the published payload is unchanged.
-      files = await this.gitService.changedFilesForPr(
-        workspaceId,
-        row.targetBranch,
-        row.sourceBranch,
-        { at: { baseSha, headSha }, ...(opts.patches === false ? { patchCap: 0 } : {}) },
-      );
-      // Pinned to the same two commits as the file list, so "needs updating"
-      // and the diff it qualifies can never describe different heads.
-      forkPoint = await this.gitService.forkPointForPr(workspaceId, { baseSha, headSha });
-      // Only a target that moved in a file THIS request also changes makes the
-      // proposal's diff describe text that has moved. One extra
-      // `diff --name-only` (and only when the branches have diverged at all)
-      // buys the difference between opening instantly and paying for a merge,
-      // a push and a second detail read.
-      targetChangedShared = await this.targetTouchesRequestFiles(
-        workspaceId,
-        forkPoint,
-        baseSha,
-        files,
-      );
+      baseSha = '';
+      headSha = '';
+      files = [];
+      forkPoint = { mergeBaseSha: null, behind: false };
+      targetChangedShared = false;
     }
 
     // Validated cache hit: TTL fresh AND head SHA unchanged since we cached.
