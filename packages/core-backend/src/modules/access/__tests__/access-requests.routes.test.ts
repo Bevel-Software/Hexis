@@ -12,6 +12,7 @@ import type { IAccessControl } from '../access-control.interface.js';
 import type { IAccessRequestLifecycle } from '../access-requests.contract.js';
 import { createAccessRequestRoutes } from '../access-requests.routes.js';
 import { ChangeRequestConflictsError } from '../../../shared/domain-errors.js';
+import { pendingProposals } from '../../plugins/join-proposals.js';
 
 /**
  * Asking for Can edit or Owner on an item, and what the editors then see.
@@ -232,6 +233,28 @@ describe('POST /workspace/:id/access/request', () => {
     });
     expect(res.status).toBe(200);
     expect(h.written.map((w) => w.path)).toEqual([`${KB}/${NOTE_FILE}`]);
+  });
+
+  it('writes a file proposal the request reader can actually read back', async () => {
+    // The seam that broke on staging: the opener wrote one grant into a node's
+    // frontmatter as a scalar, and the reader parsed it with the folder
+    // grammar, which rejects a scalar and so found no grants at all. Every
+    // file request then looked finished and was closed on the editors' first
+    // listing. Asserting the WRITE alone could never catch that — the write
+    // was always right — so assert the round trip.
+    const live = '---\nnodeType: "[Note](../NodeTypes/Note.md)"\n---\n# Notes\n';
+    const h = await makeHarness({ liveRules: live });
+    server = h.server;
+    await post(`${h.base}/${LIVE_WS}/access/request`, {
+      path: `${KB}/${NOTE_FILE}`,
+      kind: 'file',
+      level: 'owner',
+    });
+
+    const onBranch = h.written[0].text;
+    expect(pendingProposals(onBranch, live, NOTE_FILE, 'file')).toEqual([
+      expect.objectContaining({ verb: 'owner', id: `user:${RITA.email}` }),
+    ]);
   });
 
   it('answers with the OPEN request instead of opening a second one', async () => {

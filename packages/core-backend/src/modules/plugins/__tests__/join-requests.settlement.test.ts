@@ -10,6 +10,7 @@ import { type WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { folderTarget } from '../../access/access-requests.contract.js';
 import { JoinRequestsService } from '../join-requests.service.js';
+import { spliceGrant } from '../../access-model/access-splice.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
@@ -272,5 +273,99 @@ describe('a stale ref must not be mistaken for a finished request', () => {
     expect(h.fetches.some((f) => f.force)).toBe(true);
     // Genuinely finished — the confirming read agrees, so it closes.
     expect(h.workflow.rejectChangeRequest).toHaveBeenCalled();
+  });
+});
+
+describe('a request whose target is a FILE', () => {
+  /**
+   * The staging failure, at the level it happened. Every file-target request
+   * self-closed on the editors' FIRST listing: the listing answered
+   * `{"requests":[]}` and closed the change request in the same call, and the
+   * requester's status dropped to "none". Nobody had seen the line.
+   *
+   * A file's rules are its own frontmatter, and `spliceGrant` writes one grant
+   * there as a scalar — the same bytes the dialog's ordinary grant writes, and
+   * the resolver honours them. Read with the folder grammar it is a parse
+   * error, which yielded no grants, which reads as a finished request.
+   *
+   * So this exercises the real splice output against the real reader, with the
+   * target the request was actually made about.
+   */
+  const FILE = 'Plugins/GTM/page.md';
+  const LIVE_FILE = '---\nnodeType: "[Note](../NodeTypes/Note.md)"\n---\n# Page\n\nbody\n';
+  const fileTarget = { path: FILE, kind: 'file' as const };
+
+  /** Exactly what the request opener writes onto the branch for a file. */
+  const asksWrite = spliceGrant(
+    LIVE_FILE,
+    'write',
+    { kind: 'user', email: ALI, displayName: 'Ali Baba' },
+    { allowScalar: true, target: 'node' },
+  ).text;
+
+  /** The harness above is keyed on an access.md; this one answers for a file. */
+  function fileHarness(branchText: string, holds: Record<string, boolean> = {}) {
+    const byRef: Record<string, string> = {
+      [`origin/${DEFAULT_BRANCH}`]: LIVE_FILE,
+      [`origin/${BRANCH}`]: branchText,
+    };
+    const workspaceService = {
+      ensureRemotesFetched: vi.fn(async () => undefined),
+      readFileAtRef: vi.fn(async (_ws: string, ref: string, p: string) => {
+        if (p !== FILE) throw new Error(`unexpected path ${p}`);
+        const text = byRef[ref];
+        if (text === undefined) throw new Error(`unknown revision ${ref}`);
+        return text;
+      }),
+    } as unknown as WorkspaceService;
+    const workflow = {
+      rejectChangeRequest: vi.fn(async () => ({ number: 7, state: 'closed' })),
+      deleteBranch: vi.fn(async () => undefined),
+    } as unknown as IWorkflowService;
+    const answer = (verb: string) => vi.fn(async () => holds[verb] ?? false);
+    const accessControl = {
+      canRead: answer('canRead'),
+      canWrite: answer('canWrite'),
+      canOwner: answer('canOwner'),
+      canDownload: answer('canDownload'),
+    } as unknown as IAccessControl;
+    return {
+      svc: new JoinRequestsService(workspaceService, workflow, testKbContext(), accessControl),
+      workflow,
+      workspaceService,
+    };
+  }
+
+  it('reads the file\'s OWN frontmatter, so the request survives the first listing', async () => {
+    const h = fileHarness(asksWrite);
+    const out = await h.svc.list('GTM', fileTarget, [cr()], ACTOR);
+
+    expect(out).toHaveLength(1);
+    expect(out[0].proposals.map((p) => p.verb)).toEqual(['write']);
+    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.workflow.deleteBranch).not.toHaveBeenCalled();
+  });
+
+  it('reads the FILE itself, never an access.md beside it', async () => {
+    // A request on a file changes only that file's rules, so the only path it
+    // may read is the file. The harness throws on anything else.
+    const h = fileHarness(asksWrite);
+    await h.svc.list('GTM', fileTarget, [cr()], ACTOR);
+    const paths = (h.workspaceService.readFileAtRef as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c) => c[2],
+    );
+    expect(new Set(paths)).toEqual(new Set([FILE]));
+  });
+
+  it('retires it once the person holds the level on the file', async () => {
+    const h = fileHarness(asksWrite, { canWrite: true });
+    await expect(h.svc.reconcile('GTM', fileTarget, cr(), ACTOR)).resolves.toBe(true);
+  });
+
+  it('retires it once the grant has landed on live', async () => {
+    const h = fileHarness(asksWrite);
+    const byRef = h.workspaceService.readFileAtRef as ReturnType<typeof vi.fn>;
+    byRef.mockImplementation(async () => asksWrite); // both refs carry it now
+    await expect(h.svc.reconcile('GTM', fileTarget, cr(), ACTOR)).resolves.toBe(true);
   });
 });
