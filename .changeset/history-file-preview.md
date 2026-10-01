@@ -1,5 +1,5 @@
 ---
-'@bevel-software/platform-shared': patch
+'@bevel-software/platform-shared': minor
 '@bevel-software/platform-core-backend': minor
 '@bevel-software/platform-core-frontend': minor
 ---
@@ -12,4 +12,4 @@ For `html`, `htm`, `csv` and `svg` the pane keeps the line diff behind a "Source
 
 Every read of a past save is now scoped to the branch being viewed: a sha that is not in that branch's history — one from someone else's branch, or an invented one — is refused with 404 "This version is not in this file's history on this branch." This applies to the new byte route AND to the existing `workflow/show-file` and `workflow/file-at-change` routes, which previously served any sha the repository happened to contain. A save the history panel lists is never refused this way.
 
-`IWorkflowService` gains `fileBytesAtChange(workspaceId, path, sha, side)`; any other implementation of that interface must add it. The six document viewers (`PdfRenderer`, `DocxRenderer`, `XlsxRenderer`, `PptxRenderer`, `EmailRenderer`, and `ImageRenderer`) now offer "Try again" beside a failed read wherever they are mounted, the file page included — previously only the image viewer did, and a dropped connection left the others on their error until something remounted them. The viewers stay lazily loaded: no viewer moves into the eager bundle.
+`IWorkflowService` gains `fileBytesAtChange(workspaceId, path, sha, side)`; any other implementation of that interface must add it. The six document viewers (`PdfRenderer`, `DocxRenderer`, `XlsxRenderer`, `PptxRenderer`, `EmailRenderer`, and `ImageRenderer`) now offer "Try again" beside a failed read wherever they are mounted, the file page included — previously only the image viewer did, and a dropped connection left the others on their error until something remounted them. The viewers stay lazily loaded: no viewer moves into the eager bundle. A viewer's "Try again" also hands keyboard focus to the pane it sits in rather than letting it fall to the page, since pressing it unmounts the button itself.

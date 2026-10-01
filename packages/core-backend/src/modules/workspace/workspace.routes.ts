@@ -780,7 +780,11 @@ export function createWorkspaceRoutes(
    *   - a ref that is present but malformed is a 400, never a silent fall back
    *     to `readFileBinary`. Serving today's bytes for a request that asked for
    *     a past version would be the worst possible answer — it looks like a
-   *     success — so the ref branch and the working-tree branch are exclusive.
+   *     success — so the ref branch and the working-tree branch are exclusive;
+   *   - and a read that fails for OUR reasons (a blob over the git runner's
+   *     output ceiling, a timed-out `cat-file`) is a logged 500, not the
+   *     blanket 404 the working-tree read answers with: "not found" about a
+   *     save the reader can see listed is a lie about their own history.
    */
   router.get('/workspace/:id/file/raw', async (req, res) => {
     const id = authenticated(req, res);
@@ -915,6 +919,21 @@ export function createWorkspaceRoutes(
       // blanket 404 it has always answered with.
       if (ref !== null && error instanceof WorkflowDomainError) {
         sendError(res, error);
+        return;
+      }
+      // Anything else out of the ref branch is OUR failure, not a missing
+      // version: the read goes through the git runner, where a blob over
+      // `MAX_OUTPUT_BYTES` and a timed-out `cat-file` both arrive here as
+      // plain errors. A 404 would tell a reader the save they can see listed
+      // had vanished, and would do it silently — so it is a logged 500, and
+      // "Try again" in the pane is then a truthful offer.
+      if (ref !== null) {
+        log.error(
+          `could not read ${printable(filePath)} at ${printable(ref)}: ${printable(
+            error instanceof Error ? error.message : String(error),
+          )}`,
+        );
+        res.status(500).json({ error: 'Could not read this version of the file' });
         return;
       }
       res.status(404).json({ error: 'File not found' });

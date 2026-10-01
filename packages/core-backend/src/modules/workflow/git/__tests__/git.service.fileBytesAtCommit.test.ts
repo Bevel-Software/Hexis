@@ -161,10 +161,27 @@ describe('GitService.fileBytesAtCommit', () => {
 
     // …and every save the panel LISTS is accepted, which is the other half of
     // the rule: `logForFile` walks HEAD, so anything it returns is an ancestor.
+    // Asserted through the read itself rather than a boolean helper, so what is
+    // pinned is the thing the route calls.
     for (const listed of await svc.logForFile(workspaceId, 'knowledge-base/logo.png')) {
-      expect(await svc.isOnBranchHistory(workspaceId, listed.sha)).toBe(true);
+      await expect(
+        svc.fileBytesAtCommit(workspaceId, 'knowledge-base/logo.png', listed.sha, 'after'),
+      ).resolves.not.toBeNull();
     }
-    expect(await svc.isOnBranchHistory(workspaceId, otherSha)).toBe(false);
+  });
+
+  it('propagates a repository failure rather than calling it a version off the branch', async () => {
+    // An UNBORN HEAD: the sha resolves perfectly well and git's complaint is
+    // about the other argument ('ambiguous argument HEAD'). Folded into
+    // `VersionNotOnBranchError` it would tell a reader the save they can see
+    // listed is not in their history — a broken workspace dressed up as an
+    // answer about access, and one 'Try again' can never get past.
+    await runGit(repo, ['checkout', '--orphan', 'nothing-committed-yet']);
+    const err: unknown = await svc
+      .fileBytesAtCommit(workspaceId, 'knowledge-base/logo.png', addSha, 'after')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(VersionNotOnBranchError);
   });
 
   it('applies the same branch rule to the existing text-history reads', async () => {
@@ -187,11 +204,5 @@ describe('GitService.fileBytesAtCommit', () => {
     expect(await svc.diffFileAtCommit(workspaceId, 'knowledge-base/logo.png', replaceSha)).toContain(
       'logo.png',
     );
-  });
-
-  it('readFileBytesAtRef reads a branch or a tag ref too, and nulls a missing path', async () => {
-    const bytes = await svc.readFileBytesAtRef(workspaceId, 'HEAD', 'logo.png');
-    expect(bytes!.equals(V2)).toBe(true);
-    expect(await svc.readFileBytesAtRef(workspaceId, 'HEAD', 'never.png')).toBeNull();
   });
 });

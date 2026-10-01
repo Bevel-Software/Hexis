@@ -12,6 +12,8 @@ import {
   CanDownloadContext,
   DownloadFileButton,
 } from '../../workspace/components/renderers/DownloadFileButton';
+import { RetryReadButton } from '../../workspace/components/renderers/RetryReadButton';
+import { READ_PANE } from '../../workspace/components/renderers/readPane';
 import {
   RendererWorkspaceContext,
   getFileRenderer,
@@ -110,6 +112,12 @@ type PreviewKind =
  * than a list somebody has to keep up to date.
  */
 function previewKind(filePath: string, patch: string): PreviewKind {
+  // The save did not touch this path at all — the file is absent, or unchanged,
+  // on both sides (a pure rename elsewhere in the commit, say). There is no
+  // version here to show, and a viewer bound to a ref with nothing at it would
+  // answer with its read error; `source` is what the panel has always shown
+  // for this, and `UnifiedDiffView`'s empty state says it in words.
+  if (patch.trim() === '') return 'source';
   if (hasFileViewer(filePath) && !isToolPath(filePath)) return 'viewer';
   if (isBinaryFile(filePath) || /^Binary files .* differ$/m.test(patch)) return 'no-preview';
   return 'source';
@@ -266,8 +274,15 @@ export function HistoryVersionPreview({ filePath, commit }: HistoryVersionPrevie
         </div>
       )}
       {/* Inside the providers, so it downloads THIS save's bytes and is
-          disabled with its reason for a reader who may not download. */}
-      <DownloadFileButton filePath={filePath} size="tiny" label="Download this version" />
+          disabled with its reason for a reader who may not download — and
+          idle until the patch has said which SIDE of the save "this version"
+          means, which for a deleting save is the one before it. */}
+      <DownloadFileButton
+        filePath={filePath}
+        size="tiny"
+        label="Download this version"
+        pending={loaded === null}
+      />
     </div>
   );
 
@@ -279,9 +294,7 @@ export function HistoryVersionPreview({ filePath, commit }: HistoryVersionPrevie
           <AlertTriangle size={13} className="mt-0.5 shrink-0" />
           <span>{error}</span>
         </p>
-        <Button variant="outline" size="tiny" onClick={retry}>
-          Try again
-        </Button>
+        <RetryReadButton onRetry={retry} />
       </div>
     );
   } else if (loaded === null) {
@@ -326,7 +339,10 @@ export function HistoryVersionPreview({ filePath, commit }: HistoryVersionPrevie
     );
     body =
       getRendererLayout(filePath) === 'prose' ? (
-        <div className="flex-1 overflow-auto p-3">
+        // `READ_PANE`: the viewer's own "Try again" unmounts itself, and this
+        // div is what stays mounted around it for focus to land on. See
+        // `RetryReadButton`.
+        <div {...READ_PANE} className="flex-1 overflow-auto p-3">
           <FilePaneCard file={fileName}>{viewer}</FilePaneCard>
         </div>
       ) : (
@@ -334,7 +350,11 @@ export function HistoryVersionPreview({ filePath, commit }: HistoryVersionPrevie
         // scrolling and needs a DEFINITE height to do it — an `h-full` child
         // of an auto-height column collapses to 0px. The floor keeps a short
         // panel from squeezing a PDF into a sliver.
-        <div data-testid="history-preview-viewport" className="min-h-[24rem] flex-1 p-3">
+        <div
+          {...READ_PANE}
+          data-testid="history-preview-viewport"
+          className="min-h-[24rem] flex-1 p-3"
+        >
           {viewer}
         </div>
       );
@@ -343,7 +363,10 @@ export function HistoryVersionPreview({ filePath, commit }: HistoryVersionPrevie
   return (
     <RendererWorkspaceContext.Provider value={rendererContext}>
       <CanDownloadContext.Provider value={access.canDownload}>
-        <div className="flex min-h-0 flex-1 flex-col">
+        {/* A read region for the whole pane, so the pane's own "Try again" —
+            which unmounts itself exactly as a viewer's does — has somewhere to
+            hand focus. A viewer's own body marks a nearer one below. */}
+        <div {...READ_PANE} className="flex min-h-0 flex-1 flex-col">
           {header}
           {loaded?.deleted && (
             // The note, then the version just before the save beneath it: a

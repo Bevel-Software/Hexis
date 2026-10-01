@@ -3325,21 +3325,6 @@ export class GitService implements IGitService {
   }
 
   /**
-   * A repo-relative file's bytes at `ref`, or `null` when nothing is there.
-   *
-   * The read-only byte counterpart of {@link readFileAtRef}; see
-   * {@link blobAtRef} for why the bytes cannot come back through a string.
-   */
-  async readFileBytesAtRef(
-    workspaceId: string,
-    ref: string,
-    repoRelativePath: string,
-  ): Promise<Buffer | null> {
-    const cwd = await this.repoDir(workspaceId);
-    return (await this.blobAtRef(cwd, ref, repoRelativePath))?.bytes ?? null;
-  }
-
-  /**
    * Refuse a sha that is not in the history of the branch this workspace has
    * checked out.
    *
@@ -3353,9 +3338,11 @@ export class GitService implements IGitService {
    * `merge-base --is-ancestor` is the exact question, and a commit is its own
    * ancestor, so the branch head passes. Exit 1 is git's answer for "resolved,
    * and not an ancestor". An unresolvable object name — a made-up id — gets
-   * the SAME refusal on purpose (see {@link VersionNotOnBranchError}), and
-   * every other failure propagates: a guard that fails open on its own errors
-   * is not a guard.
+   * the SAME refusal on purpose (see {@link VersionNotOnBranchError}), but only
+   * when git's complaint NAMES that id; every other failure propagates, a
+   * broken repository included. A guard that fails open on its own errors is
+   * not a guard, and one that reports them as a refusal is worse than no
+   * message at all.
    */
   private async assertOnBranchHistory(cwd: string, sha: string): Promise<void> {
     try {
@@ -3365,6 +3352,13 @@ export class GitService implements IGitService {
         if (err.exitCode === 1) throw new VersionNotOnBranchError();
         const stderr = err.stderr ?? err.message;
         if (
+          // The complaint has to be about THE SHA WE ASKED FOR. `HEAD` is the
+          // other argument, and git spells its own failures the same way: a
+          // repository with no commits answers "ambiguous argument 'HEAD'",
+          // which is a broken workspace, not a version off the branch.
+          // Refusing it as "not in this file's history" would hide an
+          // infrastructure failure behind a sentence about access.
+          stderr.toLowerCase().includes(sha.toLowerCase()) &&
           // git's wording for "I cannot resolve that" varies by subcommand and
           // by version — `merge-base` says "Not a valid commit name", others
           // "not a valid object name" / "unknown revision" — so every spelling
@@ -3378,26 +3372,6 @@ export class GitService implements IGitService {
       }
       throw err;
     }
-  }
-
-  /**
-   * Is `sha` in the history of the branch this workspace has checked out?
-   *
-   * The same question {@link assertOnBranchHistory} asks, as a boolean, for
-   * callers that want to decide rather than be refused.
-   */
-  async isOnBranchHistory(workspaceId: string, sha: string): Promise<boolean> {
-    if (!/^[a-f0-9]{7,40}$/i.test(sha)) throw new WorkflowValidationError('invalid commit sha');
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
-      try {
-        await this.assertOnBranchHistory(cwd, sha);
-        return true;
-      } catch (err) {
-        if (err instanceof VersionNotOnBranchError) return false;
-        throw err;
-      }
-    });
   }
 
   /**

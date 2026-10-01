@@ -181,6 +181,23 @@ describe('GET /workspace/:id/file/raw?ref= — one file at a past save', () => {
     expect(((await res.json()) as { error: string }).error).toBe('File not found');
   });
 
+  it('answers a failure of OUR making with a 500, not "File not found"', async () => {
+    // The ref read goes through the git runner: a blob over its output ceiling
+    // arrives here as a RangeError, a hung `cat-file` as a run error. Either
+    // one answered 404 would tell a reader the save they can SEE LISTED had
+    // vanished — and would retire the pane's "Try again" as pointless.
+    h = await makeHarness({
+      atRef: async () => {
+        throw new RangeError('git output exceeded 67108864 bytes');
+      },
+    });
+    const res = await raw(png());
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      'Could not read this version of the file',
+    );
+  });
+
   it('refuses a reader who may not read the file today, before any read happens', async () => {
     h = await makeHarness({ canRead: false });
     const res = await raw(png());
@@ -201,10 +218,16 @@ describe('GET /workspace/:id/file/raw?ref= — one file at a past save', () => {
     expect(inline.status).toBe(200);
   });
 
-  it('names the file in the attachment disposition of a version download', async () => {
+  it('downloads the VERSION bytes, named in the attachment disposition', async () => {
     h = await makeHarness();
     const res = await raw(png('&download=1'));
     expect(res.status).toBe(200);
+    // The bytes, not just the headers: a download that quietly fell back to
+    // the working tree would hand over today's file under a past save's name,
+    // and every header assertion would still pass.
+    expect(Buffer.from(await res.arrayBuffer()).equals(PAST_BYTES)).toBe(true);
+    expect(h.fileBytesAtChange).toHaveBeenCalledWith(WS, `${KB}/Docs/logo.png`, SHA, 'after');
+    expect(h.readFileBinary).not.toHaveBeenCalled();
     expect(res.headers.get('content-disposition')).toContain(
       `filename*=UTF-8''${encodeURIComponent('logo.png')}`,
     );

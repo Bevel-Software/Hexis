@@ -29,6 +29,7 @@ export function DownloadFileButton({
   filePath,
   size = 'tiny',
   label = 'Download',
+  pending = false,
 }: {
   filePath: string;
   /** `sm` where the download is the page's main affordance (pptx outline). */
@@ -40,6 +41,17 @@ export function DownloadFileButton({
    * and which branch they come from is the whole question.
    */
   label?: string;
+  /**
+   * WHICH bytes this button is for is not settled yet.
+   *
+   * Only Version history sets it, and only because the save it shows may be
+   * the one that DELETED the file — in which case "this version" is the side
+   * BEFORE the save, which is known only once the patch has come back. A click
+   * before then would ask for the after side of a deleting save and get a 404
+   * for a version the reader can see listed. Idle for a fraction of a second
+   * is the honest answer; a wrong download is not.
+   */
+  pending?: boolean;
 }) {
   const workspaceId = useRendererWorkspaceId();
   /**
@@ -62,7 +74,7 @@ export function DownloadFileButton({
   const fileName = filePath.slice(filePath.lastIndexOf('/') + 1);
 
   const handleDownload = useCallback(async () => {
-    if (!workspaceId || busy) return;
+    if (!workspaceId || busy || pending) return;
     setBusy(true);
     setError(null);
     try {
@@ -84,7 +96,7 @@ export function DownloadFileButton({
     } finally {
       setBusy(false);
     }
-  }, [workspaceId, busy, filePath, fileName, versionRef, versionSide]);
+  }, [workspaceId, busy, pending, filePath, fileName, versionRef, versionSide]);
 
   return (
     <span className="inline-flex items-center gap-2">
@@ -98,10 +110,13 @@ export function DownloadFileButton({
         size={size}
         leadingIcon={<Download size={size === 'sm' ? 14 : 12} />}
         onClick={() => void handleDownload()}
-        // Disabled only on a hard "no" — while the lookup is in flight the
-        // button stays optimistic, mirroring the editor; a wrong guess is
-        // still caught by the backend's own gate on the raw endpoint.
-        disabled={busy || canDownload === false}
+        // Disabled on a hard "no" about PERMISSION — while that lookup is in
+        // flight the button stays optimistic, mirroring the editor; a wrong
+        // guess is still caught by the backend's own gate on the raw endpoint.
+        // `pending` is a different kind of unknown: not who may have the
+        // bytes, but which bytes, and guessing there downloads the wrong file
+        // (or nothing at all).
+        disabled={busy || pending || canDownload === false}
         title={
           canDownload === false
             ? 'You do not have download permission for this file.'

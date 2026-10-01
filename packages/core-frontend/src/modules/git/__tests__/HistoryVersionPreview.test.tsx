@@ -303,6 +303,61 @@ describe('HistoryVersionPreview — the viewer is bound to the selected save', (
     );
   });
 
+  it('holds the download idle until it knows which side of the save to read', async () => {
+    // Until the patch comes back the pane does not know whether this save
+    // DELETED the file, so it does not know whether "this version" is the side
+    // after it or the side before it. A click in that window would ask for the
+    // after side of a deleting save and get a 404 for a version the reader can
+    // see listed.
+    let answer: (patch: string) => void = () => {};
+    const patch = new Promise<string>((resolve) => {
+      answer = resolve;
+    });
+    renderPane('Docs/old-logo.png', makeGit({ fetchFileDiff: () => patch }));
+
+    const button = await screen.findByRole('button', { name: 'Download this version' });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(rawUrls().some((u) => u.includes('download=1'))).toBe(false);
+
+    answer(deletedBinaryPatch('Docs/old-logo.png'));
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    // …and now it reads the side BEFORE the save, which is the only one with
+    // any bytes at all.
+    await waitFor(() =>
+      expect(rawUrls()).toContain(
+        `/api/workspace/${WS}/file/raw?path=${encodeURIComponent(
+          `${KB}/Docs/old-logo.png`,
+        )}&download=1&ref=${SHA}&side=before`,
+      ),
+    );
+  });
+
+  it('keeps the empty state for a save that did not touch the file', async () => {
+    // A save the file's log lists but whose patch is empty for this path (a
+    // pure rename elsewhere in the commit): there is no version to show, and a
+    // viewer bound to a ref with nothing at it would answer with a read error.
+    renderPane('Docs/logo.png', makeGit({ fetchFileDiff: async () => '' }));
+    expect(await screen.findByText('No file changes in this save.')).toBeInTheDocument();
+    expect(screen.queryByRole('img')).toBeNull();
+    expect(screen.queryByText('No preview for this format.')).toBeNull();
+  });
+
+  it('hands focus to the pane when a viewer\'s own Try again unmounts it', async () => {
+    // Pressing "Try again" removes the button from the DOM, so focus would
+    // fall to document.body and the next Tab would restart at the top of the
+    // page. The viewport the viewer sits in is what survives the swap.
+    apiMock.authFetch.mockRejectedValueOnce(new Error('network down'));
+    renderPane('Docs/logo.png', makeGit({ fetchFileDiff: async () => binaryPatch('Docs/logo.png') }));
+
+    const retry = await screen.findByRole('button', { name: 'Try again' });
+    const pane = screen.getByTestId('history-preview-viewport');
+    fireEvent.click(retry);
+    expect(document.activeElement).toBe(pane);
+    expect(await screen.findByRole('img', { name: `${KB}/Docs/logo.png` })).toBeInTheDocument();
+  });
+
   it('shows the refusal, with Try again, when the version cannot be loaded — never a blank pane', async () => {
     const fetchFileDiff = vi
       .fn()
@@ -344,16 +399,20 @@ describe('HistoryVersionPreview — the viewer is bound to the selected save', (
     // and hands this pane a fresh git object. The viewer must not re-read: the
     // bytes of a commit cannot have changed, and a re-read would blink the
     // document back to its loading state.
-    const git = makeGit({ fetchFileDiff: async () => binaryPatch('Docs/logo.png') });
+    const pngGit = () => makeGit({ fetchFileDiff: async () => binaryPatch('Docs/logo.png') });
     const commit = makeCommit();
-    const { rerender } = renderPane('Docs/logo.png', git, commit);
+    const { rerender } = renderPane('Docs/logo.png', pngGit(), commit);
     await screen.findByRole('img', { name: `${KB}/Docs/logo.png` });
     const readsBefore = rawUrls().length;
 
+    // A WHOLE new git value, fresh method identities and all — which is what
+    // the panel really hands over. Spreading the old one would keep every
+    // function reference, so the pane's own load effect would not even re-run
+    // and the assertion below would hold with no memoization at all.
     rerender(
       <MemoryRouter initialEntries={[`/workspace/${WS}/Docs/logo.png`]}>
         <WorkspaceContext.Provider value={workspace}>
-          <GitContext.Provider value={{ ...git }}>
+          <GitContext.Provider value={pngGit()}>
             <HistoryVersionPreview filePath={`${KB}/Docs/logo.png`} commit={commit} />
           </GitContext.Provider>
         </WorkspaceContext.Provider>

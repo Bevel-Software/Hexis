@@ -82,7 +82,11 @@ export function rawFileUrl(
   let url = `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(relativePath)}`;
   if (options.download) url += '&download=1';
   if (options.version) url += `&v=${options.version}`;
-  if (options.ref) {
+  // Absence, not falsiness: `ref: ''` is a BUG at the call site, and omitting
+  // it would quietly answer with today's working-tree bytes under a caller
+  // that asked for a past version. Sent as it is, the backend's own 400 says
+  // so.
+  if (options.ref != null) {
     url += `&ref=${encodeURIComponent(options.ref)}`;
     // `side` only means anything next to a ref — the backend refuses it on its
     // own — so it is appended only here, and only when it is not the default.
