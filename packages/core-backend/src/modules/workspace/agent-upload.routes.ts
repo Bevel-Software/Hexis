@@ -73,15 +73,23 @@ export function createAgentUploadRoutes(deps: AgentUploadRouteDeps): express.Rou
       });
       return;
     }
-    // The declared length first, so a caller sending something far too large
-    // is told the limit before it spends the bandwidth. The real total is
-    // checked again below — `content-length` is the sender's claim, not a fact.
-    const declared = Number.parseInt(req.headers['content-length'] ?? '', 10);
-    if (Number.isFinite(declared) && declared > uploads.maxBytes) {
-      res.status(413).json({ error: overLimit(declared, uploads.maxBytes) });
-      return;
-    }
     try {
+      // The TOKEN first — before the limit is quoted and before a single byte
+      // of the body is held. This route is authenticated by the token and
+      // nothing else: without this check anyone could make the process buffer
+      // the deployment's whole upload limit per request against tokens they
+      // invented, as many at a time as they liked, and nobody without a token
+      // is owed any other answer than the one refusal. `attach` below asks
+      // again, under the same record, because that is where it is spent.
+      uploads.assertOpen(token);
+      // Then the declared length, so a caller sending something far too large
+      // is told the limit before it spends the bandwidth. The real total is
+      // checked again below — `content-length` is the sender's claim, not a fact.
+      const declared = Number.parseInt(req.headers['content-length'] ?? '', 10);
+      if (Number.isFinite(declared) && declared > uploads.maxBytes) {
+        res.status(413).json({ error: overLimit(declared, uploads.maxBytes) });
+        return;
+      }
       const chunks: Buffer[] = [];
       let total = 0;
       for await (const chunk of req) {
@@ -107,8 +115,11 @@ export function createAgentUploadRoutes(deps: AgentUploadRouteDeps): express.Rou
         res.status(err.status).json({ error: err.message });
         return;
       }
+      // The detail stays in the log. An unexpected failure here is a
+      // filesystem error, and its message quotes the absolute path of the
+      // store's root — a place the caller is told nothing else about.
       log.error('upload failed:', { err });
-      res.status(500).json({ error: err instanceof Error ? err.message : 'Upload failed' });
+      res.status(500).json({ error: 'Upload failed' });
     }
   });
 
@@ -136,17 +147,38 @@ function fileNameOf(req: express.Request): string | null {
   const header = req.headers['x-upload-filename'];
   if (typeof header === 'string' && header.trim() !== '') return header.trim();
   const disposition = req.headers['content-disposition'];
-  if (typeof disposition === 'string') {
-    const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
-    if (match) {
-      try {
-        const decoded = decodeURIComponent(match[1]).trim();
-        if (decoded !== '') return decoded;
-      } catch {
-        const raw = match[1].trim();
-        if (raw !== '') return raw;
-      }
-    }
+  if (typeof disposition === 'string') return dispositionFilename(disposition);
+  return null;
+}
+
+/**
+ * The `filename` a `content-disposition` names, or null when it names none.
+ *
+ * A QUOTED value is read to its closing quote, not to the first semicolon: a
+ * semicolon separates the header's parameters only OUTSIDE the quotes, and
+ * `filename="report;final.md"` is one perfectly ordinary name that a
+ * semicolon-first reading landed as `report`. An unquoted value ends at the
+ * next parameter, as it must.
+ *
+ * Percent-decoded only in the extended `filename*=UTF-8''…` form, which is the
+ * only one where the encoding is part of the grammar. A plain `filename=` value
+ * is the name itself, so `50%20off.md` stays `50%20off.md` rather than losing
+ * its `%20` to a decode nobody asked for.
+ */
+export function dispositionFilename(disposition: string): string | null {
+  const match = /filename(\*?)\s*=\s*(?:"([^"]*)"|([^;]*))/i.exec(disposition);
+  if (!match) return null;
+  const extended = match[1] === '*';
+  const raw = (match[2] ?? match[3] ?? '').trim();
+  if (!extended) return raw === '' ? null : raw;
+  // `UTF-8''name`, or any other charset and language the sender declares.
+  const encoded = raw.replace(/^[^']*'[^']*'/, '');
+  try {
+    const decoded = decodeURIComponent(encoded).trim();
+    if (decoded !== '') return decoded;
+  } catch {
+    const kept = encoded.trim();
+    if (kept !== '') return kept;
   }
   return null;
 }

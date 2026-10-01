@@ -17,7 +17,7 @@ import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import { assertBranchProvided, WorkflowValidationError } from '../../shared/domain-errors.js';
+import { assertBranchProvided, GitInternalsError, WorkflowValidationError } from '../../shared/domain-errors.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a workflow service, so this stays inside the module boundary.
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
@@ -545,6 +545,11 @@ interface PlannedUploadPath {
  * write that text out as a file — content nobody sent, under a name that was
  * meant to point elsewhere.
  */
+/** The refusal an entry gets when the archive would expand past what one commit lands. */
+function tooLargeToApply(): string {
+  return `This archive expands past the ${APPLY_MAX_TOTAL_BYTES} byte total the apply lands in one commit; this entry was not applied.`;
+}
+
 async function planUpload(
   upload: ClaimedUpload,
   destination: string,
@@ -605,13 +610,20 @@ async function planUpload(
       planned.push({ path: rawName, error: 'invalid_entry', message: 'Path escapes destination' });
       continue;
     }
+    // The DECLARED uncompressed size first, BEFORE decompressing — the same
+    // order `unzip` reads it in, and for the same reason: a deflate stream can
+    // expand a thousandfold, so an entry whose own header says it will not fit
+    // the remaining budget must never be inflated to prove it. Checked again
+    // below against the bytes that actually arrived, because the header is the
+    // archive's claim, not a fact.
+    const declared = entry.header?.size ?? 0;
+    if (totalBytes + declared > APPLY_MAX_TOTAL_BYTES) {
+      planned.push({ path: rawName, error: 'too_large', message: tooLargeToApply() });
+      continue;
+    }
     const data = entry.getData();
     if (totalBytes + data.byteLength > APPLY_MAX_TOTAL_BYTES) {
-      planned.push({
-        path: rawName,
-        error: 'too_large',
-        message: `This archive expands past the ${APPLY_MAX_TOTAL_BYTES} byte total the apply lands in one commit; this entry was not applied.`,
-      });
+      planned.push({ path: rawName, error: 'too_large', message: tooLargeToApply() });
       continue;
     }
     totalBytes += data.byteLength;
@@ -622,10 +634,11 @@ async function planUpload(
 
 /**
  * Record on `entry` that this path was refused, saying what the gate that
- * refused it said. Three kinds of refusal count as one path's outcome: a
+ * refused it said. Four kinds of refusal count as one path's outcome: a
  * typed tool refusal (`exists`, `platform_file`, the mode gate), a permission
  * refusal (the caller may not write this path, where the DESTINATION was
- * writable), and a path-shape refusal from the repository rules. Anything else
+ * writable), the git folder in any spelling, and a path-shape refusal from the
+ * repository rules. Anything else
  * is not a verdict about this path — it is a gate failing — so it travels on
  * and the whole apply fails loudly, exactly as it does in `write_files`.
  */
@@ -642,7 +655,7 @@ function refuseEntry(entry: Record<string, unknown>, err: unknown): void {
     entry.message = err.message;
     return;
   }
-  if (err instanceof WorkflowValidationError) {
+  if (err instanceof GitInternalsError || err instanceof WorkflowValidationError) {
     entry.error = (err.payload as { kind?: string } | undefined)?.kind ?? 'refused';
     entry.message = err.message;
     return;
@@ -2964,6 +2977,15 @@ export function registerWorkspaceTools(
           if (blocked.has(wsPathOf)) throw await writeRefusal(branch, wsPathOf);
           const platform = platformFileReason(wsPathOf);
           if (platform !== undefined) throw new ToolError(platform, 422, { code: 'platform_file' });
+          // The git folder is never a workspace path, in any spelling. A ZIP
+          // entry's name has already met this rule in `zipEntryNameRefusal`; a
+          // SINGLE uploaded file's has not — `.git` is a name the upload
+          // route's `validateFilename` accepts — and the preflight that reads
+          // the caller's own arguments never sees it either, because the name
+          // came from the upload, not from the call. Asked here so that path
+          // is REFUSED like any other, with the rest of the upload landing,
+          // rather than failing the whole apply from inside `writeFiles`.
+          assertNoGitInternalsSegment(wsPathOf);
           assertRepoRootNameFree(wsPathOf, kbDirName);
           // A link already on disk under the destination must not redirect
           // these bytes — the rule `unzip` applies per entry, applied here on

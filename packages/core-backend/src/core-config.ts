@@ -191,6 +191,11 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
    * accepted but not yet judged, so no file tool may name it — every workspace
    * path resolves against a branch's checkout, and there is no spelling of one
    * that reaches in here. Ephemeral and never committed.
+   *
+   * `AGENT_UPLOADS_ROOT` overrides it, and the placement is CHECKED at boot
+   * (`assertUploadsRootOutsideWorkspaces`): a value inside `workspacesRoot` —
+   * or one that resolves there through a link — refuses to start rather than
+   * quietly staging unjudged bytes where the file tools read.
    */
   readonly agentUploadsRoot: string;
   /**

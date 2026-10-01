@@ -2,7 +2,7 @@ import type { Server as HttpServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import AdmZip from 'adm-zip';
 import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -20,7 +20,11 @@ import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
-import { AgentUploadStore, UPLOAD_TOKEN_REFUSAL } from '../agent-upload.store.js';
+import {
+  AgentUploadStore,
+  assertUploadsRootOutsideWorkspaces,
+  UPLOAD_TOKEN_REFUSAL,
+} from '../agent-upload.store.js';
 import { createAgentUploadRoutes, isAgentUploadRawBodyPath } from '../agent-upload.routes.js';
 import { MAX_UPLOAD_BYTES } from '../upload-limits.js';
 
@@ -288,6 +292,32 @@ function zipWithRawNames(entries: Record<string, Buffer | string>): Buffer {
   return zip.toBuffer();
 }
 
+/**
+ * A one-entry zip whose headers CLAIM `declaredSize` uncompressed bytes while
+ * holding only `content`.
+ *
+ * What a zip bomb looks like to a reader before it decompresses anything, and
+ * the only way to write one in a test without allocating the bytes it claims:
+ * the uncompressed-size field is patched in both the local file header and the
+ * central directory, which is where every reader takes an entry's size from.
+ * An apply that believed the field only after inflating would have to hold the
+ * expansion in memory to find out.
+ */
+function zipWithDeclaredSize(name: string, content: string, declaredSize: number): Buffer {
+  const buffer = zipOf({ [name]: content });
+  // The uncompressed-size field: 22 bytes into a local file header, 24 into a
+  // central-directory one (see APPNOTE 4.3.7 and 4.3.12).
+  for (const [signature, offset] of [
+    [0x04034b50, 22],
+    [0x02014b50, 24],
+  ] as const) {
+    for (let at = 0; at + 4 <= buffer.length; at++) {
+      if (buffer.readUInt32LE(at) === signature) buffer.writeUInt32LE(declaredSize, at + offset);
+    }
+  }
+  return buffer;
+}
+
 /** A real PNG: the 1×1 transparent one, so the bytes are a genuine image. */
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
@@ -409,6 +439,94 @@ describe('the upload route', () => {
     const { token } = await request(base);
     const res = await send(base, token, '../escape.md', Buffer.from('x'));
     expect(res.status).toBe(400);
+  });
+
+  it('refuses the second of two uploads sent against one token at the same time', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    // Both in flight before either has finished: the token is reserved before
+    // the first `await` of the attach, so exactly one of them is accepted and
+    // the other meets the one refusal. Without the reservation both stored
+    // their bytes and the apply landed whichever finished last.
+    const [first, second] = await Promise.all([
+      send(base, token, 'first.md', Buffer.from('first')),
+      send(base, token, 'second.md', Buffer.from('second')),
+    ]);
+    const statuses = [first.status, second.status].sort();
+    expect(statuses).toEqual([200, 404]);
+    expect(await readdir(uploadsDir)).toHaveLength(1);
+    // And the file the accepted answer named is the file the apply lands.
+    const accepted = first.status === 200 ? first : second;
+    const { filename } = await json<{ filename: string }>(accepted);
+    const answer = await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Race` });
+    expect(answer.files).toEqual([{ path: `${KB_DIR}/Race/${filename}`, outcome: 'created' }]);
+    expect(await readFile(join(tempDir, KB_DIR, 'Race', filename), 'utf8')).toBe(filename.replace('.md', ''));
+  });
+
+  it('refuses an unknown token before it has read a single byte of the body', async () => {
+    const base = await start({ maxBytes: 64 });
+    // Over the limit AND against a token that does not exist. The 404 proves
+    // the token was judged first: had the body been buffered, the size check
+    // inside the read would have answered 413 instead. That ordering is what
+    // keeps an invented token from making the process hold the deployment's
+    // whole upload limit in memory.
+    const res = await fetch(`${base}/api/agent/uploads/bevel-up_invented?filename=big.md`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: Buffer.alloc(200, 7),
+    });
+    expect(res.status).toBe(404);
+    expect((await json<{ error: string }>(res)).error).toBe(UPLOAD_TOKEN_REFUSAL);
+    expect(await readdir(uploadsDir)).toEqual([]);
+  });
+
+  it('keeps a quoted content-disposition name that holds a semicolon', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    const res = await fetch(`${base}/api/agent/uploads/${encodeURIComponent(token)}`, {
+      method: 'POST',
+      headers: { 'content-disposition': 'attachment; filename="report;final.md"' },
+      body: Buffer.from('r'),
+    });
+    expect(await json<{ filename: string }>(res)).toMatchObject({ filename: 'report;final.md' });
+  });
+
+  it('reads the extended content-disposition name, percent-decoded', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    const res = await fetch(`${base}/api/agent/uploads/${encodeURIComponent(token)}`, {
+      method: 'POST',
+      headers: { 'content-disposition': "attachment; filename*=UTF-8''r%C3%A9sum%C3%A9.md" },
+      body: Buffer.from('r'),
+    });
+    expect(await json<{ filename: string }>(res)).toMatchObject({ filename: 'résumé.md' });
+  });
+
+  it('reads a plain content-disposition name as the name itself, percent signs and all', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    const res = await fetch(`${base}/api/agent/uploads/${encodeURIComponent(token)}`, {
+      method: 'POST',
+      headers: { 'content-disposition': 'attachment; filename=50%20off.md' },
+      body: Buffer.from('r'),
+    });
+    expect(await json<{ filename: string }>(res)).toMatchObject({ filename: '50%20off.md' });
+  });
+
+  it('answers an unexpected failure without quoting the filesystem back', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    // The store's root replaced by a FILE, so the attach's `mkdir` fails with
+    // an ENOTDIR whose message carries the absolute path of the staging root —
+    // a place the caller is told nothing else about.
+    await rm(uploadsDir, { recursive: true, force: true });
+    await writeFile(uploadsDir, 'not a directory');
+    const res = await send(base, token, 'a.md', Buffer.from('a'));
+    expect(res.status).toBe(500);
+    expect(await json<{ error: string }>(res)).toEqual({ error: 'Upload failed' });
+    // Removed here, because `afterEach` deletes a directory, not a file.
+    await rm(uploadsDir, { force: true });
+    uploadsDir = '';
   });
 
   it('refuses a .zip whose bytes are not an archive, while the caller still holds the file', async () => {
@@ -688,6 +806,39 @@ describe('apply_file_upload', () => {
     expect(outcomeAt(answer, `${KB_DIR}/Drop/fine.md`)).toMatchObject({ outcome: 'created' });
   });
 
+  it('refuses a SINGLE file named after the git folder as that path\'s own outcome', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    // `.git` is a name `validateFilename` accepts, so the upload route lets it
+    // through; it reaches the apply as a name of the upload's, not of the
+    // call's, so the preflight that reads the caller's arguments never sees it.
+    // Judged per path, like every other refusal, rather than failing the whole
+    // apply from inside the batch write.
+    await send(base, token, '.git', Buffer.from('evil'));
+    const answer = await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Drop` });
+    expect(answer.count).toBe(0);
+    expect(outcomeAt(answer, `${KB_DIR}/Drop/.git`)).toMatchObject({
+      outcome: 'refused',
+      error: 'git-internals',
+    });
+    expect(batches).toEqual([]);
+  });
+
+  it('refuses an entry that CLAIMS more than one commit lands, without inflating it', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    // 200 MB declared against a 128 MB apply budget. Judged on the header,
+    // before `getData`, because a deflate stream expands by three orders of
+    // magnitude and an entry inflated to be measured is an entry already held
+    // in memory. The bytes behind this header are a handful.
+    const bomb = zipWithDeclaredSize('bomb.md', 'tiny', 200 * 1024 * 1024);
+    await send(base, token, 'bomb.zip', bomb);
+    const answer = await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Bomb` });
+    expect(outcomeAt(answer, 'bomb.md')).toMatchObject({ outcome: 'refused', error: 'too_large' });
+    expect(outcomeAt(answer, 'bomb.md')?.message).toContain('one commit');
+    expect(batches).toEqual([]);
+  });
+
   // Scenario: a zip holds 60 entries.
   it('lists 25 paths with the total, and all of them when asked', async () => {
     const base = await start();
@@ -829,11 +980,15 @@ describe('a token is good once, for one user, for a limited time', () => {
   });
 
   it('is refused once it has expired, and the stored upload is gone', async () => {
-    const base = await start({ ttlMs: 30 });
+    // A TTL comfortably longer than the two HTTP round-trips below: at 30ms a
+    // loaded machine could expire the token mid-`send`, and the test would
+    // fail on an upload that was never stored rather than on the expiry it is
+    // about.
+    const base = await start({ ttlMs: 1_000 });
     const { token } = await request(base);
     await send(base, token, 'a.md', Buffer.from('a'));
     expect(await readdir(uploadsDir)).toHaveLength(1);
-    await new Promise((r) => setTimeout(r, 60));
+    await new Promise((r) => setTimeout(r, 1_500));
     const res = await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: KB_DIR });
     expect(res.status).toBe(404);
     expect((await json<{ error: string }>(res)).error).toBe(UPLOAD_TOKEN_REFUSAL);
@@ -844,16 +999,89 @@ describe('a token is good once, for one user, for a limited time', () => {
   it('deletes an upload nobody applied, on its own, when the token expires', async () => {
     // The periodic sweep, started before the first token is issued so the
     // store's own default interval does not win the race.
-    const base = await start({ ttlMs: 30, sweepEveryMs: 10 });
+    // The TTL has the same margin over the round-trips as above; the sweep
+    // interval stays short, and the deadline loop below is what makes the
+    // sweep-side timing robust once the send has landed.
+    const base = await start({ ttlMs: 1_000, sweepEveryMs: 10 });
     const { token } = await request(base);
     await send(base, token, 'forgotten.zip', zipOf({ 'a.md': 'a' }));
     expect(await readdir(uploadsDir)).toHaveLength(1);
-    const deadline = Date.now() + 5_000;
+    const deadline = Date.now() + 6_500;
     while (Date.now() < deadline && (await readdir(uploadsDir)).length > 0) {
       await new Promise((r) => setTimeout(r, 10));
     }
     expect(await readdir(uploadsDir)).toEqual([]);
     expect((await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: KB_DIR })).status).toBe(404);
+  });
+});
+
+describe('the sweep', () => {
+  it('leaves the bytes an apply is holding alone, even past the expiry', async () => {
+    const base = await start({ ttlMs: 1_000 });
+    const { token } = await request(base);
+    await send(base, token, 'slow.md', Buffer.from('slow'));
+    // Exactly what an apply holds while it resolves the branch, reads the
+    // bytes, judges every path and commits — work that can outlast a token
+    // whose TTL was nearly up when it started. A sweep that deleted the source
+    // here would make the commit land short with nothing saying why.
+    const claimed = uploads.claim(token, 'u');
+    await new Promise((r) => setTimeout(r, 1_200));
+    await uploads.sweepNow();
+    expect(await readFile(claimed.absolutePath, 'utf8')).toBe('slow');
+    // And a second apply arriving meanwhile still finds the token unusable.
+    expect(() => uploads.claim(token, 'u')).toThrow(UPLOAD_TOKEN_REFUSAL);
+    // Released without landing anything, the claim is gone and so are the bytes.
+    uploads.release(token);
+    await uploads.sweepNow();
+    expect(await readdir(uploadsDir)).toEqual([]);
+  });
+
+  it('runs once the moment it starts, so bytes a dead process left behind go now', async () => {
+    const base = await start();
+    // A file no record of THIS store names: what a restart finds, since the
+    // records live in memory and went with the process that issued them.
+    await writeFile(join(uploadsDir, 'upload-from-a-dead-process'), 'orphan');
+    const { token } = await request(base);
+    await uploads.drainSweep();
+    expect(await readdir(uploadsDir)).toEqual([]);
+    // The token issued alongside it is untouched — the sweep reclaims by what
+    // the live records do NOT name.
+    expect((await send(base, token, 'a.md', Buffer.from('a'))).status).toBe(200);
+  });
+
+  it('stops deleting once it is stopped, so an evicted graph cannot sweep its replacement', async () => {
+    await start();
+    uploads.stopSweeping();
+    await writeFile(join(uploadsDir, 'upload-the-next-store-issued'), 'theirs');
+    await uploads.sweepNow();
+    expect(await readdir(uploadsDir)).toEqual(['upload-the-next-store-issued']);
+  });
+});
+
+describe('the staging root', () => {
+  it('refuses a boot that would stage uploads inside a workspace', async () => {
+    const workspaces = await mkdtemp(join(tmpdir(), 'ws-root-'));
+    try {
+      for (const inside of [workspaces, join(workspaces, 'agent-uploads'), join(workspaces, 'a', 'b')]) {
+        await expect(assertUploadsRootOutsideWorkspaces(inside, workspaces)).rejects.toThrow(
+          /AGENT_UPLOADS_ROOT/,
+        );
+      }
+      // Through a LINK, too: where the path resolves to is what decides it.
+      const linked = join(workspaces, '..', `link-${basename(workspaces)}`);
+      await symlink(workspaces, linked);
+      try {
+        await expect(assertUploadsRootOutsideWorkspaces(join(linked, 'uploads'), workspaces)).rejects.toThrow(
+          /AGENT_UPLOADS_ROOT/,
+        );
+      } finally {
+        await rm(linked, { force: true });
+      }
+      // A sibling — the default — is what the invariant asks for.
+      await assertUploadsRootOutsideWorkspaces(join(workspaces, '..', 'agent-uploads'), workspaces);
+    } finally {
+      await rm(workspaces, { recursive: true, force: true });
+    }
   });
 });
 

@@ -91,8 +91,9 @@ export function platformFileCreationRefusal(pathOrName: string): string {
 
 /**
  * The sentence an UPLOAD is refused with when one of its paths would land a
- * platform file — a zip carrying an `access.md`, a `roles.yaml` or the agent
- * guide, or a single file sent under one of those names.
+ * platform file — a zip carrying an `access.md`, a `.bevelignore`, a
+ * `roles.yaml` or the agent guide, or a single file sent under one of those
+ * names.
  *
  * Its own sentence rather than the move's, because the thing being kept out is
  * different: a move cannot CREATE a platform file, and an upload cannot land

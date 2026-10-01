@@ -14,6 +14,20 @@ export const UPLOAD_TOKEN_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const SWEEP_INTERVAL_MS = 60 * 1000;
 
 /**
+ * How long past its expiry a CLAIMED record is pinned against the sweep.
+ *
+ * An apply holds its claim while it resolves the branch (which may clone),
+ * reads the bytes, judges every path and commits — work that can outlast a
+ * token whose TTL was nearly up when the apply started. Deleting the source
+ * mid-apply would make the commit land short with no refusal naming the
+ * reason, so a claim keeps its bytes alive. The grace is what stops that from
+ * being forever: an apply that neither consumed nor released within it has
+ * died with its process (the record is in memory, so there is no third
+ * possibility), and the bytes are reclaimed.
+ */
+const CLAIM_GRACE_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
  * THE one refusal for every way a token can fail to be usable: it was never
  * issued, it has already been applied, it has expired, or it belongs to
  * somebody else. One sentence for all four, deliberately — an answer that
@@ -40,7 +54,12 @@ export class UploadTokenError extends Error {
 export interface IssuedUpload {
   /** The absolute URL the bytes are POSTed to. Carries the token in its path. */
   uploadUrl: string;
-  /** The token itself, for a caller that would rather send it as a header. */
+  /**
+   * The token itself — what `apply_file_upload` takes. Named separately from
+   * `uploadUrl` because the apply needs it on its own, not because the upload
+   * route reads it anywhere else: the bytes go to `uploadUrl`, which carries
+   * the token in its path, and there is no header spelling of it.
+   */
   token: string;
   /** ISO-8601 instant after which the token and any bytes sent with it are gone. */
   expiresAt: string;
@@ -73,8 +92,21 @@ interface UploadRecord {
   userId: string;
   expiresAt: number;
   received?: ReceivedUpload;
+  /**
+   * Taken by an upload that is still writing its bytes. Set BEFORE the first
+   * `await` in {@link AgentUploadStore.attach}, so two uploads arriving at once
+   * cannot both pass the one-file-per-token check and then race each other's
+   * bytes onto the same path. Cleared only when an attach fails.
+   */
+  attaching: boolean;
   /** Held by an apply that is running: a second apply finds the token in use. */
   claimed: boolean;
+  /**
+   * When the apply holding this record claimed it. An expired record that is
+   * CLAIMED is pinned rather than swept — the apply is reading those bytes —
+   * until the claim itself looks abandoned (see {@link CLAIM_GRACE_MS}).
+   */
+  claimedAt?: number;
 }
 
 export interface AgentUploadStoreOptions {
@@ -126,6 +158,10 @@ export class AgentUploadStore {
   private readonly ttlMs: number;
   readonly maxBytes: number;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  /** The sweep in flight, so a shutdown can wait for it — see {@link drainSweep}. */
+  private sweeping: Promise<void> | null = null;
+  /** Set by {@link stopSweeping}: no further sweep deletes anything. */
+  private stopped = false;
 
   constructor(options: AgentUploadStoreOptions) {
     this.root = options.root;
@@ -153,6 +189,7 @@ export class AgentUploadStore {
       id: `upload-${Date.now()}-${randomBytes(8).toString('hex')}`,
       userId: user.id,
       expiresAt,
+      attaching: false,
       claimed: false,
     });
     return {
@@ -175,8 +212,7 @@ export class AgentUploadStore {
    * token would already be spent.
    */
   async attach(token: string, filename: string, data: Buffer): Promise<ReceivedUpload> {
-    const record = this.find(token);
-    if (record.received !== undefined) throw new UploadTokenError(UPLOAD_TOKEN_REFUSAL, 404);
+    const record = this.openRecord(token);
     if (data.byteLength > this.maxBytes) {
       throw new UploadTokenError(
         `That upload is ${data.byteLength} bytes, over this deployment's ${this.maxBytes} byte limit. ` +
@@ -198,10 +234,45 @@ export class AgentUploadStore {
       }
       received.kind = 'zip';
     }
-    await fs.mkdir(this.root, { recursive: true });
-    await fs.writeFile(path.join(this.root, record.id), data);
+    // RESERVED FIRST, before any `await`: two uploads arriving at once would
+    // otherwise both read `received === undefined`, both write, and the apply
+    // would land whichever set of bytes finished last — against a token whose
+    // answer described the other one.
+    record.attaching = true;
+    try {
+      await fs.mkdir(this.root, { recursive: true });
+      await fs.writeFile(path.join(this.root, record.id), data);
+    } catch (err) {
+      // Nothing was received, so the token is open again: the sender may retry
+      // with the same one rather than ask for another.
+      record.attaching = false;
+      throw err;
+    }
     record.received = received;
     return received;
+  }
+
+  /**
+   * Refuse `token` if it cannot accept bytes — unknown, expired, somebody
+   * else's doing, or already holding a file — and answer its record if it can.
+   *
+   * Exists as its own step so the upload route can ask BEFORE it reads the
+   * body. The route is the one endpoint here authenticated by a token alone,
+   * and buffering up to the deployment's whole upload limit for an invented
+   * token would let a handful of concurrent requests spend the process's
+   * memory on bytes that were never going to be stored.
+   */
+  assertOpen(token: string): void {
+    this.openRecord(token);
+  }
+
+  /** {@link assertOpen}, with the record it found — the store's own view of it. */
+  private openRecord(token: string): UploadRecord {
+    const record = this.find(token);
+    if (record.received !== undefined || record.attaching) {
+      throw new UploadTokenError(UPLOAD_TOKEN_REFUSAL, 404);
+    }
+    return record;
   }
 
   /**
@@ -222,13 +293,17 @@ export class AgentUploadStore {
       throw new UploadTokenError(UPLOAD_TOKEN_REFUSAL, 404);
     }
     record.claimed = true;
+    record.claimedAt = Date.now();
     return { ...record.received, absolutePath: path.join(this.root, record.id) };
   }
 
   /** Give a claimed token back, unused — the apply refused without landing anything. */
   release(token: string): void {
     const record = this.records.get(hash(token));
-    if (record) record.claimed = false;
+    if (record) {
+      record.claimed = false;
+      record.claimedAt = undefined;
+    }
   }
 
   /** Spend the token and delete its bytes. Idempotent. */
@@ -251,16 +326,25 @@ export class AgentUploadStore {
    * will ever mention again. Sweeping by what the records DON'T name closes
    * both, and is the honest reading of the promise: an upload nobody applied
    * is gone once its token has expired.
+   *
+   * ONE record is kept past its expiry: one an apply has CLAIMED. Those bytes
+   * are being read right now, and a sweep that deleted them would make the
+   * commit land short of what the answer promised. The pin lasts
+   * {@link CLAIM_GRACE_MS}, after which a claim nobody consumed or released
+   * belongs to a dead process and is reclaimed.
    */
   async sweepNow(): Promise<void> {
+    if (this.stopped) return;
     const now = Date.now();
     for (const [key, record] of [...this.records]) {
       if (record.expiresAt > now) continue;
+      if (this.pinned(record, now)) continue;
       this.records.delete(key);
       await this.remove(record.id);
     }
     // Every id a live record is holding — including one whose bytes have not
-    // arrived yet, so an upload in flight is never swept out from under itself.
+    // arrived yet, so an upload in flight is never swept out from under itself,
+    // and one an apply has pinned past its expiry.
     const live = new Set([...this.records.values()].map((r) => r.id));
     let names: string[];
     try {
@@ -269,8 +353,17 @@ export class AgentUploadStore {
       return; // root not created yet, or unreadable — nothing to reclaim
     }
     for (const name of names) {
+      // Asked again per name: a stop (an evicted tenant, a shutdown) that
+      // landed while this sweep was reading the directory must not go on to
+      // delete files a replacement store may already have issued ids for.
+      if (this.stopped) return;
       if (!live.has(name)) await this.remove(name);
     }
+  }
+
+  /** Whether an expired record is held open by an apply that is still running. */
+  private pinned(record: UploadRecord, now: number): boolean {
+    return record.claimed && now - (record.claimedAt ?? now) < CLAIM_GRACE_MS;
   }
 
   /**
@@ -278,21 +371,54 @@ export class AgentUploadStore {
    * than at boot, so a deployment nobody uploads to runs no timer; idempotent,
    * and the timer is `unref`'d because nothing here is worth keeping a process
    * alive for — the records are in memory and go with it.
+   *
+   * The first sweep runs IMMEDIATELY, not one interval later, because the
+   * records are in memory: a process that restarted holds no record of what
+   * the previous one stored, so every file in the root is already orphaned the
+   * moment this store starts. Waiting a full interval to notice would leave
+   * someone else's uploaded bytes on disk for no reason at all.
    */
   startSweeping(intervalMs: number = SWEEP_INTERVAL_MS): void {
     if (this.sweepTimer) return;
-    this.sweepTimer = setInterval(() => {
-      void this.sweepNow().catch((err: unknown) => {
-        log.warn('could not sweep expired uploads:', { err });
-      });
-    }, intervalMs);
+    this.stopped = false;
+    this.sweep();
+    this.sweepTimer = setInterval(() => this.sweep(), intervalMs);
     this.sweepTimer.unref?.();
   }
 
-  /** Stop the periodic sweep. For shutdown and for tests. */
+  /**
+   * Stop sweeping, for good: the timer is cleared AND a sweep already running
+   * abandons the rest of its work.
+   *
+   * Both halves matter when a graph is stopped — a tenant evicted, the process
+   * shutting down. The root is this tenant's, and a reactivation builds a new
+   * store over the same directory with an empty record map: a sweep left
+   * running from the old store would find the new store's files named by no
+   * record of ITS own and delete them, under an apply that is about to read
+   * them. {@link drainSweep} is how a caller waits for the abandonment to
+   * actually have happened.
+   */
   stopSweeping(): void {
+    this.stopped = true;
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.sweepTimer = null;
+  }
+
+  /** Wait for the sweep in flight, if any. Pairs with {@link stopSweeping} on shutdown. */
+  async drainSweep(): Promise<void> {
+    await this.sweeping;
+  }
+
+  /** One sweep, with its failure logged and its promise kept for {@link drainSweep}. */
+  private sweep(): void {
+    const running = this.sweepNow()
+      .catch((err: unknown) => {
+        log.warn('could not sweep expired uploads:', { err });
+      })
+      .finally(() => {
+        if (this.sweeping === running) this.sweeping = null;
+      });
+    this.sweeping = running;
   }
 
   /** The live record for `token`, or the one refusal. Expiry is judged here. */
@@ -300,9 +426,15 @@ export class AgentUploadStore {
     const key = hash(token);
     const record = this.records.get(key);
     if (!record) throw new UploadTokenError(UPLOAD_TOKEN_REFUSAL, 404);
-    if (record.expiresAt <= Date.now()) {
-      this.records.delete(key);
-      void this.remove(record.id);
+    const now = Date.now();
+    if (record.expiresAt <= now) {
+      // Expired either way — but a record an apply is still reading keeps its
+      // bytes (and its map entry) until that apply ends, for the reason
+      // {@link sweepNow} gives. The refusal is the same; only the deletion waits.
+      if (!this.pinned(record, now)) {
+        this.records.delete(key);
+        void this.remove(record.id);
+      }
       throw new UploadTokenError(UPLOAD_TOKEN_REFUSAL, 404);
     }
     return record;
@@ -320,4 +452,64 @@ export class AgentUploadStore {
 
 function hash(token: string): string {
   return createHash('sha256').update(token).digest('hex');
+}
+
+/**
+ * Refuse a boot whose upload root is not OUTSIDE every workspace.
+ *
+ * The whole safety of this route rests on where the bytes land: they are a
+ * buffer somebody sent, judged by nothing until `apply_file_upload` judges each
+ * path against a branch. A root configured inside `workspacesRoot` would put
+ * that unjudged buffer where the file tools read — `read_file`, `grep`, the
+ * download route — bypassing the access and platform-file rules the apply
+ * exists to apply. The invariant is documented on `AGENT_UPLOADS_ROOT`; this is
+ * it checked, at boot, naming the variable, rather than trusted.
+ *
+ * Both directions and both spellings: equal paths, either containing the
+ * other, and the real paths, so a root that is a LINK into the workspaces tree
+ * is refused too.
+ */
+export async function assertUploadsRootOutsideWorkspaces(
+  uploadsRoot: string,
+  workspacesRoot: string,
+): Promise<void> {
+  for (const [uploads, workspaces] of [
+    [path.resolve(uploadsRoot), path.resolve(workspacesRoot)],
+    [await realBase(uploadsRoot), await realBase(workspacesRoot)],
+  ]) {
+    if (uploads === workspaces || contains(workspaces, uploads) || contains(uploads, workspaces)) {
+      throw new Error(
+        `AGENT_UPLOADS_ROOT ("${uploadsRoot}") must be outside WORKSPACES_ROOT ("${workspacesRoot}"): uploaded ` +
+          'bytes are staged there before any access or platform-file rule has judged them, so a root inside a ' +
+          'workspace would let the file tools read them. Point it at a sibling directory.',
+      );
+    }
+  }
+}
+
+/** Whether `child` is inside `parent`. Paths already resolved. */
+function contains(parent: string, child: string): boolean {
+  return child.startsWith(parent.endsWith(path.sep) ? parent : parent + path.sep);
+}
+
+/**
+ * `dir` with every link on it resolved — as far as it exists. Neither root is
+ * required to exist yet (the store makes its own on the first upload), so the
+ * deepest existing ancestor is resolved and the missing rest joined back on:
+ * a link anywhere along the part that DOES exist is what could redirect the
+ * one into the other.
+ */
+async function realBase(dir: string): Promise<string> {
+  let existing = path.resolve(dir);
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      return path.join(await fs.realpath(existing), ...rest);
+    } catch {
+      const up = path.dirname(existing);
+      if (up === existing) return path.join(existing, ...rest);
+      rest.unshift(path.basename(existing));
+      existing = up;
+    }
+  }
 }
