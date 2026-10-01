@@ -104,20 +104,33 @@ export interface RepositoryChangeRequests {
   countOpen(): Promise<number>;
   /** Close every open request as "repository replaced", releasing the file locks on their branches. Answers how many closed. */
   closeAsRepositoryReplaced(): Promise<number>;
+  /**
+   * Run the move with no queued commit being written. The startup phase sets
+   * working copies aside and clones them again while the deployment is
+   * serving, and a commit worker left running would write into a directory
+   * that is being renamed away, or into the fresh clone of a repository the
+   * commit was never meant for. Absent (a minimal mount has no worker), the
+   * move runs as it is.
+   */
+  whileCommitsHeld?<T>(work: () => Promise<T>): Promise<T>;
 }
 
 /**
- * What the admin is asked to confirm before a save changes the knowledge-base
- * repository, and what they answered.
+ * What the admin is asked to confirm before a save MOVES the deployment to
+ * another repository, and what they answered about its open change requests.
  *
- * `keep` — the repository only MOVED: its branches came along, so the open
+ * `keep` — the repository only moved: its branches came along, so the open
  * change requests still mean something and stay open.
- * `close` — the repository was REPLACED: none of those branches is in the new
- * one, so the requests are closed as "repository replaced" (nothing deleted).
+ * `close` — it is a different repository: none of those branches is in it,
+ * so the requests are closed as "repository replaced" (nothing deleted).
  *
- * Either way the working copies on disk are replaced — that is not a choice,
- * it is what changing the address means; the confirmation exists so that
- * work committed here and never pushed is lost KNOWINGLY.
+ * What happens to the working copies is not a choice, and is decided by the
+ * histories, not by this answer (see the startup phase's
+ * `reconcileClonesWithConfiguredRepository`): a copy whose history the new
+ * repository holds is pointed at it and kept, unpushed commits included; any
+ * other is set aside whole and cloned fresh. Nothing is deleted. The
+ * confirmation exists so that work which leaves the app this way does so
+ * KNOWINGLY.
  */
 export type RepositoryChangeChoice = 'keep' | 'close';
 
@@ -372,7 +385,13 @@ export function createSetupRoutes(
       // losing their working copies only to be told the token was missing.
       // Before, because a refused save must destroy nothing: the check only
       // reads the new address and dry-runs a push to it.
-      const repositoryChange = await repositoryChangeFor(entries, body.confirmRepositoryChange, res);
+      // Asked only of a deployment that has SERVED on the repository it would
+      // leave. A first run whose initialisation failed has answered
+      // everything and served nobody: correcting its address is finishing
+      // setup, and a question about leaving a repository nobody ever worked
+      // on would be a question with nothing behind it.
+      const hasServed = wasComplete && kbInit === null;
+      const repositoryChange = await repositoryChangeFor(entries, body.confirmRepositoryChange, hasServed, res);
       if (!repositoryChange) return;
       const oidc = await signInHoldsFor(entries, res);
       if (!oidc) return;
@@ -420,21 +439,27 @@ export function createSetupRoutes(
       }
       const saved = await settings.save(entries, req.userId ?? null);
       /**
-       * A deployment that was not serving has nothing on the mode it had:
-       * the mode chosen takes effect now, and the startup phase below is
-       * what a restart would have run. One that WAS serving stays on the
-       * mode it is on, working copies and credential alike, until it is
-       * started again.
+       * THE WAY CHOSEN TAKES EFFECT ON THIS SAVE, in the two cases where the
+       * startup phase below runs for it.
        *
-       * SERVING, not answered. The pin protects what is running on the
-       * mode in effect, and behind a shut gate nothing is: a first run
-       * whose initialisation failed, a boot that found its repository
-       * unreachable. Pinned there, the way out of a repository that does
-       * not work would be closed — the admin chooses another, the retry
-       * below runs against the one that just failed, and the screen asks
-       * for a restart that changes nothing.
+       * A deployment that was not serving has nothing on the mode it had: a
+       * first run, one whose initialisation failed, a boot that found its
+       * repository unreachable. Pinned there, the way out of a repository
+       * that does not work would be closed.
+       *
+       * And a deployment that WAS serving, when its admin has just confirmed
+       * the move. The mode in effect was once held until the next restart, so
+       * that the running process never presented one way's credential to
+       * another way's repository. That reason is answered differently now:
+       * the phase below sets the working copies of the repository that was
+       * left aside, under a held commit worker, before anything uses the new
+       * credential. And an admin of a hosted workspace has no restart to
+       * give, so a move that waited for one never happened.
+       *
+       * What is left pinned is a save that changes the mode WITHOUT moving
+       * the repository, which no path produces today; it keeps the restart.
        */
-      if (source && !wasServing) source.takeEffect();
+      if (source && (!wasServing || repositoryChange.changing)) source.takeEffect();
       /**
        * The restart the mode owes is read off the two modes themselves, not
        * off what this save wrote: it is owed for as long as the mode chosen
@@ -487,13 +512,14 @@ export function createSetupRoutes(
        * URL arrives on a later one — and again on any save while a previous
        * setup-time run stands failed (`kbInit`), so a save is the retry.
        *
-       * AND on a save that CHANGES THE REPOSITORY, complete and healthy or
+       * AND on a save that MOVES THE REPOSITORY, complete and healthy or
        * not. That one is not a quiet moment — the gate is open and sessions
        * may be live — but it is the moment the working copies stop belonging
        * to the configured repository, and leaving them until the next restart
        * is what made Save and Retry fail against a repository that was gone.
-       * The admin has just confirmed that those copies are replaced, so the
-       * phase runs and the app opens on the new repository's content.
+       * The admin has just confirmed the move, so the phase runs, with the
+       * commit worker held for as long as it does, and the app opens on the
+       * new repository's content.
        *
        * Never on an ordinary re-save of a complete, healthy setup: with the
        * gate open, sessions may be live and nothing needs doing.
@@ -527,7 +553,13 @@ export function createSetupRoutes(
           // One run at a time. The save chain already serializes handlers
           // whole, so no second run can start while one executes; the `??=`
           // is defense in depth should another invoker ever appear.
-          kbInitInFlight ??= kbStartupRunner.runAll();
+          // A move runs with the commit worker held: nothing queued is
+          // written while working copies are set aside and cloned again.
+          const run = (): Promise<void> => kbStartupRunner.runAll();
+          kbInitInFlight ??=
+            repositoryChange.changing && changeRequests.whileCommitsHeld
+              ? changeRequests.whileCommitsHeld<void>(run)
+              : run();
           await kbInitInFlight;
           // Under KB_SAFE_BOOT a run that abandoned the phase still resolves
           // and opens the gate DELIBERATELY — booting unmaintained so the
@@ -598,40 +630,59 @@ export function createSetupRoutes(
    * What this save does to the knowledge-base repository, and whether the
    * admin has said yes to it.
    *
-   * CHANGING THE ADDRESS DESTROYS EVERY WORKING COPY. A clone fetches and
-   * pushes through the address stored in its own `remote.origin.url`, and the
-   * two repositories need not share a single commit — so a clone of the old
-   * one cannot be re-pointed, only deleted and made again from the new
-   * address. Anything committed here and never pushed goes with it. That is
-   * not something to discover afterwards, so the save is REFUSED (409) until
-   * the answer comes back with the admin's decision.
+   * A MOVE IS ANY SAVE AFTER WHICH THE DEPLOYMENT READS ANOTHER REPOSITORY
+   * than the one it is running on, however it came about: another address,
+   * another way of having the repository (managed, GitHub, address and
+   * token), another repository on GitHub. So the question is asked of the
+   * one thing that knows where the repository is under every way — the
+   * repository source — comparing the address IN EFFECT with the one this
+   * save would choose. A mount without a source has the one way there
+   * always was, and the address is the setting.
    *
-   * Only a real change asks: an address that differs from the configured one
-   * in nothing but its spelling — a trailing slash, a `.git` suffix, the case
+   * A move takes the working copies of the repository that is left out of
+   * use: one whose history the new repository holds is pointed at it and
+   * kept, any other is set aside and cloned fresh. Work that was never
+   * pushed leaves the app with a copy that is set aside. That is not
+   * something to discover afterwards, so the save is REFUSED (409) until the
+   * answer comes back with the admin's decision.
+   *
+   * Only a real move asks: an address that differs from the one in effect in
+   * nothing but its spelling — a trailing slash, a `.git` suffix, the case
    * of the host — is the same repository (see `kb-fs/remote-url.ts`), and so
-   * is a first-run save, where there is no configured address and nothing on
-   * disk to lose.
+   * is a first-run save, where no repository is in effect and nothing on
+   * disk could be left.
    *
    * Returns null when it has already answered the request.
    */
   async function repositoryChangeFor(
     entries: Record<string, string>,
     confirmation: unknown,
+    /** Whether the deployment has served on the repository in effect: only then is there a question. */
+    hasServed: boolean,
     res: express.Response,
   ): Promise<{ changing: boolean; choice: RepositoryChangeChoice | null } | null> {
     const unchanged = { changing: false, choice: null } as const;
-    const now = settings.resolve('kbRepoUrl').trim();
-    const next = settings.resolveAfter(entries)('kbRepoUrl').trim();
+    const after = settings.resolveAfter(entries);
+    const now = (source ? source.url() : settings.resolve('kbRepoUrl')).trim();
+    const next = (source ? source.url(after) : after('kbRepoUrl')).trim();
     if (now === '' || next === '' || sameRepository(now, next)) return unchanged;
     if (confirmation === 'keep' || confirmation === 'close') return { changing: true, choice: confirmation };
+    // A move all the same, and the phase treats it as one; nobody is asked.
+    if (!hasServed) return { changing: true, choice: null };
     // The count is what the choice is ABOUT, so it is read here rather than
     // left for the screen to ask for separately: the two questions would
     // otherwise be answered a round trip apart, and the number on screen
     // would be the one from before whatever happened in between.
     const openChangeRequests = await changeRequests.countOpen();
     res.status(409).json({
-      error: 'This changes the knowledge-base repository.',
-      repositoryChange: { openChangeRequests },
+      error: 'This moves the deployment to another repository.',
+      repositoryChange: {
+        openChangeRequests,
+        // The way left and the way moved to, for the screen to name them.
+        // Equal when the move is within one way (another address, another
+        // repository on GitHub); absent from a mount with one way only.
+        ...(source ? { from: source.mode(), to: source.mode(after) } : {}),
+      },
     });
     return null;
   }

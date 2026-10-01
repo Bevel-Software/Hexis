@@ -56,3 +56,28 @@ describe('PendingCommitsService.markNeedsAttentionOnBranch', () => {
     await expect(svc.markNeedsAttentionOnBranch('quiet/branch', 'whatever')).resolves.toBe(0);
   });
 });
+
+/**
+ * The same, keyed on the WORKING COPY that was set aside. Closing change
+ * requests covers their branches and nothing else; a commit queued on the
+ * default branch was written against the repository that was left all the
+ * same, and the path it names is about to hold a clone of another one.
+ */
+describe('PendingCommitsService.markNeedsAttentionInWorkspace', () => {
+  it('escalates every queued commit for the working copy, with the reason, and answers how many', async () => {
+    const { db, sets } = makeFakeDb([{ id: 'a' }, { id: 'b' }, { id: 'c' }]);
+    const svc = new PendingCommitsService(db);
+
+    await expect(svc.markNeedsAttentionInWorkspace('main', 'The repository was replaced.')).resolves.toBe(3);
+
+    expect(sets).toHaveLength(1);
+    expect(sets[0]?.status).toBe('needs_attention');
+    expect(sets[0]?.lastError).toBe('The repository was replaced.');
+    expect(sets[0]?.lastAttemptedAt).toBeInstanceOf(Date);
+  });
+
+  it('answers zero when nothing was queued for it', async () => {
+    const { db } = makeFakeDb([]);
+    await expect(new PendingCommitsService(db).markNeedsAttentionInWorkspace('main', 'whatever')).resolves.toBe(0);
+  });
+});

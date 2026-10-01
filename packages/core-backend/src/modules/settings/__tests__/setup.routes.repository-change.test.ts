@@ -68,6 +68,8 @@ function listen(openChangeRequests: number) {
   /** Every run of the KB startup phase — the thing that replaces the clones. */
   const phaseRuns = { count: 0 };
   const closes = { count: 0 };
+  /** What happened, in order: the commit worker held and let go, and the phase between. */
+  const events: string[] = [];
   const changeRequests: RepositoryChangeRequests = {
     async countOpen() {
       return openChangeRequests;
@@ -76,6 +78,14 @@ function listen(openChangeRequests: number) {
       closes.count += 1;
       if (failTheClose) throw new Error('change_requests is down');
       return openChangeRequests;
+    },
+    async whileCommitsHeld(work) {
+      events.push('commits held');
+      try {
+        return await work();
+      } finally {
+        events.push('commits released');
+      }
     },
   };
   const app = express();
@@ -93,6 +103,7 @@ function listen(openChangeRequests: number) {
       {
         async runAll() {
           phaseRuns.count += 1;
+          events.push('phase');
         },
       },
       testKbContext(),
@@ -110,7 +121,7 @@ function listen(openChangeRequests: number) {
   );
   server = app.listen(0);
   const { port } = server.address() as AddressInfo;
-  return { base: `http://127.0.0.1:${port}`, settings, phaseRuns, closes };
+  return { base: `http://127.0.0.1:${port}`, settings, phaseRuns, closes, events };
 }
 
 const post = (base: string, body: unknown) =>
@@ -264,5 +275,39 @@ describe('first-run setup', () => {
     expect(settings.resolve('kbRepoUrl')).toBe(REPO);
     // The completion transition runs the phase, as it always has.
     expect(phaseRuns.count).toBe(1);
+  });
+});
+
+/**
+ * The move runs while the deployment is serving. A commit worker left
+ * running would write into a working copy that is being renamed away, or
+ * into the fresh clone of a repository the commit was never meant for.
+ */
+describe('the commit worker, while a deployment is moved', () => {
+  it('is held for exactly as long as the startup phase runs', async () => {
+    const { base, events } = await configured(0);
+    events.length = 0;
+    const res = await post(base, {
+      settings: { kbRepoUrl: 'https://example.com/acme/another.git', gitToken: 'ghp_new' },
+      confirmRepositoryChange: 'keep',
+    });
+    expect(res.status).toBe(200);
+    expect(events).toEqual(['commits held', 'phase', 'commits released']);
+  });
+
+  it('is not touched by a save that moves nothing', async () => {
+    const { base, events } = await configured(0);
+    events.length = 0;
+    const res = await post(base, { settings: { kbSyncSecret: 'a-secret-of-sixteen-or-more' } });
+    expect(res.status).toBe(200);
+    expect(events).toEqual([]);
+  });
+
+  it('is not held by a move that was only asked about', async () => {
+    const { base, events } = await configured(0);
+    events.length = 0;
+    const res = await post(base, { settings: { kbRepoUrl: 'https://example.com/acme/another.git', gitToken: 'ghp_new' } });
+    expect(res.status).toBe(409);
+    expect(events).toEqual([]);
   });
 });

@@ -35,7 +35,7 @@ import { ManagedRepository, MANAGED_DEFAULT_BRANCH } from '../modules/settings/m
 import { RepositorySource } from '../modules/settings/repository-source.js';
 import { GitHubAppConnection } from '../modules/github-app/index.js';
 import { AdvisoryLease, AdvisoryLock } from '../modules/database/advisory-lock.js';
-import { holdCommitWorkerLease, withStartupTask, type LeaseLoopHandle } from './lifecycle.js';
+import { holdCommitWorkerLease, holdable, withStartupTask, type LeaseLoopHandle } from './lifecycle.js';
 
 /** The hosted MCP endpoint at a deployment address, with any userinfo stripped. */
 function mcpEndpointUrl(publicBackendUrl: string): string {
@@ -182,6 +182,12 @@ export interface CoreServices {
    * lease to the replacement.
    */
   commitWorker: LeaseLoopHandle;
+  /**
+   * Run something with no queued commit being written: the commit worker is
+   * stopped for its duration and started again afterwards, the lease kept.
+   * What a move to another repository runs the startup phase under.
+   */
+  whileCommitsHeld<T>(work: () => Promise<T>): Promise<T>;
   workspaceService: WorkspaceService;
   /**
    * The KB startup phase (see `startup/on-server-start.ts`): run at the
@@ -556,12 +562,31 @@ export async function createCoreServices(
     steps: kbStartupSteps,
     buildSeedTree: buildSeedTree(disk, config.kbTemplateDir, extraDirs, [config.adminEmail], kb),
     gitRunner,
-    // A working copy the phase deletes for belonging to another repository
+    // A working copy the phase sets aside for belonging to another repository
     // must leave the workspace service's cache with it: on the SAVE that
-    // changes the address the process is already running, and a cached path
+    // moves the deployment the process is already running, and a cached path
     // to a directory that is gone is how the next reader gets an ENOENT
     // instead of a fresh clone.
-    onCloneDiscarded: (workspaceId) => workspaceService.forgetClone(workspaceId),
+    //
+    // And its queue goes with it. Whatever is still waiting to be committed
+    // into that copy was written against the repository that was left; the
+    // path it names is about to hold a fresh clone of another one. Held for a
+    // person, on every branch, never written and never deleted. Reaches
+    // FORWARD to `pendingCommitsService`, like `gitService` below.
+    onCloneDiscarded: async (workspaceId) => {
+      workspaceService.forgetClone(workspaceId);
+      const held = await pendingCommitsService.markNeedsAttentionInWorkspace(
+        workspaceId,
+        'The knowledge-base repository was replaced while this commit was still queued, so it was never ' +
+          'written. The bytes are kept here: the working copy it was meant for belongs to the previous repository.',
+      );
+      if (held > 0) {
+        logger('kb-startup').warn(
+          `${held} queued commit(s) for the working copy "${workspaceId}" need attention: the repository was ` +
+            'replaced before they landed, so they were not written to the new one.',
+        );
+      }
+    },
     // And the replacement it cloned in its place: a fresh clone holds every
     // ref, so the git layer's per-workspace fetch record is told so. Without
     // it that record still holds the FAILED fetch of the repository that was
@@ -1215,7 +1240,10 @@ export async function createCoreServices(
       name: recoveryBot.name,
     },
   });
-  const leased = withStartupTask(pendingCommitsWorker, reconcileQueue);
+  // Holdable: a move to another repository stops the worker for as long as
+  // working copies are being set aside and cloned again, without giving up
+  // the lease (see `holdable` in `core/lifecycle.ts`).
+  const leased = holdable(withStartupTask(pendingCommitsWorker, reconcileQueue));
 
   // SSO providers. The array REFERENCE is shared with the caller's port — an
   // overlay pushes its own plugins into it after construction (they mount when
@@ -1311,6 +1339,7 @@ export async function createCoreServices(
     db,
     gitRunner,
     commitWorker,
+    whileCommitsHeld: (work) => leased.whileHeld(work),
     startupRetry: null,
     tenantKey,
     secretsScope,

@@ -422,6 +422,39 @@ export class PendingCommitsService {
   }
 
   /**
+   * The same, for every commit still queued against ONE WORKING COPY, and
+   * answer how many moved.
+   *
+   * The caller is the startup phase setting a working copy aside: a clone of
+   * a repository the configured one shares no history with. Whatever was
+   * queued for it was written against that clone, on any branch, the default
+   * one included, and the directory the worker would write to is now a fresh
+   * clone of another repository. Closing change requests covers the branches
+   * of the requests that were closed and nothing else, which is why this is
+   * keyed on the working copy: it is the thing that was replaced.
+   *
+   * A working copy that was only pointed at a new address (the same
+   * repository, moved) keeps its queue, and is never passed here.
+   */
+  async markNeedsAttentionInWorkspace(workspaceId: string, error: string): Promise<number> {
+    const moved = await this.db
+      .update(pendingCommits)
+      .set({
+        status: 'needs_attention',
+        lastError: error,
+        lastAttemptedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(pendingCommits.workspaceId, workspaceId),
+          inArray(pendingCommits.status, ['pending', 'running']),
+        ),
+      )
+      .returning({ id: pendingCommits.id });
+    return moved.length;
+  }
+
+  /**
    * When the oldest commit still waiting to land was queued, or null when
    * nothing waits — the readiness answer's one number. `pending` and
    * `running` both count: a row the worker holds is still not in git, and a

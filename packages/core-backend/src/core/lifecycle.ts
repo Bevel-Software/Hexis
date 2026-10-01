@@ -202,6 +202,58 @@ export function withStartupTask(
   };
 }
 
+/** A worker the lease loop drives, which something else may hold still for a while. */
+export interface HoldableWorker extends LeasedWorker {
+  /**
+   * Run `work` with the worker stopped, and start it again afterwards if the
+   * lease loop still wants it running. A hold waits for the commit in flight
+   * to finish, as a stop does. Holds may overlap; the worker starts again
+   * when the last one ends, whether `work` resolved or threw.
+   */
+  whileHeld<T>(work: () => Promise<T>): Promise<T>;
+}
+
+/**
+ * A worker that can be HELD STILL without the lease loop knowing.
+ *
+ * The lease loop decides whether this process is the one draining the commit
+ * queue; it starts the worker when the lease is taken and stops it when the
+ * lease is lost. Moving the deployment to another repository needs a second,
+ * independent reason for the worker not to run: while working copies are
+ * being set aside and cloned again, a queued commit must not be written into
+ * a directory that is being renamed away, nor into the fresh clone of a
+ * repository it was never meant for. Stopping the loop itself would release
+ * the lease, and another process would take the queue over mid-move.
+ *
+ * So the two reasons are kept apart. `wanted` is the lease loop's word,
+ * `holds` counts the moves in flight, and the worker runs exactly when it is
+ * wanted and nothing holds it.
+ */
+export function holdable(worker: LeasedWorker): HoldableWorker {
+  let wanted = false;
+  let holds = 0;
+  return {
+    start() {
+      wanted = true;
+      if (holds === 0) worker.start();
+    },
+    async stop() {
+      wanted = false;
+      await worker.stop();
+    },
+    async whileHeld<T>(work: () => Promise<T>): Promise<T> {
+      holds += 1;
+      try {
+        await worker.stop();
+        return await work();
+      } finally {
+        holds -= 1;
+        if (holds === 0 && wanted) worker.start();
+      }
+    },
+  };
+}
+
 /**
  * What one knowledge base's graph needs of itself to be STARTED: the boot
  * side effects that used to run inside `createCoreServer`, named so a host

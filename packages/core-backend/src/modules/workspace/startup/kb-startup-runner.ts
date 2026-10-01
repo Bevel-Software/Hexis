@@ -82,17 +82,20 @@ export interface KbStartupRunnerOptions {
       from the commit. */
   buildSeedTree: (dir: string) => Promise<string[]>;
   /**
-   * Called with the workspace id of each working copy the phase DELETED for
-   * being a clone of another repository. The workspace service keeps a
-   * branch→directory cache and adopts whatever is on disk, so on a RUNNING
-   * server — the save that changes the address — a deleted clone would
-   * otherwise stay in that cache as a path to nothing. Optional: at boot
-   * nothing has been cached yet, and a minimal graph has no such service.
+   * Called with the workspace id of each working copy the phase SET ASIDE for
+   * being a clone of another repository, and AWAITED before the phase goes
+   * on. Two things have to follow such a copy out, on a RUNNING server — the
+   * save that moves the deployment to another repository. The workspace
+   * service keeps a branch→directory cache and adopts whatever is on disk,
+   * so the copy would otherwise stay in that cache as a path to nothing. And
+   * whatever is still queued to be committed into it was written against the
+   * repository that was left: it must be held back before a fresh clone of
+   * another repository appears at the same path. Optional: at boot nothing
+   * has been cached yet, and a minimal graph has neither.
    *
-   * Never throws into the phase: the listener is a cache eviction, and a
-   * failing one must not stop a boot.
+   * Never throws into the phase: a listener that fails must not stop a boot.
    */
-  onCloneDiscarded?: (workspaceId: string) => void;
+  onCloneDiscarded?: (workspaceId: string) => void | Promise<void>;
   /**
    * Called with the workspace id of each working copy the phase CLONED fresh.
    * A clone has just downloaded every ref, which is a successful fetch by any
@@ -663,9 +666,9 @@ export class KbStartupRunner {
       // nothing. The directory name IS the workspace id
       // (`workspaceIdForBranch`).
       try {
-        this.opts.onCloneDiscarded?.(entry.name);
+        await this.opts.onCloneDiscarded?.(entry.name);
       } catch (err) {
-        startupLog.warn(`could not evict the cached working copy "${entry.name}":`, {
+        startupLog.warn(`could not finish setting the working copy "${entry.name}" aside:`, {
           detail: this.redact(err instanceof Error ? err.message : String(err)),
         });
       }
