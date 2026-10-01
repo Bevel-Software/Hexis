@@ -1,10 +1,11 @@
 import { Param } from 'drizzle-orm';
 
 import type { Database } from '../../database/connection.js';
+import { users } from '../../database/schema.js';
 
 /**
- * Every literal bound into a drizzle condition, in order — for
- * `inArray(users.email, emails)` that is exactly `emails`.
+ * Every address a drizzle condition binds to the users' blind index, in
+ * order — for `inArray(users.emailBidx, emails)` that is exactly `emails`.
  *
  * A drizzle `SQL` is a tree of chunks; the bound values sit in it as `Param`
  * nodes (an `inArray` puts them in a nested array chunk). Reading them back is
@@ -14,7 +15,12 @@ import type { Database } from '../../database/connection.js';
  */
 function boundValues(node: unknown, depth = 0): string[] {
   if (depth > 8 || node === null || node === undefined) return [];
-  if (node instanceof Param) return typeof node.value === 'string' ? [node.value] : [];
+  // Only what is bound THROUGH THE INDEX COLUMN counts: an address compared
+  // with the encrypted `email` column matches nothing in Postgres (the
+  // ciphertext is randomized), so it matches nothing here.
+  if (node instanceof Param) {
+    return node.encoder === users.emailBidx && typeof node.value === 'string' ? [node.value] : [];
+  }
   if (Array.isArray(node)) return node.flatMap((c) => boundValues(c, depth + 1));
   const chunks = (node as { queryChunks?: unknown }).queryChunks;
   return Array.isArray(chunks) ? chunks.flatMap((c) => boundValues(c, depth + 1)) : [];

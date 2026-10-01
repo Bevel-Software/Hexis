@@ -174,7 +174,9 @@ const CONNECT_TIMEOUT_MS = 30_000;
  */
 export function createDb(databaseUrl: string, opts: DbOptions = {}) {
   const dbSchema = assertSchemaName(opts.schema ?? DEFAULT_DB_SCHEMA);
-  const keys = opts.piiKey ? derivePiiKeys(opts.piiKey) : null;
+  // Only an ABSENT key means "this handle holds none". A blank or malformed
+  // one was meant to be a key, and is refused here rather than read as none.
+  const keys = opts.piiKey === undefined ? null : derivePiiKeys(opts.piiKey);
   const pool = new pg.Pool({
     Client: keyedClient(keys),
     connectionString: databaseUrl,

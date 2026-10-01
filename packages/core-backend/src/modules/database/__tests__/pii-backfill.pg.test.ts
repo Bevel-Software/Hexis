@@ -227,6 +227,10 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
         ).rejects.toMatchObject(refused);
         expect(await q(`select 1 from users`)).toHaveLength(0);
         await expect(runCoreMigrations(keyless, coreMigrationsDir())).rejects.toThrow(/holds no personal-data key/);
+        // "No key" is the key left out. A blank or malformed one was meant to
+        // be a key, and no handle is built with it.
+        expect(() => createDb(url, { piiKey: '' })).toThrow(/SECRETS_ENC_KEY/);
+        expect(() => createDb(url, { piiKey: 'not-a-key' })).toThrow(/SECRETS_ENC_KEY/);
       },
       TIMEOUT,
     );
