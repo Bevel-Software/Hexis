@@ -196,6 +196,30 @@ describe('AccessControlService.prospectiveHolders', () => {
     expect(names(after.write)).toEqual(names(before.write));
   });
 
+  /**
+   * A SYMLINK is neither of the two shapes the preview knows. `move_file`
+   * refuses a symlink source outright (`assertNoSymlinkOnPath`), so a link to
+   * a directory must not be described as a folder taking its `access.md`
+   * files along — that would promise the target's rules at a path nothing is
+   * ever going to arrive at. Nothing is read through the link either.
+   */
+  it('a symlink to a folder is not previewed as the folder it points at', async () => {
+    const svc = await makeService(TREE);
+    const repo = path.join(root, workspaceId, KB_DIR);
+    await fs.symlink(path.join(repo, 'Knowledge/Legal'), path.join(repo, 'Knowledge/Sales/alias'));
+
+    const { after } = await svc.prospectiveHolders(
+      workspaceId,
+      'Knowledge/Sales/alias',
+      'Knowledge/alias',
+    );
+
+    // Legal's own rules stayed behind the link: `Knowledge/` has no
+    // `access.md`, so nobody holds anything at the destination.
+    expect(names(after.read)).not.toContain('Engineering');
+    expect(names(after.write)).not.toContain('Engineering');
+  });
+
   it('a probe that fails for any reason but absence throws, never a silent "file"', async () => {
     const svc = await makeService(TREE);
     // A disk fault (EACCES here) must never read as "not a directory": the
@@ -203,9 +227,10 @@ describe('AccessControlService.prospectiveHolders', () => {
     // a file would be answered with frontmatter it does not have and without
     // the `access.md` files it carries — the wrong principals, named with
     // the same confidence as the right ones. Spied rather than staged with
-    // mode bits, so the property holds as root and on Windows too.
-    const real = fs.stat;
-    const spy = vi.spyOn(fs, 'stat').mockImplementation(((p: string) =>
+    // mode bits, so the property holds as root and on Windows too. `lstat`,
+    // because that is the probe: a symlink is classified by what it IS.
+    const real = fs.lstat;
+    const spy = vi.spyOn(fs, 'lstat').mockImplementation(((p: string) =>
       String(p).endsWith('contract.md')
         ? Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }))
         : (real as (p: string) => Promise<unknown>).call(fs, p)) as never);

@@ -62,15 +62,13 @@ export type TreeConfirmRequest =
     }
   | {
       kind: 'move';
-      /** Workspace-relative path of the entry being moved. */
-      sourcePath: string;
       /**
-       * Is the thing being dragged a folder? Both kinds are asked about: a
-       * folder's rules are the `access.md` files inside it, which travel
-       * with it, and the resolver counts them where they land. Read by the
-       * sentence, not by whether the question is put.
+       * Workspace-relative path of the entry being moved. Its KIND is not
+       * part of the request any more: both kinds are asked the same question
+       * now, and the resolver — which reads the tree — is what knows whether
+       * the thing carries `access.md` files of its own.
        */
-      sourceIsDirectory: boolean;
+      sourcePath: string;
       /** Workspace-relative folder it lands in; `''` is the workspace root. */
       targetDir: string;
       /** How the destination reads in the sentence — the drop target's row name. */

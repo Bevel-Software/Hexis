@@ -384,8 +384,9 @@ export interface IAccessControl {
    * will be once `fromPath` has been moved (`sourceRemains: false`, the
    * default) or copied (`sourceRemains: true`) there — the question a move's
    * or copy's dry run asks, which the same four gates at `toPath` cannot
-   * answer because the `access.md` files that travel with a folder are not
-   * at the destination yet.
+   * answer because what travels with the bytes — the `access.md` files inside
+   * a folder, a lone `access.md`'s own rules, a file's own frontmatter — is
+   * not at the destination yet.
    *
    * PREVIEW ONLY. It describes a tree that does not exist, so it must never
    * decide whether an operation may run: the gates keep resolving against the

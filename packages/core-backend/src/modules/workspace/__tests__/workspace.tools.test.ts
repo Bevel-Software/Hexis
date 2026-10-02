@@ -2714,6 +2714,35 @@ describe('preflight for moves and deletes', () => {
       expect(await exists(KB('Sales/deal.md'))).toBe(true);
     });
 
+    /**
+     * The dry run keeps that order too, and it is the easier oracle to reach:
+     * it answers 200 rather than throwing, so a denied caller could read the
+     * source's kind and its file count off it — or a 404 saying whether a
+     * source they may not copy from exists at all. Nothing on disk is probed
+     * until the write verdict on the destination has been taken.
+     */
+    it('copy_file\'s dry run refuses a denied destination the same way whatever the source is', async () => {
+      const base = await seeded();
+      const dry = async (src: string) =>
+        (await call(base, 'copy_file', { src, dest: KB('Locked/new.md'), dryRun: true })).body;
+
+      const file = await dry(KB('Sales/deal.md'));
+      const folder = await dry(KB('Sales/archive'));
+      const missing = await dry(KB('Sales/nothing-here.md'));
+
+      // One sentence, three sources: the refusal says nothing about any of them.
+      for (const answer of [file, folder, missing]) {
+        expect(answer).toMatchObject({ allowed: false, dryRun: true, copied: false });
+        expect(answer.reason).toContain(KB('Locked/new.md'));
+        expect(answer.kind).toBeUndefined();
+        expect(answer.descendants).toBeUndefined();
+      }
+      expect(folder.reason).toBe(file.reason);
+      expect(missing.reason).toBe(file.reason);
+      // And the caller's own verbs are still answered — those are theirs.
+      expect(Object.keys(file.access).sort()).toEqual(['after', 'before']);
+    });
+
     it('copy_file keeps the same order: the write refusal, not what is in the folder', async () => {
       const base = await seeded();
 
@@ -4323,6 +4352,30 @@ describe('a move preview judges the destination as it will be', () => {
       expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
       // A copy leaves the source exactly as it was.
       expect(await verbsAt(base, args.src)).toEqual(dry.body.access.before);
+    });
+
+    /**
+     * `copy_file` will copy a lone `access.md`, and the moment it lands it
+     * governs the folder it landed in. The preview counts it: the rules a
+     * copy carries are the point of this ticket whether they travel inside a
+     * folder or on their own.
+     */
+    it('a lone access.md previews the access it will give at the destination', async () => {
+      const base = await seeded();
+      // A folder with no rules of its own, so the destination's answer today
+      // is the root's: read and nothing else. (`Legal/access.md` is taken, and
+      // a copy onto a name that exists is refused long before access is asked.)
+      await fs.writeFile(KB('Open/note.md'), 'note');
+      const args = { src: KB('Sales/access.md'), dest: KB('Open/access.md') };
+
+      const dry = await call(base, 'copy_file', { ...args, dryRun: true });
+      expect(dry.body).toMatchObject({ kind: 'file', descendants: 1, allowed: true });
+      expect(await verbsAt(base, KB('Open'))).toMatchObject({ write: false, owner: false });
+      expect(dry.body.access.after).toMatchObject({ write: true, owner: true });
+      expect(dry.body.accessChanges).toBe(false);
+
+      expect((await call(base, 'copy_file', args)).body).toMatchObject({ copied: true });
+      expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
     });
 
     it('a destination that is taken is named, and the dry run changes nothing', async () => {

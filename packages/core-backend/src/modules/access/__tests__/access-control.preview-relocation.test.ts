@@ -86,6 +86,13 @@ describe('AccessControlService.previewAccessAfterRelocation', () => {
     await fs.rename(path.join(repo, from), dest);
   }
 
+  /** Copy `from` to `to` on disk, leaving the source where it is. */
+  async function reallyCopy(from: string, to: string): Promise<void> {
+    const dest = path.join(repo, to);
+    await fs.mkdir(path.dirname(dest), { recursive: true });
+    await fs.cp(path.join(repo, from), dest, { recursive: true });
+  }
+
   const BASE = {
     'roles.yaml': 'roles:\n  Admin:\n    - admin@x.io\n',
     'access.md': rules('read:\n  - everyone\n'),
@@ -193,16 +200,102 @@ describe('AccessControlService.previewAccessAfterRelocation', () => {
       ...BASE,
       'Sales/access.md': rules(`write:\n  - Mover <${MOVER}>\nowner:\n  - Mover <${MOVER}>\n`),
       'Sales/deal.md': '# Deal\n',
+      // A destination governed DIFFERENTLY from the source, so the answer can
+      // only come from the rules the copy carries: Legal grants read and
+      // nothing else, as the root does.
+      'Legal/access.md': rules('read:\n  - everyone\n'),
     });
 
     const svc = service();
     const after = await svc.previewAccessAfterRelocation(
-      workspaceId, MOVER, 'Sales', 'Sales-Copy', { sourceRemains: true },
+      workspaceId, MOVER, 'Sales', 'Legal/Sales-Copy', { sourceRemains: true },
     );
 
-    expect(after).toEqual(await verbsAt(svc, 'Sales'));
-    // The source is untouched by the question.
-    expect(await verbsAt(svc, 'Sales')).toMatchObject({ owner: true });
+    // The copied `access.md` governs the copy, which is the opposite of what
+    // the destination says today.
+    expect(after).toMatchObject({ write: true, owner: true });
+    expect(await verbsAt(svc, 'Legal')).toMatchObject({ write: false, owner: false });
+
+    await reallyCopy('Sales', 'Legal/Sales-Copy');
+    const done = service();
+    expect(await verbsAt(done, 'Legal/Sales-Copy')).toEqual(after);
+    // `sourceRemains`: both sets of rules are real afterwards, and the source
+    // keeps the access it always had.
+    expect(await verbsAt(done, 'Sales')).toMatchObject({ owner: true });
+  });
+
+  /**
+   * A lone `access.md` is a single FILE whose rules are a whole folder's.
+   * Keyed by the directory it sits in, it is not a path "under" the source,
+   * so the folder walk cannot see it — and `copy_file` will copy one, which
+   * is how a preview came to answer the destination's old rules about a
+   * directory that was about to be governed by the file landing in it.
+   */
+  it('a lone access.md governs the folder it is copied into', async () => {
+    await write({
+      ...BASE,
+      'Sales/access.md': rules(`write:\n  - Mover <${MOVER}>\nowner:\n  - Mover <${MOVER}>\n`),
+      'Legal/note.md': '# Note\n',
+    });
+
+    const svc = service();
+    // `Legal/` has no rules of its own; the root grants read and nothing else.
+    expect(await verbsAt(svc, 'Legal')).toMatchObject({ write: false, owner: false });
+
+    const after = await svc.previewAccessAfterRelocation(
+      workspaceId, MOVER, 'Sales/access.md', 'Legal/access.md', { sourceRemains: true },
+    );
+    expect(after).toMatchObject({ write: true, owner: true });
+
+    await fs.copyFile(path.join(repo, 'Sales/access.md'), path.join(repo, 'Legal/access.md'));
+    const done = service();
+    expect(await verbsAt(done, 'Legal/access.md')).toEqual(after);
+    // What landed governs the folder, not only itself.
+    expect(await verbsAt(done, 'Legal')).toMatchObject({ write: true, owner: true });
+  });
+
+  it('a file copied under any other name carries no folder rules with it', async () => {
+    await write({
+      ...BASE,
+      'Sales/access.md': rules(`write:\n  - Mover <${MOVER}>\nowner:\n  - Mover <${MOVER}>\n`),
+      'Legal/note.md': '# Note\n',
+    });
+
+    const svc = service();
+    // The same bytes, landing as an ordinary note: they govern nothing there,
+    // so the answer is the destination's own, exactly as the gates say.
+    const after = await svc.previewAccessAfterRelocation(
+      workspaceId, MOVER, 'Sales/access.md', 'Legal/rules-copy.md', { sourceRemains: true },
+    );
+    expect(after).toEqual(await verbsAt(svc, 'Legal/rules-copy.md'));
+    expect(after).toMatchObject({ write: false, owner: false });
+  });
+
+  /**
+   * The same rule for the other thing that travels with a file: its own
+   * frontmatter. Asking the DESTINATION for it always answered null — nothing
+   * is there yet — so a rename of a self-governing file previewed a loss the
+   * move hands straight back, and the preview contradicted the access the
+   * caller really has afterwards (Specification requirement 6).
+   */
+  it("a file's own frontmatter travels with its bytes, so a rename costs nothing", async () => {
+    await write({
+      ...BASE,
+      'Work/access.md': rules('read:\n  - everyone\n'),
+      'Work/plan.md': rules(`owner:\n  - Mover <${MOVER}>\n`) + '# Plan\n',
+    });
+
+    const svc = service();
+    const before = await verbsAt(svc, 'Work/plan.md');
+    expect(before.owner).toBe(true);
+
+    const after = await svc.previewAccessAfterRelocation(
+      workspaceId, MOVER, 'Work/plan.md', 'Work/roadmap.md',
+    );
+    expect(after).toEqual(before);
+
+    await reallyMove('Work/plan.md', 'Work/roadmap.md');
+    expect(await verbsAt(service(), 'Work/roadmap.md')).toEqual(after);
   });
 
   it('a single file answers exactly as the gates at the destination do', async () => {

@@ -1975,7 +1975,6 @@ describe('FileExplorer right-click: the viewport stub cleans up after itself', (
 // follows the destination, plus whatever else about it is worth knowing.
 describe('FileExplorer: delete and move ask first', () => {
   const DRAG_MIME = 'application/x-workspace-path';
-  const DRAG_KIND_MIME = 'application/x-workspace-kind';
   const KB = 'knowledge-base';
   const TREE: FileTreeEntry = rootedAtCheckout({
     name: '.',
@@ -2005,6 +2004,10 @@ describe('FileExplorer: delete and move ask first', () => {
                     type: 'directory',
                     children: [
                       { name: 'nda.md', relativePath: `${KB}/KnowledgeBase/Legal/Old/nda.md`, type: 'file' },
+                      // The folder in Juan's case carries its own rules, which
+                      // travel with it — the reason the resolver answers the
+                      // same holders on both sides of its move.
+                      { name: 'access.md', relativePath: `${KB}/KnowledgeBase/Legal/Old/access.md`, type: 'file' },
                     ],
                   },
                 ],
@@ -2079,12 +2082,11 @@ describe('FileExplorer: delete and move ask first', () => {
     fireEvent.click(screen.getByText('Legal'));
   }
 
-  async function dropOn(rowName: string, sourcePath: string, kind: 'file' | 'directory' = 'file') {
+  async function dropOn(rowName: string, sourcePath: string) {
     await act(async () => {
       fireEvent.drop(screen.getByText(rowName), {
         dataTransfer: {
-          getData: (t: string) =>
-            t === DRAG_MIME ? sourcePath : t === DRAG_KIND_MIME ? kind : '',
+          getData: (t: string) => (t === DRAG_MIME ? sourcePath : ''),
           files: [],
         },
       });
@@ -2116,7 +2118,9 @@ describe('FileExplorer: delete and move ask first', () => {
     it('counts every file under a folder, nested ones included', async () => {
       renderExplorer({ fileTree: TREE });
       await chooseDelete('Legal');
-      expect(screen.getByRole('dialog')).toHaveTextContent('Delete Legal and its 3 files?');
+      // `contract.md`, `access.md`, `Old/nda.md` and `Old/access.md` — the
+      // nested ones and the rules files count, because the delete takes them.
+      expect(screen.getByRole('dialog')).toHaveTextContent('Delete Legal and its 4 files?');
     });
 
     it('deletes nothing on Cancel', async () => {
@@ -2416,7 +2420,6 @@ describe('FileExplorer: delete and move ask first', () => {
       });
       // The component put the drag's subject where the drop handler looks.
       expect(store.get(DRAG_MIME)).toBe(CONTRACT);
-      expect(store.get(DRAG_KIND_MIME)).toBe('file');
 
       await act(async () => {
         fireEvent.drop(screen.getByText('Sales'), { dataTransfer });
@@ -2572,7 +2575,7 @@ describe('FileExplorer: delete and move ask first', () => {
       // with it — the resolver counts them where they land, so the question
       // is worth asking for a folder as much as for a file.
       answerAccess({ read: [group('Engineering')] }, {});
-      await dropOn('Sales', `${KB}/KnowledgeBase/Legal/Old`, 'directory');
+      await dropOn('Sales', `${KB}/KnowledgeBase/Legal/Old`);
       await waitFor(() =>
         expect(
           mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),
@@ -2598,19 +2601,26 @@ describe('FileExplorer: delete and move ask first', () => {
     });
 
     /**
-     * Juan's case, in the dialog: the folder carries its own `access.md`, so
-     * the resolver answers the same holders on both sides and there is
-     * nothing to warn about. The dialog used to say nothing here because it
-     * asked nothing; now it says nothing because the answer says nothing.
+     * Juan's case, in the dialog. `Legal/Old` carries its own `access.md`
+     * (see the tree above), so the resolver answers the same holders on both
+     * sides — that resolution is the BACKEND's, proven over a real tree in
+     * `access-control.preview-relocation.test.ts` and
+     * `workspace.tools.test.ts`; the route is a mock here, as it is in every
+     * case in this suite.
+     *
+     * What this case proves is the half the dialog owns: given an answer with
+     * nothing in it, the dialog says so. It used to say nothing here because
+     * it asked nothing about a folder; now it says nothing because the answer
+     * says nothing, and the two are not the same sentence.
      */
-    it('names no loss when a folder that carries its own rules is moved', async () => {
+    it('says nobody loses access when the answer is the same on both sides of a folder move', async () => {
       renderExplorer({ fileTree: TREE });
       answerAccess(
         { read: [group('Engineering')], write: [group('Engineering')] },
         { read: [group('Engineering')], write: [group('Engineering')] },
       );
       const dialog = await (async () => {
-        await dropOn('Sales', `${KB}/KnowledgeBase/Legal/Old`, 'directory');
+        await dropOn('Sales', `${KB}/KnowledgeBase/Legal/Old`);
         await waitFor(() =>
           expect(
             mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),

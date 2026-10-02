@@ -368,7 +368,7 @@ export function createAccessRoutes(
   });
 
   /**
-   * GET /api/workspace/:id/access/prospective?from=<file>&toDir=<folder>
+   * GET /api/workspace/:id/access/prospective?from=<file|folder>&toDir=<folder>
    *
    * Who can open and who can edit one file OR FOLDER where it is, and where
    * a move would put it — `{ before, after }`, each `{ read, write }` lists

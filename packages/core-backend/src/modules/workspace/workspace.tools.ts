@@ -963,32 +963,47 @@ export function registerWorkspaceTools(
    * file; the preview says so rather than promising a copy that would fail,
    * and still answers `access.after` for the folder it was asked about.
    *
-   * The source IS probed up front here, which the call itself does not do —
-   * what kind of thing is moving, and how much of it, is the first half of
-   * the impact, and it is a fact about a path the caller named. The ordering
-   * the call protects is the one above: nothing about the DESTINATION is
-   * read until the write verdict on it has been taken.
+   * NOTHING is probed on disk until the write verdict on the destination has
+   * been taken — not the destination, and not the source either, which is the
+   * order the call itself keeps at length: a caller who may not write there
+   * gets the same refusal whether the source is a file, a folder, or missing
+   * altogether. Probing the source first put a 404 in front of that 403 and
+   * handed a denied caller the source's kind and its file count. So a refused
+   * preview answers `allowed: false` with the sentence and no `kind` or
+   * `descendants`: those are the half of the impact the caller has to have
+   * earned. The two `access` sides are the caller's own four verbs and tell
+   * them nothing they could not ask `file_stat` for.
    */
   const copyImpact = async (branch: string, ctx: ToolContext, src: string, dest: string) => {
+    const [before, after, blocked] = await Promise.all([
+      accessAt(branch, ctx, src),
+      accessAfter(branch, ctx, src, dest, { sourceRemains: true }),
+      writeBlocked(branch, ctx, [dest]),
+    ]);
+    const access = { before, after };
+    const accessChanges = verbsDiffer(before, after);
+    if (blocked.length > 0) {
+      return {
+        src,
+        dest,
+        access,
+        accessChanges,
+        allowed: false,
+        reason: `You may not write "${dest}", so the copy cannot run.`,
+        dryRun: true,
+        copied: false,
+      };
+    }
     const fs = await ctx.getFilesystem(branch);
     const kind = await kindOf(fs, src);
     if (kind === null) throw notFound(src, 'Nothing to copy');
     const srcFiles = kind === 'folder' ? (await filesUnder(fs, src)).files : [src];
-    const [before, after] = await Promise.all([
-      accessAt(branch, ctx, src),
-      accessAfter(branch, ctx, src, dest, { sourceRemains: true }),
-    ]);
-    const blocked = await writeBlocked(branch, ctx, [dest]);
-    const occupiedBy = blocked.length === 0
-      ? await existingAt(await workspaceRoot(branch, ctx), dest)
-      : null;
-    const reason = blocked.length > 0
-      ? `You may not write "${dest}", so the copy cannot run.`
-      : occupiedBy !== null
-        ? entryExistsMessage(occupiedBy, dest)
-        : kind === 'folder'
-          ? folderCopyRefusal(src)
-          : undefined;
+    const occupiedBy = await existingAt(await workspaceRoot(branch, ctx), dest);
+    const reason = occupiedBy !== null
+      ? entryExistsMessage(occupiedBy, dest)
+      : kind === 'folder'
+        ? folderCopyRefusal(src)
+        : undefined;
     return {
       src,
       dest,
@@ -996,8 +1011,8 @@ export function registerWorkspaceTools(
       // The placeholder travels with its folder, but it is never content —
       // counted as `move_file` counts it.
       descendants: srcFiles.filter((f) => !isFolderPlaceholder(f)).length,
-      access: { before, after },
-      accessChanges: verbsDiffer(before, after),
+      access,
+      accessChanges,
       allowed: reason === undefined,
       ...(reason !== undefined ? { reason } : {}),
       dryRun: true,
