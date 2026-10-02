@@ -30,7 +30,11 @@ const CALL_TOOL_CHAIN_DESCRIPTION = [
   'Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function. Call tools as `KNOWLEDGE_BASE.<tool>({ body: { ...args } })` with NO `await` (results are already resolved), and `return` the final value. The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax).',
   'Discover first: `list_tools` lists every tool in callable form (e.g. `KNOWLEDGE_BASE.read_file`); `tools_info` returns their exact argument + return shapes — do not guess. Batch multiple tool calls into one chain to avoid a round-trip per call. The chain runs with your own connection key, so it can only reach the tools you can already call directly.',
   'Large results: if the combined result+logs exceed `max_output_size` (default 200000 chars) the full JSON is spilled to a shared store and you get back a `__tool_chain_spill__/…` ref instead. Read it with `read_file` (pass that ref as `path` — `branch` is ignored — plus `offset`/`limit` to slice it), or better, re-run a narrower chain that returns only what you need.',
-  'Images: image files are returned as native MCP image content on a DIRECT `read_file` call only — a chained `read_file` of an image yields `{ image_omitted: true, note }` instead of the picture, so call it outside the chain to actually see the image.',
+  // What a chained `read_file` of an image gives back used to be a fourth
+  // paragraph here. It is part of the content rule now — stated in the
+  // handshake instructions and in the managed agent guide, where the rest of
+  // what the file tools share also lives — so repeating it here only made this
+  // description long enough to be cut.
 ].join('\n\n');
 
 export const CODE_MODE_META_TOOLS: McpTool[] = [

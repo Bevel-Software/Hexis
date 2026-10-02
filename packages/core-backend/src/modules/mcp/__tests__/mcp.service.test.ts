@@ -11,8 +11,12 @@ import { SpillStore } from '../../workspace/spill-store.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
-import { PLATFORM_HEADER, TOOL_PREFIX_LINE } from '../../agent-instructions/index.js';
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
+import { TOOL_PREFIX_LINE, platformInstructions } from '../../agent-instructions/index.js';
 import type { AgentEventInput, IAgentEventRecorder } from '../../audit/audit.contract.js';
+
+/** The platform-owned part of the handshake text: the header plus the shared file rules. */
+const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT);
 
 /**
  * End-to-end proxy test: a real express app serving the registry-driven tool
@@ -507,17 +511,17 @@ describe('McpService — per-user credential pre-check', () => {
 describe('McpService — agent instructions', () => {
   const KB_TOOLS = ['start_session', 'grep', 'list_files', 'read_file'];
 
-  it('sends the header and the preamble as the session\'s instructions', async () => {
+  it("sends the platform text and the preamble as the session's instructions", async () => {
     const client = await setup({ readAgentPreamble: async () => 'Acme builds solar farms.\n\nProjects live in Projects/.' });
-    expect(client.getInstructions()).toBe(`${PLATFORM_HEADER}\n\nAcme builds solar farms.\n\nProjects live in Projects/.`);
+    expect(client.getInstructions()).toBe(`${PLATFORM}\n\nAcme builds solar farms.\n\nProjects live in Projects/.`);
   });
 
-  it('sends the header alone when no reader is wired', async () => {
+  it('sends the platform text alone when no reader is wired', async () => {
     const client = await setup();
-    expect(client.getInstructions()).toBe(PLATFORM_HEADER);
+    expect(client.getInstructions()).toBe(PLATFORM);
   });
 
-  it('a throwing reader still yields a session, with the header as its instructions and a warning', async () => {
+  it('a throwing reader still yields a session, with the platform text as its instructions and a warning', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const client = await setup({
       readAgentPreamble: async () => {
@@ -525,7 +529,7 @@ describe('McpService — agent instructions', () => {
       },
       extraTools: KB_TOOLS,
     });
-    expect(client.getInstructions()).toBe(PLATFORM_HEADER);
+    expect(client.getInstructions()).toBe(PLATFORM);
     // The error itself rides along, so a terminal shows its stack.
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('mcp-description.md'),

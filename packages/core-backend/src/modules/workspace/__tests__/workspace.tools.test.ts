@@ -13,7 +13,8 @@ import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
-import { CONTENT_RULE, registerWorkspaceTools } from '../workspace.tools.js';
+import { registerWorkspaceTools } from '../workspace.tools.js';
+import { sharedFileRules, sharedFileRulesSection, sharedRulesPointer } from '../../agent-instructions/shared-file-rules.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
 import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workflow-hooks.js';
@@ -27,7 +28,7 @@ import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
-import { PROPOSAL_ROUTE_NOTE, proposalTitleFor } from '../write-denial.js';
+import { proposalTitleFor } from '../write-denial.js';
 import { NOT_FOUND_NEXT_STEP } from '../not-found.js';
 
 const KB_DIR = 'knowledge-base';
@@ -912,19 +913,26 @@ describe('write modes and per-path outcomes', () => {
     });
   });
 
-  it('both descriptions state the default and all three modes, and `mode` is an input on each', async () => {
+  it('states the three modes on the `mode` input of each write tool, and once in the shared rules', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
+    // The paragraph that said this in BOTH descriptions is one shared rule now.
+    // What stays on the tool is the input the agent fills, which is where the
+    // decision is actually taken.
+    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'write-mode')!;
+    expect(rule.body).toContain('DEFAULTS TO `create`');
+    expect(rule.body).toContain('On write_file and write_files');
+    expect(sharedFileRulesSection(testKbContext().layout).split(rule.body)).toHaveLength(2);
     for (const name of ['write_file', 'write_files']) {
       const def = tools.find((t) => t.name === name)!;
-      expect(def.description, name).toContain('DEFAULTS TO `create`');
-      for (const mode of ['`create`', '`overwrite`', '`update`']) {
-        expect(def.description, `${name} ${mode}`).toContain(mode);
-      }
+      expect(def.description, name).not.toContain('DEFAULTS TO `create`');
       const body = (def.inputs as { properties: { body: { properties: Record<string, { enum?: string[]; description?: string }> } } }).properties.body;
       expect(body.properties.mode, name).toBeDefined();
       expect(body.properties.mode.enum, name).toEqual(['create', 'overwrite', 'update']);
       expect(body.properties.mode.description, name).toContain('default `create`');
+      for (const mode of ['`create`', '`overwrite`', '`update`']) {
+        expect(body.properties.mode.description, `${name} ${mode}`).toContain(mode);
+      }
     }
   });
 
@@ -1587,28 +1595,28 @@ describe('office documents and PDFs', () => {
     expect(await readContent(base, `${KB_DIR}/deck.pptx`)).toContain('Original');
   });
 
-  it('every file tool states the SAME content rule — refused families, the byte tools and the upload path — so agents learn before the call', async () => {
+  it('every mounted tool ends with the one sentence pointing at the shared rules, and repeats none of them', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
-    const fileTools = ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'mkdir', 'move_file', 'copy_file', 'unzip'];
-    for (const name of fileTools) {
+    const pointer = sharedRulesPointer(testKbContext().layout);
+    // The shell is in the list too: it carried the agent-guide reminder before,
+    // and that reminder is one of the rules that moved.
+    const mounted = ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'delete_folder', 'mkdir', 'move_file', 'copy_file', 'unzip', 'execute_command'];
+    for (const name of mounted) {
       const def = tools.find((t) => t.name === name);
       expect(def, name).toBeDefined();
-      // One constant, verbatim — the description is what tools_info returns.
-      expect(def!.description, name).toContain(CONTENT_RULE);
-      expect(def!.description, name).toContain('`binary_not_writable`');
-      expect(def!.description, name).toContain('copy_file, move_file, delete_file and unzip act on bytes of any kind');
-      expect(def!.description, name).toContain('`request_upload_token` + `apply_upload`');
-      expect(def!.description, name).toContain('`contentMode`');
-      // Modern extractable formats…
-      expect(def!.description, name).toContain('.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf');
-      // …email files (extractions too, so the same refusal applies)…
-      expect(def!.description, name).toContain('.eml/.msg');
-      // …the legacy binary family the refusal also covers…
-      expect(def!.description, name).toContain('.doc/.ppt/.xls');
+      expect(def!.description!.endsWith(pointer), name).toBe(true);
+      // Once, at the end — not once per paragraph that used to be appended.
+      expect(def!.description!.split(pointer), name).toHaveLength(2);
+      // The content rule is in the two shared places now (see
+      // agent-instructions/__tests__/shared-file-rules.test.ts), not here.
+      expect(def!.description, name).not.toContain('Content rule (the same on every file tool)');
+      expect(def!.description, name).not.toContain('Before your first read or change in a workspace');
     }
-    // The shell is not a file tool: it does not carry the rule.
-    expect(tools.find((t) => t.name === 'execute_command')!.description).not.toContain(CONTENT_RULE);
+    // start_session carried none of the shared paragraphs and gains no pointer:
+    // it touches no file. External-only, so it is looked up on that surface.
+    const external = await toolRegistry.listExternal();
+    expect(external.find((t) => t.name === 'start_session')!.description).not.toContain(pointer);
   });
 
   describe('binary capability contract: a text file, a document, an image and a zip', () => {
@@ -1754,14 +1762,15 @@ describe('office documents and PDFs', () => {
     });
   });
 
-  it('the page-writing tools say where images go, so an agent writes the link a page will render', async () => {
+  it('says where the images a page uses go — once, in the shared rules', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
+    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'images-in-pages')!;
+    expect(rule.body).toContain('`assets/` folder next to the page');
+    expect(rule.body).toContain('![Approval screen](./assets/approval-screen.png)');
+    expect(sharedFileRulesSection(testKbContext().layout)).toContain(rule.body);
     for (const name of ['write_file', 'write_files']) {
-      const def = tools.find((t) => t.name === name);
-      expect(def, name).toBeDefined();
-      expect(def!.description, name).toContain('`assets/` folder next to the page');
-      expect(def!.description, name).toContain('![Approval screen](./assets/approval-screen.png)');
+      expect(tools.find((t) => t.name === name)!.description, name).not.toContain('`assets/` folder next to the page');
     }
   });
 });
@@ -3271,8 +3280,12 @@ describe('preflight for moves and deletes', () => {
       expect(d.description).toMatch(/FILE or FOLDER/);
       expect(d.description).toMatch(/folder moves recursively/);
       expect(d.description).toMatch(/destination must not exist/);
-      expect(d.description).toContain('is a platform file and stays in its folder.');
-      expect(d.description).toContain('`dryRun: true`');
+      // What refuses a move, and the dry-run/confirm protocol it shares with the
+      // deletes, are shared rules — stated once, in the two shared places.
+      const rules = sharedFileRulesSection(testKbContext().layout);
+      expect(rules).toContain('is a platform file and stays in its folder.');
+      expect(rules).toContain('`dryRun: true`');
+      expect(rules).toContain('`confirm: true`');
       expect(d.description).toContain('`confirm: true`');
       expect(Object.keys(d.inputs.properties.body.properties)).toEqual(expect.arrayContaining(['dryRun', 'confirm']));
       // What the description promises a dry run returns is what it returns.
@@ -3282,7 +3295,10 @@ describe('preflight for moves and deletes', () => {
         expect(dry.body, key).toHaveProperty(key);
       }
       const unconfirmed = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('HR/deal.md') });
-      expect(d.description).toContain('confirmationRequired: true');
+      // What an unconfirmed call answers is the shared protocol's promise; the
+      // field is still declared in this tool's own `outputs`.
+      expect(rules).toContain('confirmationRequired: true');
+      expect(declaredOutputs(d)).toContain('confirmationRequired');
       expect(unconfirmed.body.confirmationRequired).toBe(true);
       for (const body of [dry.body, unconfirmed.body]) {
         expect(declaredOutputs(d)).toEqual(expect.arrayContaining(Object.keys(body)));
@@ -3292,9 +3308,12 @@ describe('preflight for moves and deletes', () => {
     it('delete_folder states the confirm rule and refusals, and declares every field it returns', async () => {
       const base = await seeded();
       const d = await def('delete_folder');
-      expect(d.description).toContain('`dryRun: true`');
-      expect(d.description).toContain('A non-empty folder is deleted only with `confirm: true`');
-      expect(d.description).toContain('platform folder');
+      expect(d.description).toContain('a non-empty folder wants `confirm: true`');
+      // The protocol itself, and what a platform folder does to it, are shared.
+      const rules = sharedFileRulesSection(testKbContext().layout);
+      expect(rules).toContain('`dryRun: true`');
+      expect(rules).toContain('A non-empty folder is deleted, and a move that changes your access runs, only with `confirm: true`');
+      expect(rules).toContain('platform folder');
       const dry = await call(base, 'delete_folder', { path: KB('Sales/archive'), dryRun: true });
       const unconfirmed = await call(base, 'delete_folder', { path: KB('Sales/archive') });
       const confirmed = await call(base, 'delete_folder', { path: KB('Sales/archive'), confirm: true });
@@ -3312,8 +3331,12 @@ describe('preflight for moves and deletes', () => {
         expect(stat.description, key).toContain(`\`${key}`);
         expect(body, key).toHaveProperty(key);
       }
+      expect(stat.description).toContain('shared rules on what these tools never move or delete');
+      // The proposal route applies to every tool a permission can refuse, so it
+      // is stated once in the shared rules rather than on each of them.
+      expect(sharedFileRulesSection(testKbContext().layout)).toContain('`write-denied`');
       for (const name of ['move_file', 'delete_file', 'delete_folder']) {
-        expect((await def(name)).description, name).toContain('`write-denied`');
+        expect((await def(name)).description, name).toContain(sharedRulesPointer(testKbContext().layout));
       }
     });
   });
@@ -3559,14 +3582,18 @@ describe('a write refused for permissions says whether and how to propose it', (
     expect(res.json).toEqual({ error: 'old_string not found in the file.' });
   });
 
-  it('each write tool mentions the proposal route in its description; read tools do not', async () => {
+  it('states the proposal route in the shared rules, not in each write tool description', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
-    for (const name of ['write_file', 'edit_file', 'write_files', 'move_file', 'delete_file', 'delete_folder', 'copy_file', 'mkdir']) {
-      expect(tools.find((t) => t.name === name)?.description, name).toContain(PROPOSAL_ROUTE_NOTE.trim());
-    }
-    for (const name of ['read_file', 'grep', 'list_files']) {
-      expect(tools.find((t) => t.name === name)?.description, name).not.toContain(PROPOSAL_ROUTE_NOTE.trim());
+    // It applies to every tool a permission can refuse, so it is a shared rule:
+    // stated in the handshake instructions and in the managed guide, and in no
+    // description. The refusal ITSELF still spells the steps out — that is what
+    // the tests above this one assert.
+    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'refused-for-permissions')!;
+    expect(sharedFileRulesSection(testKbContext().layout)).toContain(rule.body);
+    for (const def of tools) {
+      expect(def.description ?? '', def.name).not.toContain('If this is refused for permissions');
+      expect(def.description ?? '', def.name).not.toContain(rule.body);
     }
   });
 });
@@ -4086,18 +4113,22 @@ describe('tool descriptions and the deployment note', () => {
     expect(all.get('read_file')!.description).not.toContain('Stay within one');
   });
 
-  it('a registered note lands at the END of every gated tool\'s description and on the sessionId input', async () => {
+  it("a registered note lands after every gated tool's own text, ahead of the shared-rules pointer, and on the sessionId input", async () => {
     await start();
     notes.registerGatedToolNote(' One folder per conversation.');
     notes.registerSessionIdNote(' It also pins that folder.');
     const all = await defs();
+    // The POINTER is last, always: that is the one sentence an agent needs to
+    // find the shared rules, and a description cut short must not lose it. The
+    // deployment's note sits directly before it, after the tool's own text.
+    const pointer = sharedRulesPointer(testKbContext().layout);
     for (const name of ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'delete_folder', 'mkdir', 'move_file', 'copy_file', 'unzip']) {
-      expect(all.get(name)!.description.endsWith(' One folder per conversation.'), name).toBe(true);
+      expect(all.get(name)!.description.endsWith(` One folder per conversation.${pointer}`), name).toBe(true);
       expect(sessionIdDescriptionOf(all.get(name)!), name).toBe(`${SESSION_ID_DESCRIPTION} It also pins that folder.`);
     }
     // `execute_command` is internal-only, so it is checked on that surface.
     const internal = new Map((await toolRegistry.listInternal()).map((t) => [t.name, t]));
-    expect(internal.get('execute_command')!.description.endsWith(' One folder per conversation.')).toBe(true);
+    expect(internal.get('execute_command')!.description.endsWith(` One folder per conversation.${pointer}`)).toBe(true);
   });
 
   it('a tool that is not gated carries no note', async () => {

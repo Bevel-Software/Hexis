@@ -38,23 +38,21 @@ import { createFileReaderRegistry } from './file-readers/file-reader.registry.js
 import { DocumentReader } from './file-readers/document-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
 import {
-  LEGACY_AGENTS_FILE,
   folderPlaceholderPath,
   isFolderPlaceholder,
   isPlatformFile,
   isPlatformFolder,
   platformFileCreationRefusal,
-  platformFileNames,
   platformFileRefusal,
   platformFolderRefusal,
   entryExistsMessage,
   type ExistingEntryKind,
-  type KbLayout,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import { removeEmptyDirs } from './empty-dirs.js';
-import { PROPOSAL_ROUTE_NOTE, rethrowAsWriteDenial } from './write-denial.js';
+import { rethrowAsWriteDenial } from './write-denial.js';
+import { sharedRulesPointer } from '../agent-instructions/shared-file-rules.js';
 import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
 import { logger } from '../../shared/logging.js';
@@ -193,60 +191,9 @@ async function keepFolderOf(
   }
 }
 
-/**
- * Appended (centrally, in `mount`) to EVERY workspace tool description. The
- * platform's managed agent guide sits at the workspace root and documents the
- * conventions of that knowledge base; agents (ours and external) should consult
- * it before touching files. It rides on every entrypoint — reads (grep/
- * list_files/file_stat) included — because any of them can be a session's first
- * touch.
- *
- * `CLAUDE.md` is named as a fallback because knowledge bases seeded before the
- * rename still carry one, and the seeder never deletes a file it did not
- * expect. Naming both means an agent finds the conventions either way, instead
- * of reading none because it looked for the newer name and stopped.
- *
- * WHEN THE GUIDE HAS BEEN RENAMED the sentence names two files, ours first. The
- * second is the organisation's OWN `AGENTS.md`, which on such a deployment is
- * ordinary content the platform never touches — and which no harness reads for a
- * remote agent, because a remote agent has no checkout. Telling it to read both
- * is the only way the conventions the customer actually wrote reach the agent
- * working in their knowledge base. Under the default name the wording collapses
- * to the one file it has always named.
- *
- * A FUNCTION of the layout, called when a description is built: the name is a
- * deployment setting, and a module-scope string would snapshot the default.
- */
-function kbConventionsNote(layout: KbLayout): string {
-  const agentsFile = layout.agentsFile ?? LEGACY_AGENTS_FILE;
-  if (agentsFile === LEGACY_AGENTS_FILE) {
-    return ' Before your first read or change in a workspace, read `AGENTS.md` at the KB root — or `CLAUDE.md` on a knowledge base seeded before it was renamed — if either exists: it holds the author\'s conventions for this knowledge base, and you should follow them.';
-  }
-  return (
-    ` Before your first read or change in a workspace, read \`${agentsFile}\` at the KB root, then ` +
-    '`AGENTS.md` if it also exists (the organisation\'s own conventions) — or `CLAUDE.md` on a knowledge base seeded before it was renamed: together they hold the conventions for this knowledge base, and you should follow them.'
-  );
-}
-
-/** The platform files as a tool description lists them — the guide under its own name. */
-function platformFileList(layout: KbLayout): string {
-  return platformFileNames(layout)
-    .map((name) => `\`${name}\``)
-    .join(', ');
-}
-
 const int = (description: string): JsonSchema => ({ type: 'integer', description });
 
 const str = (description: string): JsonSchema => ({ type: 'string', description });
-
-/**
- * Where pictures go, on the two tools that write pages. An agent in core cannot
- * upload bytes yet (TODOS.md), but it can write the page with the link a person
- * will satisfy, and this sentence is what keeps every page it writes on the
- * README's convention: images beside the page, linked relatively.
- */
-const IMAGE_CONVENTION_NOTE =
-  ' Images: keep them in an `assets/` folder next to the page that uses them and link them with a relative path, e.g. `![Approval screen](./assets/approval-screen.png)`; the page renders them inline.';
 
 /**
  * A path input that names the clone folder, and says what happens when it does
@@ -312,16 +259,6 @@ interface DocGrepState {
   uncachedBudget: number;
   skippedUncached: number;
 }
-
-/**
- * THE binary capability contract, stated once and appended (in `mount`) to
- * every file tool's description — which is also what `tools_info` returns.
- * The split it states is enforced by the reader registry: the text tools
- * refuse what their reader marks not `textEditable` (and binary content under
- * any name) with a `binary_not_writable` refusal; the byte tools never look.
- */
-export const CONTENT_RULE =
-  ' Content rule (the same on every file tool): read_file returns text for text files and extracted text for documents (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf, .eml/.msg); write_file, write_files and edit_file accept TEXT only — they refuse documents, images, archives and other binary files (legacy .doc/.ppt/.xls included) with kind `binary_not_writable`, naming the file\'s kind and the tool to use instead; copy_file, move_file, delete_file and unzip act on bytes of any kind; new binary content arrives through upload (`request_upload_token` + `apply_upload` where offered, otherwise Upload in the app). file_stat reports `contentMode` (`text` | `document` | `binary`) so you can decide before acting.';
 
 /** What a `binary_not_writable` refusal points to, in the order to try them. */
 const BINARY_USE_INSTEAD = ['upload', 'copy_file', 'move_file'] as const;
@@ -426,34 +363,6 @@ const WRITE_MODE_INPUT: JsonSchema = {
     'holds something; `overwrite` replaces what is there, and creates the file when there is nothing; `update` replaces an ' +
     'EXISTING file and refuses (`missing`) a path that holds nothing.',
 };
-
-/** The same three modes, said once, for both tool descriptions. */
-const WRITE_MODE_NOTE =
-  ' `mode` decides what may happen at a path and DEFAULTS TO `create`: `create` writes a new file and refuses a path that ' +
-  'already exists (`exists`, with the path — pass `mode: overwrite` to replace it), `overwrite` replaces what is there ' +
-  '(creating it if there is nothing), `update` replaces an existing file and refuses a path that does not exist (`missing`). ' +
-  'A refused path is left exactly as it was.';
-
-/**
- * What an agent needs to know about escape sequences in the content it sends,
- * on the three tools that take content as a JSON string.
- *
- * The three write routes — the MCP endpoint, the `/api/agent/tools/<name>`
- * route and `call_tool_chain` — were measured end to end against raw requests
- * and a byte-level read of the stored file (see
- * `__tests__/escape-sequences.routes.test.ts`): each stores content exactly as
- * the JSON string value decodes ONCE. So when an escape arrives already
- * decoded, the decoding happened in the client that built the request, and no
- * tool here can tell that content from content that was meant to be decoded.
- * Hence a warning rather than a fix, and the pointer to the one route whose
- * payload is bytes rather than a JSON string.
- */
-const ESCAPE_SEQUENCE_NOTE =
-  ' Escape sequences: some clients decode them in arguments before sending, so content meant to CONTAIN an escape rather ' +
-  'than what it stands for (the six characters backslash, `u`, `0`, `0`, `4`, `1`, say, rather than the letter `A`) can ' +
-  'reach this tool already decoded — what arrives is stored byte for byte, so when that distinction matters, verify what ' +
-  'landed (`read_file`, or a hash) and send such content through the upload route (`request_upload_token` + `apply_upload` ' +
-  'where offered, otherwise Upload in the app), which lands it unchanged.';
 
 /** The refusal `create` gives on a path that already holds something. */
 function pathExists(path: string): ToolError {
@@ -1225,10 +1134,14 @@ export function registerWorkspaceTools(
     handler: ToolHandler;
   }): void => {
     const path = `/api/agent/tools/${spec.name}`;
-    // Every workspace entrypoint carries the agent-guide reminder, every file
-    // tool the one content rule, and every tool a permission can refuse the
-    // proposal route — appended once here so no tool (especially the
-    // read-only ones a session hits first) can miss them.
+    // Every description ends with ONE sentence pointing at the rules these
+    // tools share — the content rule, the agent guide, the write modes, the
+    // dry-run protocol, the proposal route. They used to be appended here in
+    // FULL, which made a description several thousand characters of text the
+    // agent had already read on the tool above, and clients cut a long
+    // description from the END, where what is specific to the tool sits. The
+    // rules themselves are in the handshake instructions and in the managed
+    // guide (see `shared-file-rules.ts`), stated once and from one text.
     // Whether a call to this tool MUST name a branch, read off the tool's own
     // declaration rather than assumed of the family. Every tool mounted here
     // requires `branch` today; keying on the schema means a tool that declares
@@ -1237,10 +1150,8 @@ export function registerWorkspaceTools(
     const requiresBranch = ((spec.inputs as { required?: string[] }).required ?? []).includes('branch');
     const describe = (): string =>
       (typeof spec.description === 'function' ? spec.description() : spec.description) +
-      (spec.proposable ? PROPOSAL_ROUTE_NOTE : '') +
-      (spec.fileTool === false ? '' : CONTENT_RULE) +
-      kbConventionsNote(kb.layout) +
-      (spec.gated ? agentAccessGate.notes.gatedToolNote() : '');
+      (spec.gated ? agentAccessGate.notes.gatedToolNote() : '') +
+      sharedRulesPointer(kb.layout);
     const def = toolDef({
       name: spec.name,
       description: describe(),
@@ -1406,7 +1317,13 @@ export function registerWorkspaceTools(
     name: 'read_file',
     gated: true,
     description:
-      'Read a workspace file as text. Returns `{ path, content }`. Images (.png/.jpg/.jpeg/.gif/.webp) return the IMAGE ITSELF as native MCP image content (plus a one-line text note naming the file), so you can look at the picture — up to 3.5 MB of raw image data; a larger image gets an honest refusal asking for a locally downscaled copy or a smaller export (`.svg` is text and reads as text). Images come back only on a DIRECT call: inside `call_tool_chain` an image read yields an `{ image_omitted, note }` stub instead. Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods) and PDFs return their EXTRACTED text under an honest `[extracted text of …]` header, with `[slide N]`/`[sheet: Name]`/`[page N]` markers — the extraction is READ-ONLY (layout/images omitted; such files cannot be edited as text, only replaced by uploading a new version). Email files (.eml/.msg) return their EXTRACTED text the same way: a `[from]`/`[to]`/`[subject]`/`[date]` header block, the body (plain-text part preferred; an HTML-only body is stripped to text), and an `[attachments]` name list — attachments are listed, never extracted. Other binary files return a one-line description instead of raw bytes. Optional `offset`/`limit` slice the content (characters for a file, bytes for a `__tool_chain_spill__/…` ref; ignored for an image) — use them to page through large files or a `call_tool_chain` spill rather than reading multi-MB in full. A spill ref is workspace-independent: `branch` is ignored for it.',
+      'Read a workspace file as text. Returns `{ path, content }`. What comes back for a document, an email file, an image ' +
+      'or any other binary file is the content rule\'s business (see the shared rules): text files as text, documents and ' +
+      'email files as extracted text, an image as the picture itself, anything else as a one-line description. ' +
+      'Optional `offset`/`limit` slice the content (characters for a file, bytes for a `__tool_chain_spill__/…` ref; ignored ' +
+      'for an image) — use them to page through large files or a `call_tool_chain` spill rather than reading multi-MB in full. ' +
+      'It also reads a `__tool_chain_spill__/…` ref back from a truncated `call_tool_chain`: such a ref belongs to no ' +
+      'workspace, so `branch` is ignored for it.',
     inputs: {
       type: 'object',
       properties: {
@@ -1513,12 +1430,17 @@ export function registerWorkspaceTools(
   mount({
     name: 'file_stat',
     gated: true,
-    description: () =>
-      'Get a file/directory\'s metadata (name, type, size, …) without returning content. A file also reports `contentMode`: `text` (read, write and edit it as text), `document` (read returns an extraction; replace it by upload) or `binary` (bytes: copy, move, delete, or replace by upload), plus `kind` (`text` | `document` | `image` | `binary`), `mime`, `mimeSource` and `textEditable` — decided by the same file readers read_file, grep and the write tools use, so an extensionless text file is `text/plain`.' +
-      ' Every entry also reports what you may DO with it. ' +
-      `\`managed\` is true for a platform item — a platform file (${platformFileList(kb.layout)}) or a platform folder (the repository root or a reserved root folder such as \`KnowledgeBase/\`); managed items are never movable or deletable through these tools. ` +
-      '`access: { read, write, download, owner }` is your own verdict under the access rules; pass `explainAccess: true` to learn why, and who else holds each verb. `movable` and `deletable` say whether `move_file` / `delete_file` / `delete_folder` would be allowed for you, judged like their dry runs: not managed, no symbolic link, and on a protected branch you hold write on the item AND on every file under a folder (on a draft branch writes are not gated). `movable` judges the source side only; the destination is judged by a `move_file` dry run. ' +
-      'For a folder, `descendants` is the number of files under it at any depth; counting stops at 10000 and `descendantsTruncated` says so, and past that point `movable` and `deletable` are false because a folder that large was not judged in full — run the `move_file` or `delete_folder` dry run for the real verdict. ' +
+    description:
+      'Get a file/directory\'s metadata (name, type, size, …) without returning content, and what you may DO with it. ' +
+      'A file also reports `contentMode`, `kind`, `mime`, `mimeSource` and `textEditable` — decided by the same file readers ' +
+      'read_file, grep and the write tools use, so an extensionless text file is `text/plain`. ' +
+      '`access: { read, write, download, owner }` is your own verdict under the access rules; pass `explainAccess: true` to ' +
+      'learn why, and who else holds each verb. `managed`, `movable` and `deletable` answer the shared rules on what these ' +
+      'tools never move or delete, judged like the dry runs (on a draft branch writes are not gated); `movable` judges the ' +
+      'SOURCE side only, so the destination still wants a `move_file` dry run. ' +
+      'For a folder, `descendants` is the number of files under it at any depth; counting stops at 10000 and ' +
+      '`descendantsTruncated` says so, and past that point `movable` and `deletable` are false because a folder that large ' +
+      'was not judged in full — run the `move_file` or `delete_folder` dry run for the real verdict. ' +
       'Call this before a move or delete to see what it would touch.',
     inputs: {
       type: 'object',
@@ -1826,10 +1748,7 @@ export function registerWorkspaceTools(
     gated: true,
     description:
       'Write a workspace TEXT file. The change is committed + pushed as you. Returns `{ path, bytes, outcome }`, where `outcome` is ' +
-      '`created`, `replaced` or `updated`.' +
-      WRITE_MODE_NOTE +
-      IMAGE_CONVENTION_NOTE +
-      ESCAPE_SEQUENCE_NOTE,
+      '`created`, `replaced` or `updated`.',
     inputs: {
       type: 'object',
       properties: {
@@ -1916,10 +1835,7 @@ export function registerWorkspaceTools(
       'Returns `{ count, files }`: one entry per REQUESTED path, in the order you gave them, each `{ path, outcome }` — ' +
       '`created` / `replaced` / `updated` for a path it wrote, or `refused` with `error` (the code) and `message` (why) for a ' +
       'path it could not. `count` is how many were written. A path it refuses — the mode said no, or the file is not text — ' +
-      'does not stop the others; read `files` to see what landed.' +
-      WRITE_MODE_NOTE +
-      IMAGE_CONVENTION_NOTE +
-      ESCAPE_SEQUENCE_NOTE,
+      'does not stop the others; read `files` to see what landed.',
     inputs: {
       type: 'object',
       properties: {
@@ -2088,8 +2004,7 @@ export function registerWorkspaceTools(
     name: 'edit_file',
     gated: true,
     description:
-      'Replace an exact string in a workspace TEXT file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you.' +
-      ESCAPE_SEQUENCE_NOTE,
+      'Replace an exact string in a workspace TEXT file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you.',
     inputs: {
       type: 'object',
       properties: {
@@ -2138,9 +2053,8 @@ export function registerWorkspaceTools(
   mount({
     name: 'delete_file',
     gated: true,
-    description: () =>
-      'Delete ONE workspace file (a symbolic link is refused: links are never followed or removed). Committed + pushed as you. Its folder stays, even when this was its last file. Files only: a folder is refused with a pointer to `delete_folder`. ' +
-      `A platform file (\`access.md\` or \`.bevelignore\` in any folder, \`roles.yaml\` or \`${kb.layout.agentsFile}\` at the repository root) and git metadata are refused.`,
+    description:
+      'Delete ONE workspace file. Committed + pushed as you. Its folder stays, even when this was its last file. Files only: a folder is refused with a pointer to `delete_folder`.',
     inputs: {
       type: 'object',
       properties: {
@@ -2193,10 +2107,11 @@ export function registerWorkspaceTools(
     gated: true,
     description:
       'Delete a workspace FOLDER and every file under it, at any depth; the whole folder lands as ONE committed + pushed change as you — all of it or none of it — then the empty folder is removed. This is the one way a folder goes away: the folder that held it stays, even if this was all it had, and a folder holding nothing but its empty-folder placeholder counts as empty. ' +
-      'Preflight first: `dryRun: true` changes nothing and answers `{ path, kind: "folder", descendants, files, filesTruncated, allowed, reason? }` — `descendants` is the file count, `files` names up to 100 of them. ' +
-      'A non-empty folder is deleted only with `confirm: true`; without it the call deletes nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm. ' +
-      'Refused (in a dry run as `allowed: false` with the `reason`): a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`), git metadata, a folder holding a symbolic link (links are never removed), and a folder holding any file you may not write. A path that is a file is refused with a pointer to `delete_file`, and a path through a symbolic link is refused (links are never followed). ' +
-      'The folder\'s own platform files (`access.md`, `.bevelignore`) go with it in that same one change, so its files are never left ungoverned part-way; you must be able to write those platform files too.',
+      'The dry run answers `{ path, kind: "folder", descendants, files, filesTruncated, allowed, reason? }` — `descendants` is ' +
+      'the file count, `files` names up to 100 of them — and a non-empty folder wants `confirm: true`. ' +
+      'Beyond what the shared rules refuse, a folder holding any file you may not write is refused, and a path that is a FILE ' +
+      'is refused with a pointer to `delete_file`. You must be able to write the folder\'s own platform files too: they go ' +
+      'with it in that same one change, so its files are never left ungoverned part-way.',
     inputs: {
       type: 'object',
       properties: {
@@ -2359,11 +2274,14 @@ export function registerWorkspaceTools(
   mount({
     name: 'move_file',
     gated: true,
-    description: () =>
+    // A plain string again: what refuses a move names the guide, and that is in
+    // the shared rules now, which are rebuilt from the layout where they live.
+    description:
       'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Lands as a delete + create, committed + pushed as you. ' +
-      `Rules: the destination must not exist — a move never overwrites a file or merges into a folder; a platform file (\`access.md\` or \`.bevelignore\` in any folder, \`roles.yaml\` or \`${kb.layout.agentsFile}\` at the repository root) is refused with "<name> is a platform file and stays in its folder." — a folder that moves takes its own platform files along, still in their folder; a platform folder (the repository root or a reserved root folder such as \`KnowledgeBase/\`) and git metadata are refused; a move cannot create a platform file or folder at \`dest\` either (renaming a note to \`access.md\` is refused); a path through a symbolic link is refused, since links are never followed; on a protected branch you must be able to write both ends — for a folder, every file under it at its old and its new path. ` +
-      'Access follows the destination folder. Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination. ' +
-      'A move whose `accessChanges` is true runs only with `confirm: true`; without it the call moves nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm.',
+      'The destination must not exist — a move never overwrites a file or merges into a folder. Access follows the ' +
+      'DESTINATION folder, so a move can change what you (and others) may do with the file: the dry run answers ' +
+      '`{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }`, where `access` is your ' +
+      'own `{ read, write, download, owner }` at each end, and a move whose `accessChanges` is true wants `confirm: true`.',
     inputs: {
       type: 'object',
       properties: {

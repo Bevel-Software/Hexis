@@ -1,6 +1,8 @@
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { describe, expect, it } from 'vitest';
 import {
   PLATFORM_HEADER,
+  platformInstructions,
   PREAMBLE_CAP,
   PREAMBLE_TRUNCATION_MARKER,
   TOOL_PREFIX_CAP,
@@ -13,13 +15,19 @@ import {
  * The composer is pure, so every rule of the two texts is pinned here: what
  * an absent or empty preamble yields, how comments are withheld, where both
  * caps cut, and that a cut never splits a character.
+ *
+ * `PLATFORM` is everything the code owns and the admin cannot edit: the header
+ * and the rules every file tool shares, which is what the handshake leads with.
+ * The rules themselves are pinned in `shared-file-rules.test.ts`; here they are
+ * only the fixed text the preamble follows.
  */
+const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT);
 
 describe('composeAgentInstructions: the handshake text', () => {
   it('sends the header alone for an absent, empty, whitespace or comment-only preamble', () => {
     for (const raw of [null, '', '   \n\n', '<!-- notes to myself -->', '<!--\nline one\nline two\n-->\n']) {
       const out = composeAgentInstructions(raw);
-      expect(out.instructions, JSON.stringify(raw)).toBe(PLATFORM_HEADER);
+      expect(out.instructions, JSON.stringify(raw)).toBe(PLATFORM);
       expect(out.toolPrefix).toBe(TOOL_PREFIX_LINE);
       expect(out.truncated).toBe(false);
       expect(out.toolPrefixTruncated).toBe(false);
@@ -28,15 +36,16 @@ describe('composeAgentInstructions: the handshake text', () => {
     }
   });
 
-  it('is the header, a blank line, then the preamble body', () => {
+  it('is the platform text, a blank line, then the preamble body', () => {
     const out = composeAgentInstructions('We sell permits.\n\nLook in Permitting/ first.\n');
-    expect(out.instructions).toBe(`${PLATFORM_HEADER}\n\nWe sell permits.\n\nLook in Permitting/ first.`);
+    expect(out.instructions).toBe(`${PLATFORM}\n\nWe sell permits.\n\nLook in Permitting/ first.`);
     expect(out.preambleChars).toBe('We sell permits.\n\nLook in Permitting/ first.'.length);
   });
 
   it('hands the two parts and the fixed prefix line back separately, for the card', () => {
     const out = composeAgentInstructions('We sell permits.');
-    expect(out.header).toBe(PLATFORM_HEADER);
+    expect(out.header).toBe(PLATFORM);
+    expect(out.header.startsWith(PLATFORM_HEADER)).toBe(true);
     expect(out.preamble).toBe('We sell permits.');
     expect(out.toolPrefixLine).toBe(TOOL_PREFIX_LINE);
     expect(out.toolPrefix.startsWith(out.toolPrefixLine)).toBe(true);
@@ -56,7 +65,7 @@ describe('composeAgentInstructions: the handshake text', () => {
 
   it('an unterminated comment withholds everything after it and is reported', () => {
     const out = composeAgentInstructions('Visible.\n\n<!-- forgot to close\nSecret folder names\n');
-    expect(out.instructions).toBe(`${PLATFORM_HEADER}\n\nVisible.`);
+    expect(out.instructions).toBe(`${PLATFORM}\n\nVisible.`);
     expect(out.instructions).not.toContain('Secret');
     expect(out.toolPrefix).toBe(`${TOOL_PREFIX_LINE} Visible.`);
     expect(out.unterminatedComment).toBe(true);
@@ -66,12 +75,12 @@ describe('composeAgentInstructions: the handshake text', () => {
     const exact = 'a'.repeat(PREAMBLE_CAP);
     const atCap = composeAgentInstructions(exact);
     expect(atCap.truncated).toBe(false);
-    expect(atCap.instructions).toBe(`${PLATFORM_HEADER}\n\n${exact}`);
+    expect(atCap.instructions).toBe(`${PLATFORM}\n\n${exact}`);
     expect(atCap.instructions).not.toContain('truncated');
 
     const over = composeAgentInstructions(`${exact}b`);
     expect(over.truncated).toBe(true);
-    expect(over.instructions).toBe(`${PLATFORM_HEADER}\n\n${exact}\n${PREAMBLE_TRUNCATION_MARKER}`);
+    expect(over.instructions).toBe(`${PLATFORM}\n\n${exact}\n${PREAMBLE_TRUNCATION_MARKER}`);
     expect(PREAMBLE_TRUNCATION_MARKER).toContain('6,000');
     expect(PREAMBLE_TRUNCATION_MARKER).toContain('mcp-description.md');
   });
@@ -93,7 +102,7 @@ describe('composeAgentInstructions: the handshake text', () => {
     const raw = `${'a'.repeat(PREAMBLE_CAP - 1)}😀tail`;
     const out = composeAgentInstructions(raw);
     expect(out.truncated).toBe(true);
-    const body = out.instructions.slice(PLATFORM_HEADER.length + 2);
+    const body = out.instructions.slice(PLATFORM.length + 2);
     const sent = body.slice(0, body.indexOf('\n'));
     expect(sent).toBe('a'.repeat(PREAMBLE_CAP - 1));
     expect(sent.length).toBe(PREAMBLE_CAP - 1);
@@ -222,7 +231,7 @@ describe('composeAgentInstructions: the tool prefix', () => {
   it('CRLF input still yields the first paragraph', () => {
     const out = composeAgentInstructions('# Title\r\n\r\nFirst paragraph.\r\n\r\nSecond.\r\n');
     expect(out.toolPrefix).toBe(`${TOOL_PREFIX_LINE} First paragraph.`);
-    expect(out.instructions).toBe(`${PLATFORM_HEADER}\n\n# Title\n\nFirst paragraph.\n\nSecond.`);
+    expect(out.instructions).toBe(`${PLATFORM}\n\n# Title\n\nFirst paragraph.\n\nSecond.`);
   });
 
   it('is at most the cap, still starting with the fixed line, and reports the count before the cut', () => {
