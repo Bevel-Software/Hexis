@@ -231,14 +231,55 @@ export function sharedFileRulesSection(layout: KbLayout): string {
 }
 
 /**
+/**
+ * The longest guide file name the pointer sentence spells out. Beyond this it
+ * names the guide by its ROLE instead (see {@link sharedRulesPointer}).
+ *
+ * There has to be a bound somewhere, because the pointer rides on every file
+ * tool and a file name is not a fixed cost: `validateFilename` allows a name
+ * of up to 255 bytes, so an unbounded pointer could reach 318 characters and
+ * push `file_stat` to 1,428 — over the description cap, recreating on a
+ * renamed deployment exactly the truncation this module exists to prevent, and
+ * invisibly, because every measurement is taken under the default layout.
+ *
+ * 40 is well past any name a deployment plausibly picks
+ * (`ENGINEERING-AGENT-CONVENTIONS.md` is 32) and the fallback below is only
+ * reachable past it.
+ */
+export const POINTER_GUIDE_NAME_BUDGET = 40;
+
+/**
  * The one sentence a tool description ends with, in place of the paragraphs it
- * used to carry. Short on purpose: it costs every description the same ~80
- * characters, and its whole job is to name the section and the file to read.
+ * used to carry. Short on purpose: it costs every description the same ~100
+ * characters at worst, and its whole job is to name the section and the file
+ * to read.
+ *
+ * BOUNDED BY CONSTRUCTION, which is what lets the description cap mean
+ * something on a deployment that renamed its guide: a name within
+ * {@link POINTER_GUIDE_NAME_BUDGET} is spelled out, and a longer one gets the
+ * generic wording. Naming the file is the better sentence and wins whenever it
+ * fits; a name past the budget is pathological, and there the choice is between
+ * a sentence that says where to look and a catalog entry the client cuts. The
+ * guide's own name is still in the section's first rule either way.
  *
  * An absent layout means the default one, as it does in
  * `composeAgentInstructions`: a caller reading the layout from configuration
  * gets `undefined` when none is set, and the pointer must still name a file.
  */
 export function sharedRulesPointer(layout: KbLayout = DEFAULT_KB_LAYOUT): string {
-  return ` Shared rules for all file tools: see "${SHARED_RULES_SECTION}" in ${agentsFileOf(layout)}.`;
+  const agentsFile = agentsFileOf(layout);
+  const where =
+    agentsFile.length <= POINTER_GUIDE_NAME_BUDGET ? agentsFile : 'the agent guide at the KB root';
+  return ` Shared rules for all file tools: see "${SHARED_RULES_SECTION}" in ${where}.`;
 }
+
+/**
+ * The most the pointer can ever cost a description, over every layout. What the
+ * description cap is measured against, the way the tool prefix is measured at
+ * ITS cap rather than at whatever the current admin wrote: a description that
+ * only fits beside the short default guide name does not really fit.
+ */
+export const SHARED_RULES_POINTER_MAX = Math.max(
+  sharedRulesPointer({ ...DEFAULT_KB_LAYOUT, agentsFile: `${'x'.repeat(POINTER_GUIDE_NAME_BUDGET - 3)}.md` }).length,
+  sharedRulesPointer({ ...DEFAULT_KB_LAYOUT, agentsFile: `${'x'.repeat(POINTER_GUIDE_NAME_BUDGET + 10)}.md` }).length,
+);

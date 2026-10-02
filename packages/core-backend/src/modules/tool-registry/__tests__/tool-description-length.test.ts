@@ -16,7 +16,13 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { UuidSessionSink } from '../../workspace/session-sink.js';
 import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
 import { TOOL_DESCRIPTION_CAP, clientVisibleLength } from '../description-length.js';
-import { TOOL_PREFIX_CAP, sharedFileRules, sharedRulesPointer } from '../../agent-instructions/index.js';
+import {
+  POINTER_GUIDE_NAME_BUDGET,
+  SHARED_RULES_POINTER_MAX,
+  TOOL_PREFIX_CAP,
+  sharedFileRules,
+  sharedRulesPointer,
+} from '../../agent-instructions/index.js';
 import { isPlatformFile, platformFilesByDepth } from '@bevel-software/platform-shared';
 
 /**
@@ -79,7 +85,11 @@ async function hexisTools(): Promise<UtcpTool[]> {
   });
 
   const byName = new Map<string, UtcpTool>();
-  for (const tool of [...(await registry.listInternal()), ...(await registry.listExternal()), ...CODE_MODE_META_TOOLS]) {
+  // The meta-tools as a client is served them: the chain carries its pointer
+  // (`mcp.service.ts` appends it at the mount), so the catalog measured here is
+  // the catalog that goes out rather than the unpointed constant.
+  const metaTools = withSharedRulesPointer(sharedRulesPointer(testKbContext().layout));
+  for (const tool of [...(await registry.listInternal()), ...(await registry.listExternal()), ...metaTools]) {
     byName.set(tool.name, tool as UtcpTool);
   }
   return [...byName.values()];
@@ -99,6 +109,33 @@ describe('no Hexis tool description is long enough to be cut', () => {
     ).toEqual([]);
   });
 
+  it('holds the cap on a deployment that renamed its guide, not only under the default', async () => {
+    // The pointer ends every file tool's description and its length moves with
+    // a deployment setting, so a cap checked only against the nine characters
+    // of `AGENTS.md` guarantees nothing about the catalog a renamed deployment
+    // serves. Two things make it hold: the pointer is bounded by construction
+    // (past `POINTER_GUIDE_NAME_BUDGET` the guide is named by its role), and
+    // `clientVisibleLength` charges the worst case rather than this layout's.
+    const tools = await hexisTools();
+    const atWorst = tools
+      .map((t) => ({ tool: t.name, chars: clientVisibleLength(t) }))
+      .filter((m) => m.chars > TOOL_DESCRIPTION_CAP);
+    expect(atWorst, atWorst.map((m) => `${m.tool}: ${m.chars}`).join('\n')).toEqual([]);
+
+    // And measured literally, under the longest guide name a deployment can
+    // actually configure: every description still fits.
+    const longest = `${'x'.repeat(252)}.md`;
+    const pointerHere = sharedRulesPointer(testKbContext().layout);
+    const pointerThere = sharedRulesPointer({ ...testKbContext().layout, agentsFile: longest });
+    expect(pointerThere.length).toBeLessThanOrEqual(SHARED_RULES_POINTER_MAX);
+    for (const tool of tools) {
+      if (!tool.description?.endsWith(pointerHere)) continue;
+      const asRenamed = tool.description.slice(0, -pointerHere.length) + pointerThere;
+      const chars = clientVisibleLength({ name: tool.name, description: asRenamed });
+      expect(chars, `${tool.name} on a renamed deployment`).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
+    }
+  });
+
   it('measures a prefixed tool with the prefix a client sees, not without it', async () => {
     // The four knowledge-base tools carry the deployment's tool prefix ahead of
     // their description on the MCP surface — up to `TOOL_PREFIX_CAP` characters
@@ -106,8 +143,12 @@ describe('no Hexis tool description is long enough to be cut', () => {
     // the catalog the agent reads was over it by 300.
     const read = (await hexisTools()).find((t) => t.name === 'read_file');
     expect(read).toBeDefined();
-    expect(clientVisibleLength(read!)).toBe(read!.description!.length + TOOL_PREFIX_CAP + 2);
-    expect(read!.description!.length + TOOL_PREFIX_CAP + 2).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
+    // Its own text, with the pointer charged at its worst case rather than at
+    // this layout's, plus the prefix at ITS cap and the blank line between.
+    const pointer = sharedRulesPointer();
+    const ownAtWorstPointer = read!.description!.length - pointer.length + SHARED_RULES_POINTER_MAX;
+    expect(clientVisibleLength(read!)).toBe(ownAtWorstPointer + TOOL_PREFIX_CAP + 2);
+    expect(ownAtWorstPointer + TOOL_PREFIX_CAP + 2).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
   });
 
   it('fails, naming the tool, when a paragraph takes a description over the cap', () => {

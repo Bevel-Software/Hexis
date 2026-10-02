@@ -1,6 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { DEFAULT_KB_LAYOUT, LEGACY_AGENTS_FILE, PREAMBLE_CAP } from '@bevel-software/platform-shared';
+import {
+  DEFAULT_KB_LAYOUT,
+  LEGACY_AGENTS_FILE,
+  PREAMBLE_CAP,
+  renderKbLayoutPlaceholders,
+} from '@bevel-software/platform-shared';
 import { describe, expect, it } from 'vitest';
 import { defaultKbTemplateDir } from '../../../assets.js';
 import { renderTemplateText, SHARED_FILE_RULES_PLACEHOLDER } from '../../workspace/startup/steps/template-source.js';
@@ -12,7 +17,9 @@ import {
   platformInstructions,
 } from '../compose.js';
 import {
+  POINTER_GUIDE_NAME_BUDGET,
   SHARED_FILE_RULES_CAP,
+  SHARED_RULES_POINTER_MAX,
   SHARED_RULES_SECTION,
   sharedFileRules,
   sharedFileRulesSection,
@@ -103,6 +110,31 @@ describe('the shared file rules are one text, in two places', () => {
     expect(sharedRulesPointer(layout)).toBe(` Shared rules for all file tools: see "${SHARED_RULES_SECTION}" in HEXIS.md.`);
   });
 
+  it('keeps the pointer bounded whatever the guide is called', () => {
+    // The pointer rides on every file tool, so its length is not the guide's
+    // business: `validateFilename` allows a 255-byte name, and an unbounded
+    // pointer would reach 318 characters and push `file_stat` past the
+    // description cap — on a renamed deployment only, which no measurement
+    // taken under the default layout would ever show.
+    const nameOfLength = (n: number): string => `${'x'.repeat(n - 3)}.md`;
+    for (const length of [9, POINTER_GUIDE_NAME_BUDGET, POINTER_GUIDE_NAME_BUDGET + 1, 120, 255]) {
+      const pointer = sharedRulesPointer({ ...DEFAULT_KB_LAYOUT, agentsFile: nameOfLength(length) });
+      expect(pointer.length, `a ${length}-character name`).toBeLessThanOrEqual(SHARED_RULES_POINTER_MAX);
+    }
+    // Up to the budget the file is NAMED, which is the better sentence.
+    const named = nameOfLength(POINTER_GUIDE_NAME_BUDGET);
+    expect(sharedRulesPointer({ ...DEFAULT_KB_LAYOUT, agentsFile: named })).toContain(named);
+    // Past it the guide is named by its role instead — a sentence that still
+    // says where to look, rather than a catalog entry the client cuts.
+    const tooLong = nameOfLength(POINTER_GUIDE_NAME_BUDGET + 1);
+    const fallback = sharedRulesPointer({ ...DEFAULT_KB_LAYOUT, agentsFile: tooLong });
+    expect(fallback).not.toContain(tooLong);
+    expect(fallback).toBe(` Shared rules for all file tools: see "${SHARED_RULES_SECTION}" in the agent guide at the KB root.`);
+    // Either way the section's first rule still names the file, so the name is
+    // never actually lost.
+    expect(sharedFileRulesSection({ ...DEFAULT_KB_LAYOUT, agentsFile: tooLong })).toContain(tooLong);
+  });
+
   it('points at the section with one short sentence under the default name', () => {
     expect(sharedRulesPointer(DEFAULT_KB_LAYOUT)).toBe(
       ' Shared rules for all file tools: see "Working with files" in AGENTS.md.',
@@ -141,15 +173,32 @@ describe('the guide template asks for the rules rather than repeating them', () 
   });
 
   it('renders the layout tokens first, then injects the rules — so the rules are never re-rendered', async () => {
-    // The injection runs LAST, so nothing the section itself says is fed back
-    // through the layout renderer. A guide whose author text names the skills
-    // folder still gets the real name, and the section is byte for byte the
-    // string the handshake carries.
-    const layout = { ...DEFAULT_KB_LAYOUT, skillsDir: 'Playbooks' };
+    // A layout the two orders DISAGREE on, which an ordinary one does not: the
+    // section states the knowledge-base folder's name, so a deployment whose
+    // folder is literally called `{{skillsDir}}` puts a layout token inside the
+    // rendered section. Injecting first would then rewrite it on the second
+    // pass and the guide would name the skills folder where the rule means the
+    // knowledge-base one. Pathological on purpose: it is the only kind of input
+    // on which the order is observable at all, which is why a test that pins
+    // the order has to use one.
+    const layout = { ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: '{{skillsDir}}', skillsDir: 'Playbooks' };
     const section = sharedFileRulesSection(layout);
+    expect(section).toContain('{{skillsDir}}/');
+
     const template = `Skills live in {{skillsDir}}/.\n\n${SHARED_FILE_RULES_PLACEHOLDER}\n`;
     const rendered = renderTemplateText(template, layout);
+    // The author's token is rendered, and the section survives byte for byte.
     expect(rendered).toBe(`Skills live in Playbooks/.\n\n${section}\n`);
+
+    // And the other order really does differ on this input, so the assertion
+    // above is load-bearing rather than true of both.
+    const injectedFirst = renderKbLayoutPlaceholders(
+      template.replaceAll(SHARED_FILE_RULES_PLACEHOLDER, () => section),
+      layout,
+    );
+    expect(injectedFirst).not.toBe(rendered);
+    expect(injectedFirst).not.toContain(section);
+    expect(injectedFirst).toContain('`Playbooks/`) and git metadata are refused');
   });
 });
 

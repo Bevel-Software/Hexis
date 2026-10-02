@@ -13,7 +13,9 @@ export {
   type ComposedAgentInstructions,
 } from './compose.js';
 export {
+  POINTER_GUIDE_NAME_BUDGET,
   SHARED_FILE_RULES_CAP,
+  SHARED_RULES_POINTER_MAX,
   SHARED_RULES_SECTION,
   sharedFileRules,
   sharedFileRulesSection,

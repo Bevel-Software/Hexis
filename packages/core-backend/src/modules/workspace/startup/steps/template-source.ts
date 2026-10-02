@@ -154,8 +154,12 @@ export class TemplateSource {
    * `{{sharedFileRules}}` is filled from the ONE source text the MCP handshake
    * also sends (see `shared-file-rules.ts`), so the rules every file tool
    * shares are stated in the guide and in the instructions without being
-   * written twice. Filled BEFORE the layout pass, on the raw template, so the
-   * only text that can be read as a placeholder is text an author put there.
+   * written twice. Filled AFTER the layout pass (see
+   * {@link renderTemplateText}): the rules come back already rendered for this
+   * layout, so a layout pass over them could only misread a name they STATE as
+   * a placeholder. The two passes do not collide — the layout renderer touches
+   * only its own four tokens, so `{{sharedFileRules}}` reaches the second pass
+   * untouched.
    */
   async read(relPath: string): Promise<string> {
     let raw: string;
@@ -178,8 +182,8 @@ export class TemplateSource {
     // reads as syntax (`#Guide.md`, `!Guide.md`, brackets) would hide nothing
     // written bare. Escaped there, and only there: everywhere else the
     // placeholder is prose. ONE render, with the escaped name as the layout's
-    // — a second pass over the rendered text would read a name that happens
-    // to contain a placeholder as one.
+    // — rendering twice over text already rendered would read a name that
+    // happens to contain a placeholder as one.
     const layout = this.kb.layout;
     if (relPath === IGNORE_FILENAME) {
       return renderTemplateText(raw, { ...layout, agentsFile: gitignoreLiteral(layout.agentsFile) });

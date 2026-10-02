@@ -12,6 +12,7 @@
 
 import { TOOL_PREFIX_CAP } from '@bevel-software/platform-shared';
 import { PREFIXED_TOOLS } from '../agent-instructions/compose.js';
+import { SHARED_RULES_POINTER_MAX, sharedRulesPointer } from '../agent-instructions/shared-file-rules.js';
 import type { UtcpTool } from './tool.contract.js';
 
 /**
@@ -42,6 +43,13 @@ export const TOOL_DESCRIPTION_CAP = 1_200;
  * Measured at the prefix's CAP rather than at whatever the current admin wrote:
  * the cap is what an admin may grow their text to without being told, so a
  * description that only fits beside a short prefix does not really fit.
+ *
+ * The pointer sentence is measured the same way, for the same reason. It ends
+ * every file tool's description and its length moves with a DEPLOYMENT SETTING
+ * — the guide's file name — so a description measured beside the nine
+ * characters of `AGENTS.md` would pass here and arrive cut on a deployment
+ * that renamed its guide. Whatever pointer a description actually carries is
+ * discounted and charged at {@link SHARED_RULES_POINTER_MAX} instead.
  */
 export function clientVisibleLength(tool: Pick<UtcpTool, 'name' | 'description'>): number {
   const own = tool.description?.length ?? 0;
@@ -50,6 +58,13 @@ export function clientVisibleLength(tool: Pick<UtcpTool, 'name' | 'description'>
   // blank line after it. Measuring that as zero would under-report the only
   // text the client got.
   if (own === 0) return PREFIXED_TOOLS.has(tool.name) ? TOOL_PREFIX_CAP : 0;
+  // The pointer at its worst case rather than at this layout's: swap the one
+  // it carries for the longest it could be. A description that does not end
+  // with it (`start_session`, the proxied tools) is charged nothing.
+  const pointer = sharedRulesPointer();
+  const atWorstPointer = tool.description!.endsWith(pointer)
+    ? own - pointer.length + SHARED_RULES_POINTER_MAX
+    : own;
   // `+ 2` for the blank line `prefixToolDescription` puts between the two.
-  return PREFIXED_TOOLS.has(tool.name) ? own + TOOL_PREFIX_CAP + 2 : own;
+  return PREFIXED_TOOLS.has(tool.name) ? atWorstPointer + TOOL_PREFIX_CAP + 2 : atWorstPointer;
 }

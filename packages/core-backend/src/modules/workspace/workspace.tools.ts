@@ -1432,16 +1432,16 @@ export function registerWorkspaceTools(
     gated: true,
     description:
       'Get a file/directory\'s metadata (name, type, size, …) without returning content, and what you may DO with it. ' +
-      'A file also reports `contentMode`, `kind`, `mime`, `mimeSource` and `textEditable` — decided by the same file readers ' +
+      'A file also reports `contentMode`, `kind`, `mime`, `mimeSource` and `textEditable` — decided by the same readers ' +
       'read_file, grep and the write tools use, so an extensionless text file is `text/plain`. ' +
       '`access: { read, write, download, owner }` is your own verdict under the access rules; pass `explainAccess: true` to ' +
-      'learn why, and who else holds each verb. `managed`, `movable` and `deletable` answer the shared rules on what these ' +
-      'tools never move or delete, judged like the dry runs (on a draft branch writes are not gated); `movable` judges the ' +
-      'SOURCE side only, so the destination still wants a `move_file` dry run. ' +
-      'For a folder, `descendants` is the number of files under it at any depth; counting stops at 10000 and ' +
-      '`descendantsTruncated` says so, and past that point `movable` and `deletable` are false because a folder that large ' +
-      'was not judged in full — run the `move_file` or `delete_folder` dry run for the real verdict. ' +
-      'Call this before a move or delete to see what it would touch.',
+      'learn why, and who else holds each verb. ' +
+      'Call this before a move or delete: `managed`, `movable` and `deletable` answer the shared rules on what these tools ' +
+      'never move or delete, judged like the dry runs (on a draft branch writes are not gated); `movable` judges the SOURCE ' +
+      'side only, so the destination still wants a `move_file` dry run. ' +
+      'For a folder, `descendants` counts the files under it at any depth; counting stops at 10000 and ' +
+      '`descendantsTruncated` says so, past which `movable` and `deletable` are false — a folder that large was not judged ' +
+      'in full, so run the `move_file` or `delete_folder` dry run for the real verdict.',
     inputs: {
       type: 'object',
       properties: {
