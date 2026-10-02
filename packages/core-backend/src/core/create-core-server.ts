@@ -72,6 +72,7 @@ import { publicConfig } from './public-config.js';
 import { createReadiness } from './readiness.js';
 import { createAgentInstructionsRoutes } from '../modules/agent-instructions/index.js';
 import type { CoreServices } from './create-core-services.js';
+import { createWriteAccessRoutes, createWriteGateMiddleware } from '../modules/write-access/write-access.js';
 
 type ExpressApp = ReturnType<typeof express>;
 
@@ -200,6 +201,14 @@ export async function createCoreServer(
   // is mounted again below, once the body is parsed and once the caller is
   // known (see the two mounts under `/api/workspace/:id`).
   app.use('/api/workspace/:id', createGitInternalsRouteGuard(core.workspaceService));
+  // The read-only gate, ahead of every route — core's, the tool surface's
+  // and an overlay's alike — so a read-only deployment refuses a change
+  // wherever it would enter. It lets through what signs people in, manages
+  // accounts and configures the deployment (see `ALWAYS_WRITABLE`); write
+  // tools are judged by the tool layer. A no-op unless a host fills
+  // `ports.writeAccess`. Ahead of the body parser too: a refused write is
+  // refused with its own 403, never parsed first (and answered 400 or 413).
+  app.use(createWriteGateMiddleware(core.writeAccess));
   app.use((req, res, next) => {
     if (jsonExemptPaths.has(req.path) || isSyncRawBodyPath(req.path)) return next();
     return globalJson(req, res, next);
@@ -548,6 +557,7 @@ export async function createCoreServer(
   // request also gets the resolved form judged — a link in the repository that
   // points into the git folder — before any read gate or lock.
   app.use('/api/workspace/:id', core.authMiddleware, createGitInternalsRouteGuard(core.workspaceService));
+  app.use('/api', core.authMiddleware, createWriteAccessRoutes(core.writeAccess));
   app.use('/api', core.authMiddleware, createWorkspaceRoutes(
     core.workspaceService,
     core.authService,

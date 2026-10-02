@@ -1213,11 +1213,22 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
         'There is no file or directory at "knowledge-base/nope.zip" in this workspace. Check the path with list_files.',
     });
     // A name carrying a line break cannot forge a second line of the answer,
-    // in the message or in the `path` a JSON consumer reads.
-    const forged = 'a\nb\u2028c.zip';
+    // in the message or in the `path` a JSON consumer reads. A LINE BREAK no
+    // longer reaches this refusal at all — the normaliser now refuses a
+    // control character outright, because git reads one in a path as the end
+    // of an object name (see `repo-path.ts`) — so the forged name here
+    // carries U+2028, which is a line break to a renderer and nothing to git:
+    // still accepted as a file name, still escaped on the way out.
+    const forged = 'a\u2028c.zip';
     await expect(svc.unzipFile(workspaceId, forged)).rejects.toMatchObject({
       status: 404,
-      payload: { kind: 'not_found', path: 'knowledge-base/a\\nb\\u2028c.zip' },
+      payload: { kind: 'not_found', path: 'knowledge-base/a\\u2028c.zip' },
+    });
+    // And the same invariant at the gate that now owns the line break: the
+    // refusal names the path with the break escaped, never raw.
+    await expect(svc.unzipFile(workspaceId, 'a\nb.zip')).rejects.toMatchObject({
+      status: 400,
+      payload: { kind: 'path-control-character', path: 'a\\nb.zip' },
     });
   });
 

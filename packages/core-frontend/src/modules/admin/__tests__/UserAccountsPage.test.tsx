@@ -6,15 +6,19 @@ import { AdminContext } from '../state/admin.context';
 import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
 import {
   createAccount,
+  deactivateAccount,
   deleteAccount,
   getAccountReferences,
   listAccounts,
+  reactivateAccount,
   type AccountReferences,
 } from '../../auth/services/account.api';
 
 vi.mock('../../auth/services/account.api', () => ({
   createAccount: vi.fn(),
+  deactivateAccount: vi.fn(),
   deleteAccount: vi.fn(),
+  reactivateAccount: vi.fn(),
   getAccountReferences: vi.fn(),
   listAccounts: vi.fn(),
 }));
@@ -39,6 +43,8 @@ const ALICE = {
   hasPassword: false,
   isEnvAdmin: false,
   createdAt: '2026-01-01T00:00:00Z',
+  deactivatedAt: null,
+  isSystem: false,
 };
 const BOB = {
   id: 'u-bob',
@@ -47,6 +53,8 @@ const BOB = {
   hasPassword: true,
   isEnvAdmin: false,
   createdAt: '2026-01-01T00:00:00Z',
+  deactivatedAt: null,
+  isSystem: false,
 };
 // The deployment admin (ADMIN_EMAIL) — a different account from the signed-in
 // admin, so its row offers the actions. No hash stored yet.
@@ -57,6 +65,8 @@ const ROOT = {
   hasPassword: false,
   isEnvAdmin: true,
   createdAt: '2026-01-01T00:00:00Z',
+  deactivatedAt: null,
+  isSystem: false,
 };
 
 /** The "email · Joined … · sign-in method" line of the named account's row. */
@@ -98,12 +108,14 @@ beforeEach(() => {
   vi.mocked(listAccounts)
     .mockReset()
     .mockResolvedValue([
-      { ...ME, hasPassword: true, isEnvAdmin: false, createdAt: '2026-01-01T00:00:00Z' },
+      { ...ME, hasPassword: true, isEnvAdmin: false, createdAt: '2026-01-01T00:00:00Z', deactivatedAt: null, isSystem: false },
       ALICE,
     ]);
   vi.mocked(deleteAccount).mockReset().mockResolvedValue(null);
   vi.mocked(getAccountReferences).mockReset().mockResolvedValue(REFS);
   vi.mocked(createAccount).mockReset().mockResolvedValue(undefined);
+  vi.mocked(deactivateAccount).mockReset().mockResolvedValue(undefined);
+  vi.mocked(reactivateAccount).mockReset().mockResolvedValue(undefined);
 });
 
 describe('UserAccountsPage', () => {
@@ -565,5 +577,81 @@ describe('UserAccountsPage', () => {
     expect(screen.queryByText('No user accounts.')).not.toBeInTheDocument();
     // ...and no "Loading…" left sitting beside the banner forever, either.
     expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
+  });
+});
+
+describe('UserAccountsPage — switching accounts off and on', () => {
+  it('asks before switching another account off, then shows it off; offers no switch for your own', async () => {
+    const user = userEvent.setup();
+    vi.mocked(listAccounts)
+      .mockResolvedValueOnce([ALICE])
+      .mockResolvedValueOnce([{ ...ALICE, deactivatedAt: '2026-09-01T00:00:00Z' }]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Switch off admin@example.com' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Switch off alice@example.com' }));
+    // Nothing happens until it is confirmed.
+    expect(deactivateAccount).not.toHaveBeenCalled();
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent('Nothing is deleted');
+    await user.click(within(dialog).getByRole('button', { name: 'Switch off' }));
+    expect(deactivateAccount).toHaveBeenCalledWith('u-alice');
+    // The refreshed list shows it off, and offers to switch it on.
+    expect(await screen.findByText('(switched off)')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Switch on alice@example.com' })).toBeInTheDocument();
+  });
+
+  it('switches nothing off when the confirmation is cancelled', async () => {
+    const user = userEvent.setup();
+    vi.mocked(listAccounts).mockResolvedValue([ALICE]);
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: 'Switch off alice@example.com' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    expect(deactivateAccount).not.toHaveBeenCalled();
+  });
+
+  it('marks a switched-off account and switches it back on, then shows it on', async () => {
+    const user = userEvent.setup();
+    vi.mocked(listAccounts)
+      .mockResolvedValueOnce([{ ...ALICE, deactivatedAt: '2026-09-01T00:00:00Z' }])
+      .mockResolvedValueOnce([ALICE]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText('(switched off)')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Switch on alice@example.com' }));
+    expect(reactivateAccount).toHaveBeenCalledWith('u-alice');
+    expect(await screen.findByRole('button', { name: 'Switch off alice@example.com' })).toBeInTheDocument();
+    expect(screen.queryByText('(switched off)')).not.toBeInTheDocument();
+  });
+
+  it('offers no switch on an account the platform runs its own work as', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([{ ...ALICE, id: 'u-bot', email: 'recovery-bot@bevel.local', name: 'Recovery Bot', isSystem: true }]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText('Recovery Bot')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Switch off recovery-bot@bevel.local' })).not.toBeInTheDocument();
+  });
+
+  it("shows the deployment's reason when there is no room to switch one on", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listAccounts).mockResolvedValue([{ ...ALICE, deactivatedAt: '2026-09-01T00:00:00Z' }]);
+    vi.mocked(reactivateAccount).mockRejectedValue(new Error('All 3 seats are taken'));
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: 'Switch on alice@example.com' }));
+    expect(await screen.findByText('All 3 seats are taken')).toBeInTheDocument();
+  });
+
+  it('offers no switch on the deployment admin, whose environment password is the way back in', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ROOT]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText('Root')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Switch off root@example.com' })).not.toBeInTheDocument();
+  });
+
+  it('adds an account without a password, for single sign-on', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+    await user.type(screen.getByLabelText('Email'), 'new@example.com');
+    await user.click(screen.getByRole('button', { name: 'Add account' }));
+    expect(createAccount).toHaveBeenCalledWith('new@example.com', '', '');
   });
 });

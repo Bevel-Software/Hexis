@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Presentation } from 'lucide-react';
-import { useRendererWorkspaceId } from './rendererWorkspace';
+import { useRendererFileRef, useRendererWorkspaceId } from './rendererWorkspace';
+import { RetryReadButton } from './RetryReadButton';
+import { useReadRetry } from './useReadRetry';
 import { authFetch } from '../../../../lib/api';
 import { rawFileUrl } from '../../services/workspace.api';
 import { DownloadFileButton } from './DownloadFileButton';
@@ -49,6 +51,16 @@ const MAX_LINES_PER_SLIDE = 500;
 
 export function PptxRenderer({ filePath }: FileRendererProps) {
   const workspaceId = useRendererWorkspaceId();
+  /** A past save, when Version history mounted this; null = the working tree. */
+  const fileRef = useRendererFileRef();
+  /**
+   * The save as PRIMITIVES, hoisted out of the object so the read effect can
+   * depend on exactly what it reads. Depending on `fileRef` itself would put
+   * a context object in the dependency list.
+   */
+  const versionRef = fileRef?.ref ?? null;
+  const versionSide = fileRef?.side;
+  const { attempt, retry } = useReadRetry();
   const [slides, setSlides] = useState<PptxSlide[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -65,7 +77,7 @@ export function PptxRenderer({ filePath }: FileRendererProps) {
     (async () => {
       try {
         const res = await authFetch(
-          rawFileUrl(workspaceId, filePath),
+          rawFileUrl(workspaceId, filePath, { ref: versionRef, side: versionSide }),
           { signal: abort.signal },
         );
         if (cancelled) return;
@@ -97,13 +109,16 @@ export function PptxRenderer({ filePath }: FileRendererProps) {
       cancelled = true;
       abort.abort();
     };
-  }, [workspaceId, filePath]);
+  }, [workspaceId, filePath, versionRef, versionSide, attempt]);
 
   if (error) {
     return (
       <div className="flex min-h-40 flex-col items-center justify-center gap-3 p-6 text-center">
-        <p className="text-ui text-danger">{error}</p>
-        <DownloadFileButton filePath={filePath} />
+        <p role="alert" className="text-ui text-danger">{error}</p>
+        <div className="flex items-center gap-2">
+          <RetryReadButton onRetry={retry} />
+          <DownloadFileButton filePath={filePath} />
+        </div>
       </div>
     );
   }

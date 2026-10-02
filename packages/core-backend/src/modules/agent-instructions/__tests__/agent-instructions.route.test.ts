@@ -31,11 +31,13 @@ async function serve(readPreamble: () => Promise<string | null>): Promise<string
     looksLikeInternalToken: (t: string) => t.startsWith('bit_'),
     verify: (t: string) => (t === INTERNAL_TOKEN ? { userId: 'u-internal' } : null),
   } as unknown as InternalTokenService;
+  // Sessions and internal tokens are accepted only for an account that is on; these are.
   const authService = {
-    verifyToken: (t: string) => {
+    resolveSession: async (t: string) => {
       if (t !== BROWSER_JWT) throw new Error('bad jwt');
       return { userId: 'u-browser' };
     },
+    isActive: async () => true,
   } as unknown as AuthService;
   const app = express();
   app.use('/api', createAgentInstructionsRoutes(createManualAuthMiddleware(externalKeys, internalTokens, authService), readPreamble));

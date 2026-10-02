@@ -7,6 +7,7 @@ import {
   CanDownloadContext,
   DownloadFileButton,
 } from '../../workspace/components/renderers/DownloadFileButton';
+import { READ_PANE } from '../../workspace/components/renderers/readPane';
 import {
   RendererWorkspaceContext,
   getFileRenderer,
@@ -298,7 +299,12 @@ export function BranchFilePreview({
   return (
     <div className="flex h-full min-h-0 flex-col">
       {header}
-      <div className="min-h-0 flex-1">{body}</div>
+      {/* The pane's own region: a viewer's "Try again" unmounts itself, and
+          this is what stays mounted around it for focus to land on — see
+          `RetryReadButton`. */}
+      <div {...READ_PANE} className="min-h-0 flex-1">
+        {body}
+      </div>
     </div>
   );
 }

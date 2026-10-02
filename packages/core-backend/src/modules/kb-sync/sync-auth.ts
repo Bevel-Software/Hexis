@@ -42,7 +42,7 @@ export interface SyncAuthInput {
 
 export interface SyncSessionVerifier {
   /** Resolve a browser JWT to its email, or null when it is not one. */
-  verifyJwt(token: string): { email: string } | null;
+  verifyJwt(token: string): { email: string } | null | Promise<{ email: string } | null>;
   isAdmin(email: string): Promise<boolean>;
 }
 
@@ -98,7 +98,7 @@ export async function verifySyncCredential(
   // An admin's own session, carried as the bearer. Checked after the secret
   // so a secret that happens to parse as a JWT is never mistaken for one.
   if (bearer) {
-    const claim = session.verifyJwt(bearer);
+    const claim = await session.verifyJwt(bearer);
     if (claim && (await session.isAdmin(claim.email))) {
       return { ok: true, credential: { kind: 'admin-session', email: claim.email } };
     }

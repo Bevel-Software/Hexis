@@ -1,10 +1,24 @@
 import type { Router, RequestHandler } from 'express';
 import type { IToolRegistry, UtcpTool } from '../tool-registry/tool.contract.js';
-import type { ToolContext } from '../tool-helpers/tool.contract.js';
+import { ToolError, type ToolContext } from '../tool-helpers/tool.contract.js';
 import { toolDef } from '../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import type { ISkillService } from './skills.contract.js';
 import type { IAllowedToolsChecker } from './allowed-tools-check.js';
+
+/**
+ * The optional `branch` both skill tools declare. Optional on purpose, unlike
+ * the required `branch` of the KB file tools: a skill read is answered by the
+ * released catalog by default, and naming a branch is the caller asking for
+ * something nobody has approved yet.
+ */
+const BRANCH_SKILLS_INPUT = {
+  type: 'string' as const,
+  description:
+    'Optional: a draft branch to read the skills from instead of the released (default) branch — ' +
+    'the branch you are working on. You must be able to read the branch and the skill on it; ' +
+    'a branch that does not exist answers 404 naming it. Omit it for the approved skills.',
+};
 
 /**
  * Registers the two skill tools (both surfaces) and hosts their endpoints.
@@ -14,6 +28,13 @@ import type { IAllowedToolsChecker } from './allowed-tools-check.js';
  * what exists right in the tool catalog, no `list_skills` round-trip needed, and
  * it auto-updates as the default-branch catalog changes. The hosted routes are
  * static; only the description text is dynamic.
+ *
+ * Both tools take an optional `branch`. Without it they answer from the
+ * released (default-branch) catalog — what the descriptions name, what the
+ * browser menu lists and what the MCP prompt surface serves. With it they read
+ * the skills as they are on that draft and say which of them nobody has
+ * approved, so an agent can try the skill it just wrote without waiting for a
+ * merge.
  */
 export function registerSkillsTools(
   registry: IToolRegistry,
@@ -32,8 +53,8 @@ export function registerSkillsTools(
   router.post(
     '/agent/tools/list_skills',
     toolAuth,
-    toolHandler(async (_args, ctx: ToolContext) => ({
-      skills: await skillService.listSkills(ctx.user.email),
+    toolHandler(async (args, ctx: ToolContext) => ({
+      skills: await skillService.listSkills(ctx.user.email, { branch: branchArg(args) }),
     })),
   );
 
@@ -44,12 +65,36 @@ export function registerSkillsTools(
       const name = typeof args.name === 'string' ? args.name : '';
       const file = typeof args.file === 'string' ? args.file : undefined;
       const version = typeof args.version === 'string' ? args.version : undefined;
+      const branch = branchArg(args);
       if (!name) return { error: 'missing_name' };
-      const result = await skillService.getSkill(ctx.user.email, name, file, { version });
+      // Refused rather than ranked: a `version` is a point in the released
+      // skill's history, a `branch` is a draft nobody has released — asked for
+      // together, neither answer is the one the caller meant, and guessing
+      // would serve instructions under a label that does not describe them.
+      if (branch !== undefined && version !== undefined && version.trim().length > 0) {
+        throw new ToolError(
+          'get_skill takes `branch` or `version`, not both: `branch` loads the skill as that draft has it ' +
+            'now, `version` loads a version the released skill declared. Pass one of them.',
+          400,
+        );
+      }
+      const result = await skillService.getSkill(ctx.user.email, name, file, { version, branch });
       if (!allowedTools || !result.ok || result.kind !== 'skill') return result;
       return { ...result, warnings: await allowedTools.check(ctx.user.email, result.skill.allowedTools) };
     }),
   );
+}
+
+/**
+ * The `branch` a tool call named, or undefined when it named none (the
+ * released catalog). A non-string or blank value is NOT a branch: it is taken
+ * as absent, which answers from the default branch — the approved one. The
+ * resolution of a real name, and the 404 for one the platform never heard of,
+ * belong to the workspace layer, exactly as on the file tools.
+ */
+function branchArg(args: Record<string, unknown>): string | undefined {
+  const branch = args.branch;
+  return typeof branch === 'string' && branch.trim().length > 0 ? branch : undefined;
 }
 
 /** "Currently available skills: `a`, `b`." (or a no-skills note), filtered to what the caller may read. */
@@ -67,9 +112,16 @@ async function buildListSkillsDef(skillService: ISkillService, userEmail?: strin
       'for a skill that declares one, its current `version` (its SKILL.md `metadata.version`, else a ' +
       'top-level `version`, else `lifecycle.version`). ' +
       'Discover what skills exist before specialist work, then `get_skill` to load one. ' +
+      'Pass `branch` to list the skills as they are on a draft branch instead of the released set — ' +
+      'what you need to try a skill you just wrote there; each skill that differs from the released ' +
+      'one comes back with `unmerged: true` and that branch, meaning nobody has approved it. ' +
       (await availableSkillsLine(skillService, userEmail)),
     path: '/api/agent/tools/list_skills',
-    inputs: { type: 'object', properties: {}, additionalProperties: false },
+    inputs: {
+      type: 'object',
+      properties: { branch: BRANCH_SKILLS_INPUT },
+      additionalProperties: false,
+    },
     outputs: {
       type: 'object',
       properties: {
@@ -88,6 +140,13 @@ async function buildListSkillsDef(skillService: ISkillService, userEmail?: strin
                   'else `lifecycle.version` in its SKILL.md); absent when it declares none.',
               },
               path: { type: 'string' },
+              unmerged: {
+                type: 'boolean',
+                description:
+                  'Only when `branch` was passed, and only on a skill that differs from the released one ' +
+                  '(it exists only on that branch, or was changed there): nobody has approved what it says.',
+              },
+              branch: { type: 'string', description: 'With `unmerged`: the branch the skill was read from.' },
             },
           },
         },
@@ -104,7 +163,7 @@ async function buildGetSkillDef(skillService: ISkillService, userEmail?: string)
       'Load a skill by name: returns its full instructions (SKILL.md body) to follow, plus the skill ' +
       'folder path and the list of bundled files. Pass `file` to fetch a bundled file’s content ' +
       '(e.g. a script) instead of the body. Loads the latest copy unless `version` names an earlier ' +
-      'one the skill declared. ' +
+      'one the skill declared, or `branch` names a draft to load it from. ' +
       (await availableSkillsLine(skillService, userEmail)),
     path: '/api/agent/tools/get_skill',
     inputs: {
@@ -126,6 +185,7 @@ async function buildGetSkillDef(skillService: ISkillService, userEmail?: string)
             'recent commit that declared that version; a version the skill never declared answers ' +
             '`version_not_found` with the versions it did declare.',
         },
+        branch: BRANCH_SKILLS_INPUT,
       },
       required: ['name'],
       additionalProperties: false,
@@ -134,8 +194,20 @@ async function buildGetSkillDef(skillService: ISkillService, userEmail?: string)
       type: 'object',
       description: 'On success carries `skill` (or `file` when `file` was passed); on failure carries `error`.',
       properties: {
-        skill: { type: 'object', description: 'The loaded skill: name, description, body, files, ….' },
-        file: { type: 'object', description: 'A bundled file: name, file, path, content.' },
+        skill: {
+          type: 'object',
+          description:
+            'The loaded skill: name, description, body, files, …. Read from a `branch` that changed it, ' +
+            'it also carries `unmerged: true` and that branch, and its `body` BEGINS with one line ' +
+            'saying the skill comes from that unmerged branch and is not approved — treat it as a ' +
+            'proposal you are testing, not as approved instructions.',
+        },
+        file: {
+          type: 'object',
+          description:
+            'A bundled file: name, file, path, content — plus `unmerged` and `branch` when it came off ' +
+            'a branch that changed the skill (the note stays beside the content, never inside it).',
+        },
         warnings: {
           type: 'array',
           description:

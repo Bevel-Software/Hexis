@@ -319,9 +319,30 @@ export class WorkspaceService implements IWorkspaceService {
      * Why, in one place: `setAsideRootFor` in `set-aside-clone.ts`.
      */
     private readonly setAsideRoot?: string,
+    /**
+     * What surrounds the setting aside of ONE working copy when a branch is
+     * opened and its clone turns out to be of another repository: given the
+     * workspace id and the move, it runs the move. The composition root
+     * passes what the startup phase does around its own set-asides: the
+     * commit worker held still, the copy's queued commits held back for a
+     * person, the locks on its branch dropped. If it throws, the copy stays
+     * where it was and the branch is refused with that reason. Absent, the
+     * move runs as it is.
+     */
+    private readonly aroundSetAside: (workspaceId: string, move: () => Promise<void>) => Promise<void> = (
+      _workspaceId,
+      move,
+    ) => move(),
   ) {
     this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
   }
+
+  /**
+   * The set-asides in flight, one per branch. Two callers opening the same
+   * branch both find the clone of another repository; the second waits for
+   * the first's move instead of trying to move a directory that has gone.
+   */
+  private readonly inFlightSetAsides = new Map<string, Promise<void>>();
 
   private get kbDirName(): string {
     return this.kb.kbDirName;
@@ -652,18 +673,44 @@ export class WorkspaceService implements IWorkspaceService {
     // below", it would be found again by the clone step, which sees a
     // directory with a `.git` in it, calls that already-cloned, and hands back
     // the very working copy this refused to adopt.
-    if (onDisk && (await this.isCloneOfAnotherRepository(repoDir))) {
-      const kept = path.join(
-        setAsideRootFor(this.workspacesRoot, this.setAsideRoot),
-        setAsideStamp(),
-        workspaceIdForBranch(branch),
-      );
-      await setAsideClone(repoDir, kept);
-      log.warn(
-        `the "${branch}" working copy was a clone of another repository. Set aside at ${kept}; nothing was ` +
-          'deleted, and it is being cloned fresh from the configured one. Work that was never pushed is in that ' +
-          'folder: `git log` there shows it.',
-      );
+    // Counted before the disk is looked at: the startup phase may take this
+    // very copy away while the checks below are awaited (`forgetClone`), and a
+    // copy that went must not be registered as the branch's.
+    const discardsAtAdoption = this.discardsOf(id);
+    const setAsideInFlight = this.inFlightSetAsides.get(branch);
+    if (setAsideInFlight) {
+      // Someone else is moving it. Wait, then clone below; a move that failed
+      // refuses this caller with the same reason.
+      await setAsideInFlight;
+    } else if (onDisk && (await this.isCloneOfAnotherRepository(repoDir))) {
+      // Asked again: another caller may have started the move while the
+      // address was being read.
+      const startedMeanwhile = this.inFlightSetAsides.get(branch);
+      if (startedMeanwhile) {
+        await startedMeanwhile;
+      } else {
+        const kept = path.join(setAsideRootFor(this.workspacesRoot, this.setAsideRoot), setAsideStamp(), id);
+        // What surrounds the move may wait, and the startup phase may set
+        // this very copy aside meanwhile. Then there is nothing left to move:
+        // the phase did it, and said so.
+        let moved = false;
+        const moving = this.aroundSetAside(id, async () => {
+          if (this.discardsOf(id) !== discardsAtAdoption) return;
+          await setAsideClone(repoDir, kept);
+          moved = true;
+        }).finally(() => {
+          this.inFlightSetAsides.delete(branch);
+        });
+        this.inFlightSetAsides.set(branch, moving);
+        await moving;
+        if (moved) {
+          log.warn(
+            `the "${branch}" working copy was a clone of another repository. Set aside at ${kept}; nothing was ` +
+              'deleted, and it is being cloned fresh from the configured one. Work that was never pushed is in ' +
+              'that folder: `git log` there shows it.',
+          );
+        }
+      }
     } else if (onDisk) {
       try {
         // Migration for clones already on disk: re-stamp the tracking config
@@ -672,6 +719,8 @@ export class WorkspaceService implements IWorkspaceService {
         // anything pulls it. Once per branch per process — the cached paths
         // above return before reaching here.
         await this.normalizeCloneConfig(repoDir, branch);
+        // Taken away meanwhile: nothing to adopt, clone below.
+        if (this.discardsOf(id) !== discardsAtAdoption) throw new Error('the working copy was set aside');
         this.registerBranchDir(branch, workspaceDir);
         return this.buildWorkspaceInfo(branch, workspaceDir);
       } catch {
