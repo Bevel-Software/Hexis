@@ -10,7 +10,6 @@ import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { Database } from '../../database/connection.js';
 import { createAccessRoutes } from '../access.routes.js';
-import { WorkflowDomainError } from '../../../shared/domain-errors.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
@@ -192,15 +191,15 @@ describe('GET /access/prospective', () => {
     expect(await res.json()).toEqual({ error: 'Internal error.' });
   });
 
-  it('refuses a folder source the way the resolver does, without guessing', async () => {
+  it('asks about a folder source the same way, keeping its name at the destination', async () => {
     h = await makeHarness();
-    h.prospectiveHolders.mockRejectedValueOnce(
-      new WorkflowDomainError('prospective access answers for a file, not a folder', 400),
-    );
 
-    const res = await get(`from=${encodeURIComponent('Knowledge/Legal')}&toDir=Knowledge`);
+    const res = await get(`from=${encodeURIComponent('Knowledge/Legal')}&toDir=${encodeURIComponent('Knowledge/Sales')}`);
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
+    // The route derives the destination from the name, folder or file alike;
+    // which of the two it is, and what travels with it, is the resolver's.
+    expect(h.prospectiveHolders).toHaveBeenCalledWith(WS, 'Knowledge/Legal', 'Knowledge/Sales/Legal');
   });
 
   it('falls back to the name-only roles list when the resolver omits kinds', async () => {

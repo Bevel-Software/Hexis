@@ -69,6 +69,8 @@ async function start(): Promise<string> {
     canOwner: async () => true,
     canWriteBatchAtRef: async () => null,
     canReadBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
+    // The `after` half of a move's or copy's preview — allowing everything, like the gates above.
+    previewAccessAfterRelocation: async () => ({ read: true, write: true, download: true, owner: true }),
   } as never;
   registerWorkspaceTools(registry, router, toolAuth, createToolHandlerFactory(resolve), new SpillStore(path.join(os.tmpdir(), 'bevel-test-spills')), new DocExtractService(docCache), allowAll, testKbContext({ kbDirName: KB }), {
     // No hook registered: the agent-access gate refuses nothing here.
