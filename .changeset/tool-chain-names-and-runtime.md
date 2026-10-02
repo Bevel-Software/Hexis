@@ -1,0 +1,15 @@
+---
+'@bevel-software/platform-mcp-core': minor
+'@bevel-software/platform-core-backend': minor
+'@bevel-software/hexis-mcp': minor
+---
+
+`call_tool_chain` now names the namespace the connection it is served on really exposes, gives a chain `atob`, `btoa`, `TextEncoder` and `TextDecoder`, and answers every chain failure instead of leaving one to look like a success — or like a dropped connection.
+
+**The namespace in the description.** The description was fixed text telling every agent to call tools as `KNOWLEDGE_BASE.<tool>`. That is the name on the server's own MCP endpoint, but the local server registers the whole deployment as one `hexis` manual, so an agent connected through it copied an example that died of `ReferenceError: KNOWLEDGE_BASE is not defined`. The descriptions of `call_tool_chain` and `list_tools` are now built per surface, and their example is a name read off that surface's live catalog rather than assembled from the namespace: the hosted endpoint's knowledge-base tools arrive as `KNOWLEDGE_BASE.read_file`, while the local server's arrive one level deeper and are called as `hexis.hexis_read_file`, so a namespace plus a tool name would still have been wrong on one of the two. No second name is accepted as an alias; the description names the one that works.
+
+**Base64 and bytes.** A chain runs in a bare `isolated-vm` isolate — plain V8, with no `Buffer` and no web platform — so it could not decode base64 or bytes at all. `atob`, `btoa`, `TextEncoder` and `TextDecoder` now exist inside a chain and behave as they do in a browser for UTF-8 text: forgiving base64 that throws rather than decoding to garbage, and UTF-8 that agrees with the platform's own encoder and decoder byte for byte, malformed input included. They are prepended to the chain's source as a single line, so a failure still reports the line numbers of the agent's own code.
+
+**Failures are answered.** `callToolChain` does not throw when a chain dies: it resolves with a null result and an `[ERROR] Code execution failed: …` log line, which both MCP surfaces and the in-process agent passed through as `success: true` with nothing in it. Every chain failure is now an error that says what happened — a chain that outlives its `timeout` is told it timed out, after how many milliseconds, and that `timeout` may be raised up to 120000; one that exhausted the isolate's heap is told that, and not that it timed out; one that names a namespace the runtime has no binding for is told which namespaces this connection does expose; and anything else is reported with the reason the runner gave, unaltered. The connection is untouched in every case, and a chain whose runner somehow never settles is answered by a watchdog rather than left to hang, which is what reached an agent as `ECONNRESET`.
+
+The `timeout` bounds, its default and the figure the timeout error quotes are now one constant, so the schema and the advice cannot drift apart. `retiredToolChainFailure` is gone from `@bevel-software/platform-mcp-core`: it existed so a caller could see a chain failure the runner had swallowed, and every surface now sees all of them.

@@ -27,7 +27,7 @@ import {
 } from '@utcp/sdk';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import {
-  CODE_MODE_META_TOOLS,
+  codeModeMetaTools,
   META_TOOL_NAMES,
   dispatchMetaTool,
   dispatchToolCall,
@@ -405,6 +405,15 @@ export class McpService {
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       const [{ tools, catalogNames }, { toolPrefix }] = await Promise.all([requestSurface(), agentInstructions()]);
+      // The meta-tools' examples name the namespace THIS endpoint registers the
+      // knowledge-base tools under, so a chain copied out of the description
+      // runs. Built here rather than held as a constant: the local MCP server
+      // registers the same tools under a different name, and one fixed example
+      // is necessarily wrong on one of the two surfaces.
+      const metaTools = codeModeMetaTools(
+        EXTERNAL_KB_MANUAL_NAME,
+        tools.map((t) => t.utcpName),
+      );
       // A discovered tool whose name collides with a meta-tool would be
       // listed but never callable (the dispatcher routes the name to the
       // meta-tool first), so drop it from the listing entirely.
@@ -461,13 +470,13 @@ export class McpService {
       // it by rejecting the whole response.
       if (dropped.length) {
         log.warn(
-          `tools/list: serving ${CODE_MODE_META_TOOLS.length + direct.length} tool(s); ` +
+          `tools/list: serving ${metaTools.length + direct.length} tool(s); ` +
             `dropped ${dropped.length} non-listable: ${dropped.join(', ')}`,
         );
       }
       return {
         // Code-mode meta-tools first, then every validated direct tool.
-        tools: [...CODE_MODE_META_TOOLS, ...direct],
+        tools: [...metaTools, ...direct],
       };
     });
 

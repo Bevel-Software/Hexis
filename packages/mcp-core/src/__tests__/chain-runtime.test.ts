@@ -1,0 +1,489 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { Tool } from '@utcp/sdk';
+import type { CodeModeUtcpClient } from '@utcp/code-mode';
+import {
+  CHAIN_RUNTIME_PRELUDE,
+  CHAIN_TIMEOUT_MAX_MS,
+  chainNamespaces,
+  describeChainFailure,
+  runToolChain,
+  withChainRuntime,
+} from '../chain-runtime.js';
+import { chainCallExample, codeModeMetaTools } from '../meta-tools.js';
+
+/**
+ * The chain runtime, at the level where it can be pinned exactly.
+ *
+ * The browser globals are plain JavaScript, so they are exercised here against
+ * Node's OWN `atob`/`btoa`/`TextEncoder`/`TextDecoder` — the only authority on
+ * "behaves as in a browser" that does not consist of restating this file's
+ * arithmetic. That they are actually REACHABLE from a chain is a different
+ * claim, and it is tested against a real isolate in core-backend's
+ * `chain-runtime.e2e.test.ts`.
+ */
+
+/** The prelude, run the way the isolate runs it: against a bare global object. */
+function sandbox(): Record<string, never> & {
+  atob: (s: string) => string;
+  btoa: (s: string) => string;
+  TextEncoder: new () => { encode(s?: string): Uint8Array; encoding: string };
+  TextDecoder: new (label?: string) => { decode(b?: unknown): string; encoding: string };
+} {
+  const g = {} as never;
+  new Function('globalThis', CHAIN_RUNTIME_PRELUDE)(g);
+  return g;
+}
+
+function utcpTool(name: string): Tool {
+  return {
+    name,
+    description: `the ${name} tool`,
+    inputs: { type: 'object', properties: {} },
+    outputs: { type: 'object', properties: {} },
+    tags: [],
+    tool_call_template: { call_template_type: 'http' } as never,
+  } as Tool;
+}
+
+function clientWith(tools: Tool[], outcome?: { result: unknown; logs: string[] }) {
+  const callToolChain = vi.fn(async () => outcome ?? { result: 'ok', logs: [] as string[] });
+  const client = {
+    config: { tool_repository: { getTools: vi.fn(async () => tools), getTool: vi.fn(async () => null) } },
+    callToolChain,
+  } as unknown as CodeModeUtcpClient;
+  return { client, callToolChain };
+}
+
+const KB = [utcpTool('KNOWLEDGE_BASE.read_file'), utcpTool('KNOWLEDGE_BASE.ask')];
+
+describe('the chain runtime is one physical line', () => {
+  // The whole point of the single line: a chain's stack must keep naming the
+  // chain's own line numbers. A prelude spread over 60 lines would report a
+  // failure on line 3 of the agent's code as line 63 of something it cannot see.
+  it('adds no line to the chain, so a stack still names the chain\'s own lines', () => {
+    expect(CHAIN_RUNTIME_PRELUDE).not.toContain('\n');
+    const code = 'const a = 1;\nconst b = 2;\nreturn WRONG.go();';
+    expect(withChainRuntime(code).split('\n')).toHaveLength(code.split('\n').length);
+    expect(withChainRuntime(code).endsWith(code)).toBe(true);
+  });
+
+  it('leaves the chain\'s own source intact, byte for byte', () => {
+    expect(withChainRuntime('return 1')).toBe(`${CHAIN_RUNTIME_PRELUDE}return 1`);
+  });
+});
+
+describe('atob and btoa, as in a browser', () => {
+  it('decodes the Specification\'s own example', () => {
+    expect(sandbox().atob('SGVsbG8=')).toBe('Hello');
+  });
+
+  it('matches Node\'s atob/btoa on every byte length, padding included', () => {
+    const g = sandbox();
+    for (const text of ['', 'H', 'Hi', 'Hey', 'Hello', 'Hello, world', '\x00\xff\x80']) {
+      expect(g.btoa(text)).toBe(btoa(text));
+      expect(g.atob(btoa(text))).toBe(text);
+    }
+  });
+
+  it('matches Node across 500 random byte strings', () => {
+    const g = sandbox();
+    for (let i = 0; i < 500; i += 1) {
+      const bytes = Array.from({ length: Math.floor(Math.random() * 40) }, () =>
+        Math.floor(Math.random() * 256),
+      );
+      const binary = String.fromCharCode(...bytes);
+      expect(g.btoa(binary)).toBe(Buffer.from(bytes).toString('base64'));
+      expect(g.atob(Buffer.from(bytes).toString('base64'))).toBe(binary);
+    }
+  });
+
+  it('is forgiving about whitespace and padding, as the base64 standard is', () => {
+    const g = sandbox();
+    expect(g.atob('SGVs bG8=\n')).toBe('Hello');
+    expect(g.atob('SGVsbG8')).toBe('Hello');
+  });
+
+  it('throws on input a browser also refuses, rather than decoding to garbage', () => {
+    const g = sandbox();
+    expect(() => g.atob('!!!!')).toThrow(/not valid base64/);
+    expect(() => g.atob('SGVsbG8=A')).toThrow(/not valid base64/);
+    // Beyond Latin-1 there is no byte to encode; the message says to go
+    // through TextEncoder, which is the way to base64 text.
+    expect(() => g.btoa('😀')).toThrow(/TextEncoder/);
+  });
+
+  it('encodes Latin-1 text the way a browser does, not as UTF-8', () => {
+    expect(sandbox().btoa('über')).toBe(btoa('über'));
+  });
+});
+
+describe('TextEncoder and TextDecoder, for UTF-8', () => {
+  it('round-trips the Specification\'s own example', () => {
+    const g = sandbox();
+    expect(new g.TextDecoder().decode(new g.TextEncoder().encode('über'))).toBe('über');
+  });
+
+  it('encodes exactly as Node does, astral planes included', () => {
+    const g = sandbox();
+    const node = new TextEncoder();
+    for (const text of ['', 'ascii', 'über', 'ünïcödé', 'a😀b', '日本語', '\u{10FFFF}']) {
+      expect(Array.from(new g.TextEncoder().encode(text))).toEqual(Array.from(node.encode(text)));
+    }
+  });
+
+  it('decodes exactly as Node does across 2000 random byte sequences, malformed ones included', () => {
+    const g = sandbox();
+    const node = new TextDecoder();
+    const decoder = new g.TextDecoder();
+    for (let i = 0; i < 2000; i += 1) {
+      const bytes = new Uint8Array(
+        Array.from({ length: Math.floor(Math.random() * 12) }, () => Math.floor(Math.random() * 256)),
+      );
+      expect(decoder.decode(bytes)).toBe(node.decode(bytes));
+    }
+  });
+
+  it('round-trips 300 random strings through Node\'s encoder and back', () => {
+    const g = sandbox();
+    const node = new TextEncoder();
+    const decoder = new g.TextDecoder();
+    for (let i = 0; i < 300; i += 1) {
+      let text = '';
+      for (let k = 0; k < Math.floor(Math.random() * 20); k += 1) {
+        text += String.fromCodePoint(Math.floor(Math.random() * 0x10000));
+      }
+      expect(decoder.decode(node.encode(text))).toBe(new TextDecoder().decode(node.encode(text)));
+    }
+  });
+
+  it('takes the shapes a browser takes, and reports utf-8 as its encoding', () => {
+    const g = sandbox();
+    const enc = new g.TextEncoder();
+    const dec = new g.TextDecoder();
+    expect(enc.encoding).toBe('utf-8');
+    expect(dec.encoding).toBe('utf-8');
+    expect(dec.decode()).toBe('');
+    expect(dec.decode(enc.encode('hi').buffer)).toBe('hi');
+    expect(dec.decode(new Uint8Array([]))).toBe('');
+    expect(g.TextEncoder.name).toBe('TextEncoder');
+    expect(g.TextDecoder.name).toBe('TextDecoder');
+  });
+
+  it('refuses an encoding it does not implement instead of answering mojibake', () => {
+    expect(() => new (sandbox().TextDecoder)('latin1')).toThrow(/UTF-8 only/);
+  });
+});
+
+describe('a chain that runs out of time', () => {
+  const TIMED_OUT = {
+    result: null,
+    logs: ['[ERROR] Code execution failed: Script execution timeout after 1000ms'],
+  };
+
+  it('is answered with the limit it hit and how far it may be raised', async () => {
+    const { client } = clientWith(KB, TIMED_OUT);
+    const outcome = await runToolChain(client, 'while(true){}', 1_000);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error).toContain('timed out after 1000 ms');
+    expect(outcome.error).toContain('`timeout`');
+    expect(outcome.error).toContain(String(CHAIN_TIMEOUT_MAX_MS));
+  });
+
+  /**
+   * The runner appends its failure line in a `catch` and THEN, in the
+   * `finally`, one `[WARN] Tool call "…" abandoned` line per call still in
+   * flight — into the same array the caller receives. A chain that timed out
+   * mid-call therefore has its reason second from last, and reading only the
+   * last line reported that chain as a success with a null result.
+   */
+  it('is still recognised when abandoned-tool warnings were logged after it', async () => {
+    const { client } = clientWith(KB, {
+      result: null,
+      logs: [
+        'working',
+        '[ERROR] Code execution failed: Script execution timeout after 2500ms',
+        '[WARN] Tool call "KNOWLEDGE_BASE.ask" abandoned: the chain ended before it settled',
+      ],
+    });
+    const outcome = await runToolChain(client, 'KNOWLEDGE_BASE.ask({})', 2_500);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.error).toContain('timed out after 2500 ms');
+  });
+
+  it('reports the limit the runner names, not the one that was asked for', async () => {
+    // The two agree in practice; when they do not, the figure the agent is
+    // given must be the one the runtime actually enforced.
+    expect(await describeChainFailure(clientWith(KB).client, 'Script execution timeout after 7000ms', 30_000))
+      .toContain('timed out after 7000 ms');
+  });
+
+  it('is answered when V8 itself terminated the script instead', async () => {
+    const { client } = clientWith(KB, {
+      result: null,
+      logs: ['[ERROR] Code execution failed: Script execution timed out.'],
+    });
+    const outcome = await runToolChain(client, 'while(true){}', 4_000);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.error).toContain('timed out after 4000 ms');
+  });
+
+  it('never leaves the caller waiting, even if the runner itself never settles', async () => {
+    // A request that hangs is what reaches an agent as a dropped connection.
+    const client = {
+      config: { tool_repository: { getTools: async () => KB, getTool: async () => null } },
+      callToolChain: () => new Promise(() => {}),
+    } as unknown as CodeModeUtcpClient;
+    vi.useFakeTimers();
+    try {
+      const pending = runToolChain(client, 'while(true){}', 1_000);
+      await vi.advanceTimersByTimeAsync(6_500);
+      const outcome = await pending;
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) expect(outcome.error).toContain('timed out after 1000 ms');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('a chain that names a namespace that does not exist', () => {
+  it('is told which namespaces do', async () => {
+    const { client } = clientWith(KB, {
+      result: null,
+      logs: ['[ERROR] Code execution failed: ReferenceError: WRONG is not defined\n    at <isolated-vm>:5:2952'],
+    });
+    const outcome = await runToolChain(client, 'return WRONG.read_file({})', 30_000);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error).toContain('WRONG is not defined');
+    expect(outcome.error).toContain('KNOWLEDGE_BASE');
+    expect(outcome.error).toContain('list_tools');
+  });
+
+  it('lists every namespace the catalog has, and the bare tools apart from them', async () => {
+    const { client } = clientWith(
+      [utcpTool('KNOWLEDGE_BASE.read_file'), utcpTool('git.push'), utcpTool('lone_tool')],
+      { result: null, logs: ['[ERROR] Code execution failed: ReferenceError: WRONG is not defined'] },
+    );
+    const outcome = await runToolChain(client, 'return WRONG.x()', 30_000);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error).toContain('KNOWLEDGE_BASE, git');
+    expect(outcome.error).toContain('lone_tool');
+  });
+
+  it('keeps the ReferenceError when the catalog itself cannot be read', async () => {
+    // A failing catalog must not replace the chain's reason with its own.
+    const client = {
+      config: {
+        tool_repository: {
+          getTools: async () => {
+            throw new Error('repository unavailable');
+          },
+          getTool: async () => null,
+        },
+      },
+      callToolChain: async () => ({
+        result: null,
+        logs: ['[ERROR] Code execution failed: ReferenceError: WRONG is not defined'],
+      }),
+    } as unknown as CodeModeUtcpClient;
+    const outcome = await runToolChain(client, 'return WRONG.x()', 30_000);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.error).toContain('WRONG is not defined');
+      expect(outcome.error).not.toContain('repository unavailable');
+    }
+  });
+
+  it('says so plainly when there are no namespaces at all', async () => {
+    const { client } = clientWith([], {
+      result: null,
+      logs: ['[ERROR] Code execution failed: ReferenceError: WRONG is not defined'],
+    });
+    const outcome = await runToolChain(client, 'return WRONG.x()', 30_000);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.error).toContain('no tool namespaces at all');
+  });
+
+  it('reads the namespaces the way the runtime spells them', async () => {
+    const { client } = clientWith([utcpTool('my-tool.run'), utcpTool('KNOWLEDGE_BASE.ask')]);
+    expect(await chainNamespaces(client)).toEqual({
+      namespaces: ['KNOWLEDGE_BASE', 'my_tool'],
+      bare: [],
+    });
+  });
+});
+
+describe('a chain that fails for another reason', () => {
+  it('is answered with that reason, not with a guess', async () => {
+    const { client } = clientWith(KB, {
+      result: null,
+      logs: ['[ERROR] Code execution failed: Error: You don\'t have read access to "Secret.md"'],
+    });
+    const outcome = await runToolChain(client, 'return KNOWLEDGE_BASE.read_file({})', 30_000);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.error).toContain('You don\'t have read access to "Secret.md"');
+  });
+
+  it('is answered when the chain exhausted the isolate\'s heap, and is not called a timeout', async () => {
+    const { client } = clientWith(KB, {
+      result: null,
+      logs: ['[ERROR] Code execution failed: Isolate was disposed during execution due to memory limit'],
+    });
+    const outcome = await runToolChain(client, 'const a=[];while(1)a.push("x".repeat(1e6));', 30_000);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.error).toContain('ran out of memory');
+      expect(outcome.error).not.toContain('timed out');
+    }
+  });
+
+  it('is answered when the runner throws before the chain even starts', async () => {
+    const client = {
+      config: { tool_repository: { getTools: async () => KB, getTool: async () => null } },
+      callToolChain: async () => {
+        throw Object.assign(new Error('catalog is down'), { status: 503, data: { retry: true } });
+      },
+    } as unknown as CodeModeUtcpClient;
+    const outcome = await runToolChain(client, 'return 1', 30_000);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.error).toBe('catalog is down');
+      expect(outcome.status).toBe(503);
+      expect(outcome.data).toEqual({ retry: true });
+    }
+  });
+
+  it('never throws, whatever the runner does', async () => {
+    const client = {
+      config: { tool_repository: { getTools: async () => KB, getTool: async () => null } },
+      callToolChain: async () => {
+        throw 'a string, not an Error';
+      },
+    } as unknown as CodeModeUtcpClient;
+    await expect(runToolChain(client, 'return 1', 30_000)).resolves.toMatchObject({ ok: false });
+  });
+});
+
+describe('a chain that succeeds', () => {
+  it('keeps its value and its logs', async () => {
+    const { client } = clientWith(KB, { result: { ok: 1 }, logs: ['hello'] });
+    expect(await runToolChain(client, 'return { ok: 1 }', 30_000)).toEqual({
+      ok: true,
+      result: { ok: 1 },
+      logs: ['hello'],
+    });
+  });
+
+  it('is not mistaken for a failure when it returns null and logged nothing', async () => {
+    const { client } = clientWith(KB, { result: null, logs: [] });
+    expect(await runToolChain(client, 'return null', 30_000)).toEqual({ ok: true, result: null, logs: [] });
+  });
+
+  it('is not mistaken for a failure when it returns a value AND logged an error of its own', async () => {
+    const { client } = clientWith(KB, { result: 7, logs: ['[ERROR] something I handled myself'] });
+    expect(await runToolChain(client, 'return 7', 30_000)).toMatchObject({ ok: true, result: 7 });
+  });
+
+  it('runs with the runtime prelude in front of the agent\'s own code', async () => {
+    const { client, callToolChain } = clientWith(KB);
+    await runToolChain(client, 'return 1', 30_000);
+    expect(callToolChain).toHaveBeenCalledWith(`${CHAIN_RUNTIME_PRELUDE}return 1`, 30_000);
+  });
+});
+
+/**
+ * The namespace in the descriptions. Both Scenarios, because the two surfaces
+ * register the same tools under different names and ONE fixed example was
+ * necessarily wrong on one of them — which is how this was reported.
+ */
+describe('the description names the namespace this connection exposes', () => {
+  function descriptions(namespace: string): string {
+    return codeModeMetaTools(namespace)
+      .map((t) => `${t.name}\n${t.description ?? ''}`)
+      .join('\n');
+  }
+
+  it('reads KNOWLEDGE_BASE.read_file on a deployment whose namespace is KNOWLEDGE_BASE', () => {
+    const text = descriptions('KNOWLEDGE_BASE');
+    expect(text).toContain('KNOWLEDGE_BASE.read_file');
+    expect(text).toContain('`KNOWLEDGE_BASE.<tool>({ body: { ...args } })`');
+    expect(text).not.toContain('hexis.');
+  });
+
+  it('reads hexis.read_file through the local server, whose namespace is hexis', () => {
+    const text = descriptions('hexis');
+    expect(text).toContain('hexis.read_file');
+    expect(text).toContain('`hexis.<tool>({ body: { ...args } })`');
+    expect(text).not.toContain('KNOWLEDGE_BASE');
+  });
+
+  it('spells the example the way the runtime spells the namespace, so a copied call runs', () => {
+    // `@utcp/code-mode` exposes `global.<sanitized manual name>`; an example
+    // carrying the raw name would not be callable.
+    expect(descriptions('my-deployment')).toContain('my_deployment.read_file');
+  });
+
+  it('tells the agent the runtime has the four browser globals', () => {
+    const text = descriptions('KNOWLEDGE_BASE');
+    for (const name of ['atob', 'btoa', 'TextEncoder', 'TextDecoder']) expect(text).toContain(name);
+  });
+
+  it('tells the agent a timeout is answered and how far it may be raised', () => {
+    const text = descriptions('KNOWLEDGE_BASE');
+    expect(text).toContain(String(CHAIN_TIMEOUT_MAX_MS));
+    expect(text).toMatch(/timeout/);
+  });
+
+  it('is built per surface rather than shared, so one connection cannot serve another\'s name', () => {
+    expect(codeModeMetaTools('hexis')).not.toEqual(codeModeMetaTools('KNOWLEDGE_BASE'));
+  });
+});
+
+/**
+ * The example call, read off the catalog. A namespace on its own is not enough
+ * to write a working example: the hosted endpoint's knowledge-base tools arrive
+ * two segments deep (`KNOWLEDGE_BASE.read_file`) while the local server's
+ * arrive three (`hexis.hexis.read_file`), and the chain spells the second
+ * `hexis.hexis_read_file`. The Acceptance Criterion is that an agent copying
+ * the example gets a WORKING call, so the example has to be a name the catalog
+ * actually has.
+ */
+describe('the example call is one the catalog really has', () => {
+  it('is the hosted endpoint\'s own two-segment name', () => {
+    expect(chainCallExample('KNOWLEDGE_BASE', ['KNOWLEDGE_BASE.read_file', 'KNOWLEDGE_BASE.ask'])).toBe(
+      'KNOWLEDGE_BASE.read_file',
+    );
+  });
+
+  it('is the local server\'s three-segment name, which a namespace template would get wrong', () => {
+    expect(chainCallExample('hexis', ['hexis.hexis.read_file', 'hexis.hexis.ask'])).toBe(
+      'hexis.hexis_read_file',
+    );
+  });
+
+  it('prefers this connection\'s own namespace over another manual\'s', () => {
+    const call = chainCallExample('hexis', ['localbox.read_file', 'hexis.hexis.ask']);
+    expect(call).toBe('hexis.hexis_ask');
+  });
+
+  it('falls back to any tool at all when the connection\'s namespace has none', () => {
+    expect(chainCallExample('hexis', ['localbox.local_echo'])).toBe('localbox.local_echo');
+  });
+
+  it('falls back to the namespace shape only for an empty catalog, where nothing is callable anyway', () => {
+    expect(chainCallExample('hexis', [])).toBe('hexis.read_file');
+  });
+
+  it('puts that name in the descriptions, both surfaces', () => {
+    const hosted = codeModeMetaTools('KNOWLEDGE_BASE', ['KNOWLEDGE_BASE.read_file'])
+      .map((t) => t.description)
+      .join('\n');
+    const local = codeModeMetaTools('hexis', ['hexis.hexis.read_file']).map((t) => t.description).join('\n');
+    expect(hosted).toContain('KNOWLEDGE_BASE.read_file({ body:');
+    expect(local).toContain('hexis.hexis_read_file({ body:');
+    expect(local).not.toContain('KNOWLEDGE_BASE');
+  });
+});

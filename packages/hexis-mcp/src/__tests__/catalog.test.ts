@@ -223,6 +223,35 @@ describe('listedTools', () => {
     ).toBe('local_toolbox_local_toolbox_local_echo');
   });
 
+  /**
+   * The namespace in the meta-tools' examples is THIS server's, not the hosted
+   * endpoint's. The description used to be fixed text naming `KNOWLEDGE_BASE`,
+   * which no chain on this connection can call: a copied example died of
+   * `ReferenceError: KNOWLEDGE_BASE is not defined`, which is how this was
+   * reported.
+   */
+  it('writes the meta-tools examples against this server\'s own namespace', () => {
+    const utcp = (name: string) =>
+      ({ name, description: '', inputs: { type: 'object', properties: {} } }) as unknown as UtcpTool;
+    // The real shape: the remote manual is MCP-protocol and its single server
+    // shares the manual's name, so the tool arrives three segments deep and
+    // the chain spells it `hexis.hexis_read_file`.
+    const listed = listedTools([flattenManualTool(utcp('hexis.hexis.read_file'), REMOTE_MANUAL_NAME)]);
+    const chainTool = listed.find((t) => t.name === 'call_tool_chain')!;
+    expect(chainTool.description).toContain('hexis.hexis_read_file');
+    expect(chainTool.description).not.toContain('KNOWLEDGE_BASE');
+    expect(listed.find((t) => t.name === 'list_tools')!.description).toContain('hexis.hexis_read_file');
+  });
+
+  it('tells a chain it has the four browser globals, and that a timeout is answered', () => {
+    const chainTool = listedTools([tool('read_file')]).find((t) => t.name === 'call_tool_chain')!;
+    for (const name of ['atob', 'btoa', 'TextEncoder', 'TextDecoder']) {
+      expect(chainTool.description).toContain(name);
+    }
+    expect(chainTool.description).toMatch(/timed out|timeout/);
+    expect(chainTool.description).toContain('120000');
+  });
+
   it('drops a tool a meta-tool would shadow, so the listing never advertises an uncallable name', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const listed = listedTools([{ ...tool('read_file'), mcpName: 'call_tool_chain' }]);

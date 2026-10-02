@@ -86,7 +86,7 @@ describe('call_tool_chain image scrub', () => {
       callToolChain: vi.fn(async () => ({ result: { pic: sentinel, ok: true }, logs: [] as string[] })),
     } as unknown as CodeModeUtcpClient;
     const spill = { write: vi.fn(async () => ({ ref: '__tool_chain_spill__/x.json', bytes: 1 })) };
-    const tool = createCallToolChainTool(chainClient, spill as never) as unknown as {
+    const tool = createCallToolChainTool(chainClient, spill as never, 'KNOWLEDGE_BASE') as unknown as {
       execute: (input: { code: string }) => Promise<unknown>;
     };
     const out = JSON.stringify(await tool.execute({ code: 'return 1' }));
@@ -108,7 +108,7 @@ describe('call_tool_chain and a retired tool', () => {
 
   async function runWith(chainClient: CodeModeUtcpClient, code: string) {
     const { createCallToolChainTool } = await import('../code-mode.tool.js');
-    const tool = createCallToolChainTool(chainClient, { write: vi.fn() } as never) as unknown as {
+    const tool = createCallToolChainTool(chainClient, { write: vi.fn() } as never, 'KNOWLEDGE_BASE') as unknown as {
       execute: (input: { code: string }) => Promise<{ success: boolean; error?: string; result?: unknown }>;
     };
     return tool.execute({ code });

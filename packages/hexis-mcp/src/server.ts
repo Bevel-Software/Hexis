@@ -20,7 +20,7 @@ import '@utcp/cli';
 import { UtcpClientConfigSerializer, type CallTemplate, type Tool as UtcpTool } from '@utcp/sdk';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import {
-  CODE_MODE_META_TOOLS,
+  codeModeMetaTools,
   META_TOOL_NAMES,
   RETIRED_TOOL_NAMES,
   dispatchMetaTool,
@@ -238,6 +238,14 @@ export function withoutRemoteMetaTools(tools: ProxiedTool[]): ProxiedTool[] {
  * anyone which one.
  */
 export function listedTools(tools: ProxiedTool[]): McpTool[] {
+  // The examples in the meta-tools name the namespace THIS server registers
+  // the deployment under (`hexis`), not the one the hosted endpoint uses
+  // (`KNOWLEDGE_BASE`). One fixed example was wrong here, and a chain copied
+  // out of it died of `ReferenceError: KNOWLEDGE_BASE is not defined`.
+  const metaTools = codeModeMetaTools(
+    REMOTE_MANUAL_NAME,
+    tools.map((t) => t.utcpName),
+  );
   const seen = new Set<string>(META_TOOL_NAMES);
   const listed: McpTool[] = [];
   const dropped: string[] = [];
@@ -256,11 +264,11 @@ export function listedTools(tools: ProxiedTool[]): McpTool[] {
   }
   if (dropped.length) {
     console.error(
-      `[hexis-mcp] serving ${CODE_MODE_META_TOOLS.length + listed.length} tool(s); ` +
+      `[hexis-mcp] serving ${metaTools.length + listed.length} tool(s); ` +
         `dropped ${dropped.length} non-listable: ${dropped.join(', ')}`,
     );
   }
-  return [...CODE_MODE_META_TOOLS, ...listed];
+  return [...metaTools, ...listed];
 }
 
 /**
