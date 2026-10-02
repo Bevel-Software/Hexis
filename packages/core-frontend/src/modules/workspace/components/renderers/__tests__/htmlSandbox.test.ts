@@ -262,8 +262,10 @@ describe('sanitizeAgentHtml: links written in the page', () => {
     expect(hrefOf('<a href="java&#9;script:alert(1)">x</a>')).toBeNull();
   });
 
-  // Whitespace is stripped for the CHECK, not from the value: an href that
-  // survives is handed to the parent exactly as the author wrote it.
+  // Whitespace is stripped for the CHECK, not from the value: the sanitizer
+  // does not rewrite an author's markup. The CLICK is where it matters, and
+  // the nav bridge and the parent's resolver apply the same rule, so the
+  // address followed is `Board.html` and not a filename with spaces on it.
   it('keeps a padded page link without rewriting it', () => {
     expect(hrefOf('<a href="  Board.html  ">Board</a>')).toBe('  Board.html  ');
   });
@@ -275,10 +277,20 @@ describe('sanitizeAgentHtml: links written in the page', () => {
     expect(hrefOf(`<a href="${padded}">docs</a>`)).toBe(padded);
   });
 
-  // A scheme only a tab makes valid is nobody's markup, and the parent would
-  // refuse to open it anyway — keeping the href would leave a dead link.
-  it('takes the href of an address only whitespace-removal makes external', () => {
-    expect(hrefOf('<a href="htt\tps://example.com/docs">docs</a>')).toBeNull();
+  // A scheme only a tab makes valid is nobody's markup, but a browser reads
+  // `htt<tab>ps:` as `https:` and so does every reader of an href here — the
+  // bridge posts the normalized address and the parent opens it. Keeping it is
+  // therefore a live link to the address a browser would have followed, not a
+  // dead one. The decision is the same whichever way the tab falls: the
+  // normalized string is checked against the allowlist, so a tab cannot turn
+  // a rejected scheme into an accepted one.
+  it('keeps an address a browser reads as external even with a tab in the scheme', () => {
+    expect(hrefOf('<a href="htt\tps://example.com/docs">docs</a>')).toBe(
+      'htt\tps://example.com/docs',
+    );
+    // …and the same reading still refuses the dangerous ones.
+    expect(hrefOf('<a href="javas\tcript:alert(1)">x</a>')).toBeNull();
+    expect(hrefOf('<a href="da\tta:text/html,evil">x</a>')).toBeNull();
   });
 
   it('keeps an empty href alone, as an anchor with nowhere to go', () => {
@@ -409,6 +421,47 @@ describe('buildSandboxedHtml', () => {
     // Delegated anchor-click interception, leaving in-page fragments alone.
     expect(out).toContain("a[href]");
     expect(out).toContain("href.charAt(0) === '#'");
+  });
+
+  // The bridge half of the one-rule promise. The sanitizer keeps a padded
+  // href by reading past the padding; the bridge has to hand the parent the
+  // same reading, or the resolver builds a path out of the spaces. A padded
+  // `#goal` is still an in-page anchor and stays with the browser to scroll.
+  it('posts the href a browser would follow, and leaves a padded fragment alone', () => {
+    // No lib sources: `okOpts` carries an `export`, which a vm script cannot
+    // parse. The bridge is appended after the lib either way.
+    const out = buildSandboxedHtml({ ...okOpts, libModuleSources: [] });
+    const scriptBody = out.match(/<script type="module">([\s\S]*?)<\/script>/)![1];
+
+    type ClickEvent = { target: { closest: () => unknown }; preventDefault: () => void };
+    const handlers: ((e: ClickEvent) => void)[] = [];
+    const posted: unknown[] = [];
+    const ctx: Record<string, unknown> = {
+      document: {
+        addEventListener: (type: string, fn: (e: ClickEvent) => void) => {
+          if (type === 'click') handlers.push(fn);
+        },
+      },
+      parent: { postMessage: (msg: unknown) => posted.push(msg) },
+    };
+    vm.createContext(ctx);
+    vm.runInContext(`"use strict"; (function(){ ${scriptBody} }).call(undefined);`, ctx);
+    expect(handlers).toHaveLength(1);
+
+    const click = (href: string) => {
+      const anchor = { getAttribute: () => href };
+      handlers[0]({ target: { closest: () => anchor }, preventDefault: () => {} });
+    };
+
+    click('\n      Board.html\n    ');
+    click('  #goal  ');
+    click('  https://example.com/docs  ');
+    click('  ');
+
+    expect(posted).toEqual([
+      { type: 'bevel.navigate', href: 'Board.html' },
+      { type: 'bevel.navigate', href: 'https://example.com/docs' },
+    ]);
   });
 
   it('embeds the body HTML verbatim (sanitization happens upstream)', () => {

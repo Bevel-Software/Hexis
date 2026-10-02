@@ -32,7 +32,7 @@
  *      the agent's own scripts).
  */
 
-import { isPageLinkExternalHref } from '../../../../shared/markdown/hrefs';
+import { isPageLinkExternalHref, normalizeHref } from '../../../../shared/markdown/hrefs';
 
 const DROP_ELEMENTS = new Set([
   'link',
@@ -86,28 +86,6 @@ function isAllowedUrl(rawUrl: string): boolean {
   return false;
 }
 
-/**
- * Normalise a URL the way a browser does before anything looks at its scheme:
- * drop leading and trailing C0 controls and spaces, and remove every ASCII
- * tab, line feed and carriage return from inside it. ` JaVaScRiPt:alert(1)`
- * and `java&#9;script:alert(1)` are both `javascript:` to a browser that
- * navigates them, so they have to be `javascript:` to the check that decides
- * whether the href stays. HTML entities are already decoded by the time we
- * see the value — it comes out of `getAttribute`, past the parser.
- */
-function normalizeUrl(rawUrl: string): string {
-  // Tab, line feed and carriage return go from ANYWHERE in the URL; every
-  // other C0 control and the space go from the two ends. Written as a scan
-  // rather than a character-class range, which would be a regex full of
-  // literal control characters.
-  const inner = rawUrl.replace(/[\t\n\r]/g, '');
-  let start = 0;
-  let end = inner.length;
-  while (start < end && inner.charCodeAt(start) <= 0x20) start += 1;
-  while (end > start && inner.charCodeAt(end - 1) <= 0x20) end -= 1;
-  return inner.slice(start, end);
-}
-
 /** The scheme of a URL (`https:`), lower-cased, or null when it has none. */
 function schemeOf(url: string): string | null {
   const match = /^[a-z][a-z0-9+.-]*:/i.exec(url);
@@ -136,17 +114,20 @@ function schemeOf(url: string): string | null {
  * (`noopener,noreferrer`). This predicate is one of two gates on that path —
  * the other is `isOpenableExternalHref`, which guards the bridge against the
  * strings a page's SCRIPT can post without any anchor at all.
+ *
+ * The href is read through {@link normalizeHref}, the same rule the nav bridge
+ * and the parent's resolver apply, so the string judged here is the string
+ * followed: a padded `'  Board.html  '` is kept AND resolves against the
+ * page's folder as `Board.html`, rather than becoming a filename with spaces
+ * in it. HTML entities are already decoded by the time we see the value — it
+ * comes out of `getAttribute`, past the parser.
  */
 function isKeptLink(rawUrl: string): boolean {
-  const url = normalizeUrl(rawUrl);
+  const url = normalizeHref(rawUrl);
   if (url === '') return true; // an anchor with nowhere to go; nothing to strip
   if (url.startsWith('#')) return true; // a section of this same page
   if (url.startsWith('//')) return false; // protocol-relative
-  // Both forms have to pass. The NORMALIZED one so a scheme disguised with a
-  // tab or a stray control is judged the way a browser judges it; the RAW one
-  // because that is the string handed to the parent to open, and keeping an
-  // href the opener will refuse would leave the reader a dead link.
-  if (schemeOf(url)) return isPageLinkExternalHref(url) && isPageLinkExternalHref(rawUrl);
+  if (schemeOf(url)) return isPageLinkExternalHref(url);
   if (url.startsWith('/workspace/')) return true;
   return /\.(?:md|html|htm)(?:#|$)/i.test(url);
 }
@@ -329,11 +310,24 @@ const NAV_BRIDGE = `
   globalThis.bevel.openNode = navigate;
   globalThis.bevel.navigate = navigate;
   if (typeof document !== 'undefined') {
+    // A written href is read the way a browser reads it before the bridge
+    // decides anything — the same rule as \`normalizeHref\` in the parent, kept
+    // here in ES5 because this source is a string injected into the iframe and
+    // cannot import. Without it a padded '  #goal  ' would be posted to the
+    // parent instead of left to the browser to scroll.
+    function normalize(url) {
+      var s = url.replace(/[\\t\\n\\r]/g, '');
+      var start = 0;
+      var end = s.length;
+      while (start < end && s.charCodeAt(start) <= 0x20) start++;
+      while (end > start && s.charCodeAt(end - 1) <= 0x20) end--;
+      return s.slice(start, end);
+    }
     document.addEventListener('click', function (e) {
       var el = e.target;
       var a = el && el.closest ? el.closest('a[href]') : null;
       if (!a) return;
-      var href = a.getAttribute('href');
+      var href = normalize(a.getAttribute('href') || '');
       if (!href || href.charAt(0) === '#') return;
       e.preventDefault();
       navigate(href);

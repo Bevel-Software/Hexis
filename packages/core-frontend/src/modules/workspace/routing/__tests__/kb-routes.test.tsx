@@ -369,11 +369,46 @@ describe('useFileNav.openLink', () => {
     );
   });
 
-  it('opens an external page link in a new tab and leaves the app where it is', () => {
+  // Generated markup writes an href on its own line, and `sanitizeAgentHtml`
+  // keeps it by reading past the padding. The resolver has to read past the
+  // same padding or the kept link lands on a filename with spaces in it.
+  it('resolves a page link written on its own line, padding and all', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('\n      Board.html\n    ', 'knowledge-base/Dashboards/a.html');
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/knowledge-base/Dashboards/Board.html',
+    );
+  });
+
+  it('resolves a padded citation URL as a citation URL, not a relative path', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    result.current.openLink(
+      '  /workspace/bob%2Fmain/knowledge-base/Reports/Q3.html#totals  ',
+      'knowledge-base/Dashboards/a.html',
+    );
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/bob%2Fmain/knowledge-base/Reports/Q3.html#totals',
+    );
+  });
+
+  it('keeps a padded same-document anchor on the file it sits in', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('  #goal  ', 'knowledge-base/Dashboards/a.html');
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/knowledge-base/Dashboards/a.html#goal',
+    );
+  });
+
+  // `window.open` would strip the padding itself, but the address handed over
+  // is the one the allowlist approved, so it goes over clean.
+  it('opens a padded external link at the address it names', () => {
     navigateMock.mockClear();
     const open = vi.spyOn(window, 'open').mockReturnValue(null);
     const { result } = renderNav('alice/draft');
-    result.current.openLink('https://example.com/docs', 'knowledge-base/Dashboards/a.html');
+    result.current.openLink('\n  https://example.com/docs\n', 'knowledge-base/Dashboards/a.html');
     expect(open).toHaveBeenCalledWith('https://example.com/docs', '_blank', 'noopener,noreferrer');
     expect(navigateMock).not.toHaveBeenCalled();
     open.mockRestore();

@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { isExternalHref, isOpenableExternalHref, isPageLinkExternalHref } from '../hrefs';
+import {
+  isExternalHref,
+  isOpenableExternalHref,
+  isPageLinkExternalHref,
+  normalizeHref,
+} from '../hrefs';
 
 // Generated markup puts an href on its own line often enough that the padding
 // has to be invisible to the scheme check — otherwise a perfectly ordinary
@@ -68,5 +73,39 @@ describe('isPageLinkExternalHref', () => {
       expect(isOpenableExternalHref(href)).toBe(true);
       expect(isExternalHref(href)).toBe(true);
     }
+  });
+
+  // The asymmetry the two lists are written around, pinned from BOTH sides.
+  // A protocol-relative address resolves against the page's own scheme: for
+  // the app, always http(s), so the opener takes it; for a sandboxed page,
+  // `about:srcdoc`, where there is nothing sensible to inherit, so the
+  // sanitizer drops it. Rejecting it in one place only is the point.
+  it('lets the opener follow a protocol-relative address the markup may not keep', () => {
+    expect(isOpenableExternalHref('//cdn.example.com/x.js')).toBe(true);
+    expect(isOpenableExternalHref('  //cdn.example.com/x.js')).toBe(true);
+    expect(isPageLinkExternalHref('//cdn.example.com/x.js')).toBe(false);
+  });
+});
+
+// Every reader of an href runs the same rule, so the string a check judges is
+// the string the app then follows.
+describe('normalizeHref', () => {
+  it('drops the padding a browser drops', () => {
+    expect(normalizeHref('\n      https://example.com/docs\n    ')).toBe(
+      'https://example.com/docs',
+    );
+    expect(normalizeHref('  Board.html  ')).toBe('Board.html');
+    expect(normalizeHref('  #goal  ')).toBe('#goal');
+  });
+
+  it('removes a tab, line feed or carriage return from inside', () => {
+    expect(normalizeHref('java\tscript:alert(1)')).toBe('javascript:alert(1)');
+    expect(normalizeHref('java\nscript:alert(1)')).toBe('javascript:alert(1)');
+    expect(normalizeHref('java\rscript:alert(1)')).toBe('javascript:alert(1)');
+  });
+
+  it('leaves an ordinary href alone, spaces inside a name included', () => {
+    expect(normalizeHref('Knowledge/Notes today.md#goal')).toBe('Knowledge/Notes today.md#goal');
+    expect(normalizeHref('')).toBe('');
   });
 });
