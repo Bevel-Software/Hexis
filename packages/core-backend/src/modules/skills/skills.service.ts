@@ -50,6 +50,14 @@ interface Catalog {
   /** Absolute path of that workspace's KB clone; empty when there was none to read. */
   kbRoot: string;
   skills: ParsedSkill[];
+  /**
+   * Folder digests computed out of THIS catalog's clone, by skill folder —
+   * filled lazily by `digestOf`, so it lives exactly as long as the catalog
+   * does. On the released catalog that is the cache's TTL (and a merge to
+   * default drops both together); on a branch catalog, which is never cached,
+   * it is one call.
+   */
+  digests: Map<string, Promise<string | null>>;
 }
 
 /**
@@ -342,10 +350,10 @@ export class SkillService implements ISkillService {
     try {
       wsId = (await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch)).id;
     } catch {
-      return { wsId: this.kb.defaultWorkspaceId(), kbRoot: '', skills: [] };
+      return { wsId: this.kb.defaultWorkspaceId(), kbRoot: '', skills: [], digests: new Map() };
     }
     const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
-    return { wsId, kbRoot, skills: await this.scanTree(kbRoot) };
+    return { wsId, kbRoot, skills: await this.scanTree(kbRoot), digests: new Map() };
   }
 
   /**
@@ -364,7 +372,7 @@ export class SkillService implements ISkillService {
   private async readBranch(branch: string): Promise<Catalog> {
     const wsId = (await this.workspaceService.getOrCreateForBranch(branch)).id;
     const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
-    return { wsId, kbRoot, skills: await this.scanTree(kbRoot) };
+    return { wsId, kbRoot, skills: await this.scanTree(kbRoot), digests: new Map() };
   }
 
   /**
@@ -378,15 +386,46 @@ export class SkillService implements ISkillService {
    * A file that cannot be read on either side counts as a difference — unable
    * to prove the branch's copy is the released one, the honest answer is that
    * it is not approved.
+   *
+   * Both sides go through `digestOf`, so the RELEASED side is read once per
+   * cached catalog rather than once per skill per call: a listing of N skills
+   * used to re-hash all N released folders on every call, and each `getSkill`
+   * re-hashed one of them again.
    */
   private async differs(released: Catalog, branchCatalog: Catalog, skill: ParsedSkill): Promise<boolean> {
     const mirror = released.skills.find((s) => s.summary.name === skill.summary.name);
     if (!mirror || mirror.summary.path !== skill.summary.path) return true;
     const [onBranch, onDefault] = await Promise.all([
-      folderDigest(branchCatalog.kbRoot, skill),
-      folderDigest(released.kbRoot, mirror),
+      this.digestOf(branchCatalog, skill),
+      this.digestOf(released, mirror),
     ]);
     return onBranch === null || onDefault === null || onBranch !== onDefault;
+  }
+
+  /**
+   * One skill folder's digest in one catalog's clone, computed at most once
+   * for that catalog. The folder path is a unique key within a catalog — a
+   * folder holds one `SKILL.md`, so it yields one skill — and the file list
+   * the digest covers comes from that same catalog's scan.
+   *
+   * Memoizing means a released folder's ASSETS are now as stale as the rest
+   * of the catalog that names them: both are refreshed by the TTL and dropped
+   * together by `invalidate()` on a merge to the default branch. A branch
+   * catalog is built per call and so is its memo, which is what a draft read
+   * needs — the agent's own last write must show.
+   */
+  private digestOf(catalog: Catalog, skill: ParsedSkill): Promise<string | null> {
+    const key = skill.summary.path;
+    const memo = catalog.digests.get(key);
+    if (memo) return memo;
+    // The promise, not the value: skills asked for at once share one read.
+    // A rejection is dropped rather than kept — `folderDigest` answers `null`
+    // for a file it cannot read, so a throw here is a defect, and holding it
+    // would answer with it for the catalog's whole life.
+    const pending = folderDigest(catalog.kbRoot, skill);
+    catalog.digests.set(key, pending);
+    pending.catch(() => catalog.digests.delete(key));
+    return pending;
   }
 
   /** Scan one clone's `Skills/` and `Plugins/` roots into a catalog's skills. */

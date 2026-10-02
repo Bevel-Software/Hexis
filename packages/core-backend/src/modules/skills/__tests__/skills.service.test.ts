@@ -672,6 +672,32 @@ describe('SkillService', () => {
       expect(Object.keys(await named(service))).toContain('make-deck');
     });
 
+    // The `unmerged` verdict compares two folder digests, and the released
+    // side of that comparison is memoized per cached catalog (it used to be
+    // re-hashed once per skill per call). These two pin what the memo may and
+    // may not do.
+    test('the memo never makes a draft stale: an edit on the branch is seen on the next call', async () => {
+      const service = svc();
+      expect((await named(service))['rfi'].unmerged).toBeUndefined();
+      await writeFile(join(draftKb(), 'Plugins', 'rfi', 'scripts', 'build_xlsx.py'), 'print("on the branch")\n');
+      // Same instance, no `invalidate()`: the draft's digests are built per
+      // call along with its catalog, so the agent's own last write shows.
+      expect((await named(service))['rfi']).toMatchObject({ unmerged: true, branch: DRAFT });
+    });
+
+    test('the released digests live and die with the released catalog', async () => {
+      const service = svc();
+      expect((await named(service))['rfi'].unmerged).toBeUndefined();
+      // An asset of the RELEASED copy changes. The catalog caches the file
+      // list, not the contents, so this is visible to a digest the moment one
+      // is taken — and the memo holds the pre-change one for the same TTL the
+      // rest of the released answer is held for.
+      await writeFile(join(root, wsId, KB_DIR, 'Plugins', 'rfi', 'scripts', 'build_xlsx.py'), 'print("released")\n');
+      expect((await named(service))['rfi'].unmerged).toBeUndefined();
+      service.invalidate();
+      expect((await named(service))['rfi']).toMatchObject({ unmerged: true, branch: DRAFT });
+    });
+
     test('the global set (no caller) can be read from a branch too', async () => {
       await writeDeck();
       const list = await svc().listSkills(undefined, { branch: DRAFT });

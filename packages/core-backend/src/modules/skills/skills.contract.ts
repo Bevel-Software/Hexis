@@ -87,10 +87,11 @@ export type GetSkillResult =
   | { ok: true; kind: 'file'; file: SkillFileContent }
   | { ok: false; error: 'not_found' | 'forbidden' | 'invalid_file' }
   /**
-   * A `version` was asked for that no commit of the skill's `SKILL.md` on the
-   * default branch declared. `versions` is every version the history did
-   * declare, newest first — the caller picks from those or asks for the
-   * latest by leaving `version` out.
+   * A `version` was asked for that no commit of the skill's `SKILL.md`
+   * declared in the history searched — the default branch's, or `branch`'s own
+   * when a branch was named. `versions` is every version that history did
+   * declare, newest first, so it too is that branch's answer: the caller picks
+   * from those or asks for the latest by leaving `version` out.
    */
   | { ok: false; error: 'version_not_found'; versions: string[] };
 
@@ -122,11 +123,15 @@ export interface GetSkillOptions {
    * The version the skill declared in the copy to load — its
    * `metadata.version`, else a top-level `version`, else `lifecycle.version`.
    * Omitted, the skill is loaded as it is now — the latest. Given, the
-   * default branch's history of the skill's `SKILL.md` is searched newest
-   * first for the most recent commit that declared exactly this version, and
-   * the skill (body, bundled files, or the one `file` asked for) is served as
-   * it was at that commit. Read access is the caller's access to the skill as
-   * it is now: a skill you may read, you may read the history of.
+   * history of the skill's `SKILL.md` is searched newest first for the most
+   * recent commit that declared exactly this version, and the skill (body,
+   * bundled files, or the one `file` asked for) is served as it was at that
+   * commit. Read access is the caller's access to the skill as it is now: a
+   * skill you may read, you may read the history of.
+   *
+   * The history searched is the one belonging to the branch being read: the
+   * default branch's, or — with `branch` — that branch's own, including the
+   * `versions` a `version_not_found` lists.
    */
   version?: string;
   /**
@@ -146,9 +151,12 @@ export interface GetSkillOptions {
 }
 
 /**
- * The slice of git the skill service reads history through — the default
- * branch's own clone, never a caller's draft. Narrow on purpose: the catalog
- * is a disk scan and needs none of this; only a `version` asks for history.
+ * The slice of git the skill service reads history through. Every call names
+ * the workspace to read in, which is always the clone the skill itself was
+ * scanned out of — the default branch's, or the draft a `branch` named, so a
+ * version asked for on a branch is answered from that branch's history.
+ * Narrow on purpose: the catalog is a disk scan and needs none of this; only
+ * a `version` asks for history.
  */
 export interface SkillHistorySource {
   /** The commits (newest first) on `ref` that touched `repoRelativePath`, at most `limit`. */
