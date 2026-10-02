@@ -94,14 +94,20 @@ describe("what names the guide, under the default name and under a deployment's 
   it('lists the platform files under the configured name, and no longer under AGENTS.md', () => {
     kb.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
     const rules = sharedFileRulesSection(kb.layout);
-    expect(rules).toContain('`access.md`, `roles.yaml`, `.bevelignore`, `HEXIS.md`');
+    // Listed with the depth each one counts at — `access.md` and
+    // `.bevelignore` govern the folder they sit in, the other two are read from
+    // the root — because the names alone would have an agent refuse a nested
+    // `HEXIS.md` it may rename.
+    expect(rules).toContain('`access.md` or `.bevelignore` in any folder, `roles.yaml` or `HEXIS.md` at the repository root');
     // The customer's file is content on such a deployment, so the rule that
     // refuses a move must not claim it.
     expect(rules.replace(/`AGENTS\.md` if it also exists/g, '')).not.toContain('`AGENTS.md`');
   });
 
   it('keeps naming AGENTS.md as a platform file under the default name', () => {
-    expect(sharedFileRulesSection(kb.layout)).toContain('`access.md`, `roles.yaml`, `.bevelignore`, `AGENTS.md`');
+    expect(sharedFileRulesSection(kb.layout)).toContain(
+      '`access.md` or `.bevelignore` in any folder, `roles.yaml` or `AGENTS.md` at the repository root',
+    );
   });
 
   /**

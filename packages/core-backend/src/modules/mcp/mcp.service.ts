@@ -29,6 +29,7 @@ import { CodeModeUtcpClient } from '@utcp/code-mode';
 import {
   CODE_MODE_META_TOOLS,
   META_TOOL_NAMES,
+  withSharedRulesPointer,
   dispatchMetaTool,
   dispatchToolCall,
   registerManual,
@@ -66,6 +67,7 @@ import {
   composeAgentInstructions,
   prefixToolDescription,
   PREFIXED_TOOLS,
+  sharedRulesPointer,
   type AgentPreambleReader,
   type ComposedAgentInstructions,
 } from '../agent-instructions/index.js';
@@ -474,8 +476,13 @@ export class McpService {
         );
       }
       return {
-        // Code-mode meta-tools first, then every validated direct tool.
-        tools: [...CODE_MODE_META_TOOLS, ...direct],
+        // Code-mode meta-tools first, then every validated direct tool. The
+        // chain's description ends with the same pointer every file tool ends
+        // with — what a chained read does to an IMAGE is one of the shared
+        // rules, and the clients that drop `instructions` have the description
+        // and the guide to go on. Composed here because the guide's name is
+        // this deployment's setting.
+        tools: [...withSharedRulesPointer(sharedRulesPointer(this.opts.kbLayout?.())), ...direct],
       };
     });
 

@@ -1608,8 +1608,16 @@ describe('office documents and PDFs', () => {
       expect(def!.description!.endsWith(pointer), name).toBe(true);
       // Once, at the end — not once per paragraph that used to be appended.
       expect(def!.description!.split(pointer), name).toHaveLength(2);
-      // The content rule is in the two shared places now (see
-      // agent-instructions/__tests__/shared-file-rules.test.ts), not here.
+      // EVERY shared rule, in full, is in the two shared places now (see
+      // agent-instructions/__tests__/shared-file-rules.test.ts) and in no
+      // description. Checked on the whole body rather than on a phrase: the
+      // drift this PR exists to prevent is a paragraph pasted back onto a
+      // tool, and naming only two marker phrases would catch two of eight.
+      for (const rule of sharedFileRules(testKbContext().layout)) {
+        expect(def!.description, `${name} / ${rule.id}`).not.toContain(rule.body);
+      }
+      // The two lead-in labels the paragraphs used to arrive under are gone
+      // with them — a description carrying one is carrying the old text.
       expect(def!.description, name).not.toContain('Content rule (the same on every file tool)');
       expect(def!.description, name).not.toContain('Before your first read or change in a workspace');
     }

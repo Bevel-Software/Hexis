@@ -2109,7 +2109,8 @@ export function registerWorkspaceTools(
       'Delete a workspace FOLDER and every file under it, at any depth; the whole folder lands as ONE committed + pushed change as you — all of it or none of it — then the empty folder is removed. This is the one way a folder goes away: the folder that held it stays, even if this was all it had, and a folder holding nothing but its empty-folder placeholder counts as empty. ' +
       'The dry run answers `{ path, kind: "folder", descendants, files, filesTruncated, allowed, reason? }` — `descendants` is ' +
       'the file count, `files` names up to 100 of them — and a non-empty folder wants `confirm: true`. ' +
-      'Beyond what the shared rules refuse, a folder holding any file you may not write is refused, and a path that is a FILE ' +
+      'Beyond what the shared rules refuse, a folder HOLDING a symbolic link, or any file you may not write, is refused ' +
+      '(the link itself is never removed), and a path that is a FILE ' +
       'is refused with a pointer to `delete_file`. You must be able to write the folder\'s own platform files too: they go ' +
       'with it in that same one change, so its files are never left ungoverned part-way.',
     inputs: {

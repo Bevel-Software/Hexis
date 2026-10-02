@@ -47,20 +47,31 @@ export const TEMPLATE_SOURCE_FALLBACKS: ReadonlyMap<string, string> = new Map([
 export const SHARED_FILE_RULES_PLACEHOLDER = '{{sharedFileRules}}';
 
 /**
- * Every placeholder a template file carries, filled: the shared file rules
- * first, on the text an author wrote, then the layout's names. ONE function,
- * because the two writers of template content — the top-up step through
- * {@link TemplateSource.read} and the empty-remote seeder, which streams files
- * itself — must render identically or a freshly seeded knowledge base would
- * carry a guide with a literal `{{sharedFileRules}}` in it.
+ * Every placeholder a template file carries, filled: the layout's names on the
+ * text an author wrote, THEN the shared file rules dropped into the hole they
+ * left. ONE function, because the two writers of template content — the top-up
+ * step through {@link TemplateSource.read} and the empty-remote seeder, which
+ * streams files itself — must render identically or a freshly seeded knowledge
+ * base would carry a guide with a literal `{{sharedFileRules}}` in it.
  *
- * A replacer FUNCTION for the rules: they carry `$` sequences (`${VAR}`) that a
- * string replacement would read as capture-group syntax.
+ * THAT ORDER, not the other one: the rules are already rendered for this
+ * layout (`sharedFileRulesSection` takes it), so running the layout renderer
+ * over them again would only reach text they STATE rather than contain — a
+ * folder a deployment really named `{{skillsDir}}` would come back as some
+ * other folder's name, and the rule would then point at a folder that is not
+ * the one it refuses a move out of. Injecting last leaves the section byte for
+ * byte what both channels carry, and costs nothing:
+ * `renderKbLayoutPlaceholders` touches only its own four tokens, so the
+ * placeholder for the rules survives the first pass untouched.
+ *
+ * A replacer FUNCTION for the rules: they carry dollar sequences (a `${VAR}`
+ * a template writes) that a string replacement would read as capture-group
+ * syntax.
  */
 export function renderTemplateText(text: string, layout: KbLayout): string {
-  return renderKbLayoutPlaceholders(
-    text.replaceAll(SHARED_FILE_RULES_PLACEHOLDER, () => sharedFileRulesSection(layout)),
-    layout,
+  return renderKbLayoutPlaceholders(text, layout).replaceAll(
+    SHARED_FILE_RULES_PLACEHOLDER,
+    () => sharedFileRulesSection(layout),
   );
 }
 

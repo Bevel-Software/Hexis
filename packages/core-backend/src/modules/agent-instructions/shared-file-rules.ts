@@ -29,7 +29,13 @@
  * deployment setting, so nothing here may snapshot `AGENTS.md`.
  */
 
-import { agentsFileOf, LEGACY_AGENTS_FILE, platformFileNames, type KbLayout } from '@bevel-software/platform-shared';
+import {
+  DEFAULT_KB_LAYOUT,
+  agentsFileOf,
+  LEGACY_AGENTS_FILE,
+  platformFilesByDepth,
+  type KbLayout,
+} from '@bevel-software/platform-shared';
 
 /** The heading the rules live under, in both places and in the pointer sentence. */
 export const SHARED_RULES_SECTION = 'Working with files';
@@ -85,8 +91,9 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
         'read_file returns text for text files and extracted text for documents ' +
         '(.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf, .eml/.msg); write_file, write_files and edit_file accept TEXT only — ' +
         'they refuse documents, images, archives and other binary files (legacy .doc/.ppt/.xls included) with kind ' +
-        "`binary_not_writable`, naming the file's kind and the tool to use instead; copy_file, move_file, delete_file " +
-        'and unzip act on bytes of any kind; new binary content arrives through upload (`request_upload_token` + ' +
+        "`binary_not_writable`, naming the file's kind and the tool to use instead; copy_file, move_file and delete_file " +
+        'act on bytes of any kind and unzip extracts the entries of a `.zip`; new binary content arrives through ' +
+        'upload (`request_upload_token` + ' +
         '`apply_upload` where offered, otherwise Upload in the app). file_stat reports `contentMode` ' +
         '(`text` | `document` | `binary`) so you can decide before acting.\n\n' +
         'Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods) and PDFs read as EXTRACTED text under an ' +
@@ -131,13 +138,14 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
     },
     {
       id: 'dry-run-confirm',
-      heading: 'Dry-run before a move or a delete',
+      heading: 'Dry-run before a move or a folder delete',
       body:
-        'move_file, delete_file and delete_folder take `dryRun: true`: it changes nothing and answers the impact — ' +
+        'move_file and delete_folder take `dryRun: true`: it changes nothing and answers the impact — ' +
         'what the call would touch, `allowed`, and `reason` when it may not run. A non-empty folder is deleted, and a ' +
         'move that changes your access runs, only with `confirm: true`; without it the call changes nothing and ' +
         'returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — ' +
-        'dry-run, check the impact, then confirm.',
+        'dry-run, check the impact, then confirm. delete_file takes neither: it removes the one file you named, so ' +
+        'check it first with file_stat (`deletable`) if you are unsure.',
     },
     {
       id: 'managed-items',
@@ -168,11 +176,18 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
  * The platform files as the rules list them — from the one function that knows
  * which they are, so the list cannot drift from what actually refuses a move,
  * and the guide appears under this deployment's name for it.
+ *
+ * WITH THE DEPTH each name counts at, because the name alone is half the rule:
+ * `access.md` governs the folder it sits in and `.bevelignore` layers, so both
+ * are platform files wherever they are; `roles.yaml` and the guide are read
+ * from the repository root only, so a nested copy of either is ordinary
+ * content that moves and deletes like any page. An agent told only the names
+ * refuses a rename it may make, and trusts a nested `access.md` it may not.
  */
 function platformFileList(layout: KbLayout): string {
-  return platformFileNames(layout)
-    .map((name) => `\`${name}\``)
-    .join(', ');
+  const { anyDepth, rootOnly } = platformFilesByDepth(layout);
+  const quoted = (names: readonly string[]): string => names.map((name) => `\`${name}\``).join(' or ');
+  return `${quoted(anyDepth)} in any folder, ${quoted(rootOnly)} at the repository root`;
 }
 
 /**
@@ -219,7 +234,11 @@ export function sharedFileRulesSection(layout: KbLayout): string {
  * The one sentence a tool description ends with, in place of the paragraphs it
  * used to carry. Short on purpose: it costs every description the same ~80
  * characters, and its whole job is to name the section and the file to read.
+ *
+ * An absent layout means the default one, as it does in
+ * `composeAgentInstructions`: a caller reading the layout from configuration
+ * gets `undefined` when none is set, and the pointer must still name a file.
  */
-export function sharedRulesPointer(layout: KbLayout): string {
+export function sharedRulesPointer(layout: KbLayout = DEFAULT_KB_LAYOUT): string {
   return ` Shared rules for all file tools: see "${SHARED_RULES_SECTION}" in ${agentsFileOf(layout)}.`;
 }

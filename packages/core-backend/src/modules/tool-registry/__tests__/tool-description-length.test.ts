@@ -1,6 +1,6 @@
 import express from 'express';
 import { describe, expect, it } from 'vitest';
-import { CODE_MODE_META_TOOLS } from '@bevel-software/platform-mcp-core';
+import { CALL_TOOL_CHAIN_NAME, CODE_MODE_META_TOOLS, withSharedRulesPointer } from '@bevel-software/platform-mcp-core';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { ToolRegistry } from '../tool-registry.js';
 import type { UtcpTool } from '../tool.contract.js';
@@ -16,7 +16,8 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { UuidSessionSink } from '../../workspace/session-sink.js';
 import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
 import { TOOL_DESCRIPTION_CAP, clientVisibleLength } from '../description-length.js';
-import { TOOL_PREFIX_CAP, sharedRulesPointer } from '../../agent-instructions/index.js';
+import { TOOL_PREFIX_CAP, sharedFileRules, sharedRulesPointer } from '../../agent-instructions/index.js';
+import { isPlatformFile, platformFilesByDepth } from '@bevel-software/platform-shared';
 
 /**
  * The cap exists because clients cut a long tool description, and they cut it
@@ -114,6 +115,10 @@ describe('no Hexis tool description is long enough to be cut', () => {
     expect(clientVisibleLength(padded)).toBeGreaterThan(TOOL_DESCRIPTION_CAP);
     // A tool with no description at all is not over the cap.
     expect(clientVisibleLength({ name: 'nothing' } as UtcpTool)).toBe(0);
+    // Unless it is a PREFIXED one: the prefix is sent on its own then (no
+    // description, so no blank line either), and that text is what the client
+    // was handed. Measuring it as nothing would hide the only thing it got.
+    expect(clientVisibleLength({ name: 'read_file' } as UtcpTool)).toBe(TOOL_PREFIX_CAP);
   });
 
   it('measures the catalog, which is what a client lists — and says what is outside it', async () => {
@@ -183,5 +188,70 @@ describe('every file tool ends with the pointer and carries no shared paragraph'
       const carriers = tools.filter((t) => (t.description ?? '').includes(fragment)).map((t) => t.name);
       expect(carriers, `"${fragment}" is a shared rule and belongs in the shared places only`).toEqual([]);
     }
+  });
+});
+
+describe('the shared rules describe the tools they name', () => {
+  it('ends the chain description with the pointer too, under the cap', () => {
+    // `call_tool_chain` carries a file rule of its own — what a chained read
+    // does to an IMAGE — and the clients that drop the handshake
+    // `instructions` see only descriptions, so it gets the same pointer every
+    // file tool ends with. Composed at the mount, because `mcp-core` may not
+    // spell a guide name that is a deployment setting.
+    const pointer = sharedRulesPointer(testKbContext().layout);
+    const served = withSharedRulesPointer(pointer);
+    const chain = served.find((t) => t.name === CALL_TOOL_CHAIN_NAME)!;
+    expect(chain.description!.endsWith(pointer)).toBe(true);
+    expect(clientVisibleLength(chain as UtcpTool)).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
+    // The other two describe the registry, not a file: they gain nothing and
+    // are the very same objects.
+    for (const tool of served.filter((t) => t.name !== CALL_TOOL_CHAIN_NAME)) {
+      expect(tool.description).toBe(CODE_MODE_META_TOOLS.find((t) => t.name === tool.name)!.description);
+    }
+  });
+
+  it('names a dry run only on the tools that take one', async () => {
+    // A rule is worse than no rule when it promises an argument the tool
+    // rejects: `delete_file` has no `dryRun`, so an agent told to preflight a
+    // single-file delete gets a validation error on the safe call and learns to
+    // skip it. Read off the schemas rather than asserted by hand.
+    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'dry-run-confirm')!;
+    const tools = await hexisTools();
+    // `toolDef` wraps a tool's own inputs under `body`, which is the schema a
+    // client validates against — so that is where the argument either is or is not.
+    const takesDryRun = (name: string): boolean => {
+      const inputs = tools.find((t) => t.name === name)?.inputs as
+        | { properties?: { body?: { properties?: Record<string, unknown> } } }
+        | undefined;
+      return inputs?.properties?.body?.properties?.dryRun !== undefined;
+    };
+    expect(takesDryRun('move_file')).toBe(true);
+    expect(takesDryRun('delete_folder')).toBe(true);
+    expect(takesDryRun('delete_file')).toBe(false);
+    for (const name of ['move_file', 'delete_folder']) {
+      expect(rule.body, name).toContain(name);
+    }
+    // Named, but as the tool that has none — never as one that takes one.
+    expect(rule.body).toContain('delete_file takes neither');
+    expect(rule.body).not.toContain('move_file, delete_file and delete_folder take');
+  });
+
+  it('gives each platform file the depth it actually counts at', () => {
+    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'managed-items')!;
+    const { anyDepth, rootOnly } = platformFilesByDepth(testKbContext().layout);
+    // The split is the half of the rule a list of names leaves out, and
+    // `isPlatformFile` is the predicate the prose has to match.
+    expect(rule.body).toContain(`${anyDepth.map((n) => `\`${n}\``).join(' or ')} in any folder`);
+    expect(rule.body).toContain(`${rootOnly.map((n) => `\`${n}\``).join(' or ')} at the repository root`);
+    for (const name of anyDepth) expect(isPlatformFile(`Deep/Folder/${name}`, testKbContext().layout), name).toBe(true);
+    for (const name of rootOnly) expect(isPlatformFile(`Deep/Folder/${name}`, testKbContext().layout), name).toBe(false);
+  });
+
+  it('says what unzip extracts, rather than that it takes any bytes', () => {
+    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'content-kinds')!;
+    // `unzip` refuses anything but a `.zip` (`workspace.service.ts`: "Only .zip
+    // files can be extracted"), so the byte-tool clause must not sweep it in.
+    expect(rule.body).toContain('unzip extracts the entries of a `.zip`');
+    expect(rule.body).not.toContain('and unzip act on bytes of any kind');
   });
 });

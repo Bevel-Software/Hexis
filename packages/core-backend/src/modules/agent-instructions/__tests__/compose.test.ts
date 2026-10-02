@@ -24,7 +24,7 @@ import {
 const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT);
 
 describe('composeAgentInstructions: the handshake text', () => {
-  it('sends the header alone for an absent, empty, whitespace or comment-only preamble', () => {
+  it('sends the platform text alone — header and shared rules — for an absent, empty, whitespace or comment-only preamble', () => {
     for (const raw of [null, '', '   \n\n', '<!-- notes to myself -->', '<!--\nline one\nline two\n-->\n']) {
       const out = composeAgentInstructions(raw);
       expect(out.instructions, JSON.stringify(raw)).toBe(PLATFORM);

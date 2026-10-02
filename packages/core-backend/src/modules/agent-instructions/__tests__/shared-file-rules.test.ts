@@ -80,7 +80,8 @@ describe('the shared file rules are one text, in two places', () => {
   it('carries the whole content rule — the refused families, the byte tools and the upload path', async () => {
     for (const text of [composeAgentInstructions(null).instructions, renderTemplateText(await guideTemplate(), DEFAULT_KB_LAYOUT)]) {
       expect(text).toContain('`binary_not_writable`');
-      expect(text).toContain('copy_file, move_file, delete_file and unzip act on bytes of any kind');
+      expect(text).toContain('copy_file, move_file and delete_file act on bytes of any kind');
+      expect(text).toContain('unzip extracts the entries of a `.zip`');
       expect(text).toContain('`request_upload_token` + `apply_upload`');
       expect(text).toContain('`contentMode`');
       expect(text).toContain('.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf');
@@ -127,12 +128,28 @@ describe('the guide template asks for the rules rather than repeating them', () 
   it('renders the placeholder nowhere else, so other managed files are untouched', async () => {
     const access = await readFile(path.join(defaultKbTemplateDir(), 'access.md'), 'utf8');
     expect(access).not.toContain(SHARED_FILE_RULES_PLACEHOLDER);
-    expect(renderTemplateText(access, DEFAULT_KB_LAYOUT)).toBe(renderTemplateText(access, DEFAULT_KB_LAYOUT));
+    // So rendering it gains no rule text: whatever the layout renderer does to
+    // its own tokens, the section is nowhere in the result.
+    const rendered = renderTemplateText(access, DEFAULT_KB_LAYOUT);
+    expect(rendered).not.toContain(sharedFileRulesSection(DEFAULT_KB_LAYOUT));
+    expect(rendered).not.toContain(`## ${SHARED_RULES_SECTION}`);
   });
 
   it('leaves no placeholder behind once rendered', async () => {
     const guide = renderTemplateText(await guideTemplate(), DEFAULT_KB_LAYOUT);
     expect(guide).not.toContain('{{');
+  });
+
+  it('renders the layout tokens first, then injects the rules — so the rules are never re-rendered', async () => {
+    // The injection runs LAST, so nothing the section itself says is fed back
+    // through the layout renderer. A guide whose author text names the skills
+    // folder still gets the real name, and the section is byte for byte the
+    // string the handshake carries.
+    const layout = { ...DEFAULT_KB_LAYOUT, skillsDir: 'Playbooks' };
+    const section = sharedFileRulesSection(layout);
+    const template = `Skills live in {{skillsDir}}/.\n\n${SHARED_FILE_RULES_PLACEHOLDER}\n`;
+    const rendered = renderTemplateText(template, layout);
+    expect(rendered).toBe(`Skills live in Playbooks/.\n\n${section}\n`);
   });
 });
 

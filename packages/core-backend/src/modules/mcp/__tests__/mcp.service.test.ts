@@ -12,7 +12,7 @@ import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
-import { TOOL_PREFIX_LINE, platformInstructions } from '../../agent-instructions/index.js';
+import { TOOL_PREFIX_LINE, platformInstructions, sharedRulesPointer } from '../../agent-instructions/index.js';
 import type { AgentEventInput, IAgentEventRecorder } from '../../audit/audit.contract.js';
 
 /** The platform-owned part of the handshake text: the header plus the shared file rules. */
@@ -264,6 +264,25 @@ describe('McpService (UTCP→MCP proxy)', () => {
     // {body} envelope UTCP dispatches on (and that call_tool_chain documents).
     const askSchema = byName.ask.inputSchema as { properties: { body?: { properties?: Record<string, unknown> } } };
     expect(askSchema.properties.body?.properties?.prompt).toBeDefined();
+  });
+
+  it('ends the served call_tool_chain description with the shared-rules pointer', async () => {
+    // What a chained read does to an IMAGE is one of the rules the file tools
+    // share, so it is stated once — in the handshake instructions and in the
+    // managed guide — and the chain, like every file tool, ends with the one
+    // sentence saying where. The clients that drop `instructions` have only
+    // descriptions to go on, so that sentence is their way to the rule.
+    const client = await setup();
+    const { tools } = await client.listTools();
+    const chain = tools.find((t) => t.name === 'call_tool_chain')!;
+    const pointer = sharedRulesPointer(DEFAULT_KB_LAYOUT);
+    expect(chain.description!.endsWith(pointer)).toBe(true);
+    // Once, and not on the two meta-tools that describe the registry rather
+    // than a file.
+    expect(chain.description!.split(pointer)).toHaveLength(2);
+    for (const name of ['list_tools', 'tools_info']) {
+      expect(tools.find((t) => t.name === name)!.description, name).not.toContain(pointer);
+    }
   });
 
   it('a $defs/$ref tool schema survives tools/list and a real MCP client accepts it', async () => {
