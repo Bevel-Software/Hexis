@@ -6,7 +6,11 @@ import type { IExternalApiKeyService } from './external-api-key.interface.js';
 import type { AuthService } from '../auth/auth.service.js';
 import { ACCOUNT_DEACTIVATED_MESSAGE, AuthBackendError } from '../auth/account-admission.js';
 import { InternalTokenService } from './internal-token.service.js';
-import { INVALID_CONNECTION_KEY_CHALLENGE, INVALID_CONNECTION_KEY_MESSAGE } from './connection-key-rejection.js';
+import {
+  INVALID_CONNECTION_KEY_CHALLENGE,
+  INVALID_CONNECTION_KEY_MESSAGE,
+  SWITCHED_OFF_CONNECTION_KEY_CHALLENGE,
+} from './connection-key-rejection.js';
 
 /**
  * What the `toolAuth` middleware resolves a bearer to, before the per-call
@@ -165,9 +169,14 @@ export function createTokenVerifier(
     // External API key → external caller. (verifyAndLoadToken may throw → propagates → caller maps to 500.)
     if (externalApiKeyService.looksLikeExternalApiKey(token)) {
       const resolved = await externalApiKeyService.verifyAndLoadToken(token);
-      return resolved
-        ? { ok: true, auth: { source: 'external', userId: resolved.user.id, tokenId: resolved.tokenId, scope: 'write' } }
-        : { ok: false, status: 401, message: INVALID_CONNECTION_KEY_MESSAGE, challenge: INVALID_CONNECTION_KEY_CHALLENGE };
+      if (resolved) {
+        return { ok: true, auth: { source: 'external', userId: resolved.user.id, tokenId: resolved.tokenId, scope: 'write' } };
+      }
+      // A live key of a switched-off account is told so, not sent to mint another.
+      if (await externalApiKeyService.isKeyOfSwitchedOffAccount?.(token)) {
+        return { ok: false, status: 401, message: ACCOUNT_DEACTIVATED_MESSAGE, challenge: SWITCHED_OFF_CONNECTION_KEY_CHALLENGE };
+      }
+      return { ok: false, status: 401, message: INVALID_CONNECTION_KEY_MESSAGE, challenge: INVALID_CONNECTION_KEY_CHALLENGE };
     }
 
     return missing;

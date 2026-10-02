@@ -11,6 +11,7 @@ import type { AuthService } from '../../auth/auth.service.js';
 import { InternalTokenService } from '../internal-token.service.js';
 import { createManualAuthMiddleware, createToolAuthMiddleware } from '../tool-auth.middleware.js';
 import type { IExternalApiKeyService } from '../external-api-key.interface.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE } from '../../auth/account-admission.js';
 
 /**
  * A bearer shaped like a connection key that does not verify is answered with
@@ -189,4 +190,24 @@ describe('the REST agent surface keeps its challenge for everything but a key', 
       expect(res.headers.get('www-authenticate'), endpoint.name).toBe('Bearer realm="bevel-tools"');
     }
   });
+});
+
+describe('a live connection key whose account is switched off is told so', () => {
+  const switchedOffKeys = {
+    ...externalApiKeys,
+    isKeyOfSwitchedOffAccount: async (t: string) => t === BAD_KEY,
+  } as unknown as IExternalApiKeyService;
+
+  for (const endpoint of KEY_ENDPOINTS) {
+    it(`${endpoint.name}: 401 with the switched-off reason, not an invitation to mint a new key`, async () => {
+      const base = await start(switchedOffKeys);
+      const res = await call(base, endpoint.method, endpoint.path, BAD_KEY);
+      expect(res.status).toBe(401);
+      expect(res.headers.get('www-authenticate')).toBe(
+        'Bearer error="invalid_token", error_description="The account of this connection key is switched off"',
+      );
+      expect(await res.json()).toEqual({ error: ACCOUNT_DEACTIVATED_MESSAGE });
+      expect(logged.join('\n')).not.toContain(BAD_KEY);
+    });
+  }
 });
