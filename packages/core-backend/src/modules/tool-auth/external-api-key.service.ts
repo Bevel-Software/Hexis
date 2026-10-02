@@ -108,7 +108,9 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     // Join users so a single round-trip resolves both "token is valid" and
     // "load the user it belongs to". The unique index on token_hash makes
     // this a point-lookup. `isNull(revokedAt)` is what enforces revocation
-    // — the row remains for audit.
+    // — the row remains for audit — and `isNull(deactivatedAt)` is what
+    // stops a switched-off account's keys without revoking them, so
+    // switching it back on restores them.
     const [row] = await this.db
       .select({
         tokenId: externalApiKeys.id,
@@ -119,7 +121,7 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
       })
       .from(externalApiKeys)
       .innerJoin(users, eq(externalApiKeys.userId, users.id))
-      .where(and(eq(externalApiKeys.tokenHash, tokenHash), isNull(externalApiKeys.revokedAt)))
+      .where(and(eq(externalApiKeys.tokenHash, tokenHash), isNull(externalApiKeys.revokedAt), isNull(users.deactivatedAt)))
       .limit(1);
 
     if (!row) return null;

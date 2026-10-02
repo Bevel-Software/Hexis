@@ -6,7 +6,9 @@ import { useEffect, useState } from 'react';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error — mammoth ships no .d.ts
 import mammoth from 'mammoth/mammoth.browser.js';
-import { useRendererWorkspaceId } from './rendererWorkspace';
+import { useRendererFileRef, useRendererWorkspaceId } from './rendererWorkspace';
+import { RetryReadButton } from './RetryReadButton';
+import { useReadRetry } from './useReadRetry';
 import { authFetch } from '../../../../lib/api';
 import { rawFileUrl } from '../../services/workspace.api';
 import { sanitizeDocxHtml } from './sanitizeDocxHtml';
@@ -32,6 +34,16 @@ import type { FileRendererProps } from './types';
  */
 export function DocxRenderer({ filePath }: FileRendererProps) {
   const workspaceId = useRendererWorkspaceId();
+  /** A past save, when Version history mounted this; null = the working tree. */
+  const fileRef = useRendererFileRef();
+  /**
+   * The save as PRIMITIVES, hoisted out of the object so the read effect can
+   * depend on exactly what it reads. Depending on `fileRef` itself would put
+   * a context object in the dependency list.
+   */
+  const versionRef = fileRef?.ref ?? null;
+  const versionSide = fileRef?.side;
+  const { attempt, retry } = useReadRetry();
   const [html, setHtml] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -43,7 +55,9 @@ export function DocxRenderer({ filePath }: FileRendererProps) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await authFetch(rawFileUrl(workspaceId, filePath));
+        const res = await authFetch(
+          rawFileUrl(workspaceId, filePath, { ref: versionRef, side: versionSide }),
+        );
         if (cancelled) return;
         if (!res.ok) {
           setError(`Failed to load Word document (HTTP ${res.status})`);
@@ -65,14 +79,17 @@ export function DocxRenderer({ filePath }: FileRendererProps) {
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, filePath]);
+  }, [workspaceId, filePath, versionRef, versionSide, attempt]);
 
   if (error) {
     return (
       <div className="flex min-h-40 flex-col items-center justify-center gap-3 text-center">
-        <p className="text-sm text-danger">{error}</p>
-        {/* The conversion failed; the bytes may still open fine in Word. */}
-        <DownloadFileButton filePath={filePath} />
+        <p role="alert" className="text-sm text-danger">{error}</p>
+        <div className="flex items-center gap-2">
+          <RetryReadButton onRetry={retry} />
+          {/* The conversion failed; the bytes may still open fine in Word. */}
+          <DownloadFileButton filePath={filePath} />
+        </div>
       </div>
     );
   }

@@ -13,6 +13,53 @@ export const API_UNREACHABLE_EVENT = 'bevel:api-unreachable';
 
 const PROXY_DOWN_STATUSES = new Set([502, 503, 504]);
 
+/**
+ * Window event dispatched when the server refused a change because the
+ * deployment is read-only (a 403 whose body carries `workspace_read_only`).
+ * The read-only banner listens for it and asks the server what to say, so
+ * the app learns of the state from the first refusal instead of asking on a
+ * timer.
+ */
+export const WRITE_REFUSED_EVENT = 'bevel:write-refused';
+
+/**
+ * Window event dispatched when a change went through. While the read-only
+ * banner is up it asks again on this: switching accounts off is how an admin
+ * ends the state, and those requests succeed.
+ */
+export const WRITE_ACCEPTED_EVENT = 'bevel:write-accepted';
+
+/**
+ * The server's `READ_ONLY_CODE`, as `modules/write-access/write-access.ts`
+ * in core-backend exports it. The two must stay the same string: this is
+ * what the banner recognises a refusal by.
+ */
+const READ_ONLY_CODE = 'workspace_read_only';
+const READING_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+function methodOf(input: RequestInfo | URL, init: RequestInit | undefined): string {
+  const fromRequest = typeof input === 'object' && 'method' in input ? (input as Request).method : undefined;
+  return (init?.method ?? fromRequest ?? 'GET').toUpperCase();
+}
+
+/** Tell the banner what a mutating request's answer says about the deployment. Never throws, never delays the caller. */
+function signalWriteAccess(input: RequestInfo | URL, init: RequestInit | undefined, response: Response): void {
+  if (READING_METHODS.has(methodOf(input, init))) return;
+  if (response.ok) {
+    window.dispatchEvent(new Event(WRITE_ACCEPTED_EVENT));
+    return;
+  }
+  if (response.status !== 403) return;
+  // A copy is read, so the caller still has the body to itself.
+  void response
+    .clone()
+    .json()
+    .then((body: { code?: unknown } | null) => {
+      if (body?.code === READ_ONLY_CODE) window.dispatchEvent(new Event(WRITE_REFUSED_EVENT));
+    })
+    .catch(() => undefined);
+}
+
 function signalUnreachable(): void {
   window.dispatchEvent(new Event(API_UNREACHABLE_EVENT));
 }
@@ -97,6 +144,8 @@ export async function authFetch(
   if (response.status === 401) {
     clearToken();
   }
+
+  signalWriteAccess(input, init, response);
 
   return response;
 }

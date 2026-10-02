@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { WorkflowValidationError } from '../../shared/domain-errors.js';
+import { sanitizedPath } from '../../shared/printable.js';
 
 /**
  * Workspace-relative paths and the repository folder.
@@ -21,6 +22,51 @@ import { WorkflowValidationError } from '../../shared/domain-errors.js';
  */
 
 /**
+ * NUL, the C0 controls (a line break among them) and DEL — refused in a
+ * workspace path wherever one enters.
+ *
+ * Not merely hygiene about names nobody can type. A `\n` is a SEPARATOR in
+ * git's own line-oriented stdin protocols: `cat-file --batch` reads one
+ * `<ref>:<path>` object name per LINE, so `Docs/secret.md\nzzz` is TWO specs.
+ * Everything upstream — the read gate, the download gate, the not-a-directory
+ * check — is then asked about the whole string, which names nothing, while git
+ * answers about `Docs/secret.md` and hands over its bytes. A file denied by
+ * its own frontmatter inside a folder its reader may list would be readable
+ * that way, and in a batch of several specs the extra answer shifts every
+ * result after it, so the access resolver reads one directory's `access.md` as
+ * another's.
+ *
+ * Refused HERE, at the normaliser every accepted path goes through, rather
+ * than at each route: the fence has to be at the mechanism, because the next
+ * caller to assemble a git spec from a path will not remember this. The
+ * shared `validateFilename` has always refused the same range per segment, so
+ * no name any surface can create is lost — this closes the gap between it and
+ * the paths that reach git. U+2028/U+2029 are NOT in it: they are nothing to
+ * git's protocols (which read bytes, and a line break there is 0x0A), a name
+ * carrying one is creatable today, and refusing it here would make an existing
+ * file unreadable. They are escaped for display instead, which is what
+ * `sanitizedPath` is for.
+ */
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTERS = /[\x00-\x1F\x7F]/;
+
+/**
+ * Whether `value` carries one of them — THE predicate, so the places that
+ * accept a NAME enforce the same rule as the normaliser that joins it into a
+ * path. The checkout folder name is the one that matters: it is not a caller's
+ * path, it is deployment configuration (`KB_DIR_NAME`, and the `kbDirName`
+ * setting), and it is PREFIXED onto every workspace-relative path. A name with
+ * a line break in it would therefore make the normaliser emit exactly the path
+ * this rule exists to exclude, from inputs that were each clean. Refused where
+ * the name is set — at boot in `core-config` and in the settings validator —
+ * so the deployment fails loudly instead of serving a path nothing downstream
+ * can safely read.
+ */
+export function hasControlCharacter(value: string): boolean {
+  return CONTROL_CHARACTERS.test(value);
+}
+
+/**
  * True when `wsPath` is the repository folder or lies under it.
  *
  * Judged segment by segment, not by string prefix: `knowledge-base/../x.md`
@@ -33,6 +79,10 @@ import { WorkflowValidationError } from '../../shared/domain-errors.js';
  */
 export function isInsideRepo(wsPath: string, kbDirName: string): boolean {
   if (typeof wsPath !== 'string' || wsPath.includes('\\')) return false;
+  // A control character is not a spelling of any path under the repository —
+  // see {@link CONTROL_CHARACTERS}. Refused here too, so the check AFTER the
+  // normaliser cannot pass one that somehow skipped it.
+  if (CONTROL_CHARACTERS.test(wsPath)) return false;
   const segments = wsPath.replace(/\/$/, '').split('/');
   if (segments[0] !== kbDirName) return false;
   return segments.every((segment) => segment !== '' && segment !== '.' && segment !== '..');
@@ -52,6 +102,22 @@ export function isInsideRepo(wsPath: string, kbDirName: string): boolean {
  */
 export function assertInsideRepo(wsPath: string, kbDirName: string): void {
   if (isInsideRepo(wsPath, kbDirName)) return;
+  // Said as what it is, before the suggestion below: a control character is
+  // not a path that landed in the wrong place, and a "use this instead"
+  // carrying an invisible character back to the caller would be nonsense.
+  if (typeof wsPath === 'string' && CONTROL_CHARACTERS.test(wsPath)) {
+    // Through `sanitizedPath`, like every other refusal that names a path: the
+    // character that makes this path invalid is also the character that would
+    // forge a second line of the answer, in the message and in the `path` a
+    // JSON consumer reads.
+    const shown = sanitizedPath(wsPath);
+    throw new WorkflowValidationError(
+      `"${shown}" contains a control character: a line break, a NUL or another invisible byte is not part of any ` +
+        'file name, and git reads a line break in a path as the end of one object name and the start of another. ' +
+        'Remove it and send the name as it is written.',
+      { kind: 'path-control-character', path: shown, kbDirName },
+    );
+  }
   // The suggestion collapses what made the path wrong: backslashes, leading
   // `./` or `/`, and any `..` climbing back out (a bare `..` included, so the
   // suggestion is never itself a climb). The agent gets a path it can use.
@@ -103,6 +169,25 @@ export function normalizeWorkspacePath(wsPath: string, kbDirName: string): strin
   // `\` separates segments on Windows, so `foo\..\..` is a climb this cannot
   // read. Refused before anything is collapsed, never rewritten to `/`.
   if (wsPath.includes('\\')) refuse();
+  // A line break (or any other control character) is a SEPARATOR to git, not
+  // part of a name — see {@link CONTROL_CHARACTERS}. Refused before the path
+  // is normalised, so no gate downstream is ever asked about a string that
+  // means one thing to it and two things to git.
+  if (CONTROL_CHARACTERS.test(wsPath)) refuse();
+  // …and the FOLDER NAME, which is prefixed onto the result rather than read
+  // from it: a clean path joined to `kb\nname` comes out carrying the line
+  // break, so the normaliser would itself emit what the check above refuses.
+  // Said as the configuration error it is — the caller's path is fine, and an
+  // operator reading a refusal about their own path would have nothing to fix.
+  // `core-config` and the `kbDirName` setting validator both refuse this at
+  // the point it is SET, so reaching here means the two drifted.
+  if (CONTROL_CHARACTERS.test(kbDirName)) {
+    throw new WorkflowValidationError(
+      `the configured checkout folder name (kbDirName / KB_DIR_NAME) contains a control character: "${sanitizedPath(kbDirName)}". ` +
+        'Every workspace path is prefixed with it, so no path can be resolved until the setting is corrected.',
+      { kind: 'kb-dir-name-control-character', kbDirName: sanitizedPath(kbDirName) },
+    );
+  }
   // The root-anchored form, and ONLY for the repository folder: `/<kbDirName>/…`
   // is what the app's Copy path gives (it is the form a Markdown link resolves
   // from) and names the same workspace path. `/tmp/x` and `//x` are not that

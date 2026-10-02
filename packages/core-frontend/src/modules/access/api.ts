@@ -392,7 +392,7 @@ export interface PathPrincipals {
   write: AccessPrincipalRef[];
 }
 
-/** One file's holders where it is now and where a move would put it. */
+/** One file's or folder's holders where it is now and where a move would put it. */
 export interface ProspectiveAccess {
   before: PathPrincipals;
   after: PathPrincipals;
@@ -400,9 +400,11 @@ export interface ProspectiveAccess {
 
 /**
  * Resolve who holds read and write on `relativePath` today and who would hold
- * them once the file sits in `toDir` — the destination's folder rules with the
- * file's own frontmatter layered on top. Both paths are repo-relative
- * (`Knowledge/Foo.md`, `Knowledge/Sales`); `toDir` is `''` for the repo root.
+ * them once it sits in `toDir` — the destination's folder rules with what the
+ * move carries layered on top: a file's own frontmatter, or the `access.md`
+ * files inside a folder, counted at the paths they land on. Both paths are
+ * repo-relative (`Knowledge/Foo.md`, `Knowledge/Sales`); `toDir` is `''` for
+ * the repo root.
  *
  * `signal` lets the move dialog give up on it: the answer decorates the
  * confirmation and must never hold it open.
