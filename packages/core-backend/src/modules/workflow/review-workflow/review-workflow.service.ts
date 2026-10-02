@@ -343,6 +343,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .values({
         prNumber,
         authorEmail: canonicalEmail(user.email),
+        authorEmailBidx: user.email,
         authorName: user.name,
         path: input.path ?? null,
         line: input.line ?? null,
@@ -600,6 +601,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           prNumber,
           path,
           approverEmail: callerEmail,
+          approverEmailBidx: callerEmail,
           approverName: user.name,
           headSha,
         })
@@ -625,10 +627,13 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     erased: { email: string; name: string },
   ): Promise<void> {
     await takeEveryApprovalLock(tx);
+    // Matched via the blind index — the email column is randomized
+    // ciphertext — and the index is rewritten to the placeholder's too, so no
+    // value keyed to the erased address survives.
     await tx
       .update(prFileApprovals)
-      .set({ approverEmail: erased.email, approverName: erased.name })
-      .where(eq(prFileApprovals.approverEmail, email));
+      .set({ approverEmail: erased.email, approverEmailBidx: erased.email, approverName: erased.name })
+      .where(eq(prFileApprovals.approverEmailBidx, email));
   }
 
   /**
@@ -714,6 +719,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .values({
         prNumber,
         triggeredByEmail,
+        triggeredByEmailBidx: triggeredByEmail,
         triggeredByName: user.name,
         headShaAtMerge: headSha,
         mergeMethod: MERGE_METHOD,
@@ -930,6 +936,9 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           prNumber,
           path: r.path,
           approverEmail: r.approverEmail,
+          // The address, not the stored index read back beside it: an index
+          // column is written with what it is the index of.
+          approverEmailBidx: r.approverEmail,
           approverName: r.approverName,
           headSha: toHeadSha,
           approvedAt: r.approvedAt,
@@ -1013,7 +1022,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           and(
             eq(prFileApprovals.prNumber, prNumber),
             eq(prFileApprovals.path, path),
-            eq(prFileApprovals.approverEmail, callerEmail),
+            eq(prFileApprovals.approverEmailBidx, callerEmail),
           ),
         );
     });

@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, isNull, lt, or, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, isNull, lt, or, type SQL } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
 import type { Database } from '../database/connection.js';
 import { agentConnections, agentEvents, oauthTokens, users } from '../database/schema.js';
@@ -101,7 +101,9 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         .from(agentConnections)
         .innerJoin(users, eq(agentConnections.userId, users.id))
         .where(mine === null ? undefined : eq(agentConnections.userId, mine))
-        .orderBy(asc(users.email), desc(agentConnections.connectedAt)),
+        // Not by email: that column is randomized ciphertext, and ORDER BY
+        // on it is noise. The sort below orders by email in-process.
+        .orderBy(desc(agentConnections.connectedAt)),
       this.db
         .select({ keyId: agentEvents.keyId, connectionId: agentEvents.connectionId, n: count() })
         .from(agentEvents)
