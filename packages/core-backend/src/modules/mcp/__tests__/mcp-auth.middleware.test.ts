@@ -5,6 +5,7 @@ import type { AuthService } from '../../auth/auth.service.js';
 import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
 import type { BevelOAuthProvider } from '../oauth/bevel-oauth-provider.js';
 import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
+import { AccountDeactivatedError, AuthBackendError } from '../../auth/account-admission.js';
 
 const RESOURCE_METADATA_URL = 'https://bevel.example/.well-known/oauth-protected-resource/api/mcp';
 
@@ -19,10 +20,14 @@ function makeReqRes(authorization?: string) {
 }
 
 function makeAuthService(verify?: (t: string) => { userId: string; email: string }) {
+  const verifyToken = vi.fn(verify ?? (() => {
+    throw new Error('invalid');
+  }));
   return {
-    verifyToken: vi.fn(verify ?? (() => {
-      throw new Error('invalid');
-    })),
+    verifyToken,
+    // The session path checks the account is still on; every account here is.
+    resolveSession: vi.fn(async (t: string) => verifyToken(t)),
+    isActive: vi.fn(async () => true),
   } as unknown as AuthService;
 }
 
@@ -422,5 +427,57 @@ describe('createMcpAuthMiddleware', () => {
       expect(next).not.toHaveBeenCalled();
       expect(status).toHaveBeenCalledWith(401);
     });
+  });
+});
+
+describe('createMcpAuthMiddleware — a switched-off account', () => {
+  const internal = new InternalTokenService({ secret: 'test-secret-32-bytes-long-enough!!' });
+
+  it('401s a session whose account was switched off, and says why', async () => {
+    const auth = makeAuthService();
+    (auth.resolveSession as ReturnType<typeof vi.fn>) = vi.fn(async () => {
+      throw new AccountDeactivatedError();
+    });
+    const { req, res, next, status, json } = makeReqRes('Bearer some.jwt.token');
+    await makeMw({ auth })(req, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledWith(401);
+    expect(json.mock.calls[0][0].error).toContain('switched off');
+  });
+
+  it('500s — not 401s — when the session account cannot be looked up', async () => {
+    const auth = makeAuthService();
+    (auth.resolveSession as ReturnType<typeof vi.fn>) = vi.fn(async () => {
+      throw new AuthBackendError(new Error('db down'));
+    });
+    const { req, res, next, status } = makeReqRes('Bearer some.jwt.token');
+    await makeMw({ auth })(req, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledWith(500);
+  });
+
+  it('401s an internal token whose account was switched off, and says why', async () => {
+    const token = internal.mint({ userId: 'user-7', externalProxy: true }, 60_000);
+    const auth = makeAuthService();
+    (auth.getUserById as ReturnType<typeof vi.fn>) = vi.fn(async () => ({ id: 'user-7', email: 'seven@example.com' }));
+    (auth.isActive as ReturnType<typeof vi.fn>) = vi.fn(async () => false);
+    const { req, res, next, status, json } = makeReqRes(`Bearer ${token}`);
+    await makeMw({ internal, auth })(req, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledWith(401);
+    expect(json.mock.calls[0][0].error).toContain('switched off');
+  });
+
+  it('500s — not 401s — when an internal token\'s account cannot be looked up', async () => {
+    const token = internal.mint({ userId: 'user-7', externalProxy: true }, 60_000);
+    const auth = makeAuthService();
+    (auth.getUserById as ReturnType<typeof vi.fn>) = vi.fn(async () => ({ id: 'user-7', email: 'seven@example.com' }));
+    (auth.isActive as ReturnType<typeof vi.fn>) = vi.fn(async () => {
+      throw new Error('db down');
+    });
+    const { req, res, next, status } = makeReqRes(`Bearer ${token}`);
+    await makeMw({ internal, auth })(req, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledWith(500);
   });
 });
