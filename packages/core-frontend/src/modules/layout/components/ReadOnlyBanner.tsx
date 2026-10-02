@@ -6,6 +6,9 @@ import { useLatestRef } from '../../../shared/components/useLatestRef';
 /** The least time between two checks made because the tab came back into view. */
 const RETURN_CHECK_MS = 60_000;
 
+/** The least time between two checks made because a request went through while the banner is up. */
+const ACCEPTED_CHECK_MS = 5_000;
+
 /**
  * App-wide notice that the deployment is read-only right now (`GET
  * /api/write-access`): everyone can still sign in and read, but every change
@@ -48,8 +51,20 @@ export function ReadOnlyBanner() {
     const onReturn = () => {
       if (document.visibilityState === 'visible' && Date.now() - lastAsked >= RETURN_CHECK_MS) check();
     };
+    // Requests that only ask something are POSTs too (a permission lookup,
+    // a heartbeat), and the app makes them constantly. So the checks they
+    // set off are spaced: one now if none was made lately, otherwise ONE
+    // later, at the end of the spacing, so the change that did end the state
+    // is never the one that went unasked about.
+    let pending: number | null = null;
     const onAccepted = () => {
-      if (showing.current) check();
+      if (!showing.current || pending !== null) return;
+      const wait = ACCEPTED_CHECK_MS - (Date.now() - lastAsked);
+      if (wait <= 0) return check();
+      pending = window.setTimeout(() => {
+        pending = null;
+        if (showing.current) check();
+      }, wait);
     };
     check();
     window.addEventListener(WRITE_REFUSED_EVENT, check);
@@ -57,6 +72,7 @@ export function ReadOnlyBanner() {
     document.addEventListener('visibilitychange', onReturn);
     return () => {
       cancelled = true;
+      if (pending !== null) window.clearTimeout(pending);
       window.removeEventListener(WRITE_REFUSED_EVENT, check);
       window.removeEventListener(WRITE_ACCEPTED_EVENT, onAccepted);
       document.removeEventListener('visibilitychange', onReturn);

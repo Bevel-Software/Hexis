@@ -24,6 +24,8 @@ async function mount(opts: {
   secret?: string;
   result?: SyncResult;
   admin?: boolean;
+  /** No account can be looked up: every session check fails as the database being down. */
+  outage?: boolean;
   /** Install the production-shaped global JSON parser in front of the router. */
   globalJson?: boolean;
 }): Promise<{ base: string; sync: ReturnType<typeof vi.fn> }> {
@@ -46,7 +48,7 @@ async function mount(opts: {
       syncSecret: () => opts.secret ?? SECRET,
       authService: {
         resolveSession: async (token: string) => {
-          if (token === 'jwt-during-outage') throw new AuthBackendError(new Error('the database is down'));
+          if (opts.outage) throw new AuthBackendError(new Error('the database is down'));
           if (token !== 'jwt-ok') throw new Error('bad token');
           return { userId: 'u1', email: 'person@example.com' };
         },
@@ -97,8 +99,8 @@ describe('POST /api/sync — credentials', () => {
   });
 
   it('500, not 401, when the session’s account cannot be looked up', async () => {
-    const { base, sync } = await mount({ admin: true });
-    const res = await post(base, { headers: { authorization: 'Bearer jwt-during-outage' } });
+    const { base, sync } = await mount({ admin: true, outage: true });
+    const res = await post(base, { headers: { authorization: 'Bearer jwt-ok' } });
     // An outage is not a wrong credential: a 401 would send the admin to sign in again.
     expect(res.status).toBe(500);
     expect(res.headers.get('www-authenticate')).toBeNull();
@@ -106,8 +108,15 @@ describe('POST /api/sync — credentials', () => {
   });
 
   it('the shared secret still works while accounts cannot be looked up', async () => {
-    const { base } = await mount({});
+    const { base, sync } = await mount({ outage: true });
     expect((await post(base, { headers: { authorization: `Bearer ${SECRET}` } })).status).toBe(200);
+    expect(sync).toHaveBeenCalledTimes(1);
+  });
+
+  it('a wrong credential is still a 401 during an outage only when it was never a session', async () => {
+    const { base } = await mount({ outage: true });
+    // No bearer at all: nothing was looked up, so nothing failed.
+    expect((await post(base)).status).toBe(401);
   });
 
   it('accepts the GitLab token header', async () => {

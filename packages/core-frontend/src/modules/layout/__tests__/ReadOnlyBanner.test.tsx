@@ -80,14 +80,18 @@ describe('ReadOnlyBanner', () => {
   });
 
   it('goes away once an admin’s change ends the state', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     writable = false;
     render(<ReadOnlyBanner />);
     await screen.findByRole('status');
+    // Some while later, so the check is made at once and not spaced.
+    await vi.advanceTimersByTimeAsync(30_000);
 
     // The admin switches an account off: the request succeeds, and the count is back under the plan.
     writable = true;
     await authFetch('/api/admin/accounts/u1/deactivate', { method: 'POST' });
     await waitFor(() => expect(screen.queryByRole('status')).toBeNull());
+    expect(asked).toBe(2);
   });
 
   it('does not ask again over changes that go through while nothing is wrong', async () => {
@@ -99,18 +103,55 @@ describe('ReadOnlyBanner', () => {
     expect(asked).toBe(1);
   });
 
-  it('asks again when the tab comes back into view, at most once a minute', async () => {
+  it('asks again when the tab comes back into view, at most once a minute, and never as it leaves', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    render(<ReadOnlyBanner />);
-    await waitFor(() => expect(asked).toBe(1));
+    let visibility: DocumentVisibilityState = 'visible';
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
+    const turn = (to: DocumentVisibilityState) => {
+      visibility = to;
+      document.dispatchEvent(new Event('visibilitychange'));
+    };
+    try {
+      render(<ReadOnlyBanner />);
+      await waitFor(() => expect(asked).toBe(1));
 
-    document.dispatchEvent(new Event('visibilitychange'));
+      // Back into view too soon after the last check.
+      turn('hidden');
+      turn('visible');
+      expect(asked).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(61_000);
+      writable = false;
+      // Leaving the tab asks nothing, however long it has been.
+      turn('hidden');
+      expect(asked).toBe(1);
+      turn('visible');
+      expect(await screen.findByRole('status')).toHaveTextContent(READ_ONLY);
+      expect(asked).toBe(2);
+    } finally {
+      Reflect.deleteProperty(document, 'visibilityState');
+    }
+  });
+
+  /**
+   * A permission lookup or a heartbeat is a POST that goes through, and the
+   * app makes them all the time. They must not turn into a check each.
+   */
+  it('spaces the checks that requests going through set off, without losing the last one', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    writable = false;
+    render(<ReadOnlyBanner />);
+    await screen.findByRole('status');
     expect(asked).toBe(1);
 
-    await vi.advanceTimersByTimeAsync(61_000);
-    writable = false;
-    document.dispatchEvent(new Event('visibilitychange'));
-    expect(await screen.findByRole('status')).toHaveTextContent(READ_ONLY);
+    for (let i = 0; i < 5; i += 1) await authFetch('/api/admin/accounts/lookup', { method: 'POST' });
+    expect(asked).toBe(1);
+
+    // The change that ends the state arrives inside the spacing, and is still asked about.
+    writable = true;
+    await authFetch('/api/admin/accounts/u1/deactivate', { method: 'POST' });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull());
     expect(asked).toBe(2);
   });
 });

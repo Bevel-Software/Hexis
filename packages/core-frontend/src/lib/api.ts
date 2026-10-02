@@ -29,6 +29,11 @@ export const WRITE_REFUSED_EVENT = 'bevel:write-refused';
  */
 export const WRITE_ACCEPTED_EVENT = 'bevel:write-accepted';
 
+/**
+ * The server's `READ_ONLY_CODE`, as `modules/write-access/write-access.ts`
+ * in core-backend exports it. The two must stay the same string: this is
+ * what the banner recognises a refusal by.
+ */
 const READ_ONLY_CODE = 'workspace_read_only';
 const READING_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
