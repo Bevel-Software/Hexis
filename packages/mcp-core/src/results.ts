@@ -84,7 +84,17 @@ function isMcpImageBlockObject(value: unknown): value is { type: 'image'; data: 
  * MCP caller sees the tool's real message instead of a bare "status code 500".
  */
 export function describeToolFailure(err: unknown): string {
-  const data = (err as { response?: { data?: unknown } })?.response?.data;
+  // Read through to the body UNDER the guard. `err` is whatever a transport
+  // threw, and a getter or Proxy on `response` — or on `response.data` — that
+  // throws while being read must not escape: this function runs inside catch
+  // paths, and `runToolChain` promises an answer for every outcome, so a throw
+  // here would surface as the dropped connection that contract rules out.
+  let data: unknown;
+  try {
+    data = (err as { response?: { data?: unknown } })?.response?.data;
+  } catch {
+    data = undefined;
+  }
   if (data && typeof data === 'object') {
     let inner: unknown;
     try {
@@ -218,6 +228,61 @@ function failureHost(err: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * Does `message` already state `status` AS a status code?
+ *
+ * The bare digits are not enough to go on: a message like `Processed 404 files`
+ * contains them without saying anything about a response code, and treating
+ * that as "already said" would drop the status from the one string the caller
+ * gets. So only the two phrasings a transport actually uses count — axios's
+ * `status code 404` and this file's own `HTTP 404` — and neither matches a
+ * longer number that merely starts with the same digits (`HTTP 4042`).
+ */
+function statesStatus(message: string, status: number): boolean {
+  return new RegExp(`(?:HTTP\\s+|status code\\s+)${status}(?!\\d)`, 'i').test(message);
+}
+
+/**
+ * `message` with the transport's own `status` and body folded INTO it, for a
+ * surface that can only answer with text.
+ *
+ * An MCP caller sees one string: the structured fields a `ToolChainOutcome`
+ * carries beside its message (`status`, `data`) reach it only if they are in
+ * that string. {@link describeToolFailure} already lifts an axios-shaped
+ * `response.data.error` out, but the UTCP http transport also throws failures
+ * carrying `status`/`data` directly, and THAT body is the actionable half —
+ * without this it was simply dropped on the way to the caller.
+ *
+ * Nothing is said twice: a message that already carries the body's own
+ * `error` reason — which is what `describeToolFailure` lifts out of an
+ * axios-shaped failure — keeps the body out, and a status the message already
+ * STATES as a status code (see {@link statesStatus}) is not repeated either.
+ */
+export function withTransportDetail(message: string, status?: unknown, data?: unknown): string {
+  let out = message;
+  // An integer: a status is a response code, and `(HTTP 404.5)` would be
+  // nonsense to print and a sloppy pattern to match with.
+  if (Number.isInteger(status) && !statesStatus(out, status as number)) out += ` (HTTP ${status as number})`;
+  if (data !== undefined) {
+    // Already said? The actionable part of a body is its `error` field, and
+    // `describeToolFailure` lifts exactly that (plus `kind`) out of an
+    // axios-shaped failure — so a message already carrying it has the body in
+    // it, and appending the raw JSON beside it would read as two failures.
+    let reason: unknown;
+    try {
+      reason = (data as { error?: unknown })?.error;
+    } catch {
+      reason = undefined;
+    }
+    if (typeof reason === 'string' && reason.length > 0 && out.includes(reason)) return out;
+    // Total, like the rest of this file: a body that does not serialise
+    // degrades through `safeJsonText` rather than throwing in a catch path.
+    const text = typeof data === 'string' ? data : safeJsonText(data);
+    if (text.length > 0 && text !== '{}' && text !== '""' && !out.includes(text)) out += ` Error data: ${text}`;
+  }
+  return out;
 }
 
 /**

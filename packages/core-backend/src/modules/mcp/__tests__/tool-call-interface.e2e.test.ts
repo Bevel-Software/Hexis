@@ -289,7 +289,8 @@ describe('every description opens with its call', () => {
     const chain = (await client.listTools()).tools.find((t) => t.name === 'call_tool_chain')!;
     expect(chain.description).toContain('`Call:` line');
     expect(chain.description).toContain('NO single calling shape');
-    expect(chain.description).not.toContain('Call tools as `KNOWLEDGE_BASE.<tool>({ body: { ...args } })`');
+    // No phrasing of the one-shape rule, however it is spelled or interpolated.
+    expect(chain.description).not.toContain('<tool>({ body: { ...args } })');
     // And the server instructions, which the handshake carries.
     expect(PLATFORM_HEADER).toContain('`Call:` line');
     expect(client.getInstructions()).toContain('`Call:` line');

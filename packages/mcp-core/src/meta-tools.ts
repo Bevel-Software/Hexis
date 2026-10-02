@@ -1,9 +1,16 @@
 import type { Tool as McpTool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { CodeModeUtcpClient } from '@utcp/code-mode';
-import { utcpNameToTsInterfaceName, findToolsByNames } from './code-mode-names.js';
-import { toCallToolResult, toolError, describeToolFailure, omitImagePayloads } from './results.js';
-import { retiredToolInFailure, retiredToolChainFailure } from './retired-tools.js';
+import { utcpNameToTsInterfaceName, findToolsByNames, sanitizeIdentifier } from './code-mode-names.js';
+import { chainExample, type ChainExample, type ChainExampleTool } from './chain-example.js';
+import { toCallToolResult, toolError, describeToolFailure, withTransportDetail, omitImagePayloads } from './results.js';
+import { retiredToolInFailure } from './retired-tools.js';
 import { withCallExample } from './tool-interface.js';
+import {
+  CHAIN_TIMEOUT_DEFAULT_MS,
+  CHAIN_TIMEOUT_MAX_MS,
+  CHAIN_TIMEOUT_MIN_MS,
+  runToolChain,
+} from './chain-runtime.js';
 
 /**
  * Code-mode meta-tools exposed ALONGSIDE the direct tools. They let an external
@@ -27,67 +34,117 @@ import { withCallExample } from './tool-interface.js';
  * the remote trio describes the remote registry, and locally they must describe
  * the merged one.
  */
-const CALL_TOOL_CHAIN_DESCRIPTION = [
-  'Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function, with NO `await` (results are already resolved), and `return` the final value. The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax).',
-  'There is NO single calling shape: some tools take their arguments under a `body` object, others take them flat. Call each tool exactly as the `Call:` line at the top of its own description shows — that line is generated from the tool\'s input schema. Arguments that do not match the schema are refused before anything is sent, with the tool\'s interface in the answer.',
-  'Discover first: `list_tools` lists every tool in callable form (e.g. `KNOWLEDGE_BASE.read_file`); `tools_info` returns their exact argument + return shapes — do not guess. Batch multiple tool calls into one chain to avoid a round-trip per call. The chain runs with your own connection key, so it can only reach the tools you can already call directly.',
-  'Large results: if the combined result+logs exceed `max_output_size` (default 200000 chars) the full JSON is spilled to a shared store and you get back a `__tool_chain_spill__/…` ref instead. Read it with `read_file` (pass that ref as `path` — `branch` is ignored — plus `offset`/`limit` to slice it), or better, re-run a narrower chain that returns only what you need.',
-  'Images: image files are returned as native MCP image content on a DIRECT `read_file` call only — a chained `read_file` of an image yields `{ image_omitted: true, note }` instead of the picture, so call it outside the chain to actually see the image.',
-].join('\n\n');
-
-const META_TOOLS: McpTool[] = [
-  {
-    name: 'list_tools',
-    description:
-      'List every UTCP tool currently registered, in TypeScript-accessible form (e.g. `KNOWLEDGE_BASE.read_file`) for use inside `call_tool_chain`.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false } as McpTool['inputSchema'],
-  },
-  {
-    name: 'tools_info',
-    description:
-      'Get full TypeScript interface definitions for named tools (names from `list_tools`). The schemas are the source of truth — do not guess shapes.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        tool_names: { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Tool names to describe.' },
-      },
-      required: ['tool_names'],
-      additionalProperties: false,
-    } as McpTool['inputSchema'],
-  },
-  {
-    name: 'call_tool_chain',
-    description: CALL_TOOL_CHAIN_DESCRIPTION,
-    inputSchema: {
-      type: 'object',
-      properties: {
-        code: { type: 'string', minLength: 1, description: 'JavaScript to execute against the registered tools.' },
-        timeout: { type: 'integer', minimum: 1000, maximum: 120000, description: 'Timeout in ms (default 30000).' },
-        max_output_size: { type: 'integer', minimum: 1000, maximum: 1000000, description: 'Max result+logs size in chars before spilling (default 200000, max 1000000).' },
-      },
-      required: ['code'],
-      additionalProperties: false,
-    } as McpTool['inputSchema'],
-  },
-];
 
 /**
- * The three tools this surface serves itself, each with its call example ahead
- * of its description.
+ * The namespace every example in the three descriptions is written against.
  *
- * They are called directly over MCP rather than from inside a chain, so the
- * example shows that shape — the tool's name and its required arguments, with
- * no namespace in front — and it comes from the same generator as every other
- * tool's, so "every description opens with its call" holds with no exception
- * an agent has to learn.
+ * It is NOT fixed text, because it is not the same name on every connection:
+ * the hosted endpoint registers the knowledge-base tools as `KNOWLEDGE_BASE`,
+ * while the local server registers the whole deployment as one `hexis` manual.
+ * A description that named the other one taught the agent a namespace the
+ * runtime had no binding for, and the example call it copied died of
+ * `ReferenceError` — which is how this was reported. So each surface passes
+ * the name it actually registers, and the examples are built from it.
+ *
+ * Sanitized the way the runtime sanitizes it, so the example is callable even
+ * when the registered manual's name is not a bare identifier: `@utcp/code-mode`
+ * exposes `global.<sanitized manual name>`, and an example spelled any other
+ * way would not run.
  */
-export const CODE_MODE_META_TOOLS: McpTool[] = META_TOOLS.map((t) => ({
-  ...t,
-  description: withCallExample(t.description, t.name, t.inputSchema),
-}));
+export function chainNamespaceExample(namespace: string): string {
+  return sanitizeIdentifier(namespace);
+}
 
-export const META_TOOL_NAMES: ReadonlySet<string> = new Set(CODE_MODE_META_TOOLS.map((t) => t.name));
+function callToolChainDescription(example: ChainExample): string {
+  const { namespace: ns, name, call } = example;
+  // Printed only when the catalog determines every required argument. A call
+  // the agent cannot trust is worse than the shape on its own, and `tools_info`
+  // is one hop away either way.
+  const worked = call ? ` A call that works exactly as written: \`return ${call};\`.` : '';
+  return [
+    `Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function, with NO \`await\` (results are already resolved), and \`return\` the final value.${worked} The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax), plus \`atob\`, \`btoa\`, \`TextEncoder\` and \`TextDecoder\` for base64 and UTF-8 bytes, as in a browser. There is no \`Buffer\`, no \`fetch\` and no \`require\`.`,
+    `There is NO single calling shape: some tools take their arguments under a \`body\` object, others take them flat. Call each tool exactly as the \`Call:\` line at the top of its own description shows — that line is generated from the tool's input schema, and every tool in \`${ns}\` has one. Every argument a tool declares REQUIRED must be present; for the knowledge-base tools that includes \`branch\`. Arguments that do not match the schema are refused before anything is sent or run, and the refusal carries the tool's interface.`,
+    `Discover first: \`list_tools\` lists every tool in callable form (e.g. \`${name}\`); \`tools_info\` returns their exact argument + return shapes — do not guess. Batch multiple tool calls into one chain to avoid a round-trip per call. The chain runs with your own connection key, so it can only reach the tools you can already call directly.`,
+    `Failures are answered, never dropped: a chain that throws comes back as an error carrying the reason, and one that outlives \`timeout\` (default ${CHAIN_TIMEOUT_DEFAULT_MS} ms, maximum ${CHAIN_TIMEOUT_MAX_MS} ms) comes back saying so — raise \`timeout\` or split the work and run it again. Either way the connection stays open and your next call works as usual.`,
+    'Large results: if the combined result+logs exceed `max_output_size` (default 200000 chars) the full JSON is spilled to a shared store and you get back a `__tool_chain_spill__/…` ref instead. Read it with `read_file` (pass that ref as `path` — `branch` is ignored — plus `offset`/`limit` to slice it), or better, re-run a narrower chain that returns only what you need.',
+    'Images: image files are returned as native MCP image content on a DIRECT `read_file` call only — a chained `read_file` of an image yields `{ image_omitted: true, note }` instead of the picture, so call it outside the chain to actually see the image.',
+  ].join('\n\n');
+}
 
+/**
+ * The three meta-tools, with every example written against the namespace this
+ * connection really exposes and a tool name its catalog really has.
+ *
+ * Built per listing rather than held as a module constant: both belong to the
+ * surface, and a description computed once and shared across surfaces is the
+ * fixed text this replaces. `tools` is the surface's catalog — pass every tool
+ * it serves, names AND input schemas, since the arguments in the example come
+ * from the schema (see `chainExample`).
+ */
+export function codeModeMetaTools(namespace: string, tools: readonly ChainExampleTool[] = []): McpTool[] {
+  const example = chainExample(namespace, tools);
+  const { name } = example;
+  return withCallExamples([
+    {
+      name: 'list_tools',
+      description: `List every UTCP tool currently registered, in TypeScript-accessible form (e.g. \`${name}\`) for use inside \`call_tool_chain\`.`,
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false } as McpTool['inputSchema'],
+    },
+    {
+      name: 'tools_info',
+      description:
+        'Get full TypeScript interface definitions for named tools (names from `list_tools`). The schemas are the source of truth — do not guess shapes.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          tool_names: { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Tool names to describe.' },
+        },
+        required: ['tool_names'],
+        additionalProperties: false,
+      } as McpTool['inputSchema'],
+    },
+    {
+      name: 'call_tool_chain',
+      description: callToolChainDescription(example),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          code: { type: 'string', minLength: 1, description: 'JavaScript to execute against the registered tools.' },
+          timeout: {
+            type: 'integer',
+            minimum: CHAIN_TIMEOUT_MIN_MS,
+            maximum: CHAIN_TIMEOUT_MAX_MS,
+            description: `Timeout in ms (default ${CHAIN_TIMEOUT_DEFAULT_MS}, max ${CHAIN_TIMEOUT_MAX_MS}).`,
+          },
+          max_output_size: { type: 'integer', minimum: 1000, maximum: 1000000, description: 'Max result+logs size in chars before spilling (default 200000, max 1000000).' },
+        },
+        required: ['code'],
+        additionalProperties: false,
+      } as McpTool['inputSchema'],
+    },
+  ]);
+}
+
+/**
+ * Each of the three with its call example ahead of its description, from the
+ * same generator every other tool's comes from — so "every description opens
+ * with its call" holds with no exception an agent has to learn.
+ *
+ * These three are called DIRECTLY over MCP rather than from inside a chain, so
+ * the example shows that shape: the tool's name and its required arguments,
+ * with no namespace in front.
+ */
+function withCallExamples(tools: McpTool[]): McpTool[] {
+  return tools.map((t) => ({ ...t, description: withCallExample(t.description, t.name, t.inputSchema) }));
+}
+
+/**
+ * The meta-tool NAMES, which no namespace can change. Kept separate from
+ * {@link codeModeMetaTools} because every surface needs them to route a call
+ * and to keep a discovered copy out of its listing, and neither of those knows
+ * — or should need — the namespace.
+ */
+export const META_TOOL_NAMES: ReadonlySet<string> = new Set(['list_tools', 'tools_info', 'call_tool_chain']);
 /** Default cap on a `call_tool_chain` result's stringified size before it spills. */
 export const CALL_TOOL_CHAIN_MAX_OUTPUT = 200_000;
 
@@ -176,19 +233,38 @@ export async function dispatchMetaTool(
     // the isolate far past the documented 120s cap.
     const timeout =
       typeof args.timeout === 'number' && Number.isFinite(args.timeout)
-        ? Math.min(120_000, Math.max(1_000, Math.trunc(args.timeout)))
-        : 30_000;
+        ? Math.min(CHAIN_TIMEOUT_MAX_MS, Math.max(CHAIN_TIMEOUT_MIN_MS, Math.trunc(args.timeout)))
+        : CHAIN_TIMEOUT_DEFAULT_MS;
     // Clamp to [1000, 1_000_000] so a caller can't force oversized inline
     // output past the spill.
     const maxOutputSize =
       typeof args.max_output_size === 'number' && Number.isFinite(args.max_output_size)
         ? Math.min(1_000_000, Math.max(1_000, Math.trunc(args.max_output_size)))
         : CALL_TOOL_CHAIN_MAX_OUTPUT;
-    const { result: rawResult, logs } = await client.callToolChain(code, timeout);
-    // The runner reports a failed chain in `logs` rather than throwing, so a
-    // chain that died calling a removed tool is recognised here, not in the catch.
-    const retired = retiredToolChainFailure({ result: rawResult, logs });
-    if (retired) return toolError(retired);
+    // The shared runner, which answers every failure instead of leaving one to
+    // pass for a success with a null result: the chain's own browser globals
+    // are in place, and a timeout, an exhausted heap and an unknown namespace
+    // each come back as the sentence that says so.
+    const outcome = await runToolChain(client, code, timeout);
+    if (!outcome.ok) {
+      // A chain that died calling a REMOVED tool gets the reason it was
+      // removed, not the runtime's "is not a function". Read from the failure
+      // itself, never from the chain's source: a chain that merely mentions
+      // the name and died of something else keeps its own reason. A migration
+      // notice answers alone — the transport detail below would be noise
+      // beside an answer that is not about the transport.
+      const retired = retiredToolInFailure(outcome.error);
+      if (retired) return toolError(retired);
+      // An MCP caller is answered with TEXT and nothing else, so the
+      // transport's own status and body are folded into it. `runToolChain`
+      // composes the message with `describeToolFailure` (which lifts an
+      // axios-shaped `response.data.error` out) and carries `status`/`data`
+      // beside it for the shapes that put the reason there instead; returning
+      // `outcome.error` alone dropped that half on this surface, leaving the
+      // caller with generic transport text.
+      return toolError(withTransportDetail(outcome.error, outcome.status, outcome.data));
+    }
+    const { result: rawResult, logs } = outcome;
     // Images never ride a chain result: the chain's value is stringified JSON,
     // where base64 is context flood, not a picture. A chained `read_file` of an
     // image comes back as an omitted-image note instead (see omitImagePayloads);
@@ -223,10 +299,10 @@ export async function dispatchMetaTool(
       message: `Result+logs payload was ${fullJson.length} characters (exceeded max_output_size of ${maxOutputSize}). Full JSON saved to the shared spill store as \`${ref}\`. Read it back with \`read_file\` (pass that ref as \`path\`, \`branch\` ignored, plus \`offset\`/\`limit\` to slice), or re-run a narrower chain that returns only what you need.`,
     });
   } catch (err) {
-    // A chain that failed while calling a removed tool gets the reason it was
-    // removed, not the runtime's "is not a function". Read from the failure
-    // itself, never from the chain's source: a chain that merely mentions the
-    // name and died of something else must report what really happened.
+    // `runToolChain` answers rather than throws, so a chain no longer reaches
+    // here — what does is a catalog read, a name lookup or the spill write.
+    // The retired-tool mapping is kept all the same: it costs nothing, and it
+    // is the one answer that must survive however the failure arrived.
     const failure = describeToolFailure(err);
     const retired = name === 'call_tool_chain' ? retiredToolInFailure(failure) : undefined;
     if (retired) return toolError(retired);
