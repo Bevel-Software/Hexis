@@ -2,7 +2,7 @@ import type { Tool as McpTool, CallToolResult } from '@modelcontextprotocol/sdk/
 import type { CodeModeUtcpClient } from '@utcp/code-mode';
 import { utcpNameToTsInterfaceName, findToolsByNames, sanitizeIdentifier } from './code-mode-names.js';
 import { chainExample, type ChainExample, type ChainExampleTool } from './chain-example.js';
-import { toCallToolResult, toolError, describeToolFailure, omitImagePayloads } from './results.js';
+import { toCallToolResult, toolError, describeToolFailure, withTransportDetail, omitImagePayloads } from './results.js';
 import { retiredToolInFailure } from './retired-tools.js';
 import {
   CHAIN_TIMEOUT_DEFAULT_MS,
@@ -225,8 +225,19 @@ export async function dispatchMetaTool(
       // A chain that died calling a REMOVED tool gets the reason it was
       // removed, not the runtime's "is not a function". Read from the failure
       // itself, never from the chain's source: a chain that merely mentions
-      // the name and died of something else keeps its own reason.
-      return toolError(retiredToolInFailure(outcome.error) ?? outcome.error);
+      // the name and died of something else keeps its own reason. A migration
+      // notice answers alone — the transport detail below would be noise
+      // beside an answer that is not about the transport.
+      const retired = retiredToolInFailure(outcome.error);
+      if (retired) return toolError(retired);
+      // An MCP caller is answered with TEXT and nothing else, so the
+      // transport's own status and body are folded into it. `runToolChain`
+      // composes the message with `describeToolFailure` (which lifts an
+      // axios-shaped `response.data.error` out) and carries `status`/`data`
+      // beside it for the shapes that put the reason there instead; returning
+      // `outcome.error` alone dropped that half on this surface, leaving the
+      // caller with generic transport text.
+      return toolError(withTransportDetail(outcome.error, outcome.status, outcome.data));
     }
     const { result: rawResult, logs } = outcome;
     // Images never ride a chain result: the chain's value is stringified JSON,

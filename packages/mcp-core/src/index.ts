@@ -36,6 +36,7 @@ export {
 
 export {
   describeToolFailure,
+  withTransportDetail,
   toCallToolResult,
   renderProgress,
   toolError,

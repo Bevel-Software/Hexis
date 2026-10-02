@@ -415,22 +415,50 @@ describe('a chain that fails for another reason', () => {
     }
   });
 
+  /**
+   * The hostile shapes, one per read the catch makes. `response` is the one
+   * that mattered: it was read outside any guard, so a thrown value with a
+   * getter there escaped `runToolChain` and reached the agent as exactly the
+   * dropped connection this ticket forbids.
+   */
   it('is still answered when reading the failure\'s own fields throws', async () => {
-    const hostile = new Error('the tool bridge gave up');
-    Object.defineProperty(hostile, 'status', {
-      get() {
-        throw new Error('a getter that throws');
-      },
-    });
-    const client = {
+    const throwingGetter = (field: string) => {
+      const err = new Error('the tool bridge gave up');
+      Object.defineProperty(err, field, {
+        get() {
+          throw new Error(`a ${field} getter that throws`);
+        },
+      });
+      return err;
+    };
+    for (const field of ['status', 'data', 'response']) {
+      const client = {
+        config: { tool_repository: { getTools: async () => KB, getTool: async () => null } },
+        callToolChain: async () => {
+          throw throwingGetter(field);
+        },
+      } as unknown as CodeModeUtcpClient;
+      await expect(runToolChain(client, 'return 1', 30_000), field).resolves.toMatchObject({
+        ok: false,
+        error: 'the tool bridge gave up',
+      });
+    }
+    // And one whose `response` reads fine but whose body does not.
+    const nestedClient = {
       config: { tool_repository: { getTools: async () => KB, getTool: async () => null } },
       callToolChain: async () => {
-        throw hostile;
+        throw Object.assign(new Error('Request failed with status code 500'), {
+          response: {
+            get data(): never {
+              throw new Error('a data getter that throws');
+            },
+          },
+        });
       },
     } as unknown as CodeModeUtcpClient;
-    await expect(runToolChain(client, 'return 1', 30_000)).resolves.toMatchObject({
+    await expect(runToolChain(nestedClient, 'return 1', 30_000)).resolves.toMatchObject({
       ok: false,
-      error: 'the tool bridge gave up',
+      error: 'Request failed with status code 500',
     });
   });
 

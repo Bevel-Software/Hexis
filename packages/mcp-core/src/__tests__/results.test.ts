@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   describeToolFailure,
+  withTransportDetail,
   toCallToolResult,
   renderProgress,
   mcpImageResult,
@@ -50,6 +51,87 @@ describe('describeToolFailure', () => {
     // describe that throws inside a catch path turns a tool failure into a
     // handler failure.
     expect(describeToolFailure(Object.create(null))).toBe('(indescribable tool failure)');
+  });
+
+  it('never throws when reading the body itself throws', () => {
+    // A getter on `response` — the outermost read, which used to run outside
+    // the guard, so a hostile thrown value escaped this function and turned a
+    // tool failure into a handler failure (and a chain failure into a dropped
+    // connection, since `runToolChain` composes its answer with this).
+    // Defined, not assigned: `Object.assign` would READ the getter here.
+    const hostileResponse = new Error('the bridge gave up');
+    Object.defineProperty(hostileResponse, 'response', {
+      get(): never {
+        throw new Error('response getter boom');
+      },
+    });
+    expect(describeToolFailure(hostileResponse)).toBe('the bridge gave up');
+    // And a getter one level in, on `data`.
+    const hostileData = Object.assign(new Error('status code 500'), {
+      response: {
+        get data(): never {
+          throw new Error('data getter boom');
+        },
+      },
+    });
+    expect(describeToolFailure(hostileData)).toBe('status code 500');
+  });
+});
+
+describe('withTransportDetail', () => {
+  it('folds the transport\'s status and body into the one string an MCP caller gets', () => {
+    expect(withTransportDetail('Request failed', 403, { kind: 'branch-protected', branch: 'main' })).toBe(
+      'Request failed (HTTP 403) Error data: {"kind":"branch-protected","branch":"main"}',
+    );
+    expect(withTransportDetail('Request failed', 404, 'no such path')).toBe(
+      'Request failed (HTTP 404) Error data: no such path',
+    );
+  });
+
+  it('says nothing twice', () => {
+    // The transport's own message usually quotes both already, and
+    // `describeToolFailure` folds a typed refusal's fields in — appending them
+    // again would read as two different failures.
+    expect(withTransportDetail('HTTP 400: `branch` is required {"kind":"branch-required"}', 400, { kind: 'branch-required' })).toBe(
+      'HTTP 400: `branch` is required {"kind":"branch-required"}',
+    );
+  });
+
+  it('keeps the body out when the message already carries its reason', () => {
+    // What `describeToolFailure` returns for an axios-shaped refusal: the
+    // body's `error` and `kind` are already in the message, so appending the
+    // raw body beside them would read as two different failures. The status is
+    // still added — it is otherwise invisible to an MCP caller.
+    expect(
+      withTransportDetail('The branch is protected. {"kind":"branch-protected"}', 403, {
+        error: 'The branch is protected.',
+        kind: 'branch-protected',
+      }),
+    ).toBe('The branch is protected. {"kind":"branch-protected"} (HTTP 403)');
+  });
+
+  it('appends the body when the message is the generic transport line', () => {
+    // The other shape the UTCP http transport throws: the reason is in `data`,
+    // which `describeToolFailure` does not read, so the message says nothing
+    // actionable and the body is the whole answer.
+    expect(
+      withTransportDetail('Request failed with status code 400', 400, {
+        error: '`branch` is required',
+        kind: 'branch-required',
+      }),
+    ).toBe('Request failed with status code 400 Error data: {"error":"`branch` is required","kind":"branch-required"}');
+  });
+
+  it('leaves a message with nothing to add alone', () => {
+    expect(withTransportDetail('catalog is down')).toBe('catalog is down');
+    expect(withTransportDetail('catalog is down', 'not-a-number', {})).toBe('catalog is down');
+  });
+
+  it('degrades a body that does not serialise instead of throwing', () => {
+    const cyclic: Record<string, unknown> = { kind: 'x' };
+    cyclic.self = cyclic;
+    expect(withTransportDetail('failed', undefined, cyclic)).toBe('failed Error data: {"kind":"x","self":"[Circular]"}');
+    expect(withTransportDetail('failed', undefined, { size: 10n })).toBe('failed Error data: {"size":"10"}');
   });
 });
 

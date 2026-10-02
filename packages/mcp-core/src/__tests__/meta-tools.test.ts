@@ -186,6 +186,44 @@ describe('dispatchMetaTool answers a failed chain', () => {
     expect(resultText(res)).toContain('the vault refused the key');
   });
 
+  /**
+   * An MCP caller is answered with TEXT and nothing else. The runner carries a
+   * transport failure's `status` and body beside its message, and this surface
+   * used to return the message alone — so a caller got the generic transport
+   * line while the actionable half, the provider's own body, was dropped.
+   */
+  it('folds a transport failure\'s status and body into the error an MCP caller reads', async () => {
+    const { client, callToolChain } = clientWith([]);
+    // The shape the UTCP http transport throws: the reason is in `data`, not in
+    // an axios-style `response.data` that `describeToolFailure` would lift out.
+    callToolChain.mockImplementationOnce(() => {
+      throw Object.assign(new Error('Request failed with status code 400'), {
+        status: 400,
+        data: { error: '`branch` is required', kind: 'branch-required' },
+      });
+    });
+    const res = await dispatchMetaTool(client, 'call_tool_chain', { code: 'return 1' });
+    expect(res.isError).toBe(true);
+    const text = resultText(res);
+    expect(text).toContain('`branch` is required');
+    expect(text).toContain('branch-required');
+    expect(text).toContain('400');
+  });
+
+  it('does not repeat a reason the message already carries', async () => {
+    const { client, callToolChain } = clientWith([]);
+    callToolChain.mockImplementationOnce(() => {
+      throw Object.assign(new Error('Request failed with status code 403'), {
+        response: { status: 403, data: { error: 'The branch is protected.', kind: 'branch-protected' } },
+      });
+    });
+    const text = resultText(await dispatchMetaTool(client, 'call_tool_chain', { code: 'return 1' }));
+    // `describeToolFailure` already lifted both out of `response.data`; the
+    // detail must not be appended a second time.
+    expect(text.match(/branch-protected/g)).toHaveLength(1);
+    expect(text.match(/The branch is protected\./g)).toHaveLength(1);
+  });
+
   it('still maps a retired tool onto its own message', async () => {
     const { client, callToolChain } = clientWith([]);
     callToolChain.mockResolvedValueOnce({

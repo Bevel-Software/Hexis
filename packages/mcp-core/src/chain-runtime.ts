@@ -329,7 +329,26 @@ export async function runToolChain(
     // thrown error itself; now that the catch lives here, taking `err.message`
     // instead would hand the agent a generic transport line and drop the half
     // it can act on.
-    const error = describeToolFailure(err);
+    //
+    // Under a guard even so. `describeToolFailure` is total — it reads `err`
+    // through try/catch — but THIS function's contract is that it never throws,
+    // and that contract is what the "no chain failure reaches the agent as a
+    // dropped connection" criterion rests on. A guard here keeps it local
+    // rather than resting on another module staying total.
+    let error: string;
+    try {
+      error = describeToolFailure(err);
+    } catch {
+      // Describing it is the first thing that can fail, so the fallback is
+      // itself layered: the thrown value's own message if it can be read, and
+      // a fixed sentence if even that throws. An opaque answer is still an
+      // ANSWER — what must never happen is a rejection out of this catch.
+      try {
+        error = err instanceof Error ? err.message : String(err);
+      } catch {
+        error = '(indescribable tool failure)';
+      }
+    }
     let status: unknown;
     let data: unknown;
     try {
