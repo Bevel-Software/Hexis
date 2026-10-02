@@ -196,18 +196,21 @@ describe('dispatchMetaTool answers a failed chain', () => {
     const { client, callToolChain } = clientWith([]);
     // The shape the UTCP http transport throws: the reason is in `data`, not in
     // an axios-style `response.data` that `describeToolFailure` would lift out.
+    // The message deliberately does NOT quote the status — a message that does
+    // (axios's own `status code 400`) suppresses the fold, so asserting against
+    // one would have passed on the message alone and proved nothing about it.
     callToolChain.mockImplementationOnce(() => {
-      throw Object.assign(new Error('Request failed with status code 400'), {
+      throw Object.assign(new Error('transport refused the request'), {
         status: 400,
         data: { error: '`branch` is required', kind: 'branch-required' },
       });
     });
     const res = await dispatchMetaTool(client, 'call_tool_chain', { code: 'return 1' });
     expect(res.isError).toBe(true);
-    const text = resultText(res);
-    expect(text).toContain('`branch` is required');
-    expect(text).toContain('branch-required');
-    expect(text).toContain('400');
+    // The whole composed string, so dropping either half fails this.
+    expect(resultText(res)).toBe(
+      'transport refused the request (HTTP 400) Error data: {"error":"`branch` is required","kind":"branch-required"}',
+    );
   });
 
   it('does not repeat a reason the message already carries', async () => {

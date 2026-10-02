@@ -97,6 +97,23 @@ describe('withTransportDetail', () => {
     );
   });
 
+  it('states the status unless the message states it AS a status code', () => {
+    // The bare digits are not a statement about a response code — a message
+    // that merely contains them must not suppress it.
+    expect(withTransportDetail('Processed 404 files and gave up', 404)).toBe(
+      'Processed 404 files and gave up (HTTP 404)',
+    );
+    // The two phrasings a transport really uses do suppress it.
+    expect(withTransportDetail('Request failed with status code 400', 400)).toBe(
+      'Request failed with status code 400',
+    );
+    expect(withTransportDetail('HTTP 400 calling tool `read_file`', 400)).toBe('HTTP 400 calling tool `read_file`');
+    // A longer number that merely starts with the same digits is not a match.
+    expect(withTransportDetail('HTTP 4042 is not a status', 404)).toBe('HTTP 4042 is not a status (HTTP 404)');
+    // And a status that is not a whole number is not printed as one at all.
+    expect(withTransportDetail('transport refused', 404.5)).toBe('transport refused');
+  });
+
   it('keeps the body out when the message already carries its reason', () => {
     // What `describeToolFailure` returns for an axios-shaped refusal: the
     // body's `error` and `kind` are already in the message, so appending the

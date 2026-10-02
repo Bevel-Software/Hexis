@@ -132,6 +132,20 @@ export function describeToolFailure(err: unknown): string {
 }
 
 /**
+ * Does `message` already state `status` AS a status code?
+ *
+ * The bare digits are not enough to go on: a message like `Processed 404 files`
+ * contains them without saying anything about a response code, and treating
+ * that as "already said" would drop the status from the one string the caller
+ * gets. So only the two phrasings a transport actually uses count — axios's
+ * `status code 404` and this file's own `HTTP 404` — and neither matches a
+ * longer number that merely starts with the same digits (`HTTP 4042`).
+ */
+function statesStatus(message: string, status: number): boolean {
+  return new RegExp(`(?:HTTP\\s+|status code\\s+)${status}(?!\\d)`, 'i').test(message);
+}
+
+/**
  * `message` with the transport's own `status` and body folded INTO it, for a
  * surface that can only answer with text.
  *
@@ -145,11 +159,13 @@ export function describeToolFailure(err: unknown): string {
  * Nothing is said twice: a message that already carries the body's own
  * `error` reason — which is what `describeToolFailure` lifts out of an
  * axios-shaped failure — keeps the body out, and a status the message already
- * quotes is not repeated either.
+ * STATES as a status code (see {@link statesStatus}) is not repeated either.
  */
 export function withTransportDetail(message: string, status?: unknown, data?: unknown): string {
   let out = message;
-  if (typeof status === 'number' && !out.includes(String(status))) out += ` (HTTP ${status})`;
+  // An integer: a status is a response code, and `(HTTP 404.5)` would be
+  // nonsense to print and a sloppy pattern to match with.
+  if (Number.isInteger(status) && !statesStatus(out, status as number)) out += ` (HTTP ${status as number})`;
   if (data !== undefined) {
     // Already said? The actionable part of a body is its `error` field, and
     // `describeToolFailure` lifts exactly that (plus `kind`) out of an
