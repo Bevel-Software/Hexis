@@ -25,6 +25,8 @@ import { ACCOUNT_DEACTIVATED_MESSAGE } from '../../auth/account-admission.js';
  * server requests, with the same gate `create-core-server.ts` puts on each.
  */
 const BAD_KEY = 'bevel_revokedKeyThatMustNeverBeEchoed';
+/** A second refused key: on the switched-off service it is not one of a switched-off account. */
+const OTHER_BAD_KEY = 'bevel_unknownKeyThatMustNeverBeEchoed';
 const RESOURCE_METADATA_URL = 'https://hexis.example/.well-known/oauth-protected-resource/api/mcp';
 const DISCOVERY_CHALLENGE = `Bearer realm="bevel-mcp", resource_metadata="${RESOURCE_METADATA_URL}"`;
 const KEY_CHALLENGE = 'Bearer error="invalid_token", error_description="Invalid or revoked connection key"';
@@ -208,6 +210,15 @@ describe('a live connection key whose account is switched off is told so', () =>
       );
       expect(await res.json()).toEqual({ error: ACCOUNT_DEACTIVATED_MESSAGE });
       expect(logged.join('\n')).not.toContain(BAD_KEY);
+    });
+
+    it(`${endpoint.name}: any other refused key on the same service is still told it is invalid`, async () => {
+      const base = await start(switchedOffKeys);
+      const res = await call(base, endpoint.method, endpoint.path, OTHER_BAD_KEY);
+      expect(res.status).toBe(401);
+      expect(res.headers.get('www-authenticate')).toBe(KEY_CHALLENGE);
+      expect(await res.json()).toEqual(KEY_BODY);
+      expect(logged.join('\n')).not.toContain(OTHER_BAD_KEY);
     });
   }
 });
