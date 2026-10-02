@@ -53,7 +53,8 @@ describe('the creation endpoints behind the key-or-session gate', () => {
   } as never;
   const authService = {
     getUserById: async (id: string) => (id === ALICE.id ? ALICE : null),
-    verifyToken: (t: string) => {
+    // A session is accepted only for an account that is on; Alice's is.
+    resolveSession: async (t: string) => {
       if (t !== 'session-alice') throw new Error('bad token');
       return { userId: ALICE.id, email: ALICE.email };
     },

@@ -22,6 +22,7 @@ import type { ICreatorAccess } from '../../access-model/creator.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
@@ -277,7 +278,7 @@ describe('workspace tools refuse the git folder', () => {
       new DocExtractService(join(root, 'doc-cache')),
       allowAll,
       testKbContext({ kbDirName: KB }),
-      { service: {} as never, enabled: false, kb: testKbContext({ kbDirName: KB }), recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+      { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
     );

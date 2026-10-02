@@ -112,11 +112,12 @@ function listen(
   server = app.listen(0);
   const { port } = server.address() as AddressInfo;
   const base = `http://127.0.0.1:${port}`;
-  const save = (entries: Record<string, string>) =>
+  /** `confirm` is the admin's answer to the question a move is asked, when they have given one. */
+  const save = (entries: Record<string, string>, confirm?: 'keep' | 'close') =>
     fetch(`${base}/api/setup/settings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings: entries }),
+      body: JSON.stringify({ settings: entries, ...(confirm ? { confirmRepositoryChange: confirm } : {}) }),
     });
   const status = async () => (await fetch(`${base}/api/setup/status`)).json() as Promise<Record<string, unknown>>;
   return { save, status, settings, source, managed, ensured, probed, kb, phase: { runs: () => phaseRuns, saw: phaseSaw } };
@@ -199,63 +200,97 @@ describe('a deployment that is serving moves to another repository', () => {
     return mounted;
   }
 
-  it('owes a restart, and says both where it is and where it is going', async () => {
-    const { save, status, phase, ensured } = await serving();
+  /**
+   * A move is asked about before anything is stored: the save is refused
+   * until the answer comes back, naming the way left and the way moved to.
+   * Refused, it has changed nothing — the deployment is where it was.
+   */
+  it('is asked first, and until it answers nothing has moved', async () => {
+    const { save, status, phase, source, settings } = await serving();
     const runsBefore = phase.runs();
     const res = await save({ gitMode: 'managed' });
-    const body = (await res.json()) as Record<string, unknown>;
-    expect(body).toMatchObject({ ok: true, complete: true, restartRequired: true, repository: { mode: 'token', chosen: 'managed' } });
-    expect(await status()).toMatchObject({ complete: true, repository: { mode: 'token', chosen: 'managed' } });
-    expect(ensured).toHaveLength(1);
-    // Sessions may be live: the phase that moves working copies waits for the restart.
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ repositoryChange: { openChangeRequests: 0, from: 'token', to: 'managed' } });
+    expect(settings.resolve('gitMode')).toBe('');
+    expect(source.mode()).toBe('token');
+    expect(source.url()).toBe(HOSTED.kbRepoUrl);
     expect(phase.runs()).toBe(runsBefore);
+    expect(await status()).toMatchObject({ complete: true, repository: { mode: 'token', chosen: 'token' } });
   });
 
   /**
-   * The move is a fact about the NEXT start. Until then every working copy
-   * is a clone of the repository the deployment had, so that is the
-   * repository git is handed the address of, and its token is the one
-   * presented. Reading the mode live moved the process at the save: pushes
-   * went out with no credential, and a branch opened in between was cloned
-   * from a repository nothing had prepared.
+   * Confirmed, the move takes effect ON THE SAVE: the way chosen is the way
+   * in effect, the startup phase runs against the repository moved to, and
+   * no restart is owed. It once waited for the next start, which an admin of
+   * a hosted workspace has no way to give.
    */
-  it('goes on working against the repository it has until it is started again', async () => {
-    const { save, source } = await serving();
-    await save({ gitMode: 'managed' });
-    expect(source.mode()).toBe('token');
-    expect(source.url()).toBe(HOSTED.kbRepoUrl);
-    expect(source.credentials.token()).toBe('the-token');
-    expect(source.credentials.username()).toBe('x-access-token');
-    // A token rotated meanwhile is still the one the next push carries.
-    await save({ gitToken: 'a-rotated-token' });
-    expect(source.credentials.token()).toBe('a-rotated-token');
+  it('moves on the save once confirmed, and owes no restart', async () => {
+    const { save, status, phase, ensured, managed, source } = await serving();
+    const runsBefore = phase.runs();
+    const res = await save({ gitMode: 'managed' }, 'keep');
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(body).toMatchObject({
+      ok: true,
+      complete: true,
+      restartRequired: false,
+      repository: { mode: 'managed', chosen: 'managed' },
+      repositoryChange: { choice: 'keep' },
+    });
+    expect(ensured).toHaveLength(1);
+    // The phase that sets the old working copies aside ran, against the repository moved to.
+    expect(phase.runs()).toBe(runsBefore + 1);
+    expect(phase.saw.at(-1)).toBe(managed.path);
+    expect(source.url()).toBe(managed.path);
+    expect(await status()).toMatchObject({ complete: true, repository: { mode: 'managed', chosen: 'managed' } });
   });
 
-  it('is on the repository it chose once it is started again, and presents it nothing of the old one', async () => {
-    const { save, source, managed } = await serving();
-    await save({ gitMode: 'managed' });
-    // What a restart does: the source is built on the mode chosen.
-    source.takeEffect();
-    expect(source.mode()).toBe('managed');
-    expect(source.url()).toBe(managed.path);
+  /** One way's credential is never presented to another way's repository. */
+  it('presents the repository moved to nothing of the one that was left', async () => {
+    const { save, source } = await serving();
+    expect(source.credentials.token()).toBe('the-token');
+    await save({ gitMode: 'managed' }, 'keep');
     expect(source.credentials.token()).toBeNull();
   });
 
-  it('goes on owing the restart through saves about other things', async () => {
+  it('owes nothing through later saves about other things, and is not asked again', async () => {
     const { save } = await serving();
-    await save({ gitMode: 'managed' });
-    const body = (await (await save({ kbSyncSecret: 'a-secret-of-sixteen-or-more' })).json()) as Record<string, unknown>;
-    expect(body).toMatchObject({ ok: true, restartRequired: true, repository: { mode: 'token', chosen: 'managed' } });
+    await save({ gitMode: 'managed' }, 'keep');
+    const res = await save({ kbSyncSecret: 'a-secret-of-sixteen-or-more' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, restartRequired: false, repository: { mode: 'managed', chosen: 'managed' } });
   });
 
-  it('owes nothing once the move is taken back', async () => {
-    const { save, probed } = await serving();
-    await save({ gitMode: 'managed' });
-    const asked = probed.length;
-    const body = (await (await save({ gitMode: 'token' })).json()) as Record<string, unknown>;
-    expect(body).toMatchObject({ ok: true, restartRequired: false, repository: { mode: 'token', chosen: 'token' } });
-    // Nothing about the connection changed, so the host is not asked again.
-    expect(probed).toHaveLength(asked);
+  it('is asked again to move back: that is a move too', async () => {
+    const { save, source } = await serving();
+    await save({ gitMode: 'managed' }, 'keep');
+    const back = await save({ gitMode: 'token' });
+    expect(back.status).toBe(409);
+    expect(await back.json()).toMatchObject({ repositoryChange: { from: 'managed', to: 'token' } });
+    const done = await save({ gitMode: 'token' }, 'keep');
+    expect(await done.json()).toMatchObject({ ok: true, restartRequired: false, repository: { mode: 'token', chosen: 'token' } });
+    expect(source.url()).toBe(HOSTED.kbRepoUrl);
+  });
+
+  /** Another address under the same way is the same question, with the same answer. */
+  it('asks the same of another address under the way it is on', async () => {
+    const { save, source, phase } = await serving();
+    const moved = { kbRepoUrl: 'https://git.example.com/acme/another.git', gitToken: 'another-token' };
+    const asked = await save(moved);
+    expect(asked.status).toBe(409);
+    expect(await asked.json()).toMatchObject({ repositoryChange: { from: 'token', to: 'token' } });
+    const runsBefore = phase.runs();
+    const done = await save(moved, 'close');
+    expect(await done.json()).toMatchObject({ ok: true, restartRequired: false, repositoryChange: { choice: 'close' } });
+    expect(phase.runs()).toBe(runsBefore + 1);
+    expect(source.url()).toBe(moved.kbRepoUrl);
+  });
+
+  it('asks nothing of a save that only spells the same address another way', async () => {
+    const { save } = await serving();
+    const res = await save({ kbRepoUrl: 'https://GIT.example.com/acme/kb/' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).not.toHaveProperty('repositoryChange');
   });
 
   it('owes none for naming the way it was already on', async () => {
@@ -268,10 +303,11 @@ describe('a deployment that is serving moves to another repository', () => {
 });
 
 /**
- * The pin protects what is running on the mode in effect. Behind a shut
- * gate nothing is, however completely the settings were answered, and a
- * deployment pinned there could not be got out of a repository that does
- * not work by choosing one that does.
+ * Behind a shut gate nothing is running on the way in effect, however
+ * completely the settings were answered, so a deployment there is got out of
+ * a repository that does not work by choosing one that does. One that never
+ * served is not even asked: there is no repository anyone worked on to
+ * leave. One that served before its boot failed is asked, as any move is.
  */
 describe('a deployment that answered everything and serves nobody', () => {
   const isHosted = (url: string) => url === HOSTED.kbRepoUrl;
@@ -300,18 +336,15 @@ describe('a deployment that answered everything and serves nobody', () => {
     const { save, status, phase, managed } = listen({ kb: testKbContext(), bootFailed: true, unreachable: isHosted });
     expect(await status()).toMatchObject({ complete: false, repository: { mode: 'token' } });
 
-    const body = (await (await save({ gitMode: 'managed' })).json()) as Record<string, unknown>;
+    // It served before this boot, so there may be work on the repository it
+    // leaves: it is asked, and nothing moves until it answers.
+    const asked = await save({ gitMode: 'managed' });
+    expect(asked.status).toBe(409);
+    expect(phase.saw).toEqual([]);
+
+    const body = (await (await save({ gitMode: 'managed' }, 'keep')).json()) as Record<string, unknown>;
     expect(phase.saw).toEqual([managed.path]);
     expect(body).toMatchObject({ complete: true, restartRequired: false, repository: { mode: 'managed', chosen: 'managed' } });
-  });
-
-  it('is still asked for a restart once it IS serving: the same save, a different deployment', async () => {
-    const { save, phase } = listen({ kb: testKbContext() });
-    await save({ ...HOSTED, ...BRANCHES });
-    const runs = phase.runs();
-    const body = (await (await save({ gitMode: 'managed' })).json()) as Record<string, unknown>;
-    expect(body).toMatchObject({ complete: true, restartRequired: true, repository: { mode: 'token', chosen: 'managed' } });
-    expect(phase.runs()).toBe(runs);
   });
 });
 

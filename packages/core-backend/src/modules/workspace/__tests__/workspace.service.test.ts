@@ -1122,7 +1122,7 @@ describe('WorkspaceService.readAllKbFiles', () => {
   });
 });
 
-describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
+describe('WorkspaceService.unzipFile — per-entry write guard', () => {
   let root: string;
   let svc: WorkspaceService;
   let workspaceDir: string;
@@ -1154,12 +1154,12 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
   it('skips entries the write guard rejects and never writes them to disk', async () => {
     await writeZip('a.zip', { 'keep.md': 'ok', 'blocked.md': 'no' });
     const res = await svc.unzipFile(workspaceId, 'a.zip', 'out', async (wsPath) => {
-      if (wsPath.endsWith('blocked.md')) throw new Error('Blocked by the ontology-session boundary');
+      if (wsPath.endsWith('blocked.md')) throw new Error('Not in this conversation.');
     });
     // An unprefixed destination is the repository's own `out/`, and the
     // extracted paths are reported workspace-relative, so prefixed.
     expect(res.extracted).toEqual(['knowledge-base/out/keep.md']);
-    expect(res.skipped).toContainEqual({ path: 'blocked.md', reason: 'Blocked by the ontology-session boundary' });
+    expect(res.skipped).toContainEqual({ path: 'blocked.md', reason: 'Not in this conversation.' });
     expect((await fs.readFile(path.join(repoDir, 'out', 'keep.md'))).toString()).toBe('ok');
     await expect(fs.readFile(path.join(repoDir, 'out', 'blocked.md'))).rejects.toThrow();
     await expect(fs.stat(path.join(workspaceDir, 'out'))).rejects.toMatchObject({ code: 'ENOENT' });
@@ -1173,18 +1173,18 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
     await fs.writeFile(path.join(repoDir, 'c.zip'), zip.toBuffer());
 
     const res = await svc.unzipFile(workspaceId, 'c.zip', 'out', async (wsPath) => {
-      if (wsPath.includes('blocked-dir')) throw new Error('Blocked by the ontology-session boundary');
+      if (wsPath.includes('blocked-dir')) throw new Error('Not in this conversation.');
     });
 
     expect(res.extracted).toEqual(['knowledge-base/out/keep.md']);
-    expect(res.skipped).toContainEqual({ path: 'blocked-dir/', reason: 'Blocked by the ontology-session boundary' });
+    expect(res.skipped).toContainEqual({ path: 'blocked-dir/', reason: 'Not in this conversation.' });
     await expect(fs.stat(path.join(repoDir, 'out', 'blocked-dir'))).rejects.toThrow();
   });
 
   it('does not create the destination directory when every entry is blocked', async () => {
     await writeZip('d.zip', { 'a.md': '1', 'b.md': '2' });
     const res = await svc.unzipFile(workspaceId, 'd.zip', 'out', async () => {
-      throw new Error('Blocked by the ontology-session boundary');
+      throw new Error('Not in this conversation.');
     });
     expect(res.extracted).toEqual([]);
     expect(res.skipped).toHaveLength(2);

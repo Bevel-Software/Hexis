@@ -131,11 +131,12 @@ function boot(kb: KbContext) {
   );
   server = app.listen(0);
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const save = async (entries: Record<string, string>) => {
+  /** `confirm` is the admin's answer to the question a move is asked. */
+  const save = async (entries: Record<string, string>, confirm?: 'keep' | 'close') => {
     const res = await fetch(`${base}/api/setup/settings`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ settings: entries }),
+      body: JSON.stringify({ settings: entries, ...(confirm ? { confirmRepositoryChange: confirm } : {}) }),
     });
     return { status: res.status, body: (await res.json()) as Record<string, unknown> };
   };
@@ -175,7 +176,7 @@ describe('the save that chooses a repository the deployment keeps', () => {
 
 describe('a deployment that moves to a repository it keeps', () => {
   it('leaves the repository it had untouched and sets its working copies aside, unpushed work included', async () => {
-    const { save, managed, hosted, runner, source, workingCopy, setAsideRoot } = boot(
+    const { save, managed, hosted, source, workingCopy, setAsideRoot } = boot(
       testKbContext({ branchModel: { defaultBranch: 'main', protectedBranches: ['main'] } }),
     );
     // A deployment on a repository of its own, set up and serving. The
@@ -203,17 +204,19 @@ describe('a deployment that moves to a repository it keeps', () => {
     await git(copy, ['commit', '-m', 'never pushed']);
     const hostedBefore = await git(hosted, ['for-each-ref']);
 
-    const moved = await save({ gitMode: 'managed' });
-    expect(moved.body).toMatchObject({ ok: true, restartRequired: true });
-    // Until the restart the working copy is where it was, and so is the
-    // deployment: the repository it has is the one it goes on talking to.
+    // Asked first: until the admin answers, the working copy is where it
+    // was and so is the deployment.
+    const asked = await save({ gitMode: 'managed' });
+    expect(asked.status).toBe(409);
     expect(await git(copy, ['config', '--get', 'remote.origin.url'])).toBe(hosted);
     expect(source.url()).toBe(hosted);
 
-    // The restart: the deployment is built on the mode chosen, and the
-    // phase brings the working copies into line.
-    source.takeEffect();
-    await runner.runAll();
+    // Confirmed, the move happens on the save, with no restart: the way
+    // chosen takes effect and the phase brings the working copies into line.
+    const moved = await save({ gitMode: 'managed' }, 'keep');
+    expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+    expect(moved.body).toMatchObject({ ok: true, complete: true, restartRequired: false });
+    expect(source.url()).toBe(managed.path);
 
     expect(await git(hosted, ['for-each-ref'])).toBe(hostedBefore);
     expect(await git(copy, ['config', '--get', 'remote.origin.url'])).toBe(managed.path);

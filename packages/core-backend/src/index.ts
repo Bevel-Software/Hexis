@@ -120,7 +120,17 @@ export type { ILlmUsageMeter } from './modules/tool-auth/llm-usage-meter.js';
 export type { AuthProviderPlugin } from './modules/auth/auth.routes.js';
 export type { IErasureParticipant } from './modules/auth/account-erasure.service.js';
 export {
+  alwaysWritable,
+  READ_ONLY_CODE,
+  type IWriteAccess,
+  type WriteAccessVerdict,
+} from './modules/write-access/write-access.js';
+export {
   AccountAdmissionRefusedError,
+  AccountDeactivatedError,
+  AccountChangeRefusedError,
+  AuthBackendError,
+  ACCOUNT_DEACTIVATED_MESSAGE,
   admitEveryone,
   type AccountAdmissionVerdict,
   type AccountProvisionReason,
@@ -130,6 +140,7 @@ export {
   WorkflowHooks,
   type CommitValidationHook,
   type CommitValidationContext,
+  type AgentOperationContext,
+  type AgentReadHook,
   type PreWriteHook,
-  type PreWriteContext,
 } from './modules/workflow/workflow-hooks.js';

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createShutdown, holdCommitWorkerLease, stopCore, withStartupTask, type LeasedWorker } from '../lifecycle.js';
+import { createShutdown, holdCommitWorkerLease, holdable, stopCore, withStartupTask, type LeasedWorker } from '../lifecycle.js';
 import { BevelSecretsVariableLoader, registerBevelSecretsVariableLoader } from '../../modules/secrets-vault/secrets-variable-loader.js';
 import type { AdvisoryLease } from '../../modules/database/advisory-lock.js';
 
@@ -442,5 +442,120 @@ describe('stopCore', () => {
     const core = { ...g.core, commitWorker: { stop: () => new Promise<void>(() => undefined) } };
     await stopCore(core as never, { deadlineMs: 50 });
     expect(g.order).toEqual(['backgroundJobs.stopSweeping', 'startupRetry.stop', 'backgroundJobs.drain', 'db.end']);
+  });
+});
+
+/**
+ * Two independent reasons for the commit worker not to run: the lease loop
+ * does not want it (another process holds the queue), or something holds it
+ * still (the deployment is being moved to another repository). It runs
+ * exactly when it is wanted and nothing holds it.
+ */
+describe('holdable', () => {
+  function recorded() {
+    const events: string[] = [];
+    const worker: LeasedWorker = {
+      start: () => void events.push('start'),
+      stop: async () => void events.push('stop'),
+    };
+    return { events, worker: holdable(worker) };
+  }
+
+  it('stops a running worker for the work, and starts it again afterwards', async () => {
+    const { events, worker } = recorded();
+    worker.start();
+    const answer = await worker.whileHeld(async () => {
+      events.push('work');
+      return 42;
+    });
+    expect(answer).toBe(42);
+    expect(events).toEqual(['start', 'stop', 'work', 'start']);
+  });
+
+  it('starts it again when the work fails, and hands the failure on', async () => {
+    const { events, worker } = recorded();
+    worker.start();
+    await expect(
+      worker.whileHeld(async () => {
+        throw new Error('the move failed');
+      }),
+    ).rejects.toThrow('the move failed');
+    expect(events).toEqual(['start', 'stop', 'start']);
+  });
+
+  it('does not start a worker the lease loop never wanted', async () => {
+    const { events, worker } = recorded();
+    await worker.whileHeld(async () => undefined);
+    expect(events).not.toContain('start');
+  });
+
+  it('holds back a start the lease loop asks for during the work, and makes it afterwards', async () => {
+    const { events, worker } = recorded();
+    await worker.whileHeld(async () => {
+      // The lease is taken while the move runs.
+      worker.start();
+      events.push('work');
+    });
+    expect(events).toEqual(['stop', 'work', 'start']);
+  });
+
+  it('leaves it stopped when the lease loop stopped it during the work', async () => {
+    const { events, worker } = recorded();
+    worker.start();
+    // The loop's stop waits for the hold, so it is not awaited from inside it.
+    let stopping: Promise<void> = Promise.resolve();
+    await worker.whileHeld(async () => {
+      stopping = worker.stop();
+      await settle();
+    });
+    await stopping;
+    expect(events.at(-1)).toBe('stop');
+    expect(events.filter((e) => e === 'start')).toHaveLength(1);
+  });
+
+  /**
+   * Shutdown awaits this stop before it ends the database pool. A move still
+   * setting copies aside needs that pool, so the stop does not come back
+   * while a hold is in flight.
+   */
+  it('does not finish stopping while a hold is still in flight', async () => {
+    const { worker } = recorded();
+    worker.start();
+    let finishMove: () => void = () => undefined;
+    const move = worker.whileHeld(() => new Promise<void>((resolve) => (finishMove = resolve)));
+    await settle();
+    let stopped = false;
+    const stopping = worker.stop().then(() => (stopped = true));
+    await settle();
+    expect(stopped).toBe(false);
+    finishMove();
+    await move;
+    await stopping;
+    expect(stopped).toBe(true);
+  });
+
+  it('finishes stopping when the hold in flight fails', async () => {
+    const { worker } = recorded();
+    let failMove: (err: Error) => void = () => undefined;
+    const move = worker.whileHeld(() => new Promise<void>((_, reject) => (failMove = reject)));
+    move.catch(() => undefined);
+    await settle();
+    const stopping = worker.stop();
+    failMove(new Error('the move failed'));
+    await expect(stopping).resolves.toBeUndefined();
+  });
+
+  it('waits for the last of two overlapping holds before it starts again', async () => {
+    const { events, worker } = recorded();
+    worker.start();
+    let finishFirst: () => void = () => undefined;
+    const first = worker.whileHeld(() => new Promise<void>((resolve) => (finishFirst = resolve)));
+    await settle();
+    await worker.whileHeld(async () => undefined);
+    // The second hold ended and the first is still running: not started yet.
+    expect(events.filter((e) => e === 'start')).toHaveLength(1);
+    finishFirst();
+    await first;
+    expect(events.filter((e) => e === 'start')).toHaveLength(2);
   });
 });

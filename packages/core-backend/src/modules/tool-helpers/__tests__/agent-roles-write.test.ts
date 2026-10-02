@@ -12,6 +12,7 @@ import { createToolHandlerFactory } from '../tool-handler.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
 import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { SpillStore } from '../../workspace/spill-store.js';
 import { DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
 import { NEW_ROLE_GUIDANCE } from '../../access-model/roles-yaml-guard.js';
@@ -70,11 +71,10 @@ async function start(): Promise<string> {
     canReadBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
   } as never;
   registerWorkspaceTools(registry, router, toolAuth, createToolHandlerFactory(resolve), new SpillStore(path.join(os.tmpdir(), 'bevel-test-spills')), new DocExtractService(docCache), allowAll, testKbContext({ kbDirName: KB }), {
-    service: {} as never,
-    enabled: false, // ontology boundary not under test here
-    kb: testKbContext({ kbDirName: KB }),
+    // No hook registered: the agent-access gate refuses nothing here.
     recoveryBotEmail: 'recovery-bot@bevel.local',
     hooks: new WorkflowHooks(),
+    notes: new ToolDescriptionNotes(),
   }, new RoutineWritePolicyService(), {} as never);
   const app = express();
   app.use(express.json());

@@ -3,7 +3,7 @@ import express from 'express';
 import type { Server } from 'node:http';
 import { createAccountRoutes } from '../account.routes.js';
 import { AuthService } from '../auth.service.js';
-import { AccountAdmissionRefusedError } from '../account-admission.js';
+import { AccountAdmissionRefusedError, AccountChangeRefusedError } from '../account-admission.js';
 import { hashPassword } from '../password-hash.js';
 import type { Database } from '../../database/connection.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
@@ -13,6 +13,8 @@ const authService = {
     { id: 'u1', email: 'a@example.com', name: 'A', hasPassword: true, createdAt: new Date() },
   ]),
   createAccount: vi.fn(async (email: string) => ({ id: 'u2', email, name: 'B' })),
+  deactivate: vi.fn(async (userId: string) => userId !== 'missing'),
+  reactivate: vi.fn(async (userId: string) => userId !== 'missing'),
 } as unknown as AuthService;
 
 // Satisfies the route's narrow Pick<IAccountErasureService, 'eraseUser'>
@@ -175,12 +177,12 @@ describe('account routes — admin gate', () => {
     expect(JSON.stringify(body)).not.toContain('relation');
   });
 
-  it('400s on missing fields and surfaces service validation errors', async () => {
+  it('400s without an email (a password is optional) and surfaces service validation errors', async () => {
     const base = await listen(makeApp({ admin: true }));
     const missing = await fetch(`${base}/api/admin/accounts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: 'b@example.com' }),
+      body: JSON.stringify({ name: 'B' }),
     });
     expect(missing.status).toBe(400);
 
@@ -327,5 +329,81 @@ describe('account routes — removing the erased address from access files', () 
     expect(((await res.json()) as { error: string }).error).toMatch(/last Admin/);
     expect(accountErasure.eraseUser).not.toHaveBeenCalled();
     expect(accessRemoval.remove).not.toHaveBeenCalled();
+  });
+});
+
+describe('account routes — switching an account off and on', () => {
+  const post = (base: string, path: string) => fetch(`${base}/api/admin/accounts/${path}`, { method: 'POST' });
+
+  it('switches another account off and back on', async () => {
+    const base = await listen(makeApp({ admin: true }));
+    expect((await post(base, 'u2/deactivate')).status).toBe(204);
+    expect(authService.deactivate).toHaveBeenCalledWith('u2');
+    expect((await post(base, 'u2/reactivate')).status).toBe(204);
+    expect(authService.reactivate).toHaveBeenCalledWith('u2');
+  });
+
+  it('refuses an admin switching off their own account, so an admin who can sign in always remains', async () => {
+    vi.mocked(authService.deactivate).mockClear();
+    const base = await listen(makeApp({ admin: true }));
+    const res = await post(base, 'u1/deactivate');
+    expect(res.status).toBe(400);
+    expect(authService.deactivate).not.toHaveBeenCalled();
+  });
+
+  it('refuses non-admins', async () => {
+    vi.mocked(authService.deactivate).mockClear();
+    const base = await listen(makeApp({ admin: false }));
+    expect((await post(base, 'u2/deactivate')).status).toBe(403);
+    expect((await post(base, 'u2/reactivate')).status).toBe(403);
+    expect(authService.deactivate).not.toHaveBeenCalled();
+  });
+
+  it('404s for an account that does not exist', async () => {
+    const base = await listen(makeApp({ admin: true }));
+    expect((await post(base, 'missing/deactivate')).status).toBe(404);
+    expect((await post(base, 'missing/reactivate')).status).toBe(404);
+  });
+
+  it("answers a reactivation the deployment has no room for with 403 and the port's words", async () => {
+    vi.mocked(authService.reactivate).mockRejectedValueOnce(new AccountAdmissionRefusedError('All 3 seats are taken'));
+    const base = await listen(makeApp({ admin: true }));
+    const res = await post(base, 'u2/reactivate');
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe('All 3 seats are taken');
+  });
+
+  it('answers a refused deactivation (the deployment admin, say) with 400 and the reason', async () => {
+    vi.mocked(authService.deactivate).mockRejectedValueOnce(new AccountChangeRefusedError('The deployment admin cannot be switched off'));
+    const base = await listen(makeApp({ admin: true }));
+    const res = await post(base, 'u2/deactivate');
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain('deployment admin');
+  });
+
+  it('answers an unexpected failure with a 500 that names nothing of it', async () => {
+    vi.mocked(authService.deactivate).mockRejectedValueOnce(new Error('relation "users" does not exist'));
+    vi.mocked(authService.reactivate).mockRejectedValueOnce(new Error('relation "users" does not exist'));
+    const base = await listen(makeApp({ admin: true }));
+    const off = await post(base, 'u2/deactivate');
+    expect(off.status).toBe(500);
+    expect(JSON.stringify(await off.json())).not.toContain('relation');
+    const on = await post(base, 'u2/reactivate');
+    expect(on.status).toBe(500);
+    expect(JSON.stringify(await on.json())).not.toContain('relation');
+  });
+
+  it('refuses a password that is not a string, rather than making an account for single sign-on', async () => {
+    vi.mocked(authService.createAccount).mockClear();
+    const base = await listen(makeApp({ admin: true }));
+    for (const password of [false, null, 0]) {
+      const res = await fetch(`${base}/api/admin/accounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'b@example.com', password }),
+      });
+      expect(res.status).toBe(400);
+    }
+    expect(authService.createAccount).not.toHaveBeenCalled();
   });
 });

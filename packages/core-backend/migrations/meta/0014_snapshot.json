@@ -1,5 +1,5 @@
 {
-  "id": "5846d6b6-b5a4-4d67-a0d3-62ebb7cc6508",
+  "id": "71f8e883-be7d-41a5-aa81-728d1788d7db",
   "prevId": "0da96c5a-8feb-47e2-9c97-f3698eb56c05",
   "version": "7",
   "dialect": "postgresql",
@@ -398,12 +398,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "author_email_bidx": {
-          "name": "author_email_bidx",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
         "author_name": {
           "name": "author_name",
           "type": "text",
@@ -447,12 +441,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "apply_failed_by_email_bidx": {
-          "name": "apply_failed_by_email_bidx",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "apply_failure_kind": {
           "name": "apply_failure_kind",
           "type": "text",
@@ -475,6 +463,12 @@
         "closed_at": {
           "name": "closed_at",
           "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "closed_reason": {
+          "name": "closed_reason",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         }
@@ -1425,12 +1419,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "author_email_bidx": {
-          "name": "author_email_bidx",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
         "author_name": {
           "name": "author_name",
           "type": "text",
@@ -1566,12 +1554,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "requester_email_bidx": {
-          "name": "requester_email_bidx",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
         "requester_name": {
           "name": "requester_name",
           "type": "text",
@@ -1631,11 +1613,11 @@
         }
       },
       "indexes": {
-        "plugin_join_requests_requester_bidx_plugin_unq": {
-          "name": "plugin_join_requests_requester_bidx_plugin_unq",
+        "plugin_join_requests_requester_plugin_unq": {
+          "name": "plugin_join_requests_requester_plugin_unq",
           "columns": [
             {
-              "expression": "requester_email_bidx",
+              "expression": "requester_email",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1699,12 +1681,6 @@
         },
         "author_email": {
           "name": "author_email",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "author_email_bidx": {
-          "name": "author_email_bidx",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -1839,12 +1815,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "approver_email_bidx": {
-          "name": "approver_email_bidx",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
         "approver_name": {
           "name": "approver_name",
           "type": "text",
@@ -1866,8 +1836,8 @@
         }
       },
       "indexes": {
-        "pr_file_approvals_bidx_unq": {
-          "name": "pr_file_approvals_bidx_unq",
+        "pr_file_approvals_unq": {
+          "name": "pr_file_approvals_unq",
           "columns": [
             {
               "expression": "pr_number",
@@ -1882,7 +1852,7 @@
               "nulls": "last"
             },
             {
-              "expression": "approver_email_bidx",
+              "expression": "approver_email",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1941,12 +1911,6 @@
         },
         "triggered_by_email": {
           "name": "triggered_by_email",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "triggered_by_email_bidx": {
-          "name": "triggered_by_email_bidx",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -2230,12 +2194,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "email_bidx": {
-          "name": "email_bidx",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
         "name": {
           "name": "name",
           "type": "text",
@@ -2276,26 +2234,18 @@
           "default": "now()"
         }
       },
-      "indexes": {
-        "users_email_bidx_unq": {
-          "name": "users_email_bidx_unq",
-          "columns": [
-            {
-              "expression": "email_bidx",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
+      "indexes": {},
       "foreignKeys": {},
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "users_email_unique": {
+          "name": "users_email_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "email"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

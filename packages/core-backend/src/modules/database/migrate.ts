@@ -72,7 +72,7 @@ export async function runCoreMigrations(db: Database, folder: string): Promise<v
       await migrate(db, { migrationsFolder: folder, migrationsTable: '__drizzle_migrations_core', migrationsSchema });
       log.info('Core migrations complete.');
       // Under the same lock, before anything reads or writes a PII column:
-      // the data half of migration 0014, which SQL cannot do (see below).
+      // the data half of migration 0016, which SQL cannot do (see below).
       await runPiiEncryptionBackfill(db);
     },
     { tenantKey },
@@ -105,7 +105,7 @@ export async function runEnterpriseMigrations(db: Database, folder: string): Pro
 /*
  * ── PII column encryption backfill ──────────────────────────────────────────
  *
- * Migration 0014 adds the `*_bidx` columns; the DATA change — rewriting
+ * Migration 0016 adds the `*_bidx` columns; the DATA change — rewriting
  * pre-existing plaintext PII to AES-256-GCM ciphertext and filling the blind
  * indexes — happens here, programmatically, because it needs the key the
  * handle holds (SQL migrations cannot encrypt). Runs on every start right after
@@ -332,7 +332,7 @@ const PII_FINALIZE_STATEMENTS = [
 
 /**
  * Encrypt pre-existing plaintext PII rows, fill the blind-index columns, and
- * apply the constraints migration 0014 deferred. Idempotent; `runCoreMigrations`
+ * apply the constraints migration 0016 deferred. Idempotent; `runCoreMigrations`
  * runs it under the migrations lock right after the history. The handle must
  * hold the knowledge base's key (`createDb(url, { piiKey })`; the composition
  * root's does): one that holds none is refused before anything is read.

@@ -335,6 +335,85 @@ describe('useFileNav.openLink', () => {
     open.mockRestore();
   });
 
+  // What a reader clicking a link WRITTEN IN AN HTML PAGE reaches: the
+  // sanitizer now keeps those hrefs, the nav bridge cancels the click the
+  // sandbox would not let the iframe make, and the address lands here.
+  it('opens a page linked by a relative path, resolved against the linking page', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('Board.html', 'knowledge-base/Dashboards/a.html');
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/knowledge-base/Dashboards/Board.html',
+    );
+  });
+
+  it('opens a page up a folder and keeps its fragment', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('../Reports/Q3.html#totals', 'knowledge-base/Dashboards/a.html');
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/knowledge-base/Reports/Q3.html#totals',
+    );
+  });
+
+  // A link to a page nobody wrote is still a navigation: the route goes to
+  // that path and `FileRoute` answers with its own "File not found" screen,
+  // exactly as it does for a mistyped URL. Resolution does not second-guess
+  // whether the file is there.
+  it('navigates to a page that does not exist, leaving not-found to the route', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('Missing.html', 'knowledge-base/Dashboards/a.html');
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/knowledge-base/Dashboards/Missing.html',
+    );
+  });
+
+  // Generated markup writes an href on its own line, and `sanitizeAgentHtml`
+  // keeps it by reading past the padding. The resolver has to read past the
+  // same padding or the kept link lands on a filename with spaces in it.
+  it('resolves a page link written on its own line, padding and all', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('\n      Board.html\n    ', 'knowledge-base/Dashboards/a.html');
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/knowledge-base/Dashboards/Board.html',
+    );
+  });
+
+  it('resolves a padded citation URL as a citation URL, not a relative path', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    result.current.openLink(
+      '  /workspace/bob%2Fmain/knowledge-base/Reports/Q3.html#totals  ',
+      'knowledge-base/Dashboards/a.html',
+    );
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/bob%2Fmain/knowledge-base/Reports/Q3.html#totals',
+    );
+  });
+
+  it('keeps a padded same-document anchor on the file it sits in', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('  #goal  ', 'knowledge-base/Dashboards/a.html');
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/knowledge-base/Dashboards/a.html#goal',
+    );
+  });
+
+  // `window.open` would strip the padding itself, but the address handed over
+  // is the one the allowlist approved, so it goes over clean.
+  it('opens a padded external link at the address it names', () => {
+    navigateMock.mockClear();
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('\n  https://example.com/docs\n', 'knowledge-base/Dashboards/a.html');
+    expect(open).toHaveBeenCalledWith('https://example.com/docs', '_blank', 'noopener,noreferrer');
+    expect(navigateMock).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   // A section link is a scroll, not a navigation to somewhere else.
   it('keeps a same-document anchor on the file it sits in', () => {
     navigateMock.mockClear();

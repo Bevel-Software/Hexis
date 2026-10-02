@@ -83,7 +83,7 @@ function stored(url: string, schema?: string): Query {
 
 /**
  * A schema as an upgrade finds it: the SQL history applied — migration
- * 0014's nullable blind-index columns included — and nothing sealed yet. That
+ * 0016's nullable blind-index columns included — and nothing sealed yet. That
  * is the state between the history and the backfill, and the one rows of an
  * older version can be planted in.
  */

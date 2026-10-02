@@ -34,8 +34,9 @@ export interface ToolContext {
    * The agent run / conversation id this call belongs to (the agent thread id).
    * Supplied as a `sessionId` field on the tool's input body — the external MCP
    * proxy injects it via the `ask`-tool continuity convention, and the
-   * in-process agent passes its thread id. Used to scope the ontology-session
-   * boundary to one run. Absent for non-agent or unthreaded calls.
+   * in-process agent passes its thread id. Handed to the agent-access hooks,
+   * which is how a deployment scopes a rule to one conversation. Absent for
+   * non-agent or unthreaded calls.
    */
   sessionId?: string;
   /**

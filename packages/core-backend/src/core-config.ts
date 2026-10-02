@@ -100,7 +100,6 @@ export interface TenantConfig {
   readonly gitUsername: string;
   readonly gitToken: string;
   readonly kbTemplateDir: string;
-  readonly ontologySessionBlock: boolean;
   readonly updateCheckEnabled: boolean;
   readonly loginPasswordEnabled: boolean;
   readonly allowedEmailDomains: string[];
@@ -259,17 +258,6 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
    * existing one. Override with `KB_TEMPLATE_DIR`.
    */
   readonly kbTemplateDir: string;
-  /**
-   * Ontology-session boundary kill-switch. When true (default), an agent run
-   * that has read across more than one ontology can no longer write. A no-op on
-   * a single-ontology KB. Set `ONTOLOGY_SESSION_BLOCK=false` to disable.
-   *
-   * Stays on CORE config (not `AppConfig`) even though the write BLOCK itself
-   * is an enterprise-registered hook: the flag also switches off the core-owned
-   * touch TRACKING (the gate skips entirely when false — see
-   * `session-ontology.gate.ts`), so it must exist wherever the tracking runs.
-   */
-  readonly ontologySessionBlock: boolean;
   /**
    * In-app update check. When true (default), `GET /api/update-check` lazily
    * asks api.github.com for the newest Hexis release — only when an admin's
@@ -469,8 +457,6 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
     // Default: the `kb-template/` folder shipped inside this package (works
     // both from src/ and compiled dist/ — see assets.ts).
     this.kbTemplateDir = process.env.KB_TEMPLATE_DIR || defaultKbTemplateDir();
-    this.ontologySessionBlock =
-      (process.env.ONTOLOGY_SESSION_BLOCK ?? 'true').trim().toLowerCase() !== 'false';
     this.updateCheckEnabled =
       (process.env.UPDATE_CHECK ?? 'true').trim().toLowerCase() !== 'false';
     this.allowedEmailDomains = (process.env.ALLOWED_EMAIL_DOMAINS || '')
