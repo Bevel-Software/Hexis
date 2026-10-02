@@ -84,6 +84,17 @@ let uploads: AgentUploadStore;
 let toolRegistry: ToolRegistry;
 /** One entry per `writeFiles` batch the tools landed: the paths it carried. */
 let batches: string[][] = [];
+/** One entry per folder turn a tool took: the folder it named. */
+let folderTurns: string[] = [];
+/** How many folder turns are held right now — a batch reads it to prove it ran inside one. */
+let turnsHeld = 0;
+/** The depth `turnsHeld` stood at while each `writeFiles` batch landed. */
+let batchTurnDepth: number[] = [];
+/**
+ * Held by a test that wants an apply to WAIT, standing in for the folder turn
+ * a concurrent `delete_folder` would be holding over the same subtree.
+ */
+let folderTurnGate: Promise<void> | undefined;
 
 interface StartOptions {
   access?: IAccessControl;
@@ -110,6 +121,10 @@ async function start(options: StartOptions = {}): Promise<string> {
     uploadsDir = await mkdtemp(join(tmpdir(), 'agent-uploads-'));
     docCacheDir = await mkdtemp(join(tmpdir(), 'ws-upload-doc-'));
     batches = [];
+    folderTurns = [];
+    batchTurnDepth = [];
+    turnsHeld = 0;
+    folderTurnGate = undefined;
   }
   fs = new LocalFilesystem({ basePath: tempDir, contained: true });
   // The harness speaks the paths the TOOLS speak: a fixture written here as
@@ -135,6 +150,7 @@ async function start(options: StartOptions = {}): Promise<string> {
   ) => {
     const landing = check ? await check(writes) : writes;
     batches.push(landing.map((w) => w.path));
+    batchTurnDepth.push(turnsHeld);
     for (const w of landing) await plainWriteFile(w.path, w.content as never);
     for (const p of deletes) await fs.deleteFile(p);
   };
@@ -169,6 +185,22 @@ async function start(options: StartOptions = {}): Promise<string> {
       }),
       getWorkspacePath: async () => tempDir,
       hasBootstrappedWorkspace: async () => false,
+      // Stands in for `WorkspaceService.withFolderTurn`: records the folder
+      // whose turn was taken, and waits on `folderTurnGate` on the way in so a
+      // test can hold the subtree the way a concurrent `delete_folder` holds
+      // it. The real one serialises overlapping subtrees; what a tool test can
+      // check is that the tool TAKES the turn, over the right folder, and that
+      // it lands nothing until the turn is its own.
+      withFolderTurn: async <T>(_id: string, dir: string, op: () => Promise<T>): Promise<T> => {
+        folderTurns.push(dir);
+        if (folderTurnGate !== undefined) await folderTurnGate;
+        turnsHeld++;
+        try {
+          return await op();
+        } finally {
+          turnsHeld--;
+        }
+      },
     } as never,
     workflowService: {} as never,
     events: {} as never,
@@ -1229,5 +1261,123 @@ describe('the write tools name the upload route', () => {
       expect(description, name).toMatch(/escape/i);
       expect(description, name).toMatch(/zip/i);
     }
+  });
+});
+
+describe('the token travels in the path or in a header', () => {
+  /** POST bytes to the BARE address, the token in `x-upload-token`. */
+  const sendWithHeader = (
+    base: string,
+    token: string,
+    filename: string,
+    data: Buffer,
+    contentType = 'application/octet-stream',
+  ) =>
+    fetch(`${base}/api/agent/uploads?filename=${encodeURIComponent(filename)}`, {
+      method: 'POST',
+      headers: { 'content-type': contentType, 'x-upload-token': token },
+      body: data,
+    });
+
+  it('takes the token as a header on the bare address, and the apply lands those bytes', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    const res = await sendWithHeader(base, token, 'notes.md', Buffer.from('hello'));
+    expect(res.status).toBe(200);
+    expect(await json(res)).toEqual({ filename: 'notes.md', bytes: 5, kind: 'file' });
+    const answer = await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Pages` });
+    expect(answer.files).toEqual([{ path: `${KB_DIR}/Pages/notes.md`, outcome: 'created' }]);
+    expect(await readFile(join(tempDir, KB_DIR, 'Pages/notes.md'), 'utf8')).toBe('hello');
+  });
+
+  it('keeps the bytes a stream on the bare address too, whatever content-type is claimed', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    // The global `express.json()` would drain this body — the header form has
+    // to be exempt by the same rule the path form is, or a zip sent as
+    // `application/json` reaches the handler with nothing left in it.
+    const zip = zipOf({ 'a.md': 'a' });
+    const res = await sendWithHeader(base, token, 'archive.zip', zip, 'application/json');
+    expect(await json(res)).toEqual({ filename: 'archive.zip', bytes: zip.byteLength, kind: 'zip', entries: 1 });
+  });
+
+  it('exempts both spellings of the address from the JSON parser', () => {
+    expect(isAgentUploadRawBodyPath('/api/agent/uploads')).toBe(true);
+    expect(isAgentUploadRawBodyPath('/api/agent/uploads/')).toBe(true);
+    expect(isAgentUploadRawBodyPath('/API/Agent/Uploads')).toBe(true);
+    expect(isAgentUploadRawBodyPath('/api/agent/uploads/bevel-up_abc')).toBe(true);
+    expect(isAgentUploadRawBodyPath('/api/agent/uploadsomething')).toBe(false);
+    expect(isAgentUploadRawBodyPath('/api/agent/tools/write_file')).toBe(false);
+  });
+
+  it('gives the bare address with NO token the same single refusal an unknown token gets', async () => {
+    const base = await start();
+    const bare = await fetch(`${base}/api/agent/uploads?filename=notes.md`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: Buffer.from('hello'),
+    });
+    const unknown = await send(base, 'bevel-up_nosuchtoken', 'notes.md', Buffer.from('hello'));
+    expect(bare.status).toBe(404);
+    expect(unknown.status).toBe(404);
+    // The same words: a caller holding no token learns nothing from the
+    // difference, not even that a header would have been read.
+    expect(await json(bare)).toEqual(await json(unknown));
+  });
+
+  it('lets the path win when a stale header names a different token', async () => {
+    const base = await start();
+    const first = await request(base);
+    const second = await request(base);
+    const res = await fetch(`${base}/api/agent/uploads/${encodeURIComponent(first.token)}?filename=notes.md`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream', 'x-upload-token': second.token },
+      body: Buffer.from('hello'),
+    });
+    expect(res.status).toBe(200);
+    // The bytes belong to the token in the address that was POSTed to; the
+    // other token is still open and still holds nothing.
+    const landed = await apply(base, { branch: DRAFT, token: first.token, destination: `${KB_DIR}/Pages` });
+    expect(landed.files).toEqual([{ path: `${KB_DIR}/Pages/notes.md`, outcome: 'created' }]);
+    const empty = await apply(base, { branch: DRAFT, token: second.token, destination: `${KB_DIR}/Pages` });
+    expect(empty.error).toBeDefined();
+  });
+});
+
+describe('an apply takes the destination folder\'s turn', () => {
+  it('lands its batch INSIDE the turn, over the destination it was given', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    await send(base, token, 'skill.zip', zipOf({ 'SKILL.md': '# s\n', 'docs/a.md': 'a' }));
+    await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Skills/my-skill` });
+    // One turn, over the destination — the same folder `delete_folder` takes
+    // its turn over, which is what makes the two wait for each other.
+    expect(folderTurns).toEqual([`${KB_DIR}/Skills/my-skill`]);
+    // And the batch landed while that turn was held, not before or after it:
+    // a turn taken around nothing would serialise nothing.
+    expect(batchTurnDepth).toEqual([1]);
+  });
+
+  it('lands nothing while another caller holds a turn over that subtree', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    await send(base, token, 'page.md', Buffer.from('mine\n'));
+    // The turn a concurrent `delete_folder` would be holding over the
+    // destination, held open until this test lets go.
+    let release!: () => void;
+    folderTurnGate = new Promise<void>((resolve) => (release = resolve));
+    const pending = apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Pages` });
+    // Long enough for the apply to reach the turn and ask for it: it has
+    // judged every path by now, and is holding its answer.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(folderTurns).toEqual([`${KB_DIR}/Pages`]);
+    expect(batches).toEqual([]);
+    await expect(readFile(join(tempDir, KB_DIR, 'Pages/page.md'), 'utf8')).rejects.toThrow();
+    // Now the folder is free, and the same apply finishes on it.
+    release();
+    const answer = await pending;
+    expect(answer.files).toEqual([{ path: `${KB_DIR}/Pages/page.md`, outcome: 'created' }]);
+    expect(batches).toHaveLength(1);
+    expect(await readFile(join(tempDir, KB_DIR, 'Pages/page.md'), 'utf8')).toBe('mine\n');
   });
 });

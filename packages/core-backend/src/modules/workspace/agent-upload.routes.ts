@@ -9,6 +9,20 @@ const log = logger('agent-uploads');
 export const AGENT_UPLOAD_ROUTE = '/agent/uploads/:token';
 
 /**
+ * The same endpoint with the token in the `x-upload-token` HEADER instead of
+ * the path — the address `uploadUrl` is, without its last segment.
+ *
+ * Two spellings because a token in a URL is a credential in a place that keeps
+ * copies: an access log, a proxy log, a shell history, a `ps` listing of the
+ * `curl` that sent it. The path form is what `request_file_upload` answers,
+ * because one address an agent can paste into any client is the thing that
+ * makes this route usable at all; the header form is for a caller that would
+ * rather its credential not be written down on the way. Both reach the same
+ * handler and are judged identically — same token, same single use.
+ */
+export const AGENT_UPLOAD_HEADER_ROUTE = '/agent/uploads';
+
+/**
  * Whether `path` is the agent upload route, and so must reach its handler with
  * the body still a STREAM.
  *
@@ -24,7 +38,12 @@ export const AGENT_UPLOAD_ROUTE = '/agent/uploads/:token';
  * this router, and a check that said no would let the parser eat that body.
  */
 export function isAgentUploadRawBodyPath(path: string): boolean {
-  return path.toLowerCase().startsWith('/api/agent/uploads/');
+  // Trailing slashes trimmed first, so the header form's bare address matches
+  // in every spelling Express routes to it (`/api/agent/uploads` and
+  // `/api/agent/uploads/` are one route): missing one of them would hand that
+  // request to the JSON parser, and the bytes it drains are gone.
+  const lower = path.toLowerCase().replace(/\/+$/, '');
+  return lower === '/api/agent/uploads' || lower.startsWith('/api/agent/uploads/');
 }
 
 export interface AgentUploadRouteDeps {
@@ -54,8 +73,8 @@ export function createAgentUploadRoutes(deps: AgentUploadRouteDeps): express.Rou
   const router = express.Router();
   const { uploads } = deps;
 
-  router.post(AGENT_UPLOAD_ROUTE, async (req, res) => {
-    const token = req.params.token;
+  const handle: express.RequestHandler = async (req, res) => {
+    const token = tokenOf(req);
     try {
       // THE TOKEN FIRST, before anything about the request is read, parsed,
       // judged or quoted back. This route is authenticated by the token and
@@ -124,9 +143,35 @@ export function createAgentUploadRoutes(deps: AgentUploadRouteDeps): express.Rou
       log.error('upload failed:', { err });
       res.status(500).json({ error: 'Upload failed' });
     }
-  });
+  };
+
+  // Both spellings of the one endpoint: the token in the path, or in the
+  // `x-upload-token` header on the bare address.
+  router.post(AGENT_UPLOAD_ROUTE, handle);
+  router.post(AGENT_UPLOAD_HEADER_ROUTE, handle);
 
   return router;
+}
+
+/**
+ * The token the sender presented: the `:token` path segment, or the
+ * `x-upload-token` header when the bytes went to the bare address.
+ *
+ * The path wins when both are present — it is the address the sender actually
+ * POSTed to, and a header left over from an earlier upload must not quietly
+ * redirect these bytes onto a different token.
+ *
+ * No token at all answers the empty string rather than its own refusal, so it
+ * goes through `assertOpen` like any other unusable token and gets the same
+ * single 404. A caller holding nothing is told nothing it did not already
+ * know — not even whether this endpoint wanted a header.
+ */
+function tokenOf(req: express.Request): string {
+  const inPath = req.params.token;
+  if (typeof inPath === 'string' && inPath.trim() !== '') return inPath.trim();
+  const header = req.headers['x-upload-token'];
+  if (typeof header === 'string' && header.trim() !== '') return header.trim();
+  return '';
 }
 
 /** The refusal an over-limit upload gets, naming the limit that applied. */

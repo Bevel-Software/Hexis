@@ -55,10 +55,15 @@ export interface IssuedUpload {
   /** The absolute URL the bytes are POSTed to. Carries the token in its path. */
   uploadUrl: string;
   /**
-   * The token itself — what `apply_file_upload` takes. Named separately from
-   * `uploadUrl` because the apply needs it on its own, not because the upload
-   * route reads it anywhere else: the bytes go to `uploadUrl`, which carries
-   * the token in its path, and there is no header spelling of it.
+   * The token itself — what `apply_file_upload` takes, and the credential the
+   * upload route is authenticated by.
+   *
+   * Named separately from `uploadUrl` for two reasons: the apply needs it on
+   * its own, and the route takes it either way round. The bytes can go to
+   * `uploadUrl`, which carries the token in its last path segment, or to that
+   * address WITHOUT that segment with the token in the `x-upload-token`
+   * header — the spelling for a caller that would rather its credential not
+   * land in an access log or a shell history on the way.
    */
   token: string;
   /** ISO-8601 instant after which the token and any bytes sent with it are gone. */

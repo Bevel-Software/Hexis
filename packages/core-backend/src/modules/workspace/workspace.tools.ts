@@ -3074,7 +3074,20 @@ export function registerWorkspaceTools(
             ) => Promise<{ path: string; content: Buffer }[]>,
           ): Promise<void>;
         };
-        await batching.writeFiles(writes, `Apply upload of ${writes.length} file(s)`, [], recheck);
+        // In the DESTINATION folder's TURN, which `delete_folder` takes over the
+        // same subtree (and `keepFolderOf` with it). `writeFiles` creates the
+        // destination, and any folder above a zip entry on the way to it, as
+        // part of landing the batch — and a folder delete running between that
+        // creation and the commit enumerates the folder's files BEFORE these
+        // exist and then removes the folder they are landing in, which is an
+        // answer saying `created` for bytes that are already gone. The turn is
+        // taken OUTSIDE `writeFiles`, so it is held across the under-lock
+        // recheck and the commit both, and in the same order the delete takes
+        // its own (the folder's turn first, then each path's lock), which is
+        // what keeps two callers from waiting on each other's half.
+        await ctx.workspaceService.withFolderTurn(workspaceIdForBranch(branch), destination, async () => {
+          await batching.writeFiles(writes, `Apply upload of ${writes.length} file(s)`, [], recheck);
+        });
       }
       // The token is spent once an ANSWER exists, even an answer in which
       // every path was refused: the apply ran and said what happened at each
@@ -3110,6 +3123,8 @@ export function registerWorkspaceTools(
         '(1) POST the file as the raw request body to `uploadUrl` with `?filename=<name>` — ' +
         '`curl -X POST --data-binary @skill.zip "<uploadUrl>?filename=skill.zip"` — which answers what it received; ' +
         '(2) call `apply_file_upload` with the same `token`, a `branch` and a destination folder. ' +
+        'The token may instead travel in an `x-upload-token` header, POSTed to that same address without its last ' +
+        '(token) segment — the spelling to prefer when the command line you send it from is logged or shared. ' +
         'The token is single-use, bound to you, and expires at `expiresAt`; an upload nobody applies by then is deleted. ' +
         'A file over `maxBytes` is refused when you send it, naming the limit. ' +
         'Ask for a token per upload — one token carries one file or one zip.',
@@ -3118,7 +3133,10 @@ export function registerWorkspaceTools(
         type: 'object',
         properties: {
           uploadUrl: str('The absolute URL to POST the bytes to. Carries the token; add `?filename=<name>`.'),
-          token: str('The token itself — what `apply_file_upload` takes. Treat it as a credential.'),
+          token: str(
+            'The token itself — what `apply_file_upload` takes, and what an `x-upload-token` header carries when you ' +
+              'would rather it not sit in a URL. Treat it as a credential.',
+          ),
           expiresAt: str('ISO-8601 instant after which the token, and any bytes sent with it, are gone.'),
           expiresInSeconds: int('Seconds from now until `expiresAt`.'),
           maxBytes: int('The largest upload this deployment accepts, in bytes.'),
