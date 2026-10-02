@@ -4,6 +4,7 @@ import {
   assertKbDirNameFree,
   assertRepoRootNameFree,
   assertRepoRootNameFreeArgs,
+  hasControlCharacter,
   isInsideRepo,
   normalizePathArgs,
   normalizeWorkspacePath,
@@ -45,6 +46,14 @@ describe('isInsideRepo', () => {
     expect(isInsideRepo('knowledge-base/foo\\..\\..\\outside.md', KB)).toBe(false);
     expect(isInsideRepo('knowledge-base\\KnowledgeBase\\x.md', KB)).toBe(false);
     expect(isInsideRepo('knowledge-base/KnowledgeBase/a\\b.md', KB)).toBe(false);
+  });
+
+  it('refuses a control character anywhere: git reads a line break in a path as a separator', () => {
+    expect(isInsideRepo('knowledge-base/Docs/secret.md\nzzz', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base/Docs/secret.md\rzzz', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base/Docs/a\u0000b.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base/Docs/a\u001Bb.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base/Docs/a\u007Fb.md', KB)).toBe(false);
   });
 
   it('tolerates a trailing slash on a directory path', () => {
@@ -110,6 +119,120 @@ describe('assertInsideRepo', () => {
       expect(message, p).toContain('Use "knowledge-base/" instead');
       expect(message, p).not.toMatch(/Use "[^"]*\.\.[^"]*" instead/);
     }
+  });
+});
+
+describe('a line break in a path — one name to the gates, two object names to git', () => {
+  // `git cat-file --batch` reads one `<ref>:<path>` spec per LINE. A path
+  // carrying a `\n` therefore means TWO things at once: the read gate, the
+  // download gate and the not-a-directory check are answered about the whole
+  // string — a name that exists nowhere, so the real file's own frontmatter
+  // rules are never the ones consulted — while git answers about the part
+  // before the break and hands over its bytes. In the access resolver's batch
+  // read the extra answer also shifts every result after it, so one directory
+  // is judged by another's `access.md`.
+  //
+  // Which is why the refusal is HERE, at the normaliser every accepted path
+  // passes through, and not at the route that happened to surface it: the next
+  // caller to build a git spec out of a path will not remember this.
+  const INJECTED = 'knowledge-base/Docs/secret.md\nzzz';
+
+  it('is refused by the normaliser, with a message that says what is wrong', () => {
+    let err: unknown;
+    try {
+      normalizeWorkspacePath(INJECTED, KB);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(WorkflowValidationError);
+    const e = err as WorkflowValidationError;
+    expect(e.status).toBe(400);
+    expect(e.message).toMatch(/control character/);
+    // Never "use this instead": there is no corrected spelling of a name with
+    // an invisible byte in it.
+    expect(e.message).not.toMatch(/Use "/);
+    // The path is named, ESCAPED — `sanitizedPath`, the same spelling every
+    // other refusal uses — so the character that made the path invalid cannot
+    // forge a second line of the refusal either.
+    expect(e.payload).toMatchObject({
+      kind: 'path-control-character',
+      path: 'knowledge-base/Docs/secret.md\\nzzz',
+    });
+    expect(e.message).toContain('"knowledge-base/Docs/secret.md\\nzzz"');
+    expect(e.message).not.toContain('\n');
+  });
+
+  it('is refused the same way unprefixed, which is the form a route receives', () => {
+    expect(() => normalizeWorkspacePath('Docs/secret.md\nzzz', KB)).toThrow(/control character/);
+  });
+
+  it('is refused by the check AFTER the normaliser too', () => {
+    expect(() => assertInsideRepo(INJECTED, KB)).toThrow(/control character/);
+  });
+
+  it('refuses every control character, not only the line breaks', () => {
+    for (const ch of ['\u0000', '\u0001', '\t', '\n', '\u000B', '\r', '\u001F', '\u007F']) {
+      expect(() => normalizeWorkspacePath(`knowledge-base/Docs/a${ch}b.md`, KB), ch).toThrow(
+        WorkflowValidationError,
+      );
+    }
+  });
+
+  it('refuses a CHECKOUT FOLDER NAME carrying one, which the normaliser would otherwise emit', () => {
+    // The name is prefixed onto the result rather than read from it, so a
+    // clean path joined to `kb\nname` would come out carrying the break: the
+    // normaliser would emit exactly what it refuses from a caller, from inputs
+    // that were each individually fine.
+    let err: unknown;
+    try {
+      normalizeWorkspacePath('Docs/report.md', 'kb\nname');
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(WorkflowValidationError);
+    const e = err as WorkflowValidationError;
+    // Named as the CONFIGURATION error it is: an operator told their own path
+    // was invalid would have nothing to fix.
+    expect(e.message).toMatch(/checkout folder name/);
+    expect(e.message).toMatch(/KB_DIR_NAME/);
+    expect(e.message).toContain('"kb\\nname"');
+    expect(e.payload).toMatchObject({ kind: 'kb-dir-name-control-character', kbDirName: 'kb\\nname' });
+    // The guarantee the fence is for: no return value of this function carries
+    // a control character, whatever it was given.
+    for (const dir of ['kb\nname', 'kb\rname', 'kb\u0000name']) {
+      for (const p of ['Docs/report.md', `${dir}/Docs/report.md`, 'x']) {
+        let out: string | null = null;
+        try {
+          out = normalizeWorkspacePath(p, dir);
+        } catch {
+          out = null;
+        }
+        if (out !== null) expect(hasControlCharacter(out), `${dir} + ${p}`).toBe(false);
+      }
+    }
+  });
+
+  it('exposes the rule as a predicate, so the places that SET a name share it', () => {
+    expect(hasControlCharacter('knowledge-base')).toBe(false);
+    expect(hasControlCharacter('kb\nname')).toBe(true);
+    expect(hasControlCharacter('kb\u007Fname')).toBe(true);
+    // U+2028 is not in the range: nothing to git, and a name carrying one is
+    // creatable today — refusing it would make an existing file unreadable.
+    expect(hasControlCharacter('kb\u2028name')).toBe(false);
+  });
+
+  it('leaves ordinary names alone — the rule costs no real path', () => {
+    expect(normalizeWorkspacePath('knowledge-base/Docs/[Approved] Handbook_Order archive.docx', KB)).toBe(
+      'knowledge-base/Docs/[Approved] Handbook_Order archive.docx',
+    );
+    expect(normalizeWorkspacePath('knowledge-base/Docs/Ünïcödé — naïve.md', KB)).toBe(
+      'knowledge-base/Docs/Ünïcödé — naïve.md',
+    );
+  });
+
+  it('refuses it through normalizePathArgs, which is where the MCP tools meet the rule', () => {
+    expect(() => normalizePathArgs({ path: INJECTED }, KB)).toThrow(/control character/);
+    expect(() => normalizePathArgs({ files: [{ path: INJECTED }] }, KB)).toThrow(/control character/);
   });
 });
 

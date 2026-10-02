@@ -12,6 +12,7 @@ import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { SpillStore } from '../spill-store.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 
 /**
@@ -42,11 +43,9 @@ async function descriptions(registry: ToolRegistry = new ToolRegistry()): Promis
     {} as unknown as IAccessControl,
     kb,
     {
-      service: {} as never,
-      enabled: false,
-      kb,
       recoveryBotEmail: 'recovery-bot@bevel.local',
       hooks: new WorkflowHooks(),
+      notes: new ToolDescriptionNotes(),
     },
     new RoutineWritePolicyService(),
     {} as never,

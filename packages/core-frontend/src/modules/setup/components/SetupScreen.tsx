@@ -20,6 +20,7 @@ import {
   testConnection,
   KbInitFailed,
   testOidc,
+  RepositoryChangeNeedsConfirmation,
   SettingsProblems,
   type ConnectionTest,
   type KbInitFailure,
@@ -27,6 +28,8 @@ import {
   type OidcTest,
   type OidcVerification,
   type GitMode,
+  type RepositoryChangeChoice,
+  type RepositoryChangeResult,
   type RepositoryStatus,
   type SettingStatus,
   type SyncNowResult,
@@ -473,6 +476,31 @@ export function SetupScreen({
       setInitFailure(kbInit);
     }
   }
+  /**
+   * The move to another repository the server has REFUSED until it is
+   * confirmed: how many change requests were open at that moment, and the
+   * way left and the way moved to when the server tells them apart. Null
+   * when there is nothing to confirm.
+   *
+   * THE ONE QUESTION A MOVE IS ASKED, whichever kind it is: another address,
+   * another repository on GitHub, another way of having one. The server
+   * decides what is a move, so the screen does not guess at it beforehand.
+   *
+   * Nothing was saved and nothing was destroyed while this stands: the answer
+   * is a decision only the admin can make, and the draft is kept exactly as
+   * typed so the confirmed save re-sends it.
+   */
+  const [repositoryChange, setRepositoryChange] = useState<{
+    openChangeRequests: number;
+    from?: GitMode;
+    to?: GitMode;
+    /** The move the question was asked about, so it is not shown for another one. */
+    target: string;
+  } | null>(null);
+  /** What to do with the open change requests. Keeping them is the safe default: nothing closes by hesitating. */
+  const [changeChoice, setChangeChoice] = useState<RepositoryChangeChoice>('keep');
+  /** What the save that changed the repository did, so the screen can say so afterwards. */
+  const [repositoryChanged, setRepositoryChanged] = useState<RepositoryChangeResult | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [syncing, setSyncing] = useState(false);
   /** What the last "Sync now" from THIS page came back with (a failure to ask is `error`). */
@@ -558,8 +586,9 @@ export function SetupScreen({
    * thing drawn.
    *
    * Two ways are told apart: the one IN EFFECT, which the running
-   * deployment is on, and the one chosen, which a restart puts in effect.
-   * They differ between a move and the restart the move owes.
+   * deployment is on, and the one chosen. A move takes effect on the save
+   * that confirms it, so they differ only where the server reports a choice
+   * it has not put in effect, which a restart then does.
    */
   const inEffect = repository?.mode ?? null;
   const chosen = repository ? (repository.chosen ?? repository.mode) : null;
@@ -577,26 +606,27 @@ export function SetupScreen({
     repository ? ((Object.keys(TAB_KEYS) as GitMode[]).find((mode) => TAB_KEYS[mode].includes(key)) ?? null) : null;
   /** Whether the repository is reached by an address and a token: the fields, the test, the proof. */
   const byAddress = !repository || gitTab === 'token';
-  /** A move was saved and the restart it owes has not happened: the deployment is still on the way it was. */
+  /** A way was chosen that the server has not put in effect: the deployment is still on the way it was. */
   const movePending = inEffect !== null && chosen !== inEffect;
   /**
    * Saving NOW would choose another way than the one chosen, on a deployment
-   * that has a repository: a move, or a move taken back. This is what is
-   * asked about at the button, where the decision is made; an open tab is
-   * not a decision.
+   * that has a repository: a move, or a move taken back. Said on the tab
+   * before the button is pressed; the question itself is the server's, asked
+   * when the save arrives, because an open tab is not a decision.
    */
   const savingMoves = inEffect !== null && gitTab !== chosen;
-  const movingTo = GIT_MODE_LABEL[gitTab];
   const movingFrom = inEffect ? GIT_MODE_LABEL[inEffect] : '';
-  /** A save that moves the deployment away from the way in effect. Taking a move back is not one. */
-  const mustConfirmMove = savingMoves && gitTab !== inEffect;
   /**
-   * The way the admin said yes to moving TO. Held as the way and not as a
-   * yes, so a yes given to one move is not a yes to another: opening a
-   * third tab asks again.
+   * What a move is a move TO, as far as the screen can tell: the tab, and
+   * the address or the repository on GitHub typed on it.
    */
-  const [moveConfirmed, setMoveConfirmed] = useState<GitMode | null>(null);
-  const moveIsConfirmed = moveConfirmed === gitTab;
+  const moveTarget = [gitTab, draft.kbRepoUrl ?? '', draft.githubRepository ?? ''].join('\n');
+  /**
+   * The question, while it is still about the move on screen. A yes to one
+   * move is not a yes to another: another tab, another address or another
+   * repository on GitHub is another move, and the next save asks afresh.
+   */
+  const moveAsked = repositoryChange?.target === moveTarget ? repositoryChange : null;
 
   /**
    * What a save sends about the repository, given what was typed: the way
@@ -1052,6 +1082,16 @@ export function SetupScreen({
 
   async function submit(e: FormEvent) {
     e.preventDefault();
+    await saveNow();
+  }
+
+  /**
+   * Store the draft. Called by the form, and again by the repository-change
+   * confirmation with the decision the admin made — the SAME path, so a
+   * confirmed save proves the connection and fills in the branch fields
+   * exactly as an ordinary one does.
+   */
+  async function saveNow(confirmRepositoryChange?: RepositoryChangeChoice) {
     // A save during a sign-in check would clear the draft the check is about.
     if (saving || retrying || oidcTesting) return;
     setSaving(true);
@@ -1061,6 +1101,7 @@ export function SetupScreen({
     // attempt supersedes it — leaving it up put "Saved what you filled in, but
     // this deployment still needs…" directly above this attempt's "Not saved."
     setStillMissing([]);
+    setRepositoryChanged(null);
     try {
       let payload = chosenRepository(draft);
       /** What the host said this time, or null when it could not be asked. */
@@ -1093,13 +1134,18 @@ export function SetupScreen({
         // Includes a probe the server REFUSED (a 4xx comes back as a
         // rejection, not a throw) — that is an answer about these values.
         if (proven && !proven.ok) {
-          setError(
+          // THE SERVER'S OWN WORDS FIRST. The sentences below say that the
+          // save did not happen; only the host knows WHY — "there is no
+          // repository at that address", "the host rejected the credentials".
+          // Replacing that with a generic sentence is how an admin is left
+          // reading "fix the connection" with no idea what is wrong with it.
+          const refusal =
             proven.outcome === 'read-only'
               ? 'Not saved. The token can read the repository but cannot write to it — grant it write access and test again.'
               : variant === 'setup'
                 ? 'Not saved. Nothing behind this screen works until the repository answers, and it did not — fix the connection above and test it again.'
-                : 'Not saved. The repository did not answer with those details — fix the connection above and test it again.',
-          );
+                : 'Not saved. The repository did not answer with those details — fix the connection above and test it again.';
+          setError(proven.error ? `${refusal} The server said: ${proven.error}` : refusal);
           return;
         }
       }
@@ -1119,11 +1165,19 @@ export function SetupScreen({
       ) {
         await probe();
       }
-      const result = await saveSettings(payload);
+      // An ordinary save is sent exactly as it always was — one argument, and
+      // no `confirmRepositoryChange` in the body. Only the save that answers
+      // the repository-change confirmation carries the answer.
+      const result = confirmRepositoryChange
+        ? await saveSettings(payload, confirmRepositoryChange, moveAsked?.openChangeRequests)
+        : await saveSettings(payload);
       // A save while a failure stands re-ran the initialization, and it held.
       setClearedFailure(initFailure);
       setInitFailure(null);
       setRestartRequired(result.restartRequired);
+      // The confirmation was answered — and the answer went through.
+      setRepositoryChange(null);
+      setRepositoryChanged(result.repositoryChange ?? null);
       setDraft({});
       if (result.oidcVerification) setLatest(result.oidcVerification);
       // A save can succeed and STILL leave the deployment unusable: a blank
@@ -1165,6 +1219,11 @@ export function SetupScreen({
     } catch (err) {
       if (err instanceof SettingsProblems) {
         showProblems(err.problems);
+      } else if (err instanceof RepositoryChangeNeedsConfirmation) {
+        // NOT an error: nothing was saved and nothing was destroyed. The
+        // draft stays exactly as typed — the confirmed save re-sends it.
+        setRepositoryChange({ openChangeRequests: err.openChangeRequests, from: err.from, to: err.to, target: moveTarget });
+        setChangeChoice('keep');
       } else if (err instanceof KbInitFailed) {
         // The values ARE stored — only the initialization failed. The form
         // shows what was saved, and the banner says what to fix and retries
@@ -1172,6 +1231,14 @@ export function SetupScreen({
         setClearedFailure(null);
         setInitFailure(err.kbInit);
         setDraft({});
+        // The confirmation was ANSWERED — the address is stored; it is the
+        // initialization that failed, and the banner above owns the retry.
+        // Left standing, it would offer Replace for a change that already
+        // happened, over a draft this line has just cleared: a second click
+        // would re-send the stored address, change nothing, and swallow the
+        // "requests closed" outcome for good.
+        setRepositoryChange(null);
+        setChangeChoice('keep');
         onSaved();
       } else setError(err instanceof Error ? err.message : 'Could not save these settings.');
     } finally {
@@ -1386,6 +1453,23 @@ export function SetupScreen({
             </Banner>
           )}
 
+          {/* What the save that moved the deployment actually did. */}
+          {repositoryChanged && (
+            <Banner tone="ok" role="status" className="mt-6" data-testid="repository-changed">
+              <p>
+                Saved. This deployment now works on the new repository.
+              </p>
+              {repositoryChanged.choice === 'close' && repositoryChanged.closedChangeRequests > 0 && (
+                <p className="mt-1">
+                  {repositoryChanged.closedChangeRequests === 1
+                    ? '1 change request was closed as “repository replaced”.'
+                    : `${repositoryChanged.closedChangeRequests} change requests were closed as “repository replaced”.`}{' '}
+                  Nothing was deleted.
+                </p>
+              )}
+            </Banner>
+          )}
+
           {error && (
             <Banner tone="danger" role="alert" className="mt-6">
               {error}
@@ -1580,7 +1664,8 @@ export function SetupScreen({
                   <Banner tone="wait" role="status" data-testid="moves-repository">
                     Saving moves this deployment to another repository, which starts without what the
                     current one holds. Nothing is deleted: the current repository is left as it is, and
-                    this deployment&rsquo;s working copies of it are set aside at the next restart.
+                    this deployment&rsquo;s working copies of it are set aside. You are asked to confirm
+                    before anything moves.
                   </Banner>
                 )}
                 {repositoryTabs && savingMoves && gitTab === inEffect && (
@@ -1773,32 +1858,87 @@ export function SetupScreen({
             that they are present, not that they work — and open the app onto
             a repository it cannot reach, which reads as a broken product
             rather than a wrong token. */}
-        {/* ASKED WHERE THE DECISION IS MADE. The tab is the choice, and the
-            tab is a screen above this button: an admin who opened another
-            way to read about it, then changed something else and saved,
-            would have moved the deployment to an empty repository. So a
-            save that moves is a save the admin has said yes to, here,
-            naming what is left and what is moved to. */}
-        {mustConfirmMove && (
-          <Surface tone="sunken" radius="md" className="mt-10 p-4" data-testid="confirm-move">
-            <label className="flex items-start gap-2.5 text-detail text-ink">
-              <input
-                type="checkbox"
-                className="mt-0.5"
-                checked={moveConfirmed === gitTab}
-                onChange={(e) => setMoveConfirmed(e.target.checked ? gitTab : null)}
-              />
-              <span>
-                Move this deployment from &ldquo;{movingFrom}&rdquo; to &ldquo;{movingTo}&rdquo;.
-                <span className="mt-1 block text-meta text-ink-muted">
-                  It starts on a repository without what the current one holds. Nothing is deleted, and the move takes
-                  effect when the deployment is restarted.
-                </span>
-              </span>
-            </label>
-          </Surface>
+        {/* ASKED WHERE THE DECISION IS MADE, AND ASKED ONCE. The tab is the
+            choice, and the tab is a screen above this button: an admin who
+            opened another way to read about it, then changed something else
+            and saved, would have moved the deployment to an empty
+            repository. So the server refuses a save that moves until the
+            admin has said yes, and the question is put here, naming what is
+            left and what is moved to. Nothing is stored and nothing is set
+            aside while it stands; the draft is still on screen, and
+            answering re-sends it. */}
+        {moveAsked && (
+          <Banner tone="wait" role="alert" className="mt-10" data-testid="repository-change-confirm">
+            <p className="font-semibold">
+              {moveAsked.from && moveAsked.to && moveAsked.from !== moveAsked.to
+                ? `Move this deployment from “${GIT_MODE_LABEL[moveAsked.from]}” to “${GIT_MODE_LABEL[moveAsked.to]}”?`
+                : 'Move this deployment to another repository?'}
+            </p>
+            <p className="mt-1">
+              The move happens as soon as you confirm, with no restart. Unless the new repository holds the
+              same history, every working copy on this server stops being used and is cloned fresh from the
+              new repository. Anything committed here and not
+              yet pushed from this server goes out of the app with it. Nothing is deleted, but it is only
+              recoverable from the
+              <code className="mx-1">replaced-working-copies</code>
+              folder on the server, by hand.
+            </p>
+            {moveAsked.openChangeRequests > 0 && (
+              <fieldset className="mt-3">
+                <legend className="font-semibold">
+                  {moveAsked.openChangeRequests === 1
+                    ? 'There is 1 open change request.'
+                    : `There are ${moveAsked.openChangeRequests} open change requests.`}
+                </legend>
+                <label className="mt-1 flex items-start gap-2">
+                  <input
+                    type="radio"
+                    name="repository-change-requests"
+                    className="mt-1"
+                    checked={changeChoice === 'keep'}
+                    onChange={() => setChangeChoice('keep')}
+                  />
+                  <span>Keep them open: the same repository only moved.</span>
+                </label>
+                <label className="mt-1 flex items-start gap-2">
+                  <input
+                    type="radio"
+                    name="repository-change-requests"
+                    className="mt-1"
+                    checked={changeChoice === 'close'}
+                    onChange={() => setChangeChoice('close')}
+                  />
+                  <span>
+                    Close them as “repository replaced”: this is a different repository and their
+                    branches are not in it. Nothing is deleted, and the file locks held on those
+                    branches are released.
+                  </span>
+                </label>
+              </fieldset>
+            )}
+            <div className="mt-3 flex gap-2">
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => void saveNow(moveAsked.openChangeRequests > 0 ? changeChoice : 'keep')}
+                // The same things that stop a save: a click must never do nothing.
+                disabled={saving || testing || retrying || oidcTesting}
+              >
+                {saving ? 'Moving…' : 'Move the deployment'}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setRepositoryChange(null)}
+                disabled={saving || testing}
+              >
+                Cancel
+              </Button>
+            </div>
+          </Banner>
         )}
-        <div className={`${mustConfirmMove ? 'mt-4' : 'mt-10'} flex flex-wrap items-center justify-end gap-3`}>
+        <div className={`${moveAsked ? 'mt-4' : 'mt-10'} flex flex-wrap items-center justify-end gap-3`}>
           {connectionRejected && (
             // Before the button in the DOM so the reason is read first, and
             // so `justify-end` leaves the button itself at the right edge.
@@ -1815,12 +1955,13 @@ export function SetupScreen({
             type="submit"
             form="setup-settings-form"
             variant="primary"
-            disabled={saving || testing || retrying || oidcTesting || connectionRejected || (mustConfirmMove && !moveIsConfirmed)}
+            // While the question stands, its own buttons are the way on.
+            disabled={saving || testing || retrying || oidcTesting || connectionRejected || moveAsked !== null}
             // Described by the refusal, so a reader who lands on a button
             // that will not move is told why rather than left guessing.
             aria-describedby={connectionRejected ? 'connection-refusal' : undefined}
           >
-            {saving ? 'Saving…' : mustConfirmMove ? 'Save and move' : 'Save and continue'}
+            {saving ? 'Saving…' : 'Save and continue'}
           </Button>
         </div>
 

@@ -34,7 +34,7 @@
  *                                                    (status='needs_attention')
  */
 
-import { and, eq, inArray, isNull, min, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, min, or, sql, type SQL } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('pending-commits');
@@ -382,6 +382,64 @@ export class PendingCommitsService {
         lastAttemptedAt: new Date(),
       })
       .where(eq(pendingCommits.id, id));
+  }
+
+  /**
+   * Take every commit still queued for `branch` out of the worker's reach and
+   * onto the admin surface, and answer how many moved.
+   *
+   * The one caller is the knowledge-base repository being REPLACED. A release
+   * ENQUEUES the bytes and only then drops its lock, so the moment the locks
+   * on a branch are dropped there may be rows already waiting — bytes that
+   * were written against a working copy of the repository that is gone. Left
+   * `pending`, the worker would pick them up after the re-clone and commit
+   * them onto a same-named branch of a DIFFERENT repository: someone else's
+   * file, overwritten by a change nobody made to it.
+   *
+   * `needs_attention`, not deleted — the same rule as everything else about a
+   * replacement. The bytes are still in the row, the reason is on it, and they
+   * show up on the pending-commit admin surface for a person to decide about.
+   * `running` rows go too: the worker checks the row back in when it finishes,
+   * and a row it is mid-flight with is exactly one whose destination just
+   * changed under it.
+   */
+  async markNeedsAttentionOnBranch(branch: string, error: string): Promise<number> {
+    return this.escalateQueued(eq(pendingCommits.branch, branch), error);
+  }
+
+  /** Every commit still queued that `which` selects goes to a person, with the reason. Answers how many. */
+  private async escalateQueued(which: SQL, error: string): Promise<number> {
+    const moved = await this.db
+      .update(pendingCommits)
+      .set({
+        status: 'needs_attention',
+        lastError: error,
+        lastAttemptedAt: new Date(),
+      })
+      .where(and(which, inArray(pendingCommits.status, ['pending', 'running'])))
+      .returning({ id: pendingCommits.id });
+    return moved.length;
+  }
+
+  /**
+   * The same, for every commit still queued against ONE WORKING COPY, and
+   * answer how many moved.
+   *
+   * The caller is the startup phase setting a working copy aside: a clone of
+   * a repository the configured one shares no history with. Whatever was
+   * queued for it was written against that clone, on any branch, the default
+   * one included, and the directory the worker would write to is now a fresh
+   * clone of another repository. Closing change requests covers the branches
+   * of the requests that were closed and nothing else, which is why this is
+   * keyed on the working copy: it is the thing that was replaced.
+   *
+   * A working copy that was only pointed at a new address (the same
+   * repository, moved) keeps its queue, and is never passed here.
+   */
+  async markNeedsAttentionInWorkspace(workspaceId: string, error: string): Promise<number> {
+    // The canonical form `enqueue` stores (see `canonicalWorkspaceId`), so the
+    // caller's spelling of the id cannot make this match nothing.
+    return this.escalateQueued(eq(pendingCommits.workspaceId, canonicalWorkspaceId(workspaceId)), error);
   }
 
   /**

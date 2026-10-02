@@ -31,6 +31,7 @@ import type { KbContext } from '../../shared/kb-context.js';
 import { failureOf, type GitFailure } from '../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { listRootFolders, pickListingBranch } from './git-root-folders.js';
+import { sameRepository } from '../kb-fs/remote-url.js';
 import { MANAGED_DEFAULT_BRANCH } from './managed-repository.js';
 import { GIT_MODES, type GitHubAppRepository, type RepositorySource } from './repository-source.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
@@ -89,6 +90,49 @@ export interface LastSyncStatus {
   status: 'synced' | 'partial';
   results: Array<{ branch: string; outcome: string; error?: string }>;
 }
+
+/**
+ * The open change requests, as the repository-change confirmation needs them:
+ * how many there are to decide about, and the close the admin may choose.
+ *
+ * Deliberately narrow — the setup routes never read a request, never write
+ * one, and never learn what is in it. Nothing here deletes anything: closing
+ * leaves every row where it is.
+ */
+export interface RepositoryChangeRequests {
+  /** How many change requests are open right now. */
+  countOpen(): Promise<number>;
+  /** Close every open request as "repository replaced", releasing the file locks on their branches. Answers how many closed. */
+  closeAsRepositoryReplaced(): Promise<number>;
+  /**
+   * Run the move with no queued commit being written. The startup phase sets
+   * working copies aside and clones them again while the deployment is
+   * serving, and a commit worker left running would write into a directory
+   * that is being renamed away, or into the fresh clone of a repository the
+   * commit was never meant for. Absent (a minimal mount has no worker), the
+   * move runs as it is.
+   */
+  whileCommitsHeld?<T>(work: () => Promise<T>): Promise<T>;
+}
+
+/**
+ * What the admin is asked to confirm before a save MOVES the deployment to
+ * another repository, and what they answered about its open change requests.
+ *
+ * `keep` — the repository only moved: its branches came along, so the open
+ * change requests still mean something and stay open.
+ * `close` — it is a different repository: none of those branches is in it,
+ * so the requests are closed as "repository replaced" (nothing deleted).
+ *
+ * What happens to the working copies is not a choice, and is decided by the
+ * histories, not by this answer (see the startup phase's
+ * `reconcileClonesWithConfiguredRepository`): a copy whose history the new
+ * repository holds is pointed at it and kept, unpushed commits included; any
+ * other is set aside whole and cloned fresh. Nothing is deleted. The
+ * confirmation exists so that work which leaves the app this way does so
+ * KNOWINGLY.
+ */
+export type RepositoryChangeChoice = 'keep' | 'close';
 
 /**
  * First-run setup — the deployment's own configuration, for the things that
@@ -161,6 +205,16 @@ export function createSetupRoutes(
    * one there always was: an address and a token, read from the settings.
    */
   repository?: RepositorySetup,
+  /**
+   * What a change of the knowledge-base repository has to decide about, and
+   * what to do when the admin decides to close.
+   *
+   * Injected because the setup routes must stay free of the workflow module —
+   * and a minimal mount (tests, a distribution without change requests) simply
+   * has none: the default answers "no open requests", so the confirmation
+   * offers no choice it cannot honour.
+   */
+  changeRequests: RepositoryChangeRequests = { async countOpen() { return 0; }, async closeAsRepositoryReplaced() { return 0; } },
 ): express.Router {
   const router = express.Router();
   const source = repository?.source;
@@ -299,7 +353,15 @@ export function createSetupRoutes(
   });
 
   async function handleSave(req: express.Request, res: express.Response): Promise<void> {
-    const body = (req.body ?? {}) as { settings?: Record<string, unknown> };
+    const body = (req.body ?? {}) as {
+      settings?: Record<string, unknown>;
+      /** The admin's answer to the repository-change confirmation, when they have given one. */
+      confirmRepositoryChange?: unknown;
+      /** The count of open change requests that answer was given about. */
+      seenOpenChangeRequests?: unknown;
+    };
+    /** Lets the commit worker go again, once a move has held it. */
+    let releaseCommits: (() => void) | undefined;
     const entries: Record<string, string> = {};
     for (const [key, value] of Object.entries(body.settings ?? {})) {
       if (typeof value !== 'string') {
@@ -321,6 +383,32 @@ export function createSetupRoutes(
       const wasServing = kbReady();
       nameBranchesOfManagedRepository(entries);
       if (!(await connectionHoldsFor(entries, wasComplete, res))) return;
+      // AFTER the connection check, BEFORE anything is stored. After, because
+      // an address the host will not answer for is refused on its own terms
+      // and there is then nothing to confirm — nobody should have to agree to
+      // losing their working copies only to be told the token was missing.
+      // Before, because a refused save must destroy nothing: the check only
+      // reads the new address and dry-runs a push to it.
+      // Asked only of a deployment that has SERVED on the repository it would
+      // leave. A first run whose initialisation failed has answered
+      // everything and served nobody: correcting its address is finishing
+      // setup, and a question about leaving a repository nobody ever worked
+      // on would be a question with nothing behind it.
+      const hasServed = wasComplete && kbInit === null;
+      const repositoryChange = await repositoryChangeFor(
+        entries,
+        body.confirmRepositoryChange,
+        body.seenOpenChangeRequests,
+        hasServed,
+        res,
+      );
+      if (!repositoryChange) return;
+      // HELD FROM HERE, before anything is stored. The way chosen takes
+      // effect a few lines down, and with it the credential git is handed; a
+      // commit worker still running in between would push a queued commit
+      // from a working copy of the repository being left, with the
+      // credential of the one moved to. Let go in the `finally` below.
+      if (repositoryChange.changing) releaseCommits = await holdCommits();
       const oidc = await signInHoldsFor(entries, res);
       if (!oidc) return;
       // Recorded BEFORE the save: the record is keyed by the values it is
@@ -331,23 +419,63 @@ export function createSetupRoutes(
       if (oidc.record) {
         await settings.recordOidcVerification(oidc.record.state, oidc.record.credentials);
       }
+      /**
+       * How many open change requests this save closed as "repository
+       * replaced". Nothing is ever deleted; `keep` leaves them exactly as they
+       * are, and answers 0.
+       *
+       * Closed BEFORE the address is stored, as a PRECONDITION of the save. A
+       * close that fails after the address is stored has nowhere to go: the
+       * address now matches, so the next save sees no change, asks nothing and
+       * never retries — leaving requests open on branches the new repository
+       * does not have, and their file locks refusing paths to everybody else,
+       * with no way for the admin to put it right. Refusing the save instead
+       * destroys nothing: the old address still stands, the working copies are
+       * untouched (the phase below never ran), and pressing Save again asks the
+       * same question and tries again.
+       *
+       * The other order of failure — closed, then the save itself fails — is
+       * recoverable by the admin, who wanted these requests closed and whose
+       * next Save completes the replacement. Closing deletes nothing either
+       * way.
+       */
+      let closedChangeRequests = 0;
+      if (repositoryChange.choice === 'close') {
+        try {
+          closedChangeRequests = await changeRequests.closeAsRepositoryReplaced();
+        } catch (err) {
+          log.error('the open change requests could not be closed, so the repository was not replaced:', { err });
+          res.status(500).json({
+            error:
+              'The open change requests could not be closed, so the repository was not changed. ' +
+              'Nothing was saved and no working copy was touched. Try again.',
+          });
+          return;
+        }
+      }
       const saved = await settings.save(entries, req.userId ?? null);
       /**
-       * A deployment that was not serving has nothing on the mode it had:
-       * the mode chosen takes effect now, and the startup phase below is
-       * what a restart would have run. One that WAS serving stays on the
-       * mode it is on, working copies and credential alike, until it is
-       * started again.
+       * THE WAY CHOSEN TAKES EFFECT ON THIS SAVE, in the two cases where the
+       * startup phase below runs for it.
        *
-       * SERVING, not answered. The pin protects what is running on the
-       * mode in effect, and behind a shut gate nothing is: a first run
-       * whose initialisation failed, a boot that found its repository
-       * unreachable. Pinned there, the way out of a repository that does
-       * not work would be closed — the admin chooses another, the retry
-       * below runs against the one that just failed, and the screen asks
-       * for a restart that changes nothing.
+       * A deployment that was not serving has nothing on the mode it had: a
+       * first run, one whose initialisation failed, a boot that found its
+       * repository unreachable. Pinned there, the way out of a repository
+       * that does not work would be closed.
+       *
+       * And a deployment that WAS serving, when its admin has just confirmed
+       * the move. The mode in effect was once held until the next restart, so
+       * that the running process never presented one way's credential to
+       * another way's repository. That reason is answered differently now:
+       * the phase below sets the working copies of the repository that was
+       * left aside, under a held commit worker, before anything uses the new
+       * credential. And an admin of a hosted workspace has no restart to
+       * give, so a move that waited for one never happened.
+       *
+       * What is left pinned is a save that changes the mode WITHOUT moving
+       * the repository, which no path produces today; it keeps the restart.
        */
-      if (source && !wasServing) source.takeEffect();
+      if (source && (!wasServing || repositoryChange.changing)) source.takeEffect();
       /**
        * The restart the mode owes is read off the two modes themselves, not
        * off what this save wrote: it is owed for as long as the mode chosen
@@ -398,11 +526,27 @@ export function createSetupRoutes(
        * Runs on the false→true completion transition — including when the
        * branch model was configured by an EARLIER save and the repository
        * URL arrives on a later one — and again on any save while a previous
-       * setup-time run stands failed (`kbInit`), so a save is the retry. Never
-       * on a re-save of a complete, healthy setup: with the gate open,
-       * sessions may be live and that is no longer a quiet moment.
+       * setup-time run stands failed (`kbInit`), so a save is the retry.
+       *
+       * AND on a save that MOVES THE REPOSITORY, complete and healthy or
+       * not. That one is not a quiet moment — the gate is open and sessions
+       * may be live — but it is the moment the working copies stop belonging
+       * to the configured repository, and leaving them until the next restart
+       * is what made Save and Retry fail against a repository that was gone.
+       * The admin has just confirmed the move, so the phase runs, with the
+       * commit worker held for as long as it does, and the app opens on the
+       * new repository's content.
+       *
+       * Never on an ordinary re-save of a complete, healthy setup: with the
+       * gate open, sessions may be live and nothing needs doing.
        */
-      if ((!wasComplete || kbInit !== null || bootFailure() !== null) && isComplete(settings, kb, source)) {
+      if (
+        (!wasComplete ||
+          kbInit !== null ||
+          bootFailure() !== null ||
+          repositoryChange.changing) &&
+        isComplete(settings, kb, source)
+      ) {
         /**
          * The folder names, applied BEFORE the phase for the same reason as
          * the branch model above: they are otherwise applied once at boot, so
@@ -425,6 +569,9 @@ export function createSetupRoutes(
           // One run at a time. The save chain already serializes handlers
           // whole, so no second run can start while one executes; the `??=`
           // is defense in depth should another invoker ever appear.
+          // A move runs with the commit worker held (see `holdCommits`
+          // above): nothing queued is written while working copies are set
+          // aside and cloned again.
           kbInitInFlight ??= kbStartupRunner.runAll();
           await kbInitInFlight;
           // Under KB_SAFE_BOOT a run that abandoned the phase still resolves
@@ -473,6 +620,11 @@ export function createSetupRoutes(
         settings: settings.describe(),
         ...repositoryStatus(),
         oidcVerification: await settings.oidcVerification(),
+        // Only on the save that changed the repository, so an ordinary save
+        // carries no word about change requests at all.
+        ...(repositoryChange.changing
+          ? { repositoryChange: { choice: repositoryChange.choice, closedChangeRequests } }
+          : {}),
       });
     } catch (err) {
       if (err instanceof SettingsValidationError) {
@@ -483,7 +635,96 @@ export function createSetupRoutes(
       // the schema or the connection string.
       log.error('save failed:', { err });
       res.status(500).json({ error: 'Could not save these settings.' });
+    } finally {
+      releaseCommits?.();
     }
+  }
+
+  /**
+   * Stop the commit worker until the function this resolves to is called.
+   * The hold the composition root offers runs a piece of work with the
+   * worker stopped; a move spans the store, the way taking effect and the
+   * startup phase, with refusals in between, so the hold is taken here and
+   * let go in the handler's `finally`. A mount without a worker holds
+   * nothing.
+   */
+  function holdCommits(): Promise<() => void> {
+    if (!changeRequests.whileCommitsHeld) return Promise.resolve(() => {});
+    return new Promise((held, failed) => {
+      changeRequests.whileCommitsHeld!<void>(() => new Promise<void>((release) => held(release))).catch(failed);
+    });
+  }
+
+  /**
+   * What this save does to the knowledge-base repository, and whether the
+   * admin has said yes to it.
+   *
+   * A MOVE IS ANY SAVE AFTER WHICH THE DEPLOYMENT READS ANOTHER REPOSITORY
+   * than the one it is running on, however it came about: another address,
+   * another way of having the repository (managed, GitHub, address and
+   * token), another repository on GitHub. So the question is asked of the
+   * one thing that knows where the repository is under every way — the
+   * repository source — comparing the address IN EFFECT with the one this
+   * save would choose. A mount without a source has the one way there
+   * always was, and the address is the setting.
+   *
+   * A move takes the working copies of the repository that is left out of
+   * use: one whose history the new repository holds is pointed at it and
+   * kept, any other is set aside and cloned fresh. Work that was never
+   * pushed leaves the app with a copy that is set aside. That is not
+   * something to discover afterwards, so the save is REFUSED (409) until the
+   * answer comes back with the admin's decision.
+   *
+   * Only a real move asks: an address that differs from the one in effect in
+   * nothing but its spelling — a trailing slash, a `.git` suffix, the case
+   * of the host — is the same repository (see `kb-fs/remote-url.ts`), and so
+   * is a first-run save, where no repository is in effect and nothing on
+   * disk could be left.
+   *
+   * Returns null when it has already answered the request.
+   */
+  async function repositoryChangeFor(
+    entries: Record<string, string>,
+    confirmation: unknown,
+    /** How many open change requests the screen showed when the answer was given, when it says. */
+    seenOpenChangeRequests: unknown,
+    /** Whether the deployment is serving on the repository in effect. One that never served and has no open request is not asked. */
+    hasServed: boolean,
+    res: express.Response,
+  ): Promise<{ changing: boolean; choice: RepositoryChangeChoice | null } | null> {
+    const unchanged = { changing: false, choice: null } as const;
+    const after = settings.resolveAfter(entries);
+    const now = (source ? source.url() : settings.resolve('kbRepoUrl')).trim();
+    const next = (source ? source.url(after) : after('kbRepoUrl')).trim();
+    if (now === '' || next === '' || sameRepository(now, next)) return unchanged;
+    // The count is what the choice is ABOUT, so it is read here rather than
+    // left for the screen to ask for separately: the two questions would
+    // otherwise be answered a round trip apart, and the number on screen
+    // would be the one from before whatever happened in between.
+    const openChangeRequests = await changeRequests.countOpen();
+    // An answer stands for the count it was given about. A request opened
+    // while the question stood was never offered "close", and the "keep" the
+    // screen sends when there is nothing to choose would decide it unasked:
+    // the question is put again, with the count as it is now.
+    const answered = confirmation === 'keep' || confirmation === 'close';
+    const answerIsCurrent = typeof seenOpenChangeRequests !== 'number' || seenOpenChangeRequests === openChangeRequests;
+    if (answered && answerIsCurrent) return { changing: true, choice: confirmation };
+    // A move all the same, and the phase treats it as one; nobody is asked.
+    // Open change requests are themselves proof that the deployment served,
+    // whatever `hasServed` says: a move that failed part-way leaves it gated
+    // with a failure standing, and the next save must still ask about them.
+    if (!answered && !hasServed && openChangeRequests === 0) return { changing: true, choice: null };
+    res.status(409).json({
+      error: 'This moves the deployment to another repository.',
+      repositoryChange: {
+        openChangeRequests,
+        // The way left and the way moved to, for the screen to name them.
+        // Equal when the move is within one way (another address, another
+        // repository on GitHub); absent from a mount with one way only.
+        ...(source ? { from: source.mode(), to: source.mode(after) } : {}),
+      },
+    });
+    return null;
   }
 
   /**
@@ -649,7 +890,10 @@ export function createSetupRoutes(
     // the environment, whose field the form cannot even edit) is that token's
     // first and only pairing, not a change of it.
     const tokenSupplied = Boolean(entries.gitToken?.trim());
-    if (now.url && next.url !== now.url && next.token && !tokenSupplied) {
+    // A different SPELLING of the configured address is the same repository,
+    // so the stored token is still the token it was saved for: asking for it
+    // again over a trailing slash would be a question with no answer.
+    if (now.url && !sameRepository(next.url, now.url) && next.token && !tokenSupplied) {
       return settings.sourceOf('gitToken') === 'env'
         ? refuse({
             kbRepoUrl:

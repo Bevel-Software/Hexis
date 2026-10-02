@@ -11,16 +11,20 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import type { ToolContext } from '../../tool-helpers/tool.contract.js';
+import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { CONTENT_RULE, registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workflow-hooks.js';
+import { SESSION_ID_DESCRIPTION, ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
+import { AccessControlService } from '../../access/access-control.service.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import type { WorkspaceService } from '../workspace.service.js';
 import { isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
@@ -43,6 +47,11 @@ const allowAll = {
   canDownload: async () => true,
   canOwner: async () => true,
   canWriteBatchAtRef: async () => null,
+  // The `after` half of a move's or copy's preview. Allowing everything here
+  // keeps it the same answer as the four gates above; what the relocation of
+  // a folder's `access.md` files actually does to it is exercised against
+  // REAL rules in "a move preview judges the destination as it will be".
+  previewAccessAfterRelocation: async () => ({ read: true, write: true, download: true, owner: true }),
 } as unknown as IAccessControl;
 
 /** Access control that denies `canRead` for an explicit set of repo-relative paths. */
@@ -76,6 +85,14 @@ let fs: LocalFilesystem;
 let workspacePathCalls: string[] = [];
 /** Every `(archive, destination)` pair `unzip` handed the service. */
 let unzipCalls: [string, string | undefined][] = [];
+/**
+ * Workspace-relative targets the `unzipFile` stand-in pretends the archive
+ * holds. Empty by default (the stub extracts nothing); a test that is about
+ * the per-entry write guard sets it, and the stand-in then runs the guard once
+ * per entry the way the real service does — which is asserted where it lives,
+ * in `workspace.service.test.ts`.
+ */
+let unzipEntries: string[] = [];
 /** Every folder turn a tool took, as `workspaceId:dir`. */
 let folderTurns: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
@@ -88,6 +105,21 @@ let writePolicy: RoutineWritePolicyService;
 let focusedBranch: string | undefined;
 /** The registry the tools were mounted into, so a test can inspect their defs. */
 let toolRegistry: ToolRegistry;
+/** The hook registry the tools were mounted against, so a test can register one. */
+let hooks: WorkflowHooks;
+/** The note registry the tools were mounted against, so a test can register a note. */
+let notes: ToolDescriptionNotes;
+/**
+ * The recovery/merge bot's address, as the mounted gate knows it — the one
+ * identity that never reaches a hook.
+ */
+const RECOVERY_BOT = 'recovery-bot@bevel.local';
+/**
+ * What the auth layer resolves this caller's source to. `internal` (the
+ * in-process agent) unless a test is about a person in the app (`session`) or
+ * an external agent.
+ */
+let callerSource: 'internal' | 'external' | 'session' = 'internal';
 /**
  * Another writer getting to a path in the window the real `LockingFilesystem`
  * closes: the stand-ins below run it where that filesystem would be acquiring
@@ -103,6 +135,9 @@ async function start(
   userEmail = 'e@x',
 ): Promise<string> {
   raceHook = null;
+  hooks = new WorkflowHooks();
+  notes = new ToolDescriptionNotes();
+  callerSource = 'internal';
   tempDir = await mkdtemp(join(tmpdir(), 'ws-tools-'));
   docCacheDir = await mkdtemp(join(tmpdir(), 'ws-doc-cache-'));
   fs = new LocalFilesystem({ basePath: tempDir, contained: true });
@@ -163,6 +198,7 @@ async function start(
   await fs.writeFile('a.md', 'hello\nworld\n');
   workspacePathCalls = [];
   unzipCalls = [];
+  unzipEntries = [];
   folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
   focusedBranch = undefined;
@@ -195,7 +231,12 @@ async function start(
       // shapes is absence, and the real service raises exactly this error for
       // it (asserted in workspace.service.test.ts). Extraction itself lives
       // there too — none of it is the tool's to decide.
-      unzipFile: async (_id: string, zipRel: string, destRel?: string) => {
+      unzipFile: async (
+        _id: string,
+        zipRel: string,
+        destRel?: string,
+        guardWrite?: (wsRelativePath: string) => Promise<void>,
+      ) => {
         // Recorded so a test can assert the PATHS the tool handed over — both
         // ends normalised into the repository.
         unzipCalls.push([zipRel, destRel]);
@@ -204,7 +245,17 @@ async function start(
         } catch {
           throw new PathNotFoundError(zipRel);
         }
-        return { destination: '', extracted: [], skipped: [] };
+        const extracted: string[] = [];
+        const skipped: { path: string; reason: string }[] = [];
+        for (const entry of unzipEntries) {
+          try {
+            await guardWrite?.(entry);
+            extracted.push(entry);
+          } catch (err) {
+            skipped.push({ path: entry, reason: err instanceof Error ? err.message : 'refused' });
+          }
+        }
+        return { destination: '', extracted, skipped };
       },
     } as never,
     workflowService: {} as never,
@@ -213,18 +264,19 @@ async function start(
   });
   const toolHandler = createToolHandlerFactory(resolve);
   const fakeAuth = (req: express.Request, _res: express.Response, next: express.NextFunction) => {
-    req.toolAuth = { source: 'internal', userId: 'u', scope };
+    req.toolAuth = { source: callerSource, userId: 'u', scope };
     next();
   };
   const app = express();
   app.use(express.json());
   const router = express.Router();
   registerWorkspaceTools(registry, router, fakeAuth, toolHandler, new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(docCacheDir), access, testKbContext({ kbDirName: KB_DIR }), {
-    service: {} as never,
-    enabled: false, // these tests predate and don't exercise the ontology boundary
-    kb: testKbContext({ kbDirName: KB_DIR }),
-    recoveryBotEmail: 'recovery-bot@bevel.local',
-    hooks: new WorkflowHooks(),
+    // The hooks and the notes a test registers against; with neither
+    // registered (the default, and every Hexis-only deployment) the gate
+    // refuses nothing and the descriptions say nothing extra.
+    recoveryBotEmail: RECOVERY_BOT,
+    hooks,
+    notes,
   }, writePolicy, {} as never /* sessionSink — start_session not exercised here */);
   app.use('/api', router);
   httpServer = await new Promise<HttpServer>((r) => {
@@ -1816,7 +1868,7 @@ describe('images', () => {
 /**
  * start_session must mint a REAL chat thread and return its id (not a bare
  * random UUID), so the same id works for KB reads AND for `ask` (whose
- * sessionId IS a chat thread). This is what unifies the ontology boundary
+ * sessionId IS a chat thread). This is what unifies the conversation
  * across reads + ask — see workspace.tools.ts start_session comment.
  */
 describe('start_session', () => {
@@ -1863,7 +1915,7 @@ describe('start_session', () => {
     registerWorkspaceTools(
       registry, router, auth, toolHandler,
       new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, testKbContext({ kbDirName: KB_DIR }),
-      { service: {} as never, enabled: false, kb: testKbContext({ kbDirName: KB_DIR }), recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+      { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       sink ?? fakeSessionSink,
     );
@@ -1988,7 +2040,7 @@ describe('start_session', () => {
     registerWorkspaceTools(
       registry, router, noopAuth, (() => () => {}) as never,
       new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, testKbContext({ kbDirName: KB_DIR }),
-      { service: {} as never, enabled: false, kb: testKbContext({ kbDirName: KB_DIR }), recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+      { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
     );
@@ -2030,7 +2082,7 @@ describe('branch is a required parameter in the tool contract', () => {
       new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')),
       allowAll,
       testKbContext({ kbDirName: KB_DIR }),
-      { service: {} as never, enabled: false, kb: testKbContext({ kbDirName: KB_DIR }), recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+      { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
     );
@@ -2514,6 +2566,11 @@ describe('preflight for moves and deletes', () => {
     canWriteBatchAtRef: async (_w: string, _r: string, _u: string, rels: string[]) =>
       new Map(rels.map((p) => [p, verbsFor(p).write])),
     eligibleWritersAtRef: async () => ({ roles: ['Admin'], users: [] }),
+    // This double has no access files to carry, so the destination as it will
+    // be IS the destination as it is — the answer `accessAt` gave before the
+    // preview learned to relocate them, which keeps every ordering and
+    // oracle test below about what it is about.
+    previewAccessAfterRelocation: async (_w: string, _u: string, _from: string, to: string) => verbsFor(to),
   } as unknown as IAccessControl;
 
   const call = async (base: string, tool: string, body: Record<string, unknown>) => {
@@ -2655,6 +2712,35 @@ describe('preflight for moves and deletes', () => {
       // And nothing was moved onto the name that was taken.
       expect(await fs.readFile(KB('Locked/rules.md'), { encoding: 'utf-8' })).toBe('rules');
       expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+
+    /**
+     * The dry run keeps that order too, and it is the easier oracle to reach:
+     * it answers 200 rather than throwing, so a denied caller could read the
+     * source's kind and its file count off it — or a 404 saying whether a
+     * source they may not copy from exists at all. Nothing on disk is probed
+     * until the write verdict on the destination has been taken.
+     */
+    it('copy_file\'s dry run refuses a denied destination the same way whatever the source is', async () => {
+      const base = await seeded();
+      const dry = async (src: string) =>
+        (await call(base, 'copy_file', { src, dest: KB('Locked/new.md'), dryRun: true })).body;
+
+      const file = await dry(KB('Sales/deal.md'));
+      const folder = await dry(KB('Sales/archive'));
+      const missing = await dry(KB('Sales/nothing-here.md'));
+
+      // One sentence, three sources: the refusal says nothing about any of them.
+      for (const answer of [file, folder, missing]) {
+        expect(answer).toMatchObject({ allowed: false, dryRun: true, copied: false });
+        expect(answer.reason).toContain(KB('Locked/new.md'));
+        expect(answer.kind).toBeUndefined();
+        expect(answer.descendants).toBeUndefined();
+      }
+      expect(folder.reason).toBe(file.reason);
+      expect(missing.reason).toBe(file.reason);
+      // And the caller's own verbs are still answered — those are theirs.
+      expect(Object.keys(file.access).sort()).toEqual(['after', 'before']);
     });
 
     it('copy_file keeps the same order: the write refusal, not what is in the folder', async () => {
@@ -3310,6 +3396,7 @@ describe('a write refused for permissions says whether and how to propose it', (
       canDownload: async () => true,
       canOwner: async () => true,
       canWriteBatchAtRef: async () => null,
+      previewAccessAfterRelocation: async () => ({ read: true, write: true, download: true, owner: true }),
       eligibleWritersAtRef: async () => ({ roles: ['Sales Lead'], users: [{ name: 'Owner', email: 'owner@x' }] }),
     } as unknown as IAccessControl;
     return { ac, calls };
@@ -3716,5 +3803,589 @@ describe('a path with nothing at it answers 404 not_found on every file tool', (
     } finally {
       readFileSpy.mockRestore();
     }
+  });
+});
+
+/**
+ * The neutral session hooks, through the tool routes.
+ *
+ * Hexis decides nothing about which paths a conversation may touch: it calls a
+ * registered hook before every agent read and every agent write of a
+ * knowledge-base path, hands it what it knows about the call, and lets a hook
+ * that throws refuse the operation with its own message and status. With no
+ * hook registered — every Hexis-only deployment — nothing is refused, nothing
+ * is recorded, and a call without a `sessionId` is an ordinary call.
+ */
+describe('agent read/write hooks', () => {
+  /** Every call the read hook saw, in order. */
+  let reads: AgentOperationContext[];
+  /** Every call the write hook saw, in order. */
+  let writes: AgentOperationContext[];
+
+  /** Register recording hooks on the mounted registry (after `start()`). */
+  const record = (): void => {
+    reads = [];
+    writes = [];
+    hooks.onAgentRead(async (op) => {
+      reads.push(op);
+    });
+    hooks.onPreWrite(async (op) => {
+      writes.push(op);
+    });
+  };
+
+  /** Register a write hook that refuses `path` (or every path) with a 403. */
+  const refuseWrites = (message: string, path?: string): void => {
+    hooks.onPreWrite(async (op) => {
+      if (path === undefined || op.wsPath === path) throw new ToolError(message, 403);
+    });
+  };
+
+  beforeEach(() => {
+    reads = [];
+    writes = [];
+  });
+
+  it('read_file calls the read hook once with the session, path, branch, user and source', async () => {
+    const base = await start();
+    record();
+    await fs.mkdir(`${KB_DIR}/KnowledgeBase/Product/Knowledge`, { recursive: true });
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Product/Knowledge/Roadmap.md`, 'plans');
+    const res = await post(`${base}/api/agent/tools/read_file`, {
+      branch: 'draft-1',
+      path: `${KB_DIR}/KnowledgeBase/Product/Knowledge/Roadmap.md`,
+      sessionId: 's1',
+    });
+    expect(res.status).toBe(200);
+    expect(reads).toEqual([
+      {
+        sessionId: 's1',
+        wsPath: `${KB_DIR}/KnowledgeBase/Product/Knowledge/Roadmap.md`,
+        branch: 'draft-1',
+        user: { id: 'u', email: 'e@x', name: 'N' },
+        source: 'internal',
+      },
+    ]);
+    expect(writes).toEqual([]);
+  });
+
+  it('the read hook covers list_files, file_stat, grep, delete_file and delete_folder', async () => {
+    const base = await start();
+    record();
+    await fs.mkdir(`${KB_DIR}/Folder`, { recursive: true });
+    await fs.writeFile(`${KB_DIR}/Folder/one.md`, 'needle');
+    await fs.writeFile(`${KB_DIR}/gone.md`, 'x');
+    await post(`${base}/api/agent/tools/list_files`, { path: `${KB_DIR}/Folder`, sessionId: 's1' });
+    await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/Folder/one.md`, sessionId: 's1' });
+    await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: `${KB_DIR}/Folder`, sessionId: 's1' });
+    await post(`${base}/api/agent/tools/delete_file`, { path: `${KB_DIR}/gone.md`, sessionId: 's1' });
+    await post(`${base}/api/agent/tools/delete_folder`, { path: `${KB_DIR}/Folder`, confirm: true, sessionId: 's1' });
+    const paths = reads.map((r) => r.wsPath);
+    expect(paths).toContain(`${KB_DIR}/Folder`);
+    expect(paths).toContain(`${KB_DIR}/Folder/one.md`);
+    expect(paths).toContain(`${KB_DIR}/gone.md`);
+    // A delete carries no bytes from elsewhere, so it is a read, never a write.
+    expect(writes).toEqual([]);
+  });
+
+  it('grep tells the read hook about every file the walk opens, not only its root', async () => {
+    const base = await start();
+    record();
+    await fs.mkdir(`${KB_DIR}/KnowledgeBase/Product/Knowledge`, { recursive: true });
+    await fs.mkdir(`${KB_DIR}/KnowledgeBase/Legal/Knowledge`, { recursive: true });
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Product/Knowledge/P.md`, 'needle');
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/L.md`, 'needle');
+    await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: KB_DIR, sessionId: 's1' });
+    const paths = reads.map((r) => r.wsPath);
+    expect(paths).toContain(`${KB_DIR}/KnowledgeBase/Product/Knowledge/P.md`);
+    expect(paths).toContain(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/L.md`);
+  });
+
+  it('the write hook covers write_file, edit_file and mkdir, once per path', async () => {
+    const base = await start();
+    record();
+    await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/new.md`, content: 'hi', sessionId: 's1' });
+    await post(`${base}/api/agent/tools/edit_file`, { path: `${KB_DIR}/a.md`, old_string: 'world', new_string: 'earth', sessionId: 's1' });
+    await post(`${base}/api/agent/tools/mkdir`, { path: `${KB_DIR}/dir`, sessionId: 's1' });
+    expect(writes.map((w) => w.wsPath)).toEqual([`${KB_DIR}/new.md`, `${KB_DIR}/a.md`, `${KB_DIR}/dir`]);
+    expect(writes.every((w) => w.sessionId === 's1' && w.branch === 'main')).toBe(true);
+  });
+
+  it('move_file and copy_file call the write hook for the source path AND the destination', async () => {
+    const base = await start();
+    record();
+    await fs.writeFile(`${KB_DIR}/src.md`, 'body');
+    await fs.writeFile(`${KB_DIR}/copy-me.md`, 'body');
+    await post(`${base}/api/agent/tools/move_file`, { src: `${KB_DIR}/src.md`, dest: `${KB_DIR}/moved.md`, confirm: true, sessionId: 's1' });
+    await post(`${base}/api/agent/tools/copy_file`, { src: `${KB_DIR}/copy-me.md`, dest: `${KB_DIR}/copied.md`, sessionId: 's1' });
+    expect(writes.map((w) => w.wsPath)).toEqual([
+      `${KB_DIR}/src.md`,
+      `${KB_DIR}/moved.md`,
+      `${KB_DIR}/copy-me.md`,
+      `${KB_DIR}/copied.md`,
+    ]);
+  });
+
+  it('unzip reads the archive and calls the write hook once per extracted entry', async () => {
+    const base = await start();
+    record();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/one.md`, `${KB_DIR}/out/two.md`];
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    expect(reads.map((r) => r.wsPath)).toEqual([`${KB_DIR}/a.zip`]);
+    expect(writes.map((w) => w.wsPath)).toEqual([`${KB_DIR}/out/one.md`, `${KB_DIR}/out/two.md`]);
+  });
+
+  it('execute_command calls the write hook once, with no path', async () => {
+    const base = await start();
+    record();
+    await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: 'echo hi', sessionId: 's1' });
+    expect(writes).toHaveLength(1);
+    expect(writes[0].wsPath).toBeUndefined();
+    expect(writes[0]).toMatchObject({ sessionId: 's1', branch: 'main', source: 'internal' });
+    expect(reads).toEqual([]);
+  });
+
+  it('a write hook that throws refuses the write with its own message and status, and the file is unchanged', async () => {
+    const base = await start();
+    record();
+    refuseWrites('Not in this conversation.');
+    const res = await post(`${base}/api/agent/tools/write_file`, {
+      path: `${KB_DIR}/a.md`,
+      // `overwrite`, so the unchanged file below is the hook's doing: with no
+      // hook this call WOULD replace `a.md`.
+      mode: 'overwrite',
+      content: 'clobbered',
+      sessionId: 's1',
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe('Not in this conversation.');
+    expect(await readFile(join(tempDir, `${KB_DIR}/a.md`), 'utf8')).toBe('hello\nworld\n');
+  });
+
+  it('a read hook that throws refuses the read with its own message and status', async () => {
+    const base = await start();
+    hooks.onAgentRead(async () => {
+      throw new ToolError('Not in this conversation.', 403);
+    });
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md`, sessionId: 's1' });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe('Not in this conversation.');
+  });
+
+  it('write_files reports the refused path only; the other two land', async () => {
+    const base = await start();
+    record();
+    refuseWrites('Not in this conversation.', `${KB_DIR}/two.md`);
+    const res = await post(`${base}/api/agent/tools/write_files`, {
+      files: [
+        { path: `${KB_DIR}/one.md`, content: '1' },
+        { path: `${KB_DIR}/two.md`, content: '2' },
+        { path: `${KB_DIR}/three.md`, content: '3' },
+      ],
+      sessionId: 's1',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { count: number; files: { path: string; outcome: string; message?: string }[] };
+    expect(body.files.map((f) => f.outcome)).toEqual(['created', 'refused', 'created']);
+    expect(body.files[1].message).toBe('Not in this conversation.');
+    expect(body.count).toBe(2);
+    expect(await readFile(join(tempDir, `${KB_DIR}/one.md`), 'utf8')).toBe('1');
+    expect(await readFile(join(tempDir, `${KB_DIR}/three.md`), 'utf8')).toBe('3');
+  });
+
+  it('a write hook that fails unexpectedly fails the whole write_files batch, rather than reading as a refusal', async () => {
+    const base = await start();
+    record();
+    // Not a ToolError: the hook did not JUDGE this path, the gate itself
+    // broke. Reporting that as `refused` would let the other paths commit
+    // past a gate that never ran.
+    hooks.onPreWrite(async (op) => {
+      if (op.wsPath === `${KB_DIR}/two.md`) throw new Error('the hook store is down');
+    });
+    const res = await post(`${base}/api/agent/tools/write_files`, {
+      files: [
+        { path: `${KB_DIR}/one.md`, content: '1' },
+        { path: `${KB_DIR}/two.md`, content: '2' },
+        { path: `${KB_DIR}/three.md`, content: '3' },
+      ],
+      sessionId: 's1',
+    });
+    expect(res.status).toBe(500);
+    for (const name of ['one.md', 'two.md', 'three.md']) {
+      await expect(readFile(join(tempDir, `${KB_DIR}/${name}`), 'utf8')).rejects.toThrow();
+    }
+  });
+
+  it('unzip skips the refused entry with the hook\'s message and extracts the others', async () => {
+    const base = await start();
+    record();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/keep.md`, `${KB_DIR}/out/blocked.md`, `${KB_DIR}/out/also-keep.md`];
+    refuseWrites('Not in this conversation.', `${KB_DIR}/out/blocked.md`);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
+    expect(body.extracted).toEqual([`${KB_DIR}/out/keep.md`, `${KB_DIR}/out/also-keep.md`]);
+    expect(body.skipped).toEqual([{ path: `${KB_DIR}/out/blocked.md`, reason: 'Not in this conversation.' }]);
+  });
+
+  it('a hook is called with no session id when the call carried none — what happens next is its decision', async () => {
+    const base = await start();
+    record();
+    await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` });
+    await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/fresh.md`, content: 'x' });
+    expect(reads).toHaveLength(1);
+    expect(reads[0].sessionId).toBeUndefined();
+    expect(writes).toHaveLength(1);
+    expect(writes[0].sessionId).toBeUndefined();
+  });
+
+  it('a person saving in the app never reaches the hooks', async () => {
+    const base = await start();
+    record();
+    callerSource = 'session';
+    await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md`, sessionId: 's1' });
+    await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/fresh.md`, content: 'x', sessionId: 's1' });
+    expect(reads).toEqual([]);
+    expect(writes).toEqual([]);
+  });
+
+  it('the recovery bot never reaches the hooks', async () => {
+    const base = await start('write', allowAll, RECOVERY_BOT);
+    record();
+    refuseWrites('Not in this conversation.');
+    const res = await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/fresh.md`, content: 'x', sessionId: 's1' });
+    expect(res.status).toBe(200);
+    expect(reads).toEqual([]);
+    expect(writes).toEqual([]);
+  });
+
+  /**
+   * The Hexis-only deployment: nothing registered at all. No call is refused,
+   * and a file tool call without a `sessionId` succeeds — including one that
+   * read under two different folders first.
+   */
+  it('with no hook registered, reads and writes without a sessionId all succeed', async () => {
+    const base = await start();
+    await fs.mkdir(`${KB_DIR}/KnowledgeBase/Product/Knowledge`, { recursive: true });
+    await fs.mkdir(`${KB_DIR}/KnowledgeBase/Legal/Knowledge`, { recursive: true });
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Product/Knowledge/P.md`, 'p');
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/L.md`, 'l');
+    expect((await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/KnowledgeBase/Product/Knowledge/P.md` })).status).toBe(200);
+    expect((await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/KnowledgeBase/Legal/Knowledge/L.md` })).status).toBe(200);
+    const wrote = await post(`${base}/api/agent/tools/write_file`, {
+      path: `${KB_DIR}/KnowledgeBase/Product/Knowledge/New.md`,
+      content: 'fresh',
+    });
+    expect(wrote.status).toBe(200);
+    expect(await readFile(join(tempDir, `${KB_DIR}/KnowledgeBase/Product/Knowledge/New.md`), 'utf8')).toBe('fresh');
+  });
+});
+
+/**
+ * What an agent READS about these tools. A Hexis-only deployment names no
+ * boundary and no ontology; a deployment that has one registers the wording
+ * for it, and it lands on the gated tools and on the `sessionId` input.
+ */
+describe('tool descriptions and the deployment note', () => {
+  /** Every tool def on the external surface, by name. */
+  const defs = async (): Promise<Map<string, { description: string; inputs: unknown }>> =>
+    new Map((await toolRegistry.listExternal()).map((t) => [t.name, t as unknown as { description: string; inputs: unknown }]));
+
+  /** The `sessionId` input's description on a built def, or undefined. */
+  const sessionIdDescriptionOf = (def: { inputs: unknown }): string | undefined =>
+    (def.inputs as { properties?: { body?: { properties?: Record<string, { description?: string }> } } })
+      .properties?.body?.properties?.sessionId?.description;
+
+  it('no tool description and no input description contains the word "ontology"', async () => {
+    await start();
+    for (const tool of await toolRegistry.listExternal()) {
+      expect(tool.description.toLowerCase(), `${tool.name} description`).not.toContain('ontolog');
+      expect(JSON.stringify(tool.inputs).toLowerCase(), `${tool.name} inputs`).not.toContain('ontolog');
+    }
+  });
+
+  it('start_session says what the id is — the conversation\'s, shared with `ask` — and names no ontology', async () => {
+    await start();
+    const description = (await defs()).get('start_session')?.description ?? '';
+    expect(description).toMatch(/conversation/i);
+    expect(description).toContain('`ask`');
+    expect(description.toLowerCase()).not.toContain('ontolog');
+  });
+
+  it('the file tools still accept a sessionId, described as this conversation\'s id', async () => {
+    await start();
+    const all = await defs();
+    for (const name of ['read_file', 'write_file', 'edit_file', 'grep', 'unzip']) {
+      expect(sessionIdDescriptionOf(all.get(name)!), name).toBe(SESSION_ID_DESCRIPTION);
+    }
+  });
+
+  it('a Hexis-only deployment registers no note, so nothing is appended', async () => {
+    await start();
+    const all = await defs();
+    expect(notes.gatedToolNote()).toBe('');
+    expect(all.get('read_file')!.description).not.toContain('Stay within one');
+  });
+
+  it('a registered note lands at the END of every gated tool\'s description and on the sessionId input', async () => {
+    await start();
+    notes.registerGatedToolNote(' One folder per conversation.');
+    notes.registerSessionIdNote(' It also pins that folder.');
+    const all = await defs();
+    for (const name of ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'delete_folder', 'mkdir', 'move_file', 'copy_file', 'unzip']) {
+      expect(all.get(name)!.description.endsWith(' One folder per conversation.'), name).toBe(true);
+      expect(sessionIdDescriptionOf(all.get(name)!), name).toBe(`${SESSION_ID_DESCRIPTION} It also pins that folder.`);
+    }
+    // `execute_command` is internal-only, so it is checked on that surface.
+    const internal = new Map((await toolRegistry.listInternal()).map((t) => [t.name, t]));
+    expect(internal.get('execute_command')!.description.endsWith(' One folder per conversation.')).toBe(true);
+  });
+
+  it('a tool that is not gated carries no note', async () => {
+    await start();
+    notes.registerGatedToolNote(' One folder per conversation.');
+    const description = (await defs()).get('start_session')?.description ?? '';
+    expect(description).not.toContain('One folder per conversation.');
+  });
+});
+
+/**
+ * The bug Juan reported: the dry run of renaming a top-level folder warned he
+ * would lose owner access, and after the move he was still owner. The folder
+ * carried its own `access.md`, which moved with it, and the preview judged
+ * the destination as it stood — where neither the folder nor its rules were
+ * yet.
+ *
+ * These run against the REAL resolver over a real tree, because the thing
+ * under test is what the rules say about a path nothing is at. Every preview
+ * is then held against the operation it predicted: the caller's access at the
+ * destination afterwards must be what the preview answered, or the preview is
+ * wrong again and nobody will find out until the next report.
+ */
+describe('a move preview judges the destination as it will be', () => {
+  const KB = (p: string) => `${KB_DIR}/${p}`;
+  const MOVER = 'mover@x.io';
+  const rules = (body: string) => `---\n${body}---\n`;
+
+  /**
+   * The real `AccessControlService`, re-read from disk on every question.
+   * In production the file-change notifier invalidates the model after a
+   * write; a test leaning on the five-second cache would be asserting the
+   * cache rather than what the tree now says.
+   */
+  const liveRules = (): IAccessControl => {
+    const fresh = () =>
+      new AccessControlService(
+        {
+          getWorkspacePath: async () => tempDir,
+          ensureRemotesFetched: async () => undefined,
+        } as unknown as WorkspaceService,
+        KB_DIR,
+        new NodeFs(),
+      );
+    return {
+      canRead: (w: string, u: string, r: string) => fresh().canRead(w, u, r),
+      canReadBatch: (w: string, u: string, r: string[]) => fresh().canReadBatch(w, u, r),
+      canWrite: (w: string, u: string, r: string) => fresh().canWrite(w, u, r),
+      canDownload: (w: string, u: string, r: string) => fresh().canDownload(w, u, r),
+      canOwner: (w: string, u: string, r: string) => fresh().canOwner(w, u, r),
+      canWriteBatchAtRef: async () => null,
+      previewAccessAfterRelocation: (
+        w: string, u: string, from: string, to: string, opts?: { sourceRemains?: boolean },
+      ) => fresh().previewAccessAfterRelocation(w, u, from, to, opts),
+    } as unknown as IAccessControl;
+  };
+
+  const call = async (base: string, tool: string, body: Record<string, unknown>) => {
+    const res = await post(`${base}/api/agent/tools/${tool}`, body);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- a tool body is free-form JSON, probed field by field
+    return { status: res.status, body: (await res.json()) as Record<string, any> };
+  };
+
+  /**
+   * `Sales/` grants the caller write and owner in its OWN access.md. `Work/`
+   * grants both too, so `Work/Team` — which grants only write of its own —
+   * holds owner by inheritance and loses it on the way out. `Legal/` grants
+   * read to everyone and nothing else. The root grants read and nothing else,
+   * so a folder that arrives there arrives with only what it brought.
+   */
+  async function seeded(): Promise<string> {
+    const base = await start('write', liveRules(), MOVER);
+    await fs.writeFile(KB('roles.yaml'), 'roles:\n  Admin:\n    - admin@x.io\n');
+    await fs.writeFile(KB('access.md'), rules('read:\n  - everyone\n'));
+    await fs.writeFile(KB('Sales/access.md'), rules(`write:\n  - Mover <${MOVER}>\nowner:\n  - Mover <${MOVER}>\n`));
+    await fs.writeFile(KB('Sales/deal.md'), 'deal');
+    await fs.writeFile(KB('Work/access.md'), rules(`write:\n  - Mover <${MOVER}>\nowner:\n  - Mover <${MOVER}>\n`));
+    await fs.writeFile(KB('Work/Notes/note.md'), 'note');
+    await fs.writeFile(KB('Work/Team/access.md'), rules(`write:\n  - Mover <${MOVER}>\n`));
+    await fs.writeFile(KB('Work/Team/plan.md'), 'plan');
+    await fs.writeFile(KB('Legal/access.md'), rules('read:\n  - everyone\n'));
+    return base;
+  }
+
+  /** The caller's verbs where the thing really is now, through `file_stat`. */
+  const verbsAt = async (base: string, path: string) =>
+    (await call(base, 'file_stat', { path })).body.access;
+
+  it('renaming a folder that names the caller owner previews no loss at all', async () => {
+    const base = await seeded();
+    const args = { src: KB('Sales'), dest: KB('Revenue') };
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.status).toBe(200);
+    expect(dry.body).toMatchObject({ kind: 'folder', accessChanges: false, allowed: true, moved: false });
+    expect(dry.body.access.after).toEqual(dry.body.access.before);
+    expect(dry.body.access.after.owner).toBe(true);
+    // Nothing moved and nothing was written to answer the question.
+    expect(await fs.exists(args.dest)).toBe(false);
+    expect(await fs.exists(KB('Sales/access.md'))).toBe(true);
+
+    // `accessChanges: false`, so the move itself needs no confirmation.
+    expect((await call(base, 'move_file', args)).body).toMatchObject({ moved: true });
+    expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+  });
+
+  it('moving a folder with no access.md of its own still previews the loss', async () => {
+    const base = await seeded();
+    const args = { src: KB('Work/Notes'), dest: KB('Legal/Notes') };
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.body).toMatchObject({ accessChanges: true, allowed: true });
+    expect(dry.body.access.before.write).toBe(true);
+    expect(dry.body.access.after.write).toBe(false);
+
+    // A changed answer still asks before it moves.
+    expect((await call(base, 'move_file', args)).body).toMatchObject({ confirmationRequired: true, moved: false });
+    expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
+    expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+  });
+
+  it('what the folder inherited is left behind; what its own access.md gives comes along', async () => {
+    const base = await seeded();
+    const args = { src: KB('Work/Team'), dest: KB('Legal/Team') };
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    // Write is the folder's own and travels; owner came from `Work/`.
+    expect(dry.body.access.before).toMatchObject({ write: true, owner: true });
+    expect(dry.body.access.after).toMatchObject({ write: true, owner: false });
+
+    expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
+    expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+  });
+
+  it('a nested access.md governs where it lands, not the folder above it', async () => {
+    const base = await seeded();
+    const args = { src: KB('Work/Team'), dest: KB('Legal/Team') };
+    const withoutNested = (await call(base, 'move_file', { ...args, dryRun: true })).body.access.after;
+
+    // `Sub/` shuts the caller out and moves too, but it governs `Legal/Team/Sub`.
+    await fs.writeFile(KB('Work/Team/Sub/access.md'), rules(`read:\n  - deny Mover <${MOVER}>\n`));
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.body.access.after).toEqual(withoutNested);
+
+    expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
+    expect(await verbsAt(base, args.dest)).toEqual(withoutNested);
+    // The nested file did land and does govern where it landed: the caller
+    // it shuts out cannot even stat the folder now.
+    expect((await call(base, 'file_stat', { path: KB('Legal/Team/Sub') })).status).toBe(403);
+  });
+
+  it('moving a single file previews as it always did', async () => {
+    const base = await seeded();
+    const args = { src: KB('Sales/deal.md'), dest: KB('Legal/deal.md') };
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.body).toMatchObject({ kind: 'file', descendants: 1 });
+    // Nothing travels with a file but its own bytes, so the answer is the
+    // destination's own rules — what `file_stat` says there already.
+    expect(dry.body.access.after).toEqual(await verbsAt(base, KB('Legal')));
+
+    expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
+    expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+  });
+
+  it('the preview answers the caller\'s own verbs and nothing more', async () => {
+    const base = await seeded();
+    const dry = await call(base, 'move_file', { src: KB('Sales'), dest: KB('Revenue'), dryRun: true });
+
+    expect(Object.keys(dry.body.access).sort()).toEqual(['after', 'before']);
+    for (const side of ['before', 'after'] as const) {
+      expect(Object.keys(dry.body.access[side]).sort()).toEqual(['download', 'owner', 'read', 'write']);
+    }
+  });
+
+  describe('copy_file previews the same way', () => {
+    it('a folder copy counts the copied access.md at the destination', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales'), dest: KB('Sales-Copy') };
+
+      const dry = await call(base, 'copy_file', { ...args, dryRun: true });
+      expect(dry.status).toBe(200);
+      expect(dry.body).toMatchObject({ kind: 'folder', accessChanges: false, copied: false, dryRun: true });
+      expect(dry.body.access.after.owner).toBe(true);
+      expect(dry.body.access.after).toEqual(dry.body.access.before);
+
+      // `copy_file` copies ONE FILE, which the preview says rather than
+      // promising a copy that cannot land — and the call itself refuses with
+      // the same sentence, so preflight and execution never disagree.
+      expect(dry.body.allowed).toBe(false);
+      const run = await call(base, 'copy_file', args);
+      expect(run.status).toBe(400);
+      expect(run.body.error).toBe(dry.body.reason);
+      expect(await fs.exists(args.dest)).toBe(false);
+    });
+
+    it('a file copy previews what the caller will have at the destination', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/deal.md'), dest: KB('Legal/deal.md') };
+
+      const dry = await call(base, 'copy_file', { ...args, dryRun: true });
+      expect(dry.body).toMatchObject({ kind: 'file', descendants: 1, allowed: true, copied: false });
+      expect(dry.body.access.before.write).toBe(true);
+      expect(dry.body.access.after.write).toBe(false);
+      expect(dry.body.accessChanges).toBe(true);
+      expect(await fs.exists(args.dest)).toBe(false);
+
+      expect((await call(base, 'copy_file', args)).body).toMatchObject({ copied: true });
+      expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+      // A copy leaves the source exactly as it was.
+      expect(await verbsAt(base, args.src)).toEqual(dry.body.access.before);
+    });
+
+    /**
+     * `copy_file` will copy a lone `access.md`, and the moment it lands it
+     * governs the folder it landed in. The preview counts it: the rules a
+     * copy carries are the point of this ticket whether they travel inside a
+     * folder or on their own.
+     */
+    it('a lone access.md previews the access it will give at the destination', async () => {
+      const base = await seeded();
+      // A folder with no rules of its own, so the destination's answer today
+      // is the root's: read and nothing else. (`Legal/access.md` is taken, and
+      // a copy onto a name that exists is refused long before access is asked.)
+      await fs.writeFile(KB('Open/note.md'), 'note');
+      const args = { src: KB('Sales/access.md'), dest: KB('Open/access.md') };
+
+      const dry = await call(base, 'copy_file', { ...args, dryRun: true });
+      expect(dry.body).toMatchObject({ kind: 'file', descendants: 1, allowed: true });
+      expect(await verbsAt(base, KB('Open'))).toMatchObject({ write: false, owner: false });
+      expect(dry.body.access.after).toMatchObject({ write: true, owner: true });
+      expect(dry.body.accessChanges).toBe(false);
+
+      expect((await call(base, 'copy_file', args)).body).toMatchObject({ copied: true });
+      expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+    });
+
+    it('a destination that is taken is named, and the dry run changes nothing', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/deal.md'), dest: KB('Work/Notes/note.md') };
+
+      const dry = await call(base, 'copy_file', { ...args, dryRun: true });
+      expect(dry.body.allowed).toBe(false);
+      expect(dry.body.reason).toContain('already exists');
+      expect(String(await fs.readFile(KB('Work/Notes/note.md'), { encoding: 'utf-8' }))).toContain('note');
+    });
   });
 });

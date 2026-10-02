@@ -13,6 +13,7 @@ import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { AccessControlService } from '../../access/access-control.service.js';
@@ -88,7 +89,7 @@ beforeAll(async () => {
     new DocExtractService(docCache),
     service,
     testKbContext({ kbDirName: KB }),
-    { service: {} as never, enabled: false, kb: testKbContext({ kbDirName: KB }), recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+    { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
     new RoutineWritePolicyService(),
     {} as never,
   );

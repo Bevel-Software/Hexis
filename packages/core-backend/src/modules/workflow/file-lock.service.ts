@@ -306,6 +306,37 @@ export class FileLockService {
   }
 
   /**
+   * Drop every lock held on `branch`, whoever holds it and whichever
+   * workspace it sits in, and answer how many rows went.
+   *
+   * The one caller is a change request being closed because the
+   * knowledge-base repository was REPLACED: the branch the lock names belongs
+   * to a repository this deployment no longer has, so the holder can neither
+   * publish their bytes nor release the lock themselves — and the row would
+   * otherwise sit there refusing the path to everyone until its TTL ran out
+   * on every heartbeat a still-connected client keeps sending.
+   *
+   * Expired rows go too: they are already nobody's lock, and leaving them for
+   * the lazy sweep would only make this answer harder to read.
+   *
+   * Deliberately NOT a release in the ordinary sense — nothing is committed
+   * and nothing is enqueued. The bytes belonged to a repository that is gone.
+   *
+   * What an ORDINARY release already enqueued is a different matter, and not
+   * this method's to fix: a release queues the bytes and only then drops its
+   * lock, so rows can be waiting for a branch whose locks this deletes. The
+   * caller takes those out of the worker's reach in the same breath — see
+   * `PendingCommitsService.markNeedsAttentionOnBranch`.
+   */
+  async releaseAllOnBranch(branch: string): Promise<number> {
+    const gone = await this.db
+      .delete(fileLocks)
+      .where(eq(fileLocks.branch, branch))
+      .returning({ path: fileLocks.path });
+    return gone.length;
+  }
+
+  /**
    * Is ANY unexpired lock held anywhere in this workspace? Feeds the git
    * status sanity check: a held lock means a mutation is mid-flight — the
    * file may already be changed (or deleted) on disk while its commit is only

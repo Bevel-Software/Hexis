@@ -1122,7 +1122,7 @@ describe('WorkspaceService.readAllKbFiles', () => {
   });
 });
 
-describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
+describe('WorkspaceService.unzipFile — per-entry write guard', () => {
   let root: string;
   let svc: WorkspaceService;
   let workspaceDir: string;
@@ -1154,12 +1154,12 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
   it('skips entries the write guard rejects and never writes them to disk', async () => {
     await writeZip('a.zip', { 'keep.md': 'ok', 'blocked.md': 'no' });
     const res = await svc.unzipFile(workspaceId, 'a.zip', 'out', async (wsPath) => {
-      if (wsPath.endsWith('blocked.md')) throw new Error('Blocked by the ontology-session boundary');
+      if (wsPath.endsWith('blocked.md')) throw new Error('Not in this conversation.');
     });
     // An unprefixed destination is the repository's own `out/`, and the
     // extracted paths are reported workspace-relative, so prefixed.
     expect(res.extracted).toEqual(['knowledge-base/out/keep.md']);
-    expect(res.skipped).toContainEqual({ path: 'blocked.md', reason: 'Blocked by the ontology-session boundary' });
+    expect(res.skipped).toContainEqual({ path: 'blocked.md', reason: 'Not in this conversation.' });
     expect((await fs.readFile(path.join(repoDir, 'out', 'keep.md'))).toString()).toBe('ok');
     await expect(fs.readFile(path.join(repoDir, 'out', 'blocked.md'))).rejects.toThrow();
     await expect(fs.stat(path.join(workspaceDir, 'out'))).rejects.toMatchObject({ code: 'ENOENT' });
@@ -1173,18 +1173,18 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
     await fs.writeFile(path.join(repoDir, 'c.zip'), zip.toBuffer());
 
     const res = await svc.unzipFile(workspaceId, 'c.zip', 'out', async (wsPath) => {
-      if (wsPath.includes('blocked-dir')) throw new Error('Blocked by the ontology-session boundary');
+      if (wsPath.includes('blocked-dir')) throw new Error('Not in this conversation.');
     });
 
     expect(res.extracted).toEqual(['knowledge-base/out/keep.md']);
-    expect(res.skipped).toContainEqual({ path: 'blocked-dir/', reason: 'Blocked by the ontology-session boundary' });
+    expect(res.skipped).toContainEqual({ path: 'blocked-dir/', reason: 'Not in this conversation.' });
     await expect(fs.stat(path.join(repoDir, 'out', 'blocked-dir'))).rejects.toThrow();
   });
 
   it('does not create the destination directory when every entry is blocked', async () => {
     await writeZip('d.zip', { 'a.md': '1', 'b.md': '2' });
     const res = await svc.unzipFile(workspaceId, 'd.zip', 'out', async () => {
-      throw new Error('Blocked by the ontology-session boundary');
+      throw new Error('Not in this conversation.');
     });
     expect(res.extracted).toEqual([]);
     expect(res.skipped).toHaveLength(2);
@@ -1213,11 +1213,22 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
         'There is no file or directory at "knowledge-base/nope.zip" in this workspace. Check the path with list_files.',
     });
     // A name carrying a line break cannot forge a second line of the answer,
-    // in the message or in the `path` a JSON consumer reads.
-    const forged = 'a\nb\u2028c.zip';
+    // in the message or in the `path` a JSON consumer reads. A LINE BREAK no
+    // longer reaches this refusal at all — the normaliser now refuses a
+    // control character outright, because git reads one in a path as the end
+    // of an object name (see `repo-path.ts`) — so the forged name here
+    // carries U+2028, which is a line break to a renderer and nothing to git:
+    // still accepted as a file name, still escaped on the way out.
+    const forged = 'a\u2028c.zip';
     await expect(svc.unzipFile(workspaceId, forged)).rejects.toMatchObject({
       status: 404,
-      payload: { kind: 'not_found', path: 'knowledge-base/a\\nb\\u2028c.zip' },
+      payload: { kind: 'not_found', path: 'knowledge-base/a\\u2028c.zip' },
+    });
+    // And the same invariant at the gate that now owns the line break: the
+    // refusal names the path with the break escaped, never raw.
+    await expect(svc.unzipFile(workspaceId, 'a\nb.zip')).rejects.toMatchObject({
+      status: 400,
+      payload: { kind: 'path-control-character', path: 'a\\nb.zip' },
     });
   });
 

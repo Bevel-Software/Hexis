@@ -1,18 +1,45 @@
 # TODOS
 
+## Database
+
+### Drop the table `session_ontology_touches`
+
+**What:** Remove `sessionOntologyTouches` from `packages/core-backend/src/modules/database/core-schema.ts` and ship the drop migration.
+
+**Why:** Nothing in these packages reads or writes it since the per-conversation boundary moved out of core, behind the agent read/write hooks. It is kept for exactly one release so that no deployment runs a version in which neither side has the table.
+
+**Context:** Do it in the release AFTER the one that carries "Hexis offers neutral session hooks". A distribution that took the boundary over creates and owns its own table; rows are not copied, so nothing here has to migrate data — the drop is the whole change.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** the release that removed the session-ontology gate, service and policy
+
+
 ## Knowledge rendering
 
-### Serve a file at a git ref so change-request screenshots render in the diff
+### Render the images inside a markdown diff at their own revision
 
-**What:** `?ref=<sha>` on `GET /workspace/:id/file/raw`, backed by a Buffer variant of `readFileAtRef` (`git.service.ts` returns a string today), sha validation like the existing show-file path, and a read gate for bytes at arbitrary refs. Then `MarkdownDiffViewer` passes the CR head sha so removed and added fragments each resolve to their own revision.
+**What:** Pass the save's shas into `MarkdownDiffViewer` so each `![alt](./assets/x.png)` in a rendered diff resolves through `?ref=` — the baseline sha for a removed fragment, the head sha for an added one — instead of the placeholder every relative image gets today.
 
-**Why:** The change-request dialog and file history show a placeholder for every relative image, and a screenshot that exists only on the CR branch is invisible to reviewers except by opening the doc on that branch. Reviewers should see the before and after of a visual change inline. The same endpoint can replace `BinaryChangePlaceholder` with a real before/after preview.
+**Why:** A markdown page's history (and a change request's markdown diff) names its pictures rather than showing them, so a screenshot swap reads as two identical paragraphs. The same endpoint can also replace `BinaryChangePlaceholder` with a real before/after preview.
 
-**Context:** Deferred from the KB images PR (feat/kb-images) because at-ref byte serving deserves its own security review. Alternative considered and rejected: build the image URL with the CR branch's workspace id. It works today because `resolveWorkspaceDir` lazily clones a branch workspace per user, but that clones the whole KB on first open of a dialog, is never refreshed after later pushes to the CR branch, and evaluates the read gate against that clone. Start from the raw route, add `ref` parsing and validation, then reuse the per-fragment rule in `MarkdownDiffViewer` (unchanged and added fragments resolve, removed fragments placeholder) to pass the baseline sha to removed fragments and the head sha to added ones.
+**Context:** The byte half of this landed with hx-history-file-preview: `?ref=<sha>[&side=before]` on `GET /workspace/:id/file/raw`, `GitService.readFileBytesAtRef` / `fileBytesAtCommit`, sha validation, the on-branch rule and the read + download gates are all in place and tested. What is left is purely the per-fragment plumbing in the markdown diff: `MarkdownDiffViewer` takes no ref today and the history panel deliberately passes no image resolver. Reuse its existing per-fragment rule (unchanged and added fragments resolve, removed fragments placeholder), and note that a removed fragment needs the BASELINE sha — `<sha>^`, i.e. `side=before`.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** hx-history-file-preview (the at-ref byte route)
+
+### Restore a past version of a file
+
+**What:** A Restore action on a save in Version history that writes those bytes back as a new save of the file, through the same lock + commit cycle as any other write.
+
+**Why:** Getting an old version back is a download and a re-upload today (hx-history-file-preview decision 6), which loses the "this is version N again" trail and is out of reach for a reader who may read but not download.
+
+**Context:** Deliberately out of scope of hx-history-file-preview because it is a WRITE: it needs the proposal flow for a reader who cannot write the file, conflict handling against a save that landed since, and a decision about what the commit summary says. The read half it builds on is done — `fileBytesAtChange(id, path, sha, side)` already returns the exact bytes.
 
 **Effort:** M
 **Priority:** P2
-**Depends on:** feat/kb-images (img override and the per-fragment rule)
+**Depends on:** hx-history-file-preview (the at-ref byte route)
 
 ### Paste or drop an image into the markdown editor
 

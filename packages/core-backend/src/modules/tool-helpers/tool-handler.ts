@@ -6,6 +6,7 @@ import { hasHttpStatus, ToolError, type ToolHandler } from './tool.contract.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import type { ResolveToolContext } from './tool-context.js';
+import { alwaysWritable, READ_ONLY_CODE, refuseWriteTool, type IWriteAccess } from '../write-access/write-access.js';
 import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
 
 function isAsyncIterable(v: unknown): v is AsyncIterable<unknown> {
@@ -29,7 +30,7 @@ export interface ToolHandlerOptions {
  * The handler receives `req.body` as the flat args (UTCP's `body_field` already
  * delivered the inner body as the request body).
  */
-export function createToolHandlerFactory(resolve: ResolveToolContext) {
+export function createToolHandlerFactory(resolve: ResolveToolContext, writeAccess: IWriteAccess = alwaysWritable) {
   return function toolHandler(handler: ToolHandler, opts: ToolHandlerOptions = {}) {
     return async (req: Request, res: Response): Promise<void> => {
       const auth = req.toolAuth;
@@ -41,10 +42,29 @@ export function createToolHandlerFactory(resolve: ResolveToolContext) {
         res.status(403).json({ error: 'This tool requires write access.' });
         return;
       }
+      // Before anything is awaited: a client that goes away during the
+      // write-access check below must still abort the call.
+      //
+      // Asked of the RESPONSE. The request closes as soon as its body has
+      // been read, with the client still there and waiting, so its `close`
+      // says nothing about the client; the response closes when it has been
+      // sent or the connection is gone, and `writableEnded` tells the two
+      // apart.
       const abort = new AbortController();
-      req.on('close', () => {
+      res.on('close', () => {
         if (!res.writableEnded) abort.abort();
       });
+      // The tool layer's half of the read-only gate: the HTTP gate lets every
+      // tool call through, since only here is a write tool told from a read.
+      if (opts.write) {
+        const refusal = await refuseWriteTool(writeAccess);
+        if (refusal !== null) {
+          res.status(403).json({ error: refusal, code: READ_ONLY_CODE });
+          return;
+        }
+        // The client left while the verdict was awaited: nobody to answer.
+        if (abort.signal.aborted) return;
+      }
       const body: unknown = req.body;
       if (body !== undefined && body !== null && (typeof body !== 'object' || Array.isArray(body))) {
         res.status(400).json({ error: 'Request body must be a JSON object.' });
@@ -53,8 +73,8 @@ export function createToolHandlerFactory(resolve: ResolveToolContext) {
       const args = (body ?? {}) as Record<string, unknown>;
       // `sessionId` rides the tool body like `branch` does: the external MCP
       // proxy injects it (ask-tool continuity convention) and the in-process
-      // agent passes its thread id. Surfaced on the context so the ontology
-      // gate can scope to one run without each handler re-reading args.
+      // agent passes its thread id. Surfaced on the context so the
+      // agent-access gate can name the run without each handler re-reading args.
       const sessionId = typeof args.sessionId === 'string' && args.sessionId.length > 0
         ? args.sessionId
         : undefined;

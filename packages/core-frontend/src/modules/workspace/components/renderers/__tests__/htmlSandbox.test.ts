@@ -45,16 +45,27 @@ describe('sanitizeAgentHtml', () => {
     expect(out).not.toContain('attacker.com');
   });
 
-  it('strips external src/href/action/poster/srcset/ping', () => {
+  it('strips external src/action/poster/srcset', () => {
     const html = `
       <img src="https://attacker.com/pixel.png" srcset="https://attacker.com/2x.png 2x">
-      <a href="https://attacker.com/landing" ping="https://attacker.com/track">x</a>
       <form action="https://attacker.com/submit"></form>
       <video poster="https://attacker.com/thumb.jpg"></video>
       <body background="https://attacker.com/bg.jpg">
     `;
     const out = sanitizeAgentHtml(html);
     expect(out).not.toContain('attacker.com');
+  });
+
+  // `href` is the anchor's one exception. `ping` is a beacon the browser
+  // fires on click without the reader ever seeing where it went, so it goes
+  // even on an anchor whose href stays.
+  it('strips an anchor ping while keeping its href', () => {
+    const out = sanitizeAgentHtml(
+      '<a href="https://example.com/landing" ping="https://tracker.example/t">x</a>',
+    );
+    expect(out).toContain('https://example.com/landing');
+    expect(out).not.toContain('tracker.example');
+    expect(out).not.toContain('ping=');
   });
 
   it('strips javascript: URLs', () => {
@@ -93,11 +104,8 @@ describe('sanitizeAgentHtml', () => {
     expect(out).not.toContain('Process.md');
   });
 
-  it('still strips external and javascript anchors even if they contain .md', () => {
-    const out = sanitizeAgentHtml(
-      '<a href="https://attacker.com/x.md">x</a><a href="javascript:alert(1)//x.md">y</a>',
-    );
-    expect(out).not.toContain('attacker.com');
+  it('still strips a javascript: anchor even when it contains .md', () => {
+    const out = sanitizeAgentHtml('<a href="javascript:alert(1)//x.md">y</a>');
     expect(out).not.toContain('javascript:');
   });
 
@@ -171,6 +179,136 @@ describe('sanitizeAgentHtml', () => {
     expect(() => sanitizeAgentHtml('<div><span>unclosed')).not.toThrow();
     expect(() => sanitizeAgentHtml('<<><>')).not.toThrow();
     expect(() => sanitizeAgentHtml('')).not.toThrow();
+  });
+});
+
+/**
+ * The Scenarios of "Pages keep static links". A link written in a page's
+ * markup keeps its address when it names another document of the knowledge
+ * base or an `http:`, `https:` or `mailto:` destination; every other address
+ * still loses its href. The click itself is the parent's job — see the
+ * `useFileNav.openLink` suite in `routing/__tests__/kb-routes.test.tsx` for
+ * where a kept address goes once the reader clicks it.
+ */
+describe('sanitizeAgentHtml: links written in the page', () => {
+  /** The href the sanitizer left on the first anchor, or null if it took it. */
+  function hrefOf(html: string): string | null {
+    const doc = new DOMParser().parseFromString(sanitizeAgentHtml(html), 'text/html');
+    const a = doc.querySelector('a');
+    expect(a, 'the anchor itself is never removed, only its href').not.toBeNull();
+    return a!.getAttribute('href');
+  }
+
+  it('keeps a relative link to another page', () => {
+    expect(hrefOf('<a href="Board.html">Board</a>')).toBe('Board.html');
+  });
+
+  it('keeps a relative link that walks up a folder, with its fragment', () => {
+    expect(hrefOf('<a href="../Reports/Q3.html#totals">Q3</a>')).toBe('../Reports/Q3.html#totals');
+  });
+
+  it('keeps a .htm page too', () => {
+    expect(hrefOf('<a href="legacy/Index.htm">legacy</a>')).toBe('legacy/Index.htm');
+  });
+
+  it('keeps a page named by an absolute /workspace/ address', () => {
+    const url = '/workspace/main/knowledge-base/Dashboards/Board.html';
+    expect(hrefOf(`<a href="${url}">Board</a>`)).toBe(url);
+  });
+
+  it('keeps a .md node link and its heading, as it did before', () => {
+    expect(hrefOf('<a href="Sub/Node.md#goal">Goal</a>')).toBe('Sub/Node.md#goal');
+    expect(hrefOf('<a href="notes.md">notes</a>')).toBe('notes.md');
+  });
+
+  it('keeps an http: and an https: address', () => {
+    expect(hrefOf('<a href="https://example.com/docs">docs</a>')).toBe('https://example.com/docs');
+    expect(hrefOf('<a href="http://example.com/docs">docs</a>')).toBe('http://example.com/docs');
+  });
+
+  it('keeps a mailto: address', () => {
+    expect(hrefOf('<a href="mailto:team@example.com">mail us</a>')).toBe(
+      'mailto:team@example.com',
+    );
+  });
+
+  it('keeps the scheme as written, whatever its case', () => {
+    expect(hrefOf('<a href="HTTPS://Example.com/Docs">docs</a>')).toBe('HTTPS://Example.com/Docs');
+  });
+
+  it.each([
+    ['javascript:', 'javascript:alert(1)'],
+    ['disguised by case', ' JaVaScRiPt:alert(1)'],
+    ['disguised by a tab inside the scheme', 'java\tscript:alert(1)'],
+    ['disguised by a newline inside the scheme', 'java\nscript:alert(1)'],
+    ['disguised by a leading control character', '\u0001javascript:alert(1)'],
+    ['data:', 'data:text/html,<b>evil</b>'],
+    ['data:image, which only an <img> may carry', 'data:image/png;base64,AAAA'],
+    ['file:', 'file:///etc/passwd'],
+    ['vbscript:', 'vbscript:msgbox(1)'],
+    ['an app scheme nobody named', 'x-devonthink-item:4F2A'],
+    ['tel:, openable elsewhere but not mintable by a page', 'tel:+15551234'],
+    ['protocol-relative', '//cdn.example.com/x.html'],
+    ['a relative path that is not a document', 'assets/report.pdf'],
+    ['a bare directory', '../Reports/'],
+  ])('takes the href of %s', (_label, url) => {
+    expect(hrefOf(`<a href="${url}">x</a>`)).toBeNull();
+  });
+
+  // The parser decodes entities before we ever see the value, so a scheme
+  // spelled in entities is the same string as one spelled in letters.
+  it('takes the href of a javascript: address written in HTML entities', () => {
+    expect(hrefOf('<a href="&#106;avascript&#58;alert(1)">x</a>')).toBeNull();
+    expect(hrefOf('<a href="java&#9;script:alert(1)">x</a>')).toBeNull();
+  });
+
+  // Whitespace is stripped for the CHECK, not from the value: the sanitizer
+  // does not rewrite an author's markup. The CLICK is where it matters, and
+  // the nav bridge and the parent's resolver apply the same rule, so the
+  // address followed is `Board.html` and not a filename with spaces on it.
+  it('keeps a padded page link without rewriting it', () => {
+    expect(hrefOf('<a href="  Board.html  ">Board</a>')).toBe('  Board.html  ');
+  });
+
+  // Generated markup writes an href on its own line; the address is still an
+  // ordinary external one and the reader should reach it.
+  it('keeps an external address written across lines, verbatim', () => {
+    const padded = '\n      https://example.com/docs\n    ';
+    expect(hrefOf(`<a href="${padded}">docs</a>`)).toBe(padded);
+  });
+
+  // A scheme only a tab makes valid is nobody's markup, but a browser reads
+  // `htt<tab>ps:` as `https:` and so does every reader of an href here — the
+  // bridge posts the normalized address and the parent opens it. Keeping it is
+  // therefore a live link to the address a browser would have followed, not a
+  // dead one. The decision is the same whichever way the tab falls: the
+  // normalized string is checked against the allowlist, so a tab cannot turn
+  // a rejected scheme into an accepted one.
+  it('keeps an address a browser reads as external even with a tab in the scheme', () => {
+    expect(hrefOf('<a href="htt\tps://example.com/docs">docs</a>')).toBe(
+      'htt\tps://example.com/docs',
+    );
+    // …and the same reading still refuses the dangerous ones.
+    expect(hrefOf('<a href="javas\tcript:alert(1)">x</a>')).toBeNull();
+    expect(hrefOf('<a href="da\tta:text/html,evil">x</a>')).toBeNull();
+  });
+
+  it('keeps an empty href alone, as an anchor with nowhere to go', () => {
+    expect(hrefOf('<a href="">x</a>')).toBe('');
+  });
+
+  // The exception is anchor + href. Nothing else gains an address.
+  it('does not extend the exception to other elements or attributes', () => {
+    const out = sanitizeAgentHtml(`
+      <img src="Board.html">
+      <img src="https://example.com/x.png">
+      <script src="https://example.com/x.js"></script>
+      <form action="https://example.com/submit"></form>
+      <a href="Board.html" cite="https://example.com/why">Board</a>
+    `);
+    expect(out).toContain('Board.html');
+    expect(out).not.toContain('example.com');
+    expect(out).not.toMatch(/src="Board\.html"/);
   });
 });
 
@@ -283,6 +421,47 @@ describe('buildSandboxedHtml', () => {
     // Delegated anchor-click interception, leaving in-page fragments alone.
     expect(out).toContain("a[href]");
     expect(out).toContain("href.charAt(0) === '#'");
+  });
+
+  // The bridge half of the one-rule promise. The sanitizer keeps a padded
+  // href by reading past the padding; the bridge has to hand the parent the
+  // same reading, or the resolver builds a path out of the spaces. A padded
+  // `#goal` is still an in-page anchor and stays with the browser to scroll.
+  it('posts the href a browser would follow, and leaves a padded fragment alone', () => {
+    // No lib sources: `okOpts` carries an `export`, which a vm script cannot
+    // parse. The bridge is appended after the lib either way.
+    const out = buildSandboxedHtml({ ...okOpts, libModuleSources: [] });
+    const scriptBody = out.match(/<script type="module">([\s\S]*?)<\/script>/)![1];
+
+    type ClickEvent = { target: { closest: () => unknown }; preventDefault: () => void };
+    const handlers: ((e: ClickEvent) => void)[] = [];
+    const posted: unknown[] = [];
+    const ctx: Record<string, unknown> = {
+      document: {
+        addEventListener: (type: string, fn: (e: ClickEvent) => void) => {
+          if (type === 'click') handlers.push(fn);
+        },
+      },
+      parent: { postMessage: (msg: unknown) => posted.push(msg) },
+    };
+    vm.createContext(ctx);
+    vm.runInContext(`"use strict"; (function(){ ${scriptBody} }).call(undefined);`, ctx);
+    expect(handlers).toHaveLength(1);
+
+    const click = (href: string) => {
+      const anchor = { getAttribute: () => href };
+      handlers[0]({ target: { closest: () => anchor }, preventDefault: () => {} });
+    };
+
+    click('\n      Board.html\n    ');
+    click('  #goal  ');
+    click('  https://example.com/docs  ');
+    click('  ');
+
+    expect(posted).toEqual([
+      { type: 'bevel.navigate', href: 'Board.html' },
+      { type: 'bevel.navigate', href: 'https://example.com/docs' },
+    ]);
   });
 
   it('embeds the body HTML verbatim (sanitization happens upstream)', () => {

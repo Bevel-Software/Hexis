@@ -16,9 +16,11 @@ import {
   failureOf,
   gitFailure,
   type GitFailure,
+  type GitFailureKind,
 } from '../../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
 import { normalizeRepositoryAddress, sameRepository } from '../../kb-fs/remote-url.js';
+import { setAsideClone, setAsideRootFor, setAsideStamp } from '../set-aside-clone.js';
 
 /**
  * The KB startup phase: run every registered {@link OnServerStart} step, in
@@ -29,7 +31,9 @@ import { normalizeRepositoryAddress, sameRepository } from '../../kb-fs/remote-u
  *
  * Fully fail-closed: any failure this phase cannot DECLARE (an unhandled
  * step throw, an unreachable remote, a clone that will not come down, a
- * refused write) throws out of `runAll` and stops the boot. The container's
+ * refused write) throws out of `runAll`. The boot stops on it unless the
+ * host ANSWERED about the repository or the credentials, in which case it
+ * comes up gated instead — see `bootMaySurvive`. The container's
  * restart policy is the retry — each attempt at boot time on quiet trees —
  * so an environmental failure converges without a human the moment the
  * environment returns. The one carve-out: a push rejected because a
@@ -53,13 +57,12 @@ export interface KbStartupRunnerOptions {
   kbRepoUrl: () => string;
   workspacesRoot: string;
   /**
-   * Where a working copy of a repository that is no longer the configured
-   * one is moved to, under a folder named for the moment it happened — see
-   * `reconcileClonesWithConfiguredRepository`. NOT under `workspacesRoot`:
-   * the workspace service's orphan sweep removes every folder there that is
-   * not a known branch's, and what is set aside has to outlive that sweep.
-   * The composition root names a folder under the backups root, which is a
-   * persistent volume of its own. Default: a sibling of `workspacesRoot`.
+   * Where a working copy of a repository that is no longer the configured one
+   * is moved to, under a folder named for the moment it happened — see
+   * `reconcileClonesWithConfiguredRepository`. THE SAME VALUE THE WORKSPACE
+   * SERVICE IS GIVEN.
+   *
+   * Why, in one place: `setAsideRootFor` in `set-aside-clone.ts`.
    */
   setAsideRoot?: string;
   kbDirName: string;
@@ -78,6 +81,47 @@ export interface KbStartupRunnerOptions {
       template `.gitignore` rule can never silently drop a required seed file
       from the commit. */
   buildSeedTree: (dir: string) => Promise<string[]>;
+  /**
+   * Called with the workspace id of each working copy the phase is ABOUT TO
+   * set aside for being a clone of another repository, and awaited first.
+   * Whatever is still queued to be committed into that copy was written
+   * against the repository that was left, so it must be held back before a
+   * fresh clone of another repository appears at the same path.
+   *
+   * A PRECONDITION, so a failure here STOPS THE PHASE with the copy still
+   * where it was. Carrying on would clone the replacement with the queue
+   * untouched, and the worker would then commit those bytes into a
+   * repository they were never meant for. Stopped before anything moved, the
+   * next run finds the same copy and asks again. Optional: a minimal graph
+   * has no queue.
+   */
+  beforeCloneSetAside?: (workspaceId: string) => Promise<void>;
+  /**
+   * Called with the workspace id of each working copy the phase SET ASIDE for
+   * being a clone of another repository. The workspace service keeps a
+   * branch→directory cache and adopts whatever is on disk, so on a RUNNING
+   * server (the save that moves the deployment to another repository) the
+   * copy would otherwise stay in that cache as a path to nothing. Optional:
+   * at boot nothing has been cached yet.
+   *
+   * Never throws into the phase: a listener that fails must not stop a boot.
+   */
+  onCloneDiscarded?: (workspaceId: string) => void | Promise<void>;
+  /**
+   * Called with the workspace id of each working copy the phase CLONED fresh.
+   * A clone has just downloaded every ref, which is a successful fetch by any
+   * measure — but the git layer keeps its own per-workspace record of the last
+   * fetch and whether it worked, and the one that drove the replacement is a
+   * FAILED fetch of the repository that is gone. Left standing, a strict
+   * branch listing inside that record's TTL refuses the new clone's refs as
+   * unproven, having never touched it.
+   *
+   * The ordinary path already says this (`WorkspaceService`'s cloned
+   * listener); the phase clones with git directly, so it has to say it itself.
+   *
+   * Never throws into the phase, for the same reason as above.
+   */
+  onCloneCreated?: (workspaceId: string) => void;
 }
 
 /**
@@ -106,6 +150,42 @@ export class KbRemoteUnreachableError extends ClassifiedFailure {
     );
     this.name = 'KbRemoteUnreachableError';
   }
+}
+
+/**
+ * The failure kinds a boot may survive GATED rather than stop on: the remote
+ * ANSWERED (or could not be reached at all), and what it said is about the
+ * repository or the credentials — not about what this deployment would write.
+ *
+ * All four are fixed by an operator somewhere other than this process: the
+ * host comes back, the repository is created or the token is granted access
+ * to it, a rotated token is entered on the setup screen. Refusing to boot
+ * over any of them takes away the very screen the fix is entered on — which
+ * is what happened on 2026-09-28, when a replaced repository answered
+ * `not found` inside a step and the container crash-looped.
+ *
+ * Every OTHER failure still stops the boot: it means a step or the template
+ * would write something wrong, and booting over that is worse than not
+ * booting at all.
+ */
+const GATED_BOOT_KINDS: ReadonlySet<GitFailureKind> = new Set([
+  'unreachable',
+  'not-found',
+  'credentials-rejected',
+  'write-refused',
+]);
+
+/**
+ * Whether the boot may come up GATED on this failure instead of stopping.
+ *
+ * {@link KbRemoteUnreachableError} says so by its type — it is raised where
+ * the remote is first contacted, before any step. A failure raised INSIDE the
+ * phase says so by its classification: the same fetch that stops a boot when
+ * it is the first contact must not stop one when a step happened to make it.
+ */
+export function bootMaySurvive(err: unknown): boolean {
+  if (err instanceof KbRemoteUnreachableError) return true;
+  return err instanceof ClassifiedFailure && GATED_BOOT_KINDS.has(err.failure.kind);
 }
 
 export interface RetryOptions {
@@ -252,7 +332,7 @@ export class KbStartupRunner {
           // Stopped by either: a failure that is no longer the remote at all
           // (the knowledge base itself is wrong — asking again will not change
           // it), or a remote answer that a retry cannot change (see above).
-          if (!(err instanceof KbRemoteUnreachableError) || !worthRetrying()) return stopOnStanding();
+          if (!bootMaySurvive(err) || !worthRetrying()) return stopOnStanding();
           delay = Math.min(delay * 2, max);
           log(`remote still unreachable; trying again in ${Math.round(delay / 1000)}s`);
         }
@@ -561,9 +641,8 @@ export class KbStartupRunner {
       return; // no workspaces yet
     }
     // One folder per run, so what was set aside together stays together.
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const setAsideRoot =
-      this.opts.setAsideRoot ?? path.resolve(this.opts.workspacesRoot, '..', 'replaced-working-copies');
+    const stamp = setAsideStamp();
+    const setAsideRoot = setAsideRootFor(this.opts.workspacesRoot, this.opts.setAsideRoot);
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const repoDir = path.join(this.opts.workspacesRoot, entry.name, this.opts.kbDirName);
@@ -587,12 +666,25 @@ export class KbStartupRunner {
         continue;
       }
       const kept = path.join(setAsideRoot, stamp, entry.name);
-      await this.setAside(repoDir, kept);
+      // First, and allowed to stop the phase: see `beforeCloneSetAside`. The
+      // directory name IS the workspace id (`workspaceIdForBranch`).
+      await this.opts.beforeCloneSetAside?.(entry.name);
+      await setAsideClone(repoDir, kept);
       startupLog.warn(
         `working copy "${entry.name}" is a clone of another repository (${was}). Set aside at ${kept}; nothing was ` +
           'deleted, and it will be cloned fresh from the configured one. Work that was never pushed is in that ' +
           'folder: `git log` there shows it, and `git push <address> <branch>` from there sends it to a repository.',
       );
+      // Setting it aside already removed it from the workspaces root, so the
+      // cached handle the workspace service holds for it now points at
+      // nothing.
+      try {
+        await this.opts.onCloneDiscarded?.(entry.name);
+      } catch (err) {
+        startupLog.warn(`could not finish setting the working copy "${entry.name}" aside:`, {
+          detail: this.redact(err instanceof Error ? err.message : String(err)),
+        });
+      }
     }
   }
 
@@ -638,27 +730,6 @@ export class KbStartupRunner {
    * not (the backups root is a volume of its own in the shipped compose
    * files), with the original removed only once the copy is complete.
    */
-  private async setAside(repoDir: string, dest: string): Promise<void> {
-    await fs.mkdir(path.dirname(dest), { recursive: true });
-    try {
-      await fs.rename(repoDir, dest);
-      return;
-    } catch {
-      // Another volume, or a handle held open on it: copy instead.
-    }
-    try {
-      await fs.cp(repoDir, dest, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
-    } catch (err) {
-      await fs.rm(dest, { recursive: true, force: true }).catch(() => undefined);
-      throw new Error(
-        `Could not set aside the working copy at ${repoDir}, a clone of a repository that is no longer the ` +
-          `configured one, into ${dest}: ${err instanceof Error ? err.message : String(err)}. Nothing was deleted. ` +
-          'Make room there, or move that folder away by hand, and start again.',
-        { cause: err },
-      );
-    }
-    await fs.rm(repoDir, { recursive: true, force: true });
-  }
 
   /**
    * The branch's working copy at the runtime layout
@@ -677,6 +748,16 @@ export class KbStartupRunner {
       await fs.mkdir(workspaceDir, { recursive: true });
       await fs.rm(repoDir, { recursive: true, force: true });
       await git(this.opts.gitRunner, workspaceDir, ['clone', '-b', branch, this.opts.kbRepoUrl(), repoDir]);
+      // Said as soon as the clone is there, before its configuration: if a
+      // command below fails, the clone stays on disk, and the retry finds it
+      // and never comes back through here.
+      try {
+        this.opts.onCloneCreated?.(workspaceIdForBranch(branch));
+      } catch (err) {
+        startupLog.warn(`could not announce the fresh working copy for "${branch}":`, {
+          detail: this.redact(err instanceof Error ? err.message : String(err)),
+        });
+      }
       await git(this.opts.gitRunner, repoDir, ['config', 'core.longpaths', 'true']);
       await stampIdentity(this.opts.gitRunner, repoDir);
       return repoDir;

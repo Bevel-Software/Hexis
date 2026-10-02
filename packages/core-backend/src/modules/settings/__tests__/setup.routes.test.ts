@@ -780,8 +780,11 @@ describe('POST /setup/settings — the connection is checked before it is stored
     const { base, settings } = listen(true, undefined, remote.check);
     await settings.save({ kbRepoUrl: REPO, gitToken: 'ghp_old' }, null);
     const moved = 'https://example.com/acme/moved.git';
+    // A different repository replaces every working copy, so the save is
+    // refused until the admin confirms — the address is checked all the same.
     const res = await post(base, '/api/setup/settings', {
       settings: { kbRepoUrl: moved, gitToken: 'ghp_new' },
+      confirmRepositoryChange: 'keep',
     });
     expect(res.status).toBe(200);
     expect(remote.asked).toEqual([{ url: moved, token: 'ghp_new', username: 'x-access-token' }]);

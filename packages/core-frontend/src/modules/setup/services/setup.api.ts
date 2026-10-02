@@ -118,6 +118,50 @@ export interface SetupStatus {
   repository?: RepositoryStatus;
 }
 
+/**
+ * What the admin must decide before a save moves the deployment to another
+ * repository: `keep` — it only moved, so the open change requests still mean
+ * something — or `close` — it was replaced, so they are closed as "repository
+ * replaced". Nothing is deleted either way.
+ */
+export type RepositoryChangeChoice = 'keep' | 'close';
+
+/**
+ * The server refused the save until the move to another repository is
+ * confirmed (409). The one question every move is asked: another address,
+ * another repository on GitHub, another way of having one.
+ *
+ * Not an error to show as one: nothing was saved, nothing was destroyed, and
+ * the answer is a decision only the admin can make. `openChangeRequests` is
+ * the count the choice is about, read at the moment of the refusal. `from`
+ * and `to` are the way left and the way moved to: equal for a move within
+ * one way, absent from a server that knows one way only.
+ */
+export class RepositoryChangeNeedsConfirmation extends Error {
+  readonly openChangeRequests: number;
+  readonly from?: GitMode;
+  readonly to?: GitMode;
+
+  constructor(openChangeRequests: number, from?: GitMode, to?: GitMode) {
+    super('This moves the deployment to another repository.');
+    this.name = 'RepositoryChangeNeedsConfirmation';
+    this.openChangeRequests = openChangeRequests;
+    this.from = from;
+    this.to = to;
+  }
+}
+
+/** What a save that changed the repository did about the open change requests. */
+export interface RepositoryChangeResult {
+  choice: RepositoryChangeChoice | null;
+  /**
+   * How many were closed as "repository replaced". `keep` answers 0. A close
+   * that could not be done refuses the whole save, so this never reports on
+   * requests that are still open.
+   */
+  closedChangeRequests: number;
+}
+
 export interface SaveResult {
   restartRequired: boolean;
   complete: boolean;
@@ -125,6 +169,8 @@ export interface SaveResult {
   settings: SettingStatus[];
   oidcVerification?: OidcVerification;
   repository?: RepositoryStatus;
+  /** Only on the save that changed the knowledge-base repository. */
+  repositoryChange?: RepositoryChangeResult;
 }
 
 /** Field-keyed messages, so the form can mark the input that was wrong. */
@@ -162,9 +208,21 @@ async function readError(res: Response): Promise<never> {
   } catch {
     throw new Error(`Request failed (${res.status})`);
   }
-  const data = body as { error?: string; problems?: Record<string, string>; kbInit?: KbInitFailure };
+  const data = body as {
+    error?: string;
+    problems?: Record<string, string>;
+    kbInit?: KbInitFailure;
+    repositoryChange?: { openChangeRequests?: number; from?: GitMode; to?: GitMode };
+  };
   if (data.problems) throw new SettingsProblems(data.problems);
   if (data.kbInit) throw new KbInitFailed(data.kbInit);
+  // A save REFUSED until the repository change is confirmed. Checked before
+  // the generic throw so the form gets the decision to put to the admin, not
+  // a sentence in a red box that nothing can be done about.
+  if (res.status === 409 && data.repositoryChange) {
+    const { openChangeRequests, from, to } = data.repositoryChange;
+    throw new RepositoryChangeNeedsConfirmation(openChangeRequests ?? 0, from, to);
+  }
   throw new Error(data.error || `Request failed (${res.status})`);
 }
 
@@ -224,11 +282,28 @@ export async function fetchSetupStatus(): Promise<SetupStatus> {
   return (await res.json()) as SetupStatus;
 }
 
-export async function saveSettings(settings: Record<string, string>): Promise<SaveResult> {
+/**
+ * Store the settings. `confirmRepositoryChange` carries the admin's decision
+ * about a change of the knowledge-base repository — without it the server
+ * refuses such a save (409), which arrives as
+ * {@link RepositoryChangeNeedsConfirmation} rather than as an error.
+ */
+export async function saveSettings(
+  settings: Record<string, string>,
+  confirmRepositoryChange?: RepositoryChangeChoice,
+  /**
+   * How many open change requests the question showed when it was answered.
+   * The server asks again when the count has changed since, so a request
+   * opened while the question stood is not decided unasked.
+   */
+  seenOpenChangeRequests?: number,
+): Promise<SaveResult> {
   const res = await authFetch('/api/setup/settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ settings }),
+    body: JSON.stringify(
+      confirmRepositoryChange ? { settings, confirmRepositoryChange, seenOpenChangeRequests } : { settings },
+    ),
   });
   if (!res.ok) await readError(res);
   return (await res.json()) as SaveResult;

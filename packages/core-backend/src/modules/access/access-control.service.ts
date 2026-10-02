@@ -5,7 +5,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('access');
 
 import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
-import { isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
+import { assertOneSpecPerLine, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
 import { hashEmail } from '../../shared/email-identity.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
@@ -19,6 +19,7 @@ import type {
   GrantSource,
   GrantSources,
   PathHolders,
+  PathVerbs,
   ProspectiveHolders,
   ResolvedPrincipal,
 } from './access-control.interface.js';
@@ -31,7 +32,6 @@ import {
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
 import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { synthesizePluginPrincipals } from '../access-model/plugin-principals.js';
 import {
   GROUPS_YAML,
@@ -81,6 +81,12 @@ async function catFileBatch(
 ): Promise<(string | null)[]> {
   // Bytes, not text: every `<size>` in the header counts bytes, and the walk
   // below has to step by that count through content that is not all ASCII.
+  // One spec per LINE is the protocol, and this walk depends on getting back
+  // exactly as many answers as it sent: a spec carrying a line break would
+  // insert an extra answer and shift every result after it, so each directory
+  // would be handed the NEXT one's `access.md`. Paths are refused a control
+  // character at the normaliser; this is the fence at the protocol.
+  assertOneSpecPerLine(specs);
   const { stdout: out } = await runner.run(repoDir, ['cat-file', '--batch'], {
     input: `${specs.join('\n')}\n`,
     encoding: 'buffer',
@@ -952,6 +958,95 @@ function resolveDenialSourcesForVerb(
 }
 
 /**
+ * The model as it will be once `fromPath` has been moved or copied to
+ * `toPath`: every `access.md` the operation carries, keyed at the directory
+ * it lands in, since the rules a folder carries travel with its bytes.
+ *
+ * What travels is BYTES, and the name they land under decides what they
+ * govern — `landing` is the caller's answer to that (see
+ * `relocationSubject`), already parsed as the destination path:
+ *
+ * - a FOLDER takes every `access.md` at or under it, each re-keyed to the
+ *   directory it lands in, and `landing` plays no part;
+ * - a FILE governs a directory exactly when it lands as that directory's
+ *   `access.md`, whatever it was called before — a copy `copy_file` allows,
+ *   and one that governs the destination folder the moment it lands. Its key
+ *   is a PARENT directory, never a path under `fromPath`, which is why the
+ *   prefix walk above cannot see it.
+ *
+ * The emptied side is the mirror: an `access.md` that MOVES stops governing
+ * the directory it left, whether or not it governs anything where it lands.
+ *
+ * PREVIEW ONLY. Nothing here reads disk and nothing here decides whether an
+ * operation may run — the gates resolve against the model as it IS. This
+ * answers the other question, the one a dry run asks: what will be true
+ * afterwards. Judging the destination as it stands today is what made a
+ * rename warn about losing the owner access the folder's own `access.md` was
+ * about to hand straight back.
+ *
+ * `sourceRemains` is the difference between a copy and a move: a copy leaves
+ * the rules where they were, a move takes them away. It changes the answer
+ * only when the destination resolves through a directory the source
+ * occupied; nothing else consults those keys.
+ */
+function withRelocatedAccessFiles(
+  model: AccessModel,
+  fromPath: string,
+  toPath: string,
+  opts: { sourceRemains: boolean; sourceIsFolder: boolean; landing?: AccessFile | null },
+): AccessModel {
+  /** Directories the operation takes an `access.md` AWAY from. */
+  const emptied: string[] = [];
+  /** Directories it leaves one IN, with the file as it will be read there. */
+  const landing: { toDir: string; file: AccessFile }[] = [];
+  if (opts.sourceIsFolder) {
+    for (const [dir, file] of model.accessFilesByDir) {
+      if (dir !== fromPath && !dir.startsWith(`${fromPath}/`)) continue;
+      emptied.push(dir);
+      landing.push({ toDir: `${toPath}${dir.slice(fromPath.length)}`, file });
+    }
+  } else {
+    const fromDir = parentDirOf(fromPath);
+    if (isAccessMdPath(fromPath) && model.accessFilesByDir.has(fromDir)) emptied.push(fromDir);
+    if (opts.landing) landing.push({ toDir: parentDirOf(toPath), file: opts.landing });
+  }
+  if (emptied.length === 0 && landing.length === 0) return model;
+  const accessFilesByDir = new Map(model.accessFilesByDir);
+  if (!opts.sourceRemains) for (const dir of emptied) accessFilesByDir.delete(dir);
+  for (const { toDir, file } of landing) {
+    // A directory that already has an `access.md` keeps it. The operation
+    // would be refused for landing on something that exists long before the
+    // two files could meet, so the model must not invent a merge either.
+    if (accessFilesByDir.has(toDir)) continue;
+    accessFilesByDir.set(toDir, {
+      ...file,
+      dir: toDir,
+      path: toDir ? `${toDir}/access.md` : 'access.md',
+    });
+  }
+  return { ...model, accessFilesByDir };
+}
+
+/** The directory a repo-relative file path sits in; `''` for the repo root. */
+function parentDirOf(relativePath: string): string {
+  const cut = relativePath.lastIndexOf('/');
+  return cut === -1 ? '' : relativePath.slice(0, cut);
+}
+
+/**
+ * One file's own-entries, parsed as the path `asName` would be read.
+ *
+ * The same frontmatter means two different things by name: in an `access.md`
+ * it is the FOLDER's rules (and the file governs itself only through the
+ * body format — see {@link accessMdSelfEntries}), and anywhere else it is the
+ * file's own. Which is why a preview must read the bytes as the name they
+ * LAND under, not the one they are leaving.
+ */
+function ownEntriesFromText(text: string, asName: string): OwnEntries | null {
+  return isAccessMdPath(asName) ? accessMdSelfEntries(text) : parseOwnAccessEntries(text);
+}
+
+/**
  * Build the repo-root → path chain of directory scopes that govern
  * `relativePath`, e.g. `Knowledge/Sales/Foo.md` →
  * `['', 'Knowledge', 'Knowledge/Sales', 'Knowledge/Sales/Foo.md']`.
@@ -1586,16 +1681,25 @@ export class AccessControlService implements IAccessControl {
   }
 
   /**
-   * The read and write holders of one file at its current path and at a path
-   * it has not moved to yet (see the interface).
+   * The read and write holders of one file or folder at its current path and
+   * at a path it has not moved to yet (see the interface).
    *
-   * A move changes nothing about the file's own frontmatter — that travels
-   * with the bytes — and everything about the folder chain above it. So the
-   * hypothetical side is the ordinary resolution with the destination path
-   * substituted: the same model, the same own-entries (read from the SOURCE,
-   * since nothing sits at the destination to read), resolved against the
-   * destination's ancestors. One model load and one file read serve all four
-   * lookups.
+   * A move changes nothing about what the thing itself carries — a file's
+   * frontmatter and a folder's `access.md` files travel with the bytes — and
+   * everything about the folder chain above it. So the hypothetical side is
+   * the ordinary resolution at the destination path, over what travels:
+   *
+   * - a FILE's own-entries, read from the SOURCE (nothing sits at the
+   *   destination to read) and parsed as the name they LAND under, layered
+   *   over the destination's ancestors — the two sides can differ, because
+   *   the same frontmatter is a folder's rules in an `access.md` and the
+   *   file's own anywhere else;
+   * - a FOLDER's `access.md` files, keyed at the directories they land in,
+   *   and a file landing as a directory's `access.md` at the directory it
+   *   lands in (`withRelocatedAccessFiles`). A folder has no frontmatter of
+   *   its own, so it passes none.
+   *
+   * One model load and one file read serve all four lookups.
    */
   async prospectiveHolders(
     workspaceId: string,
@@ -1604,31 +1708,64 @@ export class AccessControlService implements IAccessControl {
   ): Promise<ProspectiveHolders> {
     const model = await this.loadModel(workspaceId);
     const repoDir = await this.repoDir(workspaceId);
-    // A FILE question only. A folder carries its own `access.md` — which moves
-    // with it and governs everything under it — so resolving it as a file
-    // would read frontmatter it does not have and omit the rules it does,
-    // naming principals that are not the ones a folder move changes. Refuse
-    // rather than answer the wrong question convincingly.
-    //
-    // Only absence is an answer here (see `isAbsence`): a probe that failed on
-    // permissions or I/O does not say "this is a file", and folding it into
-    // one would let the very case above through on an unreadable source.
-    const fromStat = await fs.stat(path.join(repoDir, fromPath)).catch((err: unknown) => {
-      if (isAbsence(err)) return null;
-      throw err;
+    const { isFolder, ownHere, ownThere, landing } =
+      await this.relocationSubject(repoDir, fromPath, toPath);
+    const after = withRelocatedAccessFiles(model, fromPath, toPath, {
+      sourceRemains: false,
+      sourceIsFolder: isFolder,
+      landing,
     });
-    if (fromStat?.isDirectory()) {
-      throw new WorkflowDomainError(
-        'prospective access answers for a file, not a folder',
-        400,
-      );
-    }
-    const own = await this.readOwnEntries(repoDir, fromPath);
-    const holdersAt = (relativePath: string): PathHolders => ({
-      read: eligibleHoldersResolved(model, 'read', relativePath, own),
-      write: eligibleHoldersResolved(model, 'write', relativePath, own),
+    const holdersAt = (m: AccessModel, relativePath: string, own: OwnEntries | null): PathHolders => ({
+      read: eligibleHoldersResolved(m, 'read', relativePath, own),
+      write: eligibleHoldersResolved(m, 'write', relativePath, own),
     });
-    return { before: holdersAt(fromPath), after: holdersAt(toPath) };
+    return {
+      before: holdersAt(model, fromPath, ownHere),
+      after: holdersAt(after, toPath, ownThere),
+    };
+  }
+
+  /**
+   * The caller's own verbs at `toPath` as they will be once `fromPath` has
+   * been moved or copied there (see the interface).
+   *
+   * Identical to asking `canRead`/`canWrite`/`canDownload`/`canOwner` at
+   * `toPath` whenever nothing travels — an ordinary file with no rules of its
+   * own, or a folder with no `access.md` of its own — so the cases this was
+   * not written for answer exactly as they always did.
+   *
+   * What travels is what `prospectiveHolders` says travels, and for the same
+   * reason: the preview and the dialog's holder lists must not disagree about
+   * one move. A file's own-entries come from the SOURCE, where the bytes
+   * carrying them still are — asking the destination, which does not exist
+   * yet, always answered null and so dropped the frontmatter a rename hands
+   * straight back (requirement 6: what the caller has afterwards equals what
+   * the preview said) — and they are parsed as the name they LAND under,
+   * because that is the parse the gates will use a moment later.
+   */
+  async previewAccessAfterRelocation(
+    workspaceId: string,
+    userEmail: string,
+    fromPath: string,
+    toPath: string,
+    opts?: { sourceRemains?: boolean },
+  ): Promise<PathVerbs> {
+    const repoDir = await this.repoDir(workspaceId);
+    const { isFolder, ownThere: own, landing } =
+      await this.relocationSubject(repoDir, fromPath, toPath);
+    const model = withRelocatedAccessFiles(
+      await this.loadModel(workspaceId),
+      fromPath,
+      toPath,
+      { sourceRemains: opts?.sourceRemains === true, sourceIsFolder: isFolder, landing },
+    );
+    const machineOwned = this.machineOwnedWriteRule(userEmail, toPath);
+    return {
+      read: canReadResolved(model, userEmail, toPath, own),
+      write: machineOwned ?? hasPermissionResolved(model, 'write', userEmail, toPath, own),
+      download: hasPermissionResolved(model, 'download', userEmail, toPath, own),
+      owner: hasPermissionResolved(model, 'owner', userEmail, toPath, own),
+    };
   }
 
   async eligibleWriterEmails(
@@ -2219,8 +2356,69 @@ export class AccessControlService implements IAccessControl {
     } catch {
       return null;
     }
-    if (isAccessMdPath(relativePath)) return accessMdSelfEntries(text);
-    return parseOwnAccessEntries(text);
+    return ownEntriesFromText(text, relativePath);
+  }
+
+  /**
+   * What a move or a copy of `fromPath` to `toPath` CARRIES — the one disk
+   * read both preview surfaces need:
+   *
+   * - `isFolder`: the source is a folder, so the `access.md` files under it
+   *   travel, keyed at the directories they land in;
+   * - `ownHere` / `ownThere`: a file's own-entries as the SOURCE's name reads
+   *   them and as the DESTINATION's name will. They differ because the same
+   *   frontmatter means two things by name (see `ownEntriesFromText`), so
+   *   `Sales/access.md` copied to `Legal/rules-copy.md` arrives as an
+   *   ordinary file whose frontmatter is its own — reading it as the source's
+   *   name had the preview contradict the copy it was previewing;
+   * - `landing`: the folder rules the bytes WILL be, when they land under the
+   *   name `access.md`. Parsed as the destination path, so the directory it
+   *   governs is already the right one. An `access.md` that will not parse
+   *   travels as nothing, as the loader treats it.
+   *
+   * `lstat`, not `stat`: a SYMLINK is none of this. `move_file` refuses a
+   * symlink source outright, so a link to a directory must not be previewed
+   * as a folder taking access files along, and nothing is read THROUGH the
+   * link either — the link's target is not what would move.
+   *
+   * Only absence is an answer (see `isAbsence`): a probe that failed on
+   * permissions or I/O does not say "this is a file", and reading a folder as
+   * one would resolve it through frontmatter it does not have.
+   */
+  private async relocationSubject(
+    repoDir: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<{
+    isFolder: boolean;
+    ownHere: OwnEntries | null;
+    ownThere: OwnEntries | null;
+    landing: AccessFile | null;
+  }> {
+    const nothing = { isFolder: false, ownHere: null, ownThere: null, landing: null };
+    const fromStat = await fs.lstat(path.join(repoDir, fromPath)).catch((err: unknown) => {
+      if (isAbsence(err)) return null;
+      throw err;
+    });
+    if (fromStat?.isSymbolicLink() === true) return nothing;
+    if (fromStat?.isDirectory() === true) return { ...nothing, isFolder: true };
+    // `roles.yaml` carries no own-entries wherever it sits, exactly as
+    // `readOwnEntries` has it; a read that fails for any reason is no rules,
+    // which is what the gates would say about the same file.
+    if (fromPath === 'roles.yaml' || toPath === 'roles.yaml') return nothing;
+    let text: string;
+    try {
+      text = await fs.readFile(path.join(repoDir, fromPath), 'utf-8');
+    } catch {
+      return nothing;
+    }
+    const parsed = isAccessMdPath(toPath) ? parseAccessFile(text, toPath) : null;
+    return {
+      isFolder: false,
+      ownHere: ownEntriesFromText(text, fromPath),
+      ownThere: ownEntriesFromText(text, toPath),
+      landing: parsed?.ok === true ? parsed.file : null,
+    };
   }
 
   /**

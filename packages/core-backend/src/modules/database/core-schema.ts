@@ -1,8 +1,8 @@
 /**
  * CORE platform tables — the git-backed workspace/workflow, auth, access,
- * change requests, locks, the pending-commits queue, the ontology-session
- * touched-set, connection keys, MCP OAuth, and the Secrets Vault. A core-only
- * deployment migrates and runs on exactly these tables.
+ * change requests, locks, the pending-commits queue, connection keys, MCP
+ * OAuth, and the Secrets Vault. A core-only deployment migrates and runs on
+ * exactly these tables.
  *
  * Enterprise-only tables (chat, routines, watchlist, connectors, LLM config,
  * SharePoint/Atlassian links, feedback, upload, kb-revalidation) live in
@@ -37,6 +37,19 @@ export const users = pgTable('users', {
    * backfill would need, and being shown the setup once costs a click.
    */
   onboardingDone: boolean('onboarding_done').default(false).notNull(),
+  /**
+   * When an admin switched this account off; NULL while it is on. A
+   * deactivated account keeps its row, its history and its place in roles
+   * and groups, but nothing it holds is honoured: it cannot sign in, and its
+   * session, connection keys, agent tokens and internal tokens are refused
+   * the next time they are presented (see `AuthService.isActive`). Turning it
+   * back on restores all of them as they were.
+   *
+   * The off switch a host that sells seats needs — a seat is an account that
+   * is on — and the one an admin uses for someone who left without erasing
+   * what they did.
+   */
+  deactivatedAt: timestamp('deactivated_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
@@ -160,6 +173,18 @@ export const changeRequests = pgTable('change_requests', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at'),
   closedAt: timestamp('closed_at'),
+  /**
+   * Why a closed request was closed, when something other than a person
+   * closed it. Today the one value is 'repository-replaced': the admin
+   * pointed the deployment at a different knowledge-base repository and chose
+   * to close the requests rather than keep them. Null for every request
+   * closed the ordinary way — by its author, or by the deleted-branch sweep —
+   * so the column reads as "nobody recorded a reason", not as a default.
+   *
+   * The row is never deleted: a replaced repository loses the branches, not
+   * the record of what people asked for.
+   */
+  closedReason: text('closed_reason'),
 }, (t) => ({
   numberUnq: uniqueIndex('change_requests_number_unq').on(t.number),
   // Enforce the "A→B blocks A→B while open" uniqueness rule at the DB level —
@@ -383,30 +408,6 @@ export const secrets = pgTable('secrets', {
 }));
 
 /**
- * Ontology-session boundary — the per-session log of which named ontologies a
- * run has TOUCHED (one row per `(session_id, ontology)`). Each agent operation
- * that resolves to a named ontology records a row here (idempotent on the PK).
- *
- * The rule the gate enforces from this set:
- *   - READS are always allowed; they just record the ontology they touched.
- *   - WRITES are allowed only while the session's touched set is a SINGLE named
- *     ontology equal to the write target. Once a session has touched two or
- *     more ontologies (e.g. by reading across them), every write is blocked —
- *     "read across ontologies → you can't write anymore at all."
- *
- * Postgres is the durable source of truth so the boundary holds across a
- * backend restart (an in-memory set would reset and silently un-poison a run).
- * A write-through in-process cache fronts this table for the chatty read path;
- * a cache miss falls back here.
- *
- *   - PK is `(session_id, ontology)` — a set, idempotent on repeat touches.
- *   - `ontology` is the resolved ontology id (e.g. `KnowledgeBase/Product`).
- *     Neutral touches don't record, so they never write a row.
- *   - `touched_at` drives the abandoned-run `sweepOlderThan` backstop; the
- *     primary reclamation is an explicit delete of all of a session's rows at
- *     run end.
- */
-/**
  * OAuth clients dynamically registered by MCP clients (RFC 7591 DCR). When an
  * MCP client (claude.ai, Claude Code) connects to `/api/mcp` without a
  * connection key, it registers itself here via `POST /register`, then runs the
@@ -575,6 +576,13 @@ export const agentEvents = pgTable('agent_events', {
   ),
 }));
 
+/**
+ * UNUSED IN THIS RELEASE. It backed the per-session boundary that a deployment
+ * now owns for itself, behind the agent read/write hooks; nothing in this
+ * package reads or writes it any more. The definition stays for ONE release so
+ * that no deployment runs a version in which neither side has the table, and
+ * the NEXT release drops it (see `TODOS.md`). Do not build on it.
+ */
 export const sessionOntologyTouches = pgTable('session_ontology_touches', {
   sessionId: text('session_id').notNull(),
   ontology: text('ontology').notNull(),

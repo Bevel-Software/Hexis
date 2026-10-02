@@ -8,6 +8,10 @@ import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowEventBus } from '../event-bus.js';
 import { createWorkflowRoutes } from '../workflow.routes.js';
+import {
+  VersionNotOnBranchError,
+  VERSION_NOT_ON_BRANCH_MESSAGE,
+} from '../../../shared/domain-errors.js';
 
 // A file's history is its content with a time axis: the same default-deny
 // read model that hides a file must hide its commit list, its diffs, and its
@@ -128,6 +132,27 @@ describe('history routes enforce the read model', () => {
     );
     expect((await get(`/compare-file?from=a&to=b&path=${OPEN}`)).status).toBe(403);
   });
+
+  it.each([
+    ['/show-file?sha=abc1234&path=%s', 'showFileAtChange'],
+    ['/file-at-change?sha=abc1234&path=%s', 'fileAtChange'],
+  ] as const)(
+    '%s: a save off this branch is refused with the history message',
+    async (route, method) => {
+      // The service raises it (the git layer knows the branch); the route has
+      // to pass the typed refusal through with its own status and sentence,
+      // because a reader who is told "not found" about a file that is plainly
+      // there learns the wrong thing. The bytes route carries the same rule,
+      // so neither can be read around through the other.
+      h = await makeHarness();
+      h.workflow[method].mockRejectedValueOnce(new VersionNotOnBranchError());
+      const res = await get(route.replace('%s', OPEN));
+      expect(res.status).toBe(404);
+      expect(((await res.json()) as { error: string }).error).toBe(
+        VERSION_NOT_ON_BRANCH_MESSAGE,
+      );
+    },
+  );
 
   it('an access-model error fails closed, not open', async () => {
     h = await makeHarness();

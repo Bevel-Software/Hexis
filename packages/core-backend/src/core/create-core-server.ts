@@ -37,7 +37,7 @@ import {
   registerPluginsTools,
 } from '../modules/plugins/index.js';
 import { keyOrSessionAuth } from '../modules/tool-auth/key-or-session.middleware.js';
-import type { SessionOntologyGate } from '../modules/workspace/session-ontology.gate.js';
+import { ToolDescriptionNotes, type AgentAccessGate } from '../modules/workspace/agent-access.gate.js';
 import {
   createSecretsVaultRoutes,
   createSecretsVaultPublicRoutes,
@@ -72,6 +72,7 @@ import { publicConfig } from './public-config.js';
 import { createReadiness } from './readiness.js';
 import { createAgentInstructionsRoutes } from '../modules/agent-instructions/index.js';
 import type { CoreServices } from './create-core-services.js';
+import { createWriteAccessRoutes, createWriteGateMiddleware } from '../modules/write-access/write-access.js';
 
 type ExpressApp = ReturnType<typeof express>;
 
@@ -85,8 +86,8 @@ export interface ToolSurfaceCtx {
   router: Router;
   toolAuth: RequestHandler;
   toolHandler: CoreServices['toolHandlerFactory'];
-  /** Shared ontology-session boundary gate config (file tools + graph tools). */
-  sessionOntologyGate: SessionOntologyGate;
+  /** Shared agent-access gate config (file tools + graph tools). */
+  agentAccessGate: AgentAccessGate;
   core: CoreServices;
 }
 
@@ -200,6 +201,14 @@ export async function createCoreServer(
   // is mounted again below, once the body is parsed and once the caller is
   // known (see the two mounts under `/api/workspace/:id`).
   app.use('/api/workspace/:id', createGitInternalsRouteGuard(core.workspaceService));
+  // The read-only gate, ahead of every route — core's, the tool surface's
+  // and an overlay's alike — so a read-only deployment refuses a change
+  // wherever it would enter. It lets through what signs people in, manages
+  // accounts and configures the deployment (see `ALWAYS_WRITABLE`); write
+  // tools are judged by the tool layer. A no-op unless a host fills
+  // `ports.writeAccess`. Ahead of the body parser too: a refused write is
+  // refused with its own 403, never parsed first (and answered 400 or 413).
+  app.use(createWriteGateMiddleware(core.writeAccess));
   app.use((req, res, next) => {
     if (jsonExemptPaths.has(req.path) || isSyncRawBodyPath(req.path)) return next();
     return globalJson(req, res, next);
@@ -420,24 +429,23 @@ export async function createCoreServer(
       },
     }),
   );
-  // Shared ontology-session boundary gate config, consumed by every tool
-  // surface that touches the KB (file tools + graph tools). The gate's
-  // blocking decision runs through the workflow hooks: core registers none
-  // (tracking only); the enterprise root registers the ontology block on
-  // `workflowService.hooks` before this server is built.
-  const sessionOntologyGate = {
-    service: core.sessionOntologyService,
-    enabled: core.config.ontologySessionBlock,
-    kb: core.kb,
+  // Shared agent-access gate config, consumed by every tool surface that
+  // touches the KB (file tools + graph tools). The gate decides nothing
+  // itself: it calls the read and write hooks a deployment registered on
+  // `workflowService.hooks`, and carries the notes that deployment wants
+  // agents to read about the gated tools. Core registers neither, so a
+  // core-only deployment refuses nothing and says nothing extra.
+  const agentAccessGate: AgentAccessGate = {
     recoveryBotEmail: RECOVERY_BOT_EMAIL,
     hooks: core.workflowService.hooks,
+    notes: new ToolDescriptionNotes(),
   };
   // A skill's `allowed-tools`, checked against what the caller can see — on
   // every save surface (agent write tools, the app's PUT /file) and on
   // `get_skill`. Warnings only; it never refuses a save.
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
   registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, sessionOntologyGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate);
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
@@ -455,7 +463,7 @@ export async function createCoreServer(
     router: toolsRouter,
     toolAuth: ta,
     toolHandler: th,
-    sessionOntologyGate,
+    agentAccessGate,
     core,
   });
   toolsRouter.use(createManualRoutes(
@@ -546,6 +554,7 @@ export async function createCoreServer(
   // request also gets the resolved form judged — a link in the repository that
   // points into the git folder — before any read gate or lock.
   app.use('/api/workspace/:id', core.authMiddleware, createGitInternalsRouteGuard(core.workspaceService));
+  app.use('/api', core.authMiddleware, createWriteAccessRoutes(core.writeAccess));
   app.use('/api', core.authMiddleware, createWorkspaceRoutes(
     core.workspaceService,
     core.authService,
@@ -721,6 +730,15 @@ export async function createCoreServer(
         source: core.repositorySource,
         ensureManaged: (branch) => core.managedRepository.ensure(core.gitRunner, branch),
         githubApp: core.githubApp,
+      },
+      // What a move to another repository has to decide about, and what it
+      // runs under. Bound here rather than handed the whole workflow service:
+      // the setup routes ask two questions, hold the commit worker for the
+      // move, and know nothing else about a request or a commit.
+      {
+        countOpen: () => core.workflowService.countOpenChangeRequests(),
+        closeAsRepositoryReplaced: () => core.workflowService.closeOpenChangeRequestsAsRepositoryReplaced(),
+        whileCommitsHeld: (work) => core.whileCommitsHeld(work),
       },
     ),
   );

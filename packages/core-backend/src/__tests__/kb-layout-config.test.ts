@@ -10,7 +10,6 @@ import {
   currentKbLayout,
   isPlatformFile,
   mentionsAgentsFile,
-  ontologyRoots,
   platformFileNames,
   pluginOfPath,
   renderKbLayoutPlaceholders,
@@ -105,7 +104,6 @@ describe('KB layout — configuration', () => {
 
   test('the derived sets follow the configured names rather than snapshotting the defaults', () => {
     configureKbLayout({ knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' });
-    expect(ontologyRoots(currentKbLayout())).toEqual(['docs', 'Data']);
     expect(reservedRootDirNames(currentKbLayout()).has('plugins')).toBe(true);
     expect(reservedRootDirNames(currentKbLayout()).has('Plugins')).toBe(false);
     // Path rules read the configured name too.

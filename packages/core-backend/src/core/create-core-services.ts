@@ -12,6 +12,7 @@ import { sql } from 'drizzle-orm';
 import { DEFAULT_DB_SCHEMA, assertSearchPath } from '../modules/database/connection.js';
 import { DEFAULT_SECRETS_SCOPE } from '../modules/secrets-vault/secrets-variable-loader.js';
 import { KbContext } from '../shared/kb-context.js';
+import { branchForWorkspaceId } from '../shared/workspace-id.js';
 import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
@@ -35,7 +36,7 @@ import { ManagedRepository, MANAGED_DEFAULT_BRANCH } from '../modules/settings/m
 import { RepositorySource } from '../modules/settings/repository-source.js';
 import { GitHubAppConnection } from '../modules/github-app/index.js';
 import { AdvisoryLease, AdvisoryLock } from '../modules/database/advisory-lock.js';
-import { holdCommitWorkerLease, withStartupTask, type LeaseLoopHandle } from './lifecycle.js';
+import { holdCommitWorkerLease, holdable, withStartupTask, type LeaseLoopHandle } from './lifecycle.js';
 
 /** The hosted MCP endpoint at a deployment address, with any userinfo stripped. */
 function mcpEndpointUrl(publicBackendUrl: string): string {
@@ -110,7 +111,6 @@ import { WorkflowEventBus } from '../modules/workflow/event-bus.js';
 import { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
 import { WorkflowService } from '../modules/workflow/workflow.service.js';
 import { WorkflowHooks } from '../modules/workflow/workflow-hooks.js';
-import { SessionOntologyService } from '../modules/workflow/session-ontology.service.js';
 import { PendingCommitsService } from '../modules/workflow/pending-commits.service.js';
 import {
   PendingCommitsWorker,
@@ -142,6 +142,7 @@ import { BevelOAuthProvider } from '../modules/mcp/oauth/bevel-oauth-provider.js
 import { getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { ToolRegistry } from '../modules/tool-registry/tool-registry.js';
 import { createToolContextResolver } from '../modules/tool-helpers/tool-context.js';
+import { alwaysWritable, type IWriteAccess } from '../modules/write-access/write-access.js';
 import { createToolHandlerFactory } from '../modules/tool-helpers/tool-handler.js';
 import { TokenCrypto } from '../shared/token-crypto.js';
 import { UpdateCheckService } from '../modules/update-check/update-check.service.js';
@@ -182,6 +183,12 @@ export interface CoreServices {
    * lease to the replacement.
    */
   commitWorker: LeaseLoopHandle;
+  /**
+   * Run something with no queued commit being written: the commit worker is
+   * stopped for its duration and started again afterwards, the lease kept.
+   * What a move to another repository runs the startup phase under.
+   */
+  whileCommitsHeld<T>(work: () => Promise<T>): Promise<T>;
   workspaceService: WorkspaceService;
   /**
    * The KB startup phase (see `startup/on-server-start.ts`): run at the
@@ -218,7 +225,6 @@ export interface CoreServices {
   creatorAccess: CreatorAccessService;
   /** Read-before-write, for the surfaces that ask ahead of the lock (see `access-model/change-gate.ts`). */
   changeGate: ChangeReadGate;
-  sessionOntologyService: SessionOntologyService;
   routineWritePolicy: RoutineWritePolicyService;
   skillService: SkillService;
   pendingSkillsService: PendingSkillsService;
@@ -327,6 +333,8 @@ export interface CoreServices {
   toolAuthMiddleware: ReturnType<typeof createToolAuthMiddleware>;
   manualAuthMiddleware: ReturnType<typeof createManualAuthMiddleware>;
   toolHandlerFactory: ReturnType<typeof createToolHandlerFactory>;
+  /** Whether the deployment may be changed right now — `ports.writeAccess`, or always. */
+  writeAccess: IWriteAccess;
   // ── Server-time seams (enterprise overwrites after construction) ────────
   /** `start_session` backing — core default {@link UuidSessionSink}. */
   sessionSink: ISessionSink;
@@ -486,12 +494,83 @@ export async function createCoreServices(
   if (repositorySource.mode() === 'github-app') {
     await githubApp.prepare().catch(() => undefined);
   }
+  /**
+   * Where a working copy of a replaced repository is kept, for BOTH the places
+   * that find one: the KB startup phase sweeping the workspaces root, and the
+   * workspace service refusing to adopt one on a branch open. One variable,
+   * passed to both, because they move the same clones for the same reason and
+   * an admin looking for their work must have one folder to look in — the two
+   * drifted apart once already, and the copy the workspace service set aside
+   * landed in the image's own filesystem and was gone at the next recreate.
+   *
+   * Under the backups root: a persistent volume of its own, and one nothing
+   * sweeps (see the runner's `reconcileClonesWithConfiguredRepository`).
+   */
+  const replacedWorkingCopiesRoot = path.join(config.backupsRoot, 'replaced-working-copies');
+  /**
+   * What must leave with a working copy that is set aside, whoever sets it
+   * aside: the startup phase, or the workspace service on a branch open.
+   *
+   * Its queue: whatever still waits to be committed into that copy was
+   * written against the repository that was left, and the path it names is
+   * about to hold a fresh clone of another one. Held for a person, on every
+   * branch, never written and never deleted.
+   *
+   * And the locks on its branch: each is a claim on a file of the copy that
+   * is going. Left standing, a holder still connected keeps one alive with
+   * heartbeats, and the same path in the new repository refuses everybody
+   * else. Dropped without enqueueing anything, as when change requests are
+   * closed as "repository replaced".
+   *
+   * Throws when either cannot be done, and the caller then leaves the copy
+   * where it is. Reaches FORWARD to both services, like `gitService` below:
+   * it is only ever called long after this function has returned them.
+   */
+  const releaseWorkOnSetAsideCopy = async (workspaceId: string): Promise<void> => {
+    const held = await pendingCommitsService.markNeedsAttentionInWorkspace(
+      workspaceId,
+      'The knowledge-base repository was replaced while this commit was still queued, so it was never ' +
+        'written. The bytes are kept here: the working copy it was meant for belongs to the previous repository.',
+    );
+    if (held > 0) {
+      logger('kb-startup').warn(
+        `${held} queued commit(s) for the working copy "${workspaceId}" need attention: the repository was ` +
+          'replaced before they landed, so they were not written to the new one.',
+      );
+    }
+    await fileLockService.releaseAllOnBranch(branchForWorkspaceId(workspaceId));
+  };
   const workspaceService = new WorkspaceService(
     config.workspacesRoot,
     () => repositorySource.url(),
     kb,
     disk,
     gitRunner,
+    replacedWorkingCopiesRoot,
+    // A branch opened onto a clone of another repository sets it aside on
+    // the spot, with nobody having stopped the commit worker for it. So it
+    // is held here, for the one move, and the copy's work leaves first and
+    // is looked for again once the copy has gone: a release that queued its
+    // bytes in between was writing to the copy that left.
+    //
+    // Only the first look may refuse the branch: the copy has not moved yet.
+    // The second runs after the move, so its failure is tried once more and
+    // then logged, as the startup phase logs the same step. Refusing then
+    // would report a move that did happen as one that did not.
+    (workspaceId, move) =>
+      leased.whileHeld(async () => {
+        await releaseWorkOnSetAsideCopy(workspaceId);
+        await move();
+        await releaseWorkOnSetAsideCopy(workspaceId)
+          .catch(() => releaseWorkOnSetAsideCopy(workspaceId))
+          .catch((err: unknown) => {
+            logger('workspace').error(
+              `the working copy "${workspaceId}" was set aside, but what was queued or locked on it meanwhile ` +
+                'could not be looked for again:',
+              { err },
+            );
+          });
+      }),
   );
   // The KB startup phase: every seeding, scaffolding and migration concern,
   // run through one runner at the deployment's quiet moments (boot + setup
@@ -529,10 +608,9 @@ export async function createCoreServices(
     // the first thing that needs them.
     kbRepoUrl: () => repositorySource.url(),
     workspacesRoot: config.workspacesRoot,
-    // Under the backups root, a persistent volume of its own and one nothing
-    // sweeps: a working copy of a repository that was replaced is kept there,
-    // never deleted (see the runner's `reconcileClonesWithConfiguredRepository`).
-    setAsideRoot: path.join(config.backupsRoot, 'replaced-working-copies'),
+    // The same folder the workspace service sets aside into — see
+    // `replacedWorkingCopiesRoot` above for why the two must agree.
+    setAsideRoot: replacedWorkingCopiesRoot,
     kbDirName,
     templateDir: config.kbTemplateDir,
     defaultBranch: () => kb.defaultBranch,
@@ -543,6 +621,33 @@ export async function createCoreServices(
     steps: kbStartupSteps,
     buildSeedTree: buildSeedTree(disk, config.kbTemplateDir, extraDirs, [config.adminEmail], kb),
     gitRunner,
+    // The work on a working copy that is about to be set aside leaves first:
+    // its queued commits and the locks on its branch (see
+    // `releaseWorkOnSetAsideCopy`). A failure here stops the phase before
+    // the copy moves: a replacement cloned over an untouched queue is how
+    // those bytes would land in the wrong repository.
+    beforeCloneSetAside: releaseWorkOnSetAsideCopy,
+    // And once it is set aside it must leave the workspace service's cache:
+    // on the SAVE that moves the deployment the process is already running,
+    // and a cached path to a directory that is gone is how the next reader
+    // gets an ENOENT instead of a fresh clone.
+    //
+    // Then the copy's work is looked for once more. A release that queued
+    // its bytes between the first look and the move was writing to the copy
+    // that has now gone; nothing can queue against it after this.
+    onCloneDiscarded: async (workspaceId) => {
+      workspaceService.forgetClone(workspaceId);
+      await releaseWorkOnSetAsideCopy(workspaceId);
+    },
+    // And the replacement it cloned in its place: a fresh clone holds every
+    // ref, so the git layer's per-workspace fetch record is told so. Without
+    // it that record still holds the FAILED fetch of the repository that was
+    // replaced, and a strict branch listing within its TTL refuses the new
+    // clone's refs as unproven. Reaches FORWARD to `gitService`, which is
+    // built further down: safe because the runner only ever calls this from
+    // `runAll`, which the server builder invokes long after this function has
+    // returned every service.
+    onCloneCreated: (workspaceId) => gitService.noteWorkspaceFetched(workspaceId),
   });
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
@@ -574,14 +679,10 @@ export async function createCoreServices(
   // except that new folder at a root (see `access-model/change-gate.ts`).
   const changeGate = new ChangeReadGate(workspaceService, accessControl, kb, disk);
 
-  // Ontology-session boundary: records each agent run's touched ontologies and
-  // blocks writes once a run has crossed ontologies. Postgres-backed so the
-  // boundary survives a restart.
-  const sessionOntologyService = new SessionOntologyService(db, kb);
   // Per-run write restriction (by file extension). Shared by the workspace tool
   // surface (which enforces it) and the routine runner (which sets it for
-  // dashboard-only `watchlist_check` runs). In-memory: a restriction lives only for
-  // one run, unlike the Postgres-backed ontology touched-set above.
+  // dashboard-only `watchlist_check` runs). In-memory: a restriction lives only
+  // for one run.
   const routineWritePolicy = new RoutineWritePolicyService();
   // Skills: discovered from the default-branch workspace only (global catalog).
   const skillService = new SkillService(workspaceService, accessControl, kb, disk);
@@ -632,11 +733,11 @@ export async function createCoreServices(
   // against each other — a backup-reseed races a concurrent commit otherwise.
   const workspaceMutex = new WorkspaceMutex();
   // Workflow lifecycle hooks — the ONE registry this composition shares
-  // between GitService (advisory commit validation), the session-ontology
-  // gate (blocking preWrite), and the enterprise composition root, which
-  // registers module-owned handlers on `workflowService.hooks` right after
-  // this function returns. Core registers none: no commit-time validation
-  // (advisory anyway) and no ontology write block.
+  // between GitService (advisory commit validation), the agent-access gate
+  // (the blocking agentRead / preWrite hooks), and the composition root,
+  // which registers module-owned handlers on `workflowService.hooks` right
+  // after this function returns. Core registers none: no commit-time
+  // validation (advisory anyway) and nothing that refuses an agent call.
   const workflowHooks = new WorkflowHooks();
   const gitService = new GitService(
     workspaceService,
@@ -731,7 +832,7 @@ export async function createCoreServices(
     eventBus,
     fileChangeNotifier,
     // Exposed as `workflowService.hooks` — the SAME instance GitService and
-    // the session-ontology gate consult, so enterprise registrations against
+    // the agent-access gate consult, so a deployment's registrations against
     // it reach every hook point.
     workflowHooks,
   );
@@ -1134,8 +1235,9 @@ export async function createCoreServices(
     creatorAccess,
     loadActiveGroups,
   });
-  const toolHandlerFactory = createToolHandlerFactory(resolveToolContext);
-  const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService);
+  const writeAccess = ports.writeAccess ?? alwaysWritable;
+  const toolHandlerFactory = createToolHandlerFactory(resolveToolContext, writeAccess);
+  const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService);
   // Read-only manual endpoints accept the above PLUS a browser JWT, so a
   // logged-in user can browse the catalog with their session. Execution routes
   // keep `toolAuthMiddleware` (no JWT), so a session can read but not invoke.
@@ -1187,7 +1289,10 @@ export async function createCoreServices(
       name: recoveryBot.name,
     },
   });
-  const leased = withStartupTask(pendingCommitsWorker, reconcileQueue);
+  // Holdable: a move to another repository stops the worker for as long as
+  // working copies are being set aside and cloned again, without giving up
+  // the lease (see `holdable` in `core/lifecycle.ts`).
+  const leased = holdable(withStartupTask(pendingCommitsWorker, reconcileQueue));
 
   // SSO providers. The array REFERENCE is shared with the caller's port — an
   // overlay pushes its own plugins into it after construction (they mount when
@@ -1283,6 +1388,7 @@ export async function createCoreServices(
     db,
     gitRunner,
     commitWorker,
+    whileCommitsHeld: (work) => leased.whileHeld(work),
     startupRetry: null,
     tenantKey,
     secretsScope,
@@ -1302,7 +1408,6 @@ export async function createCoreServices(
     accessControl,
     creatorAccess,
     changeGate,
-    sessionOntologyService,
     routineWritePolicy,
     skillService,
     pendingSkillsService,
@@ -1353,6 +1458,7 @@ export async function createCoreServices(
     toolAuthMiddleware,
     manualAuthMiddleware,
     toolHandlerFactory,
+    writeAccess,
     // Server-time seams — defaults here; the enterprise overlay overwrites
     // (or, for the array, pushes into) these after construction.
     sessionSink: ports.sessionSink ?? new UuidSessionSink(),

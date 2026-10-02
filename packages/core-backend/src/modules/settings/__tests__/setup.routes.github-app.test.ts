@@ -108,11 +108,12 @@ function listen(
   );
   server = app.listen(0);
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const save = async (entries: Record<string, string>) => {
+  /** `confirm` is the admin's answer to the question a move is asked. */
+  const save = async (entries: Record<string, string>, confirm?: 'keep' | 'close') => {
     const res = await fetch(`${base}/api/setup/settings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings: entries }),
+      body: JSON.stringify({ settings: entries, ...(confirm ? { confirmRepositoryChange: confirm } : {}) }),
     });
     return { status: res.status, body: (await res.json()) as Record<string, unknown> & { problems?: Record<string, string> } };
   };
@@ -271,12 +272,28 @@ describe('a deployment on GitHub that is serving', () => {
     expect(probed).toHaveLength(asked);
   });
 
-  it('is asked again when it moves to another repository', async () => {
-    const { save, probed } = await serving();
-    const asked = probed.length;
-    const { status } = await save({ githubRepository: 'acme/another' });
-    expect(status).toBe(200);
-    expect(probed).toHaveLength(asked + 1);
+  /**
+   * Another repository on GitHub is a move like any other: GitHub is asked
+   * about the new one, the admin is asked about the move, and confirmed it
+   * happens on the save.
+   */
+  it('proves the new repository, asks about the move, and moves on the save once confirmed', async () => {
+    const { save, probed, source, phaseRuns } = await serving();
+    const before = probed.length;
+    const asked = await save({ githubRepository: 'acme/another' });
+    expect(asked.status).toBe(409);
+    expect(asked.body).toMatchObject({ repositoryChange: { from: 'github-app', to: 'github-app' } });
+    // The connection is proven before the question is put: nobody agrees to
+    // a move only to be told the repository cannot be reached.
+    expect(probed).toHaveLength(before + 1);
     expect(probed.at(-1)!.url).toBe('https://github.com/acme/another.git');
+    expect(source.url()).toBe('https://github.com/acme/kb.git');
+
+    const runs = phaseRuns();
+    const moved = await save({ githubRepository: 'acme/another' }, 'keep');
+    expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+    expect(moved.body).toMatchObject({ ok: true, restartRequired: false, repositoryChange: { choice: 'keep' } });
+    expect(source.url()).toBe('https://github.com/acme/another.git');
+    expect(phaseRuns()).toBe(runs + 1);
   });
 });
