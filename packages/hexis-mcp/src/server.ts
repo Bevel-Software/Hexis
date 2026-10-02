@@ -20,7 +20,7 @@ import '@utcp/cli';
 import { UtcpClientConfigSerializer, type CallTemplate, type Tool as UtcpTool } from '@utcp/sdk';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import {
-  CODE_MODE_META_TOOLS,
+  codeModeMetaTools,
   META_TOOL_NAMES,
   RETIRED_TOOL_NAMES,
   dispatchMetaTool,
@@ -241,6 +241,7 @@ export function listedTools(tools: ProxiedTool[]): McpTool[] {
   const seen = new Set<string>(META_TOOL_NAMES);
   const listed: McpTool[] = [];
   const dropped: string[] = [];
+  const examplePool: ProxiedTool[] = [];
   for (const tool of tools) {
     const entry = toListedTool(tool); // logs its own reason on a name/schema drop
     if (!entry) {
@@ -253,14 +254,23 @@ export function listedTools(tools: ProxiedTool[]): McpTool[] {
     }
     seen.add(entry.name);
     listed.push(entry);
+    // Kept for the worked example in the meta-tool descriptions, which has to
+    // be derived from the tools this listing really serves: an example naming
+    // one just dropped as non-listable or duplicate is a call nobody can make.
+    examplePool.push(tool);
   }
+  // The examples in the meta-tools name the namespace THIS server registers
+  // the deployment under (`hexis`), not the one the hosted endpoint uses
+  // (`KNOWLEDGE_BASE`). One fixed example was wrong here, and a chain copied
+  // out of it died of `ReferenceError: KNOWLEDGE_BASE is not defined`.
+  const metaTools = codeModeMetaTools(REMOTE_MANUAL_NAME, examplePool);
   if (dropped.length) {
     console.error(
-      `[hexis-mcp] serving ${CODE_MODE_META_TOOLS.length + listed.length} tool(s); ` +
+      `[hexis-mcp] serving ${metaTools.length + listed.length} tool(s); ` +
         `dropped ${dropped.length} non-listable: ${dropped.join(', ')}`,
     );
   }
-  return [...CODE_MODE_META_TOOLS, ...listed];
+  return [...metaTools, ...listed];
 }
 
 /**

@@ -534,6 +534,23 @@ describe('McpService — per-user credential pre-check', () => {
       expect(await toolNames(client)).toEqual(['ask', 'boom', 'call_tool_chain', 'list_tools', 'refy', 'tools_info']);
     });
 
+    /**
+     * The worked example in `call_tool_chain`'s description has to be derived
+     * from the tools THIS caller is actually served. Derived from the unfiltered
+     * catalog it could name a credential-gated tool the filter just removed —
+     * an example a connection-key caller copies and cannot call at all.
+     */
+    it('never writes the worked example against a tool it just hid', async () => {
+      const hidden = await setup({ secretsVault: vault(false), toolManuals: manualsWithUserVar });
+      const chain = (await hidden.listTools()).tools.find((t) => t.name === 'call_tool_chain')!;
+      expect(chain.description).not.toMatch(/return KNOWLEDGE_BASE\.\w+\(/);
+      // The same catalog, with the credential set, does print one — so the
+      // assertion above is the filter at work, not an example that never exists.
+      const served = await setup({ secretsVault: vault(true), toolManuals: manualsWithUserVar });
+      const shown = (await served.listTools()).tools.find((t) => t.name === 'call_tool_chain')!;
+      expect(shown.description).toMatch(/return KNOWLEDGE_BASE\.\w+\(/);
+    });
+
     it('keeps the full listing for an OAuth/JWT session (tokenId null) — the caller configures interactively', async () => {
       const client = await setup({
         secretsVault: vault(false),
