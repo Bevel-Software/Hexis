@@ -35,6 +35,12 @@ export {
 } from './proxied-tool.js';
 
 export {
+  type SchemaDefect,
+  inputSchemaDefect,
+  schemaDefectMarker,
+} from './schema-validity.js';
+
+export {
   describeToolFailure,
   toCallToolResult,
   renderProgress,

@@ -77,6 +77,14 @@ export function toListedTool(tool: ProxiedTool): McpTool | null {
   };
 }
 
+/**
+ * How deep {@link sanitizeInputSchema} descends before it stops walking and
+ * passes the remainder through untouched. Generous on purpose: a real schema
+ * costs two levels per nesting (the `properties` keyword, then the field name),
+ * and the whole reason for this constant is the call stack, not the schema.
+ */
+const MAX_SANITIZE_DEPTH = 200;
+
 /** JSON-Schema string `format` values the Anthropic tool validator accepts. */
 const SUPPORTED_SCHEMA_FORMATS = new Set([
   'date-time',
@@ -99,9 +107,24 @@ const SUPPORTED_SCHEMA_FORMATS = new Set([
  *  - drop non-standard `format` values (OpenAPI's `int32`/`byte`/… — only the
  *    JSON-Schema-standard formats above are accepted; `format` is advisory, so
  *    dropping it doesn't change tool behavior).
- * Depth-bounded so a recursive schema degrades to a permissive `{}` node instead
- * of hanging or emitting the unsupported recursion; non-local/external refs
- * degrade the same way. Exported for direct testing.
+ * Everything else is passed through UNCHANGED, and both recursion guards are
+ * built so that hitting one cannot change a schema either:
+ *
+ *  - a `$ref` that resolves back onto a schema we are already inlining is
+ *    recursive, and inlining has no finite answer for it. It degrades to a
+ *    permissive `{}` — which is legal, because a `$ref` only ever stands where
+ *    a SCHEMA is expected and `{}` there means "any value". Non-local and
+ *    unresolvable refs degrade the same way.
+ *  - the depth cap hands the rest of the subtree back exactly as it came.
+ *
+ * That second rule is the fix for three tools AI clients silently dropped. The
+ * cap used to return `{}` at WHATEVER position it stopped at, and most
+ * positions in a schema are not schema positions: a tool nested deeper than
+ * the cap reached clients with `anyOf: {}`, `required: [{}]` or `type: {}` in
+ * it. None of those is valid JSON Schema, so the client refused the tool — and
+ * said so about a server that had sent a perfectly good schema.
+ *
+ * Exported for direct testing.
  */
 export function sanitizeInputSchema(schema: unknown): unknown {
   const root = schema;
@@ -115,26 +138,43 @@ export function sanitizeInputSchema(schema: unknown): unknown {
     }
     return node;
   };
+  // The pointers currently being inlined, on THIS path. A `$ref` that points
+  // at a schema we are already inside is recursive: JSON Schema says that with
+  // the reference, and an inlined copy has no finite form.
+  const inlining = new Set<string>();
   // `isPropertyMap` marks the value of `properties`/`patternProperties`: its
   // keys are the tool's OWN field names, not schema keywords, so a field
   // literally named `format`, `$ref` or `definitions` must survive untouched
   // (its VALUE is still a schema and is walked as one).
   const walk = (node: unknown, depth: number, isPropertyMap = false): unknown => {
-    if (depth > 20) return {}; // recursion/cycle guard — permissive fallback
+    // Stack guard, not a schema rule: `$ref` recursion is caught below, so
+    // nothing a server legitimately sends reaches this. The rest of the
+    // subtree is handed back as it came, so stopping never rewrites a schema.
+    if (depth > MAX_SANITIZE_DEPTH) return node;
     if (Array.isArray(node)) return node.map((item) => walk(item, depth + 1));
     if (!node || typeof node !== 'object') return node;
     const obj = node as Record<string, unknown>;
     if (!isPropertyMap && typeof obj.$ref === 'string') {
-      const target = resolvePointer(obj.$ref);
+      const pointer = obj.$ref;
       // JSON Schema allows siblings next to $ref; keep them, target wins ties.
       const siblings: Record<string, unknown> = { ...obj };
       delete siblings.$ref;
-      const resolved = walk(target ?? {}, depth + 1);
-      return resolved && typeof resolved === 'object' && !Array.isArray(resolved)
-        ? { ...siblings, ...(resolved as Record<string, unknown>) }
-        : Object.keys(siblings).length
-          ? siblings
-          : resolved ?? {};
+      // Recursive: `{}` ("any value") is the only finite answer, and a `$ref`
+      // stands at a schema position, so `{}` there is valid JSON Schema. The
+      // reference itself has to go — the `$defs` block it points into is
+      // dropped below, and a dangling `$ref` is what clients reject.
+      if (inlining.has(pointer)) return Object.keys(siblings).length ? siblings : {};
+      inlining.add(pointer);
+      try {
+        const resolved = walk(resolvePointer(pointer) ?? {}, depth + 1);
+        return resolved && typeof resolved === 'object' && !Array.isArray(resolved)
+          ? { ...siblings, ...(resolved as Record<string, unknown>) }
+          : Object.keys(siblings).length
+            ? siblings
+            : resolved ?? {};
+      } finally {
+        inlining.delete(pointer);
+      }
     }
     const out: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {

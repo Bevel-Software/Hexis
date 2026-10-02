@@ -327,6 +327,54 @@ describe('ToolPage: capabilities', () => {
   });
 });
 
+/**
+ * The marker for a tool of this server that no agent is offered, because its
+ * input schema is not valid JSON Schema as the server sent it.
+ *
+ * An AI client handed such a tool drops it in silence, so without this section
+ * the only symptom is a capability that quietly does not work. The backend
+ * sends the findings only to someone who may write the tool, so the page has
+ * no permission rule of its own: it renders what it is given.
+ */
+describe('ToolPage: tools hidden for an invalid schema', () => {
+  const HIDDEN = {
+    name: 'notion_srv_query_data_sources',
+    path: '/properties/value/anyOf/0/required/0',
+    reason: 'must be a string',
+    marker:
+      'Hidden from agents: its schema is invalid at /properties/value/anyOf/0/required/0 (must be a string).',
+  };
+
+  it('names the tool and quotes the place in the schema and the reason', async () => {
+    toolsMock.getToolDetail.mockResolvedValue({ ...DETAIL, type: 'mcp', hiddenTools: [HIDDEN] });
+    renderPage();
+
+    expect(await screen.findByRole('heading', { name: 'Not offered to assistants' })).toBeInTheDocument();
+    const note = screen.getByRole('note');
+    expect(note).toHaveTextContent('notion_srv_query_data_sources');
+    expect(note).toHaveTextContent(
+      'Hidden from agents: its schema is invalid at /properties/value/anyOf/0/required/0 (must be a string).',
+    );
+    // What a reader has to know: it is the SERVER's schema, the other tools
+    // are fine, and nobody here is rewriting anything.
+    expect(screen.getByText(/absent from every assistant/i)).toBeInTheDocument();
+    expect(screen.getByText(/rest of this server's tools are unaffected/i)).toBeInTheDocument();
+  });
+
+  it('shows nothing when the server is healthy, or when the field is absent', async () => {
+    toolsMock.getToolDetail.mockResolvedValue({ ...DETAIL, type: 'mcp', hiddenTools: [] });
+    renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    expect(screen.queryByRole('heading', { name: 'Not offered to assistants' })).toBeNull();
+
+    // A backend that does not serve the field yet: the page must not break.
+    toolsMock.getToolDetail.mockResolvedValue({ ...DETAIL, type: 'mcp' });
+    renderPage();
+    await screen.findAllByRole('heading', { name: 'heyreach', level: 1 });
+    expect(screen.queryByRole('heading', { name: 'Not offered to assistants' })).toBeNull();
+  });
+});
+
 describe('ToolPage: powers these skills', () => {
   it('links each matching skill at the reserved skill route', async () => {
     libraryMock.listSkills.mockResolvedValue([
