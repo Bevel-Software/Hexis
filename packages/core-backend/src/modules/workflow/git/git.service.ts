@@ -1446,7 +1446,9 @@ export class GitService implements IGitService {
    * the new base and re-merge on top of it. Conflicts are deterministic — they
    * return immediately (no retry) so the caller can route into resolution.
    *
-   * Returns the merge commit SHA, or the conflicting paths.
+   * Returns the state the target is left at (`sha`) together with the merge
+   * commit this change request owns (`mergeCommit`, null when there is none), or
+   * the conflicting paths.
    */
   async mergeChangeRequest(
     baseWorkspaceId: string,
@@ -1481,11 +1483,31 @@ export class GitService implements IGitService {
        * instead of falling back to the stale one.
        */
       authorize?: (target: { sha: string; changedPaths: string[] }) => Promise<void>;
+      /**
+       * The change request this merge applies, when it is one (the agent
+       * `merge_branch` path merges no request and leaves it unset).
+       *
+       * It is what lets the "nothing to merge" case tell apart a request that
+       * never had anything to land from one whose merge commit an EARLIER
+       * attempt already pushed — see {@link ownMergeCommitOn}. Without it the
+       * second is indistinguishable from the first, and finalizing it would
+       * forget the only commit its files can be read from.
+       */
+      appliedChangeNumber?: number;
     } = {},
   ): Promise<AppliedMergeResult> {
     assertValidBranchName(sourceBranch);
     assertValidBranchName(targetBranch);
     assertValidAuthor(user);
+    // The same single-line rule `commit` applies, and for a sharper reason here:
+    // `git commit -m` takes the first PARAGRAPH of this string as the subject, so
+    // a blank line inside it would silently push everything after the break into
+    // the body — including the `(#N)` an applied request is read back by.
+    // `mergeCommitSubject` already flattens the title it builds from; this is the
+    // guard that keeps any other caller from reintroducing the break.
+    if (/\n\s*\n/.test(commit.subject)) {
+      throw new WorkflowValidationError('merge commit subject must be a single paragraph');
+    }
     const MAX_ATTEMPTS = 3;
     return this.mutex.run(baseWorkspaceId, async () => {
       const cwd = await this.repoDir(baseWorkspaceId);
@@ -1565,18 +1587,29 @@ export class GitService implements IGitService {
           );
         }
 
-        // Nothing staged ⇒ base already contains source (empty CR). The base tip
-        // is the "merged" state; report it without an empty commit — and say
-        // that no commit was made, because the tip is NOT this request's own
-        // merge commit and must not be recorded as if it were. It is whatever
-        // landed on the target last, usually another request's merge commit, and
-        // a reader that took it for this request's would answer with that other
-        // request's files under this number (cubic P1 on #347).
+        // Nothing staged ⇒ the target already contains the source. The target tip
+        // is the "merged" state; report it without an empty commit — but NOT as
+        // this request's own merge commit. It is whatever landed on the target
+        // last, usually another request's merge commit, and a reader that took it
+        // for this request's would answer with that other request's files under
+        // this number (cubic P1 on #347).
+        //
+        // There are two ways to arrive here, and they differ in exactly one
+        // thing: whether this request has a merge commit on the target already.
+        // An EMPTY request never had anything to land and has none. A request
+        // whose previous attempt pushed its merge commit and then failed to
+        // finalize the row (a transient database fault between the push and the
+        // update) has one, and it is the only place its file list survives — so
+        // it is looked for rather than assumed absent (cubic P2 on #347).
         const { stdout: staged } = await this.git(cwd, ['diff', '--cached', '--name-only']);
         if (staged.trim() === '') {
           const { stdout: sha } = await this.git(cwd, ['rev-parse', 'HEAD']);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);
-          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: false };
+          const own =
+            opts.appliedChangeNumber === undefined
+              ? null
+              : await this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, opts.appliedChangeNumber);
+          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: own };
         }
 
         await this.git(cwd, [
@@ -1591,7 +1624,7 @@ export class GitService implements IGitService {
           await this.git(cwd, ['push', 'origin', `HEAD:refs/heads/${targetBranch}`]);
           this.accessControl?.invalidate(baseWorkspaceId);
           // A commit of this request's own, with the subject the reader verifies.
-          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: true };
+          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: sha.trim() };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           // Base moved under us — reset to the new tip and re-merge next loop.
@@ -1605,6 +1638,42 @@ export class GitService implements IGitService {
         `merge push to "${targetBranch}" kept being rejected after ${MAX_ATTEMPTS} attempts (base moving concurrently)`,
       );
     });
+  }
+
+  /**
+   * The newest merge commit reachable from `targetRef` that is change request
+   * `number`'s OWN, or null if the target carries none.
+   *
+   * Asked when a merge finds nothing to merge, to tell "this request never had
+   * anything to land" apart from "a previous attempt already landed it". The
+   * second happens when the push succeeded and the row update did not — the
+   * merge commit is on the target, and if this attempt then records no sha the
+   * request becomes permanently fileless, readable by its author alone, with the
+   * commit that holds its files still sitting there unreferenced (cubic P2 on
+   * #347).
+   *
+   * The two conditions are the reader's own (`appliedChangeShas`): a merge
+   * commit, whose subject names this number. Deciding it here with the same
+   * predicate means the writer records only what the reader will accept. The
+   * walk is bounded by `--grep` (the number, as a fixed string) and capped,
+   * since the subject check still has to confirm a body-only match; it runs on
+   * the empty-merge path only, never on an ordinary merge.
+   */
+  private async ownMergeCommitOn(
+    cwd: string,
+    targetRef: string,
+    number: number,
+  ): Promise<string | null> {
+    const { stdout } = await this.git(cwd, [
+      'log', '--merges', '--fixed-strings', `--grep=(#${number})`,
+      '--format=%H%x00%s', '-n', '20', targetRef,
+    ]);
+    for (const line of stdout.split('\n')) {
+      const [sha, subject] = line.split('\0');
+      if (!sha || subject === undefined) continue;
+      if (mergeCommitSubjectNames(subject, number)) return sha.trim();
+    }
+    return null;
   }
 
   /** Conflicted paths from a half-done merge, parsed from porcelain status. */

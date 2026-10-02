@@ -753,6 +753,10 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
         cr.targetBranch,
         { subject, body },
         user,
+        // Named so a merge that finds nothing to merge can tell an empty request
+        // apart from one a previous attempt already merged and failed to record
+        // (see `ownMergeCommitOn`).
+        { appliedChangeNumber: prNumber },
       );
     } catch (err) {
       const redacted = redactTokens(err instanceof Error ? err.message : String(err), this.git.credentials?.token());
@@ -785,13 +789,17 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .update(changeRequests)
       .set({
         state: 'merged',
-        // Only a commit this merge actually WROTE. When the target already
-        // contained the source there was nothing to merge, so `sha` is the
-        // target tip — usually another request's merge commit — and recording it
-        // here would let this request be read back with that other request's
-        // files under its number (cubic P1 on #347). An empty request has no
-        // file list to recover anyway.
-        mergedSha: mergeResult.mergeCommit ? mergeResult.sha : null,
+        // Only the commit this request OWNS, never `sha`. With nothing to merge
+        // `sha` is the target tip — usually another request's merge commit — and
+        // recording it here would let this request be read back with that other
+        // request's files under its number (cubic P1 on #347).
+        //
+        // `mergeCommit` is also what makes a retry after a failed finalization
+        // idempotent: the merge commit a previous attempt pushed is found and
+        // recorded instead of being dropped as "nothing was merged" (cubic P2 on
+        // #347). It is null only when the request has no merge commit at all,
+        // and such a request has no file list to lose.
+        mergedSha: mergeResult.mergeCommit,
         closedAt: completedAt,
         updatedAt: completedAt,
       })

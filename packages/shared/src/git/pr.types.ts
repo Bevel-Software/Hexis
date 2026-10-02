@@ -142,14 +142,22 @@ export interface AppliedChangeRef {
 /**
  * What applying a change request did.
  *
- * `mergeCommit` says whether a commit was actually written for it. It is false
- * when the target already contained the source: there was nothing to merge, so
- * `sha` is the target tip — the state at which the request counts as merged, and
- * NOT a commit of this request's own. The caller must not record it as the
- * request's merge commit; nothing can read a file list out of it.
+ * Two different commits, which is why they are two fields:
+ *
+ *   `sha` is the state the target is left at — the tip at which the request
+ *   counts as merged. When there was nothing to merge it is whatever landed on
+ *   the target last, usually ANOTHER request's merge commit, so it must never be
+ *   recorded as this request's own: a reader would answer with that other
+ *   request's files under this number.
+ *
+ *   `mergeCommit` is the commit this request OWNS, and the only sha a row may
+ *   record as its `merged_sha` — the commit this merge wrote, or the one an
+ *   earlier attempt wrote and left on the target when it failed to finalize the
+ *   row. Null when the request has none, which is the genuinely empty case: its
+ *   file list is empty anyway, so nothing readable is lost.
  */
 export type AppliedMergeResult =
-  | { kind: 'merged'; sha: string; mergeCommit: boolean }
+  | { kind: 'merged'; sha: string; mergeCommit: string | null }
   | { kind: 'conflicts'; paths: string[] };
 
 export type PrFileStatus =

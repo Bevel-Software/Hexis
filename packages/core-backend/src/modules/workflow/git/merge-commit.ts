@@ -25,9 +25,25 @@
  * applied request author-only.
  */
 
-/** The merge commit's subject for request `number` titled `title`. */
+/**
+ * The merge commit's subject for request `number` titled `title`.
+ *
+ * The title is flattened to ONE line, because the number only proves anything
+ * where git reports it. `%s` is the first PARAGRAPH of the message joined with
+ * spaces, so a single newline in the title is harmless — but a BLANK line (two
+ * newlines, or a whitespace-only line) ends that paragraph, and nothing rejects
+ * one: a title is stored `.trim()`-ed and the tool schema bounds only its
+ * length. The subject would then end before `(#N)`,
+ * {@link mergeCommitSubjectNames} would refuse the request's OWN merge commit,
+ * and every applied request with such a title would read as author-only with no
+ * files (cubic P2 on PR #347).
+ *
+ * Flattened here rather than rejected at the write side so the titles already
+ * stored are covered too — and because a merge is the wrong moment to discover
+ * that a title typed days ago is unacceptable.
+ */
 export function mergeCommitSubject(title: string, number: number): string {
-  return `${title} (#${number})`;
+  return `${title.replace(/\s+/g, ' ').trim()} (#${number})`;
 }
 
 /**

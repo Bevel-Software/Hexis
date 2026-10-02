@@ -4,7 +4,13 @@ import type { PullRequestFile } from '@bevel-software/platform-shared';
 // mergePr merges locally through GitService now (no `gh`), so we stub the git
 // seam and spy on it. `mergeChangeRequestMock` stands in for the real
 // merge+push; asserting whether it was called replaces the old `gh`-call checks.
-const mergeChangeRequestMock = vi.fn(async () => ({ kind: 'merged' as const, sha: 'merged-sha' }));
+const mergeChangeRequestMock = vi.fn(async () => ({
+  kind: 'merged' as const,
+  sha: 'merged-sha',
+  // The commit the request owns — `sha` and `mergeCommit` coincide whenever the
+  // merge wrote one, which is the ordinary case these tests exercise.
+  mergeCommit: 'merged-sha',
+}));
 
 import { ReviewWorkflowService } from '../review-workflow.service.js';
 import { changeRequests } from '../../../database/schema.js';

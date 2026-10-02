@@ -9,6 +9,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
 import { GitService } from '../git.service.js';
+import { mergeCommitSubject } from '../merge-commit.js';
 
 const execFileAsync = promisify(execFile);
 const BASE = 'current-company-state';
@@ -103,9 +104,9 @@ describe('GitService.mergeChangeRequest', () => {
     expect(result.kind).toBe('merged');
     if (result.kind !== 'merged') return;
     expect(result.sha).toMatch(/^[0-9a-f]{40}$/);
-    // A commit of this request's own was written, which is what licenses the row
-    // to record it as the request's merge commit.
-    expect(result.mergeCommit).toBe(true);
+    // A commit of this request's own was written: it IS the state the target is
+    // left at here, and it is what the row may record as the merge commit.
+    expect(result.mergeCommit).toBe(result.sha);
 
     // The merge landed on origin/BASE: a fresh clone sees the feature file and a
     // merge commit authored by the human triggerer.
@@ -122,11 +123,24 @@ describe('GitService.mergeChangeRequest', () => {
   // nothing to merge, so no commit is written and `sha` is the TARGET TIP —
   // whatever landed on the target last, which in a deployment that lands
   // everything through change requests is usually ANOTHER request's merge commit.
-  // Saying `mergeCommit: false` is what stops the row recording it as this
+  // Answering `mergeCommit: null` is what stops the row recording it as this
   // request's own: a reader that took it would answer with that other request's
-  // files under this request's number.
-  it('reports that NO commit of its own was written when there was nothing to merge', async () => {
+  // files under this request's number. The fixture puts request #1's merge commit
+  // on the tip for exactly that reason.
+  it('owns NO merge commit when there was nothing to merge, not even the one on the tip', async () => {
     const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    // Another request lands first, so the target tip is a real merge commit whose
+    // subject names #1.
+    await pushFeatureBranch(root, upstream, 'bob/first', async (dir) => {
+      await fs.writeFile(path.join(dir, 'first.md'), 'first\n');
+    });
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
+    const first = await git.mergeChangeRequest(
+      baseWsId, 'bob/first', BASE, { subject: mergeCommitSubject('First', 1), body: 'x' }, USER,
+      { appliedChangeNumber: 1 },
+    );
+    expect(first.kind).toBe('merged');
+
     // A branch the target already contains: branched and pushed with no commit of
     // its own, so the merge has nothing to do. (`pushFeatureBranch` always
     // commits, which is the one thing this case must not do.)
@@ -135,20 +149,150 @@ describe('GitService.mergeChangeRequest', () => {
     await runGit(emptyDir, ['checkout', '-b', 'alice/empty']);
     await runGit(emptyDir, ['push', '-u', 'origin', 'alice/empty']);
 
-    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
     const result = await git.mergeChangeRequest(
-      baseWsId, 'alice/empty', BASE, { subject: 'Nothing to do (#2)', body: 'Merged via Bevel' }, USER,
+      baseWsId, 'alice/empty', BASE,
+      { subject: mergeCommitSubject('Nothing to do', 2), body: 'Merged via Bevel' }, USER,
+      { appliedChangeNumber: 2 },
     );
 
     expect(result.kind).toBe('merged');
     if (result.kind !== 'merged') return;
-    expect(result.mergeCommit).toBe(false);
-    // The sha it reports is the target tip, and that tip is NOT a commit of this
-    // request's: nothing was pushed, and the tip still has one parent.
+    // Asked for #2's own merge commit and there is none — the one on the tip is
+    // #1's, and it is not offered in its place.
+    expect(result.mergeCommit).toBeNull();
+    // The sha it reports is the target tip, which is #1's merge commit.
     const verify = path.join(root, 'verify-empty');
     await runGit(root, ['clone', '-b', BASE, upstream, verify]);
     expect((await gitOut(verify, ['rev-parse', 'HEAD'])).trim()).toBe(result.sha);
-    expect(await gitOut(verify, ['log', '-1', '--format=%s'])).not.toContain('(#2)');
+    expect(await gitOut(verify, ['log', '-1', '--format=%s'])).toContain('(#1)');
+  });
+
+  /**
+   * cubic P2 on #347. The push and the row update are two steps, and a transient
+   * database fault between them leaves the merge commit ON the target with the
+   * row still open. The retry then finds nothing to merge — and if that answered
+   * "no merge commit", the row would record none, and the request would be
+   * permanently fileless (author-only) with the commit holding its files sitting
+   * on the target unreferenced.
+   */
+  it('recovers the merge commit a previous attempt pushed but never recorded', async () => {
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+      await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+    });
+
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
+    const merge = () =>
+      git.mergeChangeRequest(
+        baseWsId, 'alice/add', BASE,
+        { subject: mergeCommitSubject('Add feature', 7), body: 'Merged via Bevel' }, USER,
+        { appliedChangeNumber: 7 },
+      );
+
+    // Attempt one succeeds in git; imagine the row update failing right here.
+    const first = await merge();
+    expect(first.kind).toBe('merged');
+    if (first.kind !== 'merged') return;
+    const pushed = first.mergeCommit;
+    expect(pushed).toBe(first.sha);
+
+    // Attempt two: the target already contains the source, so nothing is staged
+    // and no new commit is written — but #7 does own a merge commit, and it is
+    // the one the first attempt pushed.
+    const second = await merge();
+    expect(second.kind).toBe('merged');
+    if (second.kind !== 'merged') return;
+    expect(second.mergeCommit).toBe(pushed);
+
+    // Nothing new was pushed: the target is still at that same commit.
+    const verify = path.join(root, 'verify-retry');
+    await runGit(root, ['clone', '-b', BASE, upstream, verify]);
+    expect((await gitOut(verify, ['rev-parse', 'HEAD'])).trim()).toBe(pushed);
+  });
+
+  // The merge commit a later attempt recovers is matched on the number alone, so
+  // a request that landed a DIFFERENT change under its own number is not offered
+  // another request's commit — and `git log --grep` finding the number in a
+  // BODY is not enough either, since the subject check still has to pass.
+  it('does not mistake a mention of the number in a merge body for the request\'s own commit', async () => {
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, 'bob/first', async (dir) => {
+      await fs.writeFile(path.join(dir, 'first.md'), 'first\n');
+    });
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
+    // #1's merge commit, whose BODY mentions #9 — the shape `--grep` matches and
+    // the subject check must reject.
+    await git.mergeChangeRequest(
+      baseWsId, 'bob/first', BASE,
+      { subject: mergeCommitSubject('First', 1), body: 'Supersedes the work in (#9)' }, USER,
+      { appliedChangeNumber: 1 },
+    );
+
+    const emptyDir = path.join(root, 'feat-empty-9');
+    await runGit(root, ['clone', '-b', BASE, upstream, emptyDir]);
+    await runGit(emptyDir, ['checkout', '-b', 'alice/empty']);
+    await runGit(emptyDir, ['push', '-u', 'origin', 'alice/empty']);
+
+    const result = await git.mergeChangeRequest(
+      baseWsId, 'alice/empty', BASE, { subject: mergeCommitSubject('Nothing', 9), body: 'x' }, USER,
+      { appliedChangeNumber: 9 },
+    );
+    expect(result.kind).toBe('merged');
+    if (result.kind !== 'merged') return;
+    expect(result.mergeCommit).toBeNull();
+  });
+
+  /**
+   * `git commit -m` takes the FIRST PARAGRAPH of the message as the subject, so a
+   * blank line inside it pushes `(#N)` into the body — where `%s` never reports
+   * it and the applied request's reader cannot find it (cubic P2 on #347).
+   * `mergeCommitSubject` flattens the title it builds from; this is the guard
+   * against any other caller reintroducing the break.
+   */
+  it('refuses a subject that is more than one paragraph, before touching the clone', async () => {
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+      await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+    });
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
+    await expect(
+      git.mergeChangeRequest(
+        baseWsId, 'alice/add', BASE, { subject: 'Add feature\n\nand a note (#3)', body: 'x' }, USER,
+      ),
+    ).rejects.toThrow(/single paragraph/);
+
+    // Nothing was merged or pushed.
+    const verify = path.join(root, 'verify-subject');
+    await runGit(root, ['clone', '-b', BASE, upstream, verify]);
+    await expect(fs.readFile(path.join(verify, 'feature.md'), 'utf8')).rejects.toThrow();
+  });
+
+  // A title with a blank line in it reaches here (titles are stored `.trim()`-ed
+  // and the tool schema bounds only their length), and the whole read-back of an
+  // applied request hangs on the number being ON the subject git reports.
+  it('keeps the number on the subject when the title itself spans paragraphs', async () => {
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+      await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+    });
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
+    const result = await git.mergeChangeRequest(
+      baseWsId, 'alice/add', BASE,
+      { subject: mergeCommitSubject('Add feature\n\nand a note', 4), body: 'x' }, USER,
+      { appliedChangeNumber: 4 },
+    );
+    expect(result.kind).toBe('merged');
+    if (result.kind !== 'merged') return;
+
+    const verify = path.join(root, 'verify-flat');
+    await runGit(root, ['clone', '-b', BASE, upstream, verify]);
+    expect((await gitOut(verify, ['log', '-1', '--format=%s'])).trim())
+      .toBe('Add feature and a note (#4)');
+    // Which is what lets the request be recognised as the owner of this commit:
+    // the same read that would otherwise refuse it as "not the merge commit of
+    // change request #4" and leave the applied request fileless.
+    expect(await git.appliedChangeShas(baseWsId, { number: 4, mergeSha: result.sha }))
+      .toMatchObject({ baseSha: expect.any(String), headSha: expect.any(String) });
   });
 
   it('returns the conflicting paths when base and source both changed a file', async () => {
