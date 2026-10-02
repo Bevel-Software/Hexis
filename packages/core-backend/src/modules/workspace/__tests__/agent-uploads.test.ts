@@ -26,6 +26,7 @@ import {
   UPLOAD_TOKEN_REFUSAL,
 } from '../agent-upload.store.js';
 import { createAgentUploadRoutes, isAgentUploadRawBodyPath } from '../agent-upload.routes.js';
+import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/write-access.js';
 import { MAX_UPLOAD_BYTES } from '../upload-limits.js';
 
 /**
@@ -95,6 +96,13 @@ let batchTurnDepth: number[] = [];
  * a concurrent `delete_folder` would be holding over the same subtree.
  */
 let folderTurnGate: Promise<void> | undefined;
+/**
+ * Resolved the moment a tool ASKS for a folder turn — before any wait on
+ * `folderTurnGate`. A test awaits this instead of sleeping: when it resolves,
+ * the apply is parked on the gate with certainty, not with probability.
+ */
+let folderTurnAsked: Promise<void>;
+let announceFolderTurnAsked: () => void;
 
 interface StartOptions {
   access?: IAccessControl;
@@ -112,6 +120,11 @@ interface StartOptions {
    * store — without the first one's state being thrown away.
    */
   store?: AgentUploadStore;
+  /**
+   * The deployment’s write verdict, as a host fills it. Default (absent) is
+   * core’s own: always writable.
+   */
+  writeAccess?: IWriteAccess;
 }
 
 async function start(options: StartOptions = {}): Promise<string> {
@@ -125,6 +138,7 @@ async function start(options: StartOptions = {}): Promise<string> {
     batchTurnDepth = [];
     turnsHeld = 0;
     folderTurnGate = undefined;
+    folderTurnAsked = new Promise<void>((resolve) => (announceFolderTurnAsked = resolve));
   }
   fs = new LocalFilesystem({ basePath: tempDir, contained: true });
   // The harness speaks the paths the TOOLS speak: a fixture written here as
@@ -193,6 +207,7 @@ async function start(options: StartOptions = {}): Promise<string> {
       // it lands nothing until the turn is its own.
       withFolderTurn: async <T>(_id: string, dir: string, op: () => Promise<T>): Promise<T> => {
         folderTurns.push(dir);
+        announceFolderTurnAsked();
         if (folderTurnGate !== undefined) await folderTurnGate;
         turnsHeld++;
         try {
@@ -206,7 +221,10 @@ async function start(options: StartOptions = {}): Promise<string> {
     events: {} as never,
     getFilesystem: async () => fs,
   });
-  const toolHandler = createToolHandlerFactory(resolve);
+  const toolHandler =
+    options.writeAccess !== undefined
+      ? createToolHandlerFactory(resolve, options.writeAccess)
+      : createToolHandlerFactory(resolve);
   const fakeAuth = (req: express.Request, _res: express.Response, next: express.NextFunction) => {
     req.toolAuth = { source: 'external', userId, scope: 'write' };
     next();
@@ -1367,10 +1385,15 @@ describe('an apply takes the destination folder\'s turn', () => {
     let release!: () => void;
     folderTurnGate = new Promise<void>((resolve) => (release = resolve));
     const pending = apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Pages` });
-    // Long enough for the apply to reach the turn and ask for it: it has
-    // judged every path by now, and is holding its answer.
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Until the apply ASKS for the turn — no sleep, so a loaded runner cannot
+    // turn this into a flake, and nothing here depends on how long the judging
+    // took. Racing the apply itself means a regression that never asks for a
+    // turn fails on the assertions below instead of hanging to the timeout.
+    await Promise.race([folderTurnAsked, pending]);
+    // Asked for, and not yet granted: the apply is parked on the gate, which
+    // is what makes every assertion that follows a statement about waiting.
     expect(folderTurns).toEqual([`${KB_DIR}/Pages`]);
+    expect(turnsHeld).toBe(0);
     expect(batches).toEqual([]);
     await expect(readFile(join(tempDir, KB_DIR, 'Pages/page.md'), 'utf8')).rejects.toThrow();
     // Now the folder is free, and the same apply finishes on it.
@@ -1379,5 +1402,54 @@ describe('an apply takes the destination folder\'s turn', () => {
     expect(answer.files).toEqual([{ path: `${KB_DIR}/Pages/page.md`, outcome: 'created' }]);
     expect(batches).toHaveLength(1);
     expect(await readFile(join(tempDir, KB_DIR, 'Pages/page.md'), 'utf8')).toBe('mine\n');
+  });
+});
+
+describe('a read-only deployment lands no upload', () => {
+  /** A host's verdict: the deployment may be read, not changed. */
+  const readOnly: IWriteAccess = {
+    canWrite: async () => ({ ok: false, message: 'This workspace is read-only until an admin adds seats.' }),
+  };
+
+  /**
+   * Both upload tools must be WRITE tools, because the read-only gate's HTTP
+   * half cannot refuse them: `/api/agent/` is on its always-writable list, on
+   * the stated grounds that "every tool call is judged by the tool layer
+   * itself, which knows a write tool from a read". That makes `write: true` on
+   * these two mounts the only thing standing between a read-only deployment
+   * and a commit — worth a test that fails if either loses the flag, rather
+   * than a comment hoping nobody does.
+   */
+  it('refuses request_file_upload and apply_file_upload at the tool layer', async () => {
+    const base = await start({ writeAccess: readOnly });
+    for (const tool of ['request_file_upload', 'apply_file_upload']) {
+      const res = await call(base, tool, { branch: DRAFT, token: 'bevel-up_x', destination: KB_DIR });
+      expect(res.status, tool).toBe(403);
+      expect(await json<{ code?: string }>(res), tool).toMatchObject({ code: READ_ONLY_CODE });
+    }
+  });
+
+  /**
+   * The raw upload route is NOT a tool and never reaches the tool layer, so
+   * the always-writable prefix does let its bytes through. That is harmless
+   * and deliberate: it stages bytes beside the workspaces root and commits
+   * nothing, no new token can be issued while the deployment is read-only
+   * (`request_file_upload` is refused above), and bytes nobody can apply are
+   * deleted when their token expires. Asserted so the reasoning is on record
+   * where the behaviour is.
+   */
+  it('still takes the bytes of a token issued before the deployment went read-only, and lands none of them', async () => {
+    const writable = await start();
+    const { token } = await request(writable);
+    const readOnlyServer = await start({ store: uploads, writeAccess: readOnly });
+    expect((await send(readOnlyServer, token, 'notes.md', Buffer.from('hello'))).status).toBe(200);
+    const refused = await call(readOnlyServer, 'apply_file_upload', {
+      branch: DRAFT,
+      token,
+      destination: `${KB_DIR}/Pages`,
+    });
+    expect(refused.status).toBe(403);
+    expect(batches).toEqual([]);
+    await expect(readFile(join(tempDir, KB_DIR, 'Pages/notes.md'), 'utf8')).rejects.toThrow();
   });
 });
