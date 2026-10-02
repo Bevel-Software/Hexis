@@ -208,7 +208,8 @@ describe('files', () => {
       change: 'moved',
       additions: 3,
       deletions: 1,
-      sha: 'blob-1',
+      // No `sha`: nothing in Hexis populates a blob sha, so answering one would
+      // answer `""` for every file. See `toCrFile`.
       isBinary: false,
       requiredApprovers: { roles: ['Engineering'], users: [] },
       approvedBy: [

@@ -148,8 +148,6 @@ export interface CrFile {
   change: ChangeKind;
   additions: number;
   deletions: number;
-  /** Blob sha at the request head. */
-  sha: string;
   /** Unified diff. Only on `include: ["patches"]`, and absent for binaries. */
   patch?: string;
   isBinary: boolean;
@@ -506,7 +504,16 @@ export function toCrFile(
     change: changeKindOf(file.status),
     additions: file.additions,
     deletions: file.deletions,
-    sha: file.sha,
+    // No `sha`. GitHub's file entry carries the blob sha at the head, and an
+    // earlier draft of this answer did too — but nothing in Hexis populates it:
+    // `GitService.prFilesForRange`, the only builder of `PullRequestFile` and
+    // the one that serves an open request and an applied one alike, writes
+    // `sha: ''` for every file. Answering a field whose every value is the empty
+    // string is worse than not answering it, because an agent that pins content
+    // or a diff on it gets no error (cubic P3 on #347). If a blob sha is wanted
+    // here, the git layer has to produce it first — `git diff --raw` carries
+    // both sides' blob shas — and the app's own change-request detail gets it in
+    // the same change.
     ...(opts.patches && file.patch !== undefined ? { patch: file.patch } : {}),
     isBinary: file.isBinary,
     requiredApprovers: {

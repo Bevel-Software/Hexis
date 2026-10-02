@@ -3,6 +3,7 @@ import { logger } from '../../../shared/logging.js';
 
 const log = logger('cr');
 import type {
+  AppliedChangeRef,
   ChangedPathPair,
   FileApprovalState,
   IPullRequestService,
@@ -57,7 +58,7 @@ type ChangeRequestRow = typeof changeRequests.$inferSelect;
  */
 export type ChangeSource =
   | { kind: 'branches' }
-  | { kind: 'commit'; sha: string }
+  | { kind: 'commit'; applied: AppliedChangeRef }
   | { kind: 'none' };
 
 /**
@@ -92,11 +93,20 @@ export type ChangeSource =
  * read in full.
  */
 export function changeSourceFor(row: {
+  number: number;
   state: string;
   mergedSha?: string | null;
 }): ChangeSource {
   if (row.state === 'open') return { kind: 'branches' };
-  if (row.state === 'merged' && row.mergedSha) return { kind: 'commit', sha: row.mergedSha };
+  // The NUMBER travels with the sha, because reading the commit's own change is
+  // only sound if the commit is this request's merge commit — and the number is
+  // what proves it (the subject ends with `(#<number>)`). A row whose
+  // `merged_sha` was written by a merge that made no commit points at the target
+  // tip, which is usually another request's merge commit; the git layer rejects
+  // that rather than answering with its files. See `merge-commit.ts`.
+  if (row.state === 'merged' && row.mergedSha) {
+    return { kind: 'commit', applied: { number: row.number, mergeSha: row.mergedSha } };
+  }
   return { kind: 'none' };
 }
 
@@ -308,8 +318,8 @@ export class PullRequestService implements IPullRequestService {
     if (source.kind === 'none') return empty;
     if (source.kind === 'commit') {
       return this.gitService
-        .changedPathsAndPairsAtCommit(workspaceId, source.sha)
-        .catch(degrade('changedPathsAndPairsAtCommit'));
+        .changedPathsAndPairsOfAppliedChange(workspaceId, source.applied)
+        .catch(degrade('changedPathsAndPairsOfAppliedChange'));
     }
     return this.gitService
       .changedPathsAndPairsForPr(workspaceId, row.targetBranch, row.sourceBranch, opts)
@@ -623,10 +633,10 @@ export class PullRequestService implements IPullRequestService {
         // answered no files — which, since an empty file set proves no read
         // access, made every applied request readable by its author alone.
         // Reading back what happened is what the ticket exists for.
-        const ends = await this.gitService.appliedChangeShas(workspaceId, source.sha);
+        const ends = await this.gitService.appliedChangeShas(workspaceId, source.applied);
         baseSha = ends.baseSha;
         headSha = ends.headSha;
-        files = await this.gitService.changedFilesAtCommit(workspaceId, source.sha, {
+        files = await this.gitService.changedFilesOfAppliedChange(workspaceId, source.applied, {
           ...(opts.patches === false ? { patchCap: 0 } : {}),
         });
         // `forkPoint` and `targetChangedShared` stay at their defaults. "Is this

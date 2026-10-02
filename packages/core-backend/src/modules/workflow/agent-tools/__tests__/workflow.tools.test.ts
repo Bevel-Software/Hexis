@@ -244,7 +244,7 @@ describe('registerWorkflowTools', () => {
     const res = await post(`${base}/api/agent/tools/post_change_request_comment`, writeTok(), { number: DECLINED_CR, body: 'why was this turned down?' });
     expect(res.status).toBe(409);
     expect(((await res.json()) as { error: string }).error).toMatch(
-      /#21 is closed and has no commit to anchor a comment to/,
+      new RegExp(`#${DECLINED_CR} is closed and has no commit to anchor a comment to`),
     );
     // Nothing was written: the refusal happens before the service is asked.
     expect(calls.some((c) => c[0] === 'postComment')).toBe(false);

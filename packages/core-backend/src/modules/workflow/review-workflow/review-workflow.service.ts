@@ -18,6 +18,7 @@ import { changeRequests, prComments, prFileApprovals, prMergeLog, users } from '
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { GitService } from '../git/git.service.js';
+import { mergeCommitSubject } from '../git/merge-commit.js';
 import { redactSecret } from '../../../shared/redact-secret.js';
 import {
   ChangeRequestConflictsError,
@@ -724,7 +725,9 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     // Attribution lives on the merge commit itself (authored as the human
     // triggerer). When bypass is used, the bypassed warnings are appended so the
     // decision survives in git history — no separate audit table needed.
-    const subject = `${prTitle} (#${prNumber})`;
+    // One place builds this, one place reads it back — `merge-commit.ts` says
+    // why an applied request's reader has to verify the subject at all.
+    const subject = mergeCommitSubject(prTitle, prNumber);
     const bypassFooter =
       opts.bypass && gate.warnings.length > 0
         ? `\n\nApproval requirements bypassed:\n${gate.warnings.map((w) => `- ${w}`).join('\n')}`
@@ -774,7 +777,18 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     const completedAt = new Date();
     const [updatedCr] = await this.db
       .update(changeRequests)
-      .set({ state: 'merged', mergedSha: mergeResult.sha, closedAt: completedAt, updatedAt: completedAt })
+      .set({
+        state: 'merged',
+        // Only a commit this merge actually WROTE. When the target already
+        // contained the source there was nothing to merge, so `sha` is the
+        // target tip — usually another request's merge commit — and recording it
+        // here would let this request be read back with that other request's
+        // files under its number (cubic P1 on #347). An empty request has no
+        // file list to recover anyway.
+        mergedSha: mergeResult.mergeCommit ? mergeResult.sha : null,
+        closedAt: completedAt,
+        updatedAt: completedAt,
+      })
       .where(and(eq(changeRequests.id, cr.id), eq(changeRequests.state, 'open')))
       .returning({ id: changeRequests.id });
     if (!updatedCr) {

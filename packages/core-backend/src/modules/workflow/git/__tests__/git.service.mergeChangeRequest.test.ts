@@ -103,6 +103,9 @@ describe('GitService.mergeChangeRequest', () => {
     expect(result.kind).toBe('merged');
     if (result.kind !== 'merged') return;
     expect(result.sha).toMatch(/^[0-9a-f]{40}$/);
+    // A commit of this request's own was written, which is what licenses the row
+    // to record it as the request's merge commit.
+    expect(result.mergeCommit).toBe(true);
 
     // The merge landed on origin/BASE: a fresh clone sees the feature file and a
     // merge commit authored by the human triggerer.
@@ -113,6 +116,39 @@ describe('GitService.mergeChangeRequest', () => {
     const log = await gitOut(verify, ['log', '-1', '--format=%an <%ae>%n%s']);
     expect(log).toContain('Alice <alice@example.com>');
     expect(log).toContain('Add feature (#1)');
+  });
+
+  // cubic P1 on #347. When the target already contains the source there is
+  // nothing to merge, so no commit is written and `sha` is the TARGET TIP —
+  // whatever landed on the target last, which in a deployment that lands
+  // everything through change requests is usually ANOTHER request's merge commit.
+  // Saying `mergeCommit: false` is what stops the row recording it as this
+  // request's own: a reader that took it would answer with that other request's
+  // files under this request's number.
+  it('reports that NO commit of its own was written when there was nothing to merge', async () => {
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    // A branch the target already contains: branched and pushed with no commit of
+    // its own, so the merge has nothing to do. (`pushFeatureBranch` always
+    // commits, which is the one thing this case must not do.)
+    const emptyDir = path.join(root, 'feat-empty');
+    await runGit(root, ['clone', '-b', BASE, upstream, emptyDir]);
+    await runGit(emptyDir, ['checkout', '-b', 'alice/empty']);
+    await runGit(emptyDir, ['push', '-u', 'origin', 'alice/empty']);
+
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
+    const result = await git.mergeChangeRequest(
+      baseWsId, 'alice/empty', BASE, { subject: 'Nothing to do (#2)', body: 'Merged via Bevel' }, USER,
+    );
+
+    expect(result.kind).toBe('merged');
+    if (result.kind !== 'merged') return;
+    expect(result.mergeCommit).toBe(false);
+    // The sha it reports is the target tip, and that tip is NOT a commit of this
+    // request's: nothing was pushed, and the tip still has one parent.
+    const verify = path.join(root, 'verify-empty');
+    await runGit(root, ['clone', '-b', BASE, upstream, verify]);
+    expect((await gitOut(verify, ['rev-parse', 'HEAD'])).trim()).toBe(result.sha);
+    expect(await gitOut(verify, ['log', '-1', '--format=%s'])).not.toContain('(#2)');
   });
 
   it('returns the conflicting paths when base and source both changed a file', async () => {

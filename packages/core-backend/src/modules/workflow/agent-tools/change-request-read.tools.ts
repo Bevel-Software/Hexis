@@ -495,7 +495,7 @@ export function registerChangeRequestReadTools(
     description:
       "List a change request's changed files (GitHub: list pull request files). Each answers " +
       '`path`, `change` (`added`, `changed`, `deleted` or `moved`, a moved one with its ' +
-      '`previousPath`), `additions`, `deletions` and `sha` — the same words ' +
+      '`previousPath`), `additions` and `deletions` — the same words ' +
       '`open_change_request` uses — plus who must approve it (`requiredApprovers`) and who has ' +
       '(`approvedBy`). No patch is returned unless you ask with `include: ["patches"]`. ' +
       'Read-only. Files you may not read are left out and counted in `withheldFiles`, never named.',
@@ -526,7 +526,6 @@ export function registerChangeRequestReadTools(
               change: { type: 'string', enum: ['added', 'changed', 'deleted', 'moved'], description: 'What happened to it.' },
               additions: { type: 'integer' },
               deletions: { type: 'integer' },
-              sha: { type: 'string', description: 'Blob sha at the request head.' },
               patch: { type: 'string', description: 'Unified diff — only on `include: ["patches"]`, and never for a binary.' },
               isBinary: { type: 'boolean' },
               requiredApprovers: {
@@ -557,7 +556,7 @@ export function registerChangeRequestReadTools(
               inMergeGate: { type: 'boolean', description: 'Whether the gate waits on this file at all.' },
               viewerMayApprove: { type: 'boolean', description: 'Whether YOU may approve it.' },
             },
-            required: ['path', 'change', 'additions', 'deletions', 'sha', 'isBinary', 'requiredApprovers', 'approvedBy', 'approved', 'inMergeGate', 'viewerMayApprove'],
+            required: ['path', 'change', 'additions', 'deletions', 'isBinary', 'requiredApprovers', 'approvedBy', 'approved', 'inMergeGate', 'viewerMayApprove'],
           },
         },
         withheldFiles: { type: 'integer', description: 'How many of its files you may not read. Never named.' },

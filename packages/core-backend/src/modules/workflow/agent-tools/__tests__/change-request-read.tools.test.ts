@@ -534,11 +534,17 @@ describe('get_change_request', () => {
     });
   });
 
+  // The AUTHOR reads it, because nobody else can: a declined request is read
+  // from nothing (no sha is recorded, and its branch now holds later work), so
+  // its file set is empty and an empty file set proves no read access. Asking as
+  // a stranger would pin the state mapping on a combination the service cannot
+  // produce — a non-author holding a readable file list for a declined request.
   it('reports a declined request as closed, which in Hexis means declined', async () => {
     const base = await start();
-    details.set(12, detail({ state: 'closed' }));
+    callerEmail = AUTHOR;
+    details.set(12, detail({ state: 'closed', files: [], approvals: [] }));
     const { json } = await call(base, 'get_change_request', { number: 12 });
-    expect(json).toMatchObject({ state: 'closed' });
+    expect(json).toMatchObject({ state: 'closed', changedFiles: 0, viewer: { isAuthor: true } });
     expect(json).not.toHaveProperty('merged');
   });
 

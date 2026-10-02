@@ -2,6 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { logger } from '../../../shared/logging.js';
 import type {
+  AppliedChangeRef,
+  AppliedMergeResult,
   AuthUser,
   BranchInfo,
   ChangedPathPair,
@@ -14,6 +16,7 @@ import type {
   WorkingTreeStatus,
 } from '@bevel-software/platform-shared';
 import { isFolderPlaceholder } from '@bevel-software/platform-shared';
+import { mergeCommitSubjectNames } from './merge-commit.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -1479,7 +1482,7 @@ export class GitService implements IGitService {
        */
       authorize?: (target: { sha: string; changedPaths: string[] }) => Promise<void>;
     } = {},
-  ): Promise<{ kind: 'merged'; sha: string } | { kind: 'conflicts'; paths: string[] }> {
+  ): Promise<AppliedMergeResult> {
     assertValidBranchName(sourceBranch);
     assertValidBranchName(targetBranch);
     assertValidAuthor(user);
@@ -1563,12 +1566,17 @@ export class GitService implements IGitService {
         }
 
         // Nothing staged ⇒ base already contains source (empty CR). The base tip
-        // is the "merged" state; report it without an empty commit.
+        // is the "merged" state; report it without an empty commit — and say
+        // that no commit was made, because the tip is NOT this request's own
+        // merge commit and must not be recorded as if it were. It is whatever
+        // landed on the target last, usually another request's merge commit, and
+        // a reader that took it for this request's would answer with that other
+        // request's files under this number (cubic P1 on #347).
         const { stdout: staged } = await this.git(cwd, ['diff', '--cached', '--name-only']);
         if (staged.trim() === '') {
           const { stdout: sha } = await this.git(cwd, ['rev-parse', 'HEAD']);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);
-          return { kind: 'merged' as const, sha: sha.trim() };
+          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: false };
         }
 
         await this.git(cwd, [
@@ -1582,7 +1590,8 @@ export class GitService implements IGitService {
         try {
           await this.git(cwd, ['push', 'origin', `HEAD:refs/heads/${targetBranch}`]);
           this.accessControl?.invalidate(baseWorkspaceId);
-          return { kind: 'merged' as const, sha: sha.trim() };
+          // A commit of this request's own, with the subject the reader verifies.
+          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: true };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           // Base moved under us — reset to the new tip and re-merge next loop.
@@ -2666,38 +2675,61 @@ export class GitService implements IGitService {
    * side for a merge commit, and for a squashed or fast-forwarded commit it is
    * simply the commit before — the same answer either way.
    *
-   * Throws `WorkflowValidationError` when this clone does not hold the commit,
-   * or when it is a root commit with no parent to diff against. Every caller
-   * reads that as "the file set could not be resolved" and falls back to its own
-   * fail-closed answer, which is what a clone that has not fetched the merge yet
-   * must get: no files, never somebody else's.
+   * Throws `WorkflowValidationError` whenever the recorded commit cannot be
+   * PROVEN to be this request's own merge commit — see
+   * {@link appliedChangeShas}. Every caller reads that as "the file set could
+   * not be resolved" and falls back to its own fail-closed answer, which is what
+   * a clone that has not fetched the merge yet must get: no files, never
+   * somebody else's.
    */
-  private async firstParentOf(cwd: string, sha: string): Promise<string> {
-    if (!/^[0-9a-f]{40,64}$/.test(sha)) {
-      throw new WorkflowValidationError(`invalid commit sha: ${sha}`);
+  private async appliedEnds(
+    cwd: string,
+    applied: AppliedChangeRef,
+  ): Promise<{ baseSha: string; headSha: string }> {
+    const { mergeSha, number } = applied;
+    if (!/^[0-9a-f]{40,64}$/.test(mergeSha)) {
+      throw new WorkflowValidationError(`invalid commit sha: ${mergeSha}`);
     }
-    try {
-      // One question, both answers: `--verify --quiet` prints the parent it
-      // resolved, and exits 1 if there is none to resolve.
-      const { stdout } = await this.git(cwd, [
-        'rev-parse', '--verify', '--quiet', `${sha}^1^{commit}`,
-      ]);
-      return stdout.trim();
-    } catch (err) {
-      // Exit 1 under --quiet is git's own "no such object": this clone does not
-      // have the commit, or it has no first parent. Anything else (a deadline, a
-      // broken repository) is the caller's to see.
-      if (err instanceof GitRunError && !err.timedOut && err.exitCode === 1) {
-        throw new WorkflowValidationError(`no first parent for commit ${sha}`);
+    const revParse = async (rev: string): Promise<string | null> => {
+      try {
+        // One question, both answers: `--verify --quiet` prints what it resolved
+        // and exits 1 if there is nothing to resolve.
+        const { stdout } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', rev]);
+        return stdout.trim();
+      } catch (err) {
+        // Exit 1 under --quiet is git's own "no such object": this clone does
+        // not have the commit, or the commit has no such parent. Anything else
+        // (a deadline, a broken repository) is the caller's to see.
+        if (err instanceof GitRunError && !err.timedOut && err.exitCode === 1) return null;
+        throw err;
       }
-      throw err;
+    };
+    // The SECOND parent first, because its absence is the whole P1: a merge
+    // `--no-ff` always has one, and a commit that does not is not a merge this
+    // request made. Asking for it also answers "is this commit here at all".
+    const headSha = await revParse(`${mergeSha}^2^{commit}`);
+    if (!headSha) {
+      throw new WorkflowValidationError(
+        `commit ${mergeSha} is not a merge commit in this clone, so it cannot be change request #${number}'s`,
+      );
     }
+    const baseSha = await revParse(`${mergeSha}^1^{commit}`);
+    if (!baseSha) {
+      throw new WorkflowValidationError(`no first parent for commit ${mergeSha}`);
+    }
+    const { stdout: subject } = await this.git(cwd, ['log', '-1', '--format=%s', mergeSha]);
+    if (!mergeCommitSubjectNames(subject, number)) {
+      throw new WorkflowValidationError(
+        `commit ${mergeSha} is not the merge commit of change request #${number}`,
+      );
+    }
+    return { baseSha, headSha };
   }
 
   /**
-   * The two commits an APPLIED change request spanned, recovered from its merge
-   * commit: the target as it stood before the merge (`^1`) and the source tip
-   * that was merged (`^2`).
+   * The two commits an APPLIED change request spanned, recovered from the merge
+   * commit its row records: the target as it stood before the merge (`^1`) and
+   * the source tip that was merged (`^2`).
    *
    * These are what the detail of a merged request reports as its `baseSha` and
    * `headSha`, and the `headSha` matters beyond being informative: an approval
@@ -2707,69 +2739,81 @@ export class GitService implements IGitService {
    * collected as stale, and every file of it as unapproved — the opposite of
    * what happened.
    *
-   * `mergeChangeRequest` always merges `--no-ff`, so a request's merge commit has
-   * two parents. A commit with only one (a hand-made fast-forward, or a row
-   * pointing at something else entirely) IS the source tip as far as anything
-   * here can tell, so it answers as both ends.
+   * ## Why the commit is VERIFIED rather than taken
+   *
+   * `merged_sha` is not reliably a commit this request created. When the target
+   * already contains the source there is nothing to merge, so
+   * `mergeChangeRequest` writes no commit and reports the TARGET TIP as the
+   * merged state — and in a deployment that lands everything through change
+   * requests, that tip is usually ANOTHER request's merge commit. Reading "the
+   * recorded commit's own change" then answers with somebody else's files under
+   * this request's number: the request looks like it changed files it never
+   * touched, and becomes visible to whoever may read THOSE (cubic P1 on #347).
+   *
+   * So three things must hold, and all three are cheap:
+   *
+   *   1. the commit is in this clone,
+   *   2. it has a SECOND parent — `mergeChangeRequest` merges `--no-ff`, so
+   *      every merge commit it writes has one, and a commit that has none was
+   *      not written by a merge,
+   *   3. its subject names THIS request — see `merge-commit.ts`.
+   *
+   * Anything else fails closed: no files, so author-only, rather than a file
+   * list that belongs to another change. The write side no longer records a
+   * no-op merge's sha at all, so for rows written from now on all three hold by
+   * construction; the verification is what protects the rows written before it.
    */
   async appliedChangeShas(
     workspaceId: string,
-    mergeSha: string,
+    applied: AppliedChangeRef,
   ): Promise<{ baseSha: string; headSha: string }> {
     const cwd = await this.repoDir(workspaceId);
-    return this.mutex.run(workspaceId, async () => {
-      const baseSha = await this.firstParentOf(cwd, mergeSha);
-      let headSha = mergeSha;
-      try {
-        const { stdout } = await this.git(cwd, [
-          'rev-parse', '--verify', '--quiet', `${mergeSha}^2^{commit}`,
-        ]);
-        headSha = stdout.trim();
-      } catch (err) {
-        if (!(err instanceof GitRunError) || err.timedOut || err.exitCode !== 1) throw err;
-      }
-      return { baseSha, headSha };
-    });
+    return this.mutex.run(workspaceId, async () => this.appliedEnds(cwd, applied));
   }
 
   /**
-   * The changed-file list a COMMIT introduced, read against its first parent and
-   * shaped the way `changedFilesForPr` shapes a branch pair — how an APPLIED
-   * change request is read back, since its source branch is retired and the
-   * merge commit is what is left of it.
+   * The changed-file list an APPLIED change request landed, read from its merge
+   * commit against that commit's first parent, and shaped the way
+   * `changedFilesForPr` shapes a branch pair — how an applied request is read
+   * back, since its source branch is retired and the merge commit is what is
+   * left of it.
    *
    * TWO dots, from the first parent. A three-dot diff would be read from the
    * merge base of the merge commit's two parents, i.e. it would re-report the
    * source branch's whole history instead of what landed on the target.
    *
-   * No fetch: the commit is in this clone or this rejects.
+   * Verified, not assumed — see {@link appliedChangeShas}. No fetch: the commit
+   * is in this clone or this rejects.
    */
-  async changedFilesAtCommit(
+  async changedFilesOfAppliedChange(
     workspaceId: string,
-    sha: string,
+    applied: AppliedChangeRef,
     opts: { patchCap?: number } = {},
   ): Promise<PullRequestFile[]> {
     const cwd = await this.repoDir(workspaceId);
     return this.mutex.run(workspaceId, async () => {
-      const parent = await this.firstParentOf(cwd, sha);
-      return this.prFilesForRange(cwd, `${parent}..${sha}`, opts.patchCap ?? 400);
+      const { baseSha } = await this.appliedEnds(cwd, applied);
+      return this.prFilesForRange(cwd, `${baseSha}..${applied.mergeSha}`, opts.patchCap ?? 400);
     });
   }
 
   /**
-   * The same commit's change as the two path views a change-request SUMMARY
-   * needs — the flat touched-path list and the rename-aware pairs — out of one
+   * The same applied change as the two path views a change-request SUMMARY needs
+   * — the flat touched-path list and the rename-aware pairs — out of one
    * `git diff`, exactly as {@link changedPathsAndPairsForPr} does for a branch
-   * pair. No fetch, for the same reason.
+   * pair. Same verification and same no-fetch contract.
    */
-  async changedPathsAndPairsAtCommit(
+  async changedPathsAndPairsOfAppliedChange(
     workspaceId: string,
-    sha: string,
+    applied: AppliedChangeRef,
   ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }> {
     const cwd = await this.repoDir(workspaceId);
     return this.mutex.run(workspaceId, async () => {
-      const parent = await this.firstParentOf(cwd, sha);
-      const entries = await this.prChangedEntriesForRange(cwd, `${parent}..${sha}`);
+      const { baseSha } = await this.appliedEnds(cwd, applied);
+      const entries = await this.prChangedEntriesForRange(
+        cwd,
+        `${baseSha}..${applied.mergeSha}`,
+      );
       return { paths: flattenChangedPaths(entries, {}), pairs: changedPathPairs(entries) };
     });
   }

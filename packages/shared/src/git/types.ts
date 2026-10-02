@@ -1,5 +1,5 @@
 import type { AuthUser } from '../auth/types.js';
-import type { ChangedPathPair, PullRequestFile } from './pr.types.js';
+import type { AppliedChangeRef, ChangedPathPair, PullRequestFile } from './pr.types.js';
 
 export interface BranchInfo {
   name: string;
@@ -300,8 +300,8 @@ export interface IGitService {
   ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }>;
 
   /**
-   * The changed-file list ONE COMMIT introduced, read against its first parent
-   * — how an APPLIED change request is read back.
+   * The changed-file list an APPLIED change request landed, read from its merge
+   * commit against that commit's first parent.
    *
    * Its source branch is retired, so the branch pair the other two methods want
    * no longer exists; what is left is the merge commit the row records. Its
@@ -309,42 +309,48 @@ export interface IGitService {
    * between them is precisely what the request applied — and immutable, which
    * the branch pair never was.
    *
-   * No network. The commit is in the clone or this rejects with
+   * The commit is VERIFIED to be that request's own, which is why the ref
+   * carries the number as well as the sha: a merge with nothing to merge used to
+   * record the target tip, and reading that commit's change would answer with
+   * another request's files. It must be in the clone, have a second parent, and
+   * carry a subject naming this request; anything else rejects with
    * `WorkflowValidationError`, which every caller reads as "the file set could
    * not be resolved" and answers fail-closed (no files, so author-only) rather
    * than reaching for a fetch per request.
+   *
+   * No network, either way.
    */
-  changedFilesAtCommit(
+  changedFilesOfAppliedChange(
     workspaceId: string,
-    sha: string,
+    applied: AppliedChangeRef,
     opts?: { patchCap?: number },
   ): Promise<PullRequestFile[]>;
 
   /**
-   * The same commit's change as the two path views a change-request SUMMARY
-   * needs, out of one `git diff` — `changedPathsAndPairsForPr` for a commit
-   * instead of a branch pair, and with the same no-network contract as
-   * {@link changedFilesAtCommit}.
+   * The same applied change as the two path views a change-request SUMMARY
+   * needs, out of one `git diff` — `changedPathsAndPairsForPr` for an applied
+   * request instead of a branch pair, with the same verification and the same
+   * no-network contract as {@link changedFilesOfAppliedChange}.
    */
-  changedPathsAndPairsAtCommit(
+  changedPathsAndPairsOfAppliedChange(
     workspaceId: string,
-    sha: string,
+    applied: AppliedChangeRef,
   ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }>;
 
   /**
    * The two commits an APPLIED change request spanned, recovered from its merge
    * commit: the target before the merge (`^1`) and the source tip that was
-   * merged (`^2`, or the commit itself when it has only one parent).
+   * merged (`^2`).
    *
    * The head matters beyond being informative: an approval is called stale when
    * the head it was given against is not the detail's `headSha`, so answering
    * the merge commit there would report every approval a merged request ever
-   * collected as stale. Same no-network contract and same
-   * `WorkflowValidationError` as {@link changedFilesAtCommit}.
+   * collected as stale. Same verification, same no-network contract and the same
+   * `WorkflowValidationError` as {@link changedFilesOfAppliedChange}.
    */
   appliedChangeShas(
     workspaceId: string,
-    mergeSha: string,
+    applied: AppliedChangeRef,
   ): Promise<{ baseSha: string; headSha: string }>;
 
   /**

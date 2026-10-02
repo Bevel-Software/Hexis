@@ -120,6 +120,38 @@ export interface ChangedPathPair {
   previousPath?: string;
 }
 
+/**
+ * An APPLIED change request, named by BOTH the commit its row records and the
+ * number that row carries — because reading the commit's own change is only
+ * sound if the commit really is that request's merge commit, and the number is
+ * what proves it (the merge commit's subject ends with `(#<number>)`).
+ *
+ * The pair travels together so no read can ask for a commit without saying which
+ * request it must belong to. `merged_sha` is not reliably a commit the request
+ * created: a merge with nothing to merge used to record the TARGET TIP, which in
+ * a deployment that lands everything through change requests is usually ANOTHER
+ * request's merge commit.
+ */
+export interface AppliedChangeRef {
+  /** The change request's number, as its merge commit's subject names it. */
+  number: number;
+  /** The `merged_sha` the row records. */
+  mergeSha: string;
+}
+
+/**
+ * What applying a change request did.
+ *
+ * `mergeCommit` says whether a commit was actually written for it. It is false
+ * when the target already contained the source: there was nothing to merge, so
+ * `sha` is the target tip — the state at which the request counts as merged, and
+ * NOT a commit of this request's own. The caller must not record it as the
+ * request's merge commit; nothing can read a file list out of it.
+ */
+export type AppliedMergeResult =
+  | { kind: 'merged'; sha: string; mergeCommit: boolean }
+  | { kind: 'conflicts'; paths: string[] };
+
 export type PrFileStatus =
   | 'added'
   | 'modified'

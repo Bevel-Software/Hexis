@@ -276,7 +276,7 @@ describe('PullRequestService.listPrsByState', () => {
     const atCommit = vi.fn(async () => answer(changedPaths));
     const git = {
       changedPathsAndPairsForPr: forPr,
-      changedPathsAndPairsAtCommit: atCommit,
+      changedPathsAndPairsOfAppliedChange: atCommit,
     } as unknown as GitService;
     const svc = new PullRequestService(db, workspace, makeAccessControl({}), git);
     return { svc, select, forPr, atCommit, ensureRemotesFetched };
@@ -311,7 +311,9 @@ describe('PullRequestService.listPrsByState', () => {
     expect(select).toHaveBeenCalledTimes(1);
     // The merge commit, not the branch pair: the source branch is retired, so
     // asking for it is what sent one fetch per row at the remote.
-    expect(atCommit).toHaveBeenCalledWith('ws', MERGE_SHA);
+    // The ref carries the NUMBER as well as the sha: the git layer refuses a
+    // commit that is not this request's own merge commit.
+    expect(atCommit).toHaveBeenCalledWith('ws', { number: 9, mergeSha: MERGE_SHA });
     expect(forPr).not.toHaveBeenCalled();
     expect(summary).toMatchObject({
       number: 9,
@@ -395,8 +397,10 @@ describe('PullRequestService.listPrsByState', () => {
       findAnyWorkspaceId: async () => 'ws',
     } as unknown as WorkspaceService;
     const git = {
-      changedPathsAndPairsAtCommit: vi.fn(async () => {
-        throw new WorkflowValidationError(`no first parent for commit ${MERGE_SHA}`);
+      changedPathsAndPairsOfAppliedChange: vi.fn(async () => {
+        throw new WorkflowValidationError(
+          `commit ${MERGE_SHA} is not a merge commit in this clone, so it cannot be change request #1's`,
+        );
       }),
     } as unknown as GitService;
     const svc = new PullRequestService(db, workspace, makeAccessControl({}), git);
@@ -526,7 +530,7 @@ describe('PullRequestService.getPrDetail of an applied request', () => {
       throw new WorkflowValidationError('unknown branch: feature/x');
     });
     const appliedChangeShas = vi.fn(async () => ({ baseSha: BASE_SHA, headSha: HEAD_SHA }));
-    const changedFilesAtCommit = vi.fn(async () => [
+    const changedFilesOfAppliedChange = vi.fn(async () => [
       {
         path: 'Knowledge/A.md',
         previousPath: undefined,
@@ -542,16 +546,22 @@ describe('PullRequestService.getPrDetail of an applied request', () => {
     const git = {
       resolvePrShas,
       appliedChangeShas,
-      changedFilesAtCommit,
+      changedFilesOfAppliedChange,
     } as unknown as GitService;
     const svc = new PullRequestService(db, workspace, makeAccessControl({}), git);
-    return { svc, resolvePrShas, appliedChangeShas, changedFilesAtCommit, ensureRemotesFetched };
+    return {
+      svc,
+      resolvePrShas,
+      appliedChangeShas,
+      changedFilesOfAppliedChange,
+      ensureRemotesFetched,
+    };
   }
 
   it('reads its files from the merge commit, and never asks for its branches', async () => {
-    const { svc, resolvePrShas, changedFilesAtCommit } = svcFor();
+    const { svc, resolvePrShas, changedFilesOfAppliedChange } = svcFor();
     const detail = await svc.getPrDetail(4);
-    expect(changedFilesAtCommit).toHaveBeenCalledWith('ws', MERGE_SHA, {});
+    expect(changedFilesOfAppliedChange).toHaveBeenCalledWith('ws', { number: 4, mergeSha: MERGE_SHA }, {});
     // Not one branch resolution, so not one fetch: the branch no longer exists
     // and the commit cannot change.
     expect(resolvePrShas).not.toHaveBeenCalled();
@@ -580,9 +590,13 @@ describe('PullRequestService.getPrDetail of an applied request', () => {
   });
 
   it('skips the patches when the caller asked for none', async () => {
-    const { svc, changedFilesAtCommit } = svcFor();
+    const { svc, changedFilesOfAppliedChange } = svcFor();
     await svc.getPrDetail(4, { patches: false });
-    expect(changedFilesAtCommit).toHaveBeenCalledWith('ws', MERGE_SHA, { patchCap: 0 });
+    expect(changedFilesOfAppliedChange).toHaveBeenCalledWith(
+      'ws',
+      { number: 4, mergeSha: MERGE_SHA },
+      { patchCap: 0 },
+    );
   });
 
   it('falls back to the row alone when this clone does not hold the merge commit', async () => {
@@ -749,36 +763,46 @@ describe('PullRequestService.getPrDetail of a declined request whose branch stil
  */
 describe('changeSourceFor', () => {
   it('reads an open request from its branch pair', () => {
-    expect(changeSourceFor({ state: 'open', mergedSha: null })).toEqual({ kind: 'branches' });
+    expect(changeSourceFor({ number: 9, state: 'open', mergedSha: null })).toEqual({
+      kind: 'branches',
+    });
   });
 
-  it('reads an applied request from the merge commit its row records', () => {
+  // The NUMBER travels with the sha, and that is not decoration: the git layer
+  // refuses a commit whose subject does not name this request, because a merge
+  // with nothing to merge used to record the target tip — usually another
+  // request's merge commit (cubic P1 on #347).
+  it("reads an applied request from the merge commit its row records, named by number", () => {
     const sha = 'f'.repeat(40);
-    expect(changeSourceFor({ state: 'merged', mergedSha: sha })).toEqual({
+    expect(changeSourceFor({ number: 9, state: 'merged', mergedSha: sha })).toEqual({
       kind: 'commit',
-      sha,
+      applied: { number: 9, mergeSha: sha },
     });
   });
 
   it('reads a declined request from nothing — no sha records what it proposed', () => {
-    expect(changeSourceFor({ state: 'closed', mergedSha: null })).toEqual({ kind: 'none' });
+    expect(changeSourceFor({ number: 9, state: 'closed', mergedSha: null })).toEqual({
+      kind: 'none',
+    });
   });
 
   it('reads a declined request from nothing even if a sha somehow sits on the row', () => {
     // A row flipped to `closed` after an apply recorded a sha would otherwise
     // publish a merge commit as a declined request's content.
-    expect(changeSourceFor({ state: 'closed', mergedSha: 'e'.repeat(40) })).toEqual({
+    expect(changeSourceFor({ number: 9, state: 'closed', mergedSha: 'e'.repeat(40) })).toEqual({
       kind: 'none',
     });
   });
 
   it('reads a merged row recording no merge commit from nothing', () => {
-    expect(changeSourceFor({ state: 'merged', mergedSha: null })).toEqual({ kind: 'none' });
-    expect(changeSourceFor({ state: 'merged' })).toEqual({ kind: 'none' });
+    expect(changeSourceFor({ number: 9, state: 'merged', mergedSha: null })).toEqual({
+      kind: 'none',
+    });
+    expect(changeSourceFor({ number: 9, state: 'merged' })).toEqual({ kind: 'none' });
   });
 
   it('reads a state it has never heard of from nothing, rather than guessing', () => {
-    expect(changeSourceFor({ state: 'draft', mergedSha: 'd'.repeat(40) })).toEqual({
+    expect(changeSourceFor({ number: 9, state: 'draft', mergedSha: 'd'.repeat(40) })).toEqual({
       kind: 'none',
     });
   });
