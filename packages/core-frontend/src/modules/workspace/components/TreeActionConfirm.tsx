@@ -65,10 +65,10 @@ export type TreeConfirmRequest =
       /** Workspace-relative path of the entry being moved. */
       sourcePath: string;
       /**
-       * Is the thing being dragged a folder? A folder's access is its own
-       * `access.md` plus every file under it — a different question from one
-       * file's, and not one this dialog answers, so it asks nothing and says
-       * only what it has always said.
+       * Is the thing being dragged a folder? Both kinds are asked about: a
+       * folder's rules are the `access.md` files inside it, which travel
+       * with it, and the resolver counts them where they land. Read by the
+       * sentence, not by whether the question is put.
        */
       sourceIsDirectory: boolean;
       /** Workspace-relative folder it lands in; `''` is the workspace root. */

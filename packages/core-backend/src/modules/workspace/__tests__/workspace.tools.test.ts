@@ -22,6 +22,9 @@ import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
+import { AccessControlService } from '../../access/access-control.service.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import type { WorkspaceService } from '../workspace.service.js';
 import { isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
@@ -44,6 +47,11 @@ const allowAll = {
   canDownload: async () => true,
   canOwner: async () => true,
   canWriteBatchAtRef: async () => null,
+  // The `after` half of a move's or copy's preview. Allowing everything here
+  // keeps it the same answer as the four gates above; what the relocation of
+  // a folder's `access.md` files actually does to it is exercised against
+  // REAL rules in "a move preview judges the destination as it will be".
+  previewAccessAfterRelocation: async () => ({ read: true, write: true, download: true, owner: true }),
 } as unknown as IAccessControl;
 
 /** Access control that denies `canRead` for an explicit set of repo-relative paths. */
@@ -2558,6 +2566,11 @@ describe('preflight for moves and deletes', () => {
     canWriteBatchAtRef: async (_w: string, _r: string, _u: string, rels: string[]) =>
       new Map(rels.map((p) => [p, verbsFor(p).write])),
     eligibleWritersAtRef: async () => ({ roles: ['Admin'], users: [] }),
+    // This double has no access files to carry, so the destination as it will
+    // be IS the destination as it is — the answer `accessAt` gave before the
+    // preview learned to relocate them, which keeps every ordering and
+    // oracle test below about what it is about.
+    previewAccessAfterRelocation: async (_w: string, _u: string, _from: string, to: string) => verbsFor(to),
   } as unknown as IAccessControl;
 
   const call = async (base: string, tool: string, body: Record<string, unknown>) => {
@@ -3354,6 +3367,7 @@ describe('a write refused for permissions says whether and how to propose it', (
       canDownload: async () => true,
       canOwner: async () => true,
       canWriteBatchAtRef: async () => null,
+      previewAccessAfterRelocation: async () => ({ read: true, write: true, download: true, owner: true }),
       eligibleWritersAtRef: async () => ({ roles: ['Sales Lead'], users: [{ name: 'Owner', email: 'owner@x' }] }),
     } as unknown as IAccessControl;
     return { ac, calls };
@@ -4105,5 +4119,220 @@ describe('tool descriptions and the deployment note', () => {
     notes.registerGatedToolNote(' One folder per conversation.');
     const description = (await defs()).get('start_session')?.description ?? '';
     expect(description).not.toContain('One folder per conversation.');
+  });
+});
+
+/**
+ * The bug Juan reported: the dry run of renaming a top-level folder warned he
+ * would lose owner access, and after the move he was still owner. The folder
+ * carried its own `access.md`, which moved with it, and the preview judged
+ * the destination as it stood — where neither the folder nor its rules were
+ * yet.
+ *
+ * These run against the REAL resolver over a real tree, because the thing
+ * under test is what the rules say about a path nothing is at. Every preview
+ * is then held against the operation it predicted: the caller's access at the
+ * destination afterwards must be what the preview answered, or the preview is
+ * wrong again and nobody will find out until the next report.
+ */
+describe('a move preview judges the destination as it will be', () => {
+  const KB = (p: string) => `${KB_DIR}/${p}`;
+  const MOVER = 'mover@x.io';
+  const rules = (body: string) => `---\n${body}---\n`;
+
+  /**
+   * The real `AccessControlService`, re-read from disk on every question.
+   * In production the file-change notifier invalidates the model after a
+   * write; a test leaning on the five-second cache would be asserting the
+   * cache rather than what the tree now says.
+   */
+  const liveRules = (): IAccessControl => {
+    const fresh = () =>
+      new AccessControlService(
+        {
+          getWorkspacePath: async () => tempDir,
+          ensureRemotesFetched: async () => undefined,
+        } as unknown as WorkspaceService,
+        KB_DIR,
+        new NodeFs(),
+      );
+    return {
+      canRead: (w: string, u: string, r: string) => fresh().canRead(w, u, r),
+      canReadBatch: (w: string, u: string, r: string[]) => fresh().canReadBatch(w, u, r),
+      canWrite: (w: string, u: string, r: string) => fresh().canWrite(w, u, r),
+      canDownload: (w: string, u: string, r: string) => fresh().canDownload(w, u, r),
+      canOwner: (w: string, u: string, r: string) => fresh().canOwner(w, u, r),
+      canWriteBatchAtRef: async () => null,
+      previewAccessAfterRelocation: (
+        w: string, u: string, from: string, to: string, opts?: { sourceRemains?: boolean },
+      ) => fresh().previewAccessAfterRelocation(w, u, from, to, opts),
+    } as unknown as IAccessControl;
+  };
+
+  const call = async (base: string, tool: string, body: Record<string, unknown>) => {
+    const res = await post(`${base}/api/agent/tools/${tool}`, body);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- a tool body is free-form JSON, probed field by field
+    return { status: res.status, body: (await res.json()) as Record<string, any> };
+  };
+
+  /**
+   * `Sales/` grants the caller write and owner in its OWN access.md. `Work/`
+   * grants both too, so `Work/Team` — which grants only write of its own —
+   * holds owner by inheritance and loses it on the way out. `Legal/` grants
+   * read to everyone and nothing else. The root grants read and nothing else,
+   * so a folder that arrives there arrives with only what it brought.
+   */
+  async function seeded(): Promise<string> {
+    const base = await start('write', liveRules(), MOVER);
+    await fs.writeFile(KB('roles.yaml'), 'roles:\n  Admin:\n    - admin@x.io\n');
+    await fs.writeFile(KB('access.md'), rules('read:\n  - everyone\n'));
+    await fs.writeFile(KB('Sales/access.md'), rules(`write:\n  - Mover <${MOVER}>\nowner:\n  - Mover <${MOVER}>\n`));
+    await fs.writeFile(KB('Sales/deal.md'), 'deal');
+    await fs.writeFile(KB('Work/access.md'), rules(`write:\n  - Mover <${MOVER}>\nowner:\n  - Mover <${MOVER}>\n`));
+    await fs.writeFile(KB('Work/Notes/note.md'), 'note');
+    await fs.writeFile(KB('Work/Team/access.md'), rules(`write:\n  - Mover <${MOVER}>\n`));
+    await fs.writeFile(KB('Work/Team/plan.md'), 'plan');
+    await fs.writeFile(KB('Legal/access.md'), rules('read:\n  - everyone\n'));
+    return base;
+  }
+
+  /** The caller's verbs where the thing really is now, through `file_stat`. */
+  const verbsAt = async (base: string, path: string) =>
+    (await call(base, 'file_stat', { path })).body.access;
+
+  it('renaming a folder that names the caller owner previews no loss at all', async () => {
+    const base = await seeded();
+    const args = { src: KB('Sales'), dest: KB('Revenue') };
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.status).toBe(200);
+    expect(dry.body).toMatchObject({ kind: 'folder', accessChanges: false, allowed: true, moved: false });
+    expect(dry.body.access.after).toEqual(dry.body.access.before);
+    expect(dry.body.access.after.owner).toBe(true);
+    // Nothing moved and nothing was written to answer the question.
+    expect(await fs.exists(args.dest)).toBe(false);
+    expect(await fs.exists(KB('Sales/access.md'))).toBe(true);
+
+    // `accessChanges: false`, so the move itself needs no confirmation.
+    expect((await call(base, 'move_file', args)).body).toMatchObject({ moved: true });
+    expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+  });
+
+  it('moving a folder with no access.md of its own still previews the loss', async () => {
+    const base = await seeded();
+    const args = { src: KB('Work/Notes'), dest: KB('Legal/Notes') };
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.body).toMatchObject({ accessChanges: true, allowed: true });
+    expect(dry.body.access.before.write).toBe(true);
+    expect(dry.body.access.after.write).toBe(false);
+
+    // A changed answer still asks before it moves.
+    expect((await call(base, 'move_file', args)).body).toMatchObject({ confirmationRequired: true, moved: false });
+    expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
+    expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+  });
+
+  it('what the folder inherited is left behind; what its own access.md gives comes along', async () => {
+    const base = await seeded();
+    const args = { src: KB('Work/Team'), dest: KB('Legal/Team') };
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    // Write is the folder's own and travels; owner came from `Work/`.
+    expect(dry.body.access.before).toMatchObject({ write: true, owner: true });
+    expect(dry.body.access.after).toMatchObject({ write: true, owner: false });
+
+    expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
+    expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+  });
+
+  it('a nested access.md governs where it lands, not the folder above it', async () => {
+    const base = await seeded();
+    const args = { src: KB('Work/Team'), dest: KB('Legal/Team') };
+    const withoutNested = (await call(base, 'move_file', { ...args, dryRun: true })).body.access.after;
+
+    // `Sub/` shuts the caller out and moves too, but it governs `Legal/Team/Sub`.
+    await fs.writeFile(KB('Work/Team/Sub/access.md'), rules(`read:\n  - deny Mover <${MOVER}>\n`));
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.body.access.after).toEqual(withoutNested);
+
+    expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
+    expect(await verbsAt(base, args.dest)).toEqual(withoutNested);
+    // The nested file did land and does govern where it landed: the caller
+    // it shuts out cannot even stat the folder now.
+    expect((await call(base, 'file_stat', { path: KB('Legal/Team/Sub') })).status).toBe(403);
+  });
+
+  it('moving a single file previews as it always did', async () => {
+    const base = await seeded();
+    const args = { src: KB('Sales/deal.md'), dest: KB('Legal/deal.md') };
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.body).toMatchObject({ kind: 'file', descendants: 1 });
+    // Nothing travels with a file but its own bytes, so the answer is the
+    // destination's own rules — what `file_stat` says there already.
+    expect(dry.body.access.after).toEqual(await verbsAt(base, KB('Legal')));
+
+    expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
+    expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+  });
+
+  it('the preview answers the caller\'s own verbs and nothing more', async () => {
+    const base = await seeded();
+    const dry = await call(base, 'move_file', { src: KB('Sales'), dest: KB('Revenue'), dryRun: true });
+
+    expect(Object.keys(dry.body.access).sort()).toEqual(['after', 'before']);
+    for (const side of ['before', 'after'] as const) {
+      expect(Object.keys(dry.body.access[side]).sort()).toEqual(['download', 'owner', 'read', 'write']);
+    }
+  });
+
+  describe('copy_file previews the same way', () => {
+    it('a folder copy counts the copied access.md at the destination', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales'), dest: KB('Sales-Copy') };
+
+      const dry = await call(base, 'copy_file', { ...args, dryRun: true });
+      expect(dry.status).toBe(200);
+      expect(dry.body).toMatchObject({ kind: 'folder', accessChanges: false, copied: false, dryRun: true });
+      expect(dry.body.access.after.owner).toBe(true);
+      expect(dry.body.access.after).toEqual(dry.body.access.before);
+
+      // `copy_file` copies ONE FILE, which the preview says rather than
+      // promising a copy that cannot land — and the call itself refuses with
+      // the same sentence, so preflight and execution never disagree.
+      expect(dry.body.allowed).toBe(false);
+      const run = await call(base, 'copy_file', args);
+      expect(run.status).toBe(400);
+      expect(run.body.error).toBe(dry.body.reason);
+      expect(await fs.exists(args.dest)).toBe(false);
+    });
+
+    it('a file copy previews what the caller will have at the destination', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/deal.md'), dest: KB('Legal/deal.md') };
+
+      const dry = await call(base, 'copy_file', { ...args, dryRun: true });
+      expect(dry.body).toMatchObject({ kind: 'file', descendants: 1, allowed: true, copied: false });
+      expect(dry.body.access.before.write).toBe(true);
+      expect(dry.body.access.after.write).toBe(false);
+      expect(dry.body.accessChanges).toBe(true);
+      expect(await fs.exists(args.dest)).toBe(false);
+
+      expect((await call(base, 'copy_file', args)).body).toMatchObject({ copied: true });
+      expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+      // A copy leaves the source exactly as it was.
+      expect(await verbsAt(base, args.src)).toEqual(dry.body.access.before);
+    });
+
+    it('a destination that is taken is named, and the dry run changes nothing', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/deal.md'), dest: KB('Work/Notes/note.md') };
+
+      const dry = await call(base, 'copy_file', { ...args, dryRun: true });
+      expect(dry.body.allowed).toBe(false);
+      expect(dry.body.reason).toContain('already exists');
+      expect(String(await fs.readFile(KB('Work/Notes/note.md'), { encoding: 'utf-8' }))).toContain('note');
+    });
   });
 });

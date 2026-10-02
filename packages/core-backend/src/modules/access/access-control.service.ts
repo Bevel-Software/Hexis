@@ -19,6 +19,7 @@ import type {
   GrantSource,
   GrantSources,
   PathHolders,
+  PathVerbs,
   ProspectiveHolders,
   ResolvedPrincipal,
 } from './access-control.interface.js';
@@ -31,7 +32,6 @@ import {
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
 import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { synthesizePluginPrincipals } from '../access-model/plugin-principals.js';
 import {
   GROUPS_YAML,
@@ -952,6 +952,50 @@ function resolveDenialSourcesForVerb(
 }
 
 /**
+ * The model as it will be once `fromPath` has been moved or copied to
+ * `toPath`: every `access.md` at or under `fromPath` keyed at the directory
+ * it lands in, since the rules a folder carries travel with its bytes.
+ *
+ * PREVIEW ONLY. Nothing here reads disk and nothing here decides whether an
+ * operation may run — the gates resolve against the model as it IS. This
+ * answers the other question, the one a dry run asks: what will be true
+ * afterwards. Judging the destination as it stands today is what made a
+ * rename warn about losing the owner access the folder's own `access.md` was
+ * about to hand straight back.
+ *
+ * `sourceRemains` is the difference between a copy and a move: a copy leaves
+ * the rules where they were, a move takes them away. It changes the answer
+ * only when the destination resolves through a directory the source
+ * occupied; nothing else consults those keys.
+ */
+function withRelocatedAccessFiles(
+  model: AccessModel,
+  fromPath: string,
+  toPath: string,
+  sourceRemains: boolean,
+): AccessModel {
+  const travelling = [...model.accessFilesByDir].filter(
+    ([dir]) => dir === fromPath || dir.startsWith(`${fromPath}/`),
+  );
+  if (travelling.length === 0) return model;
+  const accessFilesByDir = new Map(model.accessFilesByDir);
+  if (!sourceRemains) for (const [dir] of travelling) accessFilesByDir.delete(dir);
+  for (const [dir, file] of travelling) {
+    const landedDir = `${toPath}${dir.slice(fromPath.length)}`;
+    // A directory that already has an `access.md` keeps it. The operation
+    // would be refused for landing on something that exists long before the
+    // two files could meet, so the model must not invent a merge either.
+    if (accessFilesByDir.has(landedDir)) continue;
+    accessFilesByDir.set(landedDir, {
+      ...file,
+      dir: landedDir,
+      path: landedDir ? `${landedDir}/access.md` : 'access.md',
+    });
+  }
+  return { ...model, accessFilesByDir };
+}
+
+/**
  * Build the repo-root → path chain of directory scopes that govern
  * `relativePath`, e.g. `Knowledge/Sales/Foo.md` →
  * `['', 'Knowledge', 'Knowledge/Sales', 'Knowledge/Sales/Foo.md']`.
@@ -1586,16 +1630,21 @@ export class AccessControlService implements IAccessControl {
   }
 
   /**
-   * The read and write holders of one file at its current path and at a path
-   * it has not moved to yet (see the interface).
+   * The read and write holders of one file or folder at its current path and
+   * at a path it has not moved to yet (see the interface).
    *
-   * A move changes nothing about the file's own frontmatter — that travels
-   * with the bytes — and everything about the folder chain above it. So the
-   * hypothetical side is the ordinary resolution with the destination path
-   * substituted: the same model, the same own-entries (read from the SOURCE,
-   * since nothing sits at the destination to read), resolved against the
-   * destination's ancestors. One model load and one file read serve all four
-   * lookups.
+   * A move changes nothing about what the thing itself carries — a file's
+   * frontmatter and a folder's `access.md` files travel with the bytes — and
+   * everything about the folder chain above it. So the hypothetical side is
+   * the ordinary resolution at the destination path, over what travels:
+   *
+   * - a FILE's own-entries, read from the SOURCE (nothing sits at the
+   *   destination to read), layered over the destination's ancestors;
+   * - a FOLDER's `access.md` files, keyed at the directories they land in
+   *   (`withRelocatedAccessFiles`). A folder has no frontmatter of its own,
+   *   so it passes none.
+   *
+   * One model load and one file read serve all four lookups.
    */
   async prospectiveHolders(
     workspaceId: string,
@@ -1604,31 +1653,58 @@ export class AccessControlService implements IAccessControl {
   ): Promise<ProspectiveHolders> {
     const model = await this.loadModel(workspaceId);
     const repoDir = await this.repoDir(workspaceId);
-    // A FILE question only. A folder carries its own `access.md` — which moves
-    // with it and governs everything under it — so resolving it as a file
-    // would read frontmatter it does not have and omit the rules it does,
-    // naming principals that are not the ones a folder move changes. Refuse
-    // rather than answer the wrong question convincingly.
-    //
-    // Only absence is an answer here (see `isAbsence`): a probe that failed on
-    // permissions or I/O does not say "this is a file", and folding it into
-    // one would let the very case above through on an unreadable source.
+    // Which of the two shapes travels is decided here. Only absence is an
+    // answer (see `isAbsence`): a probe that failed on permissions or I/O
+    // does not say "this is a file", and reading it as one would resolve a
+    // folder through frontmatter it does not have.
     const fromStat = await fs.stat(path.join(repoDir, fromPath)).catch((err: unknown) => {
       if (isAbsence(err)) return null;
       throw err;
     });
-    if (fromStat?.isDirectory()) {
-      throw new WorkflowDomainError(
-        'prospective access answers for a file, not a folder',
-        400,
-      );
-    }
-    const own = await this.readOwnEntries(repoDir, fromPath);
-    const holdersAt = (relativePath: string): PathHolders => ({
-      read: eligibleHoldersResolved(model, 'read', relativePath, own),
-      write: eligibleHoldersResolved(model, 'write', relativePath, own),
+    const isFolder = fromStat?.isDirectory() === true;
+    const own = isFolder ? null : await this.readOwnEntries(repoDir, fromPath);
+    const after = isFolder ? withRelocatedAccessFiles(model, fromPath, toPath, false) : model;
+    const holdersAt = (m: AccessModel, relativePath: string): PathHolders => ({
+      read: eligibleHoldersResolved(m, 'read', relativePath, own),
+      write: eligibleHoldersResolved(m, 'write', relativePath, own),
     });
-    return { before: holdersAt(fromPath), after: holdersAt(toPath) };
+    return { before: holdersAt(model, fromPath), after: holdersAt(after, toPath) };
+  }
+
+  /**
+   * The caller's own verbs at `toPath` as they will be once `fromPath` has
+   * been moved or copied there (see the interface).
+   *
+   * Identical to asking `canRead`/`canWrite`/`canDownload`/`canOwner` at
+   * `toPath` whenever nothing travels — a single file, or a folder with no
+   * `access.md` of its own — so the cases this was not written for answer
+   * exactly as they always did.
+   */
+  async previewAccessAfterRelocation(
+    workspaceId: string,
+    userEmail: string,
+    fromPath: string,
+    toPath: string,
+    opts?: { sourceRemains?: boolean },
+  ): Promise<PathVerbs> {
+    const model = withRelocatedAccessFiles(
+      await this.loadModel(workspaceId),
+      fromPath,
+      toPath,
+      opts?.sourceRemains === true,
+    );
+    // Read at the DESTINATION, exactly as the four gates do: nothing is there
+    // yet, so this is null in practice, and a single file therefore previews
+    // as it always has. Reading the source's frontmatter instead would change
+    // the one case the ticket asks to leave alone.
+    const own = await this.readOwnEntries(await this.repoDir(workspaceId), toPath);
+    const machineOwned = this.machineOwnedWriteRule(userEmail, toPath);
+    return {
+      read: canReadResolved(model, userEmail, toPath, own),
+      write: machineOwned ?? hasPermissionResolved(model, 'write', userEmail, toPath, own),
+      download: hasPermissionResolved(model, 'download', userEmail, toPath, own),
+      owner: hasPermissionResolved(model, 'owner', userEmail, toPath, own),
+    };
   }
 
   async eligibleWriterEmails(

@@ -370,25 +370,23 @@ export function createAccessRoutes(
   /**
    * GET /api/workspace/:id/access/prospective?from=<file>&toDir=<folder>
    *
-   * Who can open and who can edit one file where it is, and where a move
-   * would put it — `{ before, after }`, each `{ read, write }` lists of
-   * principals named as their grants name them. `toDir` is the destination
-   * FOLDER (`''` is the repo root); the file keeps its name, so the route
-   * derives the destination path itself rather than trusting a second one.
+   * Who can open and who can edit one file OR FOLDER where it is, and where
+   * a move would put it — `{ before, after }`, each `{ read, write }` lists
+   * of principals named as their grants name them. `toDir` is the
+   * destination FOLDER (`''` is the repo root); the thing keeps its name, so
+   * the route derives the destination path itself rather than trusting a
+   * second one.
    *
    * The destination path does not exist yet, which is why this cannot be two
-   * calls to `GET /access`: the resolver is asked for a hypothetical, with
-   * the file's own frontmatter (read where the file actually is) layered over
-   * the destination's folder chain. Nothing is written and nothing is moved.
+   * calls to `GET /access`: the resolver is asked for a hypothetical, over
+   * what the move carries — a file's own frontmatter, or the `access.md`
+   * files inside a folder, at the paths they land on. Nothing is written and
+   * nothing is moved.
    *
    * Gated like the sibling `overrides` route rather than the permissive
-   * `GET /access`: the caller must resolve read on the file being moved. The
-   * lists name people, and someone who cannot see the file has no business
+   * `GET /access`: the caller must resolve read on the thing being moved. The
+   * lists name people, and someone who cannot see it has no business
    * learning who can.
-   *
-   * `from` must be a FILE. A folder carries its own `access.md` and governs
-   * everything under it, which is a different question; the resolver refuses
-   * one with a 400 rather than answering it as if it were a file.
    */
   router.get('/workspace/:id/access/prospective', async (req, res) => {
     const user = await requireUser(req, res);

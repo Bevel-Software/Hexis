@@ -877,6 +877,113 @@ export function registerWorkspaceTools(
     return { read, write, download, owner };
   };
 
+  /** Whether any one of the caller's four verdicts differs between the two sides of a preview. */
+  const verbsDiffer = (before: AccessVerbs, after: AccessVerbs): boolean =>
+    (Object.keys(before) as (keyof AccessVerbs)[]).some((v) => before[v] !== after[v]);
+
+  /**
+   * Why `copy_file` will not take a folder. One sentence, said by the dry
+   * run and by the call itself, so the preflight and the execution never
+   * disagree — the rule this whole section is built on.
+   */
+  const folderCopyRefusal = (src: string): string =>
+    `"${src}" is a folder; copy_file copies one file. Copy its files one by one, or move the folder with move_file.`;
+
+  /**
+   * The caller's verdicts at `dest` as they will be once `src` has been
+   * moved (or, with `sourceRemains`, copied) there — the `after` half of a
+   * move's or copy's preview.
+   *
+   * `accessAt(dest)` is the wrong answer to that question for a folder: the
+   * destination on disk has neither the folder nor the `access.md` files it
+   * carries, so it describes the destination's PARENT. A rename of a folder
+   * that names the caller owner in its own `access.md` therefore warned
+   * about losing owner access the move was about to hand straight back, and
+   * a warning that is wrong is a warning people learn to click through.
+   *
+   * Preview only, like everything else in this section: it answers what the
+   * caller WILL have, never whether they may do it. The write verdicts that
+   * gate the move are `writeBlocked` and the lock gate, both of which read
+   * the tree as it is.
+   */
+  const accessAfter = async (
+    branch: string,
+    ctx: ToolContext,
+    src: string,
+    dest: string,
+    opts?: { sourceRemains?: boolean },
+  ): Promise<AccessVerbs> => {
+    const from = toKbRelative(src, kbDirName);
+    const to = toKbRelative(dest, kbDirName);
+    // Outside the repository there are no rules to carry, and none to land
+    // among — the same answer `accessAt` gives for such a path.
+    if (from === null || to === null) return accessAt(branch, ctx, dest);
+    return accessControl.previewAccessAfterRelocation(
+      workspaceIdForBranch(branch),
+      ctx.user.email,
+      from,
+      to,
+      opts,
+    );
+  };
+
+  /**
+   * What `copy_file`'s dry run answers: the same impact shape `move_file`
+   * previews, over a copy's own rules.
+   *
+   * A copy LEAVES the source where it is, so the rules it carries are
+   * duplicated rather than relocated (`sourceRemains`) — otherwise the two
+   * previews ask the same question. The order of the refusals is `copy_file`'s
+   * own and is load-bearing: the write verdict on the destination outranks
+   * "that name is taken", because a caller who may not write a folder must
+   * not learn what is in it from a refusal.
+   *
+   * A folder source is reported as the refusal it is. `copy_file` copies one
+   * file; the preview says so rather than promising a copy that would fail,
+   * and still answers `access.after` for the folder it was asked about.
+   *
+   * The source IS probed up front here, which the call itself does not do —
+   * what kind of thing is moving, and how much of it, is the first half of
+   * the impact, and it is a fact about a path the caller named. The ordering
+   * the call protects is the one above: nothing about the DESTINATION is
+   * read until the write verdict on it has been taken.
+   */
+  const copyImpact = async (branch: string, ctx: ToolContext, src: string, dest: string) => {
+    const fs = await ctx.getFilesystem(branch);
+    const kind = await kindOf(fs, src);
+    if (kind === null) throw notFound(src, 'Nothing to copy');
+    const srcFiles = kind === 'folder' ? (await filesUnder(fs, src)).files : [src];
+    const [before, after] = await Promise.all([
+      accessAt(branch, ctx, src),
+      accessAfter(branch, ctx, src, dest, { sourceRemains: true }),
+    ]);
+    const blocked = await writeBlocked(branch, ctx, [dest]);
+    const occupiedBy = blocked.length === 0
+      ? await existingAt(await workspaceRoot(branch, ctx), dest)
+      : null;
+    const reason = blocked.length > 0
+      ? `You may not write "${dest}", so the copy cannot run.`
+      : occupiedBy !== null
+        ? entryExistsMessage(occupiedBy, dest)
+        : kind === 'folder'
+          ? folderCopyRefusal(src)
+          : undefined;
+    return {
+      src,
+      dest,
+      kind,
+      // The placeholder travels with its folder, but it is never content —
+      // counted as `move_file` counts it.
+      descendants: srcFiles.filter((f) => !isFolderPlaceholder(f)).length,
+      access: { before, after },
+      accessChanges: verbsDiffer(before, after),
+      allowed: reason === undefined,
+      ...(reason !== undefined ? { reason } : {}),
+      dryRun: true,
+      copied: false,
+    };
+  };
+
   /**
    * The paths among `paths` the caller may NOT write, judged exactly as the
    * lock gate judges them (`WorkflowService.acquireLock`): on a protected
@@ -2338,7 +2445,7 @@ export function registerWorkspaceTools(
     description: () =>
       'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Lands as a delete + create, committed + pushed as you. ' +
       `Rules: the destination must not exist — a move never overwrites a file or merges into a folder; a platform file (\`access.md\` or \`.bevelignore\` in any folder, \`roles.yaml\` or \`${kb.layout.agentsFile}\` at the repository root) is refused with "<name> is a platform file and stays in its folder." — a folder that moves takes its own platform files along, still in their folder; a platform folder (the repository root or a reserved root folder such as \`KnowledgeBase/\`) and git metadata are refused; a move cannot create a platform file or folder at \`dest\` either (renaming a note to \`access.md\` is refused); a path through a symbolic link is refused, since links are never followed; on a protected branch you must be able to write both ends — for a folder, every file under it at its old and its new path. ` +
-      'Access follows the destination folder. Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination. ' +
+      'Access follows the destination folder. Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the move has landed, with every `access.md` inside a moved folder counted at its new place. ' +
       'A move whose `accessChanges` is true runs only with `confirm: true`; without it the call moves nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm.',
     inputs: {
       type: 'object',
@@ -2360,8 +2467,8 @@ export function registerWorkspaceTools(
         dest: str('Destination path (echoes the input).'),
         kind: str('`file` or `folder`.'),
         descendants: int('Files that move: 1 for a file, the file count under a folder.'),
-        access: { type: 'object', description: 'Your `{ read, write, download, owner }` at the source (`before`) and destination (`after`).' },
-        accessChanges: { type: 'boolean', description: 'True when any of your verdicts differs between source and destination.' },
+        access: { type: 'object', description: 'Your `{ read, write, download, owner }` at the source (`before`) and at the destination once the move has landed (`after`).' },
+        accessChanges: { type: 'boolean', description: 'True when any of your verdicts differs between `before` and `after`.' },
         allowed: { type: 'boolean', description: 'Whether the move may run.' },
         reason: str('Why it may not, when `allowed` is false.'),
         dryRun: { type: 'boolean', description: 'True on a dry run.' },
@@ -2401,8 +2508,13 @@ export function registerWorkspaceTools(
         writePolicy.assertPathWritable(ctx.sessionId, dest + f.slice(src.length));
       }
 
-      const [before, after] = await Promise.all([accessAt(branch, ctx, src), accessAt(branch, ctx, dest)]);
-      const accessChanges = (Object.keys(before) as (keyof AccessVerbs)[]).some((v) => before[v] !== after[v]);
+      // `after` is the destination as it WILL be — with the `access.md` files
+      // under `src` counted where they land. See `accessAfter`.
+      const [before, after] = await Promise.all([
+        accessAt(branch, ctx, src),
+        accessAfter(branch, ctx, src, dest),
+      ]);
+      const accessChanges = verbsDiffer(before, after);
       // The placeholder moves with its folder, but it is never content.
       const descendants = srcFiles.filter((f) => !isFolderPlaceholder(f)).length;
       // Neither end may be the platform's own: a move neither takes a platform
@@ -2497,13 +2609,15 @@ export function registerWorkspaceTools(
     name: 'copy_file',
     gated: true,
     description:
-      'Copy a workspace file to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you.',
+      'Copy a workspace FILE to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you. ' +
+      'Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the copy has landed, with every `access.md` inside a copied folder counted at its new place.',
     inputs: {
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
         src: wsPath(kbDirName, 'Source path'),
         dest: wsPath(kbDirName, 'Destination path — must not exist yet'),
+        dryRun: { type: 'boolean', description: 'Answer with the impact and change nothing.' },
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'src', 'dest'],
@@ -2511,7 +2625,18 @@ export function registerWorkspaceTools(
     },
     outputs: {
       type: 'object',
-      properties: { src: str('Source path (echoes the input).'), dest: str('Destination path (echoes the input).'), copied: { type: 'boolean', description: 'Always true on success.' } },
+      properties: {
+        src: str('Source path (echoes the input).'),
+        dest: str('Destination path (echoes the input).'),
+        kind: str('`file` or `folder` (dry run only).'),
+        descendants: int('Files the copy would carry: 1 for a file, the file count under a folder (dry run only).'),
+        access: { type: 'object', description: 'Your `{ read, write, download, owner }` at the source (`before`) and at the destination once the copy has landed (`after`) — dry run only.' },
+        accessChanges: { type: 'boolean', description: 'True when any of your verdicts differs between `before` and `after` (dry run only).' },
+        allowed: { type: 'boolean', description: 'Whether the copy may run (dry run only).' },
+        reason: str('Why it may not, when `allowed` is false.'),
+        dryRun: { type: 'boolean', description: 'True on a dry run.' },
+        copied: { type: 'boolean', description: 'True once the copy landed; false on a dry run.' },
+      },
       required: ['src', 'dest', 'copied'],
     },
     write: true,
@@ -2535,6 +2660,7 @@ export function registerWorkspaceTools(
       // own containment check: a path with a `..` segment must not reach
       // `lstat` outside the workspace, even to be told a name is taken.
       assertPlainPath(dest);
+      if (a.dryRun === true) return copyImpact(branch, ctx, src, dest);
       // The write verdict comes FIRST, for the reason `move_file` gives at
       // length: "already exists" is a fact about the destination folder, and a
       // caller who may not write there must not be told it. The lock gate
@@ -2571,6 +2697,12 @@ export function registerWorkspaceTools(
       try {
         await asEntryExists(() => fs.copyFile(src, dest));
       } catch (err) {
+        // The filesystem's own "that is a directory" becomes the sentence the
+        // dry run predicts, instead of escaping as a 500 carrying the
+        // server's absolute path.
+        if ((err as { name?: string } | null)?.name === 'IsDirectoryError') {
+          throw new ToolError(folderCopyRefusal(src), 400);
+        }
         const missing = isAbsence(err) || (err as { name?: string }).name === 'FileNotFoundError';
         if (missing) {
           throw (await kindOf(fs, src)) === null

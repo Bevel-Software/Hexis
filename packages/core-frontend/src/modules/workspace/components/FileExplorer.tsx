@@ -1845,9 +1845,12 @@ export function TreeChrome({
   // nothing about access it cannot resolve. `kbDirName` alone is the KB root.
   const insideKb = (path: string) =>
     !!kbDirName && (path === kbDirName || path.startsWith(`${kbDirName}/`));
+  // Folders are asked about as well as files. The rules a folder carries are
+  // the `access.md` files inside it, and the resolver counts them at the
+  // paths they land on — so a rename of a folder that grants its own access
+  // answers "nothing changes", which is what happens.
   const accessLookup =
     moveRequest && workspaceId && kbDirName
-    && !moveRequest.sourceIsDirectory
     && moveRequest.sourcePath.startsWith(`${kbDirName}/`)
     && insideKb(moveRequest.targetDir)
       ? moveRequest

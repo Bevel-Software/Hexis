@@ -2534,21 +2534,26 @@ describe('FileExplorer: delete and move ask first', () => {
       expect(screen.getAllByText('Engineering: can no longer open')).toHaveLength(2);
     });
 
-    it('asks nothing about a folder being dragged, and says only what it always said', async () => {
-      const { moveEntry } = renderExplorer({ fileTree: TREE });
-      // A folder's access is its own access.md plus every file under it — not
-      // the question this lookup answers, so it is not asked.
+    it('asks about a folder being dragged too, and names what its move costs', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE, workspaceId: 'main' });
+      // A folder's rules are the `access.md` files inside it, and they travel
+      // with it — the resolver counts them where they land, so the question
+      // is worth asking for a folder as much as for a file.
+      answerAccess({ read: [group('Engineering')] }, {});
       await dropOn('Sales', `${KB}/KnowledgeBase/Legal/Old`, 'directory');
-
-      const dialog = screen.getByRole('dialog');
-      expect(dialog).toHaveTextContent(
-        "Move Old to Sales? Access to it will follow Sales' rules from now on.",
+      await waitFor(() =>
+        expect(
+          mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),
+        ).toBe(true),
       );
-      expect(screen.queryByText('Will lose access:')).not.toBeInTheDocument();
-      expect(screen.queryByText("Couldn't work out the access change.")).not.toBeInTheDocument();
-      expect(
-        mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),
-      ).toBe(false);
+      await act(async () => {});
+
+      const url = mockAuthFetch.mock.calls
+        .map((c) => String(c[0]))
+        .find((u) => u.includes('/access/prospective'))!;
+      expect(url).toContain(`from=${encodeURIComponent('KnowledgeBase/Legal/Old')}`);
+      expect(url).toContain(`toDir=${encodeURIComponent('KnowledgeBase/Sales')}`);
+      expect(screen.getByText('Engineering: can no longer open')).toBeInTheDocument();
 
       // And it is still an ordinary move.
       await act(async () => {
@@ -2558,6 +2563,36 @@ describe('FileExplorer: delete and move ask first', () => {
         `${KB}/KnowledgeBase/Legal/Old`,
         `${KB}/KnowledgeBase/Sales/Old`,
       );
+    });
+
+    /**
+     * Juan's case, in the dialog: the folder carries its own `access.md`, so
+     * the resolver answers the same holders on both sides and there is
+     * nothing to warn about. The dialog used to say nothing here because it
+     * asked nothing; now it says nothing because the answer says nothing.
+     */
+    it('names no loss when a folder that carries its own rules is moved', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess(
+        { read: [group('Engineering')], write: [group('Engineering')] },
+        { read: [group('Engineering')], write: [group('Engineering')] },
+      );
+      const dialog = await (async () => {
+        await dropOn('Sales', `${KB}/KnowledgeBase/Legal/Old`, 'directory');
+        await waitFor(() =>
+          expect(
+            mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),
+          ).toBe(true),
+        );
+        await act(async () => {});
+        return screen.getByRole('dialog');
+      })();
+
+      // Not "could not work it out" and not a warning either: the question
+      // was asked, answered, and the answer is that nothing changes.
+      expect(dialog).toHaveTextContent("Move Old to Sales? Nobody's access changes.");
+      expect(screen.queryByText('Will lose access:')).not.toBeInTheDocument();
+      expect(screen.queryByText("Couldn't work out the access change.")).not.toBeInTheDocument();
     });
 
     it('never decorates the next move with the last one’s answer', async () => {

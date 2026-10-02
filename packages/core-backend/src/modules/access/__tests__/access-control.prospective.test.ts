@@ -9,11 +9,12 @@ import { AccessControlService } from '../access-control.service.js';
 import { holderPrincipals } from '../access-view.js';
 
 /**
- * `prospectiveHolders`: who can open and edit a file where it sits, and who
- * could once a move puts it somewhere else. Driven over a real on-disk tree
- * through the public resolver, because the whole point is that the "after"
- * side must be the SAME resolution as a real one — the destination's folder
- * chain with the file's own frontmatter on top — for a path that does not
+ * `prospectiveHolders`: who can open and edit a file or folder where it
+ * sits, and who could once a move puts it somewhere else. Driven over a real
+ * on-disk tree through the public resolver, because the whole point is that
+ * the "after" side must be the SAME resolution as a real one — the
+ * destination's folder chain with whatever travels laid over it, a file's own
+ * frontmatter or a folder's `access.md` files — for a path that does not
  * exist yet and therefore cannot be asked for in the ordinary way.
  */
 
@@ -136,23 +137,73 @@ describe('AccessControlService.prospectiveHolders', () => {
     expect(holderPrincipals(before.read)).toContainEqual({ kind: 'group', name: 'Engineering' });
   });
 
-  it('refuses a folder source rather than resolving it as a file', async () => {
+  /**
+   * A folder carries its own `access.md`, and that file MOVES WITH IT. The
+   * resolver used to refuse the question rather than answer it as if the
+   * folder were a file — the right refusal for the wrong reason, since the
+   * answer it could not give is the one a folder move actually needs.
+   */
+  it('answers a folder source with the rules it carries, at the path they land on', async () => {
     const svc = await makeService(TREE);
 
-    // `Knowledge/Legal` carries its own access.md and governs everything under
-    // it. Resolved as a file it would report the rules of the folder ABOVE it
-    // and none of its own — a confident, wrong answer.
-    await expect(
-      svc.prospectiveHolders(workspaceId, 'Knowledge/Legal', 'Knowledge/Sales/Legal'),
-    ).rejects.toThrow(/folder/i);
+    const { before, after } = await svc.prospectiveHolders(
+      workspaceId,
+      'Knowledge/Legal',
+      'Knowledge/Sales/Legal',
+    );
+
+    // `Knowledge/Legal/access.md` travels, so Engineering keeps both verbs at
+    // the new path — the rules the folder brings, not the ones it is landing
+    // among. Read as a FILE the answer would have been Product's, from
+    // `Knowledge/Sales/access.md` alone.
+    expect(names(before.read)).toContain('Engineering');
+    expect(names(before.write)).toContain('Engineering');
+    expect(names(after.read)).toContain('Engineering');
+    expect(names(after.write)).toContain('Engineering');
+  });
+
+  it('leaves the old parent behind and picks the new one up', async () => {
+    const svc = await makeService({
+      ...TREE,
+      // Engineering's write on Team comes from Legal above it, not from Team.
+      'Knowledge/Legal/Team/access.md': rules('read:\n  - Product\n'),
+      'Knowledge/Legal/Team/plan.md': '# Plan\n',
+    });
+
+    const { before, after } = await svc.prospectiveHolders(
+      workspaceId,
+      'Knowledge/Legal/Team',
+      'Knowledge/Sales/Team',
+    );
+
+    expect(names(before.write)).toContain('Engineering');
+    // Sales grants nobody write, and Team's own file grants only read — so
+    // the write Team held by inheritance does not come along.
+    expect(names(after.write)).not.toContain('Engineering');
+    expect(names(after.read)).toContain('Product');
+  });
+
+  it('a rename of a folder that grants its own access changes nothing', async () => {
+    const svc = await makeService(TREE);
+
+    const { before, after } = await svc.prospectiveHolders(
+      workspaceId,
+      'Knowledge/Legal',
+      'Knowledge/Revenue',
+    );
+
+    expect(names(after.read)).toEqual(names(before.read));
+    expect(names(after.write)).toEqual(names(before.write));
   });
 
   it('a probe that fails for any reason but absence throws, never a silent "file"', async () => {
     const svc = await makeService(TREE);
-    // A disk fault (EACCES here) must never read as "not a directory": that is
-    // exactly how a folder source would slip past the refusal above, and the
-    // answer it slips into names the wrong principals. Spied rather than
-    // staged with mode bits, so the property holds as root and on Windows too.
+    // A disk fault (EACCES here) must never read as "not a directory": the
+    // probe is what chooses between the two resolutions, so a folder read as
+    // a file would be answered with frontmatter it does not have and without
+    // the `access.md` files it carries — the wrong principals, named with
+    // the same confidence as the right ones. Spied rather than staged with
+    // mode bits, so the property holds as root and on Windows too.
     const real = fs.stat;
     const spy = vi.spyOn(fs, 'stat').mockImplementation(((p: string) =>
       String(p).endsWith('contract.md')
