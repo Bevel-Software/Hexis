@@ -8,7 +8,6 @@ import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '
 import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   validateRelativePath,
-  validateFilename,
   FOLDER_PLACEHOLDER,
   isFolderPlaceholder,
   entryExistsMessage,
@@ -26,6 +25,7 @@ import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { assertRepoRootNameFree, normalizeWorkspacePath } from '../kb-fs/repo-path.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
+import { isZipNoiseEntry, zipEntryName, zipEntryNameRefusal, zipEntrySegments } from './zip-entry-rules.js';
 import {
   GitInternalsError,
   PathNotFoundError,
@@ -1948,43 +1948,22 @@ export class WorkspaceService implements IWorkspaceService {
         continue;
       }
       processedCount++;
-      const rawName = entry.entryName.replace(/\\/g, '/');
+      const rawName = zipEntryName(entry.entryName);
 
-      if (
-        rawName.startsWith('__MACOSX/') ||
-        rawName === '__MACOSX' ||
-        rawName.endsWith('/.DS_Store') ||
-        rawName === '.DS_Store' ||
-        /(^|\/)\._/.test(rawName)
-      ) {
-        continue;
-      }
+      if (isZipNoiseEntry(rawName)) continue;
 
-      if (!rawName || rawName.startsWith('/') || /(^|\/)\.\.($|\/)/.test(rawName)) {
-        skipped.push({ path: rawName || '(empty)', reason: 'Invalid path' });
-        continue;
-      }
-
-      // An archive never writes into the git folder, whatever the entry's spelling.
-      if (hasGitInternalsSegment(rawName)) {
-        skipped.push({ path: rawName, reason: new GitInternalsError().message });
+      // What an entry's NAME may be — invalid path, the git folder in any
+      // spelling, a segment no filesystem keeps intact — is `zip-entry-rules`,
+      // so `apply_file_upload` judges the same names by the same rules rather
+      // than by a second copy of them.
+      const nameRefusal = zipEntryNameRefusal(rawName);
+      if (nameRefusal !== null) {
+        skipped.push({ path: rawName || '(empty)', reason: nameRefusal });
         continue;
       }
 
       const trimmed = rawName.replace(/\/+$/, '');
-      const segments = trimmed.split('/').filter((s) => s.length > 0);
-      let invalidReason: string | null = null;
-      for (const segment of segments) {
-        const reason = validateFilename(segment);
-        if (reason) {
-          invalidReason = reason;
-          break;
-        }
-      }
-      if (invalidReason) {
-        skipped.push({ path: rawName, reason: invalidReason });
-        continue;
-      }
+      const segments = zipEntrySegments(rawName);
 
       const targetAbsolute = path.resolve(destAbsolute, ...segments);
       const destRoot = path.resolve(destAbsolute);

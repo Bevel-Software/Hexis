@@ -4,6 +4,10 @@ import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
 import { createAuthRoutes } from '../modules/auth/auth.routes.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
+import {
+  createAgentUploadRoutes,
+  isAgentUploadRawBodyPath,
+} from '../modules/workspace/agent-upload.routes.js';
 import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals.middleware.js';
 import { startCore } from './lifecycle.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
@@ -210,7 +214,14 @@ export async function createCoreServer(
   // refused with its own 403, never parsed first (and answered 400 or 413).
   app.use(createWriteGateMiddleware(core.writeAccess));
   app.use((req, res, next) => {
-    if (jsonExemptPaths.has(req.path) || isSyncRawBodyPath(req.path)) return next();
+    // The agent upload route is exempt for the same reason `/api/sync` is:
+    // whoever needs the EXACT bytes has to see them before any parser can
+    // drain the stream. `curl --data-binary @file.zip` with a JSON
+    // content-type is a request an agent can make, and the parser would
+    // otherwise leave the handler nothing to store.
+    if (jsonExemptPaths.has(req.path) || isSyncRawBodyPath(req.path) || isAgentUploadRawBodyPath(req.path)) {
+      return next();
+    }
     return globalJson(req, res, next);
   });
 
@@ -445,7 +456,14 @@ export async function createCoreServer(
   // `get_skill`. Warnings only; it never refuses a save.
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
   registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore);
+  // The agent upload route, on the same router as the tool endpoints so it
+  // mounts ahead of the JWT `/api` mounts below — but WITHOUT `toolAuth`: its
+  // whole credential is the single-use token in its path, which is the point
+  // (an agent's `curl` carries no session and no connection key). It resolves
+  // no workspace and writes into none; every access, platform-file and branch
+  // rule is applied later by `apply_file_upload`.
+  toolsRouter.use(createAgentUploadRoutes({ uploads: core.agentUploadStore }));
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.

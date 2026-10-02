@@ -90,6 +90,26 @@ export function platformFileCreationRefusal(pathOrName: string): string {
 }
 
 /**
+ * The sentence an UPLOAD is refused with when one of its paths would land a
+ * platform file — a zip carrying an `access.md`, a `.bevelignore`, a
+ * `roles.yaml` or the agent guide, or a single file sent under one of those
+ * names.
+ *
+ * Its own sentence rather than the move's, because the thing being kept out is
+ * different: a move cannot CREATE a platform file, and an upload cannot land
+ * one at all, in either sense — the bytes arrive outside every gate that reads
+ * these files as configuration. What governs a folder's access and which roles
+ * exist has to be written where the write is checked, so the refusal names the
+ * two tools that check it.
+ */
+export function platformFileUploadRefusal(pathOrName: string): string {
+  return (
+    `${baseName(pathOrName)} is a platform file and is never landed by an upload — ` +
+    'change it with edit_file or write_file, where the change is checked.'
+  );
+}
+
+/**
  * Whether `repoRelativeDir` is a folder the platform owns rather than content:
  * the repository root itself, or one of its reserved top-level folders
  * (`KnowledgeBase/`, `Skills/`, `Plugins/`, `Data/`, …). Deleting or moving
