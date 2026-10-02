@@ -3,6 +3,7 @@ import type { CodeModeUtcpClient } from '@utcp/code-mode';
 import { utcpNameToTsInterfaceName, findToolsByNames } from './code-mode-names.js';
 import { toCallToolResult, toolError, describeToolFailure, omitImagePayloads } from './results.js';
 import { retiredToolInFailure, retiredToolChainFailure } from './retired-tools.js';
+import { withCallExample } from './tool-interface.js';
 
 /**
  * Code-mode meta-tools exposed ALONGSIDE the direct tools. They let an external
@@ -27,13 +28,14 @@ import { retiredToolInFailure, retiredToolChainFailure } from './retired-tools.j
  * the merged one.
  */
 const CALL_TOOL_CHAIN_DESCRIPTION = [
-  'Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function. Call tools as `KNOWLEDGE_BASE.<tool>({ body: { ...args } })` with NO `await` (results are already resolved), and `return` the final value. The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax).',
+  'Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function, with NO `await` (results are already resolved), and `return` the final value. The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax).',
+  'There is NO single calling shape: some tools take their arguments under a `body` object, others take them flat. Call each tool exactly as the `Call:` line at the top of its own description shows — that line is generated from the tool\'s input schema. Arguments that do not match the schema are refused before anything is sent, with the tool\'s interface in the answer.',
   'Discover first: `list_tools` lists every tool in callable form (e.g. `KNOWLEDGE_BASE.read_file`); `tools_info` returns their exact argument + return shapes — do not guess. Batch multiple tool calls into one chain to avoid a round-trip per call. The chain runs with your own connection key, so it can only reach the tools you can already call directly.',
   'Large results: if the combined result+logs exceed `max_output_size` (default 200000 chars) the full JSON is spilled to a shared store and you get back a `__tool_chain_spill__/…` ref instead. Read it with `read_file` (pass that ref as `path` — `branch` is ignored — plus `offset`/`limit` to slice it), or better, re-run a narrower chain that returns only what you need.',
   'Images: image files are returned as native MCP image content on a DIRECT `read_file` call only — a chained `read_file` of an image yields `{ image_omitted: true, note }` instead of the picture, so call it outside the chain to actually see the image.',
 ].join('\n\n');
 
-export const CODE_MODE_META_TOOLS: McpTool[] = [
+const META_TOOLS: McpTool[] = [
   {
     name: 'list_tools',
     description:
@@ -68,6 +70,21 @@ export const CODE_MODE_META_TOOLS: McpTool[] = [
     } as McpTool['inputSchema'],
   },
 ];
+
+/**
+ * The three tools this surface serves itself, each with its call example ahead
+ * of its description.
+ *
+ * They are called directly over MCP rather than from inside a chain, so the
+ * example shows that shape — the tool's name and its required arguments, with
+ * no namespace in front — and it comes from the same generator as every other
+ * tool's, so "every description opens with its call" holds with no exception
+ * an agent has to learn.
+ */
+export const CODE_MODE_META_TOOLS: McpTool[] = META_TOOLS.map((t) => ({
+  ...t,
+  description: withCallExample(t.description, t.name, t.inputSchema),
+}));
 
 export const META_TOOL_NAMES: ReadonlySet<string> = new Set(CODE_MODE_META_TOOLS.map((t) => t.name));
 
@@ -132,8 +149,18 @@ export async function dispatchMetaTool(
       const resolved = await findToolsByNames(client, names);
       for (const n of names) {
         const found = resolved.get(n);
-        if (found) interfaces.push(client.toolToTypeScriptInterface(found.tool));
-        else notFound.push(n);
+        // The call example travels with the interface too: `tools_info` is
+        // where an agent writing a chain reads the shape, and reading it there
+        // without the example is how a flat tool's arguments end up in a
+        // `body`. Added to a COPY — the repository's tool is not ours to edit.
+        if (found) {
+          interfaces.push(
+            client.toolToTypeScriptInterface({
+              ...found.tool,
+              description: withCallExample(found.tool.description, found.utcpName, found.tool.inputs),
+            }),
+          );
+        } else notFound.push(n);
       }
       return toCallToolResult({ interfaces: interfaces.join('\n\n'), not_found: notFound });
     }

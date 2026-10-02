@@ -45,6 +45,8 @@ export {
   mcpImageResult,
   isMcpImageResult,
   omitImagePayloads,
+  NOT_JSON_KIND,
+  pageInsteadOfJson,
 } from './results.js';
 
 export {
@@ -56,6 +58,25 @@ export {
 } from './meta-tools.js';
 
 export { registerManual, dispatchToolCall } from './dispatch.js';
+
+export {
+  CALL_LINE_PREFIX,
+  ARGUMENTS_DO_NOT_MATCH_KIND,
+  BODY_AT_TOP_LEVEL_LINE,
+  callExample,
+  exampleArguments,
+  callLine,
+  withCallExample,
+  splitCallLine,
+  describeInterface,
+  argumentsDoNotMatchMessage,
+  compileCheck,
+  type CompiledCheck,
+} from './tool-interface.js';
+
+export { installCallGuards, argumentRefusal, ArgumentsDoNotMatchError } from './call-guards.js';
+
+export { installGetHasNoBody, withoutBodyOnGet, NO_BODY_FIELD } from './get-has-no-body.js';
 
 export {
   RETIRED_TOOL_MESSAGES,

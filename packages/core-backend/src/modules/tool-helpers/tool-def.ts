@@ -49,6 +49,12 @@ export interface ToolDefSpec {
  * placeholders the consumer resolves (public URL + key for external; loopback +
  * internal token for our agent), so one def serves both surfaces.
  */
+/** Does this flat input schema require any argument at all? */
+function requiresAnything(inputs: JsonSchema): boolean {
+  const required = (inputs as { required?: unknown }).required;
+  return Array.isArray(required) && required.length > 0;
+}
+
 export function toolDef(spec: ToolDefSpec): UtcpTool {
   return toolSerializer.validateDict({
     name: spec.name,
@@ -56,7 +62,14 @@ export function toolDef(spec: ToolDefSpec): UtcpTool {
     inputs: {
       type: 'object',
       properties: { body: spec.inputs },
-      required: ['body'],
+      // The envelope is required only when something inside it is. A tool
+      // whose flat inputs are all optional is legitimately called as
+      // `Bevel.<name>({})` — agents have always called `list_branches` and
+      // `start_session` that way, and the endpoint reads `req.body` as `{}`
+      // either way — so declaring `body` required would make the schema
+      // disagree with the tool. It is also what the argument check reads, and
+      // a check must never refuse a call the tool accepts.
+      ...(requiresAnything(spec.inputs) ? { required: ['body'] } : {}),
       additionalProperties: false,
     },
     outputs: spec.outputs ?? { type: 'object', properties: {} },

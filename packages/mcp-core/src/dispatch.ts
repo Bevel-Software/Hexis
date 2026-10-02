@@ -3,6 +3,8 @@ import type { CodeModeUtcpClient } from '@utcp/code-mode';
 import type { CallTemplate } from '@utcp/sdk';
 import type { ProxiedTool } from './proxied-tool.js';
 import { toCallToolResult, toolError, describeToolFailure, renderProgress } from './results.js';
+import { installCallGuards } from './call-guards.js';
+import { installGetHasNoBody } from './get-has-no-body.js';
 
 /**
  * Register one manual on a client, reduced to a verdict.
@@ -21,6 +23,15 @@ export async function registerManual(
   client: CodeModeUtcpClient,
   manual: CallTemplate,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  // A tool must be registered before it can be called, so registration is the
+  // one point every tool of every surface passes through — and therefore where
+  // the call guards are installed. A deployment that registers manuals of its
+  // own gets the argument check and the GET-sends-no-body rule for its tools
+  // without writing a line for either. Both are idempotent; `installCallGuards`
+  // re-wraps if another layer has since wrapped the call methods, so it stays
+  // outermost whatever the order of installation.
+  installGetHasNoBody();
+  installCallGuards(client);
   try {
     const result = await client.registerManual(manual);
     if (result && result.success === false) {

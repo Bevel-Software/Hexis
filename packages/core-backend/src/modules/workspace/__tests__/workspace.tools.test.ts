@@ -32,6 +32,8 @@ import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { PROPOSAL_ROUTE_NOTE, proposalTitleFor } from '../write-denial.js';
 import { NOT_FOUND_NEXT_STEP } from '../not-found.js';
+import { callLine, compileCheck, exampleArguments } from '@bevel-software/platform-mcp-core';
+import { TOOL_DESCRIPTION_CAP, TOOL_PREFIX_CAP } from '../../agent-instructions/index.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -1617,6 +1619,42 @@ describe('office documents and PDFs', () => {
     }
     // The shell is not a file tool: it does not carry the rule.
     expect(tools.find((t) => t.name === 'execute_command')!.description).not.toContain(CONTENT_RULE);
+  });
+
+  /**
+   * The call example at the top of every description is generated from the
+   * tool's input schema, and the same schema is what the argument check reads.
+   * If the two could disagree, the platform would publish an example its own
+   * check refuses — so every declared tool is called with its own example here.
+   */
+  it('every declared tool can be called with its own generated example', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    // The whole family this harness declares, the four the scenarios name included.
+    for (const name of ['read_file', 'write_file', 'list_files', 'grep']) {
+      expect(tools.some((t) => t.name === name), name).toBe(true);
+    }
+    expect(tools.length).toBeGreaterThan(12);
+    for (const def of tools) {
+      const compiled = compileCheck(def.inputs);
+      expect(compiled.checkable, `${def.name}: ${compiled.checkable ? '' : compiled.reason}`).toBe(true);
+      if (!compiled.checkable) continue;
+      expect(compiled.check(exampleArguments(def.inputs)), def.name).toEqual([]);
+    }
+  });
+
+  it('every description, call example and purpose prefix included, stays inside the cap a client shows', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    for (const def of tools) {
+      // Measured as a CLIENT receives it: the call line, the purpose prefix at
+      // its own cap (the four knowledge-base tools carry one), and the
+      // description — the three things that ride one tool's entry.
+      const received = `${callLine(`KNOWLEDGE_BASE.${def.name}`, def.inputs)}\n\n${'p'.repeat(TOOL_PREFIX_CAP)}\n\n${def.description}`;
+      expect(received.length, `${def.name} is ${received.length} characters (cap ${TOOL_DESCRIPTION_CAP})`).toBeLessThanOrEqual(
+        TOOL_DESCRIPTION_CAP,
+      );
+    }
   });
 
   describe('binary capability contract: a text file, a document, an image and a zip', () => {
