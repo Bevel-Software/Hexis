@@ -8,8 +8,6 @@ import { hashEmail } from '../../../../shared/email-identity.js';
 import {
   authorsDescription,
   fileIsReadable,
-  ghMerged,
-  ghState,
   isAuthor,
   loginFor,
   matchesAuthor,
@@ -18,13 +16,14 @@ import {
   pagingOf,
   pathsOf,
   statesFor,
-  toGhAccess,
-  toGhChangeRequest,
-  toGhComment,
-  toGhFile,
-  toGhReviews,
+  toCrViewer,
+  toCrSummary,
+  visibleComments,
+  toCrComment,
+  toCrFile,
+  toCrReviews,
   visibleBlockers,
-} from '../github-shape.js';
+} from '../change-request-read-shape.js';
 
 const AUTHOR = 'juan@bevel.software';
 
@@ -60,22 +59,16 @@ function approval(over: Partial<FileApproval> = {}): FileApproval {
   };
 }
 
-describe('state mapping — GitHub has two states and a flag where Hexis has three', () => {
-  // Scenario: WHEN the request is merged THEN `state` is `closed` and `merged`
-  // is true, as on GitHub.
-  it('a merged request is closed and merged', () => {
-    expect(ghState('merged')).toBe('closed');
-    expect(ghMerged('merged')).toBe(true);
-  });
-
-  it('a declined or withdrawn request is closed and NOT merged', () => {
-    expect(ghState('closed')).toBe('closed');
-    expect(ghMerged('closed')).toBe(false);
-  });
-
-  it('an open request is open and not merged', () => {
-    expect(ghState('open')).toBe('open');
-    expect(ghMerged('open')).toBe(false);
+describe("state is Hexis's own, and only the filter speaks GitHub's", () => {
+  // Scenario: WHEN the request is merged THEN `state` says `merged`. GitHub
+  // would say `closed` with a `merged` flag beside it; Hexis has the word, so
+  // it uses it, and no answer carries the flag (Razvan, 2026-10-02).
+  it('reports each of the three states as itself, with no flag to cross-read', () => {
+    for (const state of ['open', 'merged', 'closed'] as const) {
+      const answer = toCrSummary(summary({ state }), { readable: 1, withheld: 0 });
+      expect(answer.state).toBe(state);
+      expect(answer).not.toHaveProperty('merged');
+    }
   });
 
   it('the `closed` filter covers applied and declined alike; `all` covers everything', () => {
@@ -86,35 +79,39 @@ describe('state mapping — GitHub has two states and a flag where Hexis has thr
 });
 
 describe('summary mapping', () => {
-  it("uses GitHub's field names, with `head` and `base` as refs", () => {
-    expect(toGhChangeRequest(summary(), { readable: 1, withheld: 0 })).toEqual({
+  it("uses the field names `open_change_request` answers in, `url` first", () => {
+    const answer = toCrSummary(summary(), { readable: 1, withheld: 0 });
+    expect(answer).toEqual({
+      url: 'https://hexis.example.com/change-requests/12',
       number: 12,
-      state: 'open',
       title: 'Rework the onboarding note',
-      user: { login: loginFor(AUTHOR), name: 'Juan' },
-      head: { ref: 'juan/my-draft' },
-      base: { ref: 'main' },
-      created_at: '2026-09-28T10:00:00.000Z',
-      updated_at: '2026-09-28T10:00:00.000Z',
-      merged: false,
-      html_url: 'https://hexis.example.com/change-requests/12',
-      changed_files: 1,
-      withheld_files: 0,
+      state: 'open',
+      author: { login: loginFor(AUTHOR), name: 'Juan' },
+      sourceBranch: 'juan/my-draft',
+      targetBranch: 'main',
+      createdAt: '2026-09-28T10:00:00.000Z',
+      updatedAt: '2026-09-28T10:00:00.000Z',
+      changedFiles: 1,
+      withheldFiles: 0,
     });
+    // `url` first on purpose: it is the field an agent must hand a person, so a
+    // truncation of the answer cannot take it. `toEqual` above pins the set of
+    // keys; this pins the order.
+    expect(Object.keys(answer)[0]).toBe('url');
   });
 
   it('carries the note through when the deployment has no public address', () => {
     const cr = summary({ url: '/change-requests/12', urlNote: 'Configure a public address.' });
-    expect(toGhChangeRequest(cr, { readable: 1, withheld: 0 })).toMatchObject({
-      html_url: '/change-requests/12',
-      url_note: 'Configure a public address.',
+    expect(toCrSummary(cr, { readable: 1, withheld: 0 })).toMatchObject({
+      url: '/change-requests/12',
+      urlNote: 'Configure a public address.',
     });
   });
 
   it('falls back to the creation time when the row records no later moment', () => {
     const cr = summary();
     delete cr.updatedAt;
-    expect(toGhChangeRequest(cr, { readable: 1, withheld: 0 }).updated_at).toBe(cr.createdAt);
+    expect(toCrSummary(cr, { readable: 1, withheld: 0 }).updatedAt).toBe(cr.createdAt);
   });
 });
 
@@ -173,19 +170,19 @@ describe('paging', () => {
     const all = Array.from({ length: 40 }, (_, i) => i);
     const first = pageOf(all, 30, 1);
     expect(first.items).toHaveLength(30);
-    expect(first).toMatchObject({ total_count: 40, page: 1, per_page: 30, has_next_page: true });
+    expect(first).toMatchObject({ totalCount: 40, page: 1, perPage: 30, hasNextPage: true });
     const second = pageOf(all, 30, 2);
     expect(second.items).toHaveLength(10);
-    expect(second.has_next_page).toBe(false);
+    expect(second.hasNextPage).toBe(false);
   });
 
   it('a page past the end is empty rather than an error', () => {
-    expect(pageOf([1, 2], 30, 9)).toMatchObject({ items: [], total_count: 2, has_next_page: false });
+    expect(pageOf([1, 2], 30, 9)).toMatchObject({ items: [], totalCount: 2, hasNextPage: false });
   });
 });
 
 describe('files', () => {
-  it("uses GitHub's `filename` and `previous_filename`, and Hexis's approval fields", () => {
+  it("names the path `path`, the kind of change `change`, and the old name `previousPath`", () => {
     const file = {
       path: 'Knowledge/A.md',
       previousPath: 'Knowledge/Old.md',
@@ -204,48 +201,68 @@ describe('files', () => {
       isApproved: true,
       viewerCanApprove: true,
     });
-    expect(toGhFile(file, approved, { patches: false })).toEqual({
-      filename: 'Knowledge/A.md',
-      previous_filename: 'Knowledge/Old.md',
-      status: 'renamed',
+    expect(toCrFile(file, approved, { patches: false })).toEqual({
+      path: 'Knowledge/A.md',
+      previousPath: 'Knowledge/Old.md',
+      // git's `renamed` through `open_change_request`'s own `changeKindOf`.
+      change: 'moved',
       additions: 3,
       deletions: 1,
-      changes: 4,
       sha: 'blob-1',
-      is_binary: false,
-      required_approvers: { roles: ['Engineering'], users: [] },
-      required_approvers_resolved: true,
-      approved_by: [
+      isBinary: false,
+      requiredApprovers: { roles: ['Engineering'], users: [] },
+      approvedBy: [
         {
           user: { login: loginFor('mia@bevel.software'), name: 'Mia', email: 'mia@bevel.software' },
-          approved_at: '2026-09-29T08:00:00.000Z',
+          approvedAt: '2026-09-29T08:00:00.000Z',
           stale: false,
-          self_approval: false,
+          selfApproval: false,
         },
       ],
       approved: true,
-      in_merge_gate: true,
-      viewer_may_approve: true,
+      inMergeGate: true,
+      viewerMayApprove: true,
     });
   });
 
   it('returns a patch only when one was asked for', () => {
     const file = { path: 'A.md', status: 'modified' as const, additions: 1, deletions: 0, isBinary: false, sha: 's', rawUrl: '', patch: '@@' };
-    expect(toGhFile(file, undefined, { patches: false }).patch).toBeUndefined();
-    expect(toGhFile(file, undefined, { patches: true }).patch).toBe('@@');
+    expect(toCrFile(file, undefined, { patches: false }).patch).toBeUndefined();
+    expect(toCrFile(file, undefined, { patches: true }).patch).toBe('@@');
   });
 
-  it('says the approver set is unresolved when nothing could answer for the file', () => {
+  // `approversUnknown` is PRESENT or absent, never `false` — the same shape
+  // `open_change_request` answers in, so the fail-closed reading ("empty means
+  // not known") is the one a caller gets by default rather than one they have to
+  // look for.
+  it('says the approver set is unknown when nothing could answer for the file', () => {
     const file = { path: 'A.md', status: 'modified' as const, additions: 1, deletions: 0, isBinary: false, sha: 's', rawUrl: '' };
-    expect(toGhFile(file, undefined, { patches: false })).toMatchObject({
-      required_approvers: { roles: [], users: [] },
-      required_approvers_resolved: false,
+    expect(toCrFile(file, undefined, { patches: false })).toMatchObject({
+      requiredApprovers: { roles: [], users: [] },
+      approversUnknown: true,
       approved: false,
-      in_merge_gate: false,
-      viewer_may_approve: false,
+      inMergeGate: false,
+      viewerMayApprove: false,
     });
-    expect(toGhFile(file, approval({ eligibilityResolved: false }), { patches: false })
-      .required_approvers_resolved).toBe(false);
+    expect(toCrFile(file, approval({ eligibilityResolved: false }), { patches: false })
+      .approversUnknown).toBe(true);
+    // Resolved: the key is absent, not false.
+    expect(toCrFile(file, approval(), { patches: false })).not.toHaveProperty('approversUnknown');
+  });
+
+  it('reads each of git\'s statuses as one of the four words', () => {
+    const kind = (status: 'added' | 'removed' | 'renamed' | 'copied' | 'modified' | 'changed' | 'unchanged') =>
+      toCrFile(
+        { path: 'A.md', status, additions: 0, deletions: 0, isBinary: false, sha: 's', rawUrl: '' },
+        undefined,
+        { patches: false },
+      ).change;
+    expect(kind('added')).toBe('added');
+    expect(kind('removed')).toBe('deleted');
+    expect(kind('renamed')).toBe('moved');
+    expect(kind('copied')).toBe('moved');
+    expect(kind('modified')).toBe('changed');
+    expect(kind('unchanged')).toBe('changed');
   });
 });
 
@@ -260,39 +277,42 @@ describe('reviews, gathered out of the per-file approvals', () => {
       isStale,
       isSelfApproval: false,
     });
-    const { reviews, withheldReviews } = toGhReviews([
+    const { reviews, withheldReviews } = toCrReviews([
       approval({ path: 'A.md', approvedBy: [mia('2026-09-29T08:00:00.000Z')] }),
       approval({ path: 'B.md', approvedBy: [mia('2026-09-29T09:00:00.000Z')] }),
       approval({ path: 'C.md', approvedBy: [] }),
     ]);
     expect(reviews).toEqual([
       {
-        id: `${loginFor('mia@bevel.software')}:APPROVED`,
-        user: { login: loginFor('mia@bevel.software'), name: 'Mia', email: 'mia@bevel.software' },
-        state: 'APPROVED',
-        submitted_at: '2026-09-29T09:00:00.000Z',
+        id: `${loginFor('mia@bevel.software')}:current`,
+        reviewer: { login: loginFor('mia@bevel.software'), name: 'Mia', email: 'mia@bevel.software' },
+        stale: false,
+        submittedAt: '2026-09-29T09:00:00.000Z',
         files: ['A.md', 'B.md'],
-        withheld_files: 0,
+        withheldFiles: 0,
       },
     ]);
     expect(withheldReviews).toBe(0);
   });
 
-  it('reports an approval a later push invalidated as DISMISSED, separately', () => {
+  // GitHub's word for this is `DISMISSED`; Hexis's is `isStale`, and the answer
+  // uses Hexis's.
+  it("reports an approval a later push invalidated as `stale`, separately", () => {
     const mia = (at: string, isStale: boolean) => ({ email: 'mia@x', name: 'Mia', approvedAt: at, isStale, isSelfApproval: false });
-    const { reviews } = toGhReviews([
+    const { reviews } = toCrReviews([
       approval({ path: 'A.md', approvedBy: [mia('2026-09-29T08:00:00.000Z', false)] }),
       approval({ path: 'B.md', approvedBy: [mia('2026-09-28T08:00:00.000Z', true)] }),
     ]);
-    expect(reviews.map((r) => [r.state, r.files])).toEqual([
-      ['DISMISSED', ['B.md']],
-      ['APPROVED', ['A.md']],
+    expect(reviews.map((r) => [r.stale, r.files])).toEqual([
+      [true, ['B.md']],
+      [false, ['A.md']],
     ]);
+    expect(JSON.stringify(reviews)).not.toContain('DISMISSED');
   });
 
   it("keeps a review's readable files and counts the rest, naming none of them", () => {
     const entry = (at: string) => ({ email: 'mia@x', name: 'Mia', approvedAt: at, isStale: false, isSelfApproval: false });
-    const { reviews, withheldReviews } = toGhReviews(
+    const { reviews, withheldReviews } = toCrReviews(
       [
         approval({ path: 'Knowledge/A.md', approvedBy: [entry('2026-09-29T08:00:00.000Z')] }),
         approval({ path: 'Secret/Pay.md', approvedBy: [entry('2026-09-29T10:00:00.000Z')] }),
@@ -300,7 +320,7 @@ describe('reviews, gathered out of the per-file approvals', () => {
       (path) => path === 'Knowledge/A.md',
     );
     expect(reviews).toHaveLength(1);
-    expect(reviews[0]).toMatchObject({ files: ['Knowledge/A.md'], withheld_files: 1 });
+    expect(reviews[0]).toMatchObject({ files: ['Knowledge/A.md'], withheldFiles: 1 });
     // Neither the path nor the moment it was approved leaks out.
     expect(JSON.stringify(reviews)).not.toContain('Secret');
     expect(JSON.stringify(reviews)).not.toContain('10:00:00');
@@ -309,7 +329,7 @@ describe('reviews, gathered out of the per-file approvals', () => {
 
   it('drops a review whose every file is withheld, and counts it instead', () => {
     const entry = { email: 'mia@x', name: 'Mia', approvedAt: '2026-09-29T08:00:00.000Z', isStale: false, isSelfApproval: false };
-    const { reviews, withheldReviews } = toGhReviews(
+    const { reviews, withheldReviews } = toCrReviews(
       [approval({ path: 'Secret/Pay.md', approvedBy: [entry] })],
       () => false,
     );
@@ -318,15 +338,15 @@ describe('reviews, gathered out of the per-file approvals', () => {
   });
 
   it('answers with no reviews when nobody has approved anything', () => {
-    expect(toGhReviews([approval({ path: 'A.md' })])).toEqual({ reviews: [], withheldReviews: 0 });
+    expect(toCrReviews([approval({ path: 'A.md' })])).toEqual({ reviews: [], withheldReviews: 0 });
   });
 });
 
 describe('comments', () => {
   // Scenario: WHEN a reviewer left an inline comment and a reply followed THEN
-  // `list_change_request_comments` returns both, the reply with `in_reply_to`.
-  it('maps an inline comment and a reply, the reply carrying `in_reply_to`', () => {
-    const inline = toGhComment({
+  // `list_change_request_comments` returns both, the reply with `parentId`.
+  it('maps an inline comment and a reply, the reply carrying `parentId`', () => {
+    const inline = toCrComment({
       id: 'c-1',
       author: { email: 'mia@bevel.software', name: 'Mia' },
       body: 'This line is out of date.',
@@ -337,14 +357,14 @@ describe('comments', () => {
     });
     expect(inline).toEqual({
       id: 'c-1',
-      user: { login: loginFor('mia@bevel.software'), name: 'Mia', email: 'mia@bevel.software' },
+      author: { login: loginFor('mia@bevel.software'), name: 'Mia', email: 'mia@bevel.software' },
       body: 'This line is out of date.',
       path: 'Knowledge/A.md',
       line: 14,
-      commit_id: 'head-1',
-      created_at: '2026-09-29T08:00:00.000Z',
+      headSha: 'head-1',
+      createdAt: '2026-09-29T08:00:00.000Z',
     });
-    const reply = toGhComment({
+    const reply = toCrComment({
       id: 'c-2',
       author: { email: AUTHOR, name: 'Juan' },
       body: 'Fixed.',
@@ -355,11 +375,11 @@ describe('comments', () => {
       createdAt: '2026-09-29T09:00:00.000Z',
       updatedAt: '2026-09-29T09:05:00.000Z',
     });
-    expect(reply).toMatchObject({ in_reply_to: 'c-1', updated_at: '2026-09-29T09:05:00.000Z' });
+    expect(reply).toMatchObject({ parentId: 'c-1', updatedAt: '2026-09-29T09:05:00.000Z' });
   });
 
-  it('leaves `path`, `line` and `in_reply_to` off a general comment', () => {
-    const general = toGhComment({
+  it('leaves `path`, `line` and `parentId` off a general comment', () => {
+    const general = toCrComment({
       id: 'c-3',
       author: { email: AUTHOR, name: 'Juan' },
       body: 'Ready for review.',
@@ -368,11 +388,11 @@ describe('comments', () => {
     });
     expect(general.path).toBeUndefined();
     expect(general.line).toBeUndefined();
-    expect(general.in_reply_to).toBeUndefined();
+    expect(general.parentId).toBeUndefined();
   });
 });
 
-describe('the access block', () => {
+describe('the viewer block — what this caller may do', () => {
   const detail = (over: Partial<ChangeRequestDetail> = {}) =>
     ({
       state: 'open',
@@ -383,63 +403,63 @@ describe('the access block', () => {
       ...over,
     }) as ChangeRequestDetail;
 
-  it('may_merge is true when the gate waits on nothing', () => {
-    expect(toGhAccess(detail(), { visible: [], withheld: 0 }, false, [])).toEqual({
-      merge_blockers: [],
-      withheld_merge_blockers: 0,
-      may_approve: false,
-      may_merge: true,
-      is_author: false,
+  it('mayMerge is true when the gate waits on nothing', () => {
+    // Only the three verbs. The blockers live beside it on the answer, under
+    // `open_change_request`'s own `mergeBlockedReasons`, so this block holds
+    // exactly what is about the CALLER and nothing about the request.
+    expect(toCrViewer(detail(), false, [])).toEqual({
+      mayApprove: false,
+      mayMerge: true,
+      isAuthor: false,
     });
   });
 
-  it('may_merge is false on a missing approval, and true for an admin who may bypass it', () => {
+  it('mayMerge is false on a missing approval, and true for an admin who may bypass it', () => {
     const waiting = ['Waiting on approval for A.md from Engineering.'];
     expect(
-      toGhAccess(detail({ mergeBlockedReasons: waiting, mergeWarnings: waiting }), { visible: waiting, withheld: 0 }, false, []).may_merge,
+      toCrViewer(detail({ mergeBlockedReasons: waiting, mergeWarnings: waiting }), false, []).mayMerge,
     ).toBe(false);
     expect(
-      toGhAccess(
+      toCrViewer(
         detail({ mergeBlockedReasons: waiting, mergeWarnings: waiting, viewerCanBypassMerge: true }),
-        { visible: waiting, withheld: 0 },
         false,
         [],
-      ).may_merge,
+      ).mayMerge,
     ).toBe(true);
   });
 
-  it('may_merge is false on a hard block, bypass or not', () => {
+  it('mayMerge is false on a hard block, bypass or not', () => {
     const hard = ['This pull request is closed.'];
     expect(
-      toGhAccess(detail({ state: 'closed', mergeBlockedReasons: hard, viewerCanBypassMerge: true }), { visible: hard, withheld: 0 }, false, []).may_merge,
+      toCrViewer(detail({ state: 'closed', mergeBlockedReasons: hard, viewerCanBypassMerge: true }), false, []).mayMerge,
     ).toBe(false);
   });
 
-  it('may_approve is true when the caller may approve any one file they are shown', () => {
+  it('mayApprove is true when the caller may approve any one file they are shown', () => {
     expect(
-      toGhAccess(detail(), { visible: [], withheld: 0 }, false, [
+      toCrViewer(detail(), false, [
         approval(),
         approval({ path: 'B.md', viewerCanApprove: true }),
-      ]).may_approve,
+      ]).mayApprove,
     ).toBe(true);
   });
 
-  it('may_approve follows exactly the approval set it is given', () => {
+  it('mayApprove follows exactly the approval set it is given', () => {
     // What this pins is the narrow thing the signature can pin: the answer is a
     // function of the SHOWN approvals and of nothing else. The leak it exists to
     // prevent — a write grant outliving a read refusal, so the only approvable
     // file is one the caller is not shown — cannot be staged here at all, since
-    // `toGhAccess` no longer receives the request's whole approval set (its
+    // `toCrViewer` no longer receives the request's whole approval set (its
     // `Pick` excludes `approvals` for exactly that reason). That case is driven
-    // end to end by 'answers may_approve false when the only approvable file is
+    // end to end by 'answers mayApprove false when the only approvable file is
     // the withheld one' in change-request-read.tools.test.ts.
     const shown = [approval({ path: 'Knowledge/A.md' })];
-    expect(toGhAccess(detail(), { visible: [], withheld: 0 }, false, shown).may_approve).toBe(false);
+    expect(toCrViewer(detail(), false, shown).mayApprove).toBe(false);
     expect(
-      toGhAccess(detail(), { visible: [], withheld: 0 }, false, [
+      toCrViewer(detail(), false, [
         ...shown,
         approval({ path: 'Knowledge/A.md', viewerCanApprove: true }),
-      ]).may_approve,
+      ]).mayApprove,
     ).toBe(true);
   });
 });
@@ -495,11 +515,34 @@ describe('the body a caller is handed is the author\'s, not the machine\'s', () 
     expect(authorsDescription('')).toBe('');
   });
 
-  it('cuts at the first generated heading, the same rule the app\'s dialog reads by', () => {
-    // `authorsReason` in ChangeRequestDialog.tsx splits on /^##\s+/m too, so a
-    // person and an agent are shown the same text. An author's own `##` heading
-    // is cut by both — one rule, not two that drift.
-    expect(authorsDescription('Lead.\n\n## My own heading\n\nmore')).toBe('Lead.');
+  // Razvan's review (2026-10-02): the first cut copied the app's dialog, which
+  // drops everything from the first `##` heading on. An author who writes their
+  // description in sections lost it from that heading onwards, and was never
+  // told. The cut is now the generated block and nothing else.
+  it("keeps the author's own headings, and everything under them", () => {
+    expect(authorsDescription('Lead.\n\n## My own heading\n\nmore')).toBe(
+      'Lead.\n\n## My own heading\n\nmore',
+    );
+    expect(authorsDescription(`Lead.\n\n## Why now\n\nBecause.\n\n${GENERATED}`)).toBe(
+      'Lead.\n\n## Why now\n\nBecause.',
+    );
+  });
+
+  // Hexis appends the block LAST, so the last such line is always the generated
+  // one — which is what makes an author who happens to use that heading
+  // themselves no worse off than before.
+  it('cuts the LAST such heading, so an author may use the words too', () => {
+    const out = authorsDescription(`Lead.\n\n## Affected owners\n\nI mean the GTM ones.\n\n${GENERATED}`);
+    expect(out).toBe('Lead.\n\n## Affected owners\n\nI mean the GTM ones.');
+    // Their sentence is kept; not one path of the generated block is.
+    expect(out).not.toContain('Avi-Checkin');
+    expect(out).not.toContain('KnowledgeBase');
+  });
+
+  it('cuts an author\'s own owners heading when there is no generated block', () => {
+    // Indistinguishable from the generated one with nothing after it, so it is
+    // cut — the safe direction, and the only way this can err.
+    expect(authorsDescription('Lead.\n\n## Affected owners\n\nI mean the GTM ones.')).toBe('Lead.');
   });
 });
 
@@ -528,5 +571,93 @@ describe('a renamed file is judged on both of its names', () => {
   it('offers both names for the access lookup, and one for a plain file', () => {
     expect(pathsOf(renamed)).toEqual(['Knowledge/Open.md', 'Payroll/Rates.md']);
     expect(pathsOf({ path: 'A.md' })).toEqual(['A.md']);
+  });
+});
+
+/**
+ * A reply is shown only when the comment it replies to is (Razvan's review,
+ * 2026-10-02, finding 3). A reply posted without a path of its own — which
+ * `post_change_request_comment` accepts, taking `parentId` without `path` — read
+ * as a general comment when judged on itself, so a reply to a comment on a
+ * withheld file came back with its body and a `parentId` naming a comment the
+ * caller cannot see.
+ */
+describe('a reply takes its parent\'s verdict, up the chain', () => {
+  const c = (id: string, over: { path?: string; parentId?: string } = {}) => ({ id, ...over });
+  const mayShow = (path: string) => path.startsWith('Open/');
+
+  it('withholds a pathless reply to a comment on a file the caller may not read', () => {
+    const { visible, withheld } = visibleComments(
+      [c('c-1', { path: 'Secret/Pay.md' }), c('c-2', { parentId: 'c-1' })],
+      mayShow,
+    );
+    expect(visible).toEqual([]);
+    expect(withheld).toBe(2);
+  });
+
+  it('withholds a reply to that reply, however deep the thread goes', () => {
+    const { visible, withheld } = visibleComments(
+      [
+        c('c-1', { path: 'Secret/Pay.md' }),
+        c('c-2', { parentId: 'c-1' }),
+        c('c-3', { parentId: 'c-2' }),
+        c('c-4', { parentId: 'c-3' }),
+      ],
+      mayShow,
+    );
+    expect(visible).toEqual([]);
+    expect(withheld).toBe(4);
+  });
+
+  it('keeps a reply whose whole chain is readable', () => {
+    const { visible, withheld } = visibleComments(
+      [c('c-1', { path: 'Open/A.md' }), c('c-2', { parentId: 'c-1' }), c('c-3', { parentId: 'c-2' })],
+      mayShow,
+    );
+    expect(visible.map((v) => v.id)).toEqual(['c-1', 'c-2', 'c-3']);
+    expect(withheld).toBe(0);
+  });
+
+  // Both halves of the rule are needed, and this is the half the inheritance
+  // alone would miss: the reply names a withheld file itself.
+  it('withholds a reply that names a withheld file under a readable parent', () => {
+    const { visible } = visibleComments(
+      [c('c-1', { path: 'Open/A.md' }), c('c-2', { path: 'Secret/Pay.md', parentId: 'c-1' })],
+      mayShow,
+    );
+    expect(visible.map((v) => v.id)).toEqual(['c-1']);
+  });
+
+  it('keeps a general comment and a reply to one — neither is about a file', () => {
+    const { visible, withheld } = visibleComments([c('c-1'), c('c-2', { parentId: 'c-1' })], mayShow);
+    expect(visible.map((v) => v.id)).toEqual(['c-1', 'c-2']);
+    expect(withheld).toBe(0);
+  });
+
+  it('withholds a reply whose parent is not in the list at all', () => {
+    // Not provably pathless, so it goes: the parent may have been anchored to
+    // anything, including a file this caller was refused.
+    const { visible, withheld } = visibleComments([c('c-2', { parentId: 'gone' })], mayShow);
+    expect(visible).toEqual([]);
+    expect(withheld).toBe(1);
+  });
+
+  it('withholds a cycle rather than looping on it', () => {
+    const { visible, withheld } = visibleComments(
+      [c('c-1', { parentId: 'c-2' }), c('c-2', { parentId: 'c-1' })],
+      mayShow,
+    );
+    expect(visible).toEqual([]);
+    expect(withheld).toBe(2);
+  });
+
+  it('resolves a long thread without re-walking it per reply', () => {
+    // 500 replies in one chain: memoised, this is linear; unmemoised it is
+    // quadratic and the suite would feel it.
+    const chain = [c('c-0', { path: 'Open/A.md' })];
+    for (let i = 1; i <= 500; i++) chain.push(c(`c-${i}`, { parentId: `c-${i - 1}` }));
+    const { visible, withheld } = visibleComments(chain, mayShow);
+    expect(visible).toHaveLength(501);
+    expect(withheld).toBe(0);
   });
 });

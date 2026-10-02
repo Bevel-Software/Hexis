@@ -300,6 +300,54 @@ export interface IGitService {
   ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }>;
 
   /**
+   * The changed-file list ONE COMMIT introduced, read against its first parent
+   * — how an APPLIED change request is read back.
+   *
+   * Its source branch is retired, so the branch pair the other two methods want
+   * no longer exists; what is left is the merge commit the row records. Its
+   * first parent is the target as it stood before the merge, so the two-dot diff
+   * between them is precisely what the request applied — and immutable, which
+   * the branch pair never was.
+   *
+   * No network. The commit is in the clone or this rejects with
+   * `WorkflowValidationError`, which every caller reads as "the file set could
+   * not be resolved" and answers fail-closed (no files, so author-only) rather
+   * than reaching for a fetch per request.
+   */
+  changedFilesAtCommit(
+    workspaceId: string,
+    sha: string,
+    opts?: { patchCap?: number },
+  ): Promise<PullRequestFile[]>;
+
+  /**
+   * The same commit's change as the two path views a change-request SUMMARY
+   * needs, out of one `git diff` — `changedPathsAndPairsForPr` for a commit
+   * instead of a branch pair, and with the same no-network contract as
+   * {@link changedFilesAtCommit}.
+   */
+  changedPathsAndPairsAtCommit(
+    workspaceId: string,
+    sha: string,
+  ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }>;
+
+  /**
+   * The two commits an APPLIED change request spanned, recovered from its merge
+   * commit: the target before the merge (`^1`) and the source tip that was
+   * merged (`^2`, or the commit itself when it has only one parent).
+   *
+   * The head matters beyond being informative: an approval is called stale when
+   * the head it was given against is not the detail's `headSha`, so answering
+   * the merge commit there would report every approval a merged request ever
+   * collected as stale. Same no-network contract and same
+   * `WorkflowValidationError` as {@link changedFilesAtCommit}.
+   */
+  appliedChangeShas(
+    workspaceId: string,
+    mergeSha: string,
+  ): Promise<{ baseSha: string; headSha: string }>;
+
+  /**
    * A change request's fork point (merge base of the two resolved commits)
    * and whether the target has commits the proposal does not contain. No
    * fetch: `at` is what `resolvePrShas` just returned.

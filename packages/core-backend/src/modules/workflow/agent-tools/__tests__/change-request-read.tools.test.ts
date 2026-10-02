@@ -319,10 +319,11 @@ describe('the five read tools', () => {
 
 describe('list_change_requests', () => {
   // WHEN an agent calls `list_change_requests` with `state: open` and
-  // `head: juan/my-draft` THEN it gets the open request from that branch, with
-  // `number`, `title`, `state`, `user`, `head`, `base`, `created_at`,
-  // `updated_at` and `html_url`.
-  it('answers the open request from the named source branch, in GitHub fields', async () => {
+  // `head: juan/my-draft` THEN it gets the open request from that branch — in
+  // HEXIS's field names, the ones `open_change_request` answers in: `url`
+  // first, `number`, `title`, `state`, `author`, `sourceBranch`,
+  // `targetBranch`, `createdAt`, `updatedAt`.
+  it("answers the open request from the named source branch, in Hexis's field names", async () => {
     const base = await start();
     summaries = [
       summary(),
@@ -333,23 +334,30 @@ describe('list_change_requests', () => {
       head: 'juan/my-draft',
     });
     expect(status).toBe(200);
-    expect(json).toMatchObject({ total_count: 1, page: 1, per_page: 30, has_next_page: false });
-    expect(json.change_requests).toEqual([
+    expect(json).toMatchObject({ totalCount: 1, page: 1, perPage: 30, hasNextPage: false });
+    expect(json.changeRequests).toEqual([
       {
+        url: 'https://hexis.example.com/change-requests/12',
         number: 12,
-        state: 'open',
         title: 'Rework the onboarding note',
-        user: { login: `user-${hashEmail(AUTHOR).slice(0, 12)}`, name: 'Juan' },
-        head: { ref: 'juan/my-draft' },
-        base: { ref: 'main' },
-        created_at: '2026-09-28T10:00:00.000Z',
-        updated_at: '2026-09-28T10:00:00.000Z',
-        merged: false,
-        html_url: 'https://hexis.example.com/change-requests/12',
-        changed_files: 1,
-        withheld_files: 0,
+        state: 'open',
+        author: { login: `user-${hashEmail(AUTHOR).slice(0, 12)}`, name: 'Juan' },
+        sourceBranch: 'juan/my-draft',
+        targetBranch: 'main',
+        createdAt: '2026-09-28T10:00:00.000Z',
+        updatedAt: '2026-09-28T10:00:00.000Z',
+        changedFiles: 1,
+        withheldFiles: 0,
       },
     ]);
+    // No GitHub field names anywhere in the answer, and no `merged` flag: the
+    // state says it.
+    const row = json.changeRequests[0] as Record<string, unknown>;
+    for (const gh of ['html_url', 'user', 'head', 'base', 'merged', 'created_at', 'changed_files']) {
+      expect(row).not.toHaveProperty(gh);
+    }
+    // `url` is the first key, so a truncated answer still carries the link.
+    expect(Object.keys(row)[0]).toBe('url');
     expect(calls).toContainEqual(['listChangeRequestsByState', ['open']]);
   });
 
@@ -383,11 +391,11 @@ describe('list_change_requests', () => {
       }),
     ];
     const byBase = await call(base, 'list_change_requests', { base: 'release' });
-    expect(byBase.json.change_requests).toHaveLength(1);
-    expect((byBase.json.change_requests as unknown as { number: number }[])[0].number).toBe(13);
+    expect(byBase.json.changeRequests).toHaveLength(1);
+    expect((byBase.json.changeRequests as unknown as { number: number }[])[0].number).toBe(13);
 
     const byAuthor = await call(base, 'list_change_requests', { author: AUTHOR });
-    expect((byAuthor.json.change_requests as unknown as { number: number }[]).map((c) => c.number))
+    expect((byAuthor.json.changeRequests as unknown as { number: number }[]).map((c) => c.number))
       .toEqual([12, 13]);
   });
 
@@ -408,8 +416,8 @@ describe('list_change_requests', () => {
     readable = [];
     summaries = [summary()];
     const { json } = await call(base, 'list_change_requests', {});
-    expect(json.change_requests).toEqual([]);
-    expect(json.total_count).toBe(0);
+    expect(json.changeRequests).toEqual([]);
+    expect(json.totalCount).toBe(0);
   });
 
   it('still shows the author their own request when they may read none of it', async () => {
@@ -418,8 +426,8 @@ describe('list_change_requests', () => {
     callerEmail = AUTHOR;
     summaries = [summary()];
     const { json } = await call(base, 'list_change_requests', {});
-    expect(json.change_requests).toHaveLength(1);
-    expect((json.change_requests as unknown as { withheld_files: number }[])[0].withheld_files).toBe(1);
+    expect(json.changeRequests).toHaveLength(1);
+    expect((json.changeRequests as unknown as { withheldFiles: number }[])[0].withheldFiles).toBe(1);
   });
 
   it('counts the files it withheld without naming them', async () => {
@@ -427,8 +435,8 @@ describe('list_change_requests', () => {
     readable = ['Knowledge/A.md'];
     summaries = [summary({ touchedNodePaths: ['Knowledge/A.md', 'Payroll/Rates.md'] })];
     const { json } = await call(base, 'list_change_requests', {});
-    expect(json.change_requests).toHaveLength(1);
-    expect(json.change_requests[0]).toMatchObject({ changed_files: 1, withheld_files: 1 });
+    expect(json.changeRequests).toHaveLength(1);
+    expect(json.changeRequests[0]).toMatchObject({ changedFiles: 1, withheldFiles: 1 });
     expect(JSON.stringify(json)).not.toContain('Payroll');
   });
 
@@ -440,9 +448,9 @@ describe('list_change_requests', () => {
     );
     const { json } = await call(base, 'list_change_requests', {});
     // 20 of the 40 are visible — a full page of 30 would have been the giveaway.
-    expect(json.total_count).toBe(20);
-    expect(json.change_requests).toHaveLength(20);
-    expect(json.has_next_page).toBe(false);
+    expect(json.totalCount).toBe(20);
+    expect(json.changeRequests).toHaveLength(20);
+    expect(json.hasNextPage).toBe(false);
   });
 });
 
@@ -450,8 +458,9 @@ describe('list_change_requests', () => {
 
 describe('get_change_request', () => {
   // WHEN it calls `get_change_request` with that number THEN it also gets
-  // `body`, `merged`, `mergeable`, and `access` with the blockers.
-  it('adds body, merged, mergeable and the access block with the blockers', async () => {
+  // `body`, `mergeable`, the blockers and the `viewer` block — unwrapped, the
+  // way `open_change_request` answers since #349.
+  it('adds body, mergeable, the blockers and the viewer block', async () => {
     const base = await start();
     const waiting = ['Waiting on approval for Knowledge/A.md from Engineering.'];
     details.set(
@@ -460,24 +469,24 @@ describe('get_change_request', () => {
     );
     const { status, json } = await call(base, 'get_change_request', { number: 12 });
     expect(status).toBe(200);
-    expect(json.change_request).toMatchObject({
+    expect(json).toMatchObject({
+      url: 'https://hexis.example.com/change-requests/12',
       number: 12,
-      state: 'open',
       title: 'Rework the onboarding note',
+      state: 'open',
       body: 'Why this change is needed.',
-      merged: false,
+      sourceBranch: 'juan/my-draft',
+      targetBranch: 'main',
+      headSha: 'head-1',
+      baseSha: 'base-1',
       mergeable: false,
-      head: { ref: 'juan/my-draft', sha: 'head-1' },
-      base: { ref: 'main', sha: 'base-1' },
-      html_url: 'https://hexis.example.com/change-requests/12',
-      access: {
-        merge_blockers: waiting,
-        withheld_merge_blockers: 0,
-        may_approve: false,
-        may_merge: false,
-        is_author: false,
-      },
+      mergeBlockedReasons: waiting,
+      withheldMergeBlockedReasons: 0,
+      viewer: { mayApprove: false, mayMerge: false, isAuthor: false },
     });
+    // Not wrapped in `change_request`, and `url` still first.
+    expect(json).not.toHaveProperty('change_request');
+    expect(Object.keys(json)[0]).toBe('url');
   });
 
   it('tells the author it is theirs, and an approver that they may approve', async () => {
@@ -485,11 +494,12 @@ describe('get_change_request', () => {
     callerEmail = AUTHOR;
     details.set(12, detail({ approvals: [approval('Knowledge/A.md', { viewerCanApprove: true })] }));
     const { json } = await call(base, 'get_change_request', { number: 12 });
-    expect(json.change_request).toMatchObject({ access: { is_author: true, may_approve: true } });
+    expect(json).toMatchObject({ viewer: { isAuthor: true, mayApprove: true } });
   });
 
-  // WHEN the request is merged THEN `state` is `closed` and `merged` is true.
-  it('reports a merged request as closed and merged', async () => {
+  // WHEN the request is merged THEN `state` says `merged` — Hexis's own state,
+  // not GitHub's `closed` plus a flag a reader has to look for.
+  it('reports a merged request as merged, with no flag to cross-read', async () => {
     const base = await start();
     details.set(
       12,
@@ -499,15 +509,16 @@ describe('get_change_request', () => {
       }),
     );
     const { json } = await call(base, 'get_change_request', { number: 12 });
-    expect(json.change_request).toMatchObject({ state: 'closed', merged: true });
-    expect(json.change_request).toMatchObject({ access: { may_merge: false } });
+    expect(json).toMatchObject({ state: 'merged', viewer: { mayMerge: false } });
+    expect(json).not.toHaveProperty('merged');
   });
 
-  // Applying a request retires its source branch, so its diff can no longer be
-  // computed and no file of it can be proven readable. Fail-closed therefore
-  // leaves it readable by its author alone — the honest answer, since "we cannot
-  // tell what it touched" is not "you may see it".
-  it('leaves an applied request whose files can no longer be resolved to its author', async () => {
+  // An applied request is normally read from its merge commit (the 2026-10-02
+  // decision), so this is the corner that is left: a row whose file set could not
+  // be resolved AT ALL — no `merged_sha`, or a clone that does not hold the
+  // commit yet. No file of it can be proven readable, so fail-closed leaves it to
+  // its author alone: "we cannot tell what it touched" is not "you may see it".
+  it('leaves an applied request whose files could not be resolved at all to its author', async () => {
     const base = await start();
     details.set(12, detail({ state: 'merged', files: [], approvals: [] }));
     expect((await call(base, 'get_change_request', { number: 12 })).status).toBe(404);
@@ -515,20 +526,20 @@ describe('get_change_request', () => {
     callerEmail = AUTHOR;
     const mine = await call(base, 'get_change_request', { number: 12 });
     expect(mine.status).toBe(200);
-    expect(mine.json.change_request).toMatchObject({
-      state: 'closed',
-      merged: true,
-      changed_files: 0,
-      withheld_files: 0,
-      access: { is_author: true, may_merge: false },
+    expect(mine.json).toMatchObject({
+      state: 'merged',
+      changedFiles: 0,
+      withheldFiles: 0,
+      viewer: { isAuthor: true, mayMerge: false },
     });
   });
 
-  it('reports a declined request as closed and NOT merged', async () => {
+  it('reports a declined request as closed, which in Hexis means declined', async () => {
     const base = await start();
     details.set(12, detail({ state: 'closed' }));
     const { json } = await call(base, 'get_change_request', { number: 12 });
-    expect(json.change_request).toMatchObject({ state: 'closed', merged: false });
+    expect(json).toMatchObject({ state: 'closed' });
+    expect(json).not.toHaveProperty('merged');
   });
 
   // WHEN the caller may read none of the request's files and is not its author
@@ -571,10 +582,11 @@ describe('get_change_request', () => {
       }),
     );
     const { json } = await call(base, 'get_change_request', { number: 12 });
-    expect(json.change_request).toMatchObject({
-      changed_files: 1,
-      withheld_files: 1,
-      access: { merge_blockers: [reasons[0]], withheld_merge_blockers: 1 },
+    expect(json).toMatchObject({
+      changedFiles: 1,
+      withheldFiles: 1,
+      mergeBlockedReasons: [reasons[0]],
+      withheldMergeBlockedReasons: 1,
     });
     expect(JSON.stringify(json)).not.toContain('Payroll');
   });
@@ -591,8 +603,8 @@ describe('get_change_request', () => {
 
 describe('list_change_request_files', () => {
   // WHEN a reviewer approved two of three files THEN `list_change_request_files`
-  // shows `approved_by` on those two and the missing approver on the third.
-  it('shows approved_by on the approved files and the missing approver on the rest', async () => {
+  // shows `approvedBy` on those two and the missing approver on the third.
+  it('shows approvedBy on the approved files and the missing approver on the rest', async () => {
     const base = await start();
     readable = ['A.md', 'B.md', 'C.md'];
     const mia = approvedBy(VIEWER, 'Mia', '2026-09-29T08:00:00.000Z');
@@ -612,31 +624,31 @@ describe('list_change_request_files', () => {
     const { status, json } = await call(base, 'list_change_request_files', { number: 12 });
     expect(status).toBe(200);
     const files = json.files as unknown as {
-      filename: string;
+      path: string;
       approved: boolean;
-      approved_by: { user: { name: string } }[];
-      required_approvers: { roles: string[]; users: { email: string }[] };
+      approvedBy: { user: { name: string } }[];
+      requiredApprovers: { roles: string[]; users: { email: string }[] };
     }[];
-    expect(files.map((f) => f.filename)).toEqual(['A.md', 'B.md', 'C.md']);
-    expect(files[0].approved_by.map((a) => a.user.name)).toEqual(['Mia']);
-    expect(files[1].approved_by.map((a) => a.user.name)).toEqual(['Mia']);
-    expect(files[2].approved_by).toEqual([]);
+    expect(files.map((f) => f.path)).toEqual(['A.md', 'B.md', 'C.md']);
+    expect(files[0].approvedBy.map((a) => a.user.name)).toEqual(['Mia']);
+    expect(files[1].approvedBy.map((a) => a.user.name)).toEqual(['Mia']);
+    expect(files[2].approvedBy).toEqual([]);
     expect(files[2].approved).toBe(false);
-    expect(files[2].required_approvers.users.map((u) => u.email)).toEqual(['ana@bevel.software']);
+    expect(files[2].requiredApprovers.users.map((u) => u.email)).toEqual(['ana@bevel.software']);
   });
 
   // WHEN the request touches one file in a folder the caller may not read THEN
-  // the files list leaves it out and `withheld_files` is 1.
+  // the files list leaves it out and `withheldFiles` is 1.
   it('leaves out a file in a folder the caller may not read, and counts it', async () => {
     const base = await start();
     readable = ['Knowledge/A.md'];
     details.set(12, detail({ files: [file('Knowledge/A.md'), file('Payroll/Rates.md')] }));
     const { json } = await call(base, 'list_change_request_files', { number: 12 });
-    expect((json.files as unknown as { filename: string }[]).map((f) => f.filename)).toEqual([
+    expect((json.files as unknown as { path: string }[]).map((f) => f.path)).toEqual([
       'Knowledge/A.md',
     ]);
-    expect(json.withheld_files).toBe(1);
-    expect(json.total_count).toBe(1);
+    expect(json.withheldFiles).toBe(1);
+    expect(json.totalCount).toBe(1);
     expect(JSON.stringify(json)).not.toContain('Payroll');
   });
 
@@ -649,10 +661,10 @@ describe('list_change_request_files', () => {
     details.set(12, detail({ files: paths.map((p) => file(p)) }));
     const first = await call(base, 'list_change_request_files', { number: 12 });
     expect(first.json.files).toHaveLength(30);
-    expect(first.json).toMatchObject({ total_count: 40, page: 1, per_page: 30, has_next_page: true });
+    expect(first.json).toMatchObject({ totalCount: 40, page: 1, perPage: 30, hasNextPage: true });
     const second = await call(base, 'list_change_request_files', { number: 12, page: 2 });
     expect(second.json.files).toHaveLength(10);
-    expect(second.json.has_next_page).toBe(false);
+    expect(second.json.hasNextPage).toBe(false);
   });
 
   it('returns no patch unless `include: ["patches"]` asks for one', async () => {
@@ -704,12 +716,15 @@ describe('list_change_request_reviews', () => {
     expect(status).toBe(200);
     expect(json.reviews).toHaveLength(1);
     expect(json.reviews[0]).toMatchObject({
-      user: { name: 'Mia', email: VIEWER },
-      state: 'APPROVED',
-      submitted_at: '2026-09-29T09:00:00.000Z',
+      reviewer: { name: 'Mia', email: VIEWER },
+      stale: false,
+      submittedAt: '2026-09-29T09:00:00.000Z',
       files: ['A.md', 'B.md'],
-      withheld_files: 0,
+      withheldFiles: 0,
     });
+    // Hexis's own word for an approval that still stands, not GitHub's review
+    // state: nothing here says APPROVED or DISMISSED.
+    expect(JSON.stringify(json)).not.toContain('APPROVED');
   });
 
   it("counts a reviewer's withheld files without naming them", async () => {
@@ -727,8 +742,8 @@ describe('list_change_request_reviews', () => {
       }),
     );
     const { json } = await call(base, 'list_change_request_reviews', { number: 12 });
-    expect(json.reviews[0]).toMatchObject({ files: ['Knowledge/A.md'], withheld_files: 1 });
-    expect(json.withheld_reviews).toBe(0);
+    expect(json.reviews[0]).toMatchObject({ files: ['Knowledge/A.md'], withheldFiles: 1 });
+    expect(json.withheldReviews).toBe(0);
     expect(JSON.stringify(json)).not.toContain('Payroll');
   });
 
@@ -750,13 +765,13 @@ describe('list_change_request_reviews', () => {
     );
     const { json } = await call(base, 'list_change_request_reviews', { number: 12 });
     expect(json.reviews).toEqual([]);
-    expect(json.withheld_reviews).toBe(1);
+    expect(json.withheldReviews).toBe(1);
     // Neither the reviewer nor the file they approved is named.
     expect(JSON.stringify(json)).not.toContain('Ana');
     expect(JSON.stringify(json)).not.toContain('Payroll');
   });
 
-  it('reports an approval a later push invalidated as DISMISSED', async () => {
+  it('reports an approval a later push invalidated as stale, in Hexis\'s own word', async () => {
     const base = await start();
     details.set(
       12,
@@ -769,14 +784,15 @@ describe('list_change_request_reviews', () => {
       }),
     );
     const { json } = await call(base, 'list_change_request_reviews', { number: 12 });
-    expect(json.reviews[0]).toMatchObject({ state: 'DISMISSED', files: ['Knowledge/A.md'] });
+    expect(json.reviews[0]).toMatchObject({ stale: true, files: ['Knowledge/A.md'] });
+    expect(JSON.stringify(json)).not.toContain('DISMISSED');
   });
 
   it('answers an empty list when nobody has approved anything yet', async () => {
     const base = await start();
     details.set(12, detail());
     const { json } = await call(base, 'list_change_request_reviews', { number: 12 });
-    expect(json).toMatchObject({ reviews: [], withheld_reviews: 0, total_count: 0, has_next_page: false });
+    expect(json).toMatchObject({ reviews: [], withheldReviews: 0, totalCount: 0, hasNextPage: false });
   });
 });
 
@@ -784,8 +800,8 @@ describe('list_change_request_reviews', () => {
 
 describe('list_change_request_comments', () => {
   // WHEN a reviewer left an inline comment and a reply followed THEN
-  // `list_change_request_comments` returns both, the reply with `in_reply_to`.
-  it('returns the inline comment and its reply, the reply carrying in_reply_to', async () => {
+  // `list_change_request_comments` returns both, the reply with `parentId`.
+  it('returns the inline comment and its reply, the reply carrying parentId', async () => {
     const base = await start();
     details.set(
       12,
@@ -809,15 +825,15 @@ describe('list_change_request_comments', () => {
     expect(json.comments).toHaveLength(2);
     expect(json.comments[0]).toMatchObject({
       id: 'c-1',
-      user: { name: 'Mia', email: VIEWER },
+      author: { name: 'Mia', email: VIEWER },
       body: 'This line is out of date.',
       path: 'Knowledge/A.md',
       line: 14,
-      commit_id: 'head-1',
-      created_at: '2026-09-29T08:00:00.000Z',
+      headSha: 'head-1',
+      createdAt: '2026-09-29T08:00:00.000Z',
     });
-    expect(json.comments[1]).toMatchObject({ id: 'c-2', in_reply_to: 'c-1' });
-    expect(json.withheld_comments).toBe(0);
+    expect(json.comments[1]).toMatchObject({ id: 'c-2', parentId: 'c-1' });
+    expect(json.withheldComments).toBe(0);
   });
 
   it('keeps a general comment, which belongs to the request rather than a file', async () => {
@@ -843,7 +859,7 @@ describe('list_change_request_comments', () => {
     );
     const { json } = await call(base, 'list_change_request_comments', { number: 12 });
     expect((json.comments as unknown as { id: string }[]).map((c) => c.id)).toEqual(['c-1']);
-    expect(json.withheld_comments).toBe(1);
+    expect(json.withheldComments).toBe(1);
     expect(JSON.stringify(json)).not.toContain('Payroll');
     expect(JSON.stringify(json)).not.toContain('band is wrong');
   });
@@ -854,7 +870,7 @@ describe('list_change_request_comments', () => {
     details.set(12, detail({ comments: [comment({ id: 'c-7', path: 'Knowledge/Gone.md', line: 3 })] }));
     const { json } = await call(base, 'list_change_request_comments', { number: 12 });
     expect((json.comments as unknown as { id: string }[]).map((c) => c.id)).toEqual(['c-7']);
-    expect(json.withheld_comments).toBe(0);
+    expect(json.withheldComments).toBe(0);
   });
 
   it('pages the comments', async () => {
@@ -869,10 +885,10 @@ describe('list_change_request_comments', () => {
     );
     const first = await call(base, 'list_change_request_comments', { number: 12 });
     expect(first.json.comments).toHaveLength(30);
-    expect(first.json.has_next_page).toBe(true);
+    expect(first.json.hasNextPage).toBe(true);
     const second = await call(base, 'list_change_request_comments', { number: 12, page: 2 });
     expect(second.json.comments).toHaveLength(10);
-    expect(second.json.has_next_page).toBe(false);
+    expect(second.json.hasNextPage).toBe(false);
   });
 
   it('answers not found when the caller may read none of its files', async () => {
@@ -933,10 +949,10 @@ describe('a mixed-access caller is never handed a path they may not read', () =>
     mixedAccessRequest();
     const { status, json } = await call(base, 'get_change_request', { number: 1 });
     expect(status).toBe(200);
-    expect(json.change_request).toMatchObject({
+    expect(json).toMatchObject({
       body: 'Please review the check-in note.',
-      changed_files: 1,
-      withheld_files: 1,
+      changedFiles: 1,
+      withheldFiles: 1,
     });
     // The whole payload, not just `body` — this is the assertion whose absence
     // let the leak through the first time.
@@ -946,9 +962,7 @@ describe('a mixed-access caller is never handed a path they may not read', () =>
     expect(whole).not.toContain('Affected owners');
     // The file they CAN read is still named, and its blocker still readable.
     expect(whole).toContain('KnowledgeBase/GTM/Notes.md');
-    expect(json.change_request).toMatchObject({
-      access: { withheld_merge_blockers: 1 },
-    });
+    expect(json).toMatchObject({ withheldMergeBlockedReasons: 1 });
   });
 
   it('no tool of the five names the withheld file, in any field', async () => {
@@ -979,10 +993,10 @@ describe('a mixed-access caller is never handed a path they may not read', () =>
     const { json } = await call(base, 'get_change_request', { number: 1 });
     // A caller who may read everything gets the same author text, not the
     // machine block — one body nobody has to reason about.
-    expect(json.change_request).toMatchObject({
+    expect(json).toMatchObject({
       body: 'Please review the check-in note.',
-      changed_files: 2,
-      withheld_files: 0,
+      changedFiles: 2,
+      withheldFiles: 0,
     });
     expect(JSON.stringify(json)).not.toContain('Affected owners');
   });
@@ -1009,7 +1023,7 @@ describe('a file renamed out of a folder the caller may not read', () => {
     );
   }
 
-  it('is withheld whole, so `previous_filename` can never name the closed path', async () => {
+  it('is withheld whole, so `previousPath` can never name the closed path', async () => {
     const base = await start();
     renameRequest();
     const { json } = await call(base, 'list_change_request_files', {
@@ -1019,28 +1033,31 @@ describe('a file renamed out of a folder the caller may not read', () => {
     // `Knowledge/Open.md` is readable by its new name, but its diff shows what
     // was at `Payroll/Rates.md` — so it is withheld, counted, and neither of
     // its two names appears. The plainly readable file is unaffected.
-    expect((json.files as unknown as { filename: string }[]).map((f) => f.filename)).toEqual([
+    expect((json.files as unknown as { path: string }[]).map((f) => f.path)).toEqual([
       'Knowledge/Plain.md',
     ]);
-    expect(json.withheld_files).toBe(1);
+    expect(json.withheldFiles).toBe(1);
     const whole = JSON.stringify(json);
     expect(whole).not.toContain('Payroll');
     expect(whole).not.toContain('Rates');
     expect(whole).not.toContain('Knowledge/Open.md');
   });
 
-  it('is listed, with `previous_filename`, once both of its names are readable', async () => {
+  it('is listed, with `previousPath`, once both of its names are readable', async () => {
     const base = await start();
     renameRequest();
     readable = ['Knowledge/Open.md', 'Knowledge/Plain.md', 'Payroll/Rates.md'];
     const { json } = await call(base, 'list_change_request_files', { number: 12 });
     expect(json.files).toHaveLength(2);
     expect(json.files[0]).toMatchObject({
-      filename: 'Knowledge/Open.md',
-      previous_filename: 'Payroll/Rates.md',
-      status: 'renamed',
+      path: 'Knowledge/Open.md',
+      previousPath: 'Payroll/Rates.md',
+      // `open_change_request`'s word for it, from the same `changeKindOf`:
+      // git's `renamed` and `copied` both read `moved`.
+      change: 'moved',
     });
-    expect(json.withheld_files).toBe(0);
+    expect(json.files[0]).not.toHaveProperty('status');
+    expect(json.withheldFiles).toBe(0);
   });
 
   it('keeps a comment anchored to the withheld rename out of the comment list', async () => {
@@ -1065,7 +1082,7 @@ describe('a file renamed out of a folder the caller may not read', () => {
     // but the file is withheld whole, so a comment on it is withheld too. Were
     // it kept, it would print the name the files tool refuses to print.
     expect((json.comments as unknown as { id: string }[]).map((c) => c.id)).toEqual(['c-1']);
-    expect(json.withheld_comments).toBe(1);
+    expect(json.withheldComments).toBe(1);
     const whole = JSON.stringify(json);
     expect(whole).not.toContain('Knowledge/Open.md');
     expect(whole).not.toContain('Payroll');
@@ -1095,11 +1112,11 @@ describe('a file renamed out of a folder the caller may not read', () => {
     const { json } = await call(base, 'list_change_request_reviews', { number: 12 });
     expect(json.reviews).toHaveLength(1);
     expect(json.reviews[0]).toMatchObject({
-      user: { name: 'Ali' },
+      reviewer: { name: 'Ali' },
       files: ['Knowledge/Plain.md'],
-      withheld_files: 1,
+      withheldFiles: 1,
       // Taken from the readable approval alone — the later one is withheld.
-      submitted_at: '2026-09-30T09:00:00.000Z',
+      submittedAt: '2026-09-30T09:00:00.000Z',
     });
     const whole = JSON.stringify(json);
     expect(whole).not.toContain('Knowledge/Open.md');
@@ -1107,7 +1124,7 @@ describe('a file renamed out of a folder the caller may not read', () => {
     expect(whole).not.toContain('11:00:00');
   });
 
-  it('answers may_approve false when the only approvable file is the withheld one', async () => {
+  it('answers mayApprove false when the only approvable file is the withheld one', async () => {
     const base = await start();
     renameRequest();
     details.set(
@@ -1127,13 +1144,13 @@ describe('a file renamed out of a folder the caller may not read', () => {
       }),
     );
     const first = await call(base, 'get_change_request', { number: 12 });
-    expect(first.json.change_request).toMatchObject({ withheld_files: 1 });
-    expect((first.json.change_request as unknown as { access: { may_approve: boolean } }).access.may_approve).toBe(false);
+    expect(first.json).toMatchObject({ withheldFiles: 1 });
+    expect((first.json as unknown as { viewer: { mayApprove: boolean } }).viewer.mayApprove).toBe(false);
     // Readable, and the answer turns true — the filter is the read verdict, not
     // a blanket false.
     readable = ['Knowledge/Open.md', 'Knowledge/Plain.md', 'Payroll/Rates.md'];
     const second = await call(base, 'get_change_request', { number: 12 });
-    expect((second.json.change_request as unknown as { access: { may_approve: boolean } }).access.may_approve).toBe(true);
+    expect((second.json as unknown as { viewer: { mayApprove: boolean } }).viewer.mayApprove).toBe(true);
   });
 
   it('counts a withheld rename ONCE, though it goes by two names', async () => {
@@ -1148,14 +1165,14 @@ describe('a file renamed out of a folder the caller may not read', () => {
     );
     callerEmail = AUTHOR;
     const { json } = await call(base, 'list_change_request_files', { number: 12 });
-    expect(json.withheld_files).toBe(1);
+    expect(json.withheldFiles).toBe(1);
   });
 });
 
 /**
  * The contradiction Local Testing found on sha 45f18939: `list_change_requests`
  * advertised change request #3 to a caller for whom all four by-number tools
- * answered 404, and reported `withheld_files: 0` where it was 1. The list judged
+ * answered 404, and reported `withheldFiles: 0` where it was 1. The list judged
  * the flat `touchedNodePaths`, which names a rename by its new path alone.
  */
 describe('the list and the by-number tools never disagree about a request', () => {
@@ -1187,8 +1204,8 @@ describe('the list and the by-number tools never disagree about a request', () =
     details.set(3, detail({ ...cr, files: [file(NEW, { status: 'renamed', previousPath: OLD })] }));
 
     const listed = await call(base, 'list_change_requests', {});
-    expect(listed.json.change_requests).toEqual([]);
-    expect(listed.json.total_count).toBe(0);
+    expect(listed.json.changeRequests).toEqual([]);
+    expect(listed.json.totalCount).toBe(0);
 
     // ...and the four by-number tools agree, as they already did.
     for (const tool of TOOLS.filter((t) => t !== 'list_change_requests')) {
@@ -1204,7 +1221,7 @@ describe('the list and the by-number tools never disagree about a request', () =
     const { json } = await call(base, 'list_change_requests', {});
     // #2 touches the readable file plainly, so it is listed; #3 is not, and
     // nothing of it — not its title, not either of its paths — comes back.
-    expect((json.change_requests as unknown as { number: number }[]).map((c) => c.number)).toEqual([2]);
+    expect((json.changeRequests as unknown as { number: number }[]).map((c) => c.number)).toEqual([2]);
     const whole = JSON.stringify(json);
     expect(whole).not.toContain('Avi-Checkin');
     expect(whole).not.toContain('rename out of a folder');
@@ -1215,10 +1232,10 @@ describe('the list and the by-number tools never disagree about a request', () =
     callerEmail = AUTHOR;
     summaries = [renamedOutOfReach()];
     const { json } = await call(base, 'list_change_requests', {});
-    expect(json.change_requests).toHaveLength(1);
+    expect(json.changeRequests).toHaveLength(1);
     // The author may SEE their request; they still may not read the file, and
     // the count says so — one file, not two, though it goes by two names.
-    expect(json.change_requests[0]).toMatchObject({ changed_files: 0, withheld_files: 1 });
+    expect(json.changeRequests[0]).toMatchObject({ changedFiles: 0, withheldFiles: 1 });
     expect(JSON.stringify(json)).not.toContain('Avi-Checkin');
   });
 
@@ -1227,8 +1244,8 @@ describe('the list and the by-number tools never disagree about a request', () =
     readable = [NEW, OLD];
     summaries = [renamedOutOfReach()];
     const { json } = await call(base, 'list_change_requests', {});
-    expect(json.change_requests).toHaveLength(1);
-    expect(json.change_requests[0]).toMatchObject({ changed_files: 1, withheld_files: 0 });
+    expect(json.changeRequests).toHaveLength(1);
+    expect(json.changeRequests[0]).toMatchObject({ changedFiles: 1, withheldFiles: 0 });
   });
 
   it('asks the access tree about both of a rename\'s names', async () => {
@@ -1255,10 +1272,174 @@ describe('the list and the by-number tools never disagree about a request', () =
     delete bare.touchedNodeFiles;
     summaries = [bare];
     const strangers = await call(base, 'list_change_requests', {});
-    expect(strangers.json.change_requests).toEqual([]);
+    expect(strangers.json.changeRequests).toEqual([]);
 
     callerEmail = AUTHOR;
     const mine = await call(base, 'list_change_requests', {});
-    expect(mine.json.change_requests).toHaveLength(1);
+    expect(mine.json.changeRequests).toHaveLength(1);
+  });
+});
+
+/**
+ * Scenario (Razvan's decision, 2026-10-02): a MERGED request's files are
+ * recovered from its merge commit and filtered by access like an open one, so a
+ * reviewer can read back what happened. A DECLINED one has no merge commit and
+ * stays readable by its author alone.
+ *
+ * The recovery itself is the service's (`getPrDetail` of an applied request, and
+ * `changedFilesAtCommit` under it, both tested there). What these pin is the part
+ * the tools own: a merged request with a resolved file set is read like any
+ * other — same access filter, same withholding, same 404 — and nothing about
+ * being applied makes it either more or less visible.
+ */
+describe('reading a request that is no longer open', () => {
+  const applied = (over: Partial<ChangeRequestDetail> = {}) =>
+    detail({
+      number: 20,
+      state: 'merged',
+      files: [file('KnowledgeBase/GTM/Notes.md'), file('Payroll/Rates.md')],
+      mergeBlockedReasons: ['This pull request has already been merged.'],
+      ...over,
+    });
+
+  it('shows a non-author the applied files they may read, withholding the rest', async () => {
+    const base = await start();
+    readable = ['KnowledgeBase/GTM/Notes.md'];
+    const cr = applied();
+    details.set(20, cr);
+    summaries = [cr];
+
+    const got = await call(base, 'get_change_request', { number: 20 });
+    expect(got.status).toBe(200);
+    expect(got.json).toMatchObject({ state: 'merged', changedFiles: 1, withheldFiles: 1 });
+
+    const files = await call(base, 'list_change_request_files', { number: 20 });
+    expect((files.json.files as unknown as { path: string }[]).map((f) => f.path)).toEqual([
+      'KnowledgeBase/GTM/Notes.md',
+    ]);
+    expect(files.json.withheldFiles).toBe(1);
+    // Applied or not, the withheld file is never named.
+    expect(JSON.stringify(files.json)).not.toContain('Payroll');
+  });
+
+  it('lists it under `state: closed`, which covers applied and declined alike', async () => {
+    const base = await start();
+    readable = ['KnowledgeBase/GTM/Notes.md'];
+    summaries = [applied()];
+    const { json } = await call(base, 'list_change_requests', { state: 'closed' });
+    expect(calls).toContainEqual(['listChangeRequestsByState', ['closed', 'merged']]);
+    expect(json.changeRequests).toHaveLength(1);
+    // And the row says WHICH of the two it is, where GitHub would say `closed`.
+    expect(json.changeRequests[0]).toMatchObject({
+      number: 20,
+      state: 'merged',
+      changedFiles: 1,
+      withheldFiles: 1,
+    });
+  });
+
+  it('still answers 404 to a caller who may read none of the applied files', async () => {
+    const base = await start();
+    readable = [];
+    summaries = [applied()];
+    details.set(20, applied());
+    expect((await call(base, 'get_change_request', { number: 20 })).status).toBe(404);
+    expect((await call(base, 'list_change_requests', { state: 'all' })).json.changeRequests).toEqual([]);
+  });
+
+  // A declined request has no merge commit, so the service resolves no files for
+  // it at all — and an empty file set proves no read access.
+  it('leaves a declined request, whose files cannot be resolved, to its author', async () => {
+    const base = await start();
+    const declined = detail({ number: 21, state: 'closed', files: [], approvals: [] });
+    details.set(21, declined);
+    summaries = [declined];
+    expect((await call(base, 'get_change_request', { number: 21 })).status).toBe(404);
+    expect((await call(base, 'list_change_requests', { state: 'closed' })).json.changeRequests).toEqual([]);
+
+    callerEmail = AUTHOR;
+    const mine = await call(base, 'get_change_request', { number: 21 });
+    expect(mine.status).toBe(200);
+    expect(mine.json).toMatchObject({ state: 'closed', changedFiles: 0, viewer: { isAuthor: true } });
+  });
+});
+
+/**
+ * Scenario (Razvan's review, 2026-10-02, finding 3): a reply is shown only when
+ * the comment it replies to is.
+ *
+ * `post_change_request_comment` takes `parentId` without requiring `path`, so a
+ * reply to a comment on a withheld file has no path of its own — and judged on
+ * itself it looked like a general comment about the whole request. It came back
+ * with its body and a `parentId` naming a comment the caller cannot see.
+ */
+describe('a reply is shown only when the comment it replies to is', () => {
+  /** A request whose two files the caller can read one of. */
+  function threadRequest(comments: ChangeRequestComment[]) {
+    readable = ['Knowledge/Open.md'];
+    details.set(
+      12,
+      detail({
+        files: [file('Knowledge/Open.md'), file('Payroll/Rates.md')],
+        approvals: [approval('Knowledge/Open.md'), approval('Payroll/Rates.md')],
+        comments,
+      }),
+    );
+  }
+
+  it('withholds a pathless reply to a comment on a file the caller may not read', async () => {
+    const base = await start();
+    threadRequest([
+      comment({ id: 'c-1', path: 'Payroll/Rates.md', line: 3, body: 'This band is wrong.' }),
+      comment({ id: 'c-2', parentId: 'c-1', body: 'Agreed, the band moved in April.' }),
+    ]);
+    const { json } = await call(base, 'list_change_request_comments', { number: 12 });
+    expect(json.comments).toEqual([]);
+    expect(json.withheldComments).toBe(2);
+    const whole = JSON.stringify(json);
+    // Neither the parent's path, nor the reply's body, nor the id it answers.
+    expect(whole).not.toContain('Payroll');
+    expect(whole).not.toContain('band moved');
+    expect(whole).not.toContain('c-1');
+  });
+
+  it('withholds every reply down the thread, however deep it runs', async () => {
+    const base = await start();
+    threadRequest([
+      comment({ id: 'c-1', path: 'Payroll/Rates.md', body: 'This band is wrong.' }),
+      comment({ id: 'c-2', parentId: 'c-1', body: 'Which one?' }),
+      comment({ id: 'c-3', parentId: 'c-2', body: 'The senior one.' }),
+    ]);
+    const { json } = await call(base, 'list_change_request_comments', { number: 12 });
+    expect(json.comments).toEqual([]);
+    expect(json.withheldComments).toBe(3);
+    expect(JSON.stringify(json)).not.toContain('senior');
+  });
+
+  it('keeps a thread on a file the caller may read, replies and all', async () => {
+    const base = await start();
+    threadRequest([
+      comment({ id: 'c-1', path: 'Knowledge/Open.md', line: 4, body: 'Out of date.' }),
+      comment({ id: 'c-2', parentId: 'c-1', body: 'Fixed.' }),
+      comment({ id: 'c-3', parentId: 'c-2', body: 'Thanks.' }),
+    ]);
+    const { json } = await call(base, 'list_change_request_comments', { number: 12 });
+    expect((json.comments as unknown as { id: string }[]).map((c) => c.id)).toEqual([
+      'c-1',
+      'c-2',
+      'c-3',
+    ]);
+    expect(json.withheldComments).toBe(0);
+  });
+
+  it('keeps a general comment and its replies — neither is about a file', async () => {
+    const base = await start();
+    threadRequest([
+      comment({ id: 'c-1', body: 'Ready for review.' }),
+      comment({ id: 'c-2', parentId: 'c-1', body: 'Looking now.' }),
+    ]);
+    const { json } = await call(base, 'list_change_request_comments', { number: 12 });
+    expect(json.comments).toHaveLength(2);
+    expect(json.withheldComments).toBe(0);
   });
 });

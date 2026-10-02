@@ -214,25 +214,58 @@ export class PullRequestService implements IPullRequestService {
   /**
    * Cheap touched-paths for a CR row (empty when no workspace exists yet),
    * placeholders included — see {@link summaryOf} for what a summary shows.
+   *
+   * WHICH DIFF depends on the row's state, and no state reaches the network per
+   * request:
+   *
+   *   - **open** — the branch pair, as ever. `fetch: false` from a list that has
+   *     just refreshed the whole clone in one round trip.
+   *   - **merged** — the MERGE COMMIT the row records, against its first parent.
+   *     The source branch is retired, so the branch pair cannot be diffed at
+   *     all: `publishedPrCommits` answered null for it, which sent
+   *     `changedPathsAndPairsForPr` to `fetch` two refs — one of which no longer
+   *     exists — once PER REQUEST, and then logged a warning for each. A list of
+   *     a few hundred applied requests opened a few hundred concurrent fetches
+   *     to answer nothing (Razvan's review of #347, finding 1). The merge commit
+   *     is local, immutable, and holds exactly what landed.
+   *   - **closed** (declined) — nothing. No merge commit was ever written and
+   *     the branch is gone, so there is no diff to compute and nothing to ask
+   *     git for. The empty set fails closed downstream: a declined request is
+   *     readable by its author alone.
    */
   private async touchedPathsFor(
     row: ChangeRequestRow,
     workspaceId: string | null,
     opts: { fetch?: boolean } = {},
   ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }> {
-    if (!workspaceId) return { paths: [], pairs: [] };
+    const empty = { paths: [] as string[], pairs: [] as ChangedPathPair[] };
+    if (!workspaceId) return empty;
+    // Best-effort, but logged: an empty result silently hides a CR from the
+    // owner-routing match in `listPrsForOwnerEmail`, so a swallowed failure
+    // shouldn't be invisible.
+    const degrade = (what: string) => (err: unknown) => {
+      const where = `#${row.number} (${row.sourceBranch} → ${row.targetBranch}) in ${workspaceId}`;
+      // A clone that simply does not hold the merge commit yet is not a failure
+      // to shout about — it is this row's turn to be fetched, and the next list
+      // read answers it. Warning per request on that would be the log flood the
+      // network flood came with.
+      if (err instanceof WorkflowValidationError) {
+        log.debug(`${what} could not resolve ${where}; answering no touched paths:`, { err });
+      } else {
+        log.warn(`${what} failed for ${where}:`, { err });
+      }
+      return empty;
+    };
+    if (row.state === 'merged') {
+      if (!row.mergedSha) return empty;
+      return this.gitService
+        .changedPathsAndPairsAtCommit(workspaceId, row.mergedSha)
+        .catch(degrade('changedPathsAndPairsAtCommit'));
+    }
+    if (row.state !== 'open') return empty;
     return this.gitService
       .changedPathsAndPairsForPr(workspaceId, row.targetBranch, row.sourceBranch, opts)
-      .catch((err) => {
-        // Best-effort, but log it: an empty result silently hides a CR from the
-        // owner-routing match in `listPrsForOwnerEmail`, so a swallowed failure
-        // shouldn't be invisible.
-        log.warn(
-          `changedPathsForPr failed for #${row.number} (${row.sourceBranch} → ${row.targetBranch}) in ${workspaceId}:`,
-          { err },
-        );
-        return { paths: [] as string[], pairs: [] as ChangedPathPair[] };
-      });
+      .catch(degrade('changedPathsForPr'));
   }
 
   /**
@@ -317,11 +350,11 @@ export class PullRequestService implements IPullRequestService {
    * the table, because a closed-request read is rare and a second cache keyed
    * on a state set would mostly hold misses.
    *
-   * Touched paths are best-effort exactly as on the open list: a merged
-   * request's source branch has been retired, so its diff can no longer be
-   * computed and it reports no touched paths. A caller that gates on those
-   * paths must therefore treat an empty set as "cannot prove", never as
-   * "nothing to protect".
+   * Touched paths are best-effort exactly as on the open list, and no row costs
+   * a network call of its own: a MERGED row is diffed from the merge commit it
+   * records (local and immutable), and a DECLINED one is not diffed at all —
+   * see {@link touchedPathsFor}. A caller that gates on those paths must still
+   * treat an empty set as "cannot prove", never as "nothing to protect".
    */
   async listPrsByState(
     states: PullRequestState[],
@@ -336,8 +369,14 @@ export class PullRequestService implements IPullRequestService {
       .from(changeRequests)
       .where(inArray(changeRequests.state, wanted))
       .orderBy(desc(changeRequests.createdAt));
-    // ONE fetch for the whole list, for the reason spelled out on listOpenPrs.
-    if (workspaceId && rows.length > 0) {
+    // ONE fetch for the whole list, for the reason spelled out on listOpenPrs —
+    // and only when an OPEN row is in scope. An open request is diffed from two
+    // branch refs, which are as current as the last fetch; a merged one from a
+    // commit that cannot change and a declined one from nothing at all. So a
+    // listing of closed and merged requests reaches the network not once, which
+    // is what the read tools' `state: closed` asks for (and `state: all` keeps
+    // its single fetch for the open rows it does contain).
+    if (workspaceId && rows.length > 0 && wanted.includes('open')) {
       await this.workspaceService
         .ensureRemotesFetched(workspaceId, { force: opts.fresh === true })
         .catch(() => undefined);
@@ -520,7 +559,30 @@ export class PullRequestService implements IPullRequestService {
     /** Did the target change, since the fork point, a file this request changes? */
     let targetChangedShared = false;
     try {
-      if (workspaceId) {
+      if (workspaceId && row.state === 'merged' && row.mergedSha) {
+        // An APPLIED request is read from its merge commit, not from its
+        // branches: the source branch is retired, so there is nothing to resolve
+        // and nothing to fetch. The commit's first parent is the target as it
+        // stood before the merge and its second is the source tip that landed,
+        // so the file list is exactly what was applied, and the `headSha` the
+        // approvals are judged stale against is the head they were given on.
+        //
+        // Before the 2026-10-02 decision this fell into the catch below and
+        // answered no files — which, since an empty file set proves no read
+        // access, made every applied request readable by its author alone.
+        // Reading back what happened is what the ticket exists for.
+        const ends = await this.gitService.appliedChangeShas(workspaceId, row.mergedSha);
+        baseSha = ends.baseSha;
+        headSha = ends.headSha;
+        files = await this.gitService.changedFilesAtCommit(workspaceId, row.mergedSha, {
+          ...(opts.patches === false ? { patchCap: 0 } : {}),
+        });
+        // `forkPoint` and `targetChangedShared` stay at their defaults. "Is this
+        // behind its target, and does the divergence reach its files" is a
+        // question about a proposal that could still be updated; an applied one
+        // has no answer to give and reports none (`behind` and `needsUpdate` are
+        // gated on `state === 'open'` downstream anyway).
+      } else if (workspaceId) {
         const shas = await this.gitService.resolvePrShas(
           workspaceId,
           row.targetBranch,
@@ -560,7 +622,11 @@ export class PullRequestService implements IPullRequestService {
     } catch (err) {
       // A request that is NO LONGER OPEN has had its source branch retired, so
       // there are no two refs left to diff and `resolvePublishedBranch` answers
-      // `unknown branch`. Everything the ROW records — title, body, state,
+      // `unknown branch`. Since the 2026-10-02 decision a MERGED request takes
+      // the merge-commit path above instead and lands here only when that commit
+      // cannot be resolved either (a clone that has not fetched it yet, or a row
+      // with no `merged_sha`), so what reaches this in the ordinary course is a
+      // DECLINED request. Everything the ROW records — title, body, state,
       // author, times — is still true, and this is the degradation the
       // no-workspace case above already takes: no shas and no files, rather than
       // no answer at all. Without it, reading a request back after it was

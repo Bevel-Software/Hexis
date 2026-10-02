@@ -231,6 +231,9 @@ describe('PullRequestService.listPrsForOwnerEmail', () => {
  * delegated (and keeps its cache); every other state set is read from the table.
  */
 describe('PullRequestService.listPrsByState', () => {
+  /** The merge commit an applied row records, and the one its diff is read from. */
+  const MERGE_SHA = 'a'.repeat(40);
+
   /** A `change_requests` row as drizzle hands it back. */
   function row(over: Record<string, unknown> = {}): Record<string, unknown> {
     return {
@@ -242,6 +245,7 @@ describe('PullRequestService.listPrsByState', () => {
       authorEmail: 'juan@bevel.software',
       authorName: 'Juan',
       state: 'merged',
+      mergedSha: MERGE_SHA,
       createdAt: new Date('2026-04-01T00:00:00Z'),
       updatedAt: null,
       closedAt: new Date('2026-04-03T09:30:00Z'),
@@ -260,18 +264,22 @@ describe('PullRequestService.listPrsByState', () => {
     const orderBy = vi.fn(async () => rows);
     const select = vi.fn(() => ({ from: () => ({ where: () => ({ orderBy }) }) }));
     const db = { select } as unknown as Database;
+    const answer = (paths: string[]) => ({ paths, pairs: paths.map((path) => ({ path })) });
+    const ensureRemotesFetched = vi.fn(async () => undefined);
     const workspace = {
-      ensureRemotesFetched: vi.fn(async () => undefined),
+      ensureRemotesFetched,
       findAnyWorkspaceId: async () => 'ws',
     } as unknown as WorkspaceService;
+    // Both diff paths are stubbed, so a test can prove WHICH one a row's state
+    // took — the point of the routing, and of the finding behind it.
+    const forPr = vi.fn(async () => answer(changedPaths));
+    const atCommit = vi.fn(async () => answer(changedPaths));
     const git = {
-      changedPathsAndPairsForPr: vi.fn(async () => ({
-        paths: changedPaths,
-        pairs: changedPaths.map((path) => ({ path })),
-      })),
+      changedPathsAndPairsForPr: forPr,
+      changedPathsAndPairsAtCommit: atCommit,
     } as unknown as GitService;
     const svc = new PullRequestService(db, workspace, makeAccessControl({}), git);
-    return { svc, select };
+    return { svc, select, forPr, atCommit, ensureRemotesFetched };
   }
 
   beforeEach(() => {
@@ -295,9 +303,16 @@ describe('PullRequestService.listPrsByState', () => {
   });
 
   it('reads the closed and merged rows from the table', async () => {
-    const { svc, select } = svcOver([row({ number: 9, state: 'merged' })], ['Knowledge/A.md']);
+    const { svc, select, atCommit, forPr } = svcOver(
+      [row({ number: 9, state: 'merged' })],
+      ['Knowledge/A.md'],
+    );
     const [summary] = await svc.listPrsByState(['closed', 'merged']);
     expect(select).toHaveBeenCalledTimes(1);
+    // The merge commit, not the branch pair: the source branch is retired, so
+    // asking for it is what sent one fetch per row at the remote.
+    expect(atCommit).toHaveBeenCalledWith('ws', MERGE_SHA);
+    expect(forPr).not.toHaveBeenCalled();
     expect(summary).toMatchObject({
       number: 9,
       state: 'merged',
@@ -328,7 +343,49 @@ describe('PullRequestService.listPrsByState', () => {
     expect(summary.updatedAt).toBe('2026-04-01T00:00:00.000Z');
   });
 
-  it('degrades to no touched paths when a retired branch makes the diff uncomputable', async () => {
+  // Razvan's review of #347, finding 1: a closed row's branch is retired, so
+  // `publishedPrCommits` answered null and the diff FETCHED two refs — one of
+  // which no longer exists — once per row, logging a warning for each. A few
+  // hundred applied requests opened a few hundred concurrent fetches to answer
+  // nothing. Nothing about a closed row needs the network.
+  describe('listing closed and merged requests reaches the network not once', () => {
+    it('asks for no clone refresh when no open row is in scope', async () => {
+      const { svc, ensureRemotesFetched } = svcOver([row({ state: 'merged' })], ['A.md']);
+      await svc.listPrsByState(['closed', 'merged']);
+      expect(ensureRemotesFetched).not.toHaveBeenCalled();
+    });
+
+    it('keeps the ONE refresh for a set that does contain open rows', async () => {
+      const { svc, ensureRemotesFetched } = svcOver([row({ state: 'merged' })], ['A.md']);
+      vi.spyOn(svc, 'listOpenPrs').mockResolvedValue([]);
+      await svc.listPrsByState(['open', 'merged']);
+      expect(ensureRemotesFetched).toHaveBeenCalledTimes(1);
+    });
+
+    it('asks git NOTHING about a declined row — there is no diff to compute', async () => {
+      const { svc, forPr, atCommit } = svcOver([row({ state: 'closed' })], ['A.md']);
+      const [summary] = await svc.listPrsByState(['closed']);
+      expect(forPr).not.toHaveBeenCalled();
+      expect(atCommit).not.toHaveBeenCalled();
+      // No files resolved, which downstream reads as "nothing proven": a
+      // declined request stays readable by its author alone.
+      expect(summary.touchedNodePaths).toEqual([]);
+      expect(summary.touchedNodeFiles).toEqual([]);
+    });
+
+    it('asks git nothing about a merged row that records no merge commit', async () => {
+      const { svc, forPr, atCommit } = svcOver(
+        [row({ state: 'merged', mergedSha: null })],
+        ['A.md'],
+      );
+      const [summary] = await svc.listPrsByState(['merged']);
+      expect(forPr).not.toHaveBeenCalled();
+      expect(atCommit).not.toHaveBeenCalled();
+      expect(summary.touchedNodePaths).toEqual([]);
+    });
+  });
+
+  it('degrades to no touched paths when a merge commit this clone lacks cannot be diffed', async () => {
     const orderBy = vi.fn(async () => [row()]);
     const db = {
       select: () => ({ from: () => ({ where: () => ({ orderBy }) }) }),
@@ -338,8 +395,8 @@ describe('PullRequestService.listPrsByState', () => {
       findAnyWorkspaceId: async () => 'ws',
     } as unknown as WorkspaceService;
     const git = {
-      changedPathsAndPairsForPr: vi.fn(async () => {
-        throw new Error('unknown branch');
+      changedPathsAndPairsAtCommit: vi.fn(async () => {
+        throw new WorkflowValidationError(`no first parent for commit ${MERGE_SHA}`);
       }),
     } as unknown as GitService;
     const svc = new PullRequestService(db, workspace, makeAccessControl({}), git);
@@ -351,10 +408,13 @@ describe('PullRequestService.listPrsByState', () => {
 });
 
 /**
- * `getPrDetail` when the two branches can no longer be diffed — the state every
- * applied request ends in, since merging retires its source branch.
+ * `getPrDetail` when the two branches can no longer be diffed AND no merge
+ * commit is recorded either — so there is nothing left to read the change from.
+ * Since the 2026-10-02 decision an applied request is read from its merge commit
+ * (see the describe below this one), which leaves this for a declined request and
+ * for a row written before `merged_sha` was.
  */
-describe('PullRequestService.getPrDetail with a retired branch', () => {
+describe('PullRequestService.getPrDetail with a retired branch and no merge commit', () => {
   function svcFor(state: string) {
     const row = {
       number: 4,
@@ -412,5 +472,122 @@ describe('PullRequestService.getPrDetail with a retired branch', () => {
 
   it('still fails loudly on an OPEN request, so no live proposal reads as empty', async () => {
     await expect(svcFor('open').getPrDetail(4)).rejects.toThrow('unknown branch');
+  });
+});
+
+/**
+ * An APPLIED request is read from the merge commit its row records (Razvan's
+ * decision, 2026-10-02). Its branch is retired, so reading it from the branch
+ * pair answered no files — and since an empty file set proves no read access,
+ * that made every applied request readable by its author alone. Catching up on
+ * what happened is what the ticket exists for.
+ */
+describe('PullRequestService.getPrDetail of an applied request', () => {
+  const MERGE_SHA = 'c'.repeat(40);
+  const BASE_SHA = '1'.repeat(40);
+  const HEAD_SHA = '2'.repeat(40);
+
+  function svcFor(over: Record<string, unknown> = {}) {
+    const row = {
+      number: 4,
+      sourceBranch: 'feature/x',
+      targetBranch: 'main',
+      title: 'A proposal',
+      body: 'why it was needed',
+      authorEmail: 'juan@bevel.software',
+      authorName: 'Juan',
+      state: 'merged',
+      mergedSha: MERGE_SHA,
+      createdAt: new Date('2026-04-01T00:00:00Z'),
+      updatedAt: null,
+      closedAt: new Date('2026-04-03T09:30:00Z'),
+      applyFailureReason: null,
+      applyFailureConflicts: null,
+      applyFailedAt: null,
+      applyFailedByName: null,
+      applyFailureKind: null,
+      closedReason: null,
+      ...over,
+    };
+    const db = {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [row] }) }) }),
+    } as unknown as Database;
+    const ensureRemotesFetched = vi.fn(async () => undefined);
+    const workspace = {
+      ensureRemotesFetched,
+      findAnyWorkspaceId: async () => 'ws',
+    } as unknown as WorkspaceService;
+    const resolvePrShas = vi.fn(async () => {
+      throw new WorkflowValidationError('unknown branch: feature/x');
+    });
+    const appliedChangeShas = vi.fn(async () => ({ baseSha: BASE_SHA, headSha: HEAD_SHA }));
+    const changedFilesAtCommit = vi.fn(async () => [
+      {
+        path: 'Knowledge/A.md',
+        previousPath: undefined,
+        status: 'modified' as const,
+        additions: 2,
+        deletions: 1,
+        patch: '@@ -1 +1 @@',
+        isBinary: false,
+        sha: '',
+        rawUrl: '',
+      },
+    ]);
+    const git = {
+      resolvePrShas,
+      appliedChangeShas,
+      changedFilesAtCommit,
+    } as unknown as GitService;
+    const svc = new PullRequestService(db, workspace, makeAccessControl({}), git);
+    return { svc, resolvePrShas, appliedChangeShas, changedFilesAtCommit, ensureRemotesFetched };
+  }
+
+  it('reads its files from the merge commit, and never asks for its branches', async () => {
+    const { svc, resolvePrShas, changedFilesAtCommit } = svcFor();
+    const detail = await svc.getPrDetail(4);
+    expect(changedFilesAtCommit).toHaveBeenCalledWith('ws', MERGE_SHA, {});
+    // Not one branch resolution, so not one fetch: the branch no longer exists
+    // and the commit cannot change.
+    expect(resolvePrShas).not.toHaveBeenCalled();
+    expect(detail).toMatchObject({
+      number: 4,
+      state: 'merged',
+      files: [{ path: 'Knowledge/A.md', additions: 2, deletions: 1 }],
+    });
+  });
+
+  it("reports the merge commit's two parents as the request's base and head", async () => {
+    // `headSha` is not decoration: an approval is called stale when the head it
+    // was given against is not this one, so answering the merge commit here would
+    // report every approval the request ever collected as stale.
+    const { svc } = svcFor();
+    expect(await svc.getPrDetail(4)).toMatchObject({ baseSha: BASE_SHA, headSha: HEAD_SHA });
+  });
+
+  it('asks no "is it behind its target" question of an applied request', async () => {
+    const { svc } = svcFor();
+    expect(await svc.getPrDetail(4)).toMatchObject({
+      mergeBaseSha: null,
+      behind: false,
+      needsUpdate: false,
+    });
+  });
+
+  it('skips the patches when the caller asked for none', async () => {
+    const { svc, changedFilesAtCommit } = svcFor();
+    await svc.getPrDetail(4, { patches: false });
+    expect(changedFilesAtCommit).toHaveBeenCalledWith('ws', MERGE_SHA, { patchCap: 0 });
+  });
+
+  it('falls back to the row alone when this clone does not hold the merge commit', async () => {
+    const { svc } = svcFor();
+    const git = (svc as unknown as { gitService: Record<string, unknown> }).gitService;
+    git.appliedChangeShas = async () => {
+      throw new WorkflowValidationError(`no first parent for commit ${MERGE_SHA}`);
+    };
+    // Fail-closed, as before the decision: no files, so author-only — never
+    // somebody else's file list.
+    expect(await svc.getPrDetail(4)).toMatchObject({ state: 'merged', files: [], headSha: '' });
   });
 });
