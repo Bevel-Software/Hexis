@@ -242,10 +242,7 @@ export function listedTools(tools: ProxiedTool[]): McpTool[] {
   // the deployment under (`hexis`), not the one the hosted endpoint uses
   // (`KNOWLEDGE_BASE`). One fixed example was wrong here, and a chain copied
   // out of it died of `ReferenceError: KNOWLEDGE_BASE is not defined`.
-  const metaTools = codeModeMetaTools(
-    REMOTE_MANUAL_NAME,
-    tools.map((t) => t.utcpName),
-  );
+  const metaTools = codeModeMetaTools(REMOTE_MANUAL_NAME, tools);
   const seen = new Set<string>(META_TOOL_NAMES);
   const listed: McpTool[] = [];
   const dropped: string[] = [];

@@ -9,7 +9,9 @@ import {
   runToolChain,
   withChainRuntime,
 } from '../chain-runtime.js';
-import { chainCallExample, codeModeMetaTools } from '../meta-tools.js';
+import { codeModeMetaTools } from '../meta-tools.js';
+import type { ChainExampleTool } from '../chain-example.js';
+import { kbToolSchema } from './kb-tool-schema.js';
 
 /**
  * The chain runtime, at the level where it can be pinned exactly.
@@ -398,92 +400,78 @@ describe('a chain that succeeds', () => {
  * The namespace in the descriptions. Both Scenarios, because the two surfaces
  * register the same tools under different names and ONE fixed example was
  * necessarily wrong on one of them — which is how this was reported.
+ *
+ * Driven by a REALISTIC catalog, never by `codeModeMetaTools(ns)` with none. An
+ * earlier version of these tests passed an empty catalog, which falls back to
+ * assembling the name from the namespace — so they asserted the fallback and
+ * said nothing about either surface's real shape. That is precisely the gap
+ * that let a broken example through.
  */
 describe('the description names the namespace this connection exposes', () => {
-  function descriptions(namespace: string): string {
-    return codeModeMetaTools(namespace)
+  /** The hosted endpoint: the KB manual is http, so names are two segments. */
+  const HOSTED: ChainExampleTool[] = [
+    { utcpName: 'KNOWLEDGE_BASE.read_file', inputSchema: kbToolSchema(['branch', 'path']) },
+    { utcpName: 'KNOWLEDGE_BASE.start_session', inputSchema: kbToolSchema([]) },
+  ];
+  /** The local server: the deployment is one MCP manual whose server shares its name. */
+  const LOCAL: ChainExampleTool[] = [
+    { utcpName: 'hexis.hexis.read_file', inputSchema: kbToolSchema(['branch', 'path']) },
+    { utcpName: 'hexis.hexis.start_session', inputSchema: kbToolSchema([]) },
+  ];
+
+  function descriptions(namespace: string, tools: ChainExampleTool[]): string {
+    return codeModeMetaTools(namespace, tools)
       .map((t) => `${t.name}\n${t.description ?? ''}`)
       .join('\n');
   }
 
   it('reads KNOWLEDGE_BASE.read_file on a deployment whose namespace is KNOWLEDGE_BASE', () => {
-    const text = descriptions('KNOWLEDGE_BASE');
+    const text = descriptions('KNOWLEDGE_BASE', HOSTED);
     expect(text).toContain('KNOWLEDGE_BASE.read_file');
     expect(text).toContain('`KNOWLEDGE_BASE.<tool>({ body: { ...args } })`');
     expect(text).not.toContain('hexis.');
   });
 
-  it('reads hexis.read_file through the local server, whose namespace is hexis', () => {
-    const text = descriptions('hexis');
-    expect(text).toContain('hexis.read_file');
+  /**
+   * Scenario 2 of the Specification reads "the example reads `hexis.read_file(...)`".
+   * That name is not callable on the local server — the tool arrives as
+   * `hexis.hexis.read_file` and the runtime binds `hexis.hexis_read_file` — so
+   * the Scenario's literal spelling and the Acceptance Criterion that a copied
+   * example WORKS cannot both hold. The criterion wins, and what the Scenario
+   * is really about — the namespace is `hexis`, not `KNOWLEDGE_BASE` — holds
+   * exactly. (Verified live during Local Testing: `hexis.read_file` is a
+   * TypeError there.)
+   */
+  it('names hexis through the local server, in the form that is actually callable there', () => {
+    const text = descriptions('hexis', LOCAL);
     expect(text).toContain('`hexis.<tool>({ body: { ...args } })`');
+    expect(text).toContain('hexis.hexis_read_file');
     expect(text).not.toContain('KNOWLEDGE_BASE');
+    // Not the Scenario's literal spelling, because that one does not run.
+    expect(text).not.toMatch(/(?<!hexis[._])\bhexis\.read_file\b/);
   });
 
-  it('spells the example the way the runtime spells the namespace, so a copied call runs', () => {
+  it('spells the namespace the way the runtime spells it, so a copied call runs', () => {
     // `@utcp/code-mode` exposes `global.<sanitized manual name>`; an example
     // carrying the raw name would not be callable.
-    expect(descriptions('my-deployment')).toContain('my_deployment.read_file');
+    const text = descriptions('my-deployment', [
+      { utcpName: 'my-deployment.read_file', inputSchema: kbToolSchema(['branch', 'path']) },
+    ]);
+    expect(text).toContain('my_deployment.read_file');
   });
 
   it('tells the agent the runtime has the four browser globals', () => {
-    const text = descriptions('KNOWLEDGE_BASE');
+    const text = descriptions('KNOWLEDGE_BASE', HOSTED);
     for (const name of ['atob', 'btoa', 'TextEncoder', 'TextDecoder']) expect(text).toContain(name);
   });
 
   it('tells the agent a timeout is answered and how far it may be raised', () => {
-    const text = descriptions('KNOWLEDGE_BASE');
+    const text = descriptions('KNOWLEDGE_BASE', HOSTED);
     expect(text).toContain(String(CHAIN_TIMEOUT_MAX_MS));
     expect(text).toMatch(/timeout/);
   });
 
   it('is built per surface rather than shared, so one connection cannot serve another\'s name', () => {
-    expect(codeModeMetaTools('hexis')).not.toEqual(codeModeMetaTools('KNOWLEDGE_BASE'));
-  });
-});
-
-/**
- * The example call, read off the catalog. A namespace on its own is not enough
- * to write a working example: the hosted endpoint's knowledge-base tools arrive
- * two segments deep (`KNOWLEDGE_BASE.read_file`) while the local server's
- * arrive three (`hexis.hexis.read_file`), and the chain spells the second
- * `hexis.hexis_read_file`. The Acceptance Criterion is that an agent copying
- * the example gets a WORKING call, so the example has to be a name the catalog
- * actually has.
- */
-describe('the example call is one the catalog really has', () => {
-  it('is the hosted endpoint\'s own two-segment name', () => {
-    expect(chainCallExample('KNOWLEDGE_BASE', ['KNOWLEDGE_BASE.read_file', 'KNOWLEDGE_BASE.ask'])).toBe(
-      'KNOWLEDGE_BASE.read_file',
-    );
-  });
-
-  it('is the local server\'s three-segment name, which a namespace template would get wrong', () => {
-    expect(chainCallExample('hexis', ['hexis.hexis.read_file', 'hexis.hexis.ask'])).toBe(
-      'hexis.hexis_read_file',
-    );
-  });
-
-  it('prefers this connection\'s own namespace over another manual\'s', () => {
-    const call = chainCallExample('hexis', ['localbox.read_file', 'hexis.hexis.ask']);
-    expect(call).toBe('hexis.hexis_ask');
-  });
-
-  it('falls back to any tool at all when the connection\'s namespace has none', () => {
-    expect(chainCallExample('hexis', ['localbox.local_echo'])).toBe('localbox.local_echo');
-  });
-
-  it('falls back to the namespace shape only for an empty catalog, where nothing is callable anyway', () => {
-    expect(chainCallExample('hexis', [])).toBe('hexis.read_file');
-  });
-
-  it('puts that name in the descriptions, both surfaces', () => {
-    const hosted = codeModeMetaTools('KNOWLEDGE_BASE', ['KNOWLEDGE_BASE.read_file'])
-      .map((t) => t.description)
-      .join('\n');
-    const local = codeModeMetaTools('hexis', ['hexis.hexis.read_file']).map((t) => t.description).join('\n');
-    expect(hosted).toContain('KNOWLEDGE_BASE.read_file({ body:');
-    expect(local).toContain('hexis.hexis_read_file({ body:');
-    expect(local).not.toContain('KNOWLEDGE_BASE');
+    expect(codeModeMetaTools('hexis', LOCAL)).not.toEqual(codeModeMetaTools('KNOWLEDGE_BASE', HOSTED));
   });
 });

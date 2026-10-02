@@ -1,6 +1,7 @@
 import type { Tool as McpTool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { CodeModeUtcpClient } from '@utcp/code-mode';
 import { utcpNameToTsInterfaceName, findToolsByNames, sanitizeIdentifier } from './code-mode-names.js';
+import { chainExample, type ChainExample, type ChainExampleTool } from './chain-example.js';
 import { toCallToolResult, toolError, describeToolFailure, omitImagePayloads } from './results.js';
 import { retiredToolInFailure } from './retired-tools.js';
 import {
@@ -53,45 +54,15 @@ export function chainNamespaceExample(namespace: string): string {
   return sanitizeIdentifier(namespace);
 }
 
-/**
- * The CALLABLE name the examples use, read off the live catalog rather than
- * assembled from the namespace and a tool name.
- *
- * The namespace alone is not enough to write a working example, because the two
- * surfaces do not flatten to the same depth. The hosted endpoint registers the
- * knowledge-base manual over http and its tools arrive as
- * `KNOWLEDGE_BASE.read_file` — so the chain calls `KNOWLEDGE_BASE.read_file`.
- * The local server registers the whole deployment as one MCP manual whose
- * single server shares its name, so the very same tool arrives as
- * `hexis.hexis.read_file` and the chain must call `hexis.hexis_read_file`.
- * `hexis.read_file` — the example a namespace template would produce — is not
- * callable there. So the example is a name the catalog actually has.
- *
- * This connection's OWN namespace comes first, because a third-party `.tool`
- * that happens to serve a `read_file` is a worse example than any core tool:
- * the thing an agent most needs demonstrated is how to reach the knowledge
- * base. Within the namespace `read_file` is preferred, since every surface has
- * it and an agent reading the description recognises it. Only then any tool at
- * all. The namespace template is the last resort and reaches only an empty
- * catalog, where no example could work in any case.
- */
-export function chainCallExample(namespace: string, utcpNames: readonly string[]): string {
-  const ns = chainNamespaceExample(namespace);
-  const callable = utcpNames.map(utcpNameToTsInterfaceName).sort();
-  const own = callable.filter((n) => n.startsWith(`${ns}.`));
-  return (
-    own.find((n) => n.endsWith('read_file')) ??
-    own[0] ??
-    callable.find((n) => n.endsWith('read_file')) ??
-    callable[0] ??
-    `${ns}.read_file`
-  );
-}
-
-function callToolChainDescription(ns: string, call: string): string {
+function callToolChainDescription(example: ChainExample): string {
+  const { namespace: ns, name, call } = example;
+  // Printed only when the catalog determines every required argument. A call
+  // the agent cannot trust is worse than the shape on its own, and `tools_info`
+  // is one hop away either way.
+  const worked = call ? ` A call that works exactly as written: \`return ${call};\`.` : '';
   return [
-    `Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function. Call tools as \`${ns}.<tool>({ body: { ...args } })\` — for example \`${call}({ body: { path: 'knowledge-base/AGENTS.md' } })\` — with NO \`await\` (results are already resolved), and \`return\` the final value. The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax), plus \`atob\`, \`btoa\`, \`TextEncoder\` and \`TextDecoder\` for base64 and UTF-8 bytes, as in a browser. There is no \`Buffer\`, no \`fetch\` and no \`require\`.`,
-    `Discover first: \`list_tools\` lists every tool in callable form (e.g. \`${call}\`); \`tools_info\` returns their exact argument + return shapes — do not guess. Batch multiple tool calls into one chain to avoid a round-trip per call. The chain runs with your own connection key, so it can only reach the tools you can already call directly.`,
+    `Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function. Call tools as \`${ns}.<tool>({ body: { ...args } })\` with NO \`await\` (results are already resolved), and \`return\` the final value.${worked} Every argument a tool declares REQUIRED must be present — \`tools_info\` gives the exact shapes, and for the knowledge-base tools that includes \`branch\`. The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax), plus \`atob\`, \`btoa\`, \`TextEncoder\` and \`TextDecoder\` for base64 and UTF-8 bytes, as in a browser. There is no \`Buffer\`, no \`fetch\` and no \`require\`.`,
+    `Discover first: \`list_tools\` lists every tool in callable form (e.g. \`${name}\`); \`tools_info\` returns their exact argument + return shapes — do not guess. Batch multiple tool calls into one chain to avoid a round-trip per call. The chain runs with your own connection key, so it can only reach the tools you can already call directly.`,
     `Failures are answered, never dropped: a chain that throws comes back as an error carrying the reason, and one that outlives \`timeout\` (default ${CHAIN_TIMEOUT_DEFAULT_MS} ms, maximum ${CHAIN_TIMEOUT_MAX_MS} ms) comes back saying so — raise \`timeout\` or split the work and run it again. Either way the connection stays open and your next call works as usual.`,
     'Large results: if the combined result+logs exceed `max_output_size` (default 200000 chars) the full JSON is spilled to a shared store and you get back a `__tool_chain_spill__/…` ref instead. Read it with `read_file` (pass that ref as `path` — `branch` is ignored — plus `offset`/`limit` to slice it), or better, re-run a narrower chain that returns only what you need.',
     'Images: image files are returned as native MCP image content on a DIRECT `read_file` call only — a chained `read_file` of an image yields `{ image_omitted: true, note }` instead of the picture, so call it outside the chain to actually see the image.',
@@ -104,16 +75,17 @@ function callToolChainDescription(ns: string, call: string): string {
  *
  * Built per listing rather than held as a module constant: both belong to the
  * surface, and a description computed once and shared across surfaces is the
- * fixed text this replaces. `utcpNames` is the surface's catalog — pass the
- * `utcpName` of every tool it serves.
+ * fixed text this replaces. `tools` is the surface's catalog — pass every tool
+ * it serves, names AND input schemas, since the arguments in the example come
+ * from the schema (see `chainExample`).
  */
-export function codeModeMetaTools(namespace: string, utcpNames: readonly string[] = []): McpTool[] {
-  const ns = chainNamespaceExample(namespace);
-  const call = chainCallExample(namespace, utcpNames);
+export function codeModeMetaTools(namespace: string, tools: readonly ChainExampleTool[] = []): McpTool[] {
+  const example = chainExample(namespace, tools);
+  const { name } = example;
   return [
     {
       name: 'list_tools',
-      description: `List every UTCP tool currently registered, in TypeScript-accessible form (e.g. \`${call}\`) for use inside \`call_tool_chain\`.`,
+      description: `List every UTCP tool currently registered, in TypeScript-accessible form (e.g. \`${name}\`) for use inside \`call_tool_chain\`.`,
       inputSchema: { type: 'object', properties: {}, additionalProperties: false } as McpTool['inputSchema'],
     },
     {
@@ -131,7 +103,7 @@ export function codeModeMetaTools(namespace: string, utcpNames: readonly string[
     },
     {
       name: 'call_tool_chain',
-      description: callToolChainDescription(ns, call),
+      description: callToolChainDescription(example),
       inputSchema: {
         type: 'object',
         properties: {

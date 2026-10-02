@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeAll, afterAll } from 'vitest';
 import '@utcp/direct-call';
 import { addFunctionToUtcpDirectCall } from '@utcp/direct-call';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
-import { dispatchMetaTool } from '@bevel-software/platform-mcp-core';
+import { codeModeMetaTools, dispatchMetaTool } from '@bevel-software/platform-mcp-core';
 import { createCallToolChainTool } from '../code-mode.tool.js';
 
 /**
@@ -20,21 +20,76 @@ import { createCallToolChainTool } from '../code-mode.tool.js';
 const NAMESPACE = 'KNOWLEDGE_BASE';
 let client: CodeModeUtcpClient;
 
+/**
+ * The manual is shaped exactly as `toolDef` shapes a real knowledge-base tool:
+ * flat arguments wrapped under one required `body`, `branch` required inside it
+ * with no `default` and no `enum`, and a handler that REFUSES a call without it
+ * the way the route does. That refusal is the point — it is what turned a
+ * plausible-looking example into `400 … \`branch\` is required`, and a fixture
+ * that accepted anything would have let the example through again.
+ */
+function kbTool(name: string, required: string[], callable: string) {
+  const properties: Record<string, unknown> = {
+    branch: { type: 'string', minLength: 1, description: 'The branch this operates on.' },
+    path: { type: 'string', description: 'The path to read.' },
+  };
+  return {
+    name,
+    description: `A live ${name}, so the namespace is a real object.`,
+    inputs: {
+      type: 'object',
+      properties: {
+        body:
+          required.length === 0
+            ? { type: 'object', properties: {}, additionalProperties: false }
+            : {
+                type: 'object',
+                properties: Object.fromEntries(required.map((k) => [k, properties[k]])),
+                required,
+                additionalProperties: false,
+              },
+      },
+      required: ['body'],
+      additionalProperties: false,
+    },
+    outputs: { type: 'object', properties: {} },
+    tool_call_template: { call_template_type: 'direct-call', callable_name: callable },
+  };
+}
+
+/**
+ * The real `read_file` handler, as a named installer rather than an inline
+ * closure, because a test that swaps it has to put THIS back. Restoring a
+ * permissive stand-in instead silently disarmed the branch check for every
+ * test that ran afterwards — which is how a test for the missing-argument
+ * failure passed while asserting the opposite.
+ *
+ * Note the unwrapping: the direct-call protocol hands the callable the inner
+ * `body` object, so what arrives is `{ branch, path }`, not `{ body: … }`.
+ */
+function installReadFile(): void {
+  addFunctionToUtcpDirectCall('e2e_read_file', async (args: unknown) => {
+    const given = (args ?? {}) as Record<string, unknown>;
+    const body = (given.body as Record<string, unknown> | undefined) ?? given;
+    // The server's own refusal, reproduced: identity never implies a
+    // workspace, so `branch` always comes from the argument.
+    if (!body.branch) throw new Error('HTTP 400: `branch` is required');
+    if (!body.path) throw new Error('HTTP 400: `path` is required');
+    return { content: 'live' };
+  });
+}
+
 beforeAll(async () => {
   addFunctionToUtcpDirectCall('e2e_manual', async () => ({
     utcp_version: '1.0.0',
     manual_version: '1.0.0',
     tools: [
-      {
-        name: 'read_file',
-        description: 'A live tool, so the namespace is a real object.',
-        inputs: { type: 'object', properties: { path: { type: 'string' } } },
-        outputs: { type: 'object', properties: {} },
-        tool_call_template: { call_template_type: 'direct-call', callable_name: 'e2e_read_file' },
-      },
+      kbTool('read_file', ['branch', 'path'], 'e2e_read_file'),
+      kbTool('start_session', [], 'e2e_start_session'),
     ],
   }));
-  addFunctionToUtcpDirectCall('e2e_read_file', async () => ({ content: 'live' }));
+  installReadFile();
+  addFunctionToUtcpDirectCall('e2e_start_session', async () => ({ sessionId: 's-1' }));
   client = await CodeModeUtcpClient.create(process.cwd(), null);
   const registered = await client.registerManual({
     name: NAMESPACE,
@@ -55,9 +110,22 @@ type ChainResult = {
   logs?: string[];
 };
 
-/** The shipping Mastra tool, run for real. */
+/** This client's catalog, in the shape the description builder takes. */
+async function catalog(): Promise<{ utcpName: string; inputSchema: unknown }[]> {
+  return (await client.config.tool_repository.getTools()).map((t) => ({
+    utcpName: t.name,
+    inputSchema: t.inputs,
+  }));
+}
+
+/** The shipping Mastra tool, run for real against the LIVE catalog. */
 async function chain(code: string, timeout?: number): Promise<ChainResult> {
-  const tool = createCallToolChainTool(client, { write: vi.fn() } as never, NAMESPACE) as unknown as {
+  const tool = createCallToolChainTool(
+    client,
+    { write: vi.fn() } as never,
+    NAMESPACE,
+    await catalog(),
+  ) as unknown as {
     execute: (input: { code: string; timeout?: number }) => Promise<ChainResult>;
   };
   return tool.execute({ code, ...(timeout === undefined ? {} : { timeout }) });
@@ -118,7 +186,7 @@ describe('a chain that outlives its timeout, in a real isolate', () => {
     expect(out.error).toContain('`timeout`');
     expect(out.error).toContain('120000');
     // The Scenario's second half: the NEXT call on the same connection works.
-    expect(await chain("return KNOWLEDGE_BASE.read_file({ path: 'x' })")).toMatchObject({
+    expect(await chain("return KNOWLEDGE_BASE.read_file({ body: { branch: 'main', path: 'x' } })")).toMatchObject({
       success: true,
       result: { content: 'live' },
     });
@@ -129,7 +197,7 @@ describe('a chain that outlives its timeout, in a real isolate', () => {
     expect(timedOut.isError).toBe(true);
     expect(timedOut.text).toContain('timed out after 1000 ms');
     expect(timedOut.text).toContain('120000');
-    const next = await mcpChain("return KNOWLEDGE_BASE.read_file({ path: 'x' })");
+    const next = await mcpChain("return KNOWLEDGE_BASE.read_file({ body: { branch: 'main', path: 'x' } })");
     expect(next.isError).toBeFalsy();
     expect(JSON.parse(next.text)).toMatchObject({ success: true });
     // And a plain tool listing still answers, so nothing about the session died.
@@ -158,11 +226,12 @@ describe('a chain that fails some other way, in a real isolate', () => {
       throw new Error("You don't have read access to \"Secret.md\"");
     });
     try {
-      const out = await chain("return KNOWLEDGE_BASE.read_file({ path: 'Secret.md' })");
+      const out = await chain("return KNOWLEDGE_BASE.read_file({ body: { branch: 'main', path: 'Secret.md' } })");
       expect(out.success).toBe(false);
       expect(out.error).toContain('read access');
     } finally {
-      addFunctionToUtcpDirectCall('e2e_read_file', async () => ({ content: 'live' }));
+      // The REAL handler back, branch check included — see `installReadFile`.
+      installReadFile();
     }
   });
 
@@ -194,12 +263,73 @@ describe('a chain that fails some other way, in a real isolate', () => {
 describe('a chain that succeeds, in a real isolate', () => {
   it('still calls its tools and returns its value', async () => {
     const out = await chain(
-      "const a = KNOWLEDGE_BASE.read_file({ path: 'x' }); return { seen: a.content, b64: btoa(a.content) };",
+      "const a = KNOWLEDGE_BASE.read_file({ body: { branch: 'main', path: 'x' } }); return { seen: a.content, b64: btoa(a.content) };",
     );
     expect(out).toMatchObject({ success: true, result: { seen: 'live', b64: 'bGl2ZQ==' } });
   });
 
   it('can still return null without being read as a failure', async () => {
     expect(await chain('return null')).toMatchObject({ success: true, result: null });
+  });
+});
+
+/**
+ * The acceptance criterion itself: an agent that copies the example call out of
+ * the description gets a WORKING call. Run verbatim, in a real isolate, against
+ * a manual that refuses a call without `branch` exactly as the route does.
+ *
+ * This is the test whose absence shipped the bug. The unit tests checked that
+ * the example's NAME came from the catalog; nothing executed it, so nobody
+ * noticed the arguments beside the name were fixed text omitting a required
+ * one. Here the example is extracted from the generated description and run.
+ */
+describe('the example call in the description, copied verbatim', () => {
+  async function printedExample(): Promise<string> {
+    const tool = createCallToolChainTool(
+      client,
+      { write: vi.fn() } as never,
+      NAMESPACE,
+      await catalog(),
+    ) as unknown as { description: string };
+    const printed = /works exactly as written: `return ([^`]+);`/.exec(tool.description);
+    expect(printed, 'the description printed no example call').not.toBeNull();
+    return printed![1]!;
+  }
+
+  it('runs, and returns a value rather than an error', async () => {
+    const example = await printedExample();
+    const out = await chain(`return ${example};`);
+    expect(out.success).toBe(true);
+    expect(out.error).toBeUndefined();
+    expect(out.result).not.toBeNull();
+  });
+
+  it('runs on the MCP surfaces too, from the description THEY serve', async () => {
+    const chainTool = codeModeMetaTools(NAMESPACE, await catalog()).find(
+      (t) => t.name === 'call_tool_chain',
+    )!;
+    const printed = /works exactly as written: `return ([^`]+);`/.exec(chainTool.description!);
+    expect(printed).not.toBeNull();
+    const out = await mcpChain(`return ${printed![1]!};`);
+    expect(out.isError).toBeFalsy();
+    expect(JSON.parse(out.text)).toMatchObject({ success: true });
+  });
+
+  /**
+   * The fixture has teeth. If a missing `branch` were quietly accepted, the
+   * test above would pass for the wrong reason and the regression would be
+   * invisible again — so prove the refusal is real.
+   */
+  it('fails when a required argument is dropped, which is what the old example did', async () => {
+    const out = await chain("return KNOWLEDGE_BASE.read_file({ body: { path: 'x' } })");
+    expect(out.success).toBe(false);
+    expect(out.error).toContain('`branch` is required');
+  });
+
+  it('names a tool the catalog actually has, in the form the runtime binds', async () => {
+    const example = await printedExample();
+    const name = /^([\w.$]+)\(/.exec(example)![1]!;
+    const bound = await chain(`return typeof ${name};`);
+    expect(bound).toMatchObject({ success: true, result: 'function' });
   });
 });

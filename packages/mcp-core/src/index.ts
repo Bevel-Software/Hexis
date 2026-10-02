@@ -49,7 +49,6 @@ export {
 
 export {
   codeModeMetaTools,
-  chainCallExample,
   chainNamespaceExample,
   META_TOOL_NAMES,
   CALL_TOOL_CHAIN_MAX_OUTPUT,
@@ -72,6 +71,12 @@ export {
   unknownNamespaceMessage,
   withChainRuntime,
 } from './chain-runtime.js';
+
+export {
+  type ChainExample,
+  type ChainExampleTool,
+  chainExample,
+} from './chain-example.js';
 
 export { registerManual, dispatchToolCall } from './dispatch.js';
 

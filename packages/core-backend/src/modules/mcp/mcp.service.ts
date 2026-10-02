@@ -410,10 +410,7 @@ export class McpService {
       // runs. Built here rather than held as a constant: the local MCP server
       // registers the same tools under a different name, and one fixed example
       // is necessarily wrong on one of the two surfaces.
-      const metaTools = codeModeMetaTools(
-        EXTERNAL_KB_MANUAL_NAME,
-        tools.map((t) => t.utcpName),
-      );
+      const metaTools = codeModeMetaTools(EXTERNAL_KB_MANUAL_NAME, tools);
       // A discovered tool whose name collides with a meta-tool would be
       // listed but never callable (the dispatcher routes the name to the
       // meta-tool first), so drop it from the listing entirely.

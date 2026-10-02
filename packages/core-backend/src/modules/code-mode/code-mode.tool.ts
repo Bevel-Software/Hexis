@@ -8,8 +8,8 @@ import {
   CHAIN_TIMEOUT_DEFAULT_MS,
   CHAIN_TIMEOUT_MAX_MS,
   CHAIN_TIMEOUT_MIN_MS,
-  chainCallExample,
-  chainNamespaceExample,
+  chainExample,
+  type ChainExampleTool,
   runToolChain,
 } from '@bevel-software/platform-mcp-core';
 import type { SpillStore } from '../workspace/spill-store.js';
@@ -25,27 +25,28 @@ import { utcpNameToTsInterfaceName, findToolByName, AmbiguousToolNameError } fro
  * server registers the whole deployment as `hexis` — and a description naming
  * the other one taught the agent a namespace the runtime had no binding for.
  *
- * `utcpNames` is this client's catalog, and is used only to write an EXAMPLE
- * call the catalog really has — the namespace alone does not say how deeply a
- * tool's name is nested (see `chainCallExample`). The in-process agent
- * registers the knowledge-base manual directly, so its tools really are
- * `KNOWLEDGE_BASE.read_file` and the default is already right; the parameter
- * exists so a client that registers them some other way is not handed an
- * example that cannot run.
+ * `tools` is this client's catalog — names AND input schemas — and is used only
+ * to write an EXAMPLE call that actually runs. Both halves are needed: the
+ * namespace does not say how deeply a tool's name is nested, and the name does
+ * not say which of its arguments are required (see `chainExample`). Passing
+ * nothing prints no concrete example, which is the honest default for a caller
+ * that has not handed over its catalog.
  */
 export function createCallToolChainTool(
   client: CodeModeUtcpClient,
   spillStore: SpillStore,
   namespace: string,
-  utcpNames: readonly string[] = [],
+  tools: readonly ChainExampleTool[] = [],
 ) {
-  const ns = chainNamespaceExample(namespace);
-  const call = chainCallExample(namespace, utcpNames);
+  const { namespace: ns, call } = chainExample(namespace, tools);
+  // Printed only when the catalog determines every required argument, so a
+  // copied example never 400s on a missing one; see `chainExample`.
+  const worked = call ? ` A call that works exactly as written: \`return ${call};\`.` : '';
   return createTool({
     id: 'call_tool_chain',
     description: [
       CodeModeUtcpClient.AGENT_PROMPT_TEMPLATE,
-      `Execute JavaScript code with direct access to all registered UTCP tools as hierarchical functions — call them as \`${ns}.<tool>({ body: { ...args } })\`, for example \`${call}({ body: { path: 'knowledge-base/AGENTS.md' } })\`, synchronous, no await. The runtime is plain JavaScript — no type annotations or other TypeScript-only syntax — plus \`atob\`, \`btoa\`, \`TextEncoder\` and \`TextDecoder\` for base64 and UTF-8 bytes, as in a browser; there is no \`Buffer\`, no \`fetch\` and no \`require\`. Return the final value with \`return\`. Use \`list_tools\` and \`tools_info\` first to discover available tools and their interfaces.`,
+      `Execute JavaScript code with direct access to all registered UTCP tools as hierarchical functions — call them as \`${ns}.<tool>({ body: { ...args } })\`, synchronous, no await.${worked} Every argument a tool declares REQUIRED must be present — for the knowledge-base tools that includes \`branch\`. The runtime is plain JavaScript — no type annotations or other TypeScript-only syntax — plus \`atob\`, \`btoa\`, \`TextEncoder\` and \`TextDecoder\` for base64 and UTF-8 bytes, as in a browser; there is no \`Buffer\`, no \`fetch\` and no \`require\`. Return the final value with \`return\`. Use \`list_tools\` and \`tools_info\` first to discover available tools and their interfaces.`,
       'Error handling inside the chain: a failing tool call THROWS, and the thrown error\'s `.message` holds the server\'s actual reason (e.g. a 403 with the explanation, not just a status code). If you catch it, surface `err.message` (and `err.status` / `err.data` when present) — NEVER `return { error: err }` or otherwise return the raw Error object, because an Error serializes to `{}` (its `message` is non-enumerable) and the reason is lost. If you don\'t need to handle it, just let it throw — the runtime already reports `err.message` back to you.',
       `Failures are answered, never dropped: a chain that throws comes back with \`success: false\` and the reason, and one that outlives \`timeout\` (default ${CHAIN_TIMEOUT_DEFAULT_MS} ms, maximum ${CHAIN_TIMEOUT_MAX_MS} ms) comes back saying it timed out — raise \`timeout\` or split the work and run it again. Either way your next tool call works as usual.`,
       'Large return values: if the returned value exceeds `max_output_size`, the full JSON is auto-spilled to a shared spill store (outside any workspace, never committed) and the response contains only a `__tool_chain_spill__/…` ref + a truncated marker. You can read the spill back with the regular `read_file` tool — pass that ref as `path` (its `branch` is ignored) plus `offset` / `limit` to slice it, never read a multi-MB file in full. Order of preference: (1) re-run `call_tool_chain` with a follow-up code chain that filters/maps the data inline and returns just what you need; (2) narrow the API call — shorter `fields`, tighter date window, lower `limit`; (3) last resort — `read_file` against the spill ref with `offset` / `limit`. The spill is read-only context only; do NOT use it as a way to persist KB content — for KB writes use the regular `write_file` / `edit_file` tools, which go through the lock/commit pipeline.',
@@ -120,12 +121,12 @@ export function createCallToolChainTool(
 export function createListToolsTool(
   client: CodeModeUtcpClient,
   namespace: string,
-  utcpNames: readonly string[] = [],
+  tools: readonly ChainExampleTool[] = [],
 ) {
-  const call = chainCallExample(namespace, utcpNames);
+  const { name } = chainExample(namespace, tools);
   return createTool({
     id: 'list_tools',
-    description: `Returns a list of all UTCP tool names currently registered, in their TypeScript-accessible form (e.g. \`${call}\`).`,
+    description: `Returns a list of all UTCP tool names currently registered, in their TypeScript-accessible form (e.g. \`${name}\`).`,
     inputSchema: z.object({}),
     execute: async () => {
       const tools = await client.config.tool_repository.getTools();
