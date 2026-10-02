@@ -552,11 +552,24 @@ export async function createCoreServices(
     // is held here, for the one move, and the copy's work leaves first and
     // is looked for again once the copy has gone: a release that queued its
     // bytes in between was writing to the copy that left.
+    //
+    // Only the first look may refuse the branch: the copy has not moved yet.
+    // The second runs after the move, so its failure is tried once more and
+    // then logged, as the startup phase logs the same step. Refusing then
+    // would report a move that did happen as one that did not.
     (workspaceId, move) =>
       leased.whileHeld(async () => {
         await releaseWorkOnSetAsideCopy(workspaceId);
         await move();
-        await releaseWorkOnSetAsideCopy(workspaceId);
+        await releaseWorkOnSetAsideCopy(workspaceId)
+          .catch(() => releaseWorkOnSetAsideCopy(workspaceId))
+          .catch((err: unknown) => {
+            logger('workspace').error(
+              `the working copy "${workspaceId}" was set aside, but what was queued or locked on it meanwhile ` +
+                'could not be looked for again:',
+              { err },
+            );
+          });
       }),
   );
   // The KB startup phase: every seeding, scaffolding and migration concern,

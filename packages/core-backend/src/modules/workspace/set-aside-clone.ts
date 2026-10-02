@@ -56,18 +56,28 @@ export async function setAsideClone(repoDir: string, dest: string): Promise<void
   // A destination that is already there is somebody's set-aside work, and
   // never this call's to touch: the copy below cleans up after itself by
   // removing the destination, which must then be one this call made.
-  if (await fs.access(dest).then(() => true, () => false)) {
-    throw new Error(
+  const taken = (): Error =>
+    new Error(
       `Could not set aside the working copy at ${repoDir}: ${dest} already holds one. Nothing was deleted or ` +
         'moved. Try again; the folder is named for the moment it is made.',
     );
-  }
+  if (await fs.access(dest).then(() => true, () => false)) throw taken();
   await fs.mkdir(path.dirname(dest), { recursive: true });
   try {
     await fs.rename(repoDir, dest);
     return;
   } catch {
     // Another volume, or a handle held open on it: copy instead.
+  }
+  // The destination is MADE here, by the one call that will fill it. Two
+  // calls that both found it absent above cannot both make it: the second
+  // is refused by the filesystem, before the cleanup below could ever be
+  // about a folder it did not create.
+  try {
+    await fs.mkdir(dest);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') throw taken();
+    throw err;
   }
   try {
     await fs.cp(repoDir, dest, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });

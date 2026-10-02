@@ -270,6 +270,28 @@ describe('what surrounds the setting aside of one working copy', () => {
     expect(await setAside()).toEqual([]);
   });
 
+  /**
+   * What surrounds the move can wait: for the commit in flight, or for the
+   * startup phase, which may set this very copy aside in the meantime.
+   */
+  it('moves nothing, and still opens the branch, when the startup phase took the copy while it waited', async () => {
+    const { replacement } = await onTheOldRepository();
+    const phaseKept = path.join(root, 'kept-by-the-phase');
+    const svc: WorkspaceService = service(() => replacement, undefined, async (workspaceId, move) => {
+      // The phase, while this call waited: the copy moved out, and said so.
+      await fs.rename(cloneDir(), phaseKept);
+      svc.forgetClone(workspaceId);
+      await move();
+    });
+
+    await svc.getOrCreateForBranch(BRANCH);
+
+    expect(await fs.readFile(path.join(cloneDir(), 'marker.txt'), 'utf8')).toBe('new repository');
+    // Nothing of this call's own was set aside: the phase's copy is the only one.
+    expect(await setAside()).toEqual([]);
+    expect(await fs.readFile(path.join(phaseKept, 'marker.txt'), 'utf8')).toBe('old repository');
+  });
+
   it('moves it once for two callers opening the branch together, and serves both', async () => {
     const { replacement } = await onTheOldRepository();
     let moves = 0;

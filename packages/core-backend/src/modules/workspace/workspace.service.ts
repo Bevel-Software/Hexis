@@ -690,16 +690,26 @@ export class WorkspaceService implements IWorkspaceService {
         await startedMeanwhile;
       } else {
         const kept = path.join(setAsideRootFor(this.workspacesRoot, this.setAsideRoot), setAsideStamp(), id);
-        const moving = this.aroundSetAside(id, () => setAsideClone(repoDir, kept)).finally(() => {
+        // What surrounds the move may wait, and the startup phase may set
+        // this very copy aside meanwhile. Then there is nothing left to move:
+        // the phase did it, and said so.
+        let moved = false;
+        const moving = this.aroundSetAside(id, async () => {
+          if (this.discardsOf(id) !== discardsAtAdoption) return;
+          await setAsideClone(repoDir, kept);
+          moved = true;
+        }).finally(() => {
           this.inFlightSetAsides.delete(branch);
         });
         this.inFlightSetAsides.set(branch, moving);
         await moving;
-        log.warn(
-          `the "${branch}" working copy was a clone of another repository. Set aside at ${kept}; nothing was ` +
-            'deleted, and it is being cloned fresh from the configured one. Work that was never pushed is in that ' +
-            'folder: `git log` there shows it.',
-        );
+        if (moved) {
+          log.warn(
+            `the "${branch}" working copy was a clone of another repository. Set aside at ${kept}; nothing was ` +
+              'deleted, and it is being cloned fresh from the configured one. Work that was never pushed is in ' +
+              'that folder: `git log` there shows it.',
+          );
+        }
       }
     } else if (onDisk) {
       try {
