@@ -93,9 +93,11 @@ describe('account routes — admin gate', () => {
       { id: 'u2', email: 'b@example.com', name: 'B', passwordHash, createdAt: new Date() },
     ];
     // A real AuthService over a stub db — the route's body is what the
-    // service produces from full `users` rows, hash column included.
+    // service produces from full `users` rows, hash column included. The
+    // listing is sorted in-process (the email column is ciphertext in the
+    // database), so the read is a bare `select().from()`.
     const db = {
-      select: () => ({ from: () => ({ orderBy: async () => rows }) }),
+      select: () => ({ from: async () => rows }),
     } as unknown as Database;
     const realAuth = new AuthService(db, {
       jwtSecret: 'test-jwt-secret',
@@ -118,9 +120,10 @@ describe('account routes — admin gate', () => {
     const body = JSON.parse(text) as {
       accounts: Array<{ email: string; hasPassword: boolean; isEnvAdmin: boolean }>;
     };
+    // Sorted by email in-process, since the column is ciphertext in the database.
     expect(body.accounts.map((a) => [a.email, a.hasPassword, a.isEnvAdmin])).toEqual([
-      ['root@example.com', false, true],
       ['b@example.com', true, false],
+      ['root@example.com', false, true],
     ]);
     expect(text).not.toContain('scrypt:');
     expect(text).not.toContain('passwordHash');

@@ -521,9 +521,11 @@ describe('AuthService.listAccounts', () => {
     const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
 
     const withHash = await new AuthService(makeFakeDb([rows]).db, config).listAccounts();
+    // Sorted by email in-process: the email column is ciphertext in the
+    // database, so the listing orders itself after decrypting.
     expect(withHash.map((a) => [a.email, a.hasPassword, a.isEnvAdmin])).toEqual([
-      ['root@example.com', true, true],
       ['bob@example.com', true, false],
+      ['root@example.com', true, true],
       ['sso@example.com', false, false],
     ]);
 

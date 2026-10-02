@@ -1,10 +1,11 @@
 import { Param } from 'drizzle-orm';
 
 import type { Database } from '../../database/connection.js';
+import { users } from '../../database/schema.js';
 
 /**
- * Every literal bound into a drizzle condition, in order — for
- * `inArray(users.email, emails)` that is exactly `emails`.
+ * Every address a drizzle condition binds to the users' blind index, in
+ * order — for `inArray(users.emailBidx, emails)` that is exactly `emails`.
  *
  * A drizzle `SQL` is a tree of chunks; the bound values sit in it as `Param`
  * nodes (an `inArray` puts them in a nested array chunk). Reading them back is
@@ -14,7 +15,12 @@ import type { Database } from '../../database/connection.js';
  */
 function boundValues(node: unknown, depth = 0): string[] {
   if (depth > 8 || node === null || node === undefined) return [];
-  if (node instanceof Param) return typeof node.value === 'string' ? [node.value] : [];
+  // Only what is bound THROUGH THE INDEX COLUMN counts: an address compared
+  // with the encrypted `email` column matches nothing in Postgres (the
+  // ciphertext is randomized), so it matches nothing here.
+  if (node instanceof Param) {
+    return node.encoder === users.emailBidx && typeof node.value === 'string' ? [node.value] : [];
+  }
   if (Array.isArray(node)) return node.flatMap((c) => boundValues(c, depth + 1));
   const chunks = (node as { queryChunks?: unknown }).queryChunks;
   return Array.isArray(chunks) ? chunks.flatMap((c) => boundValues(c, depth + 1)) : [];
@@ -30,14 +36,17 @@ function boundValues(node: unknown, depth = 0): string[] {
  * routes ask about comes back without one, which is what makes the share
  * dialog label it "hasn't signed in yet".
  *
- * The `where` clause IS evaluated: the emails bound into it are matched
- * against the roster the same way Postgres would — against the stored rows as
- * written, with no re-canonicalisation on the double's side. Real rows are
- * canonical (the auth service lowercases every address it writes), so a
- * caller that stopped lowering the emails it asks about would match nothing
- * here, exactly as it would match nothing in Postgres. A double that answered
- * with the whole roster could not tell those two apart.
+ * The `where` clause IS evaluated: the values bound into it are matched
+ * against the roster the same way Postgres would. The email column is
+ * randomized ciphertext, so the routes compare its blind index
+ * (`email_bidx`), which they bind the ADDRESSES to — the database handle
+ * turns each into its index, over the canonical (trimmed, lowercased)
+ * address. The double does what the index does: a caller that stopped
+ * lowering the emails it asks about still matches here, as it does in
+ * Postgres.
  */
+const canonical = (email: string) => email.trim().toLowerCase();
+
 export function usersDbDouble(
   accounts: readonly (string | { email: string; name?: string })[] = [],
 ): Database {
@@ -54,8 +63,8 @@ export function usersDbDouble(
       where: (condition: unknown) => Promise<typeof rows>;
     };
     query.where = async (condition: unknown) => {
-      const asked = new Set(boundValues(condition));
-      return rows.filter((r) => asked.has(r.email));
+      const asked = new Set(boundValues(condition).map(canonical));
+      return rows.filter((r) => asked.has(canonical(r.email)));
     };
     return query;
   };
