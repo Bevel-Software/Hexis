@@ -434,6 +434,27 @@ const WRITE_MODE_NOTE =
   '(creating it if there is nothing), `update` replaces an existing file and refuses a path that does not exist (`missing`). ' +
   'A refused path is left exactly as it was.';
 
+/**
+ * What an agent needs to know about escape sequences in the content it sends,
+ * on the three tools that take content as a JSON string.
+ *
+ * The three write routes — the MCP endpoint, the `/api/agent/tools/<name>`
+ * route and `call_tool_chain` — were measured end to end against raw requests
+ * and a byte-level read of the stored file (see
+ * `__tests__/escape-sequences.routes.test.ts`): each stores content exactly as
+ * the JSON string value decodes ONCE. So when an escape arrives already
+ * decoded, the decoding happened in the client that built the request, and no
+ * tool here can tell that content from content that was meant to be decoded.
+ * Hence a warning rather than a fix, and the pointer to the one route whose
+ * payload is bytes rather than a JSON string.
+ */
+const ESCAPE_SEQUENCE_NOTE =
+  ' Escape sequences: some clients decode them in arguments before sending, so content meant to CONTAIN an escape rather ' +
+  'than what it stands for (the six characters backslash, `u`, `0`, `0`, `4`, `1`, say, rather than the letter `A`) can ' +
+  'reach this tool already decoded — what arrives is stored byte for byte, so when that distinction matters, verify what ' +
+  'landed (`read_file`, or a hash) and send such content through the upload route (`request_upload_token` + `apply_upload` ' +
+  'where offered, otherwise Upload in the app), which lands it unchanged.';
+
 /** The refusal `create` gives on a path that already holds something. */
 function pathExists(path: string): ToolError {
   return new ToolError(
@@ -1914,7 +1935,8 @@ export function registerWorkspaceTools(
       'Write a workspace TEXT file. The change is committed + pushed as you. Returns `{ path, bytes, outcome }`, where `outcome` is ' +
       '`created`, `replaced` or `updated`.' +
       WRITE_MODE_NOTE +
-      IMAGE_CONVENTION_NOTE,
+      IMAGE_CONVENTION_NOTE +
+      ESCAPE_SEQUENCE_NOTE,
     inputs: {
       type: 'object',
       properties: {
@@ -2003,7 +2025,8 @@ export function registerWorkspaceTools(
       'path it could not. `count` is how many were written. A path it refuses — the mode said no, or the file is not text — ' +
       'does not stop the others; read `files` to see what landed.' +
       WRITE_MODE_NOTE +
-      IMAGE_CONVENTION_NOTE,
+      IMAGE_CONVENTION_NOTE +
+      ESCAPE_SEQUENCE_NOTE,
     inputs: {
       type: 'object',
       properties: {
@@ -2172,7 +2195,8 @@ export function registerWorkspaceTools(
     name: 'edit_file',
     gated: true,
     description:
-      'Replace an exact string in a workspace TEXT file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you.',
+      'Replace an exact string in a workspace TEXT file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you.' +
+      ESCAPE_SEQUENCE_NOTE,
     inputs: {
       type: 'object',
       properties: {
