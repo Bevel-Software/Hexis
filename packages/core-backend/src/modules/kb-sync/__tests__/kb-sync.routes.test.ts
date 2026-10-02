@@ -113,7 +113,7 @@ describe('POST /api/sync — credentials', () => {
     expect(sync).toHaveBeenCalledTimes(1);
   });
 
-  it('a wrong credential is still a 401 during an outage only when it was never a session', async () => {
+  it('a request with no credential is still a 401 during an outage', async () => {
     const { base } = await mount({ outage: true });
     // No bearer at all: nothing was looked up, so nothing failed.
     expect((await post(base)).status).toBe(401);
