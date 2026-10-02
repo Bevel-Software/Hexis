@@ -141,7 +141,7 @@ export class AuthService {
     const [existing] = await this.db
       .select({ id: users.id })
       .from(users)
-      .where(eq(users.email, normalizedEmail))
+      .where(eq(users.emailBidx, normalizedEmail))
       .limit(1);
     if (existing) return;
     const verdict = await this.admission.canProvision(normalizedEmail, reason);
@@ -153,8 +153,13 @@ export class AuthService {
     if (verdict.waitForAdmin && reason === 'sso') {
       await this.db
         .insert(users)
-        .values({ email: normalizedEmail, name: normalizedEmail.split('@')[0] || normalizedEmail, deactivatedAt: new Date() })
-        .onConflictDoNothing({ target: users.email });
+        .values({
+          email: normalizedEmail,
+          emailBidx: normalizedEmail,
+          name: normalizedEmail.split('@')[0] || normalizedEmail,
+          deactivatedAt: new Date(),
+        })
+        .onConflictDoNothing({ target: users.emailBidx });
       throw new AccountAdmissionRefusedError(verdict.message, { waitingForAdmin: true });
     }
     throw new AccountAdmissionRefusedError(verdict.message);
@@ -198,11 +203,12 @@ export class AuthService {
     // address's — one round trip short — and repeated timings would then
     // disclose which email the deployment configured as `ADMIN_EMAIL`. The
     // decoy hash already buys that uniformity for the scrypt half; this keeps
-    // the database half uniform too.
+    // the database half uniform too. Through the blind index: `email` is
+    // randomized ciphertext.
     const [user] = await this.db
       .select()
       .from(users)
-      .where(eq(users.email, normalizedEmail))
+      .where(eq(users.emailBidx, normalizedEmail))
       .limit(1);
 
     if (this.isEnvAdminEmail(normalizedEmail)) {
@@ -319,9 +325,9 @@ export class AuthService {
       await this.assertAdmitted(normalizedEmail, 'admin-create');
       const [created] = await this.db
         .insert(users)
-        .values({ email: normalizedEmail, name: displayName })
+        .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName })
         .onConflictDoUpdate({
-          target: users.email,
+          target: users.emailBidx,
           set: suppliedName ? { name: suppliedName, updatedAt: new Date() } : { updatedAt: new Date() },
         })
         .returning();
@@ -341,9 +347,9 @@ export class AuthService {
     // fallback. `returning()` yields the authoritative row either way.
     const [row] = await this.db
       .insert(users)
-      .values({ email: normalizedEmail, name: displayName, passwordHash })
+      .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName, passwordHash })
       .onConflictDoUpdate({
-        target: users.email,
+        target: users.emailBidx,
         set: suppliedName
           ? { passwordHash, name: suppliedName, updatedAt: new Date() }
           : { passwordHash, updatedAt: new Date() },
@@ -462,17 +468,21 @@ export class AuthService {
       createdAt: Date;
     }>
   > {
-    const rows = await this.db.select().from(users).orderBy(users.email);
-    return rows.map((row) => ({
-      id: row.id,
-      email: row.email,
-      name: row.name,
-      hasPassword: row.passwordHash != null,
-      isEnvAdmin: this.reportsAsEnvAdmin(row.email),
-      deactivatedAt: row.deactivatedAt,
-      isSystem: SYSTEM_ACCOUNT_EMAILS.includes(row.email),
-      createdAt: row.createdAt,
-    }));
+    // Sorted in-process: `email` is ciphertext in the database, so ORDER BY
+    // would sort by IV noise. The table is one row per team member.
+    const rows = await this.db.select().from(users);
+    return rows
+      .map((row) => ({
+        id: row.id,
+        email: row.email,
+        name: row.name,
+        hasPassword: row.passwordHash != null,
+        isEnvAdmin: this.reportsAsEnvAdmin(row.email),
+        deactivatedAt: row.deactivatedAt,
+        isSystem: SYSTEM_ACCOUNT_EMAILS.includes(row.email),
+        createdAt: row.createdAt,
+      }))
+      .sort((a, b) => a.email.localeCompare(b.email));
   }
 
   private assertPasswordPolicy(password: string): void {
@@ -509,8 +519,8 @@ export class AuthService {
   private async upsertUserByEmail(email: string, name: string) {
     const [user] = await this.db
       .insert(users)
-      .values({ email, name })
-      .onConflictDoUpdate({ target: users.email, set: { updatedAt: new Date() } })
+      .values({ email, emailBidx: email, name })
+      .onConflictDoUpdate({ target: users.emailBidx, set: { updatedAt: new Date() } })
       .returning();
     return user;
   }
@@ -686,7 +696,7 @@ export class AuthService {
     const [user] = await this.db
       .select()
       .from(users)
-      .where(eq(users.email, canonicalEmail(email ?? '')))
+      .where(eq(users.emailBidx, canonicalEmail(email ?? '')))
       .limit(1);
 
     if (!user) return null;

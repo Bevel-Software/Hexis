@@ -357,7 +357,11 @@ export async function createCoreServices(
   // the default schema, so a single-tenant deployment keeps the lock ids and
   // the ledger it always had.
   const tenantKey = config.dbSchema === DEFAULT_DB_SCHEMA ? '' : config.dbSchema;
-  const db = getDb(config.databaseUrl, { schema: config.dbSchema });
+  // The handle holds this knowledge base's key for its personal-data columns:
+  // the same `SECRETS_ENC_KEY` that seals its stored credentials — its own
+  // derived one, for a tenant — so everything in the schema opens with one
+  // key and nothing in it opens with another tenant's.
+  const db = getDb(config.databaseUrl, { schema: config.dbSchema, piiKey: config.secretsEncKey });
   // A schema of its own is created on first use, so a tenant's first
   // activation needs nothing done by hand; `public` always exists. Then the
   // server is asked whether the connections really search that schema: a
@@ -377,6 +381,10 @@ export async function createCoreServices(
   // package runs its own squashed idempotent CORE history from the packaged
   // `migrations/` folder, tracked in `__drizzle_migrations_core`. An
   // enterprise overlay runs its own history AFTER this (see migrate.ts).
+  // `runCoreMigrations` also seals any pre-encryption plaintext PII rows and
+  // swaps the unique constraints onto the blind-index columns (see
+  // migrate.ts), under the same lock, before any service reads or writes a
+  // PII column.
   await runCoreMigrations(db, coreMigrationsDir());
 
   // Deployment settings come next, before ANY service is built: the KB remote

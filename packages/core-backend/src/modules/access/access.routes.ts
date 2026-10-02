@@ -724,10 +724,13 @@ export function createAccessRoutes(
   async function accountsAmong(emails: string[]): Promise<Set<string>> {
     // `inArray` refuses an empty list, and there is nothing to ask anyway.
     if (emails.length === 0) return new Set();
+    // Through the blind index: `email` is randomized ciphertext, and the
+    // index is what the unique constraint and every lookup key on. It is
+    // compared with the addresses themselves.
     const rows = await db
       .select({ email: users.email })
       .from(users)
-      .where(inArray(users.email, emails));
+      .where(inArray(users.emailBidx, emails));
     return new Set(rows.map((r) => r.email.trim().toLowerCase()));
   }
 

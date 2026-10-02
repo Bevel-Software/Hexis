@@ -79,6 +79,15 @@ describe('ReviewWorkflowService.eraseApprover', () => {
     expect(h.lockSql[0]).toContain('pg_advisory_xact_lock');
     expect(h.lockSql[0]).not.toMatch(/pg_advisory_lock\b/);
     // And the rewrite is to the placeholder identity it was given.
-    expect(h.sets).toEqual([{ approverEmail: 'deleted-1@erased.invalid', approverName: 'Deleted user' }]);
+    // The blind index is rewritten with the email: nothing keyed to the
+    // erased address may survive, and the email itself is ciphertext. The
+    // index column is written with the address; the handle indexes it.
+    expect(h.sets).toEqual([
+      {
+        approverEmail: 'deleted-1@erased.invalid',
+        approverEmailBidx: 'deleted-1@erased.invalid',
+        approverName: 'Deleted user',
+      },
+    ]);
   });
 });
