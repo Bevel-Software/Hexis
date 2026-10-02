@@ -505,23 +505,39 @@ function ContextMenu({
     }),
     [entry.relativePath, branch, folderCanWrite],
   );
-  const registeredItems = useMemo(
-    () =>
-      offersRegistered
-        ? folderMenuItems.filter((item) => {
-            try {
-              return item.appliesTo(folder);
-            } catch (err) {
-              // One deployment entry's broken predicate must not cost the
-              // viewer the whole menu — Delete and Manage access included.
-              // It is left out and said out loud; the others are asked anyway.
-              console.error(`Folder menu entry "${item.id}" failed appliesTo:`, err);
-              return false;
-            }
-          })
-        : [],
-    [offersRegistered, folderMenuItems, folder],
-  );
+  const { registeredItems, predicateFailures } = useMemo(() => {
+    // One deployment entry's broken predicate must not cost the viewer the
+    // whole menu — Delete and Manage access included. It is left out here and
+    // said out loud below; the others are asked anyway.
+    const failures: { id: string; err: unknown }[] = [];
+    const items = offersRegistered
+      ? folderMenuItems.filter((item) => {
+          try {
+            return item.appliesTo(folder);
+          } catch (err) {
+            failures.push({ id: item.id, err });
+            return false;
+          }
+        })
+      : [];
+    return { registeredItems: items, predicateFailures: failures };
+  }, [offersRegistered, folderMenuItems, folder]);
+
+  // The failure is collected above and reported HERE, because a `console`
+  // line is a side effect and the memo above must stay a pure computation: it
+  // runs again on every render whose inputs moved — the `folderCanWrite`
+  // lookup resolving, a tree refresh arriving — and twice over in StrictMode,
+  // and none of those is a second thing going wrong. The ids already reported
+  // are remembered for the life of this menu, and this component mounts fresh
+  // on every open, so a broken entry costs exactly one line per menu opened.
+  const reportedFailures = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const { id, err } of predicateFailures) {
+      if (reportedFailures.current.has(id)) continue;
+      reportedFailures.current.add(id);
+      console.error(`Folder menu entry "${id}" failed appliesTo:`, err);
+    }
+  }, [predicateFailures]);
 
   /**
    * Run a registered entry. It creates nothing itself: the tools below are the

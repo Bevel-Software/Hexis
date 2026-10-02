@@ -3755,6 +3755,40 @@ describe("FileExplorer folder menu: a deployment's own entries", () => {
     }
   });
 
+  it('says a broken appliesTo once per menu, not once per render', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const complaints = () =>
+      errorSpy.mock.calls.filter((c) => String(c[0]).includes('"broken" failed appliesTo')).length;
+    try {
+      // On a protected branch the write lookup actually goes out, and it
+      // answers `true` where the menu had assumed `false` — so the verdict
+      // MOVES, the folder the predicates are asked about is rebuilt, and
+      // every predicate is asked a second time.
+      answerCanWrite(true);
+      const broken = anEntry({
+        id: 'broken',
+        label: 'Broken thing',
+        appliesTo: () => {
+          throw new Error('no idea');
+        },
+      });
+      renderExplorer({ fileTree: TREE, workspaceId: 'main', folderMenuItems: [broken] });
+      await openMenuOn('reports');
+      await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+      await act(async () => {});
+
+      expect(complaints()).toBe(1);
+
+      // A second opening is a second menu, and says so again.
+      fireEvent.keyDown(document, { key: 'Escape' });
+      await openMenuOn('reports');
+      await act(async () => {});
+      expect(complaints()).toBe(2);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it('creates what an action asks for through the workspace\'s own routes, and refreshes the tree', async () => {
     const createDirectory = vi.fn().mockResolvedValue(undefined);
     const createFile = vi.fn().mockResolvedValue(undefined);
