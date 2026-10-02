@@ -28,6 +28,8 @@ const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT);
 
 let httpServer: HttpServer | undefined;
 const cleanups: Array<() => Promise<void>> = [];
+/** Every loopback call the skill routes saw this test, in order — with its body. */
+let skillRequests: { tool: string; body: Record<string, unknown> }[] = [];
 
 // Module-hosted tool endpoints + their registered defs: a stand-in echo `ask`
 // (mirrors the real `{text, sessionId}` contract) and an erroring `boom`.
@@ -53,6 +55,7 @@ async function setup(deps?: {
   /** The agent connection an OAuth caller arrived through (with `tokenId: null`). */
   connectionId?: string | null;
 }) {
+  skillRequests = [];
   const registry = new ToolRegistry();
   registry.registerExternalTool(
     toolDef({
@@ -103,9 +106,47 @@ async function setup(deps?: {
   // The two the Audit log's skill classification reads through: a catalog of
   // one skill, and a file read that answers for any path (registered as
   // tools only by the tests that need them, via `extraTools`).
-  app.post('/api/agent/tools/list_skills', (_req, res) =>
-    res.json({ skills: [{ name: 'rfi', description: 'RFI answers', path: 'Plugins/Sales/rfi' }] }),
-  );
+  //
+  // Both skill routes answer like the real ones: a `branch` in the body reads
+  // that draft (an extra, unmerged skill), no `branch` reads the released
+  // catalog. Every call is recorded, so a test can assert which of the two the
+  // prompt surface asked for.
+  const RFI_BODY = '# RFI\n\nAnswer the RFI.';
+  app.post('/api/agent/tools/list_skills', (req, res) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    skillRequests.push({ tool: 'list_skills', body: b });
+    const released = [{ name: 'rfi', description: 'RFI answers', path: 'Plugins/Sales/rfi' }];
+    res.json({
+      skills:
+        typeof b.branch === 'string'
+          ? [
+              ...released,
+              { name: 'make-deck', description: 'Decks.', path: 'Plugins/make-deck', unmerged: true, branch: b.branch },
+            ]
+          : released,
+    });
+  });
+  app.post('/api/agent/tools/get_skill', (req, res) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    skillRequests.push({ tool: 'get_skill', body: b });
+    if (b.name !== 'rfi' && typeof b.branch !== 'string') {
+      res.json({ ok: false, error: 'not_found' });
+      return;
+    }
+    const unmergedLine =
+      typeof b.branch === 'string' ? `This skill is read from the unmerged branch "${b.branch}" and is not approved.\n\n` : '';
+    res.json({
+      ok: true,
+      kind: 'skill',
+      skill: {
+        name: b.name,
+        description: 'RFI answers',
+        path: 'Plugins/Sales/rfi',
+        body: `${unmergedLine}${RFI_BODY}`,
+        files: [],
+      },
+    });
+  });
   app.post('/api/agent/tools/read_file', (req, res) => {
     const b = (req.body ?? {}) as { path?: string };
     res.json({ content: `contents of ${b.path}` });
@@ -777,10 +818,31 @@ describe('McpService — the Audit log records what an agent calls', () => {
   it('records a prompt read as a skill, with an error outcome when the skill is unknown', async () => {
     const recorder = spyRecorder();
     const client = await setup({ auditRecorder: recorder });
-    // The harness serves no get_skill endpoint, so every prompt is unknown here.
-    await expect(client.getPrompt({ name: 'rfi' })).rejects.toThrow(/Unknown skill/);
+    // A name the harness's catalog does not have: get_skill answers not_found.
+    await expect(client.getPrompt({ name: 'nope' })).rejects.toThrow(/Unknown skill/);
     await settle();
-    expect(recorder.events[0]).toMatchObject({ kind: 'skill', name: 'rfi', outcome: 'error' });
+    expect(recorder.events[0]).toMatchObject({ kind: 'skill', name: 'nope', outcome: 'error' });
+  });
+
+  /**
+   * Prompts ARE skills, and a skill offered as a prompt is one the
+   * organisation released: the two prompt handlers name no branch, so a draft's
+   * skills never reach a client's slash-command menu.
+   */
+  it('serves prompts from the default branch only, never a draft', async () => {
+    const client = await setup();
+    const { prompts } = await client.listPrompts();
+    expect(prompts.map((p) => p.name)).toEqual(['rfi']);
+
+    const got = await client.getPrompt({ name: 'rfi' });
+    const text = got.messages[0].content.text as string;
+    expect(text).toContain('Answer the RFI.');
+    expect(text).not.toContain('unmerged');
+
+    // The loopback bodies prove it: had either handler passed a branch, the
+    // harness would have answered with the draft's skill and its notice.
+    expect(skillRequests.map((r) => r.tool)).toEqual(['list_skills', 'get_skill']);
+    expect(skillRequests.every((r) => r.body.branch === undefined)).toBe(true);
   });
 
   it('records a call refused for a missing sign-in as denied, without running the tool', async () => {
