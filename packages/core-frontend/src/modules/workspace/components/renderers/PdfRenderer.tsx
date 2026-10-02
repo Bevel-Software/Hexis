@@ -4,7 +4,9 @@ import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Button } from '../../../../shared/components';
-import { useRendererWorkspaceId } from './rendererWorkspace';
+import { useRendererFileRef, useRendererWorkspaceId } from './rendererWorkspace';
+import { RetryReadButton } from './RetryReadButton';
+import { useReadRetry } from './useReadRetry';
 import { authFetch } from '../../../../lib/api';
 import { rawFileUrl } from '../../services/workspace.api';
 import { DownloadFileButton } from './DownloadFileButton';
@@ -37,6 +39,16 @@ GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
  */
 export function PdfRenderer({ filePath }: FileRendererProps) {
   const workspaceId = useRendererWorkspaceId();
+  /** A past save, when Version history mounted this; null = the working tree. */
+  const fileRef = useRendererFileRef();
+  /**
+   * The save as PRIMITIVES, hoisted out of the object so the read effect can
+   * depend on exactly what it reads. Depending on `fileRef` itself would put
+   * a context object in the dependency list.
+   */
+  const versionRef = fileRef?.ref ?? null;
+  const versionSide = fileRef?.side;
+  const { attempt, retry } = useReadRetry();
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [error, setError] = useState<string | null>(null);
@@ -77,7 +89,9 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
     let loadingTask: PDFDocumentLoadingTask | null = null;
     (async () => {
       try {
-        const res = await authFetch(rawFileUrl(workspaceId, filePath));
+        const res = await authFetch(
+          rawFileUrl(workspaceId, filePath, { ref: versionRef, side: versionSide }),
+        );
         if (cancelled) return;
         if (!res.ok) {
           setError(`Failed to load PDF (HTTP ${res.status})`);
@@ -126,7 +140,7 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
       loadingTask?.destroy().catch(() => {});
       loadingTaskRef.current = null;
     };
-  }, [workspaceId, filePath]);
+  }, [workspaceId, filePath, versionRef, versionSide, attempt]);
 
   // Track the page column's width so the canvas re-renders to fit it. The
   // container only mounts once the document is loaded, hence the `doc` dep.
@@ -248,10 +262,16 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
   if (error) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-        <p className="text-ui text-danger">{error}</p>
-        {/* The rendering failed; the bytes may still be perfectly good to
-            someone with a desktop viewer. */}
-        <DownloadFileButton filePath={filePath} />
+        <p role="alert" className="text-ui text-danger">{error}</p>
+        <div className="flex items-center gap-2">
+          {/* A failed READ is worth another go; a failed PARSE is not, but the
+              two are one error state here and offering the retry is cheaper
+              than a third. */}
+          <RetryReadButton onRetry={retry} />
+          {/* The rendering failed; the bytes may still be perfectly good to
+              someone with a desktop viewer. */}
+          <DownloadFileButton filePath={filePath} />
+        </div>
       </div>
     );
   }

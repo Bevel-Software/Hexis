@@ -10,7 +10,12 @@ import { LegacyOfficeRenderer } from './LegacyOfficeRenderer';
 import { lazyRenderer } from './lazyRenderer';
 
 export type { FileRendererProps, RendererSaveState } from './types';
-export { RendererWorkspaceContext, useRendererWorkspaceId } from './rendererWorkspace';
+export {
+  RendererWorkspaceContext,
+  useRendererWorkspaceId,
+  useRendererFileRef,
+  type RendererFileRef,
+} from './rendererWorkspace';
 
 /**
  * The document viewers are code-split: their parsers (xlsx ~141 KB gzip,

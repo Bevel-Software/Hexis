@@ -309,7 +309,8 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     // the revoke (a refresh that raced it) is dead on arrival rather than
     // live until its own expiry. A token from before connections existed
     // (null `connection_id`) has no connection to be revoked and verifies on
-    // its own row alone.
+    // its own row alone. A switched-off account's tokens fail here too, and
+    // come back with it.
     const [row] = await this.deps.db
       .select({
         id: oauthTokens.id,
@@ -330,6 +331,7 @@ export class BevelOAuthProvider implements OAuthServerProvider {
           isNull(oauthTokens.revokedAt),
           gt(oauthTokens.expiresAt, now),
           or(isNull(oauthTokens.connectionId), isNull(agentConnections.revokedAt)),
+          isNull(users.deactivatedAt),
         ),
       )
       .limit(1);

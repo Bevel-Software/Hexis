@@ -1975,7 +1975,6 @@ describe('FileExplorer right-click: the viewport stub cleans up after itself', (
 // follows the destination, plus whatever else about it is worth knowing.
 describe('FileExplorer: delete and move ask first', () => {
   const DRAG_MIME = 'application/x-workspace-path';
-  const DRAG_KIND_MIME = 'application/x-workspace-kind';
   const KB = 'knowledge-base';
   const TREE: FileTreeEntry = rootedAtCheckout({
     name: '.',
@@ -2005,6 +2004,10 @@ describe('FileExplorer: delete and move ask first', () => {
                     type: 'directory',
                     children: [
                       { name: 'nda.md', relativePath: `${KB}/KnowledgeBase/Legal/Old/nda.md`, type: 'file' },
+                      // The folder in Juan's case carries its own rules, which
+                      // travel with it — the reason the resolver answers the
+                      // same holders on both sides of its move.
+                      { name: 'access.md', relativePath: `${KB}/KnowledgeBase/Legal/Old/access.md`, type: 'file' },
                     ],
                   },
                 ],
@@ -2079,12 +2082,11 @@ describe('FileExplorer: delete and move ask first', () => {
     fireEvent.click(screen.getByText('Legal'));
   }
 
-  async function dropOn(rowName: string, sourcePath: string, kind: 'file' | 'directory' = 'file') {
+  async function dropOn(rowName: string, sourcePath: string) {
     await act(async () => {
       fireEvent.drop(screen.getByText(rowName), {
         dataTransfer: {
-          getData: (t: string) =>
-            t === DRAG_MIME ? sourcePath : t === DRAG_KIND_MIME ? kind : '',
+          getData: (t: string) => (t === DRAG_MIME ? sourcePath : ''),
           files: [],
         },
       });
@@ -2116,7 +2118,9 @@ describe('FileExplorer: delete and move ask first', () => {
     it('counts every file under a folder, nested ones included', async () => {
       renderExplorer({ fileTree: TREE });
       await chooseDelete('Legal');
-      expect(screen.getByRole('dialog')).toHaveTextContent('Delete Legal and its 3 files?');
+      // `contract.md`, `access.md`, `Old/nda.md` and `Old/access.md` — the
+      // nested ones and the rules files count, because the delete takes them.
+      expect(screen.getByRole('dialog')).toHaveTextContent('Delete Legal and its 4 files?');
     });
 
     it('deletes nothing on Cancel', async () => {
@@ -2377,11 +2381,12 @@ describe('FileExplorer: delete and move ask first', () => {
      * The one drag test that actually DRAGS.
      *
      * Every other drop here hands the handler a `dataTransfer` built by the
-     * test, with the source path and kind written in by hand. That skips the
-     * handshake: `handleDragStart` writing the payload, and `handleDrop`
-     * reading it back under the same two MIME keys. Stop setting the payload,
-     * rename a key, or leave the row undraggable, and all of those tests still
-     * pass while no real drag in the app does anything at all.
+     * test, with the source path written in by hand. That skips the handshake:
+     * `handleDragStart` writing the payload, and `handleDrop` reading it back
+     * under the same MIME key — one key, the dragged row's path, since the
+     * dialog stopped needing the row's kind. Stop setting the payload, rename
+     * the key, or leave the row undraggable, and all of those tests still pass
+     * while no real drag in the app does anything at all.
      *
      * This one grabs the row, lets the component's own `dragStart` fill a
      * DataTransfer that behaves like the browser's (what `setData` stores is
@@ -2416,7 +2421,6 @@ describe('FileExplorer: delete and move ask first', () => {
       });
       // The component put the drag's subject where the drop handler looks.
       expect(store.get(DRAG_MIME)).toBe(CONTRACT);
-      expect(store.get(DRAG_KIND_MIME)).toBe('file');
 
       await act(async () => {
         fireEvent.drop(screen.getByText('Sales'), { dataTransfer });
@@ -2566,21 +2570,26 @@ describe('FileExplorer: delete and move ask first', () => {
       expect(screen.getAllByText('Engineering: can no longer open')).toHaveLength(2);
     });
 
-    it('asks nothing about a folder being dragged, and says only what it always said', async () => {
-      const { moveEntry } = renderExplorer({ fileTree: TREE });
-      // A folder's access is its own access.md plus every file under it — not
-      // the question this lookup answers, so it is not asked.
-      await dropOn('Sales', `${KB}/KnowledgeBase/Legal/Old`, 'directory');
-
-      const dialog = screen.getByRole('dialog');
-      expect(dialog).toHaveTextContent(
-        "Move Old to Sales? Access to it will follow Sales' rules from now on.",
+    it('asks about a folder being dragged too, and names what its move costs', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE, workspaceId: 'main' });
+      // A folder's rules are the `access.md` files inside it, and they travel
+      // with it — the resolver counts them where they land, so the question
+      // is worth asking for a folder as much as for a file.
+      answerAccess({ read: [group('Engineering')] }, {});
+      await dropOn('Sales', `${KB}/KnowledgeBase/Legal/Old`);
+      await waitFor(() =>
+        expect(
+          mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),
+        ).toBe(true),
       );
-      expect(screen.queryByText('Will lose access:')).not.toBeInTheDocument();
-      expect(screen.queryByText("Couldn't work out the access change.")).not.toBeInTheDocument();
-      expect(
-        mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),
-      ).toBe(false);
+      await act(async () => {});
+
+      const url = mockAuthFetch.mock.calls
+        .map((c) => String(c[0]))
+        .find((u) => u.includes('/access/prospective'))!;
+      expect(url).toContain(`from=${encodeURIComponent('KnowledgeBase/Legal/Old')}`);
+      expect(url).toContain(`toDir=${encodeURIComponent('KnowledgeBase/Sales')}`);
+      expect(screen.getByText('Engineering: can no longer open')).toBeInTheDocument();
 
       // And it is still an ordinary move.
       await act(async () => {
@@ -2590,6 +2599,43 @@ describe('FileExplorer: delete and move ask first', () => {
         `${KB}/KnowledgeBase/Legal/Old`,
         `${KB}/KnowledgeBase/Sales/Old`,
       );
+    });
+
+    /**
+     * Juan's case, in the dialog. `Legal/Old` carries its own `access.md`
+     * (see the tree above), so the resolver answers the same holders on both
+     * sides — that resolution is the BACKEND's, proven over a real tree in
+     * `access-control.preview-relocation.test.ts` and
+     * `workspace.tools.test.ts`; the route is a mock here, as it is in every
+     * case in this suite.
+     *
+     * What this case proves is the half the dialog owns: given an answer with
+     * nothing in it, the dialog says so. It used to say nothing here because
+     * it asked nothing about a folder; now it says nothing because the answer
+     * says nothing, and the two are not the same sentence.
+     */
+    it('says nobody loses access when the answer is the same on both sides of a folder move', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess(
+        { read: [group('Engineering')], write: [group('Engineering')] },
+        { read: [group('Engineering')], write: [group('Engineering')] },
+      );
+      const dialog = await (async () => {
+        await dropOn('Sales', `${KB}/KnowledgeBase/Legal/Old`);
+        await waitFor(() =>
+          expect(
+            mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),
+          ).toBe(true),
+        );
+        await act(async () => {});
+        return screen.getByRole('dialog');
+      })();
+
+      // Not "could not work it out" and not a warning either: the question
+      // was asked, answered, and the answer is that nothing changes.
+      expect(dialog).toHaveTextContent("Move Old to Sales? Nobody's access changes.");
+      expect(screen.queryByText('Will lose access:')).not.toBeInTheDocument();
+      expect(screen.queryByText("Couldn't work out the access change.")).not.toBeInTheDocument();
     });
 
     it('never decorates the next move with the last one’s answer', async () => {

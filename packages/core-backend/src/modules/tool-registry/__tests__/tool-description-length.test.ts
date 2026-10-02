@@ -15,7 +15,7 @@ import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { UuidSessionSink } from '../../workspace/session-sink.js';
 import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
-import { TOOL_DESCRIPTION_CAP, clientVisibleLength } from '../description-length.js';
+import { CLIENT_SHORT_CUT, TOOL_DESCRIPTION_CAP, clientVisibleLength, firstSentenceEnd } from '../description-length.js';
 import {
   POINTER_GUIDE_NAME_BUDGET,
   SHARED_RULES_POINTER_MAX,
@@ -106,6 +106,25 @@ describe('no Hexis tool description is long enough to be cut', () => {
     expect(
       over,
       over.map((m) => `${m.tool}: ${m.chars} characters (cap ${TOOL_DESCRIPTION_CAP})`).join('\n'),
+    ).toEqual([]);
+  });
+
+  it(`leaves the tool's own first sentence inside the shorter ${CLIENT_SHORT_CUT}-character cut`, async () => {
+    // The cap does not answer the ~500-character cut; the ORDER of the text
+    // does, and this is where that claim is checked rather than asserted in a
+    // comment. A client that stops at 500 must still have the sentence saying
+    // what the tool does — what it loses is the pointer tail, and the file the
+    // pointer names is stated in the handshake instructions and in the guide
+    // anyway. Lowering the cap to 500 would not buy this; only order does.
+    const late = (await hexisTools())
+      .map((t) => ({ tool: t.name, endsAt: firstSentenceEnd(t) }))
+      .filter((m) => m.endsAt > CLIENT_SHORT_CUT)
+      .sort((a, b) => b.endsAt - a.endsAt);
+    expect(
+      late,
+      late
+        .map((m) => `${m.tool}: first sentence ends at ${m.endsAt} (cut ${CLIENT_SHORT_CUT}) — lead with what it does`)
+        .join('\n'),
     ).toEqual([]);
   });
 
@@ -269,7 +288,13 @@ describe('the shared rules describe the tools they name', () => {
     expect(takesDryRun('move_file')).toBe(true);
     expect(takesDryRun('delete_folder')).toBe(true);
     expect(takesDryRun('delete_file')).toBe(false);
-    for (const name of ['move_file', 'delete_folder']) {
+    // Every tool that takes one, read off the catalog rather than listed here —
+    // a hand-written list is what let `copy_file` gain a `dryRun` on dev while
+    // the rule still named two tools, so an agent reading the guide was told
+    // the copy had no preflight it could run.
+    const withDryRun = tools.filter((t) => takesDryRun(t.name)).map((t) => t.name);
+    expect(withDryRun.length, 'no tool takes a dryRun — the rule would be vacuous').toBeGreaterThan(1);
+    for (const name of withDryRun) {
       expect(rule.body, name).toContain(name);
     }
     // Named, but as the tool that has none — never as one that takes one.

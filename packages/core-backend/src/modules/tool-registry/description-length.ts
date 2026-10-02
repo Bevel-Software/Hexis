@@ -37,6 +37,47 @@ import type { UtcpTool } from './tool.contract.js';
 export const TOOL_DESCRIPTION_CAP = 1_200;
 
 /**
+ * The OTHER cut — the ~500 characters claude.ai allows — as a number the tests
+ * can hold something to.
+ *
+ * It is deliberately not the value of {@link TOOL_DESCRIPTION_CAP}, and the
+ * difference is the whole point: lowering the cap to 500 would not make these
+ * descriptions survive that client, it would only move the loss from the client
+ * to the source, because no useful description of `move_file` or `file_stat`
+ * fits in 500 characters and shortening them to fit means dropping facts an
+ * agent needs.
+ *
+ * What survives a cut here is decided by ORDER instead, and order is testable:
+ * the purpose prefix goes first, the tool's own opening sentence next, the
+ * pointer to the shared rules last. So a cut at 500 takes the pointer — which
+ * costs the agent the name of a file the handshake instructions and the guide
+ * both state anyway — and leaves the sentence saying what the tool does.
+ * {@link firstSentenceEnd} measures where that sentence ends, and the suite
+ * pins it under this number for every tool, so the claim above is a check
+ * rather than a comment.
+ */
+export const CLIENT_SHORT_CUT = 500;
+
+/**
+ * Where the tool's OWN opening sentence ends in the text a client is handed:
+ * the purpose prefix counted at its cap, as in {@link clientVisibleLength}, and
+ * the pointer not counted at all, since it is the part a short cut is meant to
+ * take.
+ *
+ * A description with no sentence-ending punctuation counts whole — the honest
+ * answer for text that never finishes a sentence.
+ */
+export function firstSentenceEnd(tool: Pick<UtcpTool, 'name' | 'description'>): number {
+  const prefix = PREFIXED_TOOLS.has(tool.name) ? TOOL_PREFIX_CAP + 2 : 0;
+  const description = tool.description ?? '';
+  if (description === '') return prefix;
+  const pointer = sharedRulesPointer();
+  const own = description.endsWith(pointer) ? description.slice(0, -pointer.length) : description;
+  const firstSentence = own.match(/^[\s\S]*?[.!?](?=\s|$)/)?.[0] ?? own;
+  return prefix + firstSentence.length;
+}
+
+/**
  * The length of the description as a CLIENT receives it — which for the four
  * knowledge-base tools includes the deployment's purpose prefix, since the MCP
  * surface prepends it (`prefixToolDescription`) and the client cuts the result.

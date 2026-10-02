@@ -413,6 +413,22 @@ describe('DeploymentSettingsService — validation', () => {
     );
   });
 
+  it('rejects a directory name carrying a line break, which every path is prefixed with', async () => {
+    // The name is joined onto every workspace-relative path, and a line break
+    // in a path is a separator to git's `cat-file --batch` — so a name
+    // carrying one would make the normaliser emit a path it refuses from a
+    // caller. Refused where the name is SET, which is here and at boot.
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    for (const bad of ['kb\nname', 'kb\rname', 'kb\u0000name', 'kb\u007Fname']) {
+      await expect(settings.save({ kbDirName: bad }, null), bad).rejects.toThrow(
+        /Invalid settings/,
+      );
+    }
+    // The ordinary name beside them, so the rule is not simply refusing both.
+    await expect(settings.save({ kbDirName: 'company-brain' }, null)).resolves.toBeTruthy();
+  });
+
   it('rejects a username that would break out of the credential-helper snippet', async () => {
     const { db } = makeDb();
     const settings = new DeploymentSettingsService(db, ENC_KEY);

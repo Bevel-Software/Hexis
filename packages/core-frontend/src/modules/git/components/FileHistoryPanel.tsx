@@ -3,8 +3,8 @@ import { History, AlertTriangle, Loader2 } from 'lucide-react';
 import type { CommitAttribution, FileDiffPayload } from '@bevel-software/platform-shared';
 import { useGit } from '../state/git.context';
 import { formatRelativeTime } from '../../../lib/utils';
-import { UnifiedDiffView } from './UnifiedDiffView';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
+import { HistoryVersionPreview } from './HistoryVersionPreview';
 import { friendlyGitError } from '../services/error-messages';
 import { useEventBus, canonicalizeWorkspaceId } from '../../workflow/state/event-bus.context';
 import { useWorkspace } from '../../workspace/state/workspace.context';
@@ -32,7 +32,6 @@ export function FileHistoryPanel({ filePath }: Props) {
   const git = useGit();
   const [commits, setCommits] = useState<CommitAttribution[] | null>(null);
   const [selected, setSelected] = useState<CommitAttribution | null>(null);
-  const [diff, setDiff] = useState<string | null>(null);
   // Markdown files render through the same viewer as "Review agent changes":
   // full before/after contents diffed client-side into a rendered-markdown
   // red/green view. `diff` (the raw patch) stays the path for everything else.
@@ -45,14 +44,13 @@ export function FileHistoryPanel({ filePath }: Props) {
   // Pull the stable callbacks out so the effect's deps don't include the whole
   // `git` object — that object is a useMemo result that changes on every status
   // poll, which would otherwise wipe local state (selection, loading) every 30s.
-  const { fetchFileHistory, fetchFileDiff, fetchFileAtChange } = git;
+  const { fetchFileHistory, fetchFileAtChange } = git;
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     setSelected(null);
-    setDiff(null);
     setMdPayload(null);
     setCommits(null);
     latestDiffRequestRef.current = null;
@@ -115,35 +113,24 @@ export function FileHistoryPanel({ filePath }: Props) {
       // Clear any banner left over from a previous failed diff so the UI
       // reflects only the currently-selected save's state.
       setError(null);
-      setDiff(null);
       setMdPayload(null);
-      setDiffLoading(true);
       latestDiffRequestRef.current = commit.sha;
-      if (isMarkdownPath(filePath)) {
-        fetchFileAtChange(filePath, commit.sha)
-          .then(({ baseline, current }) => {
-            if (latestDiffRequestRef.current !== commit.sha) return;
-            setMdPayload({
-              path: filePath,
-              kind: baseline === null ? 'added' : current === null ? 'deleted' : 'modified',
-              baseline,
-              current,
-              isBinary: false,
-            });
-          })
-          .catch((err) => {
-            if (latestDiffRequestRef.current === commit.sha) {
-              setError(friendlyGitError(err));
-            }
-          })
-          .finally(() => {
-            if (latestDiffRequestRef.current === commit.sha) setDiffLoading(false);
+      // Everything that is NOT markdown is loaded by `HistoryVersionPreview`,
+      // which needs the save and nothing else: it fetches the patch (and, for
+      // a text-fed viewer, the save's text) for itself, keyed on the sha.
+      // Only the markdown path still loads here, unchanged.
+      if (!isMarkdownPath(filePath)) return;
+      setDiffLoading(true);
+      fetchFileAtChange(filePath, commit.sha)
+        .then(({ baseline, current }) => {
+          if (latestDiffRequestRef.current !== commit.sha) return;
+          setMdPayload({
+            path: filePath,
+            kind: baseline === null ? 'added' : current === null ? 'deleted' : 'modified',
+            baseline,
+            current,
+            isBinary: false,
           });
-        return;
-      }
-      fetchFileDiff(filePath, commit.sha)
-        .then((d) => {
-          if (latestDiffRequestRef.current === commit.sha) setDiff(d);
         })
         .catch((err) => {
           if (latestDiffRequestRef.current === commit.sha) {
@@ -154,7 +141,7 @@ export function FileHistoryPanel({ filePath }: Props) {
           if (latestDiffRequestRef.current === commit.sha) setDiffLoading(false);
         });
     },
-    [filePath, fetchFileDiff, fetchFileAtChange],
+    [filePath, fetchFileAtChange],
   );
 
   return (
@@ -245,41 +232,41 @@ export function FileHistoryPanel({ filePath }: Props) {
                   {shortSha(selected.sha)}
                 </span>
               </div>
-              <div className="flex-1 overflow-auto">
-                {diffLoading && (
-                  <div className="flex items-center gap-2 px-3 py-3 text-xs text-ink-muted">
-                    <Loader2 size={13} className="animate-spin" />
-                    Loading changes…
-                  </div>
-                )}
-                {!diffLoading && mdPayload !== null && (
-                  mdPayload.baseline === null && mdPayload.current === null ? (
-                    // The commit exists in the file's log but the file is
-                    // absent on both sides (e.g. a pure rename elsewhere in
-                    // the commit) — mirror the raw view's empty state.
-                    <div className="px-3 py-3 text-xs text-ink-muted">
-                      No file changes in this save.
+              {/* Markdown keeps the rendered before/after diff it has
+                  always had; every other format is the version pane. */}
+              {isMarkdownPath(filePath) ? (
+                <div className="flex-1 overflow-auto">
+                  {diffLoading && (
+                    <div className="flex items-center gap-2 px-3 py-3 text-xs text-ink-muted">
+                      <Loader2 size={13} className="animate-spin" />
+                      Loading changes…
                     </div>
-                  ) : (
-                    // No link resolvers: this is a diff of a PAST commit, and a
-                    // relative link in it has no meaningful "current" document
-                    // to resolve against — the target may have moved or stopped
-                    // existing since. Links render inert.
-                    //
-                    // No image resolver either: the checked-out tree holds
-                    // today's copy of a picture, not the one this commit had,
-                    // so the viewer names each workspace image instead of
-                    // fetching bytes that may not match (`?ref=` in TODOS.md).
-                    <MarkdownDiffViewer payload={mdPayload} />
-                  )
-                )}
-                {!diffLoading && diff !== null && (
-                  <UnifiedDiffView
-                    diff={diff}
-                    emptyMessage="No file changes in this save."
-                  />
-                )}
-              </div>
+                  )}
+                  {!diffLoading && mdPayload !== null && (
+                    mdPayload.baseline === null && mdPayload.current === null ? (
+                      // The commit exists in the file's log but the file is
+                      // absent on both sides (e.g. a pure rename elsewhere in
+                      // the commit) — mirror the raw view's empty state.
+                      <div className="px-3 py-3 text-xs text-ink-muted">
+                        No file changes in this save.
+                      </div>
+                    ) : (
+                      // No link resolvers: this is a diff of a PAST commit, and a
+                      // relative link in it has no meaningful "current" document
+                      // to resolve against — the target may have moved or stopped
+                      // existing since. Links render inert.
+                      //
+                      // No image resolver either: the checked-out tree holds
+                      // today's copy of a picture, not the one this commit had,
+                      // so the viewer names each workspace image instead of
+                      // fetching bytes that may not match (`?ref=` in TODOS.md).
+                      <MarkdownDiffViewer payload={mdPayload} />
+                    )
+                  )}
+                </div>
+              ) : (
+                <HistoryVersionPreview filePath={filePath} commit={selected} />
+              )}
             </>
           )}
         </div>

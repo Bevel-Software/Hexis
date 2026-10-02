@@ -158,6 +158,31 @@ describe('holdCommitWorkerLease', () => {
     await handle.stop();
     expect(record.released).toBe(1);
   });
+
+  /**
+   * A process that never held the lease never ran the worker, and can still
+   * be in the middle of a hold on it: a repository move, using the database.
+   * Shutdown ends the pool after this stop, so this stop is what waits.
+   */
+  it('stop() waits for a hold in flight on a worker this process never ran', async () => {
+    const { lease, record } = fakeLease([false]);
+    const worker = holdable({ start: () => undefined, stop: async () => undefined });
+    const clock = manualSleep();
+    const handle = holdCommitWorkerLease(lease, worker, { sleep: clock.sleep, log: () => undefined });
+    await settle();
+
+    let finishMove: () => void = () => undefined;
+    const move = worker.whileHeld(() => new Promise<void>((resolve) => (finishMove = resolve)));
+    await settle();
+    const stopping = handle.stop();
+    await settle();
+    expect(record.released).toBe(0);
+
+    finishMove();
+    await move;
+    await stopping;
+    expect(record.released).toBe(1);
+  });
 });
 
 describe('withStartupTask', () => {
@@ -543,6 +568,35 @@ describe('holdable', () => {
     const stopping = worker.stop();
     failMove(new Error('the move failed'));
     await expect(stopping).resolves.toBeUndefined();
+  });
+
+  /**
+   * A worker's stop answers a second caller at once while the first is
+   * still waiting for the commit in flight. A second hold given that answer
+   * would set a working copy aside under that commit.
+   */
+  it('makes a second hold wait for the stop the first one is still waiting on', async () => {
+    const events: string[] = [];
+    let stopped = false;
+    let finishStop: () => void = () => undefined;
+    const worker = holdable({
+      start: () => void events.push('start'),
+      // As the commit worker's: the first call waits, a later one returns.
+      stop: () => {
+        if (stopped) return Promise.resolve();
+        stopped = true;
+        return new Promise<void>((resolve) => (finishStop = resolve));
+      },
+    });
+    worker.start();
+    const first = worker.whileHeld(async () => void events.push('first work'));
+    const second = worker.whileHeld(async () => void events.push('second work'));
+    await settle();
+    // The commit in flight has not finished: neither hold has begun.
+    expect(events).toEqual(['start']);
+    finishStop();
+    await Promise.all([first, second]);
+    expect(events.slice(0, 3).sort()).toEqual(['first work', 'second work', 'start']);
   });
 
   it('waits for the last of two overlapping holds before it starts again', async () => {

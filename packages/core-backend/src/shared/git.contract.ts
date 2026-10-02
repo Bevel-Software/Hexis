@@ -209,6 +209,33 @@ export class GitRunError extends Error {
   }
 }
 
+/**
+ * Refuse a `cat-file --batch` spec that is not ONE line.
+ *
+ * `--batch` reads one object name per LINE, so a spec carrying a `\n` is two
+ * requests. For a single-spec read that means git answers about the part
+ * before the break — bytes the caller then presents as the whole path's,
+ * having had its access gates answered about a string that names nothing. For
+ * a batch it is worse: the extra answer shifts every result after it, and a
+ * walk that steps one header at a time hands each caller the object that
+ * belonged to the next one.
+ *
+ * A path is refused a control character long before this — by
+ * `assertValidRelativePath` and by `normalizeWorkspacePath`, which is where
+ * the rule belongs because it protects every route and tool at once. This is
+ * the fence AT the protocol, for a spec assembled from somewhere neither of
+ * those covers (a ref, a branch name, a path from a future caller). Nothing
+ * should ever trip it, so it throws rather than filtering: a request that
+ * cannot be expressed in this protocol has no correct truncation.
+ */
+export function assertOneSpecPerLine(specs: readonly string[]): void {
+  for (const spec of specs) {
+    if (/[\r\n]/.test(spec)) {
+      throw new Error('git cat-file --batch spec contains a line break');
+    }
+  }
+}
+
 /** Whether a failure came from the deadline rather than from git's own answer. */
 export function isGitTimeout(err: unknown): boolean {
   return err instanceof GitRunError && err.timedOut;

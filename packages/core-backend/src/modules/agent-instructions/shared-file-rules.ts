@@ -138,9 +138,9 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
     },
     {
       id: 'dry-run-confirm',
-      heading: 'Dry-run before a move or a folder delete',
+      heading: 'Dry-run before a move, a copy or a folder delete',
       body:
-        'move_file and delete_folder take `dryRun: true`: it changes nothing and answers the impact — ' +
+        'move_file, copy_file and delete_folder take `dryRun: true`: it changes nothing and answers the impact — ' +
         'what the call would touch, `allowed`, and `reason` when it may not run. A non-empty folder is deleted, and a ' +
         'move that changes your access runs, only with `confirm: true`; without it the call changes nothing and ' +
         'returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — ' +
