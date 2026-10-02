@@ -3,7 +3,11 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useGit } from '../../git/state/git.context';
 import { useWorkspace } from '../state/workspace.context';
 import { authFetch } from '../../../lib/api';
-import { isExternalHref, isOpenableExternalHref } from '../../../shared/markdown/hrefs';
+import {
+  isExternalHref,
+  isOpenableExternalHref,
+  normalizeHref,
+} from '../../../shared/markdown/hrefs';
 
 export const KB_ROUTE_PREFIX = '/workspace';
 
@@ -233,13 +237,21 @@ export type KbHref =
  * Serving bytes at another branch is the `?ref=` item in TODOS.md.
  */
 export function resolveKbHref(
-  href: string,
+  rawHref: string,
   {
     basePath,
     kbDirName,
     repairMangledPath = true,
   }: { basePath: string; kbDirName: string | null; repairMangledPath?: boolean },
 ): KbHref | null {
+  // Read the href the way a browser reads it BEFORE anything is parsed out of
+  // it, not just before the scheme check. An href written on its own line in
+  // generated markup arrives padded, and `sanitizeAgentHtml` keeps it on that
+  // reading — so every row of the table above has to see the same string, or a
+  // padded `'  Board.html  '` resolves to a filename with spaces nobody wrote,
+  // a padded `'  /workspace/…'` misses the prefix and resolves as a relative
+  // path, and a padded `'  #goal'` loses its same-document row.
+  const href = normalizeHref(rawHref);
   if (!href) return null;
   if (isExternalHref(href)) return { kind: 'external' };
   const hashIdx = href.indexOf('#');
@@ -285,7 +297,9 @@ export function openExternalHref(href: string): boolean {
   // branch name and a file path — to the destination. The markdown pipeline's
   // body links already ship `rel="noopener noreferrer"`; this is the same
   // policy on the scripted path.
-  window.open(href, '_blank', 'noopener,noreferrer');
+  // The NORMALIZED string, so the address opened is the one the allowlist
+  // approved rather than whatever padding the author left around it.
+  window.open(normalizeHref(href), '_blank', 'noopener,noreferrer');
   return true;
 }
 
@@ -363,13 +377,14 @@ export function useFileNav() {
    * is a dead click. Two surfaces do that:
    *
    *   - The frontmatter panel, for a link-valued field.
-   *   - Agent HTML, via `bevel.navigate(href)` from its own inline script.
-   *     NOT via an anchor: `sanitizeAgentHtml` strips an `href` that
-   *     `isInternalNodeLink` rejects, which is every scheme-bearing URL, so
-   *     an external anchor loses its href before the nav bridge ever sees
-   *     it. The scripted call is the reachable path, and it is why the
-   *     allowlist below is load-bearing rather than belt-and-braces: that
-   *     argument is an arbitrary string no sanitizer inspected.
+   *   - Agent HTML, two ways. A WRITTEN anchor whose address
+   *     `sanitizeAgentHtml` kept — a document of the knowledge base, or an
+   *     `http:`, `https:` or `mailto:` address — reaches here through the
+   *     nav bridge, which cancels the click the sandbox would not let the
+   *     iframe make. And `bevel.navigate(href)` from the page's own inline
+   *     script, which is why the allowlist below is load-bearing rather than
+   *     belt-and-braces: that argument is an arbitrary string no sanitizer
+   *     ever inspected.
    *
    * (A markdown BODY link never arrives here: the pipeline renders an
    * external destination as a plain `target="_blank"` anchor and the browser
