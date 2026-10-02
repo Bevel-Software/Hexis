@@ -80,7 +80,9 @@ export async function setAsideClone(repoDir: string, dest: string): Promise<void
     throw err;
   }
   try {
-    await fs.cp(repoDir, dest, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+    // Into the empty folder made above, which is why an existing destination
+    // is not an error here; nothing is overwritten (`force: false`).
+    await fs.cp(repoDir, dest, { recursive: true, errorOnExist: false, force: false, verbatimSymlinks: true });
   } catch (err) {
     await fs.rm(dest, { recursive: true, force: true }).catch(() => undefined);
     throw new Error(
