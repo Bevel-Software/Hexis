@@ -378,6 +378,37 @@ export class PathNotFoundError extends WorkflowDomainError {
 }
 
 /**
+ * The one sentence every read of a past save answers when that save is not in
+ * the history of the branch being viewed.
+ *
+ * Written once, here, because four surfaces have to give the same answer: the
+ * bytes route (`?ref=`), the patch route (`show-file`), the before/after
+ * contents route (`file-at-change`), and anything later that serves a file at
+ * a commit. A save the history panel listed came off `git log` on this
+ * workspace's own branch, so it can never be refused this way — what this
+ * refuses is a sha from someone else's branch, or one that was invented.
+ */
+export const VERSION_NOT_ON_BRANCH_MESSAGE =
+  "This version is not in this file's history on this branch.";
+
+/**
+ * The caller named a save that is not an ancestor of the branch this
+ * workspace has checked out.
+ *
+ * 404, and DELIBERATELY the same 404 for a sha that exists on another branch
+ * as for one that exists nowhere: telling the two apart would turn the route
+ * into an oracle for "does this commit exist in the repository", which is
+ * exactly the reading a branch-scoped rule exists to prevent.
+ */
+export class VersionNotOnBranchError extends WorkflowDomainError {
+  readonly kind = 'version-not-on-branch' as const;
+  constructor() {
+    super(VERSION_NOT_ON_BRANCH_MESSAGE, 404, { kind: 'version-not-on-branch' });
+    this.name = 'VersionNotOnBranchError';
+  }
+}
+
+/**
  * An archive the caller uploaded that the zip reader cannot open. 422, not
  * 400: the request is well-formed and the path is fine — the BYTES are not a
  * readable zip, which is the caller's to fix but not their spelling's.

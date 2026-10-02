@@ -911,6 +911,22 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
+   * The BYTES of one file at a change — what the file page's byte-reading
+   * viewers (pdf, image, docx, pptx, xlsx, email) need to show a past save,
+   * and what "Download this version" hands over. `fileAtChange` above cannot
+   * serve them: it decodes to UTF-8, which ruins every format that is not
+   * text.
+   */
+  fileBytesAtChange(
+    workspaceId: string,
+    path: string,
+    sha: string,
+    side: 'after' | 'before',
+  ): Promise<{ bytes: Buffer; blobId: string } | null> {
+    return this.git.fileBytesAtCommit(workspaceId, path, sha, side);
+  }
+
+  /**
    * Resolve write permission for `targetPath` against the access tree at
    * `HEAD` of `branch`. Throws `AccessDeniedError` on denial with the
    * eligible-writers payload attached. Bootstrap-friendly: when no rules are

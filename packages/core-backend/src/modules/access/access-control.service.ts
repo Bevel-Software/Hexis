@@ -5,7 +5,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('access');
 
 import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
-import { isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
+import { assertOneSpecPerLine, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
 import { hashEmail } from '../../shared/email-identity.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
@@ -81,6 +81,12 @@ async function catFileBatch(
 ): Promise<(string | null)[]> {
   // Bytes, not text: every `<size>` in the header counts bytes, and the walk
   // below has to step by that count through content that is not all ASCII.
+  // One spec per LINE is the protocol, and this walk depends on getting back
+  // exactly as many answers as it sent: a spec carrying a line break would
+  // insert an extra answer and shift every result after it, so each directory
+  // would be handed the NEXT one's `access.md`. Paths are refused a control
+  // character at the normaliser; this is the fence at the protocol.
+  assertOneSpecPerLine(specs);
   const { stdout: out } = await runner.run(repoDir, ['cat-file', '--batch'], {
     input: `${specs.join('\n')}\n`,
     encoding: 'buffer',
