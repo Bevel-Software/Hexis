@@ -26,7 +26,7 @@ AFTER this change all three are **identical** to what the server sent, and all t
 
 - a `$ref` that resolves back onto a schema already being inlined is recursive, and degrades to a permissive `{}` at that position, which is a schema position and therefore legal. So does one past the new expansion budget: `$ref`s that branch rather than nest (two `allOf` arms on one target, repeatedly) double per level, and a few hundred bytes on the wire could otherwise ask `tools/list` for a reply no memory holds;
 - the depth cap (now 200, and a stack guard rather than a schema rule) keeps the SHAPE of what it stops at, replacing only the objects past it with `{}`. An `anyOf` stays a list, a `required` entry stays a string, a `type` stays a string — and because no object survives, nothing past the cap carries a `$ref` the dropped `$defs` block would leave dangling, or a `format` a client refuses;
-- the keywords it cannot inline a `$ref` into still have their SIBLINGS sanitized, since those keywords are what stands in the reference's place;
+- a `$ref` it cannot inline — recursive, or past the expansion budget — still leaves its SIBLINGS sanitized in its place, because those keywords are what stands where the reference was;
 - and instance data — a `const`, `default`, `enum` or `examples` value — is handed back exactly as it came, at any depth. A key named `format` or `$ref` inside one of those is part of a value the tool expects, not a construct to rewrite, and `{}` there would not mean "any value" but a different default.
 
 A test pins the pass-through with a schema carrying `anyOf` lists, `required` lists and nested `items`, at 1, 5, 8, 12 and 30 levels of nesting, and the two guards are pinned at depths and shapes no server sends.

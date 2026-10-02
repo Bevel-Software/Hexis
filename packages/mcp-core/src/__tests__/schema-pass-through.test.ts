@@ -193,8 +193,15 @@ describe('a connected tool\'s input schema reaches clients as the server sent it
       // The cap replaces an object with `{}` where a SCHEMA stands, and `{}`
       // there means "any value". Under `default` it would silently change what
       // the tool is told to default to.
+      //
+      // 320 levels, not 150: a single-key chain costs ONE level of the walk
+      // each (there is no `properties` keyword between them), so 150 of them
+      // sit at depth ~153 and a walk that wrongly descended into the data would
+      // still not reach the cap — the assertion would hold either way. Past 200
+      // the strip fires, and only an implementation that stays out of instance
+      // data returns this unchanged.
       let value: Record<string, unknown> = { leaf: true };
-      for (let i = 0; i < 150; i += 1) value = { level: value };
+      for (let i = 0; i < 320; i += 1) value = { level: value };
       const sent = { type: 'object', properties: { deep: { type: 'object', default: value } } };
       expect(sanitizeInputSchema(sent)).toEqual(sent);
     });

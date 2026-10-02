@@ -163,10 +163,14 @@ describe('ToolSchemaGuard', () => {
       const guard = new ToolSchemaGuard();
       const early = guard.beginLoad();
       const late = guard.beginLoad();
-      // u2's load is newer than u1's, and says nothing about u1's picture.
-      guard.screen('u1', early, load({ notion: [tool('bad', INVALID)] }));
+      // u2's NEWER load lands first, and u1's older one after it. Ordering kept
+      // globally rather than per caller would call u1's load stale on the
+      // strength of a ticket belonging to someone else, and drop a finding
+      // nothing else in this process has seen. The order matters: with u1's
+      // load first, both readings pass and the test proves nothing.
       guard.screen('u2', late, load({ notion: [tool('a', VALID)] }));
-      expect(guard.hiddenFor('notion')).toHaveLength(1);
+      guard.screen('u1', early, load({ notion: [tool('bad', INVALID)] }));
+      expect(guard.hiddenFor('notion').map((t) => t.name)).toEqual(['notion_srv_bad']);
     });
   });
 
