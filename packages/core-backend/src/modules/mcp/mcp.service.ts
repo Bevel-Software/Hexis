@@ -405,12 +405,6 @@ export class McpService {
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       const [{ tools, catalogNames }, { toolPrefix }] = await Promise.all([requestSurface(), agentInstructions()]);
-      // The meta-tools' examples name the namespace THIS endpoint registers the
-      // knowledge-base tools under, so a chain copied out of the description
-      // runs. Built here rather than held as a constant: the local MCP server
-      // registers the same tools under a different name, and one fixed example
-      // is necessarily wrong on one of the two surfaces.
-      const metaTools = codeModeMetaTools(EXTERNAL_KB_MANUAL_NAME, tools);
       // A discovered tool whose name collides with a meta-tool would be
       // listed but never callable (the dispatcher routes the name to the
       // meta-tool first), so drop it from the listing entirely.
@@ -440,6 +434,7 @@ export class McpService {
       const seen = new Set(META_TOOL_NAMES);
       const dropped: string[] = [];
       const direct: McpTool[] = [];
+      const examplePool: ProxiedTool[] = [];
       for (const t of listed) {
         const entry = toListedTool(t); // logs its own reason on a name/schema drop
         if (!entry) {
@@ -451,6 +446,12 @@ export class McpService {
           continue;
         }
         seen.add(entry.name);
+        // Kept for the worked example in the meta-tool descriptions: it must
+        // be derived from the tools THIS caller actually gets, not from the
+        // whole catalog, or a connection-key caller is shown an example naming
+        // a credential-gated tool the filter above just removed from its
+        // listing — a copied call that cannot work.
+        examplePool.push(t);
         // The four knowledge-base tools carry the purpose prefix: the one
         // pre-call channel every client shows the model, for the clients that
         // drop the handshake's `instructions`. Applied AFTER the credential
@@ -462,6 +463,13 @@ export class McpService {
             : entry,
         );
       }
+      // The meta-tools' examples name the namespace THIS endpoint registers the
+      // knowledge-base tools under, and a tool this caller is really served, so
+      // a chain copied out of the description runs. Built here rather than held
+      // as a constant: the local MCP server registers the same tools under a
+      // different name, and one fixed example is necessarily wrong on one of the
+      // two surfaces.
+      const metaTools = codeModeMetaTools(EXTERNAL_KB_MANUAL_NAME, examplePool);
       // Log only when a tool was dropped (name/schema/duplicate) — that's the
       // anomaly worth surfacing, since a downstream client would otherwise hide
       // it by rejecting the whole response.

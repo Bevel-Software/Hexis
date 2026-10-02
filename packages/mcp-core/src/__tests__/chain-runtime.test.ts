@@ -29,7 +29,7 @@ function sandbox(): Record<string, never> & {
   atob: (s: string) => string;
   btoa: (s: string) => string;
   TextEncoder: new () => { encode(s?: string): Uint8Array; encoding: string };
-  TextDecoder: new (label?: string) => { decode(b?: unknown): string; encoding: string };
+  TextDecoder: new (label?: string, options?: { ignoreBOM?: boolean }) => { decode(b?: unknown): string; encoding: string };
 } {
   const g = {} as never;
   new Function('globalThis', CHAIN_RUNTIME_PRELUDE)(g);
@@ -169,6 +169,35 @@ describe('TextEncoder and TextDecoder, for UTF-8', () => {
     expect(dec.decode(new Uint8Array([]))).toBe('');
     expect(g.TextEncoder.name).toBe('TextEncoder');
     expect(g.TextDecoder.name).toBe('TextDecoder');
+  });
+
+  /**
+   * A browser's default `TextDecoder` drops a leading byte-order mark
+   * (`ignoreBOM: false`), and so does Node's — a chain reading a UTF-8 file
+   * written on Windows would otherwise find a stray `\uFEFF` at the front of it,
+   * which breaks a `JSON.parse` and every exact-match comparison. It is also
+   * what makes the random equivalence tests above sound: without this, a
+   * generated string beginning with U+FEFF decoded one way here and another in
+   * Node, and the comparison failed on whichever run happened to draw one.
+   */
+  it('drops a leading byte-order mark, and keeps it only when asked to', () => {
+    const g = sandbox();
+    const withBom = new Uint8Array([0xef, 0xbb, 0xbf, 0x68, 0x69]);
+    expect(new g.TextDecoder().decode(withBom)).toBe('hi');
+    expect(new g.TextDecoder().decode(withBom)).toBe(new TextDecoder().decode(withBom));
+    expect(new g.TextDecoder('utf-8', { ignoreBOM: true }).decode(withBom)).toBe('\uFEFFhi');
+    expect(new g.TextDecoder('utf-8', { ignoreBOM: true }).decode(withBom)).toBe(
+      new TextDecoder('utf-8', { ignoreBOM: true }).decode(withBom),
+    );
+    // Only the FIRST one, and only a whole one: a BOM further in is content,
+    // and three bytes that merely start like one are still decoded.
+    const inner = new Uint8Array([0x68, 0xef, 0xbb, 0xbf, 0x69]);
+    expect(new g.TextDecoder().decode(inner)).toBe(new TextDecoder().decode(inner));
+    const twice = new Uint8Array([0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf]);
+    expect(new g.TextDecoder().decode(twice)).toBe(new TextDecoder().decode(twice));
+    expect(new g.TextDecoder().decode(new Uint8Array([0xef, 0xbb]))).toBe(
+      new TextDecoder().decode(new Uint8Array([0xef, 0xbb])),
+    );
   });
 
   it('refuses an encoding it does not implement instead of answering mojibake', () => {
@@ -356,6 +385,53 @@ describe('a chain that fails for another reason', () => {
       expect(outcome.status).toBe(503);
       expect(outcome.data).toEqual({ retry: true });
     }
+  });
+
+  /**
+   * The http transport carries the provider's own reason in `response.data`, not
+   * in `err.message` — the message is the generic status line. The MCP
+   * dispatcher used to read that body itself (`describeToolFailure`); once this
+   * catch moved here, taking `err.message` would have dropped the actionable
+   * half of every transport failure, so the runner reads it instead.
+   */
+  it('keeps the provider\'s own reason when the transport carries it in a body', async () => {
+    const client = {
+      config: { tool_repository: { getTools: async () => KB, getTool: async () => null } },
+      callToolChain: async () => {
+        throw Object.assign(new Error('Request failed with status code 403'), {
+          response: { status: 403, data: { error: 'The branch `main` is protected.', kind: 'branch-protected' } },
+        });
+      },
+    } as unknown as CodeModeUtcpClient;
+    const outcome = await runToolChain(client, 'return 1', 30_000);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.error).toContain('The branch `main` is protected.');
+      // The machine-readable half survives too: an MCP caller sees only this
+      // string, and `kind` is what it branches on.
+      expect(outcome.error).toContain('branch-protected');
+      expect(outcome.status).toBe(403);
+      expect(outcome.data).toEqual({ error: 'The branch `main` is protected.', kind: 'branch-protected' });
+    }
+  });
+
+  it('is still answered when reading the failure\'s own fields throws', async () => {
+    const hostile = new Error('the tool bridge gave up');
+    Object.defineProperty(hostile, 'status', {
+      get() {
+        throw new Error('a getter that throws');
+      },
+    });
+    const client = {
+      config: { tool_repository: { getTools: async () => KB, getTool: async () => null } },
+      callToolChain: async () => {
+        throw hostile;
+      },
+    } as unknown as CodeModeUtcpClient;
+    await expect(runToolChain(client, 'return 1', 30_000)).resolves.toMatchObject({
+      ok: false,
+      error: 'the tool bridge gave up',
+    });
   });
 
   it('never throws, whatever the runner does', async () => {

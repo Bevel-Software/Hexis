@@ -2,17 +2,15 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Tool } from '@utcp/sdk';
 import type { CodeModeUtcpClient } from '@utcp/code-mode';
 import { dispatchMetaTool } from '../meta-tools.js';
-import { CHAIN_RUNTIME_PRELUDE } from '../chain-runtime.js';
+import { withChainRuntime } from '../chain-runtime.js';
 
 /**
  * The code the runner is handed is the chain's own source behind the runtime
- * prelude (the browser globals every chain is promised), so these assert on the
- * TIMEOUT — which is what they are about — and on the chain source being
- * carried through intact, rather than on the exact string.
+ * prelude (the browser globals every chain is promised). These tests are about
+ * the TIMEOUT and about the chain source being carried through intact, so they
+ * compose the expectation with the SAME exported function the runner uses —
+ * re-deriving the prelude here would let the two drift and still pass.
  */
-function ranChain(code: string): string {
-  return `${CHAIN_RUNTIME_PRELUDE}${code}`;
-}
 
 function utcpTool(name: string): Tool {
   return {
@@ -50,27 +48,27 @@ describe('dispatchMetaTool call_tool_chain', () => {
   it('clamps an oversized timeout to the documented 120000ms cap', async () => {
     const { client, callToolChain } = clientWith([]);
     await dispatchMetaTool(client, 'call_tool_chain', { code: 'return 1', timeout: 999_999_999 });
-    expect(callToolChain).toHaveBeenCalledWith(ranChain('return 1'), 120_000);
+    expect(callToolChain).toHaveBeenCalledWith(withChainRuntime('return 1'), 120_000);
   });
 
   it('clamps an undersized timeout up to 1000ms', async () => {
     const { client, callToolChain } = clientWith([]);
     await dispatchMetaTool(client, 'call_tool_chain', { code: 'return 1', timeout: 1 });
-    expect(callToolChain).toHaveBeenCalledWith(ranChain('return 1'), 1_000);
+    expect(callToolChain).toHaveBeenCalledWith(withChainRuntime('return 1'), 1_000);
   });
 
   it('falls back to the 30000ms default on a non-numeric or non-finite timeout', async () => {
     const { client, callToolChain } = clientWith([]);
     await dispatchMetaTool(client, 'call_tool_chain', { code: 'return 1', timeout: '9999999' });
     await dispatchMetaTool(client, 'call_tool_chain', { code: 'return 1', timeout: Number.NaN });
-    expect(callToolChain).toHaveBeenNthCalledWith(1, ranChain('return 1'), 30_000);
-    expect(callToolChain).toHaveBeenNthCalledWith(2, ranChain('return 1'), 30_000);
+    expect(callToolChain).toHaveBeenNthCalledWith(1, withChainRuntime('return 1'), 30_000);
+    expect(callToolChain).toHaveBeenNthCalledWith(2, withChainRuntime('return 1'), 30_000);
   });
 
   it('truncates a fractional timeout to an integer', async () => {
     const { client, callToolChain } = clientWith([]);
     await dispatchMetaTool(client, 'call_tool_chain', { code: 'return 1', timeout: 5000.9 });
-    expect(callToolChain).toHaveBeenCalledWith(ranChain('return 1'), 5_000);
+    expect(callToolChain).toHaveBeenCalledWith(withChainRuntime('return 1'), 5_000);
   });
 
   it('refuses a missing or non-string code instead of executing an empty program', async () => {

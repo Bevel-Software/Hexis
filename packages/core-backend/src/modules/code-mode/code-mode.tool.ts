@@ -96,24 +96,41 @@ export function createCallToolChainTool(
         };
       }
       const { result: rawResult, logs } = outcome;
-      // Same policy as the MCP surfaces' `call_tool_chain` (see
-      // `omitImagePayloads`): a chain result is stringified JSON, so an image
-      // read inside it comes back as an omitted-image note instead of a
-      // base64 flood — images are only delivered on a direct `read_file`.
-      const result = omitImagePayloads(rawResult, 'result');
-      const json = JSON.stringify({ success: true, result, logs });
-      if (json.length <= maxOutputSize) {
-        return { success: true, result, logs };
+      // Everything past the outcome is still fallible — `omitImagePayloads`
+      // walks a value the chain built, `JSON.stringify` can meet a cycle or a
+      // BigInt, and the spill store writes to disk. This tool promises a
+      // STRUCTURED failure for every outcome, so a disk or serialization error
+      // must come back as `success: false` with its reason rather than as an
+      // unhandled tool failure the agent sees as a dropped call.
+      try {
+        // Same policy as the MCP surfaces' `call_tool_chain` (see
+        // `omitImagePayloads`): a chain result is stringified JSON, so an image
+        // read inside it comes back as an omitted-image note instead of a
+        // base64 flood — images are only delivered on a direct `read_file`.
+        const result = omitImagePayloads(rawResult, 'result');
+        const json = JSON.stringify({ success: true, result, logs });
+        if (json.length <= maxOutputSize) {
+          return { success: true, result, logs };
+        }
+        const fullJson = JSON.stringify({ result, logs }, null, 2);
+        const { ref, bytes } = await spillStore.write(fullJson);
+        return {
+          success: true,
+          truncated: true,
+          result_ref: ref,
+          result_bytes: bytes,
+          message: `Combined result+logs payload was ${fullJson.length} characters (exceeded max_output_size of ${maxOutputSize}). Full JSON (both \`result\` and \`logs\`) saved to the shared spill store as \`${ref}\` (outside any workspace, uncommitted). Read it back with \`read_file\` — pass that ref as \`path\` (\`branch\` is ignored) plus \`offset\` / \`limit\` for a slice — or, usually better, narrow the next \`call_tool_chain\` call (smaller fields list, tighter date window, lower limit) so the result fits inline.`,
+        };
+      } catch (err) {
+        // The chain itself SUCCEEDED and only its delivery failed, so the logs
+        // ride along: they are the only trace of the work left, and an agent
+        // deciding whether to re-run a long chain needs them.
+        return {
+          success: false,
+          error: `The chain ran, but its result could not be returned: ${err instanceof Error ? err.message : String(err)}. Re-run a narrower chain that returns only what you need.`,
+          ...(logs.length ? { logs } : {}),
+        };
       }
-      const fullJson = JSON.stringify({ result, logs }, null, 2);
-      const { ref, bytes } = await spillStore.write(fullJson);
-      return {
-        success: true,
-        truncated: true,
-        result_ref: ref,
-        result_bytes: bytes,
-        message: `Combined result+logs payload was ${fullJson.length} characters (exceeded max_output_size of ${maxOutputSize}). Full JSON (both \`result\` and \`logs\`) saved to the shared spill store as \`${ref}\` (outside any workspace, uncommitted). Read it back with \`read_file\` — pass that ref as \`path\` (\`branch\` is ignored) plus \`offset\` / \`limit\` for a slice — or, usually better, narrow the next \`call_tool_chain\` call (smaller fields list, tighter date window, lower limit) so the result fits inline.`,
-      };
     },
   });
 }

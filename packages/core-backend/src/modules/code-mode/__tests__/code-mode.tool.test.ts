@@ -99,6 +99,50 @@ describe('call_tool_chain image scrub', () => {
 });
 
 /**
+ * `call_tool_chain` promises a STRUCTURED answer for every outcome. The work
+ * past the runner is still fallible — the spill store writes to disk, and
+ * `JSON.stringify` can meet a value it cannot serialize — and an exception
+ * escaping `execute` reaches the agent as an unhandled tool failure, which is
+ * the dropped call this ticket is about.
+ */
+describe('call_tool_chain when the result cannot be delivered', () => {
+  async function runWith(spill: { write: (json: string) => Promise<{ ref: string; bytes: number }> }, result: unknown) {
+    const { createCallToolChainTool } = await import('../code-mode.tool.js');
+    const chainClient = {
+      callToolChain: vi.fn(async () => ({ result, logs: ['[LOG] halfway'] as string[] })),
+    } as unknown as CodeModeUtcpClient;
+    const tool = createCallToolChainTool(chainClient, spill as never, 'KNOWLEDGE_BASE') as unknown as {
+      execute: (input: { code: string; max_output_size?: number }) => Promise<{
+        success: boolean;
+        error?: string;
+        logs?: string[];
+      }>;
+    };
+    return tool.execute({ code: 'return 1', max_output_size: 1_000 });
+  }
+
+  it('answers with the reason when the spill store cannot write', async () => {
+    const out = await runWith(
+      { write: vi.fn(async () => Promise.reject(new Error('ENOSPC: no space left on device'))) },
+      'x'.repeat(2_000),
+    );
+    expect(out.success).toBe(false);
+    expect(out.error).toContain('ENOSPC');
+    // The chain itself ran, so its logs are the only trace of the work left.
+    expect(out.logs).toEqual(['[LOG] halfway']);
+  });
+
+  it('answers with the reason when the chain\'s value cannot be serialized', async () => {
+    // A BigInt, not a cycle: `omitImagePayloads` already replaces a cycle with
+    // `"[Circular]"`, so a cyclic result serializes fine and is not this case.
+    const out = await runWith({ write: vi.fn(async () => ({ ref: 'r', bytes: 1 })) }, { n: 1n });
+    expect(out.success).toBe(false);
+    expect(out.error).toMatch(/could not be returned/);
+    expect(out.error).toMatch(/BigInt/);
+  });
+});
+
+/**
  * `merge_change_request` is retired from every agent tool set, the in-app
  * chat's included. A chain still calling it gets who merges now, not the
  * runtime's "is not a function".

@@ -238,14 +238,10 @@ export function withoutRemoteMetaTools(tools: ProxiedTool[]): ProxiedTool[] {
  * anyone which one.
  */
 export function listedTools(tools: ProxiedTool[]): McpTool[] {
-  // The examples in the meta-tools name the namespace THIS server registers
-  // the deployment under (`hexis`), not the one the hosted endpoint uses
-  // (`KNOWLEDGE_BASE`). One fixed example was wrong here, and a chain copied
-  // out of it died of `ReferenceError: KNOWLEDGE_BASE is not defined`.
-  const metaTools = codeModeMetaTools(REMOTE_MANUAL_NAME, tools);
   const seen = new Set<string>(META_TOOL_NAMES);
   const listed: McpTool[] = [];
   const dropped: string[] = [];
+  const examplePool: ProxiedTool[] = [];
   for (const tool of tools) {
     const entry = toListedTool(tool); // logs its own reason on a name/schema drop
     if (!entry) {
@@ -258,7 +254,16 @@ export function listedTools(tools: ProxiedTool[]): McpTool[] {
     }
     seen.add(entry.name);
     listed.push(entry);
+    // Kept for the worked example in the meta-tool descriptions, which has to
+    // be derived from the tools this listing really serves: an example naming
+    // one just dropped as non-listable or duplicate is a call nobody can make.
+    examplePool.push(tool);
   }
+  // The examples in the meta-tools name the namespace THIS server registers
+  // the deployment under (`hexis`), not the one the hosted endpoint uses
+  // (`KNOWLEDGE_BASE`). One fixed example was wrong here, and a chain copied
+  // out of it died of `ReferenceError: KNOWLEDGE_BASE is not defined`.
+  const metaTools = codeModeMetaTools(REMOTE_MANUAL_NAME, examplePool);
   if (dropped.length) {
     console.error(
       `[hexis-mcp] serving ${metaTools.length + listed.length} tool(s); ` +

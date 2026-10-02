@@ -1,5 +1,6 @@
 import type { CodeModeUtcpClient } from '@utcp/code-mode';
 import { utcpNameToTsInterfaceName } from './code-mode-names.js';
+import { describeToolFailure } from './results.js';
 
 /**
  * What runs a `call_tool_chain` chain, for every surface that offers one: the
@@ -83,7 +84,11 @@ const UNDEFINED_IDENTIFIER = /ReferenceError: ([A-Za-z_$][\w$]*) is not defined/
  * the padding is optional, and anything else throws rather than decoding to
  * silent garbage. `TextEncoder`/`TextDecoder` are UTF-8 only — that is the
  * encoding the Specification asks for, and a decoder that took a `label` it
- * then ignored would quietly answer mojibake. Each is defined only when the
+ * then ignored would quietly answer mojibake. `TextDecoder` drops a leading
+ * byte-order mark the way a browser's default does, and keeps it under
+ * `{ ignoreBOM: true }`: a chain decoding a UTF-8 file written on Windows would
+ * otherwise find a stray `\uFEFF` at the front of it, which breaks a
+ * `JSON.parse` and every exact-match comparison. Each is defined only when the
  * runtime does not already have it, so a future `@utcp/code-mode` that ships
  * them natively wins.
  */
@@ -120,14 +125,17 @@ export const CHAIN_RUNTIME_PRELUDE: string = [
   'return new Uint8Array(out);};',
   'g.TextEncoder=TE;}',
   'if(typeof g.TextDecoder!=="function"){',
-  'var TD=function TextDecoder(label){',
+  'var TD=function TextDecoder(label,options){',
   'var e=String(label===undefined?"utf-8":label).toLowerCase();',
-  'if(e!=="utf-8"&&e!=="utf8"&&e!=="unicode-1-1-utf-8")throw new RangeError("TextDecoder(): the tool-chain runtime decodes UTF-8 only, not \\""+label+"\\".");};',
+  'if(e!=="utf-8"&&e!=="utf8"&&e!=="unicode-1-1-utf-8")throw new RangeError("TextDecoder(): the tool-chain runtime decodes UTF-8 only, not \\""+label+"\\".");',
+  'this.ignoreBOM=!!(options&&options.ignoreBOM);};',
   'TD.prototype.encoding="utf-8";',
+  'TD.prototype.ignoreBOM=false;',
   'TD.prototype.decode=function(input){',
   'if(input===undefined||input===null)return "";',
   'var b=input instanceof Uint8Array?input:(input instanceof ArrayBuffer?new Uint8Array(input):(input&&input.buffer instanceof ArrayBuffer?new Uint8Array(input.buffer,input.byteOffset,input.byteLength):new Uint8Array(input)));',
-  'var o="",i=0,n=b.length,need=0,seen=0,c=0,lo=128,hi=191,x,t;',
+  'var o="",n=b.length,need=0,seen=0,c=0,lo=128,hi=191,x,t;',
+  'var i=(!this.ignoreBOM&&n>=3&&b[0]===239&&b[1]===187&&b[2]===191)?3:0;',
   'while(i<n){x=b[i];',
   'if(need===0){i++;',
   'if(x<128)o+=String.fromCharCode(x);',
@@ -314,9 +322,24 @@ export async function runToolChain(
     // registry outage) and anything a tool bridge rethrows. The http transport
     // carries a status and a body on a tool failure, and both are worth more to
     // the agent than the message on its own.
-    const error = err instanceof Error ? err.message : String(err);
-    const status = (err as { status?: unknown })?.status;
-    const data = (err as { data?: unknown })?.data;
+    //
+    // `describeToolFailure` is what reads the PROVIDER's own reason out of such
+    // a failure — `response.data.error`, with the machine-readable `kind` kept
+    // beside it on a typed refusal. The MCP dispatcher used to call it on the
+    // thrown error itself; now that the catch lives here, taking `err.message`
+    // instead would hand the agent a generic transport line and drop the half
+    // it can act on.
+    const error = describeToolFailure(err);
+    let status: unknown;
+    let data: unknown;
+    try {
+      const e = err as { status?: unknown; data?: unknown; response?: { status?: unknown; data?: unknown } };
+      status = e?.status ?? e?.response?.status;
+      data = e?.data ?? e?.response?.data;
+    } catch {
+      // A throwing getter or Proxy says nothing about the failure; the message
+      // above already stands on its own.
+    }
     return {
       ok: false,
       error,

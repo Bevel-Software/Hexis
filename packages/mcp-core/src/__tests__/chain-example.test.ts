@@ -196,7 +196,7 @@ describe('the example is stable and bounded', () => {
     expect(chainExample('KNOWLEDGE_BASE', shuffled)).toEqual(chainExample('KNOWLEDGE_BASE', HOSTED));
   });
 
-  it('survives a tool with no schema, a malformed one, and a self-referential one', () => {
+  it('survives a tool with no schema, a malformed one, and one deep enough to exhaust the depth budget', () => {
     const deep: Record<string, unknown> = { type: 'object', required: ['body'] };
     // A schema deep enough to exhaust the walker's depth budget.
     let node: Record<string, unknown> = deep;
@@ -228,5 +228,96 @@ describe('the example is stable and bounded', () => {
     expect(call).toBe("X.t({ 'odd-key': 'it\\'s' })");
     // And it is still valid JavaScript after the quoting.
     expect(new Function(`return (${/\((.*)\)$/s.exec(call!)![1]});`)()).toEqual({ 'odd-key': "it's" });
+  });
+  /**
+   * A schema's own `default` or `enum` is the only place an example's values
+   * come from — so a schema that contradicts itself must not produce a call.
+   * cubic caught `enum: [1, 5]` beside `minimum: 5`: taking the first entry
+   * unconditionally advertised a call the server would refuse.
+   */
+  it('skips a named value its own schema forbids, and takes one it allows', () => {
+    const body = (inner: Record<string, unknown>) => ({
+      type: 'object',
+      properties: { body: { type: 'object', properties: { n: inner }, required: ['n'] } },
+      required: ['body'],
+    });
+    // Every entry violates `minimum`, so the tool affords no example at all.
+    expect(chainExample('X', [{ utcpName: 'X.t', inputSchema: body({ type: 'integer', enum: [1, 2], minimum: 5 }) }]).call).toBeNull();
+    // The second entry satisfies it, so it is used rather than the first.
+    expect(chainExample('X', [{ utcpName: 'X.t', inputSchema: body({ type: 'integer', enum: [1, 7], minimum: 5 }) }]).call).toBe(
+      'X.t({ body: { n: 7 } })',
+    );
+    // A `default` gets the same treatment — including against `pattern`.
+    expect(
+      chainExample('X', [{ utcpName: 'X.t', inputSchema: body({ type: 'string', default: 'nope', pattern: '^ok$' }) }]).call,
+    ).toBeNull();
+    // And against the type it declares beside the value.
+    expect(chainExample('X', [{ utcpName: 'X.t', inputSchema: body({ type: 'integer', default: 'seven' }) }]).call).toBeNull();
+  });
+
+  /**
+   * `minProperties` without `required` names a count, not the properties — so
+   * the object the walker builds from `required` alone can be too thin, and
+   * which property would fill it is not something the schema says.
+   */
+  it('refuses a tool whose object demands more properties than it names required', () => {
+    const schema = {
+      type: 'object',
+      properties: { body: { type: 'object', properties: { a: { type: 'string' } }, minProperties: 1 } },
+      required: ['body'],
+    };
+    expect(chainExample('X', [{ utcpName: 'X.t', inputSchema: schema }]).call).toBeNull();
+    // Satisfied by a required property, the same schema is usable again.
+    expect(
+      chainExample('X', [
+        {
+          utcpName: 'X.t',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              body: { type: 'object', properties: { a: { type: 'string', enum: ['v'] } }, required: ['a'], minProperties: 1 },
+            },
+            required: ['body'],
+          },
+        },
+      ]).call,
+    ).toBe("X.t({ body: { a: 'v' } })");
+  });
+
+  /**
+   * Two catalog entries can sanitize to ONE callable name (`A.b.c` and `A.b_c`
+   * both become `A.b_c`). The runtime binds one of them and the description
+   * cannot say which, so such a name is no example — the call might reach a
+   * tool whose arguments are not the schema it was derived from.
+   */
+  it('never names a tool whose callable name another catalog entry shares', () => {
+    const collide: ChainExampleTool[] = [
+      { utcpName: 'X.a.read_file', inputSchema: NO_ARGS },
+      { utcpName: 'X.a_read_file', inputSchema: NO_ARGS },
+    ];
+    expect(chainExample('X', collide).call).toBeNull();
+    // The unambiguous entry beside them is used instead, for the name as well.
+    const { name, call } = chainExample('X', [...collide, { utcpName: 'X.start_session', inputSchema: NO_ARGS }]);
+    expect(name).toBe('X.start_session');
+    expect(call).toBe('X.start_session({ body: {} })');
+  });
+
+  /**
+   * A schema-derived string is pasted into chain source AND into a Markdown
+   * code span. A raw newline makes the literal a SyntaxError; a backtick closes
+   * the span and truncates the call. Both must survive the quoting.
+   */
+  it('escapes a value carrying a line terminator or a backtick', () => {
+    const value = 'a\nb`c\u2028d\u0001';
+    const schema = {
+      type: 'object',
+      properties: { body: { type: 'object', properties: { s: { type: 'string', default: value } }, required: ['s'] } },
+      required: ['body'],
+    };
+    const { call } = chainExample('X', [{ utcpName: 'X.t', inputSchema: schema }]);
+    expect(call).not.toMatch(/\n/);
+    expect(call).not.toContain('`');
+    // Still the value it came from once the chain evaluates it.
+    expect(new Function(`return (${/\((.*)\)$/s.exec(call!)![1]});`)()).toEqual({ body: { s: value } });
   });
 });
