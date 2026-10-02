@@ -1,0 +1,18 @@
+---
+'@bevel-software/platform-core-backend': patch
+'@bevel-software/platform-mcp-core': patch
+---
+
+The rules every file tool shares are now stated once, and no tool description is long enough for a client to cut.
+
+The content rule, the reminder to read the agent guide first, the write modes, the image convention, the escape-sequence warning, the dry-run/confirm protocol, what is never moved or deleted, and the proposal route used to be appended in full to every description they covered — so `read_file`, `file_stat`, `write_file` and `write_files` ran to two and three thousand characters, most of it text the agent had already read on the tool above, and clients cut it from the end, where what is specific to the tool sits. Agents saw those four arrive ending in "[truncated]".
+
+Those rules now live in one source text that feeds two places: the `instructions` of the MCP initialize handshake, and a new "Working with files" section in the platform-managed agent guide at the repository root (`AGENTS.md` by default), which clients that drop `instructions` always have. Both get the identical string, so a rule cannot be changed in one and left stale in the other, and an existing knowledge base gains the section on its next boot the way every managed file is refreshed. Each tool description now holds only what is specific to that tool and ends with one sentence: `Shared rules for all file tools: see "Working with files" in AGENTS.md.`
+
+Two limits are pinned by tests: no tool description a client is handed exceeds 1,200 characters (measured with the deployment's tool prefix for the tools that carry one), and the handshake instructions stay under 13,000. Nothing an agent could read before has been dropped — every rule is in the description that is specific to it, in both shared places, or on the tool's own input/output schema.
+
+`call_tool_chain` ends with that sentence too: what a chained read does to an image is one of the shared rules, and the clients that drop `instructions` have only descriptions to go on. The pointer is composed where the tool is served, since the guide's name is a deployment setting.
+
+The pointer is bounded by construction, so the cap means something on a deployment that renamed its guide. A guide file name may be 255 bytes, which would have made the pointer 318 characters and pushed `file_stat` to 1,428 — over the cap, and invisibly, since every measurement was taken under the default `AGENTS.md`. A name up to 40 characters is spelled out; past that the sentence names the guide by its role instead (the section's first rule still gives the file's name). The cap is measured against that worst case, the way the deployment's tool prefix is already measured at its own cap.
+
+The shorter cut some clients make — around 500 characters — is answered by the order of the text rather than by the cap, and that is now a test too: every tool's own opening sentence has to finish inside 500 characters of what a client is handed, counting the deployment's purpose prefix at its cap. So a client that stops there still has the sentence saying what the tool does, and loses only the pointer, whose file is named in the handshake instructions and in the guide regardless. Lowering the cap to 500 would not buy that — no useful description of `move_file` or `file_stat` fits in 500 characters, and shortening them to fit would drop facts an agent needs.

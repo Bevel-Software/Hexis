@@ -51,6 +51,8 @@ export {
   CODE_MODE_META_TOOLS,
   META_TOOL_NAMES,
   CALL_TOOL_CHAIN_MAX_OUTPUT,
+  CALL_TOOL_CHAIN_NAME,
+  withSharedRulesPointer,
   type SpillPort,
   dispatchMetaTool,
 } from './meta-tools.js';

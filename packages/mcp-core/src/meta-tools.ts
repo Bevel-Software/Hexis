@@ -13,8 +13,19 @@ import { retiredToolInFailure, retiredToolChainFailure } from './retired-tools.j
  * are how it discovers what to call. There IS a system prompt over MCP now: the
  * platform header and the admin's preamble arrive as `instructions` on the
  * initialize handshake (see core-backend's modules/agent-instructions/compose.ts).
- * The protocol stays in the description regardless, because several clients
+ * The PROTOCOL stays in the description regardless, because several clients
  * (claude.ai on the web, the Agent SDK, Cline) drop that field.
+ *
+ * What the chain does to a FILE, though, is one of the rules the file tools
+ * share, and those are stated once — in the handshake instructions and in the
+ * platform-managed agent guide — rather than on each tool that they cover. So
+ * the chain description carries the same pointer sentence every file tool ends
+ * with, appended where the tool is served and the guide's configured name is
+ * known (core-backend's mcp.service.ts; nothing here may spell `AGENTS.md`,
+ * since the name is a deployment setting). A client that drops `instructions`
+ * is then still told WHERE the rule is, which is what the guide is for.
+ * The standalone bridge in `hexis-mcp` serves the description unpointed: it
+ * proxies a remote knowledge base and does not know that deployment's layout.
  *
  * Security is identical to the direct surface: the chain runs in an isolated-vm
  * but calls tools with the CALLER's credentials against the external catalog —
@@ -30,8 +41,16 @@ const CALL_TOOL_CHAIN_DESCRIPTION = [
   'Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function. Call tools as `KNOWLEDGE_BASE.<tool>({ body: { ...args } })` with NO `await` (results are already resolved), and `return` the final value. The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax).',
   'Discover first: `list_tools` lists every tool in callable form (e.g. `KNOWLEDGE_BASE.read_file`); `tools_info` returns their exact argument + return shapes — do not guess. Batch multiple tool calls into one chain to avoid a round-trip per call. The chain runs with your own connection key, so it can only reach the tools you can already call directly.',
   'Large results: if the combined result+logs exceed `max_output_size` (default 200000 chars) the full JSON is spilled to a shared store and you get back a `__tool_chain_spill__/…` ref instead. Read it with `read_file` (pass that ref as `path` — `branch` is ignored — plus `offset`/`limit` to slice it), or better, re-run a narrower chain that returns only what you need.',
-  'Images: image files are returned as native MCP image content on a DIRECT `read_file` call only — a chained `read_file` of an image yields `{ image_omitted: true, note }` instead of the picture, so call it outside the chain to actually see the image.',
+  // What a chained `read_file` of an image gives back used to be a fourth
+  // paragraph here. It is part of the content rule now — stated in the
+  // handshake instructions and in the managed agent guide, where the rest of
+  // what the file tools share also lives — and reached from here through the
+  // pointer sentence `withSharedRulesPointer` appends, so repeating it would
+  // only make this description long enough to be cut.
 ].join('\n\n');
+
+/** The chain tool's name, for the one caller that singles it out by name. */
+export const CALL_TOOL_CHAIN_NAME = 'call_tool_chain';
 
 export const CODE_MODE_META_TOOLS: McpTool[] = [
   {
@@ -54,7 +73,7 @@ export const CODE_MODE_META_TOOLS: McpTool[] = [
     } as McpTool['inputSchema'],
   },
   {
-    name: 'call_tool_chain',
+    name: CALL_TOOL_CHAIN_NAME,
     description: CALL_TOOL_CHAIN_DESCRIPTION,
     inputSchema: {
       type: 'object',
@@ -70,6 +89,21 @@ export const CODE_MODE_META_TOOLS: McpTool[] = [
 ];
 
 export const META_TOOL_NAMES: ReadonlySet<string> = new Set(CODE_MODE_META_TOOLS.map((t) => t.name));
+
+/**
+ * The meta-tools as a surface that KNOWS its knowledge base serves them: the
+ * chain gets `pointer` appended to its description, the other two are returned
+ * unchanged. `pointer` is opaque text — the caller composes it, because it
+ * names the agent guide and that name is a deployment setting.
+ *
+ * `list_tools` and `tools_info` describe the registry, not a file, so neither
+ * ever carried a shared rule and neither gains the sentence.
+ */
+export function withSharedRulesPointer(pointer: string): McpTool[] {
+  return CODE_MODE_META_TOOLS.map((tool) =>
+    tool.name === CALL_TOOL_CHAIN_NAME ? { ...tool, description: `${tool.description ?? ''}${pointer}` } : tool,
+  );
+}
 
 /** Default cap on a `call_tool_chain` result's stringified size before it spills. */
 export const CALL_TOOL_CHAIN_MAX_OUTPUT = 200_000;
@@ -201,7 +235,7 @@ export async function dispatchMetaTool(
     // itself, never from the chain's source: a chain that merely mentions the
     // name and died of something else must report what really happened.
     const failure = describeToolFailure(err);
-    const retired = name === 'call_tool_chain' ? retiredToolInFailure(failure) : undefined;
+    const retired = name === CALL_TOOL_CHAIN_NAME ? retiredToolInFailure(failure) : undefined;
     if (retired) return toolError(retired);
     return toolError(`The "${name}" tool failed: ${failure}`);
   }

@@ -29,6 +29,7 @@ import { CodeModeUtcpClient } from '@utcp/code-mode';
 import {
   CODE_MODE_META_TOOLS,
   META_TOOL_NAMES,
+  withSharedRulesPointer,
   dispatchMetaTool,
   dispatchToolCall,
   registerManual,
@@ -43,6 +44,7 @@ import {
   type SkillSummary,
   type LoadedSkill,
 } from '@bevel-software/platform-mcp-core';
+import type { KbLayout } from '@bevel-software/platform-shared';
 import { bevelSecretsLoaderConfig } from '../secrets-vault/index.js';
 import {
   scopesCovered,
@@ -65,6 +67,7 @@ import {
   composeAgentInstructions,
   prefixToolDescription,
   PREFIXED_TOOLS,
+  sharedRulesPointer,
   type AgentPreambleReader,
   type ComposedAgentInstructions,
 } from '../agent-instructions/index.js';
@@ -91,6 +94,13 @@ export interface McpProxyOptions {
    * carries the platform header alone.
    */
   readAgentPreamble?: AgentPreambleReader;
+  /**
+   * The layout in effect, read per request: the shared file rules name the
+   * managed guide, and a deployment may rename it after boot (the setup save
+   * applies a name without a restart). A GETTER, so nothing snapshots the
+   * pre-setup default. Absent, the rules name `AGENTS.md`.
+   */
+  kbLayout?: () => KbLayout;
   /** Bounds of the downstream (`mcp.json`) connection pool; defaults are 4h idle / 5000 entries. */
   downstreamPool?: Pick<DownstreamPoolOptions<unknown>, 'idleTtlMs' | 'maxEntries' | 'now'>;
   /**
@@ -466,8 +476,13 @@ export class McpService {
         );
       }
       return {
-        // Code-mode meta-tools first, then every validated direct tool.
-        tools: [...CODE_MODE_META_TOOLS, ...direct],
+        // Code-mode meta-tools first, then every validated direct tool. The
+        // chain's description ends with the same pointer every file tool ends
+        // with — what a chained read does to an IMAGE is one of the shared
+        // rules, and the clients that drop `instructions` have the description
+        // and the guide to go on. Composed here because the guide's name is
+        // this deployment's setting.
+        tools: [...withSharedRulesPointer(sharedRulesPointer(this.opts.kbLayout?.())), ...direct],
       };
     });
 
@@ -613,13 +628,14 @@ export class McpService {
    * fails over its preamble.
    */
   private async composeAgentInstructions(): Promise<ComposedAgentInstructions> {
+    const layout = this.opts.kbLayout?.();
     const read = this.opts.readAgentPreamble;
-    if (!read) return composeAgentInstructions(null);
+    if (!read) return composeAgentInstructions(null, layout);
     try {
-      return composeAgentInstructions(await read());
+      return composeAgentInstructions(await read(), layout);
     } catch (err) {
-      log.warn('could not read mcp-description.md; this request gets the platform header alone:', { err });
-      return composeAgentInstructions(null);
+      log.warn('could not read mcp-description.md; this request gets the platform text alone:', { err });
+      return composeAgentInstructions(null, layout);
     }
   }
 
