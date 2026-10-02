@@ -71,7 +71,11 @@ async function upstream(name: string, marker: string): Promise<string> {
   return bare;
 }
 
-function service(kbRepoUrl: () => string, setAsideRoot?: string) {
+function service(
+  kbRepoUrl: () => string,
+  setAsideRoot?: string,
+  aroundSetAside?: (workspaceId: string, move: () => Promise<void>) => Promise<void>,
+) {
   return new WorkspaceService(
     workspacesRoot,
     kbRepoUrl,
@@ -79,6 +83,7 @@ function service(kbRepoUrl: () => string, setAsideRoot?: string) {
     new NodeFs(),
     new NodeGitRunner(),
     setAsideRoot,
+    aroundSetAside,
   );
 }
 
@@ -219,6 +224,66 @@ describe('where a working copy is set aside', () => {
     await service(() => replacement).getOrCreateForBranch(BRANCH);
 
     expect(await setAside()).toHaveLength(1);
+  });
+});
+
+/**
+ * A branch opened onto a clone of another repository sets it aside on the
+ * spot, with nobody having stopped anything for it. What the deployment does
+ * around the startup phase's set-asides (the commit worker held, the copy's
+ * queued commits held back, its locks dropped) it is handed here to do around
+ * this one.
+ */
+describe('what surrounds the setting aside of one working copy', () => {
+  async function onTheOldRepository() {
+    const old = await upstream('old', 'old repository');
+    const replacement = await upstream('replacement', 'new repository');
+    await fs.mkdir(path.dirname(cloneDir()), { recursive: true });
+    await git(root, ['clone', '-b', BRANCH, old, cloneDir()]);
+    return { old, replacement };
+  }
+
+  it('is given the working copy and the move, and the copy is where it was until the move is run', async () => {
+    const { old, replacement } = await onTheOldRepository();
+    const seen: string[] = [];
+    const svc = service(() => replacement, undefined, async (workspaceId, move) => {
+      seen.push(`before ${workspaceId}: ${(await git(cloneDir(), ['config', '--get', 'remote.origin.url'])).trim()}`);
+      await move();
+      seen.push(`after: ${await fs.access(cloneDir()).then(() => 'still there', () => 'gone')}`);
+    });
+
+    await svc.getOrCreateForBranch(BRANCH);
+
+    expect(seen).toEqual([`before ${encodeURIComponent(BRANCH)}: ${old}`, 'after: gone']);
+    expect(await fs.readFile(path.join(cloneDir(), 'marker.txt'), 'utf8')).toBe('new repository');
+  });
+
+  it('refuses the branch, and leaves the copy where it was, when what must happen first fails', async () => {
+    const { old, replacement } = await onTheOldRepository();
+    const svc = service(() => replacement, undefined, async () => {
+      throw new Error('the queue could not be held back');
+    });
+
+    await expect(svc.getOrCreateForBranch(BRANCH)).rejects.toThrow('the queue could not be held back');
+
+    expect((await git(cloneDir(), ['config', '--get', 'remote.origin.url'])).trim()).toBe(old);
+    expect(await setAside()).toEqual([]);
+  });
+
+  it('moves it once for two callers opening the branch together, and serves both', async () => {
+    const { replacement } = await onTheOldRepository();
+    let moves = 0;
+    const svc = service(() => replacement, undefined, async (_workspaceId, move) => {
+      moves += 1;
+      await move();
+    });
+
+    const [first, second] = await Promise.all([svc.getOrCreateForBranch(BRANCH), svc.getOrCreateForBranch(BRANCH)]);
+
+    expect(moves).toBe(1);
+    expect(first.repoDir).toBe(second.repoDir);
+    expect(await setAside()).toHaveLength(1);
+    expect(await fs.readFile(path.join(cloneDir(), 'marker.txt'), 'utf8')).toBe('new repository');
   });
 });
 

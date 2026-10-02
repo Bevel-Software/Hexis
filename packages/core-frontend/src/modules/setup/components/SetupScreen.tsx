@@ -1457,7 +1457,7 @@ export function SetupScreen({
           {repositoryChanged && (
             <Banner tone="ok" role="status" className="mt-6" data-testid="repository-changed">
               <p>
-                Saved. This deployment now works on the new repository, with fresh working copies of it.
+                Saved. This deployment now works on the new repository.
               </p>
               {repositoryChanged.choice === 'close' && repositoryChanged.closedChangeRequests > 0 && (
                 <p className="mt-1">

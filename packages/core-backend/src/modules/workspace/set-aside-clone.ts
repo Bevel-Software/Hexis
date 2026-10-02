@@ -53,6 +53,15 @@ export function setAsideStamp(at: Date = new Date()): string {
  * branch open refuses that branch.
  */
 export async function setAsideClone(repoDir: string, dest: string): Promise<void> {
+  // A destination that is already there is somebody's set-aside work, and
+  // never this call's to touch: the copy below cleans up after itself by
+  // removing the destination, which must then be one this call made.
+  if (await fs.access(dest).then(() => true, () => false)) {
+    throw new Error(
+      `Could not set aside the working copy at ${repoDir}: ${dest} already holds one. Nothing was deleted or ` +
+        'moved. Try again; the folder is named for the moment it is made.',
+    );
+  }
   await fs.mkdir(path.dirname(dest), { recursive: true });
   try {
     await fs.rename(repoDir, dest);
