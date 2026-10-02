@@ -1,7 +1,8 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import type { Tool } from '@utcp/sdk';
 import type { CodeModeUtcpClient } from '@utcp/code-mode';
-import { ArgumentsDoNotMatchError, argumentRefusal, checkFor, installCallGuards } from '../call-guards.js';
+import { ArgumentsDoNotMatchError, argumentRefusal, installCallGuards } from '../call-guards.js';
+import { checkFor } from '../tool-interface.js';
 import { registerManual } from '../dispatch.js';
 import { BODY_AT_TOP_LEVEL_LINE } from '../tool-interface.js';
 
@@ -220,5 +221,71 @@ describe('argumentRefusal', () => {
       const args = tool === SEARCH ? { query: 'x' } : { body: { branch: 'main', path: 'a.md' } };
       await expect(argumentRefusal(client, tool.name, args)).resolves.toBeNull();
     }
+  });
+});
+
+describe('a tool this server hosts as a route is left to that route', () => {
+  /** What `toolDef` builds: the agent-tool route prefix on the `${API_URL}` origin. */
+  const hostedHere = (name: string): Tool => {
+    const tool = utcpTool(name, {
+      type: 'object',
+      properties: { body: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
+      required: ['body'],
+      additionalProperties: false,
+    });
+    (tool as { tool_call_template: Record<string, unknown> }).tool_call_template = {
+      call_template_type: 'http',
+      http_method: 'POST',
+      url: '${API_URL}/api/agent/tools/write_file',
+      body_field: 'body',
+    };
+    return tool;
+  };
+
+  it('passes a mismatching call on, so the route handler answers it', async () => {
+    const tool = hostedHere('KB.write_file');
+    const { client, callTool } = guardedClient([tool]);
+    // Plainly wrong — and still forwarded: the route's own 400, with the route's
+    // wording, is what the caller must get. Checking it here would check it
+    // twice and replace that answer with ours.
+    await client.callTool('KB.write_file', { body: {} });
+    expect(callTool).toHaveBeenCalledWith('KB.write_file', { body: {} });
+    await expect(argumentRefusal(client, 'KB.write_file', { body: {} })).resolves.toBeNull();
+  });
+
+  it('still checks a `.tool` that points at another endpoint of this same backend', async () => {
+    // An administrator's `.tool` may legitimately target some other route of
+    // ours, and that one has no tool handler to do the checking.
+    const tool = utcpTool('NS.other', {
+      type: 'object',
+      properties: { query: { type: 'string' } },
+      required: ['query'],
+      additionalProperties: false,
+    });
+    (tool as { tool_call_template: Record<string, unknown> }).tool_call_template = {
+      call_template_type: 'http',
+      http_method: 'GET',
+      url: '${API_URL}/api/third-party/search',
+    };
+    const { client, callTool } = guardedClient([tool]);
+    await expect(client.callTool('NS.other', { body: { query: 'x' } })).rejects.toThrow(/arguments do not match/);
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
+  it('still checks a tool on another host whose path happens to match', async () => {
+    const tool = utcpTool('NS.elsewhere', {
+      type: 'object',
+      properties: { query: { type: 'string' } },
+      required: ['query'],
+      additionalProperties: false,
+    });
+    (tool as { tool_call_template: Record<string, unknown> }).tool_call_template = {
+      call_template_type: 'http',
+      http_method: 'POST',
+      url: 'https://elsewhere.example/api/agent/tools/write_file',
+    };
+    const { client, callTool } = guardedClient([tool]);
+    await expect(client.callTool('NS.elsewhere', {})).rejects.toThrow(/arguments do not match/);
+    expect(callTool).not.toHaveBeenCalled();
   });
 });

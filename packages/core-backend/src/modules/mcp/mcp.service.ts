@@ -33,7 +33,6 @@ import {
   dispatchToolCall,
   registerManual,
   installSessionRecovery,
-  installCallGuards,
   flattenManualTool,
   toListedTool,
   toolError,
@@ -845,11 +844,6 @@ export class McpService {
     const kbFailure = outcomes.find((o) => o.isKb && !o.ok);
     if (kbFailure && !kbFailure.ok) throw new Error(`Bevel tool discovery failed: ${kbFailure.error}`);
     if (routes.size > 0) routeToDownstream(client, routes);
-    // AFTER the routing, never before: the router re-wraps both call methods,
-    // and a check installed underneath it would be skipped for every tool of a
-    // pooled downstream manual — the connected servers whose wrong-shape calls
-    // this exists for. Installing again is free (see `installCallGuards`).
-    installCallGuards(client);
     const utcpTools = await client.getTools();
     return {
       tools: utcpTools.map((tool: UtcpTool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME)),
@@ -1294,6 +1288,11 @@ function templateFingerprint(template: CallTemplate): string {
  * Each routed call holds its pool lease until the call ends — for a stream,
  * until the consumer finishes or abandons it (`for await` returns the
  * generator, which runs the `finally`).
+ *
+ * No guard is re-installed over this wrapper, and none is needed: a routed call
+ * is made on the POOLED client, which had the guards installed on it when its
+ * own manual was registered (`registerManual`). Nothing in this module checks a
+ * call or shapes its failure — it forwards the call and returns the answer.
  *
  * A call the downstream refuses for its token (401 / `invalid_token`) goes to
  * the route's `afterFailure`, which may refresh the token and ask for ONE retry

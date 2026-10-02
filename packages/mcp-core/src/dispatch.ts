@@ -25,11 +25,15 @@ export async function registerManual(
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   // A tool must be registered before it can be called, so registration is the
   // one point every tool of every surface passes through — and therefore where
-  // the call guards are installed. A deployment that registers manuals of its
-  // own gets the argument check and the GET-sends-no-body rule for its tools
-  // without writing a line for either. Both are idempotent; `installCallGuards`
-  // re-wraps if another layer has since wrapped the call methods, so it stays
-  // outermost whatever the order of installation.
+  // the client's guards are installed. A deployment that registers manuals of
+  // its own gets the argument check and the GET-sends-no-body rule for its
+  // tools without writing a line for either. Both are idempotent.
+  //
+  // The client checks the tools with no route HERE — a connected server's, and
+  // an http tool that calls another service. A tool this server hosts as a
+  // route is checked in that route's own handler instead, so every caller gets
+  // the same answer and the route's answer is what comes back
+  // (`call-guards.ts`).
   installGetHasNoBody();
   installCallGuards(client);
   try {

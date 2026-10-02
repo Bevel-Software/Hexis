@@ -12,6 +12,9 @@ import { SpillStore } from '../../workspace/spill-store.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { toolDef, withBranchInput } from '../../tool-helpers/tool-def.js';
+import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
+import type { ToolContext } from '../../tool-helpers/tool.contract.js';
+import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { assertBranchProvided, BRANCH_REQUIRED_MESSAGE } from '../../../shared/domain-errors.js';
 import { PLATFORM_HEADER } from '../../agent-instructions/index.js';
 
@@ -22,10 +25,16 @@ import { PLATFORM_HEADER } from '../../agent-instructions/index.js';
  * `call_tool_chain`, and a matching call reaching its endpoint untouched.
  *
  * Two kinds of tool are in the catalog, because the whole point is that they
- * are called differently:
- *  - `ask`, a platform tool — `toolDef` wraps its arguments in `body`;
+ * are called differently, and because the check for each lives somewhere else:
+ *  - `ask` and `read_file`, platform tools — `toolDef` wraps their arguments in
+ *    `body`, they are hosted as ROUTES here, and their own route handler
+ *    (the real `toolHandler`) checks every call, wherever it came from;
  *  - `search`, a tool a deployment adds through a manual of its own, with FLAT
- *    arguments, as every tool that calls another service has.
+ *    arguments as every tool that calls another service has, and NO route
+ *    here — so the tool client checks it before the call leaves.
+ *
+ * Which is why every refusal below is also asked of `POST /api/agent/tools/<name>`
+ * directly: a script with a connection key must get the same answer an agent does.
  */
 
 const KEY = 'bevel_key_user_a';
@@ -47,6 +56,8 @@ interface Platform {
   baseUrl: string;
   /** Every call the deployment's own `search` endpoint received, verbatim. */
   searchCalls: Array<{ body: unknown; query: unknown }>;
+  /** Every call that reached the `ask` HANDLER — empty when a refusal ran nothing. */
+  askCalls: Array<Record<string, unknown>>;
   stop(): Promise<void>;
 }
 
@@ -55,6 +66,7 @@ const cleanups: Array<() => Promise<void>> = [];
 
 async function startPlatform(): Promise<Platform> {
   const searchCalls: Platform['searchCalls'] = [];
+  const askCalls: Platform['askCalls'] = [];
   const registry = new ToolRegistry();
   registry.registerExternalTool(
     toolDef({
@@ -91,17 +103,40 @@ async function startPlatform(): Promise<Platform> {
 
   const app = express();
   app.use(express.json());
-  app.post('/api/agent/tools/ask', (req, res) => res.json({ text: `echo: ${(req.body ?? {}).prompt}` }));
-  // The real boundary guard, so the refusal under test is the platform's own.
-  app.post('/api/agent/tools/read_file', (req, res) => {
-    try {
-      assertBranchProvided((req.body ?? {}).branch);
-      res.json({ path: (req.body ?? {}).path, content: 'contents' });
-    } catch (err) {
-      const e = err as { status?: number; message: string; payload?: Record<string, unknown> };
-      res.status(e.status ?? 400).json({ error: e.message, ...(e.payload ?? {}) });
-    }
-  });
+  // The two platform tools are hosted through the REAL `toolHandler`, because
+  // the route's handler is where the check lives: a test that mounted a bare
+  // Express handler would prove nothing about the answer an agent gets.
+  const toolHandler = createToolHandlerFactory(
+    async (auth: ToolAuth, abortSignal: AbortSignal): Promise<ToolContext> =>
+      ({
+        user: { id: 'user-A', email: 'a@x.io', name: 'A' },
+        scope: auth.scope,
+        source: auth.source,
+        abortSignal,
+      }) as unknown as ToolContext,
+  );
+  const asTool: RequestHandler = (req, _res, next) => {
+    req.toolAuth = { source: 'external', userId: 'user-A', scope: 'write' };
+    next();
+  };
+  app.post(
+    '/api/agent/tools/ask',
+    asTool,
+    toolHandler(async (args) => {
+      askCalls.push(args);
+      return { text: `echo: ${args.prompt as string}` };
+    }),
+  );
+  // The real boundary guard too, so the refusal for a missing branch under test
+  // is the platform's own and keeps its own wording.
+  app.post(
+    '/api/agent/tools/read_file',
+    asTool,
+    toolHandler(async (args) => {
+      assertBranchProvided(args.branch);
+      return { path: args.path, content: 'contents' };
+    }),
+  );
   // The deployment's own tool: flat arguments, like every connector tool.
   app.get('/api/third-party/manual', (_req, res) =>
     res.json({
@@ -181,6 +216,7 @@ async function startPlatform(): Promise<Platform> {
   const platform: Platform = {
     baseUrl,
     searchCalls,
+    askCalls,
     async stop() {
       if (stopped) return;
       stopped = true;
@@ -206,6 +242,14 @@ async function connect(baseUrl: string): Promise<Client> {
 }
 
 const toolText = (res: { content?: unknown }) => (res.content as Array<{ text: string }>)[0].text;
+/** The REST route a script or a runner calls, with a connection key. */
+const callRoute = (baseUrl: string, tool: string, body: unknown) =>
+  fetch(`${baseUrl}/api/agent/tools/${tool}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${KEY}` },
+    body: JSON.stringify(body),
+  });
+
 
 afterEach(async () => {
   for (const c of cleanups.splice(0)) await c().catch(() => {});
@@ -266,7 +310,6 @@ describe('a call whose arguments do not match the tool', () => {
     expect(text).toContain('limit (integer, optional)');
     expect(text).toContain('Call: THIRD_PARTY.search({ query: "..." })');
     expect(text).toContain('"kind":"arguments-do-not-match"');
-    expect(text).toContain('"status":400');
     // The other service was never reached.
     expect(platform.searchCalls).toEqual([]);
   });
@@ -277,9 +320,16 @@ describe('a call whose arguments do not match the tool', () => {
     const res = await client.callTool({ name: 'ask', arguments: { body: { sessionId: 's' } } });
     expect(res.isError).toBe(true);
     const text = toolText(res);
-    expect(text).toContain('"body.prompt" is required, and was not given.');
+    expect(text).toContain('The arguments do not match the "ask" tool.');
+    // Named as the tool takes it: the handler receives `prompt`, and so does a
+    // script on the REST route. The envelope shows up where it belongs — in the
+    // call example, which is the line an agent types.
+    expect(text).toContain('"prompt" is required, and was not given.');
     expect(text).toContain('prompt (string, required) — What to ask.');
     expect(text).toContain('Call: KNOWLEDGE_BASE.ask({ body: { prompt: "..." } })');
+    expect(text).toContain('"kind":"arguments-do-not-match"');
+    // Nothing ran: the handler was never reached.
+    expect(platform.askCalls).toEqual([]);
   });
 
   it('names an argument of the wrong type', async () => {
@@ -309,6 +359,20 @@ describe('a call whose arguments do not match the tool', () => {
     expect(text).not.toContain('arguments do not match');
   });
 
+  it('fails the chain at a route-hosted tool too, with the route\'s own message', async () => {
+    const platform = await startPlatform();
+    const client = await connect(platform.baseUrl);
+    const res = await client.callTool({
+      name: 'call_tool_chain',
+      arguments: { code: 'return KNOWLEDGE_BASE.ask({ body: { sessionId: \'s\' } });' },
+    });
+    const text = toolText(res);
+    expect(text).toContain('The arguments do not match the \\"ask\\" tool.');
+    expect(text).toContain('\\"prompt\\" is required, and was not given.');
+    expect(text).toContain('Call: KNOWLEDGE_BASE.ask({ body: { prompt: \\"...\\" } })');
+    expect(platform.askCalls).toEqual([]);
+  });
+
   it('fails the chain at that call, with the same message', async () => {
     const platform = await startPlatform();
     const client = await connect(platform.baseUrl);
@@ -320,6 +384,81 @@ describe('a call whose arguments do not match the tool', () => {
     expect(text).toContain('The arguments do not match the \\"search\\" tool.');
     expect(text).toContain('This tool takes its arguments at the top level');
     expect(platform.searchCalls).toEqual([]);
+  });
+});
+
+describe('the REST route answers every caller the same way', () => {
+  it('refuses a missing argument with the 400 and the interface, and runs nothing', async () => {
+    const platform = await startPlatform();
+    const res = await callRoute(platform.baseUrl, 'ask', { sessionId: 's' });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; kind: string };
+    expect(body.kind).toBe('arguments-do-not-match');
+    expect(body.error).toContain('The arguments do not match the "ask" tool.');
+    expect(body.error).toContain('"prompt" is required, and was not given.');
+    expect(body.error).toContain('prompt (string, required) — What to ask.');
+    expect(body.error.split('\n').pop()).toBe('Call: KNOWLEDGE_BASE.ask({ body: { prompt: "..." } })');
+    expect(platform.askCalls).toEqual([]);
+  });
+
+  it('gives an MCP caller and a REST caller the SAME answer for the same wrong arguments', async () => {
+    const platform = await startPlatform();
+    const client = await connect(platform.baseUrl);
+    const overMcp = toolText(await client.callTool({ name: 'ask', arguments: { body: { sessionId: 's' } } }));
+    const overRest = (await (await callRoute(platform.baseUrl, 'ask', { sessionId: 's' })).json()) as {
+      error: string;
+      kind: string;
+    };
+    // The MCP layer shapes nothing: the route's message and the route's
+    // machine-readable fields come through as they are, under the one prefix
+    // dispatch puts on EVERY tool failure alike (a missing branch included),
+    // which says which tool it was.
+    expect(overMcp).toBe(`The "ask" tool failed: ${overRest.error} {"kind":"${overRest.kind}"}`);
+    expect(overMcp).toContain(overRest.error);
+  });
+
+  it('names an argument the tool does not have, and one of the wrong type', async () => {
+    const platform = await startPlatform();
+    const unknown = (await (await callRoute(platform.baseUrl, 'ask', { prompt: 'p', nope: 1 })).json()) as {
+      error: string;
+    };
+    expect(unknown.error).toContain('"nope" is not an argument of this tool.');
+    const wrongType = (await (await callRoute(platform.baseUrl, 'ask', { prompt: 7 })).json()) as { error: string };
+    expect(wrongType.error).toContain('"prompt" must be string, but integer was given.');
+    expect(platform.askCalls).toEqual([]);
+  });
+
+  it('keeps the refusal for a missing branch, word for word', async () => {
+    const platform = await startPlatform();
+    const res = await callRoute(platform.baseUrl, 'read_file', { path: 'a.md' });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; kind: string };
+    expect(body.kind).toBe('branch-required');
+    expect(body.error).toBe(BRANCH_REQUIRED_MESSAGE);
+  });
+
+  it('tells an agent that passed the arguments flat that they go under `body`', async () => {
+    const platform = await startPlatform();
+    // What the http protocol produces for a flat call to a tool whose
+    // `body_field` is `body`: an empty body, every argument in the query.
+    const res = await fetch(`${platform.baseUrl}/api/agent/tools/ask?prompt=hi`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${KEY}` },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; kind: string };
+    expect(body.kind).toBe('arguments-do-not-match');
+    expect(body.error.split('\n')[1]).toBe('This tool takes its arguments under "body", not at the top level.');
+    expect(platform.askCalls).toEqual([]);
+  });
+
+  it('passes a matching call on with exactly the arguments that were sent', async () => {
+    const platform = await startPlatform();
+    const res = await callRoute(platform.baseUrl, 'ask', { prompt: 'hello', sessionId: 's-1' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ text: 'echo: hello' });
+    expect(platform.askCalls).toEqual([{ prompt: 'hello', sessionId: 's-1' }]);
   });
 });
 

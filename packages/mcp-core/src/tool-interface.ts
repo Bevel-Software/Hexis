@@ -31,6 +31,16 @@ export const ARGUMENTS_DO_NOT_MATCH_KIND = 'arguments-do-not-match';
 export const BODY_AT_TOP_LEVEL_LINE = 'This tool takes its arguments at the top level, not under "body".';
 
 /**
+ * The mirror of {@link BODY_AT_TOP_LEVEL_LINE}: the same mistake the other way
+ * round, by an agent that learned the flat shape and used it on a tool whose
+ * arguments ride a `body` envelope. The platform's route-hosted tools take that
+ * envelope, and the arguments of a flat call reach their route as query
+ * parameters instead of a body — which is how the route tells this apart from a
+ * call that simply left everything out, and can say which it was.
+ */
+export const ARGS_UNDER_BODY_LINE = 'This tool takes its arguments under "body", not at the top level.';
+
+/**
  * How deep the interface and the check go: the top level and one level below
  * it. That is exactly far enough for the `{ body: { ... } }` envelope every
  * platform tool wears, and keeps a refusal readable for a connected server's
@@ -206,6 +216,17 @@ export function argumentsDoNotMatchMessage(
   utcpName: string,
   inputs: unknown,
   mismatches: string[],
+  options: {
+    /**
+     * The schema the CALL EXAMPLE is generated from, when that is not the
+     * schema the arguments were checked against. A route-hosted tool is checked
+     * against its FLAT arguments — the ones its handler receives, and so the
+     * ones the mismatch lines and the interface name — while the example still
+     * has to show the `{ body: { … } }` envelope an agent actually types.
+     * Default: one schema for both.
+     */
+    exampleInputs?: unknown;
+  } = {},
 ): string {
   const interfaceLines = describeInterface(inputs);
   return [
@@ -213,7 +234,7 @@ export function argumentsDoNotMatchMessage(
     ...mismatches,
     `Interface of "${toolName}":`,
     ...(interfaceLines.length > 0 ? interfaceLines : ['(this tool takes no arguments)']),
-    callLine(utcpName, inputs),
+    callLine(utcpName, options.exampleInputs ?? inputs),
   ].join('\n');
 }
 
@@ -221,7 +242,7 @@ export function argumentsDoNotMatchMessage(
  * A compiled check for one input schema: either the rules to check a call
  * against, or the reason this schema cannot be used for checking.
  *
- * Compiled once per distinct schema and kept (see `call-guards.ts`), so the
+ * Compiled once per distinct schema and kept (see {@link checkFor}), so the
  * check costs a walk of the arguments and nothing else per call.
  */
 export type CompiledCheck =
@@ -229,13 +250,20 @@ export type CompiledCheck =
   | { checkable: true; check: (args: Dict) => string[] };
 
 /**
- * The one argument whose absence is NOT reported here: `branch` has its own
- * named refusal at the boundary (`branch-required`, which also catches the
- * `"undefined"` a client interpolates), and that refusal says more than a
- * generic mismatch would. A call missing only `branch` therefore goes through
- * and is refused there, with its existing wording.
+ * The one argument this check says NOTHING about: `branch` has its own named
+ * refusal at the boundary (`branch-required`), and that refusal says more than
+ * any generic mismatch would — it catches the empty string, the `null`, the
+ * number, the `["main"]` that stringifies back into a real branch name, and the
+ * literal `"undefined"` a client produces by interpolating a variable it never
+ * set, all with one message. So nothing about `branch` is reported here: not
+ * its absence, not its type. A call whose only fault is its `branch` reaches
+ * that refusal and gets its existing wording.
+ *
+ * A tool may name further arguments it refuses itself; that is the tool's own
+ * declaration, applied where the check is run (see `refusesItself` on
+ * `ToolDefSpec`), not a list kept here.
  */
-const DEFERRED_REQUIRED = new Set(['branch']);
+const SELF_REFUSED = new Set(['branch']);
 
 /** A value's JSON type, as the schema's vocabulary names it. */
 function jsonTypeOf(value: unknown): string {
@@ -299,7 +327,7 @@ export function compileCheck(inputs: unknown): CompiledCheck {
       mismatches.push(BODY_AT_TOP_LEVEL_LINE);
     }
     for (const name of required) {
-      if (DEFERRED_REQUIRED.has(name)) continue;
+      if (SELF_REFUSED.has(name)) continue;
       if (args[name] === undefined) mismatches.push(`"${name}" is required, and was not given.`);
     }
     if (closed) {
@@ -310,6 +338,7 @@ export function compileCheck(inputs: unknown): CompiledCheck {
       }
     }
     for (const [name, raw] of Object.entries(properties)) {
+      if (SELF_REFUSED.has(name)) continue;
       const value = args[name];
       if (value === undefined) continue;
       const prop = isDict(raw) ? raw : {};
@@ -334,4 +363,24 @@ export function compileCheck(inputs: unknown): CompiledCheck {
 /** A nested mismatch, named by its path (`"body.path" is required…`). */
 function qualify(parent: string, mismatch: string): string {
   return mismatch.replace(/^"([^"]+)"/, (_m, name: string) => `"${parent}.${name}"`);
+}
+
+/**
+ * One compiled check per distinct input schema, kept for as long as the schema
+ * object lives. Both surfaces that check a call hand in the SAME schema object
+ * every time — the tool repository hands out tools whose `inputs` is the stored
+ * object, and a route's schema is the one its `toolDef` was given — so the
+ * check is compiled once per tool rather than once per call, and a call pays
+ * for a walk of its arguments and nothing else.
+ */
+const compiled = new WeakMap<object, CompiledCheck>();
+
+/** The compiled check for one input schema, compiled at most once per schema. */
+export function checkFor(inputs: unknown): CompiledCheck {
+  if (typeof inputs !== 'object' || inputs === null) return compileCheck(inputs);
+  const hit = compiled.get(inputs);
+  if (hit) return hit;
+  const built = compileCheck(inputs);
+  compiled.set(inputs, built);
+  return built;
 }

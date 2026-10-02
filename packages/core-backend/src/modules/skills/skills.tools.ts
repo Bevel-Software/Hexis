@@ -2,6 +2,7 @@ import type { Router, RequestHandler } from 'express';
 import type { IToolRegistry, UtcpTool } from '../tool-registry/tool.contract.js';
 import { ToolError, type ToolContext } from '../tool-helpers/tool.contract.js';
 import { toolDef } from '../tool-helpers/tool-def.js';
+import { declareRouteTool } from '../tool-helpers/route-tool-schemas.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import type { ISkillService } from './skills.contract.js';
 import type { IAllowedToolsChecker } from './allowed-tools-check.js';
@@ -18,6 +19,39 @@ const BRANCH_SKILLS_INPUT = {
     'Optional: a draft branch to read the skills from instead of the released (default) branch — ' +
     'the branch you are working on. You must be able to read the branch and the skill on it; ' +
     'a branch that does not exist answers 404 naming it. Omit it for the approved skills.',
+};
+
+/** What `list_skills` takes. A const so the route's check and the def share one declaration. */
+const LIST_SKILLS_INPUTS = {
+  type: 'object' as const,
+  properties: { branch: BRANCH_SKILLS_INPUT },
+  additionalProperties: false,
+};
+
+/** What `get_skill` takes. A const for the same reason as {@link LIST_SKILLS_INPUTS}. */
+const GET_SKILL_INPUTS = {
+  type: 'object' as const,
+  properties: {
+    name: { type: 'string' as const, minLength: 1, description: 'Skill name (its folder name, e.g. `rfi`).' },
+    file: {
+      type: 'string' as const,
+      description:
+        'Optional bundled file path relative to the skill folder (e.g. `scripts/build_xlsx.py`) — ' +
+        'fetch its content instead of the body.',
+    },
+    version: {
+      type: 'string' as const,
+      description:
+        'Optional: the declared version to load (e.g. `1.4.0` — the `version` that `list_skills` ' +
+        'reports: `metadata.version`, else `version`, else `lifecycle.version`). Omitted, the skill is loaded as it ' +
+        'is now, which is the latest. Given, the skill — or the `file` — is served as it was at the most ' +
+        'recent commit that declared that version; a version the skill never declared answers ' +
+        '`version_not_found` with the versions it did declare.',
+    },
+    branch: BRANCH_SKILLS_INPUT,
+  },
+  required: ['name'],
+  additionalProperties: false,
 };
 
 /**
@@ -49,6 +83,11 @@ export function registerSkillsTools(
   registry.registerInternalTool((ctx) => buildListSkillsDef(skillService, ctx.userEmail));
   registry.registerExternalTool((ctx) => buildGetSkillDef(skillService, ctx.userEmail));
   registry.registerInternalTool((ctx) => buildGetSkillDef(skillService, ctx.userEmail));
+  // Both defs are built per catalog listing (their descriptions name the skills
+  // THIS caller may read), so declare the arguments here as well: a direct REST
+  // call that lands before the first listing must be checked against them too.
+  declareRouteTool('list_skills', LIST_SKILLS_INPUTS);
+  declareRouteTool('get_skill', GET_SKILL_INPUTS);
 
   router.post(
     '/agent/tools/list_skills',
@@ -117,11 +156,7 @@ async function buildListSkillsDef(skillService: ISkillService, userEmail?: strin
       'one comes back with `unmerged: true` and that branch, meaning nobody has approved it. ' +
       (await availableSkillsLine(skillService, userEmail)),
     path: '/api/agent/tools/list_skills',
-    inputs: {
-      type: 'object',
-      properties: { branch: BRANCH_SKILLS_INPUT },
-      additionalProperties: false,
-    },
+    inputs: LIST_SKILLS_INPUTS,
     outputs: {
       type: 'object',
       properties: {
@@ -166,30 +201,7 @@ async function buildGetSkillDef(skillService: ISkillService, userEmail?: string)
       'one the skill declared, or `branch` names a draft to load it from. ' +
       (await availableSkillsLine(skillService, userEmail)),
     path: '/api/agent/tools/get_skill',
-    inputs: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', minLength: 1, description: 'Skill name (its folder name, e.g. `rfi`).' },
-        file: {
-          type: 'string',
-          description:
-            'Optional bundled file path relative to the skill folder (e.g. `scripts/build_xlsx.py`) — ' +
-            'fetch its content instead of the body.',
-        },
-        version: {
-          type: 'string',
-          description:
-            'Optional: the declared version to load (e.g. `1.4.0` — the `version` that `list_skills` ' +
-            'reports: `metadata.version`, else `version`, else `lifecycle.version`). Omitted, the skill is loaded as it ' +
-            'is now, which is the latest. Given, the skill — or the `file` — is served as it was at the most ' +
-            'recent commit that declared that version; a version the skill never declared answers ' +
-            '`version_not_found` with the versions it did declare.',
-        },
-        branch: BRANCH_SKILLS_INPUT,
-      },
-      required: ['name'],
-      additionalProperties: false,
-    },
+    inputs: GET_SKILL_INPUTS,
     outputs: {
       type: 'object',
       description: 'On success carries `skill` (or `file` when `file` was passed); on failure carries `error`.',

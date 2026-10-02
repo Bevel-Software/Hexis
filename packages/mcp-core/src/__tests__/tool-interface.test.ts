@@ -165,6 +165,14 @@ describe('compileCheck', () => {
     expect(check(platformTool(READ_FILE_INPUTS), { body: { path: 'a.md' } })).toEqual([]);
   });
 
+  it('says nothing about a `branch` of the wrong shape either — that refusal catches them all', () => {
+    // `branch-required` answers the empty string, the null, the number and the
+    // `["main"]` that stringifies back into a real branch name with ONE message.
+    for (const branch of ['', null, 42, ['main'], { name: 'main' }]) {
+      expect(check(platformTool(READ_FILE_INPUTS), { body: { path: 'a.md', branch } }), String(branch)).toEqual([]);
+    }
+  });
+
   it('names the argument, the type expected and the type given', () => {
     expect(check(SEARCH_INPUTS, { query: 'x', limit: 'ten' })).toEqual([
       '"limit" must be integer, but string was given.',
@@ -226,6 +234,26 @@ describe('argumentsDoNotMatchMessage', () => {
     expect(lines[3]).toBe('Interface of "search":');
     expect(lines[4]).toBe('query (string, required) — The search text.');
     expect(lines[lines.length - 1]).toBe('Call: NS.search({ query: "..." })');
+  });
+
+  it('takes the example from another schema when the call is checked flat', () => {
+    // What a route-hosted tool needs: its handler receives the FLAT arguments,
+    // so the mismatches and the interface name those — while the example has to
+    // show the envelope an agent types.
+    const message = argumentsDoNotMatchMessage(
+      'read_file',
+      'KNOWLEDGE_BASE.read_file',
+      READ_FILE_INPUTS,
+      ['"path" is required, and was not given.'],
+      { exampleInputs: platformTool(READ_FILE_INPUTS) },
+    );
+    const lines = message.split('\n');
+    expect(lines[2]).toBe('Interface of "read_file":');
+    // The interface is the FLAT arguments, named as the handler receives them.
+    expect(lines).toContain('path (string, required) — Path to read.');
+    expect(lines).toContain('offset (integer, optional) — Start character index (default 0).');
+    // The example is the envelope, which is what an agent types.
+    expect(lines[lines.length - 1]).toBe('Call: KNOWLEDGE_BASE.read_file({ body: { branch: "...", path: "..." } })');
   });
 
   it('says so when the tool takes no arguments at all', () => {

@@ -1,22 +1,26 @@
 import type { CodeModeUtcpClient } from '@utcp/code-mode';
-import {
-  ARGUMENTS_DO_NOT_MATCH_KIND,
-  argumentsDoNotMatchMessage,
-  compileCheck,
-  type CompiledCheck,
-} from './tool-interface.js';
+import { ARGUMENTS_DO_NOT_MATCH_KIND, argumentsDoNotMatchMessage, checkFor } from './tool-interface.js';
 import { NOT_JSON_KIND, pageInsteadOfJson } from './results.js';
+import { isPlatformHostedUrl } from './utcp-namespace.js';
 
 /**
- * The guards every tool call passes through, wherever it came from: the
- * arguments are checked against the tool's own input schema before anything is
- * sent or run, and an answer that is a web page where JSON was expected is cut
- * to something an agent can read.
+ * The guards the tool client puts in front of a call to a tool THIS SERVER DOES
+ * NOT HOST: its arguments are checked against the tool's own input schema before
+ * anything leaves, and an answer that is a web page where JSON was expected is
+ * cut to something an agent can read.
  *
- * Installed on the UTCP client, which is the ONE place both call paths meet:
- * `callToolStreaming` is the MCP dispatch path and `callTool` is what
- * `call_tool_chain` bridges every in-isolate tool function to. A check in
- * either surface's own dispatcher would cover one of them and not the other.
+ * The check lives where the tool lives. A tool the platform (or a deployment)
+ * hosts as a route of its own is checked IN THAT ROUTE's handler, so every
+ * caller gets the same answer — an agent over MCP, a chain, and a script
+ * calling `POST /api/agent/tools/<name>` with a connection key alike. What is
+ * left for the client are the tools with no route here: a connected server's
+ * tools, and an http tool that calls another service directly. Those are
+ * checked here, before the call leaves, and route-hosted tools are skipped so
+ * they are not checked twice and so the route's own answer is what comes back.
+ *
+ * Installed on the UTCP client, which is the one place both of ITS call paths
+ * meet: `callToolStreaming` is the MCP dispatch path and `callTool` is what
+ * `call_tool_chain` bridges every in-isolate tool function to.
  *
  * Nothing here changes a call. A call that matches its schema is passed on with
  * exactly the arguments that were given — no argument is added, removed,
@@ -27,32 +31,8 @@ import { NOT_JSON_KIND, pageInsteadOfJson } from './results.js';
 /** Marks the client's call methods as already wrapped by THESE guards. */
 const GUARDED = Symbol.for('bevel.mcp-core.callGuards');
 
-/**
- * One compiled check per distinct input schema, kept for as long as the schema
- * object lives. The repository hands out shallow copies of a tool whose
- * `inputs` object is the stored one, so the same schema is the same key across
- * every call and every lookup — the check is compiled once per tool, not once
- * per call, and the guard adds a walk of the arguments and nothing else.
- */
-const compiled = new WeakMap<object, CompiledCheck>();
-
 /** Tools whose schema could not be used for checking, so the reason is logged once each. */
 const unchecked = new Set<string>();
-
-/**
- * The compiled check for one input schema, compiled at most once.
- *
- * Exported so the cache can be pinned by identity: the check a call pays for
- * is a walk of its arguments, never a re-compilation of the schema.
- */
-export function checkFor(inputs: unknown): CompiledCheck {
-  if (typeof inputs !== 'object' || inputs === null) return compileCheck(inputs);
-  const hit = compiled.get(inputs);
-  if (hit) return hit;
-  const built = compileCheck(inputs);
-  compiled.set(inputs, built);
-  return built;
-}
 
 /**
  * The refusal a call that does not match its tool gets: a 400 carrying
@@ -95,11 +75,48 @@ class NotJsonError extends Error {
 /** The protocols whose answer is an HTTP response, and so can be a web page. */
 const HTTP_PROTOCOLS: ReadonlySet<string> = new Set(['http', 'streamable_http', 'sse']);
 
+/**
+ * Where this server mounts the tools it hosts itself: one route per tool, under
+ * one prefix, which is what `toolDef` builds every platform (and deployment)
+ * tool's URL from.
+ */
+const AGENT_TOOL_ROUTE_PREFIX = '/api/agent/tools/';
+
+/** The length of the `${API_URL}` origin template, so the path can be read past it. */
+const PLATFORM_ORIGIN_TEMPLATE_LENGTH = '${API_URL}'.length;
+
 interface RepositoryTool {
   name: string;
   description?: string;
   inputs?: unknown;
-  tool_call_template?: { call_template_type?: unknown };
+  tool_call_template?: { call_template_type?: unknown; url?: unknown };
+}
+
+/**
+ * Is this tool a route THIS server hosts? Such a tool is checked by its own
+ * route handler — which sees the flat arguments the handler really takes and
+ * answers every caller, not only the ones that came through a client — so the
+ * client must leave it alone: checking it here would check it twice, and the
+ * first refusal would replace the route's answer with one of our own.
+ *
+ * Decided on two things together: `${API_URL}` as the template's ORIGIN, which
+ * expands to this server's own loopback and which a tool definition cannot fake
+ * (a third-party `.tool` can put that literal in a path or a query but cannot
+ * make it the authority without pointing the request back at us — the same rule
+ * as the credential seeding in `utcp-namespace.ts`), AND the agent-tool route
+ * prefix every such tool is served under. Both are needed: a `.tool` an
+ * administrator wrote may legitimately point at some OTHER endpoint of this
+ * same backend, and that one has no tool handler to check it, so the client
+ * must.
+ */
+function isHostedAsARouteHere(tool: RepositoryTool): boolean {
+  const template = tool.tool_call_template;
+  if (!template) return false;
+  const type = typeof template.call_template_type === 'string' ? template.call_template_type : '';
+  if (!HTTP_PROTOCOLS.has(type)) return false;
+  const url = template.url;
+  if (typeof url !== 'string' || !isPlatformHostedUrl(url)) return false;
+  return url.slice(PLATFORM_ORIGIN_TEMPLATE_LENGTH).startsWith(AGENT_TOOL_ROUTE_PREFIX);
 }
 
 /**
@@ -120,6 +137,9 @@ export async function argumentRefusal(
   // honest answer, and inventing a mismatch for a tool that does not exist
   // would bury it.
   if (!tool) return null;
+  // Hosted here as a route: its handler does the checking, and its answer is
+  // what the caller must get (see `isHostedAsARouteHere`).
+  if (isHostedAsARouteHere(tool)) return null;
   const check = checkFor(tool.inputs);
   if (!check.checkable) {
     // Once per tool, not once per call: a tool with an unusable schema is

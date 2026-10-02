@@ -2,6 +2,7 @@ import '@utcp/http';
 import { HttpCallTemplateSerializer } from '@utcp/http';
 import { ToolSerializer } from '@utcp/sdk';
 import type { JsonSchema, UtcpTool } from '../tool-registry/tool.contract.js';
+import { declareRouteTool } from './route-tool-schemas.js';
 
 const httpTemplate = new HttpCallTemplateSerializer();
 const toolSerializer = new ToolSerializer();
@@ -38,6 +39,14 @@ export interface ToolDefSpec {
   tags?: string[];
   /** The route the owning module hosts, e.g. `/agent/tools/list_branches`. */
   path: string;
+  /**
+   * Arguments this tool's own handler refuses by name, with a message of its
+   * own. The generic argument check its route runs then says nothing about
+   * them, so that message is what the caller reads — which is the point of
+   * having written it. `branch` is never reported anyway: it has one named
+   * refusal across the whole surface.
+   */
+  refusesItself?: string[];
 }
 
 /**
@@ -49,29 +58,17 @@ export interface ToolDefSpec {
  * placeholders the consumer resolves (public URL + key for external; loopback +
  * internal token for our agent), so one def serves both surfaces.
  */
-/** Does this flat input schema require any argument at all? */
-function requiresAnything(inputs: JsonSchema): boolean {
-  const required = (inputs as { required?: unknown }).required;
-  return Array.isArray(required) && required.length > 0;
-}
-
 export function toolDef(spec: ToolDefSpec): UtcpTool {
+  // Declaring the tool IS declaring its arguments to the check that its route
+  // runs, which is why the envelope comes back from the declaration rather than
+  // being built here: a tool declared with this helper — the platform's own and
+  // a deployment's alike — refuses a call whose arguments do not match it on
+  // every way in, the REST route included, with no code of its own.
+  const wire = declareRouteTool(spec.name, spec.inputs, spec.refusesItself);
   return toolSerializer.validateDict({
     name: spec.name,
     description: spec.description,
-    inputs: {
-      type: 'object',
-      properties: { body: spec.inputs },
-      // The envelope is required only when something inside it is. A tool
-      // whose flat inputs are all optional is legitimately called as
-      // `Bevel.<name>({})` — agents have always called `list_branches` and
-      // `start_session` that way, and the endpoint reads `req.body` as `{}`
-      // either way — so declaring `body` required would make the schema
-      // disagree with the tool. It is also what the argument check reads, and
-      // a check must never refuse a call the tool accepts.
-      ...(requiresAnything(spec.inputs) ? { required: ['body'] } : {}),
-      additionalProperties: false,
-    },
+    inputs: wire,
     outputs: spec.outputs ?? { type: 'object', properties: {} },
     tags: spec.tags ?? [],
     tool_call_template: httpTemplate.validateDict({

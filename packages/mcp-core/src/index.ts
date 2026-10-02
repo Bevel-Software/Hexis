@@ -63,6 +63,7 @@ export {
   CALL_LINE_PREFIX,
   ARGUMENTS_DO_NOT_MATCH_KIND,
   BODY_AT_TOP_LEVEL_LINE,
+  ARGS_UNDER_BODY_LINE,
   callExample,
   exampleArguments,
   callLine,
@@ -71,6 +72,7 @@ export {
   describeInterface,
   argumentsDoNotMatchMessage,
   compileCheck,
+  checkFor,
   type CompiledCheck,
 } from './tool-interface.js';
 
@@ -103,6 +105,7 @@ export {
   utcpNamespacePrefix,
   utcpNamespacedKey,
   seedBevelHostedManualVars,
+  isPlatformHostedUrl,
 } from './utcp-namespace.js';
 
 export {
