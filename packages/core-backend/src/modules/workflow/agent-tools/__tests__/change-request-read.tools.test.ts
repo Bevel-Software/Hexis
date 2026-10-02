@@ -1347,8 +1347,18 @@ describe('reading a request that is no longer open', () => {
     expect((await call(base, 'list_change_requests', { state: 'all' })).json.changeRequests).toEqual([]);
   });
 
-  // A declined request has no merge commit, so the service resolves no files for
-  // it at all — and an empty file set proves no read access.
+  // A declined request records no sha, so the service reads it from nothing and
+  // resolves no files for it — and an empty file set proves no read access.
+  //
+  // That precondition is the SERVICE's to keep, and this test cannot check it:
+  // it hands the tools a detail directly. It used to be false. Declining does
+  // not retire the source branch, so `getPrDetail` resolved a declined request's
+  // branch pair and published its files, while the list — which asks git nothing
+  // about a declined row — hid the same request from the same caller. What the
+  // tools are shown here is now what the service produces, pinned by
+  // `PullRequestService.getPrDetail of a declined request whose branch still
+  // resolves`. Deliberately not re-asserted in the tool layer: a second copy of
+  // the rule is what let the two surfaces disagree in the first place.
   it('leaves a declined request, whose files cannot be resolved, to its author', async () => {
     const base = await start();
     const declined = detail({ number: 21, state: 'closed', files: [], approvals: [] });

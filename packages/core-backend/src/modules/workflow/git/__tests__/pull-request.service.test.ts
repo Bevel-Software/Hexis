@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
-import { PullRequestService } from '../pull-request.service.js';
+import { PullRequestService, changeSourceFor } from '../pull-request.service.js';
 import type { GitService } from '../git.service.js';
 import type { Database } from '../../../database/connection.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
@@ -408,11 +408,16 @@ describe('PullRequestService.listPrsByState', () => {
 });
 
 /**
- * `getPrDetail` when the two branches can no longer be diffed AND no merge
- * commit is recorded either — so there is nothing left to read the change from.
- * Since the 2026-10-02 decision an applied request is read from its merge commit
- * (see the describe below this one), which leaves this for a declined request and
- * for a row written before `merged_sha` was.
+ * `getPrDetail` when nothing is left to read the change from. Since the
+ * 2026-10-02 decision an applied request is read from its merge commit (see the
+ * describe below this one), so what lands here is a row recording no usable sha:
+ * one written before `merged_sha` was, or a declined one.
+ *
+ * A declined row no longer even TRIES the branch pair — `changeSourceFor` sends
+ * it nowhere, so the throwing stub below is never reached for it. That is the
+ * point: a declined request's branch is usually alive, so a suite that can only
+ * make the branch throw cannot see what such a request actually answers. The
+ * describe two below this one drives the live-branch case.
  */
 describe('PullRequestService.getPrDetail with a retired branch and no merge commit', () => {
   function svcFor(state: string) {
@@ -589,5 +594,192 @@ describe('PullRequestService.getPrDetail of an applied request', () => {
     // Fail-closed, as before the decision: no files, so author-only — never
     // somebody else's file list.
     expect(await svc.getPrDetail(4)).toMatchObject({ state: 'merged', files: [], headSha: '' });
+  });
+});
+
+/**
+ * A DECLINED request whose source branch is STILL ALIVE — the case the suite
+ * could not see, and the one Local Testing failed on.
+ *
+ * Declining a change request does not retire its branch; only merging deletes
+ * it. So `resolvePrShas` and `changedFilesForPr` answer a declined request
+ * perfectly well, and `getPrDetail` used to let them: its file list made the
+ * request readable by anyone who could read one of those files, against the
+ * owner's criterion that a declined request stays readable by its author alone,
+ * while `listPrsByState` — which asks git nothing about a declined row — hid the
+ * very same request from the very same caller. The earlier test for this stubbed
+ * `resolvePrShas` to THROW, pinning a precondition the service does not produce;
+ * here the branch resolves, which is what actually happens.
+ */
+describe('PullRequestService.getPrDetail of a declined request whose branch still resolves', () => {
+  const BASE_SHA = '3'.repeat(40);
+  const HEAD_SHA = '4'.repeat(40);
+
+  function svcFor(state: string) {
+    const row = {
+      number: 9,
+      sourceBranch: 'feature/declined',
+      targetBranch: 'main',
+      title: 'A proposal that was turned down',
+      body: 'why it was asked for',
+      authorEmail: 'juan@bevel.software',
+      authorName: 'Juan',
+      state,
+      mergedSha: null,
+      createdAt: new Date('2026-04-01T00:00:00Z'),
+      updatedAt: null,
+      closedAt: state === 'open' ? null : new Date('2026-04-03T09:30:00Z'),
+      applyFailureReason: null,
+      applyFailureConflicts: null,
+      applyFailedAt: null,
+      applyFailedByName: null,
+      applyFailureKind: null,
+      closedReason: null,
+    };
+    const orderBy = vi.fn(async () => [row]);
+    const db = {
+      select: () => ({
+        from: () => ({ where: () => ({ limit: async () => [row], orderBy }) }),
+      }),
+    } as unknown as Database;
+    const ensureRemotesFetched = vi.fn(async () => undefined);
+    const workspace = {
+      ensureRemotesFetched,
+      findAnyWorkspaceId: async () => 'ws',
+    } as unknown as WorkspaceService;
+    // The branch pair RESOLVES — the whole point. A stub that threw would prove
+    // nothing about a declined request, because a live branch does not throw.
+    const resolvePrShas = vi.fn(async () => ({ baseSha: BASE_SHA, headSha: HEAD_SHA }));
+    const changedFilesForPr = vi.fn(async () => [
+      {
+        path: 'KnowledgeBase/Readable.md',
+        previousPath: undefined,
+        status: 'modified' as const,
+        additions: 1,
+        deletions: 0,
+        patch: '@@ -1 +1 @@',
+        isBinary: false,
+        sha: '',
+        rawUrl: '',
+      },
+    ]);
+    const changedPathsAndPairsForPr = vi.fn(async () => ({
+      paths: ['KnowledgeBase/Readable.md'],
+      pairs: [{ path: 'KnowledgeBase/Readable.md' }],
+    }));
+    const forkPointForPr = vi.fn(async () => ({ mergeBaseSha: BASE_SHA, behind: false }));
+    const git = {
+      resolvePrShas,
+      changedFilesForPr,
+      changedPathsAndPairsForPr,
+      forkPointForPr,
+    } as unknown as GitService;
+    const svc = new PullRequestService(db, workspace, makeAccessControl({}), git);
+    return { svc, resolvePrShas, changedFilesForPr, changedPathsAndPairsForPr, forkPointForPr };
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('answers from the row alone, though the branch pair would have answered', async () => {
+    const { svc, resolvePrShas, changedFilesForPr, forkPointForPr } = svcFor('closed');
+    const detail = await svc.getPrDetail(9);
+    expect(detail).toMatchObject({
+      number: 9,
+      state: 'closed',
+      title: 'A proposal that was turned down',
+      // The row's own prose survives; only the file list goes.
+      body: 'why it was asked for',
+      files: [],
+      headSha: '',
+      baseSha: '',
+    });
+    // Not asked, so a declined request cannot publish a file list — and cannot
+    // publish the branch's CURRENT diff as the proposal that was turned down,
+    // which is what it did while the author kept committing to that branch.
+    expect(resolvePrShas).not.toHaveBeenCalled();
+    expect(changedFilesForPr).not.toHaveBeenCalled();
+    expect(forkPointForPr).not.toHaveBeenCalled();
+  });
+
+  it('costs no network round trip per by-number read', async () => {
+    // Three reads of a declined request spent three two-ref fetches before this
+    // — the per-request network call finding 1 of the review was about, removed
+    // from the list path but left on the by-number one.
+    const { svc, resolvePrShas, changedFilesForPr } = svcFor('closed');
+    await svc.getPrDetail(9, { fresh: true });
+    await svc.getPrDetail(9, { fresh: true });
+    await svc.getPrDetail(9, { fresh: true });
+    expect(resolvePrShas).not.toHaveBeenCalled();
+    expect(changedFilesForPr).not.toHaveBeenCalled();
+  });
+
+  it('agrees with the list about which files a declined request has', async () => {
+    // The contradiction itself: one caller, one request, two surfaces. Both
+    // answer "no files proven", so both make it author-only.
+    const { svc } = svcFor('closed');
+    const detail = await svc.getPrDetail(9);
+    const [summary] = await svc.listPrsByState(['closed']);
+    expect(detail?.files).toEqual([]);
+    expect(summary.touchedNodeFiles).toEqual([]);
+    expect(summary.touchedNodePaths).toEqual([]);
+  });
+
+  it('still reads an OPEN request from the very same live branch pair', async () => {
+    // The control: the stubs DO answer, so the declined case above is the
+    // routing refusing to ask, not a stub that could not have replied.
+    const { svc, resolvePrShas, changedFilesForPr } = svcFor('open');
+    const detail = await svc.getPrDetail(9);
+    expect(resolvePrShas).toHaveBeenCalled();
+    expect(changedFilesForPr).toHaveBeenCalled();
+    expect(detail).toMatchObject({
+      state: 'open',
+      headSha: HEAD_SHA,
+      baseSha: BASE_SHA,
+      files: [{ path: 'KnowledgeBase/Readable.md' }],
+    });
+  });
+});
+
+/**
+ * The routing itself, asked once and shared: the list and the by-number detail
+ * both read a row's change from whatever this answers, so neither can drift
+ * into its own reading of which files a request has.
+ */
+describe('changeSourceFor', () => {
+  it('reads an open request from its branch pair', () => {
+    expect(changeSourceFor({ state: 'open', mergedSha: null })).toEqual({ kind: 'branches' });
+  });
+
+  it('reads an applied request from the merge commit its row records', () => {
+    const sha = 'f'.repeat(40);
+    expect(changeSourceFor({ state: 'merged', mergedSha: sha })).toEqual({
+      kind: 'commit',
+      sha,
+    });
+  });
+
+  it('reads a declined request from nothing — no sha records what it proposed', () => {
+    expect(changeSourceFor({ state: 'closed', mergedSha: null })).toEqual({ kind: 'none' });
+  });
+
+  it('reads a declined request from nothing even if a sha somehow sits on the row', () => {
+    // A row flipped to `closed` after an apply recorded a sha would otherwise
+    // publish a merge commit as a declined request's content.
+    expect(changeSourceFor({ state: 'closed', mergedSha: 'e'.repeat(40) })).toEqual({
+      kind: 'none',
+    });
+  });
+
+  it('reads a merged row recording no merge commit from nothing', () => {
+    expect(changeSourceFor({ state: 'merged', mergedSha: null })).toEqual({ kind: 'none' });
+    expect(changeSourceFor({ state: 'merged' })).toEqual({ kind: 'none' });
+  });
+
+  it('reads a state it has never heard of from nothing, rather than guessing', () => {
+    expect(changeSourceFor({ state: 'draft', mergedSha: 'd'.repeat(40) })).toEqual({
+      kind: 'none',
+    });
   });
 });

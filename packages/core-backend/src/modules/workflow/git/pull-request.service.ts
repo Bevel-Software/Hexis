@@ -48,6 +48,59 @@ const DETAIL_CACHE_TTL_MS = 30_000;
 type ChangeRequestRow = typeof changeRequests.$inferSelect;
 
 /**
+ * Where a change request's files are read from.
+ *
+ *   - `branches` — the source/target pair, as a live proposal is read.
+ *   - `commit`   — the merge commit the row records, as an applied one is.
+ *   - `none`     — nothing: there is no durable record of what this request
+ *                 proposed, so it has no file list to show.
+ */
+export type ChangeSource =
+  | { kind: 'branches' }
+  | { kind: 'commit'; sha: string }
+  | { kind: 'none' };
+
+/**
+ * Which diff a change-request row is read from — asked ONCE, here, by both the
+ * list (`touchedPathsFor`) and the by-number detail (`getPrDetail`). The two
+ * surfaces answered this question separately before, and so answered it
+ * differently: the list gave a declined request no paths while the detail
+ * resolved its branch pair, which left `list_change_requests` and the four
+ * by-number tools contradicting each other about the same request for the same
+ * caller. One function, one answer.
+ *
+ * An OPEN request is its two branch tips, which is what a proposal IS.
+ *
+ * An APPLIED one is the merge commit its row records: the branch is retired, and
+ * the commit is local, immutable, and holds exactly what landed.
+ *
+ * A DECLINED one is read from NOTHING, and that is not a degradation:
+ *
+ *   - The row records no sha, so nothing durable says what the request
+ *     proposed. Declining does not retire the source branch (only merging
+ *     deletes it), so the branch pair would answer — but it would answer with
+ *     what that branch differs by NOW. The author keeps committing to it, and
+ *     may open a fresh request from it; reading the declined request would then
+ *     present someone else's later work as the proposal that was turned down.
+ *   - An empty file set proves no read access downstream, so a declined request
+ *     is readable by its author alone — the owner's criterion of 2026-10-02.
+ *   - And it asks git nothing, so neither a listing nor a by-number read of a
+ *     declined request costs a network round trip.
+ *
+ * A merged row that records no merge commit (or whose commit this clone has not
+ * fetched) lands on `none` too, and fails closed the same way until it can be
+ * read in full.
+ */
+export function changeSourceFor(row: {
+  state: string;
+  mergedSha?: string | null;
+}): ChangeSource {
+  if (row.state === 'open') return { kind: 'branches' };
+  if (row.state === 'merged' && row.mergedSha) return { kind: 'commit', sha: row.mergedSha };
+  return { kind: 'none' };
+}
+
+/**
  * The slice of the review-workflow service this module needs to compose detail
  * responses. Kept narrow (just what `getPrDetail` stitches in) so the PR
  * service doesn't depend on the full workflow interface — and so the circular
@@ -215,23 +268,18 @@ export class PullRequestService implements IPullRequestService {
    * Cheap touched-paths for a CR row (empty when no workspace exists yet),
    * placeholders included — see {@link summaryOf} for what a summary shows.
    *
-   * WHICH DIFF depends on the row's state, and no state reaches the network per
-   * request:
+   * WHICH DIFF is {@link changeSourceFor}'s answer — the same one `getPrDetail`
+   * takes, so a list and a by-number read never disagree about which files a
+   * request has. No state reaches the network per request: an open row is
+   * diffed from two branch tips a single whole-clone refresh has already brought
+   * up to date (`fetch: false`), an applied one from a local immutable commit,
+   * and a declined one from nothing at all.
    *
-   *   - **open** — the branch pair, as ever. `fetch: false` from a list that has
-   *     just refreshed the whole clone in one round trip.
-   *   - **merged** — the MERGE COMMIT the row records, against its first parent.
-   *     The source branch is retired, so the branch pair cannot be diffed at
-   *     all: `publishedPrCommits` answered null for it, which sent
-   *     `changedPathsAndPairsForPr` to `fetch` two refs — one of which no longer
-   *     exists — once PER REQUEST, and then logged a warning for each. A list of
-   *     a few hundred applied requests opened a few hundred concurrent fetches
-   *     to answer nothing (Razvan's review of #347, finding 1). The merge commit
-   *     is local, immutable, and holds exactly what landed.
-   *   - **closed** (declined) — nothing. No merge commit was ever written and
-   *     the branch is gone, so there is no diff to compute and nothing to ask
-   *     git for. The empty set fails closed downstream: a declined request is
-   *     readable by its author alone.
+   * The merge commit also undid the flood finding 1 of Razvan's review named:
+   * `publishedPrCommits` answers null for a retired branch, which sent
+   * `changedPathsAndPairsForPr` to `fetch` two refs — one of them gone — once PER
+   * REQUEST and then logged a warning for each, so a list of a few hundred
+   * applied requests opened a few hundred concurrent fetches to answer nothing.
    */
   private async touchedPathsFor(
     row: ChangeRequestRow,
@@ -256,13 +304,13 @@ export class PullRequestService implements IPullRequestService {
       }
       return empty;
     };
-    if (row.state === 'merged') {
-      if (!row.mergedSha) return empty;
+    const source = changeSourceFor(row);
+    if (source.kind === 'none') return empty;
+    if (source.kind === 'commit') {
       return this.gitService
-        .changedPathsAndPairsAtCommit(workspaceId, row.mergedSha)
+        .changedPathsAndPairsAtCommit(workspaceId, source.sha)
         .catch(degrade('changedPathsAndPairsAtCommit'));
     }
-    if (row.state !== 'open') return empty;
     return this.gitService
       .changedPathsAndPairsForPr(workspaceId, row.targetBranch, row.sourceBranch, opts)
       .catch(degrade('changedPathsForPr'));
@@ -558,8 +606,12 @@ export class PullRequestService implements IPullRequestService {
     };
     /** Did the target change, since the fork point, a file this request changes? */
     let targetChangedShared = false;
+    // The SAME routing the list takes, from the same function, so the two
+    // surfaces cannot disagree about which files a request has — see
+    // {@link changeSourceFor} for why each state reads from what it does.
+    const source = workspaceId ? changeSourceFor(row) : ({ kind: 'none' } as ChangeSource);
     try {
-      if (workspaceId && row.state === 'merged' && row.mergedSha) {
+      if (workspaceId && source.kind === 'commit') {
         // An APPLIED request is read from its merge commit, not from its
         // branches: the source branch is retired, so there is nothing to resolve
         // and nothing to fetch. The commit's first parent is the target as it
@@ -571,10 +623,10 @@ export class PullRequestService implements IPullRequestService {
         // answered no files — which, since an empty file set proves no read
         // access, made every applied request readable by its author alone.
         // Reading back what happened is what the ticket exists for.
-        const ends = await this.gitService.appliedChangeShas(workspaceId, row.mergedSha);
+        const ends = await this.gitService.appliedChangeShas(workspaceId, source.sha);
         baseSha = ends.baseSha;
         headSha = ends.headSha;
-        files = await this.gitService.changedFilesAtCommit(workspaceId, row.mergedSha, {
+        files = await this.gitService.changedFilesAtCommit(workspaceId, source.sha, {
           ...(opts.patches === false ? { patchCap: 0 } : {}),
         });
         // `forkPoint` and `targetChangedShared` stay at their defaults. "Is this
@@ -582,7 +634,7 @@ export class PullRequestService implements IPullRequestService {
         // question about a proposal that could still be updated; an applied one
         // has no answer to give and reports none (`behind` and `needsUpdate` are
         // gated on `state === 'open'` downstream anyway).
-      } else if (workspaceId) {
+      } else if (workspaceId && source.kind === 'branches') {
         const shas = await this.gitService.resolvePrShas(
           workspaceId,
           row.targetBranch,
@@ -619,19 +671,27 @@ export class PullRequestService implements IPullRequestService {
           files,
         );
       }
+      // `source.kind === 'none'` — a DECLINED request, a merged row recording no
+      // merge commit, or no workspace at all — asks git NOTHING and is answered
+      // from the ROW ALONE: no shas, no files. The row's STATE decides that, not
+      // whether git happens to fail, which is the fix for the contradiction
+      // Local Testing found: declining does not retire the source branch (only
+      // merging deletes it), so the branch pair below resolved a declined
+      // request perfectly well and published its files to anyone who could read
+      // one of them — while the list, which gives a declined row no paths at
+      // all, hid the same request from the same caller.
     } catch (err) {
-      // A request that is NO LONGER OPEN has had its source branch retired, so
-      // there are no two refs left to diff and `resolvePublishedBranch` answers
-      // `unknown branch`. Since the 2026-10-02 decision a MERGED request takes
-      // the merge-commit path above instead and lands here only when that commit
-      // cannot be resolved either (a clone that has not fetched it yet, or a row
-      // with no `merged_sha`), so what reaches this in the ordinary course is a
-      // DECLINED request. Everything the ROW records — title, body, state,
-      // author, times — is still true, and this is the degradation the
-      // no-workspace case above already takes: no shas and no files, rather than
-      // no answer at all. Without it, reading a request back after it was
-      // applied fails, which is exactly what someone catching up on a review
-      // asks for.
+      // What reaches this is a MERGED request whose merge commit this clone
+      // cannot resolve — not fetched yet, or a sha the row records that the
+      // object store does not hold. A DECLINED request never gets here at all
+      // any more: it asks git nothing (see above), so it cannot fail.
+      //
+      // Everything the ROW records — title, body, state, author, times — is
+      // still true, and this is the degradation the no-workspace case above
+      // already takes: no shas and no files, rather than no answer at all. Since
+      // an empty file set proves no read access, such a row fails CLOSED to its
+      // author, and the next read, once the commit is in the clone, answers in
+      // full.
       //
       // An OPEN request still fails loudly. There, an unresolvable branch means
       // a branch not yet published or a clone not yet caught up, and presenting
