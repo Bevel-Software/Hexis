@@ -9,11 +9,76 @@ import { createToolContextResolver } from '../../../tool-helpers/tool-context.js
 import { createToolHandlerFactory } from '../../../tool-helpers/tool-handler.js';
 import { createManualRoutes } from '../../../tool-registry/manual.routes.js';
 import { registerWorkflowTools } from '../workflow.tools.js';
-import { OpenChangeRequestBlocksMergeError } from '../../../../shared/domain-errors.js';
+import { ChangeRequestConflictsError, OpenChangeRequestBlocksMergeError } from '../../../../shared/domain-errors.js';
 
 const WS = 'target-company-state';
 
+/**
+ * One file of a change-request detail as the service returns it: a 15 KB
+ * addition, patch included. The reported failure was 27 of these — the detail
+ * answered ~445,000 characters and overflowed the agent's tool-result limit.
+ */
+function addedFile(i: number): Record<string, unknown> {
+  const path = `KnowledgeBase/Engineering/Knowledge/Hexis/Generated-Node-${i}.md`;
+  return {
+    path,
+    status: 'added',
+    additions: 400,
+    deletions: 0,
+    // 400 × 37 characters ≈ 15 KB, as reported.
+    patch: `@@ -0,0 +1,400 @@\n${'+a line of generated knowledge text\n'.repeat(400)}`,
+    isBinary: false,
+    sha: `blob-${i}`,
+    rawUrl: `https://raw.example.com/blob-${i}`,
+  };
+}
+
+/** The per-file approval state the detail carries, as the app's dialog reads it. */
+function approvalOf(path: string): Record<string, unknown> {
+  return {
+    path,
+    eligibleApprovers: {
+      roles: ['Admin', 'Engineering'],
+      users: [{ name: 'Razvan Radulescu', email: 'razvan.radulescu@bevel.software' }],
+    },
+    approvedBy: [],
+    eligibilityResolved: true,
+    isApproved: false,
+    inMergeGate: true,
+    viewerCanApprove: true,
+  };
+}
+
+/** A full change-request detail over the given files — what `openChangeRequest` answers. */
+function detailOf(files: Record<string, unknown>[]): Record<string, unknown> {
+  return {
+    number: 7,
+    url: 'https://bevel.example.com/change-requests/7',
+    title: 'My change',
+    state: 'open',
+    branch: 'me/draft',
+    base: 'target-company-state',
+    body: 'Body shown verbatim to reviewers.',
+    author: { login: 'bevel-bot' },
+    headSha: 'head-1',
+    baseSha: 'base-1',
+    files,
+    comments: [],
+    approvals: files.map((f) => approvalOf(f.path as string)),
+    mergeableInBevel: false,
+    mergeBlockedReasons: files.map((f) => `${f.path as string} is not approved`),
+    mergeWarnings: files.map((f) => `${f.path as string} is not approved`),
+  };
+}
+
+/** The reported case: 27 new files of 15 KB each. */
+const BIG = () => detailOf(Array.from({ length: 27 }, (_, i) => addedFile(i)));
+
 let calls: unknown[][] = [];
+/** What the service answers `openChangeRequest` with; a test replaces it. */
+let opened: Record<string, unknown> = BIG();
+/** Set to make `openChangeRequest` throw instead. */
+let openFails: Error | undefined;
 const externalApiKeyService = {
   looksLikeExternalApiKey: (t: string) => typeof t === 'string' && t.startsWith('bevel_'),
   verifyAndLoadToken: async (t: string) =>
@@ -38,7 +103,8 @@ const workflowService = {
   },
   openChangeRequest: async (ws: string, user: { id: string }, body: unknown) => {
     calls.push(['openChangeRequest', ws, user.id, body]);
-    return { number: 7, url: 'https://bevel.example.com/change-requests/7' };
+    if (openFails) throw openFails;
+    return opened;
   },
   createBranch: async (ws: string, name: string) => {
     calls.push(['createBranch', ws, name]);
@@ -114,6 +180,8 @@ const post = (url: string, bearer: string, body: unknown = {}) =>
 
 beforeEach(() => {
   calls = [];
+  opened = BIG();
+  openFails = undefined;
 });
 afterEach(async () => {
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
@@ -229,7 +297,7 @@ describe('registerWorkflowTools', () => {
     expect(calls).toContainEqual(['listBranches', 'existing-ws']);
   });
 
-  it('open_change_request returns the CR detail', async () => {
+  it('open_change_request acts on the SOURCE branch\'s workspace', async () => {
     const base = await start();
     const res = await post(`${base}/api/agent/tools/open_change_request`, writeTok(), {
       sourceBranch: 'me/draft',
@@ -237,9 +305,6 @@ describe('registerWorkflowTools', () => {
       title: 'My change',
     });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({
-      changeRequest: { number: 7, url: 'https://bevel.example.com/change-requests/7' },
-    });
     // The workspace must be derived from the SOURCE branch (not a separate
     // `branch` arg) — encodeURIComponent('me/draft'). Regression guard for the
     // `-b undefined` clone bug when the model omitted `branch`.
@@ -249,6 +314,199 @@ describe('registerWorkflowTools', () => {
       'user-A',
       { sourceBranch: 'me/draft', targetBranch: 'target-company-state', title: 'My change', description: undefined },
     ]);
+  });
+
+  /**
+   * One test per Scenario of the Specification
+   * (`hx-change-request-answer-is-small-spec`). The reported failure: opening a
+   * request for 27 files answered ~445,000 characters, because the answer was
+   * the detail the app's dialog reads, every patch included. It overflowed the
+   * tool-result limit, so the agent could not even read the link.
+   */
+  describe('what open_change_request answers', () => {
+    const open = async (base: string, include?: string[]) => {
+      const res = await post(`${base}/api/agent/tools/open_change_request`, writeTok(), {
+        sourceBranch: 'me/draft',
+        targetBranch: 'target-company-state',
+        title: 'My change',
+        ...(include ? { include } : {}),
+      });
+      expect(res.status).toBe(200);
+      return (await res.json()) as Record<string, unknown>;
+    };
+
+    it('answers a summary for 27 new files: the link first, 25 paths of 27, approvers, blockers, no patch', async () => {
+      const base = await start();
+      const body = await open(base);
+
+      // The link is the FIRST field: the one thing the agent must hand the
+      // user, so it survives a truncation of anything after it.
+      expect(Object.keys(body)[0]).toBe('url');
+      expect(body).toMatchObject({
+        url: 'https://bevel.example.com/change-requests/7',
+        number: 7,
+        title: 'My change',
+        state: 'open',
+        sourceBranch: 'me/draft',
+        targetBranch: 'target-company-state',
+        totalFiles: 27,
+      });
+
+      const files = body.files as { path: string; change: string }[];
+      expect(files).toHaveLength(25);
+      expect(new Set(files.map((f) => f.change))).toEqual(new Set(['added']));
+      expect(files[0].path).toBe('KnowledgeBase/Engineering/Knowledge/Hexis/Generated-Node-0.md');
+
+      // Who must approve, per path — what Juan found useful and must stay.
+      expect(body.approvals).toHaveLength(25);
+      expect((body.approvals as unknown[])[0]).toEqual({
+        path: 'KnowledgeBase/Engineering/Knowledge/Hexis/Generated-Node-0.md',
+        roles: ['Admin', 'Engineering'],
+        users: ['Razvan Radulescu'],
+        approved: false,
+        inMergeGate: true,
+      });
+      // What blocks the merge: every reason, for cut paths too.
+      expect(body.mergeBlockedReasons).toHaveLength(27);
+
+      // No patch, and no file content under any other name.
+      const json = JSON.stringify(body);
+      expect(json).not.toContain('patch');
+      expect(json).not.toContain('a line of generated knowledge text');
+      expect(files.every((f) => !('patch' in f))).toBe(true);
+    });
+
+    it('keeps the 27-file answer under 10,000 characters', async () => {
+      const base = await start();
+      const body = await open(base);
+      // The detail this was shaped from is the ~445,000-character one.
+      expect(JSON.stringify(opened).length).toBeGreaterThan(400_000);
+      // 8,918 characters as this fixture stands. The three per-path lists
+      // (`files`, `approvals`, `mergeBlockedReasons`) are what fills it, so a
+      // field added to any of them eats the margin ~25 times over.
+      expect(JSON.stringify(body).length).toBeLessThan(10_000);
+    });
+
+    it('`include: ["all-paths"]` lists all 27 paths, still without patches', async () => {
+      const base = await start();
+      const body = await open(base, ['all-paths']);
+      expect(body.files).toHaveLength(27);
+      expect(body.totalFiles).toBe(27);
+      expect(body.approvals).toHaveLength(27);
+      expect(JSON.stringify(body)).not.toContain('a line of generated knowledge text');
+    });
+
+    it('`include: ["patches"]` gives each listed file its patch', async () => {
+      const base = await start();
+      const body = await open(base, ['patches']);
+      const files = body.files as { path: string; patch?: string }[];
+      expect(files).toHaveLength(25);
+      expect(files.every((f) => f.patch?.startsWith('@@ -0,0 +1,400 @@'))).toBe(true);
+      // Cut to 25 still: `patches` adds the diffs, it does not lift the cut.
+      expect(body.totalFiles).toBe(27);
+    });
+
+    it('both together: every path, each with its patch', async () => {
+      const base = await start();
+      const body = await open(base, ['patches', 'all-paths']);
+      const files = body.files as { patch?: string }[];
+      expect(files).toHaveLength(27);
+      expect(files.every((f) => typeof f.patch === 'string')).toBe(true);
+    });
+
+    it('reads a modification `changed` and a rename `moved`, with its old path', async () => {
+      const base = await start();
+      opened = detailOf([
+        { path: 'KnowledgeBase/Kept.md', status: 'modified', additions: 2, deletions: 1, patch: '@@ x', isBinary: false, sha: 'b1', rawUrl: 'r1' },
+        { path: 'KnowledgeBase/New-Home.md', previousPath: 'KnowledgeBase/Old-Home.md', status: 'renamed', additions: 0, deletions: 0, isBinary: false, sha: 'b2', rawUrl: 'r2' },
+      ]);
+      const body = await open(base);
+      expect(body.files).toEqual([
+        { path: 'KnowledgeBase/Kept.md', change: 'changed' },
+        { path: 'KnowledgeBase/New-Home.md', change: 'moved', previousPath: 'KnowledgeBase/Old-Home.md' },
+      ]);
+      expect(body.totalFiles).toBe(2);
+    });
+
+    it('a deletion reads `deleted`', async () => {
+      const base = await start();
+      opened = detailOf([
+        { path: 'KnowledgeBase/Gone.md', status: 'removed', additions: 0, deletions: 9, isBinary: false, sha: 'b3', rawUrl: 'r3' },
+      ]);
+      expect((await open(base)).files).toEqual([{ path: 'KnowledgeBase/Gone.md', change: 'deleted' }]);
+    });
+
+    it('says the approvers are unknown rather than implying nobody must approve', async () => {
+      const base = await start();
+      opened = detailOf([
+        { path: 'KnowledgeBase/Opaque.md', status: 'added', additions: 1, deletions: 0, isBinary: false, sha: 'b4', rawUrl: 'r4' },
+      ]);
+      // No usable access config on the base: the empty approver set means "not
+      // known", and nothing may be granted on the strength of that emptiness.
+      opened.approvals = [
+        { path: 'KnowledgeBase/Opaque.md', eligibleApprovers: { roles: [], users: [] }, approvedBy: [], eligibilityResolved: false, isApproved: false, inMergeGate: false },
+      ];
+      expect((await open(base)).approvals).toEqual([
+        { path: 'KnowledgeBase/Opaque.md', roles: [], users: [], approved: false, inMergeGate: false, approversUnknown: true },
+      ]);
+
+      // A detail that carries no verdict at all reads the same way: absent is
+      // not resolved, so the emptiness still means "not known".
+      const legacy = { ...(opened.approvals as Record<string, unknown>[])[0] };
+      delete legacy.eligibilityResolved;
+      opened.approvals = [legacy];
+      expect((await open(base)).approvals).toEqual([
+        { path: 'KnowledgeBase/Opaque.md', roles: [], users: [], approved: false, inMergeGate: false, approversUnknown: true },
+      ]);
+    });
+
+    it('surfaces the `change-request-conflicts` error as before', async () => {
+      const base = await start();
+      openFails = new ChangeRequestConflictsError('me/draft', 'target-company-state', ['KnowledgeBase/Clash.md']);
+      const res = await post(`${base}/api/agent/tools/open_change_request`, writeTok(), {
+        sourceBranch: 'me/draft',
+        targetBranch: 'target-company-state',
+        title: 'My change',
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        kind: 'change-request-conflicts',
+        sourceBranch: 'me/draft',
+        targetBranch: 'target-company-state',
+        conflictedPaths: ['KnowledgeBase/Clash.md'],
+      });
+    });
+
+    /**
+     * The app's dialog reads the same detail from its own route. Shaping the
+     * agent's answer must not touch it — so the detail the service handed back
+     * still carries all 27 files and all their patches after the tool answered.
+     */
+    it('leaves the detail the app\'s dialog reads exactly as the service returned it', async () => {
+      const base = await start();
+      const before = JSON.stringify(opened);
+      await open(base);
+      expect(JSON.stringify(opened)).toBe(before);
+      expect((opened.files as unknown[])).toHaveLength(27);
+      expect((opened.files as { patch?: string }[]).every((f) => typeof f.patch === 'string')).toBe(true);
+    });
+
+    it('says in its description what the default answer holds and how to ask for more', async () => {
+      await start();
+      for (const tools of [await registryRef!.listInternal(), await registryRef!.listExternal()]) {
+        const def = tools.find((t) => t.name === 'open_change_request')!;
+        expect(def.description).toMatch(/SUMMARY/);
+        expect(def.description).toMatch(/cut to 25/);
+        expect(def.description).toMatch(/No patches and no file content/);
+        expect(def.description).toMatch(/include: \["patches"\]/);
+        expect(def.description).toMatch(/include: \["all-paths"\]/);
+        // `toolDef` wraps a tool's flat inputs under `body`.
+        const body = (def.inputs as { properties: { body: { properties: Record<string, { items?: { enum?: string[] }; description?: string }> } } })
+          .properties.body;
+        expect(body.properties.include.items?.enum).toEqual(['patches', 'all-paths']);
+        expect(body.properties.include.description).toMatch(/every changed path instead of the first 25/);
+      }
+    });
   });
 
   it('create_branch forks in the BASE branch\'s workspace, never the new draft\'s', async () => {
