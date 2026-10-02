@@ -231,7 +231,6 @@ export function sharedFileRulesSection(layout: KbLayout): string {
 }
 
 /**
-/**
  * The longest guide file name the pointer sentence spells out. Beyond this it
  * names the guide by its ROLE instead (see {@link sharedRulesPointer}).
  *
