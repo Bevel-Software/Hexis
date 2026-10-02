@@ -1770,7 +1770,7 @@ export class WorkflowService implements IWorkflowService {
       .from(changeRequests)
       .where(
         and(
-          eq(changeRequests.authorEmail, email),
+          eq(changeRequests.authorEmailBidx, email),
           eq(changeRequests.sourceBranch, sourceBranch),
           ne(changeRequests.state, 'open'),
         ),
@@ -1910,6 +1910,7 @@ export class WorkflowService implements IWorkflowService {
           title: input.title.trim(),
           body,
           authorEmail: canonicalEmail(user.email),
+          authorEmailBidx: user.email,
           authorName: user.name,
         })
         .returning({ number: changeRequests.number });
@@ -3577,6 +3578,7 @@ export class WorkflowService implements IWorkflowService {
         applyFailureKind: failure.kind,
         applyFailedAt: at,
         applyFailedByName: user.name,
+        applyFailedByEmailBidx: user.email,
       })
       // The write itself refuses to go backwards: the attempt map above is an
       // early exit within this process, but an older UPDATE still in flight (or
@@ -3637,6 +3639,7 @@ export class WorkflowService implements IWorkflowService {
           applyFailureConflicts: null,
           applyFailedAt: null,
           applyFailedByName: null,
+          applyFailedByEmailBidx: null,
           applyFailureKind: null,
         })
         .where(

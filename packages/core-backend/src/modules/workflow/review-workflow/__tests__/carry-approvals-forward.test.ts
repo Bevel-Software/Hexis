@@ -247,6 +247,9 @@ describe('ReviewWorkflowService.carryApprovalsForward', () => {
         prNumber: PR,
         path: 'Sales/Terms.md',
         approverEmail: 'carol@bevel.software',
+        // The index column of a copied row is written with the address, not
+        // with the stored index read back beside it.
+        approverEmailBidx: 'carol@bevel.software',
         approverName: 'Carol',
         headSha: NEW_HEAD,
         // The reviewer approved THEN, not now — the merge is not an approval.
@@ -256,6 +259,7 @@ describe('ReviewWorkflowService.carryApprovalsForward', () => {
         prNumber: PR,
         path: 'Sales/Pricing.md',
         approverEmail: 'bob@bevel.software',
+        approverEmailBidx: 'bob@bevel.software',
         approverName: 'Bob',
         headSha: NEW_HEAD,
         approvedAt: APPROVED_AT,
