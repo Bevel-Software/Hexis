@@ -804,6 +804,9 @@ export class McpService {
   }> {
     const routes = new Map<string, DownstreamRoute>();
     const unavailable: UnavailableManual[] = [];
+    // Taken BEFORE a single manual is registered, so it ranks this load by the
+    // freshness of what it is about to read — see ToolSchemaGuard.beginLoad.
+    const loadId = this.toolSchemas.beginLoad();
     const catalogNames = new Map<string, string>();
     for (const m of manuals) {
       if (m.call_template_type === 'mcp') catalogNames.set(utcpManualName(m), String(m.name));
@@ -896,7 +899,7 @@ export class McpService {
     if (routes.size > 0) routeToDownstream(client, routes);
     const utcpTools = await client.getTools();
     const flattened = utcpTools.map((tool: UtcpTool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME));
-    const { tools, hidden } = await this.hideInvalidSchemas(client, flattened, manualCatalogNames, userId);
+    const { tools, hidden } = await this.hideInvalidSchemas(client, flattened, manualCatalogNames, userId, loadId);
     return { tools, unavailable, catalogNames, hidden };
   }
 
@@ -920,6 +923,7 @@ export class McpService {
     tools: ProxiedTool[],
     catalogNames: ReadonlyMap<string, string>,
     userId: string,
+    loadId: number,
   ): Promise<{ tools: ProxiedTool[]; hidden: Map<string, ScreenedHiddenTool> }> {
     const byManual = new Map<string, ProxiedTool[]>();
     // EVERY manual of this surface is screened, including the ones that
@@ -934,7 +938,7 @@ export class McpService {
       const manual = catalogNames.get(tool.manualName) ?? tool.manualName;
       byManual.set(manual, [...(byManual.get(manual) ?? []), tool]);
     }
-    const found = this.toolSchemas.screen(userId, byManual);
+    const found = this.toolSchemas.screen(userId, loadId, byManual);
     const hidden = new Map<string, ScreenedHiddenTool>();
     for (const tool of found.values()) hidden.set(tool.name, tool);
     if (found.size === 0) return { tools, hidden };

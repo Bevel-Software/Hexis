@@ -132,6 +132,14 @@ function stripPastDepth(node: unknown): unknown {
   return out;
 }
 
+/**
+ * Keywords whose value is INSTANCE DATA rather than a schema. A schema says
+ * what a value may be; these carry values themselves, so nothing in them is a
+ * construct for the sanitizer to touch — and nothing in them is a place where
+ * `{}` would mean "any value" either.
+ */
+const DATA_VALUED_KEYWORDS = new Set(['const', 'default', 'enum', 'examples']);
+
 /** JSON-Schema string `format` values the Anthropic tool validator accepts. */
 const SUPPORTED_SCHEMA_FORMATS = new Set([
   'date-time',
@@ -164,7 +172,9 @@ const SUPPORTED_SCHEMA_FORMATS = new Set([
  *    unresolvable refs degrade the same way, and so does one past
  *    {@link MAX_INLINED_NODES}.
  *  - the depth cap keeps the rest of the subtree's shape, replacing only the
- *    objects in it with `{}` — see {@link stripPastDepth}.
+ *    objects in it with `{}` — see {@link stripPastDepth}. It cannot reach
+ *    inside instance data, because the walk never descends into a
+ *    {@link DATA_VALUED_KEYWORDS} value in the first place.
  *
  * That second rule is the fix for three tools AI clients silently dropped. The
  * cap used to return `{}` at WHATEVER position it stopped at, and most
@@ -212,22 +222,25 @@ export function sanitizeInputSchema(schema: unknown): unknown {
       // JSON Schema allows siblings next to $ref; keep them, target wins ties.
       const siblings: Record<string, unknown> = { ...obj };
       delete siblings.$ref;
+      // Sanitized ONCE, here, because every path below can return them: the
+      // siblings are schema keywords in their own right, and an unsupported
+      // `format` or a nested `$ref` left in them is precisely what this
+      // function exists to keep out of a listing. (`siblings` no longer holds
+      // a `$ref`, so this cannot re-enter this branch at this node; deeper
+      // ones terminate on `inlining` or on the depth cap.)
+      const kept = Object.keys(siblings).length ? (walk(siblings, depth + 1) as Record<string, unknown>) : null;
       // Recursive, or past the expansion budget: `{}` ("any value") is the only
       // finite answer, and a `$ref` stands at a schema position, so `{}` there
       // is valid JSON Schema. The reference itself has to go — the `$defs`
       // block it points into is dropped below, and a dangling `$ref` is what
       // clients reject.
-      if (inlining.has(pointer) || inlined > MAX_INLINED_NODES) {
-        return Object.keys(siblings).length ? siblings : {};
-      }
+      if (inlining.has(pointer) || inlined > MAX_INLINED_NODES) return kept ?? {};
       inlining.add(pointer);
       try {
         const resolved = walk(resolvePointer(pointer) ?? {}, depth + 1);
         return resolved && typeof resolved === 'object' && !Array.isArray(resolved)
-          ? { ...siblings, ...(resolved as Record<string, unknown>) }
-          : Object.keys(siblings).length
-            ? siblings
-            : resolved ?? {};
+          ? { ...(kept ?? {}), ...(resolved as Record<string, unknown>) }
+          : (kept ?? resolved ?? {});
       } finally {
         inlining.delete(pointer);
       }
@@ -239,6 +252,15 @@ export function sanitizeInputSchema(schema: unknown): unknown {
         continue;
       }
       if (key === '$defs' || key === 'definitions') continue; // inlined above
+      // Instance DATA, not a schema: handed back exactly as it came. A `default`
+      // or an `enum` entry that happens to carry a key named `format` or `$ref`
+      // is a value the tool expects, not a construct to rewrite — and since the
+      // walk never descends into one, the depth cap cannot reach inside it
+      // either.
+      if (DATA_VALUED_KEYWORDS.has(key)) {
+        out[key] = value;
+        continue;
+      }
       // Drop a non-standard `format` (OpenAPI `int32`/`byte`/…) — the validator
       // only allows the JSON-Schema-standard set; the annotation is non-load-bearing.
       if (key === 'format' && (typeof value !== 'string' || !SUPPORTED_SCHEMA_FORMATS.has(value))) {

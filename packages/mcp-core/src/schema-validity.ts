@@ -110,7 +110,11 @@ const SCHEMA_VALUED_KEYWORDS = [
 /** Keywords whose value is a MAP of schemas: the keys are names, the values schemas. */
 const SCHEMA_MAP_KEYWORDS = ['$defs', 'definitions', 'dependentSchemas', 'patternProperties', 'properties'] as const;
 
-/** A bound on the walk below, for a schema whose nesting is the sender's choice. */
+/**
+ * A bound on the walk below, for a schema whose shape is the sender's choice.
+ * It caps the QUEUE, so neither depth nor breadth can make the check cost more
+ * than this many entries.
+ */
 const MAX_REGEX_CHECK_NODES = 50_000;
 
 /**
@@ -132,7 +136,14 @@ const MAX_REGEX_CHECK_NODES = 50_000;
  */
 function regexDefect(schema: Record<string, unknown>): SchemaDefect | null {
   const queue: Array<{ node: Record<string, unknown>; path: string }> = [{ node: schema, path: '' }];
-  for (let i = 0; i < queue.length && i < MAX_REGEX_CHECK_NODES; i += 1) {
+  // The cap bounds what is ENQUEUED, not only what is dequeued: a wide schema
+  // reaches its limit by breadth rather than depth, and a queue entry costs a
+  // path string that the node it describes does not. Past the cap the check
+  // simply stops looking, which is the fail-open rule this whole file follows.
+  const enqueue = (node: Record<string, unknown>, path: string) => {
+    if (queue.length < MAX_REGEX_CHECK_NODES) queue.push({ node, path });
+  };
+  for (let i = 0; i < queue.length; i += 1) {
     const { node, path } = queue[i];
     if (typeof node.pattern === 'string' && !compiles(node.pattern)) {
       return { path: `${path}/pattern`, reason: 'must be a valid regular expression' };
@@ -144,17 +155,17 @@ function regexDefect(schema: Record<string, unknown>): SchemaDefect | null {
         if (keyword === 'patternProperties' && !compiles(key)) {
           return { path: `${path}/patternProperties/${pointerPart(key)}`, reason: 'must be a valid regular expression' };
         }
-        if (isSchemaObject(value)) queue.push({ node: value, path: `${path}/${keyword}/${pointerPart(key)}` });
+        if (isSchemaObject(value)) enqueue(value, `${path}/${keyword}/${pointerPart(key)}`);
       }
     }
     for (const keyword of SCHEMA_VALUED_KEYWORDS) {
       const value = node[keyword];
       if (Array.isArray(value)) {
         value.forEach((item, index) => {
-          if (isSchemaObject(item)) queue.push({ node: item, path: `${path}/${keyword}/${index}` });
+          if (isSchemaObject(item)) enqueue(item, `${path}/${keyword}/${index}`);
         });
       } else if (isSchemaObject(value)) {
-        queue.push({ node: value, path: `${path}/${keyword}` });
+        enqueue(value, `${path}/${keyword}`);
       }
     }
   }

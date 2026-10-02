@@ -98,18 +98,30 @@ describe('a connected tool\'s input schema reaches clients as the server sent it
       required: ['value'],
     };
     const deep = { ...nest(150, deepLeaf), $defs: { thing: { type: 'string' } } };
+    const shallow = { ...nest(5, deepLeaf), $defs: { thing: { type: 'string' } } };
 
     it('still offers a schema a client accepts', () => {
+      // The old cap failed exactly here: `{}` at the position it stopped at
+      // made `anyOf`, a `required` entry or a `type` invalid, and the client
+      // refused the tool.
       expect(inputSchemaDefect(sanitizeInputSchema(deep))).toBeNull();
     });
 
-    it('leaves nothing past the cap for the two sanitizer rules to have missed', () => {
-      const json = JSON.stringify(sanitizeInputSchema(deep));
-      // A `$ref` past the cap would DANGLE — the `$defs` block it points into
-      // is dropped at the root — and an unsupported `format` past it is what
-      // the Anthropic validator refuses the whole listing over.
-      expect(json).not.toContain('$ref');
-      expect(json).not.toContain('int32');
+    it('strips the subtree past the cap, and nothing before it', () => {
+      const past = JSON.stringify(sanitizeInputSchema(deep));
+      const within = JSON.stringify(sanitizeInputSchema(shallow));
+      // The leaf's own content is what says the strip HAPPENED. `$ref` and
+      // `int32` alone would not: the ordinary rules remove both wherever the
+      // walk reaches them, so a cap that never fired — or one that went back to
+      // returning `{}` — would pass on those two assertions alike.
+      expect(past).not.toContain('socialLinks');
+      expect(within).toContain('socialLinks');
+      // And the consequence that matters: a `$ref` past the cap would DANGLE,
+      // since the `$defs` block it points into is dropped at the root, and an
+      // unsupported `format` past it is what the Anthropic validator refuses
+      // the whole listing over.
+      expect(past).not.toContain('$ref');
+      expect(past).not.toContain('int32');
     });
   });
 
@@ -127,6 +139,65 @@ describe('a connected tool\'s input schema reaches clients as the server sent it
     // Bounded, and still a schema: past the budget a `$ref` degrades to the
     // same permissive `{}` a recursive one does.
     expect(inputSchemaDefect(listed)).toBeNull();
+  });
+
+  it('sanitizes the siblings it keeps in place of a `$ref` it cannot inline', () => {
+    // JSON Schema allows keywords beside a `$ref`, and when the reference
+    // cannot be inlined those keywords are what stands there instead. They are
+    // schema keywords like any others, so an unsupported `format` in them has
+    // to go and a `$ref` nested in them has to be resolved — otherwise a large
+    // but perfectly valid schema smuggles both past the sanitizer.
+    const listed = sanitizeInputSchema({
+      type: 'object',
+      properties: { node: { $ref: '#/$defs/node' } },
+      $defs: {
+        node: {
+          type: 'object',
+          properties: {
+            // Recursive, so the siblings are returned in its place.
+            child: { $ref: '#/$defs/node', format: 'int32', items: { $ref: '#/$defs/leaf' } },
+          },
+        },
+        leaf: { type: 'string' },
+      },
+    });
+    expect(listed).toEqual({
+      type: 'object',
+      properties: { node: { type: 'object', properties: { child: { items: { type: 'string' } } } } },
+    });
+    expect(inputSchemaDefect(listed)).toBeNull();
+  });
+
+  describe('instance data, which is not a schema at any depth', () => {
+    // `default`, `enum`, `const` and `examples` carry VALUES. A key named
+    // `format`, `$ref` or `$defs` inside one is part of what the tool expects,
+    // and rewriting it would change the tool's meaning rather than protect it.
+    const data = {
+      default: { format: 'int32', $ref: '#/$defs/thing', nested: { definitions: 1 } },
+      enum: [{ format: 'byte' }, { $defs: {} }],
+      const: { format: 'byte' },
+      examples: [{ $ref: 'anything' }],
+    };
+
+    it('is handed back exactly as it came', () => {
+      const sent = {
+        type: 'object',
+        properties: { mode: { type: 'object', ...data } },
+        $defs: { thing: { type: 'string' } },
+      };
+      const listed = sanitizeInputSchema(sent) as { properties: { mode: unknown } };
+      expect(listed.properties.mode).toEqual({ type: 'object', ...data });
+    });
+
+    it('is not stripped past the depth cap either', () => {
+      // The cap replaces an object with `{}` where a SCHEMA stands, and `{}`
+      // there means "any value". Under `default` it would silently change what
+      // the tool is told to default to.
+      let value: Record<string, unknown> = { leaf: true };
+      for (let i = 0; i < 150; i += 1) value = { level: value };
+      const sent = { type: 'object', properties: { deep: { type: 'object', default: value } } };
+      expect(sanitizeInputSchema(sent)).toEqual(sent);
+    });
   });
 
   it('inlines a RECURSIVE $ref as a permissive `{}` rather than a dangling reference', () => {

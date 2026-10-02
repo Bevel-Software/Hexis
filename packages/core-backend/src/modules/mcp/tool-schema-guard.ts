@@ -73,9 +73,30 @@ export class ToolSchemaGuard implements HiddenToolSource {
    * `hiddenFor` reports the union, since the finding is about the server.
    */
   private readonly hidden = new Map<string, Map<string, ScreenedHiddenTool[]>>();
+  /** The newest load whose picture has been applied, per caller — see {@link beginLoad}. */
+  private readonly applied = new Map<string, number>();
+  /** Hands out {@link beginLoad} tickets; monotonic for the life of the process. */
+  private loads = 0;
 
   /** `check` is injected only by tests, to observe how often the check runs. */
   constructor(private readonly check: (schema: unknown) => SchemaDefect | null = inputSchemaDefect) {}
+
+  /**
+   * A ticket for a load that is ABOUT TO READ a server's tools, to be handed
+   * back to {@link screen} with what it found.
+   *
+   * Requests overlap: a caller's surface is rebuilt on every one of them, and
+   * two can be dialling the same server at once. Without an order, a load that
+   * started while a schema was still broken could land after the load that saw
+   * it corrected, and put the marker back on a tool that is fine — until some
+   * later request happened to clear it again. The ticket is taken BEFORE the
+   * read, so it ranks loads by the freshness of what they saw, and `screen`
+   * ignores a picture older than the one already applied.
+   */
+  beginLoad(): number {
+    this.loads += 1;
+    return this.loads;
+  }
 
   /**
    * Screen everything one caller's request just loaded — every manual on their
@@ -89,8 +110,17 @@ export class ToolSchemaGuard implements HiddenToolSource {
    * A manual absent from `groups` is no longer on this caller's surface. Either
    * way the marker goes, with nothing to clear by hand — and nothing claims a
    * tool is hidden for a schema this process can no longer see.
+   *
+   * `loadId` comes from {@link beginLoad}, taken before the tools were read. A
+   * load that is already out of date still gets its own answer — the request
+   * that ran it must not offer a tool it has just judged invalid — but it does
+   * not write that answer into what everyone else reads.
    */
-  screen(userId: string, groups: ReadonlyMap<string, readonly ScreenedTool[]>): Map<string, ScreenedHiddenTool> {
+  screen(
+    userId: string,
+    loadId: number,
+    groups: ReadonlyMap<string, readonly ScreenedTool[]>,
+  ): Map<string, ScreenedHiddenTool> {
     const found = new Map<string, ScreenedHiddenTool>();
     const picture = new Map<string, ScreenedHiddenTool[]>();
     for (const [manual, tools] of groups) {
@@ -111,16 +141,21 @@ export class ToolSchemaGuard implements HiddenToolSource {
       }
       if (ofManual.length > 0) picture.set(manual, ofManual);
     }
-    if (picture.size > 0) {
-      // Not about size — each entry is a handful of strings — but about a
-      // deployment with many callers never growing this without bound. Cleared
-      // whole rather than evicted one by one: the next load of each surface
-      // puts its own findings back.
-      if (this.hidden.size >= MAX_REMEMBERED_CALLERS && !this.hidden.has(userId)) this.hidden.clear();
-      this.hidden.set(userId, picture);
-    } else {
-      this.hidden.delete(userId);
+    // Stale: a load that read the server earlier than one already applied. Its
+    // own answer stands, the shared picture does not move.
+    if (loadId < (this.applied.get(userId) ?? 0)) return found;
+    // Not about size — each entry is a handful of strings — but about a
+    // deployment with many callers never growing these without bound. Cleared
+    // whole rather than evicted one by one: the next load of each surface puts
+    // its own findings back, and a ticket is monotonic, so a cleared order is
+    // still an order.
+    if (this.applied.size >= MAX_REMEMBERED_CALLERS && !this.applied.has(userId)) {
+      this.hidden.clear();
+      this.applied.clear();
     }
+    this.applied.set(userId, loadId);
+    if (picture.size > 0) this.hidden.set(userId, picture);
+    else this.hidden.delete(userId);
     return found;
   }
 
