@@ -589,10 +589,13 @@ describe('McpService — agent instructions', () => {
       expect.stringContaining('mcp-description.md'),
       expect.objectContaining({ message: 'disk' }),
     );
-    // And the four tools carry the fixed line alone.
+    // And the four tools carry the fixed line alone — behind the call line,
+    // which stays first whatever is prepended.
     const { tools } = await client.listTools();
     for (const name of KB_TOOLS) {
-      expect(tools.find((t) => t.name === name)?.description).toBe(`${TOOL_PREFIX_LINE}\n\noriginal ${name} description`);
+      expect(tools.find((t) => t.name === name)?.description).toBe(
+        `Call: KNOWLEDGE_BASE.${name}({})\n\n${TOOL_PREFIX_LINE}\n\noriginal ${name} description`,
+      );
     }
   });
 
@@ -602,12 +605,17 @@ describe('McpService — agent instructions', () => {
     const byName = Object.fromEntries(tools.map((t) => [t.name, t.description]));
     const prefix = `${TOOL_PREFIX_LINE} Acme builds solar farms.`;
     for (const name of KB_TOOLS) {
-      expect(byName[name], name).toBe(`${prefix}\n\noriginal ${name} description`);
+      expect(byName[name], name).toBe(
+        `Call: KNOWLEDGE_BASE.${name}({})\n\n${prefix}\n\noriginal ${name} description`,
+      );
     }
-    // Regression: the rest, meta-tools included, is untouched.
-    expect(byName.ask).toBe('echo the prompt');
-    expect(byName.boom).toBe('always errors');
-    expect(byName.refy).toBe('has $defs/$ref in its schema');
+    // Regression: the rest, meta-tools included, keeps its own description
+    // behind its own call line and gains nothing else.
+    expect(byName.ask).toBe('Call: KNOWLEDGE_BASE.ask({ body: { prompt: "..." } })\n\necho the prompt');
+    expect(byName.boom).toBe('Call: KNOWLEDGE_BASE.boom({})\n\nalways errors');
+    // Its `to` is an array of a `$ref`'d shape: the example takes the type at
+    // the top and says nothing about what is inside — the interface does that.
+    expect(byName.refy).toBe('Call: KNOWLEDGE_BASE.refy({ body: { to: [] } })\n\nhas $defs/$ref in its schema');
     for (const meta of ['call_tool_chain', 'list_tools', 'tools_info']) {
       expect(byName[meta], meta).not.toContain(TOOL_PREFIX_LINE);
     }
@@ -627,7 +635,8 @@ describe('McpService — agent instructions', () => {
     });
     const { tools } = await client.listTools();
     for (const name of KB_TOOLS) {
-      expect(tools.find((t) => t.name === name)?.description.startsWith(`${TOOL_PREFIX_LINE} Acme.`)).toBe(true);
+      expect(tools.find((t) => t.name === name)?.description).toContain(`\n\n${TOOL_PREFIX_LINE} Acme.`);
+      expect(tools.find((t) => t.name === name)?.description.startsWith('Call: ')).toBe(true);
     }
   });
 });

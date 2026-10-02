@@ -3,6 +3,7 @@ import type { IToolRegistry, UtcpTool } from '../tool-registry/tool.contract.js'
 import type { KbContext } from '../../shared/kb-context.js';
 import type { ToolContext } from '../tool-helpers/tool.contract.js';
 import { toolDef } from '../tool-helpers/tool-def.js';
+import { declareRouteTool } from '../tool-helpers/route-tool-schemas.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
@@ -47,6 +48,11 @@ export function registerToolManualsTools(
 ): void {
   registry.registerExternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
   registry.registerInternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
+  // The def above is built per catalog listing (its description names the
+  // tools configured for THIS caller), so declare the arguments here as well:
+  // a direct REST call that lands before the first listing must be checked
+  // against them too.
+  declareRouteTool('list_local_tools', LIST_LOCAL_TOOLS_INPUTS);
 
   router.post(
     '/agent/tools/list_local_tools',
@@ -252,6 +258,9 @@ async function localToolsLine(svc: IToolManualService, userEmail?: string): Prom
   return `Local-only tools configured for you: ${tools.map((t) => `\`${t.name}\``).join(', ')}.`;
 }
 
+/** `list_local_tools` takes nothing; a const so the route and the def share one declaration. */
+const LIST_LOCAL_TOOLS_INPUTS = { type: 'object' as const, properties: {}, additionalProperties: false };
+
 async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: string): Promise<UtcpTool> {
   return toolDef({
     name: 'list_local_tools',
@@ -267,7 +276,7 @@ async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: strin
       'setup by hand. ' +
       (await localToolsLine(svc, userEmail)),
     path: '/api/agent/tools/list_local_tools',
-    inputs: { type: 'object', properties: {}, additionalProperties: false },
+    inputs: LIST_LOCAL_TOOLS_INPUTS,
     outputs: {
       type: 'object',
       properties: {

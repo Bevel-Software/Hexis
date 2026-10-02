@@ -191,6 +191,8 @@ export function registerWorkflowTools(
      * out of the check while still demanding the input.
      */
     skipBranch?: boolean;
+    /** Arguments this tool's handler refuses by name itself (see `ToolDefSpec`). */
+    refusesItself?: string[];
     handler: ToolHandler;
   }): void => {
     const path = `/api/agent/tools/${spec.name}`;
@@ -206,6 +208,7 @@ export function registerWorkflowTools(
       path,
       inputs,
       outputs: spec.outputs,
+      refusesItself: spec.refusesItself,
       tags: spec.write ? ['workflow', 'write'] : ['workflow'],
     });
     registry.registerInternalTool(def);
@@ -383,6 +386,9 @@ export function registerWorkflowTools(
     // workspace-`branch` injection ("the branch you are currently working on"),
     // whose wording invites filling in the draft being created instead.
     skipBranch: true,
+    // The handler refuses a missing `name` with a message that says what the
+    // name is for (`name-required`); the generic check leaves it to that.
+    refusesItself: ['name'],
     inputs: {
       type: 'object',
       properties: {

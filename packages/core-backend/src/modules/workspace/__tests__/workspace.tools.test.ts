@@ -32,6 +32,9 @@ import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { PROPOSAL_ROUTE_NOTE, proposalTitleFor } from '../write-denial.js';
 import { NOT_FOUND_NEXT_STEP } from '../not-found.js';
+import { callLine, compileCheck, exampleArguments } from '@bevel-software/platform-mcp-core';
+import { routeToolSchemas } from '../../tool-helpers/route-tool-schemas.js';
+import { TOOL_DESCRIPTION_CAP, TOOL_PREFIX_CAP } from '../../agent-instructions/index.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -293,7 +296,9 @@ const postRaw = (url: string, body: unknown = {}) =>
  * POST a well-formed call. Every KB tool requires `branch` — a call that names
  * none is refused at the mount with 400 `branch-required` — so this names one
  * unless the test already did. A test ABOUT the missing input uses `postRaw`,
- * so the thing under test is never papered over by the helper.
+ * so the thing under test is never papered over by the helper. So does
+ * `start_session`, which declares no arguments at all and forbids extras: its
+ * route refuses a `branch` as an argument it does not have.
  */
 const post = (url: string, body: unknown = {}) =>
   postRaw(
@@ -1619,6 +1624,50 @@ describe('office documents and PDFs', () => {
     expect(tools.find((t) => t.name === 'execute_command')!.description).not.toContain(CONTENT_RULE);
   });
 
+  /**
+   * The call example at the top of every description is generated from the
+   * tool's input schema, and the same schema is what the argument check reads.
+   * If the two could disagree, the platform would publish an example its own
+   * check refuses — so every declared tool is called with its own example here.
+   */
+  it('every declared tool can be called with its own generated example', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    // The whole family this harness declares, the four the scenarios name included.
+    for (const name of ['read_file', 'write_file', 'list_files', 'grep']) {
+      expect(tools.some((t) => t.name === name), name).toBe(true);
+    }
+    expect(tools.length).toBeGreaterThan(12);
+    for (const def of tools) {
+      const compiled = compileCheck(def.inputs);
+      expect(compiled.checkable, `${def.name}: ${compiled.checkable ? '' : compiled.reason}`).toBe(true);
+      if (!compiled.checkable) continue;
+      expect(compiled.check(exampleArguments(def.inputs)), def.name).toEqual([]);
+      // And the FLAT schema, which is what the tool's own route checks the
+      // call against: the two must agree, or a call the example produced would
+      // be refused one layer in.
+      const flat = routeToolSchemas(def.name)?.flat;
+      expect(flat, def.name).toBeDefined();
+      const flatCheck = compileCheck(flat);
+      expect(flatCheck.checkable, `${def.name} (flat): ${flatCheck.checkable ? '' : flatCheck.reason}`).toBe(true);
+      if (flatCheck.checkable) expect(flatCheck.check(exampleArguments(flat)), `${def.name} (flat)`).toEqual([]);
+    }
+  });
+
+  it('every description, call example and purpose prefix included, stays inside the cap a client shows', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    for (const def of tools) {
+      // Measured as a CLIENT receives it: the call line, the purpose prefix at
+      // its own cap (the four knowledge-base tools carry one), and the
+      // description — the three things that ride one tool's entry.
+      const received = `${callLine(`KNOWLEDGE_BASE.${def.name}`, def.inputs)}\n\n${'p'.repeat(TOOL_PREFIX_CAP)}\n\n${def.description}`;
+      expect(received.length, `${def.name} is ${received.length} characters (cap ${TOOL_DESCRIPTION_CAP})`).toBeLessThanOrEqual(
+        TOOL_DESCRIPTION_CAP,
+      );
+    }
+  });
+
   describe('binary capability contract: a text file, a document, an image and a zip', () => {
     const PNG = Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
@@ -1933,13 +1982,13 @@ describe('start_session', () => {
 
   it('returns the sink-minted id as sessionId', async () => {
     const base = await startSessionApp();
-    const res = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+    const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
     expect(res.sessionId).toBe('thread-xyz');
   });
 
   it('mints the session for the authenticated user', async () => {
     const base = await startSessionApp();
-    await post(`${base}/api/agent/tools/start_session`);
+    await postRaw(`${base}/api/agent/tools/start_session`);
     expect(created).toHaveLength(1);
     expect(created[0].userId).toBe('user-42');
     expect(created[0].startedAt).toBeInstanceOf(Date);
@@ -1950,7 +1999,7 @@ describe('start_session', () => {
     // loopback token resolves to source 'external' at the verifier (see
     // tool-auth), so it is admitted here like any external agent.
     const base = await startSessionApp('internal');
-    const res = await post(`${base}/api/agent/tools/start_session`);
+    const res = await postRaw(`${base}/api/agent/tools/start_session`);
     expect(res.status).toBe(403);
     expect(created).toHaveLength(0);
   });
@@ -1974,7 +2023,7 @@ describe('start_session', () => {
     it('answers every one of them with a session id of its own', async () => {
       const base = await startSessionApp('external', new UuidSessionSink());
 
-      const responses = await Promise.all(Array.from({ length: 50 }, () => post(`${base}/api/agent/tools/start_session`)));
+      const responses = await Promise.all(Array.from({ length: 50 }, () => postRaw(`${base}/api/agent/tools/start_session`)));
       const bodies = (await Promise.all(responses.map((r) => r.json()))) as Array<{ sessionId?: string }>;
 
       expect(responses.map((r) => r.status)).toEqual(Array.from({ length: 50 }, () => 200));
@@ -2007,13 +2056,13 @@ describe('start_session', () => {
       const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
       let failed: Awaited<ReturnType<typeof post>>;
       try {
-        failed = await post(`${base}/api/agent/tools/start_session`);
+        failed = await postRaw(`${base}/api/agent/tools/start_session`);
       } finally {
         errorLog.mockRestore();
       }
       expect(failed.status).toBeGreaterThanOrEqual(500);
 
-      const retried = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const retried = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
       expect(retried.sessionId).toBe('session-2');
       expect(calls).toBe(2);
     });
@@ -2025,8 +2074,8 @@ describe('start_session', () => {
       // to other tools, and the spare is simply never mentioned again.
       const base = await startSessionApp('external', new UuidSessionSink());
 
-      const first = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
-      const retry = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const first = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const retry = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
 
       expect(retry.sessionId).not.toBe(first.sessionId);
       expect(first.sessionId).toBeTruthy();

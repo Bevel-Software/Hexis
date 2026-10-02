@@ -221,8 +221,18 @@ const STRINGIFIED_ABSENT_VALUES = new Set(['undefined', 'null']);
  * nothing", which is the one case where naming the branch back is impossible.
  */
 export function assertBranchProvided(branch: unknown): asserts branch is string {
-  if (typeof branch !== 'string' || branch.length === 0) throw new BranchRequiredError();
-  if (STRINGIFIED_ABSENT_VALUES.has(branch)) throw new BranchRequiredError();
+  if (!branchProvided(branch)) throw new BranchRequiredError();
+}
+
+/**
+ * The same question as {@link assertBranchProvided}, answered rather than
+ * thrown — for a caller that must know whether the branch refusal is the one
+ * this call is going to get, without being the one to raise it. The generic
+ * argument check asks it so that refusal keeps coming first.
+ */
+export function branchProvided(branch: unknown): branch is string {
+  if (typeof branch !== 'string' || branch.length === 0) return false;
+  return !STRINGIFIED_ABSENT_VALUES.has(branch);
 }
 
 /**

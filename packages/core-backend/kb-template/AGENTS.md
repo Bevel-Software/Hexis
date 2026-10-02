@@ -485,6 +485,16 @@ with its own credentials and access rule — a plugin is a folder, not a registr
 of unique names. Remember: `.tool` files are for `http` and `inline` manuals
 only; MCP servers belong in `mcp.json`.
 
+**Calling a tool: read its `Call:` line.** Tools do not share one calling
+shape — the knowledge-base tools take their arguments under a `body` object, a
+tool that calls another service takes them flat — so every tool description
+opens with one generated line showing how that tool is called, e.g.
+`Call: KNOWLEDGE_BASE.read_file({ body: { branch: "...", path: "..." } })` or
+`Call: SERPER.search({ query: "..." })`. Copy that line and fill it in, inside
+`call_tool_chain` or directly. Arguments that do not match a tool's input
+schema are refused before anything is sent, and the refusal lists what is
+wrong and gives the tool's whole interface.
+
 A `.tool` file is JSON or YAML. Its `type` decides how tools are discovered:
 
 - **`inline`** — the tools are embedded in the file (no network round-trip to list them).

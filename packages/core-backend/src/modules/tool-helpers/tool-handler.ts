@@ -6,6 +6,8 @@ import { hasHttpStatus, ToolError, type ToolHandler } from './tool.contract.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import type { ResolveToolContext } from './tool-context.js';
+import { argumentsRefusal } from './route-argument-check.js';
+import { routeToolName } from './route-tool-schemas.js';
 import { alwaysWritable, READ_ONLY_CODE, refuseWriteTool, type IWriteAccess } from '../write-access/write-access.js';
 import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
 
@@ -24,11 +26,21 @@ export interface ToolHandlerOptions {
 
 /**
  * Wrap a pure tool handler into an Express handler. Resolves the `ToolContext`
- * from `req.toolAuth` (set by `toolAuth`), enforces write-scope, runs the
- * handler, and serializes the result — JSON for a value, SSE for an
- * async-iterable (streaming). `ToolError`/`hasHttpStatus` map to HTTP status.
- * The handler receives `req.body` as the flat args (UTCP's `body_field` already
- * delivered the inner body as the request body).
+ * from `req.toolAuth` (set by `toolAuth`), enforces write-scope, CHECKS THE
+ * ARGUMENTS against what the tool declared, runs the handler, and serializes the
+ * result — JSON for a value, SSE for an async-iterable (streaming).
+ * `ToolError`/`hasHttpStatus` map to HTTP status. The handler receives
+ * `req.body` as the flat args (UTCP's `body_field` already delivered the inner
+ * body as the request body).
+ *
+ * The argument check is HERE, in the route, because the route is where every
+ * caller of a route-hosted tool arrives: an agent over MCP, a `call_tool_chain`
+ * chain, the in-process agent over loopback, and a script calling
+ * `POST /api/agent/tools/<name>` with a connection key. Checked one layer up,
+ * in the MCP dispatch, the last of those was left answering a 500 for a missing
+ * argument — or running: `grep` without a `pattern` matched every file. Every
+ * tool mounted through this factory gets it, a deployment's included, without
+ * saying so (see `route-argument-check.ts`).
  */
 export function createToolHandlerFactory(resolve: ResolveToolContext, writeAccess: IWriteAccess = alwaysWritable) {
   return function toolHandler(handler: ToolHandler, opts: ToolHandlerOptions = {}) {
@@ -71,6 +83,16 @@ export function createToolHandlerFactory(resolve: ResolveToolContext, writeAcces
         return;
       }
       const args = (body ?? {}) as Record<string, unknown>;
+      // Before the context is resolved and before the handler runs: nothing is
+      // read, written or sent on a call that does not match its tool. The more
+      // specific refusals each tool makes for itself (a missing `branch`,
+      // above all) are left to the handler and keep their own wording — this
+      // reports what the SCHEMA alone can settle.
+      const mismatch = argumentsRefusal(routeToolName(req.path), args, req.query);
+      if (mismatch) {
+        res.status(mismatch.status).json({ ...mismatch.details, error: mismatch.message });
+        return;
+      }
       // `sessionId` rides the tool body like `branch` does: the external MCP
       // proxy injects it (ask-tool continuity convention) and the in-process
       // agent passes its thread id. Surfaced on the context so the

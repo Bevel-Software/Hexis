@@ -4,6 +4,7 @@ import { utcpNameToTsInterfaceName, findToolsByNames, sanitizeIdentifier } from 
 import { chainExample, type ChainExample, type ChainExampleTool } from './chain-example.js';
 import { toCallToolResult, toolError, describeToolFailure, withTransportDetail, omitImagePayloads } from './results.js';
 import { retiredToolInFailure } from './retired-tools.js';
+import { withCallExample } from './tool-interface.js';
 import {
   CHAIN_TIMEOUT_DEFAULT_MS,
   CHAIN_TIMEOUT_MAX_MS,
@@ -61,7 +62,8 @@ function callToolChainDescription(example: ChainExample): string {
   // is one hop away either way.
   const worked = call ? ` A call that works exactly as written: \`return ${call};\`.` : '';
   return [
-    `Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function. Call tools as \`${ns}.<tool>({ body: { ...args } })\` with NO \`await\` (results are already resolved), and \`return\` the final value.${worked} Every argument a tool declares REQUIRED must be present — \`tools_info\` gives the exact shapes, and for the knowledge-base tools that includes \`branch\`. The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax), plus \`atob\`, \`btoa\`, \`TextEncoder\` and \`TextDecoder\` for base64 and UTF-8 bytes, as in a browser. There is no \`Buffer\`, no \`fetch\` and no \`require\`.`,
+    `Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function, with NO \`await\` (results are already resolved), and \`return\` the final value.${worked} The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax), plus \`atob\`, \`btoa\`, \`TextEncoder\` and \`TextDecoder\` for base64 and UTF-8 bytes, as in a browser. There is no \`Buffer\`, no \`fetch\` and no \`require\`.`,
+    `There is NO single calling shape: some tools take their arguments under a \`body\` object, others take them flat. Call each tool exactly as the \`Call:\` line at the top of its own description shows — that line is generated from the tool's input schema, and every tool in \`${ns}\` has one. Every argument a tool declares REQUIRED must be present; for the knowledge-base tools that includes \`branch\`. Arguments that do not match the schema are refused before anything is sent or run, and the refusal carries the tool's interface.`,
     `Discover first: \`list_tools\` lists every tool in callable form (e.g. \`${name}\`); \`tools_info\` returns their exact argument + return shapes — do not guess. Batch multiple tool calls into one chain to avoid a round-trip per call. The chain runs with your own connection key, so it can only reach the tools you can already call directly.`,
     `Failures are answered, never dropped: a chain that throws comes back as an error carrying the reason, and one that outlives \`timeout\` (default ${CHAIN_TIMEOUT_DEFAULT_MS} ms, maximum ${CHAIN_TIMEOUT_MAX_MS} ms) comes back saying so — raise \`timeout\` or split the work and run it again. Either way the connection stays open and your next call works as usual.`,
     'Large results: if the combined result+logs exceed `max_output_size` (default 200000 chars) the full JSON is spilled to a shared store and you get back a `__tool_chain_spill__/…` ref instead. Read it with `read_file` (pass that ref as `path` — `branch` is ignored — plus `offset`/`limit` to slice it), or better, re-run a narrower chain that returns only what you need.',
@@ -82,7 +84,7 @@ function callToolChainDescription(example: ChainExample): string {
 export function codeModeMetaTools(namespace: string, tools: readonly ChainExampleTool[] = []): McpTool[] {
   const example = chainExample(namespace, tools);
   const { name } = example;
-  return [
+  return withCallExamples([
     {
       name: 'list_tools',
       description: `List every UTCP tool currently registered, in TypeScript-accessible form (e.g. \`${name}\`) for use inside \`call_tool_chain\`.`,
@@ -120,7 +122,20 @@ export function codeModeMetaTools(namespace: string, tools: readonly ChainExampl
         additionalProperties: false,
       } as McpTool['inputSchema'],
     },
-  ];
+  ]);
+}
+
+/**
+ * Each of the three with its call example ahead of its description, from the
+ * same generator every other tool's comes from — so "every description opens
+ * with its call" holds with no exception an agent has to learn.
+ *
+ * These three are called DIRECTLY over MCP rather than from inside a chain, so
+ * the example shows that shape: the tool's name and its required arguments,
+ * with no namespace in front.
+ */
+function withCallExamples(tools: McpTool[]): McpTool[] {
+  return tools.map((t) => ({ ...t, description: withCallExample(t.description, t.name, t.inputSchema) }));
 }
 
 /**
@@ -191,8 +206,18 @@ export async function dispatchMetaTool(
       const resolved = await findToolsByNames(client, names);
       for (const n of names) {
         const found = resolved.get(n);
-        if (found) interfaces.push(client.toolToTypeScriptInterface(found.tool));
-        else notFound.push(n);
+        // The call example travels with the interface too: `tools_info` is
+        // where an agent writing a chain reads the shape, and reading it there
+        // without the example is how a flat tool's arguments end up in a
+        // `body`. Added to a COPY — the repository's tool is not ours to edit.
+        if (found) {
+          interfaces.push(
+            client.toolToTypeScriptInterface({
+              ...found.tool,
+              description: withCallExample(found.tool.description, found.utcpName, found.tool.inputs),
+            }),
+          );
+        } else notFound.push(n);
       }
       return toCallToolResult({ interfaces: interfaces.join('\n\n'), not_found: notFound });
     }

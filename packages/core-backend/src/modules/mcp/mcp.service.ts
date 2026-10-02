@@ -1303,6 +1303,11 @@ function templateFingerprint(template: CallTemplate): string {
  * until the consumer finishes or abandons it (`for await` returns the
  * generator, which runs the `finally`).
  *
+ * No guard is re-installed over this wrapper, and none is needed: a routed call
+ * is made on the POOLED client, which had the guards installed on it when its
+ * own manual was registered (`registerManual`). Nothing in this module checks a
+ * call or shapes its failure — it forwards the call and returns the answer.
+ *
  * A call the downstream refuses for its token (401 / `invalid_token`) goes to
  * the route's `afterFailure`, which may refresh the token and ask for ONE retry
  * on a fresh connection. Retrying is safe for the same reason session recovery
