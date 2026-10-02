@@ -41,8 +41,32 @@ export interface PullRequestSummary {
   base: string;
   state: PullRequestState;
   createdAt: string;
+  /**
+   * The latest moment the change-request ROW records: its close time when it
+   * has one, else its creation time. GitHub's `updated_at` on a pull request
+   * means "when it last changed"; Hexis stamps no such column on a change
+   * request (comments and approvals carry their own times), so this is as
+   * close as the row can honestly answer — never a time guessed from
+   * elsewhere. Absent only on a summary built by something other than a
+   * change-request row (test doubles).
+   */
+  updatedAt?: string;
   /** Relative paths within `knowledge-base/`. Empty if not yet computed. */
   touchedNodePaths: string[];
+  /**
+   * The same changed files as {@link touchedNodePaths}, paired with the path
+   * each was renamed from — what a READ gate has to decide over, since
+   * `touchedNodePaths` reports a rename under its new name alone and so cannot
+   * say that a readable-looking file came out of a folder its reader cannot
+   * open.
+   *
+   * Absent when no summary builder filled it (a test double, a caller that
+   * constructs a summary by hand). A read gate must treat absence as "nothing
+   * proven" rather than falling back to `touchedNodePaths` — that fallback is
+   * precisely the disagreement between a list and a detail this field exists to
+   * remove, and it would come back silently.
+   */
+  touchedNodeFiles?: ChangedPathPair[];
   review: PullRequestReviewStatus;
   /**
    * Link to the change request: absolute (`<public frontend address>/change-requests/<number>`)
@@ -78,6 +102,63 @@ export interface ChangeRequestApplyFailure {
   /** Display name of whoever attempted the apply. */
   byName: string;
 }
+
+/**
+ * One changed file of a change request, named on both sides: where it is now
+ * and, for a rename, where it came from.
+ *
+ * The minimum a READ gate needs. A plain path list says a rename's new name and
+ * (with `forAccessCheck`) its old one, but not that the two are the same file —
+ * and the diff of a rename shows the old side's content, so a file moved out of
+ * a folder its reader cannot open must not be offered under its new name
+ * either. Both the list of change requests and the detail of one decide
+ * readability over these, so the two cannot disagree about whether a request is
+ * visible.
+ */
+export interface ChangedPathPair {
+  path: string;
+  previousPath?: string;
+}
+
+/**
+ * An APPLIED change request, named by BOTH the commit its row records and the
+ * number that row carries — because reading the commit's own change is only
+ * sound if the commit really is that request's merge commit, and the number is
+ * what proves it (the merge commit's subject ends with `(#<number>)`).
+ *
+ * The pair travels together so no read can ask for a commit without saying which
+ * request it must belong to. `merged_sha` is not reliably a commit the request
+ * created: a merge with nothing to merge used to record the TARGET TIP, which in
+ * a deployment that lands everything through change requests is usually ANOTHER
+ * request's merge commit.
+ */
+export interface AppliedChangeRef {
+  /** The change request's number, as its merge commit's subject names it. */
+  number: number;
+  /** The `merged_sha` the row records. */
+  mergeSha: string;
+}
+
+/**
+ * What applying a change request did.
+ *
+ * Two different commits, which is why they are two fields:
+ *
+ *   `sha` is the state the target is left at — the tip at which the request
+ *   counts as merged. When there was nothing to merge it is whatever landed on
+ *   the target last, usually ANOTHER request's merge commit, so it must never be
+ *   recorded as this request's own: a reader would answer with that other
+ *   request's files under this number.
+ *
+ *   `mergeCommit` is the commit this request OWNS, and the only sha a row may
+ *   record as its `merged_sha` — the commit this merge wrote, or the one an
+ *   earlier attempt wrote and left on the target when it failed to finalize the
+ *   row. Null when the request has none, which is the genuinely empty case: its
+ *   file list is empty anyway, so nothing readable is lost.
+ */
+export type AppliedMergeResult =
+  | { kind: 'merged'; sha: string; mergeCommit: string | null }
+  | { kind: 'conflicts'; paths: string[] };
 
 export type PrFileStatus =
   | 'added'
@@ -368,6 +449,17 @@ export interface IPullRequestService {
    * via `gh pr create`) and the user expects to see the update immediately.
    */
   listOpenPrs(opts?: { fresh?: boolean }): Promise<PullRequestSummary[]>;
+  /**
+   * PRs in ANY of `states`, newest first — what `listOpenPrs` answers for the
+   * open ones, widened to the closed and merged rows it filters out. Only the
+   * `['open']` case goes through that method's 30s list cache; a read that
+   * asks for closed rows is rare (a reader catching up on what happened) and
+   * is served straight from the table.
+   */
+  listPrsByState(
+    states: PullRequestState[],
+    opts?: { fresh?: boolean; workspaceId?: string },
+  ): Promise<PullRequestSummary[]>;
   listPrsAuthoredBy(githubLoginOrEmail: string): Promise<PullRequestSummary[]>;
   /**
    * PRs whose touched paths have an owner with the given email.

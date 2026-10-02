@@ -1730,6 +1730,13 @@ export class WorkflowService implements IWorkflowService {
     return this.prs.listOpenPrs(opts);
   }
 
+  listChangeRequestsByState(
+    states: ChangeRequestState[],
+    opts?: { fresh?: boolean },
+  ): Promise<ChangeRequest[]> {
+    return this.prs.listPrsByState(states, opts);
+  }
+
   listChangeRequestsAuthoredBy(
     emailOrLogin: string,
     opts?: { fresh?: boolean },

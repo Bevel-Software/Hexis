@@ -18,6 +18,7 @@ import { changeRequests, prComments, prFileApprovals, prMergeLog, users } from '
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { GitService } from '../git/git.service.js';
+import { mergeCommitSubject } from '../git/merge-commit.js';
 import { redactSecret } from '../../../shared/redact-secret.js';
 import {
   ChangeRequestConflictsError,
@@ -730,7 +731,9 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     // Attribution lives on the merge commit itself (authored as the human
     // triggerer). When bypass is used, the bypassed warnings are appended so the
     // decision survives in git history — no separate audit table needed.
-    const subject = `${prTitle} (#${prNumber})`;
+    // One place builds this, one place reads it back — `merge-commit.ts` says
+    // why an applied request's reader has to verify the subject at all.
+    const subject = mergeCommitSubject(prTitle, prNumber);
     const bypassFooter =
       opts.bypass && gate.warnings.length > 0
         ? `\n\nApproval requirements bypassed:\n${gate.warnings.map((w) => `- ${w}`).join('\n')}`
@@ -750,6 +753,10 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
         cr.targetBranch,
         { subject, body },
         user,
+        // Named so a merge that finds nothing to merge can tell an empty request
+        // apart from one a previous attempt already merged and failed to record
+        // (see `ownMergeCommitOn`).
+        { appliedChangeNumber: prNumber },
       );
     } catch (err) {
       const redacted = redactTokens(err instanceof Error ? err.message : String(err), this.git.credentials?.token());
@@ -780,7 +787,22 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     const completedAt = new Date();
     const [updatedCr] = await this.db
       .update(changeRequests)
-      .set({ state: 'merged', mergedSha: mergeResult.sha, closedAt: completedAt, updatedAt: completedAt })
+      .set({
+        state: 'merged',
+        // Only the commit this request OWNS, never `sha`. With nothing to merge
+        // `sha` is the target tip — usually another request's merge commit — and
+        // recording it here would let this request be read back with that other
+        // request's files under its number (cubic P1 on #347).
+        //
+        // `mergeCommit` is also what makes a retry after a failed finalization
+        // idempotent: the merge commit a previous attempt pushed is found and
+        // recorded instead of being dropped as "nothing was merged" (cubic P2 on
+        // #347). It is null only when the request has no merge commit at all,
+        // and such a request has no file list to lose.
+        mergedSha: mergeResult.mergeCommit,
+        closedAt: completedAt,
+        updatedAt: completedAt,
+      })
       .where(and(eq(changeRequests.id, cr.id), eq(changeRequests.state, 'open')))
       .returning({ id: changeRequests.id });
     if (!updatedCr) {
