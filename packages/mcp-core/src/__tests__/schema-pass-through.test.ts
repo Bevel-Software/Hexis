@@ -79,6 +79,56 @@ describe('a connected tool\'s input schema reaches clients as the server sent it
     expect(sanitizeInputSchema(sent)).toEqual(sent);
   });
 
+  /**
+   * The cap is a STACK guard, and a schema no server sends is the only thing
+   * that reaches it. What matters is that reaching it cannot produce an invalid
+   * schema — which is exactly what the old cap did, and what cost three real
+   * tools. 150 levels of nesting costs 300 of the walk's depth, so everything
+   * in the leaf below is past a cap of 200.
+   */
+  describe('a schema deep enough to reach the depth cap', () => {
+    const deepLeaf = {
+      type: 'object',
+      properties: {
+        socialLinks: { type: 'array', items: { anyOf: [{ type: 'string' }, { type: 'null' }] } },
+        value: { anyOf: [{ type: 'object', required: ['id'] }] },
+        thing: { $ref: '#/$defs/thing' },
+        count: { type: 'integer', format: 'int32' },
+      },
+      required: ['value'],
+    };
+    const deep = { ...nest(150, deepLeaf), $defs: { thing: { type: 'string' } } };
+
+    it('still offers a schema a client accepts', () => {
+      expect(inputSchemaDefect(sanitizeInputSchema(deep))).toBeNull();
+    });
+
+    it('leaves nothing past the cap for the two sanitizer rules to have missed', () => {
+      const json = JSON.stringify(sanitizeInputSchema(deep));
+      // A `$ref` past the cap would DANGLE — the `$defs` block it points into
+      // is dropped at the root — and an unsupported `format` past it is what
+      // the Anthropic validator refuses the whole listing over.
+      expect(json).not.toContain('$ref');
+      expect(json).not.toContain('int32');
+    });
+  });
+
+  it('bounds a schema whose `$ref`s branch instead of nesting', () => {
+    // Each entry points TWICE at the next. Nothing is recursive, so the
+    // recursion guard has nothing to catch, and an expansion that doubles per
+    // level is 2^40 nodes from 40 short lines — a few hundred bytes on the wire
+    // asking `tools/list` for a reply no memory holds.
+    const $defs: Record<string, unknown> = { d40: { type: 'string' } };
+    for (let i = 39; i >= 0; i -= 1) {
+      $defs[`d${i}`] = { allOf: [{ $ref: `#/$defs/d${i + 1}` }, { $ref: `#/$defs/d${i + 1}` }] };
+    }
+    const listed = sanitizeInputSchema({ type: 'object', properties: { a: { $ref: '#/$defs/d0' } }, $defs });
+    expect(JSON.stringify(listed).length).toBeLessThan(2_000_000);
+    // Bounded, and still a schema: past the budget a `$ref` degrades to the
+    // same permissive `{}` a recursive one does.
+    expect(inputSchemaDefect(listed)).toBeNull();
+  });
+
   it('inlines a RECURSIVE $ref as a permissive `{}` rather than a dangling reference', () => {
     // A self-referential schema has no finite inlined form. `{}` stands at a
     // schema position, so what comes out is still valid JSON Schema — which is

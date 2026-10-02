@@ -34,6 +34,12 @@ export interface HiddenToolSource {
    * The tools of `manual` currently hidden for an invalid schema, by the
    * manual's CATALOG name — empty for a healthy server, and empty for a server
    * whose tools this process has not loaded yet.
+   *
+   * A finding belongs to the SERVER, not to whoever's request loaded it: a
+   * schema is a property of the tool definition, and the people who can get it
+   * fixed are not necessarily the person whose connection saw it. So this is
+   * every finding this process holds for that manual, from whichever callers
+   * have loaded it, each distinct defect once.
    */
   hiddenFor(manual: string): HiddenTool[];
 }

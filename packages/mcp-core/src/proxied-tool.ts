@@ -85,6 +85,53 @@ export function toListedTool(tool: ProxiedTool): McpTool | null {
  */
 const MAX_SANITIZE_DEPTH = 200;
 
+/**
+ * How many nodes one schema's `$ref` inlining may produce before a `$ref`
+ * stops being expanded.
+ *
+ * The recursion guard tracks only the pointers on the ACTIVE path, which is
+ * what `$ref` recursion means — but it does not make expansion cheap. A
+ * schema whose references form a DAG rather than a tree (two `allOf` branches
+ * pointing at one `$defs` entry, that entry doing the same) expands its target
+ * once per branch, and that doubles per level: a few hundred bytes on the wire
+ * can ask `tools/list` for a reply no amount of memory will hold. Past this
+ * budget a `$ref` degrades to the same permissive `{}` a recursive one does,
+ * which stands at a schema position and leaves the result valid JSON Schema.
+ */
+const MAX_INLINED_NODES = 20_000;
+
+/**
+ * The stand-in for a subtree past {@link MAX_SANITIZE_DEPTH}: every plain
+ * object becomes `{}`, while arrays and scalars keep their shape. Iterative,
+ * because the whole reason for being here is that the recursion has to stop.
+ *
+ * `{}` is legal exactly where a SCHEMA stands, and an object this deep inside a
+ * schema is at a schema position. The positions the old cap destroyed were an
+ * `anyOf` LIST, a `required` entry and a `type` STRING — none of them an
+ * object, all of them handed back as they came. And because no object survives,
+ * nothing past the cap can carry a `$ref` left dangling by the `$defs` block
+ * this walk drops, or a `format` the Anthropic validator refuses.
+ */
+function stripPastDepth(node: unknown): unknown {
+  if (!node || typeof node !== 'object') return node;
+  if (!Array.isArray(node)) return {};
+  const out: unknown[] = [];
+  const queue: Array<{ from: readonly unknown[]; to: unknown[] }> = [{ from: node, to: out }];
+  for (let i = 0; i < queue.length; i += 1) {
+    const { from, to } = queue[i];
+    for (const item of from) {
+      if (!item || typeof item !== 'object') to.push(item);
+      else if (!Array.isArray(item)) to.push({});
+      else {
+        const nested: unknown[] = [];
+        to.push(nested);
+        queue.push({ from: item, to: nested });
+      }
+    }
+  }
+  return out;
+}
+
 /** JSON-Schema string `format` values the Anthropic tool validator accepts. */
 const SUPPORTED_SCHEMA_FORMATS = new Set([
   'date-time',
@@ -114,8 +161,10 @@ const SUPPORTED_SCHEMA_FORMATS = new Set([
  *    recursive, and inlining has no finite answer for it. It degrades to a
  *    permissive `{}` — which is legal, because a `$ref` only ever stands where
  *    a SCHEMA is expected and `{}` there means "any value". Non-local and
- *    unresolvable refs degrade the same way.
- *  - the depth cap hands the rest of the subtree back exactly as it came.
+ *    unresolvable refs degrade the same way, and so does one past
+ *    {@link MAX_INLINED_NODES}.
+ *  - the depth cap keeps the rest of the subtree's shape, replacing only the
+ *    objects in it with `{}` — see {@link stripPastDepth}.
  *
  * That second rule is the fix for three tools AI clients silently dropped. The
  * cap used to return `{}` at WHATEVER position it stopped at, and most
@@ -142,28 +191,35 @@ export function sanitizeInputSchema(schema: unknown): unknown {
   // at a schema we are already inside is recursive: JSON Schema says that with
   // the reference, and an inlined copy has no finite form.
   const inlining = new Set<string>();
+  // Nodes produced while inlining a `$ref`, against MAX_INLINED_NODES.
+  let inlined = 0;
   // `isPropertyMap` marks the value of `properties`/`patternProperties`: its
   // keys are the tool's OWN field names, not schema keywords, so a field
   // literally named `format`, `$ref` or `definitions` must survive untouched
   // (its VALUE is still a schema and is walked as one).
   const walk = (node: unknown, depth: number, isPropertyMap = false): unknown => {
     // Stack guard, not a schema rule: `$ref` recursion is caught below, so
-    // nothing a server legitimately sends reaches this. The rest of the
-    // subtree is handed back as it came, so stopping never rewrites a schema.
-    if (depth > MAX_SANITIZE_DEPTH) return node;
+    // nothing a server legitimately sends reaches this. Stopping must never
+    // make a schema INVALID — which is exactly what the old cap did, by
+    // returning `{}` at whatever position it had reached.
+    if (depth > MAX_SANITIZE_DEPTH) return stripPastDepth(node);
     if (Array.isArray(node)) return node.map((item) => walk(item, depth + 1));
     if (!node || typeof node !== 'object') return node;
+    if (inlining.size > 0) inlined += 1;
     const obj = node as Record<string, unknown>;
     if (!isPropertyMap && typeof obj.$ref === 'string') {
       const pointer = obj.$ref;
       // JSON Schema allows siblings next to $ref; keep them, target wins ties.
       const siblings: Record<string, unknown> = { ...obj };
       delete siblings.$ref;
-      // Recursive: `{}` ("any value") is the only finite answer, and a `$ref`
-      // stands at a schema position, so `{}` there is valid JSON Schema. The
-      // reference itself has to go — the `$defs` block it points into is
-      // dropped below, and a dangling `$ref` is what clients reject.
-      if (inlining.has(pointer)) return Object.keys(siblings).length ? siblings : {};
+      // Recursive, or past the expansion budget: `{}` ("any value") is the only
+      // finite answer, and a `$ref` stands at a schema position, so `{}` there
+      // is valid JSON Schema. The reference itself has to go — the `$defs`
+      // block it points into is dropped below, and a dangling `$ref` is what
+      // clients reject.
+      if (inlining.has(pointer) || inlined > MAX_INLINED_NODES) {
+        return Object.keys(siblings).length ? siblings : {};
+      }
       inlining.add(pointer);
       try {
         const resolved = walk(resolvePointer(pointer) ?? {}, depth + 1);

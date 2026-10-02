@@ -36,6 +36,91 @@ describe('inputSchemaDefect', () => {
   it('reports a schema that is not an object at all', () => {
     expect(inputSchemaDefect([{ type: 'object' }])).toEqual({ path: '/', reason: 'must be an object' });
     expect(inputSchemaDefect('object')).toEqual({ path: '/', reason: 'must be an object' });
+    // `true` and `false` are legal JSON Schema — "accept anything", "accept
+    // nothing" — but MCP requires an input schema to be an object, so a client
+    // refuses them. Were this to regress it would be the ajv branch below that
+    // answered, and ajv calls both of them valid.
+    expect(inputSchemaDefect(true)).toEqual({ path: '/', reason: 'must be an object' });
+    expect(inputSchemaDefect(false)).toEqual({ path: '/', reason: 'must be an object' });
+    // `null` is a DECLARED schema that is not an object, not an absent one.
+    expect(inputSchemaDefect(null)).toEqual({ path: '/', reason: 'must be an object' });
+  });
+
+  /**
+   * The meta-schema says a `pattern` is a string and stops there. A client goes
+   * on to COMPILE it (the MCP SDK's validator is `ajv.compile`), which throws —
+   * and the tool is dropped exactly as silently as for any other defect.
+   */
+  it('reports a `pattern` that is not a compilable regular expression', () => {
+    expect(
+      inputSchemaDefect({
+        type: 'object',
+        properties: { code: { type: 'string', pattern: '[' } },
+      }),
+    ).toEqual({ path: '/properties/code/pattern', reason: 'must be a valid regular expression' });
+  });
+
+  it('reports a bad regex wherever a schema stands — inside `anyOf`, `items`, `$defs`', () => {
+    expect(
+      inputSchemaDefect({
+        type: 'object',
+        properties: { rows: { type: 'array', items: { anyOf: [{ type: 'string', pattern: 'a{2,1}' }] } } },
+      }),
+    ).toEqual({ path: '/properties/rows/items/anyOf/0/pattern', reason: 'must be a valid regular expression' });
+    expect(inputSchemaDefect({ type: 'object', $defs: { x: { pattern: '(' } }, properties: {} })).toEqual({
+      path: '/$defs/x/pattern',
+      reason: 'must be a valid regular expression',
+    });
+  });
+
+  it('reports a `patternProperties` KEY that is not a compilable regular expression', () => {
+    expect(inputSchemaDefect({ type: 'object', patternProperties: { 'a/[': { type: 'string' } } })).toEqual({
+      // `/` inside a name is `~1` in a JSON Pointer, so the path still points
+      // at one place.
+      path: '/patternProperties/a~1[',
+      reason: 'must be a valid regular expression',
+    });
+  });
+
+  it('accepts the regexes real schemas carry, including the ones only the `u` flag judges', () => {
+    expect(
+      inputSchemaDefect({
+        type: 'object',
+        properties: {
+          slug: { type: 'string', pattern: '^[a-zA-Z0-9_\\-]+$' },
+          phone: { type: 'string', pattern: '\\d{3}-\\d{2}' },
+          word: { type: 'string', pattern: '\\p{L}+' },
+          named: { type: 'string', pattern: '^(?<year>\\d{4})$' },
+        },
+        patternProperties: { '^x-': { type: 'string' } },
+      }),
+    ).toBeNull();
+  });
+
+  it('does not read a `pattern` that is a tool\'s own field, or one inside a `const`', () => {
+    expect(
+      inputSchemaDefect({
+        type: 'object',
+        // A field NAMED pattern, whose value happens to be the string `[`.
+        properties: { pattern: { type: 'string', const: '[' } },
+        default: { pattern: '[' },
+      }),
+    ).toBeNull();
+  });
+
+  /**
+   * FAIL-OPEN, the one branch where being wrong costs a working tool. A schema
+   * naming a dialect this validator has never heard of makes ajv throw, and a
+   * validator fault is not evidence against the server's tool.
+   */
+  it('reports no defect when the validator itself cannot process the schema', () => {
+    expect(
+      inputSchemaDefect({
+        $schema: 'https://example.invalid/draft/2029-13/schema',
+        type: 'object',
+        properties: {},
+      }),
+    ).toBeNull();
   });
 
   it('accepts a rich but valid schema — `anyOf` lists, `required` lists, nested `items`', () => {

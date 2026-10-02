@@ -361,16 +361,20 @@ describe('ToolPage: tools hidden for an invalid schema', () => {
     expect(screen.getByText(/rest of this server's tools are unaffected/i)).toBeInTheDocument();
   });
 
-  it('shows nothing when the server is healthy, or when the field is absent', async () => {
+  // Both cases wait for the DETAIL to be on screen, not for the heading: the
+  // heading comes from the route, so it is there before the response is, and
+  // asserting absence against it would pass on a page that had loaded nothing.
+  it('shows nothing when the server is healthy', async () => {
     toolsMock.getToolDetail.mockResolvedValue({ ...DETAIL, type: 'mcp', hiddenTools: [] });
     renderPage();
-    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    expect(await screen.findByText('Runs LinkedIn outreach campaigns.')).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Not offered to assistants' })).toBeNull();
+  });
 
-    // A backend that does not serve the field yet: the page must not break.
+  it('shows nothing — and does not break — when the backend does not serve the field', async () => {
     toolsMock.getToolDetail.mockResolvedValue({ ...DETAIL, type: 'mcp' });
     renderPage();
-    await screen.findAllByRole('heading', { name: 'heyreach', level: 1 });
+    expect(await screen.findByText('Runs LinkedIn outreach campaigns.')).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Not offered to assistants' })).toBeNull();
   });
 });

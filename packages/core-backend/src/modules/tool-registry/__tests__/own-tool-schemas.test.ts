@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import express from 'express';
 import { describe, expect, it } from 'vitest';
 import { inputSchemaDefect } from '@bevel-software/platform-mcp-core';
@@ -22,9 +23,13 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
  *
  * It registers the DEFS as `create-core-server` does, with stubs for the
  * services (no def-building path touches one: the lazy providers are resolved
- * with no caller context, which is their static form). Add a tool module to
- * the server and add it here; a missing one shows up as a tool count that
- * stopped growing.
+ * with no caller context, which is their static form).
+ *
+ * Add a tool module to the server and this test FAILS until it is added here:
+ * `covers every tool module the server registers` reads the server's own source
+ * and compares the `register…Tools` calls in it with `MODULES` below. A test
+ * that silently skipped a whole module's schemas would be worse than no test,
+ * because it would read as if it had checked them.
  */
 
 /**
@@ -41,47 +46,83 @@ const nothing = new Proxy(
   },
 ) as never;
 
-async function allOwnTools() {
+const pass: express.RequestHandler = (_req, _res, next) => next();
+const handler = (() => pass) as never;
+
+/** Where the server registers its tool modules — read, not imported, see below. */
+const CORE_SERVER_SOURCE = new URL('../../../core/create-core-server.ts', import.meta.url);
+
+/** Every tool-registering module, by the name the server calls it under. */
+const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) => void }> = [
+  {
+    name: 'registerWorkflowTools',
+    register: (registry) => registerWorkflowTools(registry, express.Router(), pass, handler, testKbContext()),
+  },
+  {
+    name: 'registerWorkspaceTools',
+    register: (registry) =>
+      registerWorkspaceTools(
+        registry,
+        express.Router(),
+        pass,
+        handler,
+        nothing,
+        nothing,
+        nothing,
+        testKbContext(),
+        { recoveryBotEmail: 'recovery@bevel.software', hooks: nothing, notes: new ToolDescriptionNotes() },
+        nothing,
+        nothing,
+      ),
+  },
+  {
+    name: 'registerSkillsTools',
+    register: (registry) => registerSkillsTools(registry, express.Router(), pass, handler, nothing),
+  },
+  { name: 'registerPluginsTools', register: (registry) => registerPluginsTools(registry) },
+  {
+    name: 'registerToolManualsTools',
+    register: (registry) =>
+      registerToolManualsTools(registry, express.Router(), pass, handler, nothing, {
+        accessControl: nothing,
+        variableStatus: nothing,
+        kb: testKbContext(),
+      }),
+  },
+];
+
+async function toolsOf(modules: ReadonlyArray<(typeof MODULES)[number]>) {
   const registry = new ToolRegistry();
-  const router = express.Router();
-  const pass: express.RequestHandler = (_req, _res, next) => next();
-  const handler = (() => pass) as never;
-  const kb = testKbContext();
-
-  registerWorkflowTools(registry, router, pass, handler, kb);
-  registerWorkspaceTools(
-    registry,
-    router,
-    pass,
-    handler,
-    nothing,
-    nothing,
-    nothing,
-    kb,
-    { recoveryBotEmail: 'recovery@bevel.software', hooks: nothing, notes: new ToolDescriptionNotes() },
-    nothing,
-    nothing,
-  );
-  registerSkillsTools(registry, router, pass, handler, nothing);
-  registerPluginsTools(registry);
-  registerToolManualsTools(registry, router, pass, handler, nothing, {
-    accessControl: nothing,
-    variableStatus: nothing,
-    kb,
-  });
-
+  for (const module of modules) module.register(registry);
   // Both surfaces: the external one is what reaches a connected AI client, the
   // internal one is what the in-app agent calls. Either can carry a bad schema.
   return [...(await registry.listExternal()), ...(await registry.listInternal())];
 }
 
+const allOwnTools = () => toolsOf(MODULES);
+
 describe("Hexis's own tool schemas", () => {
+  /**
+   * The harness's own guard, and the reason it reads a source file: nothing in
+   * the registry can tell this test about a module nobody registered. A count
+   * cannot either — a new module leaves it larger either way. The server's call
+   * list can, and it is the only place that knows the whole set.
+   */
+  it('covers every tool module the server registers', () => {
+    const source = readFileSync(CORE_SERVER_SOURCE, 'utf8');
+    const registered = [...source.matchAll(/\b(register\w*Tools)\s*\(/g)].map((m) => m[1]);
+    expect([...new Set(registered)].sort()).toEqual(MODULES.map((m) => m.name).sort());
+  });
+
+  it.each(MODULES.map((m) => [m.name, m] as const))('%s contributes tools to check', async (_name, module) => {
+    // A module that registers nothing — a renamed registry method, a provider
+    // that threw away its defs — would otherwise pass every assertion below
+    // while exercising nothing.
+    expect(await toolsOf([module])).not.toEqual([]);
+  });
+
   it('declares valid JSON Schema for every tool, on both surfaces', async () => {
-    const tools = await allOwnTools();
-    // A guard on the harness itself: an empty list would pass every assertion
-    // below and prove nothing.
-    expect(tools.length).toBeGreaterThan(20);
-    const defects = tools
+    const defects = (await allOwnTools())
       .map((tool) => ({ tool: tool.name, defect: inputSchemaDefect(tool.inputs) }))
       .filter((entry) => entry.defect !== null);
     // Named, not counted: a failure has to say WHICH tool and WHERE.

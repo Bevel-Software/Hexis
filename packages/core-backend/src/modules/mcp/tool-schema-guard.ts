@@ -36,6 +36,18 @@ export interface ScreenedTool {
 }
 
 /**
+ * A finding as the LOADING side needs it. The owner-facing `HiddenTool` is
+ * about a tool by the name an agent would have called it; the proxy also has to
+ * take the tool out of its repository and record it in the audit trail, and
+ * both of those know a tool by its UTCP name. Kept off `HiddenTool` so the
+ * owner-facing payload stays exactly what its surfaces declare.
+ */
+export interface ScreenedHiddenTool extends HiddenTool {
+  /** The UTCP name (`<manual>.<server>.<tool>`) the tool repository knows it by. */
+  utcpName: string;
+}
+
+/**
  * How many schema verdicts to remember. Each is a hash and a verdict, so the
  * cap is about a deployment that edits servers all day rather than about size;
  * past it the whole table is cleared instead of evicted entry by entry, since
@@ -43,55 +55,86 @@ export interface ScreenedTool {
  */
 const MAX_REMEMBERED_SCHEMAS = 5000;
 
+/** How many callers' pictures to hold at once — see `screen` for what happens past it. */
+const MAX_REMEMBERED_CALLERS = 2000;
+
 export class ToolSchemaGuard implements HiddenToolSource {
   /** Verdict per distinct schema: `null` means valid, so `undefined` means unchecked. */
   private readonly verdicts = new Map<string, SchemaDefect | null>();
-  /** Per manual, by catalog name. Replaced whole on each load — see `screen`. */
-  private readonly hidden = new Map<string, HiddenTool[]>();
+  /**
+   * The findings, per CALLER and then per manual by catalog name.
+   *
+   * Keyed by caller because that is what a load is: discovery runs on the
+   * requesting user's own connection to the server, and two callers can be
+   * shown different tools by the same server. A single table keyed by manual
+   * would let one caller's load erase another's finding — the owner page would
+   * then show a defect from whichever request happened to be last, or none at
+   * all. Keyed by caller, a load replaces only what that caller can see, and
+   * `hiddenFor` reports the union, since the finding is about the server.
+   */
+  private readonly hidden = new Map<string, Map<string, ScreenedHiddenTool[]>>();
 
   /** `check` is injected only by tests, to observe how often the check runs. */
   constructor(private readonly check: (schema: unknown) => SchemaDefect | null = inputSchemaDefect) {}
 
   /**
-   * Screen one server's freshly loaded tools, by the manual's CATALOG name.
-   * Returns the tools to keep off the agent surfaces, keyed by UTCP name.
+   * Screen everything one caller's request just loaded — every manual on their
+   * surface, with the tools that manual advertised — and replace that caller's
+   * whole picture. Returns the tools to keep off the agent surfaces, keyed by
+   * UTCP name.
    *
-   * The manual's findings are replaced WHOLE, so a server that corrected a
-   * schema loses its marker on the next load with nothing to clear by hand —
-   * and a server whose tools are all valid holds no entry at all.
+   * WHOLE is the point, and why this takes every manual rather than one. A
+   * manual whose group is EMPTY has nothing hidden: its server dropped the
+   * offending tool, or it failed to attach at all and its tools are not loaded.
+   * A manual absent from `groups` is no longer on this caller's surface. Either
+   * way the marker goes, with nothing to clear by hand — and nothing claims a
+   * tool is hidden for a schema this process can no longer see.
    */
-  screen(manual: string, tools: readonly ScreenedTool[]): Map<string, HiddenTool> {
-    const found = new Map<string, HiddenTool>();
-    for (const tool of tools) {
-      const defect = this.verdict(tool.inputSchema);
-      if (!defect) continue;
-      found.set(tool.utcpName, {
-        manual,
-        name: tool.mcpName,
-        path: defect.path,
-        reason: defect.reason,
-        marker: schemaDefectMarker(defect),
-      });
+  screen(userId: string, groups: ReadonlyMap<string, readonly ScreenedTool[]>): Map<string, ScreenedHiddenTool> {
+    const found = new Map<string, ScreenedHiddenTool>();
+    const picture = new Map<string, ScreenedHiddenTool[]>();
+    for (const [manual, tools] of groups) {
+      const ofManual: ScreenedHiddenTool[] = [];
+      for (const tool of tools) {
+        const defect = this.verdict(tool.inputSchema);
+        if (!defect) continue;
+        const hidden: ScreenedHiddenTool = {
+          manual,
+          name: tool.mcpName,
+          utcpName: tool.utcpName,
+          path: defect.path,
+          reason: defect.reason,
+          marker: schemaDefectMarker(defect),
+        };
+        found.set(tool.utcpName, hidden);
+        ofManual.push(hidden);
+      }
+      if (ofManual.length > 0) picture.set(manual, ofManual);
     }
-    if (found.size > 0) this.hidden.set(manual, [...found.values()]);
-    else this.hidden.delete(manual);
+    if (picture.size > 0) {
+      // Not about size — each entry is a handful of strings — but about a
+      // deployment with many callers never growing this without bound. Cleared
+      // whole rather than evicted one by one: the next load of each surface
+      // puts its own findings back.
+      if (this.hidden.size >= MAX_REMEMBERED_CALLERS && !this.hidden.has(userId)) this.hidden.clear();
+      this.hidden.set(userId, picture);
+    } else {
+      this.hidden.delete(userId);
+    }
     return found;
   }
 
   hiddenFor(manual: string): HiddenTool[] {
-    return this.hidden.get(manual) ?? [];
-  }
-
-  /**
-   * The finding for a tool an agent called by the name it would have been
-   * offered under — the one case where a hidden tool has to answer for itself.
-   */
-  hiddenByAgentName(name: string): HiddenTool | undefined {
-    for (const tools of this.hidden.values()) {
-      const match = tools.find((t) => t.name === name);
-      if (match) return match;
+    const union = new Map<string, HiddenTool>();
+    for (const picture of this.hidden.values()) {
+      for (const { manual: of, name, path, reason, marker } of picture.get(manual) ?? []) {
+        // One entry per distinct defect: two callers shown the same broken tool
+        // have found one thing, and its owner should read it once. Projected to
+        // the owner-facing shape, so nothing of the loading side rides along.
+        union.set(`${name}\u0000${path}\u0000${reason}`, { manual: of, name, path, reason, marker });
+      }
     }
-    return undefined;
+    return [...union.values()];
   }
 
   /** The check itself, once per distinct schema. */
