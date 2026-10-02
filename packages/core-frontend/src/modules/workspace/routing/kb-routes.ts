@@ -363,13 +363,14 @@ export function useFileNav() {
    * is a dead click. Two surfaces do that:
    *
    *   - The frontmatter panel, for a link-valued field.
-   *   - Agent HTML, via `bevel.navigate(href)` from its own inline script.
-   *     NOT via an anchor: `sanitizeAgentHtml` strips an `href` that
-   *     `isInternalNodeLink` rejects, which is every scheme-bearing URL, so
-   *     an external anchor loses its href before the nav bridge ever sees
-   *     it. The scripted call is the reachable path, and it is why the
-   *     allowlist below is load-bearing rather than belt-and-braces: that
-   *     argument is an arbitrary string no sanitizer inspected.
+   *   - Agent HTML, two ways. A WRITTEN anchor whose address
+   *     `sanitizeAgentHtml` kept — a document of the knowledge base, or an
+   *     `http:`, `https:` or `mailto:` address — reaches here through the
+   *     nav bridge, which cancels the click the sandbox would not let the
+   *     iframe make. And `bevel.navigate(href)` from the page's own inline
+   *     script, which is why the allowlist below is load-bearing rather than
+   *     belt-and-braces: that argument is an arbitrary string no sanitizer
+   *     ever inspected.
    *
    * (A markdown BODY link never arrives here: the pipeline renders an
    * external destination as a plain `target="_blank"` anchor and the browser
