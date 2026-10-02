@@ -6,6 +6,8 @@ import { assertKeyDecodesTo32Bytes } from './shared/token-crypto.js';
 import { DEFAULT_GIT_TIMEOUT_MS } from './modules/workflow/git/node-git-runner.js';
 import { DEFAULT_DB_SCHEMA, assertSchemaName } from './modules/database/connection.js';
 import { logger } from './shared/logging.js';
+import { hasControlCharacter } from './modules/kb-fs/repo-path.js';
+import { sanitizedPath } from './shared/printable.js';
 
 const log = logger('config');
 
@@ -624,6 +626,17 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
       path.isAbsolute(this.kbDirName)
     ) {
       throw new Error(`KB_DIR_NAME must be a single path segment: ${this.kbDirName}`);
+    }
+    // A control character, a line break above all: this name is PREFIXED onto
+    // every workspace-relative path, and a line break in a path is a separator
+    // in git's line-oriented stdin protocols (`cat-file --batch` reads one
+    // `<ref>:<path>` per line). A name carrying one would make the normaliser
+    // emit the very path it refuses from a caller — so the deployment fails to
+    // boot rather than resolving paths nothing downstream can safely read.
+    if (hasControlCharacter(this.kbDirName)) {
+      throw new Error(
+        `KB_DIR_NAME must not contain a control character: "${sanitizedPath(this.kbDirName)}"`,
+      );
     }
   }
 }

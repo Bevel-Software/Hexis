@@ -67,6 +67,16 @@ describe('assertValidRelativePath', () => {
     ['nested parent', 'a/../b'],
     ['current segment', 'a/./b'],
     ['null byte', 'a\x00b'],
+    // A line break is not merely an unwritable name: git's `cat-file --batch`
+    // reads one `<ref>:<path>` object name per LINE, so a path carrying one
+    // is two specs and git answers about the first — under the gates that were
+    // asked about the whole string. Every other control character goes with
+    // them, matching what the shared `validateFilename` has always refused.
+    ['line feed', 'Docs/secret.md\nzzz'],
+    ['carriage return', 'Docs/secret.md\rzzz'],
+    ['tab', 'Docs/a\tb.md'],
+    ['escape', 'Docs/a\u001Bb.md'],
+    ['delete', 'Docs/a\u007Fb.md'],
     ['leading dash', '-afile'],
   ])('rejects %s (%s)', (_label, p) => {
     expect(() => assertValidRelativePath(p)).toThrow(WorkflowValidationError);

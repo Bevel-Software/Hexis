@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
-import { Button } from '../../../../shared/components';
-import { useRendererWorkspaceId } from './rendererWorkspace';
+import { useRendererFileRef, useRendererWorkspaceId } from './rendererWorkspace';
+import { RetryReadButton } from './RetryReadButton';
+import { useReadRetry } from './useReadRetry';
 import { useImageRevision } from '../../hooks/useImageRevision';
 import { authFetch } from '../../../../lib/api';
 import { rawFileUrl } from '../../services/workspace.api';
@@ -31,19 +32,35 @@ export function ImageRenderer({ filePath }: FileRendererProps) {
    * its author may still be pushing to while a reviewer looks at it.
    */
   const revision = useImageRevision(workspaceId);
+  /**
+   * A past save, when Version history mounted this. The revision above is
+   * then deliberately NOT folded in: the bytes at a commit cannot change, so
+   * `&v=` would only defeat the browser cache, and the revision bumps on every
+   * save of the file — which for a version pane means a re-read of a version
+   * that is not what changed.
+   */
+  const fileRef = useRendererFileRef();
+  /**
+   * The save as PRIMITIVES, hoisted out of the object so the read effect can
+   * depend on exactly what it reads. Depending on `fileRef` itself would put
+   * a context object in the dependency list.
+   */
+  const versionRef = fileRef?.ref ?? null;
+  const versionSide = fileRef?.side;
+  /**
+   * The cache key of a WORKING-TREE read, and nothing else. Folding the
+   * revision into a version read would not just waste a request: a teammate
+   * saving the file while a past save is on screen would bump it, the read
+   * effect would re-run, and the picture the reader is looking at would blink
+   * back to "Loading image…" for bytes that cannot have changed.
+   */
+  const revisionKey = versionRef === null ? revision : null;
   // Blob and failure in ONE value, so the cleanup that drops the old blob
   // drops the old failure with it — a second `useState` would need a reset in
   // the effect body, which costs a cascading render on every path change.
   const [read, setRead] = useState<ImageRead>(NOT_READ);
-  /**
-   * Bumped by Try again, and a dependency of the read below — which is the
-   * whole mechanism. A failure whose `workspaceId`, path and revision are all
-   * unchanged has nothing to re-trigger the effect, so a dropped connection or
-   * a 502 was terminal until the pane remounted; a reviewer with a dialog open
-   * had no way back to the picture. Automatic recovery on a path or revision
-   * change is untouched: those change the deps by themselves.
-   */
-  const [attempt, setAttempt] = useState(0);
+  /** Bumped by Try again, and a dependency of the read below — see the hook. */
+  const { attempt, retry } = useReadRetry();
 
   useEffect(() => {
     if (!workspaceId) return;
@@ -51,7 +68,15 @@ export function ImageRenderer({ filePath }: FileRendererProps) {
     let revoked = false;
     (async () => {
       try {
-        const res = await authFetch(rawFileUrl(workspaceId, filePath, { version: revision }));
+        const res = await authFetch(
+          rawFileUrl(
+            workspaceId,
+            filePath,
+            versionRef === null
+              ? { version: revisionKey ?? undefined }
+              : { ref: versionRef, side: versionSide },
+          ),
+        );
         if (revoked) return;
         if (!res.ok) {
           setRead({ objectUrl: null, error: `Couldn't load this image (HTTP ${res.status}).` });
@@ -74,7 +99,7 @@ export function ImageRenderer({ filePath }: FileRendererProps) {
         return prev === NOT_READ ? prev : NOT_READ;
       });
     };
-  }, [workspaceId, filePath, revision, attempt]);
+  }, [workspaceId, filePath, revisionKey, versionRef, versionSide, attempt]);
 
   if (read.error) {
     return (
@@ -82,9 +107,7 @@ export function ImageRenderer({ filePath }: FileRendererProps) {
         <p role="alert" className="text-detail text-danger">
           {read.error}
         </p>
-        <Button variant="outline" size="tiny" onClick={() => setAttempt((n) => n + 1)}>
-          Try again
-        </Button>
+        <RetryReadButton onRetry={retry} />
       </div>
     );
   }

@@ -1021,12 +1021,6 @@ function RowNotice({
 // ── Tree Node ──
 
 const DRAG_MIME = 'application/x-workspace-path';
-/**
- * What kind of row is being dragged — `directory` or `file`. The path alone
- * does not say (a folder may be named like a file), and the move dialog asks
- * a file-only access question, so the kind travels with the path.
- */
-const DRAG_KIND_MIME = 'application/x-workspace-kind';
 
 export function FileTreeNode({
   entry,
@@ -1308,10 +1302,9 @@ export function FileTreeNode({
   const handleDragStart = useCallback((e: React.DragEvent) => {
     if (isRoot || reserved || dragRefusal) { e.preventDefault(); return; }
     e.dataTransfer.setData(DRAG_MIME, entry.relativePath);
-    e.dataTransfer.setData(DRAG_KIND_MIME, entry.type);
     e.dataTransfer.effectAllowed = 'move';
     setDragging(true);
-  }, [entry.relativePath, entry.type, isRoot, reserved, dragRefusal]);
+  }, [entry.relativePath, isRoot, reserved, dragRefusal]);
 
   const handleDragEnd = useCallback(() => {
     setDragging(false);
@@ -1368,7 +1361,6 @@ export function FileTreeNode({
         confirm({
           kind: 'move',
           sourcePath,
-          sourceIsDirectory: e.dataTransfer.getData(DRAG_KIND_MIME) === 'directory',
           targetDir,
           // Named after the row that was dropped on, so a drop that resolved
           // to the clone's root still reads as "the top level".
@@ -1978,9 +1970,12 @@ export function TreeChrome({
   // nothing about access it cannot resolve. `kbDirName` alone is the KB root.
   const insideKb = (path: string) =>
     !!kbDirName && (path === kbDirName || path.startsWith(`${kbDirName}/`));
+  // Folders are asked about as well as files. The rules a folder carries are
+  // the `access.md` files inside it, and the resolver counts them at the
+  // paths they land on — so a rename of a folder that grants its own access
+  // answers "nothing changes", which is what happens.
   const accessLookup =
     moveRequest && workspaceId && kbDirName
-    && !moveRequest.sourceIsDirectory
     && moveRequest.sourcePath.startsWith(`${kbDirName}/`)
     && insideKb(moveRequest.targetDir)
       ? moveRequest

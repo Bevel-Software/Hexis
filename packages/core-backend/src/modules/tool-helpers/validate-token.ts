@@ -35,7 +35,7 @@ export type ValidateToken = (
 ) => Promise<ToolContext>;
 
 export function createToolValidator(deps: ToolValidatorDeps): ValidateToken {
-  const verify = createTokenVerifier(deps.externalApiKeyService, deps.internalTokenService);
+  const verify = createTokenVerifier(deps.externalApiKeyService, deps.internalTokenService, deps.authService);
   const resolve = createToolContextResolver(deps);
   return async (token, signal) => {
     let result;

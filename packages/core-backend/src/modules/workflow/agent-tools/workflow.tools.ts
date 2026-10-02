@@ -9,6 +9,12 @@ import { assertBranchProvided } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
 import { RETIRED_TOOL_MESSAGES } from '@bevel-software/platform-mcp-core';
+import {
+  CHANGE_REQUEST_INCLUDES,
+  CHANGE_REQUEST_PATH_LIMIT,
+  parseInclude,
+  summarizeChangeRequest,
+} from './change-request-summary.js';
 
 /** `knowledge-base/KnowledgeBase/x.md` → `KnowledgeBase/x.md`; anything else unchanged. */
 function stripKbDir(path: string, kbDirName: string): string {
@@ -47,20 +53,31 @@ const commitSchema: JsonSchema = {
   required: ['authorName', 'authorEmail', 'sha', 'subject', 'committedAt'],
 };
 
-const changeRequestFileSchema: JsonSchema = {
+const changeRequestSummaryFileSchema: JsonSchema = {
   type: 'object',
   properties: {
     path: { type: 'string' },
-    previousPath: { type: 'string', description: 'Set for renames/copies.' },
-    status: { type: 'string', description: '`added` | `modified` | `removed` | `renamed` | `copied` | `changed` | `unchanged`.' },
-    additions: { type: 'integer' },
-    deletions: { type: 'integer' },
-    patch: { type: 'string', description: 'Unified diff; absent for binary or oversized files.' },
-    isBinary: { type: 'boolean' },
-    sha: { type: 'string', description: 'Blob SHA at the change-request head.' },
-    rawUrl: { type: 'string' },
+    change: { type: 'string', description: '`added` | `changed` | `deleted` | `moved`.' },
+    previousPath: { type: 'string', description: 'Where a `moved` file came from.' },
+    patch: {
+      type: 'string',
+      description: 'Unified diff. Only with `include: ["patches"]`, and absent for a binary or oversized file.',
+    },
   },
-  required: ['path', 'status', 'additions', 'deletions', 'isBinary', 'sha', 'rawUrl'],
+  required: ['path', 'change'],
+};
+
+const changeRequestApproversSchema: JsonSchema = {
+  type: 'object',
+  properties: {
+    path: { type: 'string' },
+    roles: { type: 'array', items: { type: 'string' }, description: 'Roles that confer approval here; `everyone` means any signed-in approver.' },
+    users: { type: 'array', items: { type: 'string' }, description: 'Approvers named directly, by display name.' },
+    approved: { type: 'boolean', description: 'True once an eligible approver has approved at the current head.' },
+    inMergeGate: { type: 'boolean', description: 'False when the merge gate does not bind this path — then nobody has to approve it.' },
+    approversUnknown: { type: 'boolean', description: 'Present when the access tree could not be resolved: empty `roles`/`users` means unknown, not nobody.' },
+  },
+  required: ['path', 'roles', 'users', 'approved', 'inMergeGate'],
 };
 
 const commentSchema: JsonSchema = {
@@ -99,24 +116,43 @@ function linkOf(cr: { number: number; url: string; urlNote?: string }): { number
   return { number: cr.number, url: cr.url, ...(cr.urlNote ? { urlNote: cr.urlNote } : {}) };
 }
 
-const changeRequestDetailSchema: JsonSchema = {
+/**
+ * What `open_change_request` answers: a summary, `url` first, with no patch and
+ * no file content. The app's dialog reads the full detail from its own route;
+ * handing that to an agent cost ~445,000 characters for 27 files of 15 KB and
+ * overflowed every tool-result limit. Built by `summarizeChangeRequest`.
+ *
+ * Property order is the answer's field order, and `url` leads it: the link is
+ * the one field the agent must hand the user, so it must survive any truncation.
+ */
+const changeRequestSummarySchema: JsonSchema = {
   type: 'object',
-  description: 'Full change-request detail (aliased from the underlying pull request).',
   properties: {
-    number: { type: 'integer' },
     url: changeRequestUrlSchema,
     urlNote: changeRequestUrlNoteSchema,
+    number: { type: 'integer' },
     title: { type: 'string' },
-    body: { type: 'string' },
-    author: { type: 'object', properties: { login: { type: 'string' }, name: { type: 'string' } }, required: ['login'] },
-    headSha: { type: 'string' },
-    baseSha: { type: 'string' },
-    files: { type: 'array', items: changeRequestFileSchema },
-    comments: { type: 'array', items: commentSchema },
-    approvals: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Per-file approval state, one entry per file in `files`.' },
+    state: { type: 'string', description: '`open` | `merged` | `closed`.' },
+    sourceBranch: { type: 'string', description: 'The draft branch carrying the changes.' },
+    targetBranch: { type: 'string', description: 'The branch the changes apply to.' },
+    approvals: {
+      type: 'array',
+      items: changeRequestApproversSchema,
+      description: 'Who must approve, one entry per listed file. A file nobody can approve (`inMergeGate: false`) blocks nothing.',
+    },
+    mergeBlockedReasons: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'What blocks the merge — every missing approval, whether its file is listed or cut. Empty when nothing blocks.',
+    },
+    files: {
+      type: 'array',
+      items: changeRequestSummaryFileSchema,
+      description: `The changed paths with their kind of change, cut to ${CHANGE_REQUEST_PATH_LIMIT}; \`include: ["all-paths"]\` lists them all.`,
+    },
+    totalFiles: { type: 'integer', description: 'How many files the request changes in total, cut or not.' },
   },
-  required: ['number', 'url', 'title', 'body', 'headSha', 'baseSha', 'files', 'comments', 'approvals'],
-  additionalProperties: true,
+  required: ['url', 'number', 'title', 'state', 'sourceBranch', 'targetBranch', 'approvals', 'mergeBlockedReasons', 'files', 'totalFiles'],
 };
 
 /**
@@ -399,6 +435,12 @@ export function registerWorkflowTools(
       'Open a change request from a draft branch into a target branch. Auto-merges the latest target ' +
       'into the source first, pushes, then creates the CR. On conflicts returns a ' +
       '`change-request-conflicts` error with affected paths. The author marker is injected server-side. ' +
+      'Answers a SUMMARY, not the request\'s content: `url` first (hand it to the user), then `number`, ' +
+      '`title`, `state`, `sourceBranch`, `targetBranch`, `approvals` (who must approve each file), ' +
+      '`mergeBlockedReasons` (what blocks the merge), and `files` — the changed paths with their kind of ' +
+      `change (\`added\` / \`changed\` / \`deleted\` / \`moved\`), cut to ${CHANGE_REQUEST_PATH_LIMIT} of \`totalFiles\`. ` +
+      'No patches and no file content: ask for the diffs with `include: ["patches"]` and for every path ' +
+      'with `include: ["all-paths"]`. ' +
       'An agent proposes; a person reviews and merges the request in the app — hand the user its `url`.',
     inputs: {
       type: 'object',
@@ -407,28 +449,37 @@ export function registerWorkflowTools(
         targetBranch: { type: 'string', minLength: 1, description: `The branch to apply to (e.g. '${kb.defaultBranch}').` },
         title: { type: 'string', minLength: 1, maxLength: 256, description: 'Short imperative title (≤256 chars).' },
         description: { type: 'string', description: 'Optional markdown body shown verbatim to reviewers.' },
+        include: {
+          type: 'array',
+          items: { type: 'string', enum: [...CHANGE_REQUEST_INCLUDES] },
+          description:
+            'Add to the default answer, which carries neither: `patches` gives each listed file its unified diff, ' +
+            `\`all-paths\` lists every changed path instead of the first ${CHANGE_REQUEST_PATH_LIMIT}. Both may be given. ` +
+            'Patches of a large request run to hundreds of thousands of characters — ask for them only when you will read them.',
+        },
       },
       required: ['sourceBranch', 'targetBranch', 'title'],
       additionalProperties: false,
     },
-    outputs: {
-      type: 'object',
-      properties: { changeRequest: changeRequestDetailSchema },
-      required: ['changeRequest'],
-    },
+    outputs: changeRequestSummarySchema,
     write: true,
     // The workspace this acts on is the SOURCE draft's — `sourceBranch` already
     // names it, so skip the auto-injected (and here redundant) `branch` input
     // rather than asking the model for both and reading the wrong one.
     skipBranch: true,
-    handler: async (args, ctx: ToolContext) => ({
-      changeRequest: await ctx.workflowService.openChangeRequest(workspaceIdForBranch(args.sourceBranch as string), ctx.user, {
-        sourceBranch: args.sourceBranch as string,
-        targetBranch: args.targetBranch as string,
-        title: args.title as string,
-        description: typeof args.description === 'string' ? args.description : undefined,
-      }),
-    }),
+    // The service still returns the full detail — the app's routes serve the
+    // same call and must keep getting it. The shaping happens here, in the
+    // answer, so nothing below the tool changes.
+    handler: async (args, ctx: ToolContext) =>
+      summarizeChangeRequest(
+        await ctx.workflowService.openChangeRequest(workspaceIdForBranch(args.sourceBranch as string), ctx.user, {
+          sourceBranch: args.sourceBranch as string,
+          targetBranch: args.targetBranch as string,
+          title: args.title as string,
+          description: typeof args.description === 'string' ? args.description : undefined,
+        }),
+        parseInclude(args.include),
+      ),
   });
 
   mount({

@@ -14,7 +14,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { createHmac } from 'node:crypto';
 import { TokenCrypto } from '../../shared/token-crypto.js';
-import { assertKbDirNameFree } from '../kb-fs/repo-path.js';
+import { assertKbDirNameFree, hasControlCharacter } from '../kb-fs/repo-path.js';
 import { parseRetentionWindow } from '../audit/audit.contract.js';
 import { normalizeIssuerUrl } from './oidc-check.js';
 import { GIT_MODES, isGitMode } from './repository-source.js';
@@ -210,10 +210,15 @@ export const CORE_SETTINGS: SettingDef[] = [
     envVar: 'KB_DIR_NAME',
     section: 'knowledge-base',
     // Joined with workspace paths, so a separator or `..` would let it escape
-    // the workspace directory.
+    // the workspace directory — and a control character would be PREFIXED onto
+    // every path, where a line break is a separator to git's `cat-file
+    // --batch` and would make the normaliser emit a path it refuses from a
+    // caller (see `hasControlCharacter`).
     validate: (v) =>
       v && v !== '.' && v !== '..' && !v.includes('/') && !v.includes('\\')
-        ? null
+        ? hasControlCharacter(v)
+          ? 'Use a single folder name — no line breaks or other invisible characters.'
+          : null
         : 'Use a single folder name — no slashes.',
     // Copied into a dozen services when they are constructed. A running server
     // keeps the name it started with.

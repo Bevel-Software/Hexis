@@ -5,6 +5,7 @@ const log = logger('auth');
 import type { AuthService } from './auth.service.js';
 import { AUTH_COOKIE_NAME } from './auth.middleware.js'; // also imports Express Request augmentation
 import { FixedWindowRateLimiter } from './rate-limit.js';
+import { AccountDeactivatedError } from './account-admission.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
 
 /**
@@ -113,6 +114,13 @@ export function createAuthRoutes(
       });
       res.json(result);
     } catch (error) {
+      // The password was right and an admin switched the account off: said
+      // as such (only ever after the password is proven, see
+      // `loginWithPassword`), so the person knows whom to ask.
+      if (error instanceof AccountDeactivatedError) {
+        res.status(403).json({ error: error.message });
+        return;
+      }
       const msg = error instanceof Error ? error.message : 'Unknown error';
       log.error('Login error:', { detail: msg });
       res.status(401).json({ error: 'Authentication failed' });

@@ -228,6 +228,30 @@ export interface IWorkflowService {
     sha: string,
   ): Promise<{ baseline: string | null; current: string | null }>;
   /**
+   * One file's BYTES at a change, for the viewers that read the file itself
+   * rather than a text buffer — a past save of a pdf, an image, a Word
+   * document, a deck, a workbook, a message.
+   *
+   * `side: 'after'` is the file as that save left it; `'before'` is `<sha>^`,
+   * which is what the save that DELETED a file has to show. `null` means the
+   * file was not there on the side asked for.
+   *
+   * Refuses a sha that is not in the history of the branch the workspace has
+   * checked out — a past version is served per branch, and the text history
+   * routes above carry the same rule. Access to the file itself is the
+   * caller's to check, exactly as for `fileAtChange`.
+   *
+   * `Uint8Array`, not `Buffer`: this interface is isomorphic and `packages/
+   * shared` carries no node types. The backing implementation returns a
+   * `Buffer`, which IS one.
+   */
+  fileBytesAtChange(
+    workspaceId: string,
+    path: string,
+    sha: string,
+    side: 'after' | 'before',
+  ): Promise<{ bytes: Uint8Array; blobId: string } | null>;
+  /**
    * One file as it stood at a change request's fork point (`sha`, which must
    * lie on the target branch's history) — the "before" side of the request
    * dialog's diff. `null` when the path did not exist there. Access is the
