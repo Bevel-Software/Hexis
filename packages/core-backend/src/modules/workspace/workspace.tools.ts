@@ -2649,7 +2649,8 @@ export function registerWorkspaceTools(
     gated: true,
     description:
       'Copy a workspace FILE to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you. ' +
-      'Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the copy has landed, with every `access.md` inside a copied folder counted at its new place.',
+      'Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the copy has landed, with every `access.md` inside a copied folder counted at its new place. ' +
+      'One exception to that shape: when the destination is one you may not write, the answer is the refusal alone — `allowed: false` with `reason`, and no `kind` and no `descendants`, because nothing about the source is read before that verdict.',
     inputs: {
       type: 'object',
       properties: {
@@ -2667,8 +2668,8 @@ export function registerWorkspaceTools(
       properties: {
         src: str('Source path (echoes the input).'),
         dest: str('Destination path (echoes the input).'),
-        kind: str('`file` or `folder` (dry run only).'),
-        descendants: int('Files the copy would carry: 1 for a file, the file count under a folder (dry run only).'),
+        kind: str('`file` or `folder` (dry run only; absent when `allowed` is false because you may not write the destination).'),
+        descendants: int('Files the copy would carry: 1 for a file, the file count under a folder (dry run only; absent when `allowed` is false because you may not write the destination).'),
         access: { type: 'object', description: 'Your `{ read, write, download, owner }` at the source (`before`) and at the destination once the copy has landed (`after`) — dry run only.' },
         accessChanges: { type: 'boolean', description: 'True when any of your verdicts differs between `before` and `after` (dry run only).' },
         allowed: { type: 'boolean', description: 'Whether the copy may run (dry run only).' },

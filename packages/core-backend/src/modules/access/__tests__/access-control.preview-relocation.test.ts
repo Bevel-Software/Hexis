@@ -254,7 +254,17 @@ describe('AccessControlService.previewAccessAfterRelocation', () => {
     expect(await verbsAt(done, 'Legal')).toMatchObject({ write: true, owner: true });
   });
 
-  it('a file copied under any other name carries no folder rules with it', async () => {
+  /**
+   * The name the bytes land under decides what they GOVERN, and it decides
+   * how they are PARSED: the same frontmatter is a folder's rules in an
+   * `access.md` and the file's own rules anywhere else. So these bytes
+   * govern no folder at `Legal/rules-copy.md` — and still grant the caller
+   * write and owner, on that one file. Reading them as the source's name said
+   * `write: false, owner: false`, and the copy then handed over both: a
+   * preview contradicting the operation it was previewing, which is the
+   * entire fault this ticket exists to kill.
+   */
+  it('a file copied under any other name governs no folder, but keeps its own grants', async () => {
     await write({
       ...BASE,
       'Sales/access.md': rules(`write:\n  - Mover <${MOVER}>\nowner:\n  - Mover <${MOVER}>\n`),
@@ -262,13 +272,48 @@ describe('AccessControlService.previewAccessAfterRelocation', () => {
     });
 
     const svc = service();
-    // The same bytes, landing as an ordinary note: they govern nothing there,
-    // so the answer is the destination's own, exactly as the gates say.
     const after = await svc.previewAccessAfterRelocation(
       workspaceId, MOVER, 'Sales/access.md', 'Legal/rules-copy.md', { sourceRemains: true },
     );
-    expect(after).toEqual(await verbsAt(svc, 'Legal/rules-copy.md'));
-    expect(after).toMatchObject({ write: false, owner: false });
+    // Pinned, not merely equal to the outcome: both sides reading `false`
+    // would satisfy the comparison below and be wrong together.
+    expect(after).toMatchObject({ write: true, owner: true });
+
+    await reallyCopy('Sales/access.md', 'Legal/rules-copy.md');
+    const done = service();
+    expect(await verbsAt(done, 'Legal/rules-copy.md')).toEqual(after);
+    // The folder it landed in is untouched: an ordinary note governs nothing
+    // but itself, whatever its frontmatter says.
+    expect(await verbsAt(done, 'Legal')).toMatchObject({ write: false, owner: false });
+    expect(await verbsAt(done, 'Legal/note.md')).toMatchObject({ write: false, owner: false });
+  });
+
+  /**
+   * And the mirror, which `copy_file` also allows: ordinary bytes landing as
+   * a directory's `access.md` become that directory's rules the moment they
+   * land. The preview reads them as the destination will.
+   */
+  it('a file copied TO an access.md gives the destination folder its rules', async () => {
+    await write({
+      ...BASE,
+      'Draft/proposed-rules.md': rules(`write:\n  - Mover <${MOVER}>\nowner:\n  - Mover <${MOVER}>\n`),
+      'Legal/note.md': '# Note\n',
+    });
+
+    const svc = service();
+    expect(await verbsAt(svc, 'Legal')).toMatchObject({ write: false, owner: false });
+
+    const after = await svc.previewAccessAfterRelocation(
+      workspaceId, MOVER, 'Draft/proposed-rules.md', 'Legal/access.md', { sourceRemains: true },
+    );
+    expect(after).toMatchObject({ write: true, owner: true });
+
+    await reallyCopy('Draft/proposed-rules.md', 'Legal/access.md');
+    const done = service();
+    expect(await verbsAt(done, 'Legal/access.md')).toEqual(after);
+    // It governs the folder now, which is the whole difference the name makes.
+    expect(await verbsAt(done, 'Legal')).toMatchObject({ write: true, owner: true });
+    expect(await verbsAt(done, 'Legal/note.md')).toMatchObject({ write: true, owner: true });
   });
 
   /**

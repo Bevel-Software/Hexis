@@ -2381,11 +2381,12 @@ describe('FileExplorer: delete and move ask first', () => {
      * The one drag test that actually DRAGS.
      *
      * Every other drop here hands the handler a `dataTransfer` built by the
-     * test, with the source path and kind written in by hand. That skips the
-     * handshake: `handleDragStart` writing the payload, and `handleDrop`
-     * reading it back under the same two MIME keys. Stop setting the payload,
-     * rename a key, or leave the row undraggable, and all of those tests still
-     * pass while no real drag in the app does anything at all.
+     * test, with the source path written in by hand. That skips the handshake:
+     * `handleDragStart` writing the payload, and `handleDrop` reading it back
+     * under the same MIME key — one key, the dragged row's path, since the
+     * dialog stopped needing the row's kind. Stop setting the payload, rename
+     * the key, or leave the row undraggable, and all of those tests still pass
+     * while no real drag in the app does anything at all.
      *
      * This one grabs the row, lets the component's own `dragStart` fill a
      * DataTransfer that behaves like the browser's (what `setData` stores is
