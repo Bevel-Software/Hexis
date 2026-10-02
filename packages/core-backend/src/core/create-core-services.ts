@@ -12,6 +12,7 @@ import { sql } from 'drizzle-orm';
 import { DEFAULT_DB_SCHEMA, assertSearchPath } from '../modules/database/connection.js';
 import { DEFAULT_SECRETS_SCOPE } from '../modules/secrets-vault/secrets-variable-loader.js';
 import { KbContext } from '../shared/kb-context.js';
+import { branchForWorkspaceId } from '../shared/workspace-id.js';
 import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
@@ -506,6 +507,39 @@ export async function createCoreServices(
    * sweeps (see the runner's `reconcileClonesWithConfiguredRepository`).
    */
   const replacedWorkingCopiesRoot = path.join(config.backupsRoot, 'replaced-working-copies');
+  /**
+   * What must leave with a working copy that is set aside, whoever sets it
+   * aside: the startup phase, or the workspace service on a branch open.
+   *
+   * Its queue: whatever still waits to be committed into that copy was
+   * written against the repository that was left, and the path it names is
+   * about to hold a fresh clone of another one. Held for a person, on every
+   * branch, never written and never deleted.
+   *
+   * And the locks on its branch: each is a claim on a file of the copy that
+   * is going. Left standing, a holder still connected keeps one alive with
+   * heartbeats, and the same path in the new repository refuses everybody
+   * else. Dropped without enqueueing anything, as when change requests are
+   * closed as "repository replaced".
+   *
+   * Throws when either cannot be done, and the caller then leaves the copy
+   * where it is. Reaches FORWARD to both services, like `gitService` below:
+   * it is only ever called long after this function has returned them.
+   */
+  const releaseWorkOnSetAsideCopy = async (workspaceId: string): Promise<void> => {
+    const held = await pendingCommitsService.markNeedsAttentionInWorkspace(
+      workspaceId,
+      'The knowledge-base repository was replaced while this commit was still queued, so it was never ' +
+        'written. The bytes are kept here: the working copy it was meant for belongs to the previous repository.',
+    );
+    if (held > 0) {
+      logger('kb-startup').warn(
+        `${held} queued commit(s) for the working copy "${workspaceId}" need attention: the repository was ` +
+          'replaced before they landed, so they were not written to the new one.',
+      );
+    }
+    await fileLockService.releaseAllOnBranch(branchForWorkspaceId(workspaceId));
+  };
   const workspaceService = new WorkspaceService(
     config.workspacesRoot,
     () => repositorySource.url(),
@@ -513,6 +547,30 @@ export async function createCoreServices(
     disk,
     gitRunner,
     replacedWorkingCopiesRoot,
+    // A branch opened onto a clone of another repository sets it aside on
+    // the spot, with nobody having stopped the commit worker for it. So it
+    // is held here, for the one move, and the copy's work leaves first and
+    // is looked for again once the copy has gone: a release that queued its
+    // bytes in between was writing to the copy that left.
+    //
+    // Only the first look may refuse the branch: the copy has not moved yet.
+    // The second runs after the move, so its failure is tried once more and
+    // then logged, as the startup phase logs the same step. Refusing then
+    // would report a move that did happen as one that did not.
+    (workspaceId, move) =>
+      leased.whileHeld(async () => {
+        await releaseWorkOnSetAsideCopy(workspaceId);
+        await move();
+        await releaseWorkOnSetAsideCopy(workspaceId)
+          .catch(() => releaseWorkOnSetAsideCopy(workspaceId))
+          .catch((err: unknown) => {
+            logger('workspace').error(
+              `the working copy "${workspaceId}" was set aside, but what was queued or locked on it meanwhile ` +
+                'could not be looked for again:',
+              { err },
+            );
+          });
+      }),
   );
   // The KB startup phase: every seeding, scaffolding and migration concern,
   // run through one runner at the deployment's quiet moments (boot + setup
@@ -563,32 +621,24 @@ export async function createCoreServices(
     steps: kbStartupSteps,
     buildSeedTree: buildSeedTree(disk, config.kbTemplateDir, extraDirs, [config.adminEmail], kb),
     gitRunner,
-    // The queue of a working copy that is about to be set aside goes first.
-    // Whatever is still waiting to be committed into that copy was written
-    // against the repository that was left; the path it names is about to
-    // hold a fresh clone of another one. Held for a person, on every branch,
-    // never written and never deleted. A failure here stops the phase before
+    // The work on a working copy that is about to be set aside leaves first:
+    // its queued commits and the locks on its branch (see
+    // `releaseWorkOnSetAsideCopy`). A failure here stops the phase before
     // the copy moves: a replacement cloned over an untouched queue is how
-    // those bytes would land in the wrong repository. Reaches FORWARD to
-    // `pendingCommitsService`, like `gitService` below.
-    beforeCloneSetAside: async (workspaceId) => {
-      const held = await pendingCommitsService.markNeedsAttentionInWorkspace(
-        workspaceId,
-        'The knowledge-base repository was replaced while this commit was still queued, so it was never ' +
-          'written. The bytes are kept here: the working copy it was meant for belongs to the previous repository.',
-      );
-      if (held > 0) {
-        logger('kb-startup').warn(
-          `${held} queued commit(s) for the working copy "${workspaceId}" need attention: the repository was ` +
-            'replaced before they landed, so they were not written to the new one.',
-        );
-      }
-    },
+    // those bytes would land in the wrong repository.
+    beforeCloneSetAside: releaseWorkOnSetAsideCopy,
     // And once it is set aside it must leave the workspace service's cache:
     // on the SAVE that moves the deployment the process is already running,
     // and a cached path to a directory that is gone is how the next reader
     // gets an ENOENT instead of a fresh clone.
-    onCloneDiscarded: (workspaceId) => workspaceService.forgetClone(workspaceId),
+    //
+    // Then the copy's work is looked for once more. A release that queued
+    // its bytes between the first look and the move was writing to the copy
+    // that has now gone; nothing can queue against it after this.
+    onCloneDiscarded: async (workspaceId) => {
+      workspaceService.forgetClone(workspaceId);
+      await releaseWorkOnSetAsideCopy(workspaceId);
+    },
     // And the replacement it cloned in its place: a fresh clone holds every
     // ref, so the git layer's per-workspace fetch record is told so. Without
     // it that record still holds the FAILED fetch of the repository that was

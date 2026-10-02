@@ -748,8 +748,9 @@ export class KbStartupRunner {
       await fs.mkdir(workspaceDir, { recursive: true });
       await fs.rm(repoDir, { recursive: true, force: true });
       await git(this.opts.gitRunner, workspaceDir, ['clone', '-b', branch, this.opts.kbRepoUrl(), repoDir]);
-      await git(this.opts.gitRunner, repoDir, ['config', 'core.longpaths', 'true']);
-      await stampIdentity(this.opts.gitRunner, repoDir);
+      // Said as soon as the clone is there, before its configuration: if a
+      // command below fails, the clone stays on disk, and the retry finds it
+      // and never comes back through here.
       try {
         this.opts.onCloneCreated?.(workspaceIdForBranch(branch));
       } catch (err) {
@@ -757,6 +758,8 @@ export class KbStartupRunner {
           detail: this.redact(err instanceof Error ? err.message : String(err)),
         });
       }
+      await git(this.opts.gitRunner, repoDir, ['config', 'core.longpaths', 'true']);
+      await stampIdentity(this.opts.gitRunner, repoDir);
       return repoDir;
     }
     await git(this.opts.gitRunner, repoDir, ['fetch', 'origin', branch]);

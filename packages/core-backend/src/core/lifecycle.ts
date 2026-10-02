@@ -164,7 +164,13 @@ export function holdCommitWorkerLease(
         running = false;
         wake?.();
         await loop;
+        // The worker is asked to stop whether or not this process is running
+        // it: a worker that can be held still (`holdable`) may be in the
+        // middle of a hold that uses the database, and its stop is what
+        // waits for that. Stopping a worker that is not running is nothing.
+        const idle = !workerRunning && !stopping;
         await stopWorker();
+        if (idle) await worker.stop().catch((err: unknown) => log(`commit worker stop failed: ${String(err)}`));
         await lease.release();
       })();
       return stopped;
@@ -237,6 +243,19 @@ export interface HoldableWorker extends LeasedWorker {
 export function holdable(worker: LeasedWorker): HoldableWorker {
   let wanted = false;
   const inFlight = new Set<Promise<unknown>>();
+  /**
+   * ONE stop at a time, shared by everyone who asks. A worker's own stop is
+   * idempotent by answering a second caller at once, while the first is
+   * still waiting for the commit in flight; a second hold given that answer
+   * would set a working copy aside under that commit.
+   */
+  let stopping: Promise<void> | null = null;
+  const stopWorker = (): Promise<void> => {
+    stopping ??= worker.stop().finally(() => {
+      stopping = null;
+    });
+    return stopping;
+  };
   return {
     start() {
       wanted = true;
@@ -244,12 +263,12 @@ export function holdable(worker: LeasedWorker): HoldableWorker {
     },
     async stop() {
       wanted = false;
-      await worker.stop();
+      await stopWorker();
       await Promise.allSettled([...inFlight]);
     },
     whileHeld<T>(work: () => Promise<T>): Promise<T> {
       const held = (async () => {
-        await worker.stop();
+        await stopWorker();
         return work();
       })();
       inFlight.add(held);
