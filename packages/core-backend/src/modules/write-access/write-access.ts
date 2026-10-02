@@ -78,11 +78,22 @@ const ALWAYS_WRITABLE: readonly RegExp[] = [
   /^\/api\/tools\/preview$/,
 ];
 
-/** Whether a request may go ahead while the deployment is read-only, without asking. */
+/**
+ * Whether a request may go ahead while the deployment is read-only, without asking.
+ *
+ * Judged on the path in LOWER CASE, because that is how the router reads
+ * it: routes match whatever the letter case, so `/API/workspace/…` reaches
+ * the same handler as `/api/workspace/…`. Judged as written, it would be
+ * outside the gated namespace and walk past the gate.
+ */
 export function isAlwaysWritable(method: string, path: string, hostPaths: readonly string[] = []): boolean {
   if (!MUTATING_METHODS.has(method.toUpperCase())) return true;
-  if (path !== '/api' && !path.startsWith('/api/')) return true;
-  return ALWAYS_WRITABLE.some((rule) => rule.test(path)) || hostPaths.some((prefix) => path.startsWith(prefix));
+  const asRouted = path.toLowerCase();
+  if (asRouted !== '/api' && !asRouted.startsWith('/api/')) return true;
+  return (
+    ALWAYS_WRITABLE.some((rule) => rule.test(asRouted)) ||
+    hostPaths.some((prefix) => asRouted.startsWith(prefix.toLowerCase()))
+  );
 }
 
 /**

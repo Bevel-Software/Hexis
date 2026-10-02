@@ -93,6 +93,35 @@ describe('createWriteGateMiddleware', () => {
     expect(await res.json()).toEqual({ error: READ_ONLY_MESSAGE, code: READ_ONLY_CODE });
   });
 
+  /**
+   * The router matches a path whatever its letter case, so the gate has to
+   * read it the same way: here the route is mounted as the server mounts
+   * its own, under `/api`, and a spelling the gate did not recognise as
+   * that namespace would reach it.
+   */
+  it('refuses a change however the path is cased, since the router matches it either way', async () => {
+    const app = express();
+    app.use(createWriteGateMiddleware(readOnly));
+    const routes = express.Router();
+    const wrote = vi.fn();
+    routes.put('/workspace/:id/file', (_req, res) => {
+      wrote();
+      res.json({ wrote: true });
+    });
+    app.use('/api', routes);
+    const base = await listen(app);
+    for (const path of ['/api/workspace/w1/file', '/API/workspace/w1/file', '/Api/Workspace/w1/File']) {
+      const res = await fetch(`${base}${path}`, { method: 'PUT' });
+      expect({ path, status: res.status }).toEqual({ path, status: 403 });
+    }
+    expect(wrote).not.toHaveBeenCalled();
+  });
+
+  it('keeps an open route open however it is cased', async () => {
+    const base = await listen(appWith(readOnly));
+    expect((await fetch(`${base}/API/Auth/login`, { method: 'POST' })).status).toBe(200);
+  });
+
   it('still serves reads, and the routes that sign people in and manage accounts', async () => {
     const base = await listen(appWith(readOnly));
     expect((await fetch(`${base}/api/workspace/w1/file`)).status).toBe(200);
@@ -125,55 +154,81 @@ describe('createWriteGateMiddleware', () => {
 });
 
 describe('the tool layer', () => {
-  function call(writeAccess: IWriteAccess, write: boolean) {
-    const resolve = vi.fn(async () => ({})) as unknown as ResolveToolContext;
+  /**
+   * One tool, mounted the way the server mounts it and called over HTTP: a
+   * parsed body, then an auth step that does not wait for anything, then the
+   * handler. A request closes once its body has been read, so only a real
+   * request shows what the handler makes of that.
+   */
+  async function mounted(writeAccess: IWriteAccess, write: boolean) {
+    const resolve = (async () => ({})) as unknown as ResolveToolContext;
     const handler = vi.fn(async () => ({ done: true }));
-    const toolHandler = createToolHandlerFactory(resolve, writeAccess);
-    const json = vi.fn();
-    const status = vi.fn(() => ({ json }));
-    const req = {
-      toolAuth: { source: 'external', userId: 'u1', scope: 'write' },
-      body: {},
-      on: vi.fn(),
-    } as unknown as Request;
-    const res = { status, json, writableEnded: false } as unknown as Response;
-    return { run: toolHandler(handler as never, { write })(req, res), handler, status, json };
+    const closed = { count: 0 };
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, res: Response, next) => {
+      req.toolAuth = { source: 'external', userId: 'u1', scope: 'write' } as Request['toolAuth'];
+      res.on('close', () => {
+        closed.count += 1;
+      });
+      next();
+    });
+    app.post('/api/agent/tools/a_tool', createToolHandlerFactory(resolve, writeAccess)(handler as never, { write }));
+    const url = `${await listen(app)}/api/agent/tools/a_tool`;
+    const post = (signal?: AbortSignal) =>
+      fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', signal });
+    return { post, handler, closed };
   }
 
   it('refuses a write tool while the deployment is read-only', async () => {
-    const { run, handler, status, json } = call(readOnly, true);
-    await run;
+    const { post, handler } = await mounted(readOnly, true);
+    const res = await post();
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: READ_ONLY_MESSAGE, code: READ_ONLY_CODE });
     expect(handler).not.toHaveBeenCalled();
-    expect(status).toHaveBeenCalledWith(403);
-    expect(json).toHaveBeenCalledWith({ error: READ_ONLY_MESSAGE, code: READ_ONLY_CODE });
   });
 
-  it('listens for the client going away before it waits on the write-access verdict', async () => {
-    let listening = false;
-    const writeAccess: IWriteAccess = {
-      canWrite: async () => {
-        expect(listening).toBe(true);
-        return { ok: true };
+  /**
+   * The verdict is awaited, and by then the request has closed: its body was
+   * read. Taken for the client leaving, that left every write tool on a
+   * deployment with a port unanswered, for as long as the caller would wait.
+   */
+  it('answers a write tool the port allows, with the client still there', async () => {
+    const { post, handler } = await mounted({ canWrite: async () => ({ ok: true }) }, true);
+    const res = await post();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ done: true });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not run a write tool whose client left while the verdict was awaited', async () => {
+    const asked = { count: 0 };
+    let allow: () => void = () => undefined;
+    const { post, handler, closed } = await mounted(
+      {
+        canWrite: () => {
+          asked.count += 1;
+          return new Promise((resolve) => {
+            allow = () => resolve({ ok: true });
+          });
+        },
       },
-    };
-    const resolve = vi.fn(async () => ({})) as unknown as ResolveToolContext;
-    const toolHandler = createToolHandlerFactory(resolve, writeAccess);
-    const req = {
-      toolAuth: { source: 'external', userId: 'u1', scope: 'write' },
-      body: {},
-      on: vi.fn(() => {
-        listening = true;
-      }),
-    } as unknown as Request;
-    const json = vi.fn();
-    const res = { status: vi.fn(() => ({ json })), json, writableEnded: false } as unknown as Response;
-    await toolHandler(vi.fn(async () => ({})) as never, { write: true })(req, res);
-    expect(req.on).toHaveBeenCalledWith('close', expect.any(Function));
+      true,
+    );
+    const leaving = new AbortController();
+    const call = post(leaving.signal).catch(() => undefined);
+    await vi.waitFor(() => expect(asked.count).toBe(1));
+    leaving.abort();
+    await call;
+    await vi.waitFor(() => expect(closed.count).toBe(1));
+    allow();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(handler).not.toHaveBeenCalled();
   });
 
   it('still runs a read tool', async () => {
-    const { run, handler } = call(readOnly, false);
-    await run;
+    const { post, handler } = await mounted(readOnly, false);
+    expect((await post()).status).toBe(200);
     expect(handler).toHaveBeenCalledTimes(1);
   });
 });

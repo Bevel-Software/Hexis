@@ -4,7 +4,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('tools');
 import type { IExternalApiKeyService } from './external-api-key.interface.js';
 import type { AuthService } from '../auth/auth.service.js';
-import { ACCOUNT_DEACTIVATED_MESSAGE } from '../auth/account-admission.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE, AuthBackendError } from '../auth/account-admission.js';
 import { InternalTokenService } from './internal-token.service.js';
 import { INVALID_CONNECTION_KEY_CHALLENGE, INVALID_CONNECTION_KEY_MESSAGE } from './connection-key-rejection.js';
 
@@ -258,7 +258,14 @@ export function createManualAuthMiddleware(
     let userId: string;
     try {
       ({ userId } = await authService.resolveSession(token));
-    } catch {
+    } catch (err) {
+      // The account could not be looked up: an outage, not a verdict on the
+      // session, and a 401 would sign a valid caller out over it.
+      if (err instanceof AuthBackendError) {
+        log.error('session account lookup failed:', { err: err.cause });
+        res.status(500).json({ error: 'Authentication backend unavailable' });
+        return;
+      }
       res.setHeader('WWW-Authenticate', WWW_AUTH);
       res.status(401).json({ error: 'Invalid or expired token' });
       return;

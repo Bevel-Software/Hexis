@@ -44,8 +44,14 @@ export function createToolHandlerFactory(resolve: ResolveToolContext, writeAcces
       }
       // Before anything is awaited: a client that goes away during the
       // write-access check below must still abort the call.
+      //
+      // Asked of the RESPONSE. The request closes as soon as its body has
+      // been read, with the client still there and waiting, so its `close`
+      // says nothing about the client; the response closes when it has been
+      // sent or the connection is gone, and `writableEnded` tells the two
+      // apart.
       const abort = new AbortController();
-      req.on('close', () => {
+      res.on('close', () => {
         if (!res.writableEnded) abort.abort();
       });
       // The tool layer's half of the read-only gate: the HTTP gate lets every
@@ -56,6 +62,7 @@ export function createToolHandlerFactory(resolve: ResolveToolContext, writeAcces
           res.status(403).json({ error: refusal, code: READ_ONLY_CODE });
           return;
         }
+        // The client left while the verdict was awaited: nobody to answer.
         if (abort.signal.aborted) return;
       }
       const body: unknown = req.body;

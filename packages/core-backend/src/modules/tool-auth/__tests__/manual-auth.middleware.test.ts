@@ -8,6 +8,7 @@ import { InternalTokenService } from '../internal-token.service.js';
 import { createManualAuthMiddleware } from '../tool-auth.middleware.js';
 import type { IExternalApiKeyService } from '../external-api-key.interface.js';
 import type { AuthService } from '../../auth/auth.service.js';
+import { AuthBackendError } from '../../auth/account-admission.js';
 
 /**
  * The manual endpoints (`/agent/utcp`, `/agent/internal/utcp`) accept a browser
@@ -17,6 +18,8 @@ import type { AuthService } from '../../auth/auth.service.js';
  */
 const KEY = 'bevel_validkey';
 const JWT = 'browser-jwt';
+/** A valid session, presented while its account cannot be looked up. */
+const JWT_DURING_OUTAGE = 'browser-jwt-during-outage';
 
 const fakeExternalApiKeys = {
   looksLikeExternalApiKey: (t: string) => typeof t === 'string' && t.startsWith('bevel_'),
@@ -27,6 +30,7 @@ const fakeExternalApiKeys = {
 const fakeAuth = {
   resolveSession: async (t: string) => {
     if (t === JWT) return { userId: 'u-jwt', email: 'jwt@x' };
+    if (t === JWT_DURING_OUTAGE) throw new AuthBackendError(new Error('the database is down'));
     throw new Error('bad jwt');
   },
   isActive: async () => true,
@@ -74,6 +78,14 @@ describe('createManualAuthMiddleware (read-only manual endpoints)', () => {
     const { base } = await start();
     expect((await get(base, '/api/agent/utcp')).status).toBe(401);
     expect((await get(base, '/api/agent/utcp', 'garbage')).status).toBe(401);
+  });
+
+  it('answers 500, not 401, when the session’s account cannot be looked up', async () => {
+    const { base } = await start();
+    const r = await get(base, '/api/agent/utcp', JWT_DURING_OUTAGE);
+    // A 401 would sign a valid caller out over an outage.
+    expect(r.status).toBe(500);
+    expect(r.headers.get('www-authenticate')).toBeNull();
   });
 
   it('refuses the INTERNAL manual to a browser JWT (403) but allows an internal token', async () => {

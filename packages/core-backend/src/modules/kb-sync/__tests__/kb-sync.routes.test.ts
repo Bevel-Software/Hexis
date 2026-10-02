@@ -4,6 +4,7 @@ import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createKbSyncRoutes, isSyncRawBodyPath } from '../kb-sync.routes.js';
 import type { IKbSyncService, SyncResult } from '../kb-sync.interface.js';
+import { AuthBackendError } from '../../auth/account-admission.js';
 
 const SECRET = 'a-very-long-and-random-sync-secret';
 
@@ -45,6 +46,7 @@ async function mount(opts: {
       syncSecret: () => opts.secret ?? SECRET,
       authService: {
         resolveSession: async (token: string) => {
+          if (token === 'jwt-during-outage') throw new AuthBackendError(new Error('the database is down'));
           if (token !== 'jwt-ok') throw new Error('bad token');
           return { userId: 'u1', email: 'person@example.com' };
         },
@@ -92,6 +94,20 @@ describe('POST /api/sync — credentials', () => {
     expect((await post(admin.base, { headers: { authorization: 'Bearer jwt-ok' } })).status).toBe(200);
     const person = await mount({ admin: false });
     expect((await post(person.base, { headers: { authorization: 'Bearer jwt-ok' } })).status).toBe(401);
+  });
+
+  it('500, not 401, when the session’s account cannot be looked up', async () => {
+    const { base, sync } = await mount({ admin: true });
+    const res = await post(base, { headers: { authorization: 'Bearer jwt-during-outage' } });
+    // An outage is not a wrong credential: a 401 would send the admin to sign in again.
+    expect(res.status).toBe(500);
+    expect(res.headers.get('www-authenticate')).toBeNull();
+    expect(sync).not.toHaveBeenCalled();
+  });
+
+  it('the shared secret still works while accounts cannot be looked up', async () => {
+    const { base } = await mount({});
+    expect((await post(base, { headers: { authorization: `Bearer ${SECRET}` } })).status).toBe(200);
   });
 
   it('accepts the GitLab token header', async () => {

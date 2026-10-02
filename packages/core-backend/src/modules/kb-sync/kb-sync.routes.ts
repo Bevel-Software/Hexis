@@ -7,6 +7,7 @@ import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import type { IKbSyncService, SyncResult } from './kb-sync.interface.js';
 import { parseSyncPayload, type SyncPayloadSource } from './sync-payload.js';
 import { verifySyncCredential } from './sync-auth.js';
+import { AuthBackendError } from '../auth/account-admission.js';
 
 /**
  * Remote sync — a git host or a pipeline tells Hexis the repository changed.
@@ -107,6 +108,7 @@ export function createKbSyncRoutes(deps: KbSyncRouteDeps): express.Router {
   ): Promise<void> {
     res.setHeader(SYNC_RESPONSE_HEADER, SYNC_RESPONSE_MARKER);
     const raw: Buffer | undefined = Buffer.isBuffer(req.body) ? req.body : undefined;
+    let lookupFailed: AuthBackendError | null = null as AuthBackendError | null;
 
     const auth = await verifySyncCredential(
       {
@@ -120,7 +122,8 @@ export function createKbSyncRoutes(deps: KbSyncRouteDeps): express.Router {
         verifyJwt: async (token) => {
           try {
             return { email: (await deps.authService.resolveSession(token)).email };
-          } catch {
+          } catch (err) {
+            if (err instanceof AuthBackendError) lookupFailed = err;
             return null;
           }
         },
@@ -128,6 +131,13 @@ export function createKbSyncRoutes(deps: KbSyncRouteDeps): express.Router {
       },
     );
     if (!auth.ok) {
+      // The session's account could not be looked up: an outage, not a wrong
+      // credential, and saying 401 would send an admin to sign in again.
+      if (lookupFailed) {
+        log.error('session account lookup failed:', { err: lookupFailed.cause });
+        res.status(500).json({ error: 'Authentication backend unavailable' });
+        return;
+      }
       if (auth.status === 401) res.setHeader('WWW-Authenticate', 'Bearer realm="hexis-sync"');
       res.status(auth.status).json({ error: auth.message });
       return;
