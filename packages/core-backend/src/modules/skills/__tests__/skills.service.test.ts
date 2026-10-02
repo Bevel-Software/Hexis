@@ -1,10 +1,11 @@
 import { describe, test, expect, beforeEach, afterEach } from 'vitest';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, cp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { SkillService } from '../skills.service.js';
+import { SkillService, unmergedSkillNotice } from '../skills.service.js';
+import { BranchNotFoundError } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -38,11 +39,20 @@ You answer RFIs.
 
 describe('SkillService', () => {
   let root: string;
+  /**
+   * The branches that have a clone under `root`. A name that is not in here
+   * answers the way the real service does for a branch nobody ever pushed: the
+   * 404 the file tools answer, not an empty workspace.
+   */
+  let clones: Set<string>;
 
-  // WorkspaceService stub: default-branch workspace lives at <root>/<wsId>, the
-  // KB clone at <root>/<wsId>/<KB_DIR>.
+  // WorkspaceService stub: a branch's workspace lives at <root>/<branch's id>,
+  // its KB clone at <root>/<id>/<KB_DIR>.
   const workspaceService = {
-    getOrCreateForBranch: async () => ({ id: wsId }),
+    getOrCreateForBranch: async (branch: string) => {
+      if (!clones.has(branch)) throw new BranchNotFoundError(branch);
+      return { id: workspaceIdForBranch(branch) };
+    },
     getWorkspacePath: async (id: string) => join(root, id),
     readFile: async (id: string, rel: string) => fsReadFile(join(root, id, rel), 'utf-8'),
   } as unknown as WorkspaceService;
@@ -58,6 +68,7 @@ describe('SkillService', () => {
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'skills-'));
+    clones = new Set([DEFAULT_BRANCH]);
     const skills = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(join(skills, 'rfi', 'scripts'), { recursive: true });
     await writeFile(join(skills, 'rfi', 'SKILL.md'), RFI_SKILL);
@@ -478,6 +489,193 @@ describe('SkillService', () => {
         ok: false,
         error: 'forbidden',
       });
+    });
+  });
+
+  /**
+   * Reading a DRAFT branch: what an agent needs to try the skill it has just
+   * written, with the answer saying plainly that nobody approved it.
+   *
+   * The draft starts as a copy of the released tree — which is what a clone of
+   * a branch with no skill changes on it is — and each test changes it.
+   */
+  describe('reading a branch', () => {
+    const DRAFT = 'juan/skill-deck';
+    const draftWsId = workspaceIdForBranch(DRAFT);
+    const user = 'user@x.eu';
+    const draftKb = () => join(root, draftWsId, KB_DIR);
+    const named = async (service = svc()) =>
+      Object.fromEntries((await service.listSkills(user, { branch: DRAFT })).map((s) => [s.name, s]));
+
+    const writeDeck = (body = '# Deck\n') =>
+      mkdir(join(draftKb(), 'Plugins', 'make-deck'), { recursive: true }).then(() =>
+        writeFile(join(draftKb(), 'Plugins', 'make-deck', 'SKILL.md'), `---\ndescription: Decks.\n---\n\n${body}`),
+      );
+
+    beforeEach(async () => {
+      await cp(join(root, wsId), join(root, draftWsId), { recursive: true });
+      clones.add(DRAFT);
+    });
+
+    test('a skill that exists only on the branch is listed as unmerged; the released ones are not marked', async () => {
+      await writeDeck();
+      const list = await named();
+      expect(Object.keys(list).sort()).toEqual(['coding-guidelines', 'make-deck', 'rfi']);
+      expect(list['make-deck']).toMatchObject({ unmerged: true, branch: DRAFT, description: 'Decks.' });
+      // The skills the branch shares with the default branch are the released
+      // ones, read through a draft's clone: nothing about them is unapproved.
+      expect(list['rfi'].unmerged).toBeUndefined();
+      expect(list['rfi'].branch).toBeUndefined();
+      expect(list['coding-guidelines'].unmerged).toBeUndefined();
+    });
+
+    test('without a branch the draft-only skill is absent, and nothing carries a mark', async () => {
+      await writeDeck();
+      const list = await svc().listSkills(user);
+      expect(list.map((s) => s.name)).toEqual(['coding-guidelines', 'rfi']);
+      expect(list.some((s) => s.unmerged !== undefined || s.branch !== undefined)).toBe(false);
+    });
+
+    test('get_skill loads the draft-only skill, body starting with the unmerged line', async () => {
+      await writeDeck();
+      const res = await svc().getSkill(user, 'make-deck', undefined, { branch: DRAFT });
+      expect(res.ok && res.kind === 'skill').toBe(true);
+      if (!res.ok || res.kind !== 'skill') return;
+      expect(res.skill.body.split('\n')[0]).toBe(
+        `This skill is read from the unmerged branch "${DRAFT}" and is not approved.`,
+      );
+      expect(res.skill.body.split('\n')[0]).toBe(unmergedSkillNotice(DRAFT));
+      expect(res.skill.body).toContain('# Deck');
+      expect(res.skill).toMatchObject({ unmerged: true, branch: DRAFT, path: 'Plugins/make-deck' });
+      // Without the branch there is no such skill at all.
+      expect(await svc().getSkill(user, 'make-deck')).toEqual({ ok: false, error: 'not_found' });
+    });
+
+    test('a skill changed on the branch loads changed there and released without the branch', async () => {
+      await writeFile(
+        join(draftKb(), 'Plugins', 'rfi', 'SKILL.md'),
+        RFI_SKILL.replace('You answer RFIs.', 'You answer RFIs, in three paragraphs.'),
+      );
+      const service = svc();
+      const draft = await service.getSkill(user, 'rfi', undefined, { branch: DRAFT });
+      expect(draft.ok && draft.kind === 'skill' && draft.skill.body).toContain('in three paragraphs');
+      expect(draft.ok && draft.kind === 'skill' && draft.skill.body.split('\n')[0]).toBe(unmergedSkillNotice(DRAFT));
+      expect(draft.ok && draft.kind === 'skill' && draft.skill.unmerged).toBe(true);
+      expect((await named(service))['rfi']).toMatchObject({ unmerged: true, branch: DRAFT });
+
+      const released = await service.getSkill(user, 'rfi');
+      expect(released.ok && released.kind === 'skill' && released.skill.body).not.toContain('three paragraphs');
+      expect(released.ok && released.kind === 'skill' && released.skill.body).not.toContain('unmerged');
+      expect(released.ok && released.kind === 'skill' && released.skill.unmerged).toBeUndefined();
+    });
+
+    test('a skill unchanged on the branch carries no mark and no line — it is the released answer', async () => {
+      const service = svc();
+      expect(await service.getSkill(user, 'rfi', undefined, { branch: DRAFT })).toEqual(
+        await service.getSkill(user, 'rfi'),
+      );
+      expect(await service.getSkill(user, 'rfi', 'scripts/build_xlsx.py', { branch: DRAFT })).toEqual(
+        await service.getSkill(user, 'rfi', 'scripts/build_xlsx.py'),
+      );
+    });
+
+    test('a bundled file changed on the branch makes the skill unmerged, and rides beside its content', async () => {
+      // The SKILL.md is byte-identical: the difference is in the folder.
+      await writeFile(join(draftKb(), 'Plugins', 'rfi', 'scripts', 'build_xlsx.py'), 'print("xlsx v2")\n');
+      expect((await named())['rfi']).toMatchObject({ unmerged: true, branch: DRAFT });
+      const file = await svc().getSkill(user, 'rfi', 'scripts/build_xlsx.py', { branch: DRAFT });
+      expect(file).toEqual({
+        ok: true,
+        kind: 'file',
+        file: {
+          name: 'rfi',
+          file: 'scripts/build_xlsx.py',
+          path: 'Plugins/rfi/scripts/build_xlsx.py',
+          // The notice never goes INSIDE a script.
+          content: 'print("xlsx v2")\n',
+          unmerged: true,
+          branch: DRAFT,
+        },
+      });
+    });
+
+    test('an asset added on the branch is a difference too', async () => {
+      await writeFile(join(draftKb(), 'Plugins', 'rfi', 'scripts', 'extra.py'), 'print("new")\n');
+      expect((await named())['rfi']).toMatchObject({ unmerged: true, branch: DRAFT });
+    });
+
+    test('a skill deleted on the branch is absent there and still released without it', async () => {
+      await rm(join(draftKb(), 'Plugins', 'rfi'), { recursive: true });
+      const service = svc();
+      expect(Object.keys(await named(service))).toEqual(['coding-guidelines']);
+      expect(await service.getSkill(user, 'rfi', undefined, { branch: DRAFT })).toEqual({
+        ok: false,
+        error: 'not_found',
+      });
+      expect((await service.listSkills(user)).map((s) => s.name)).toContain('rfi');
+    });
+
+    test("access is judged on the branch, with that branch's rules", async () => {
+      // The same caller, the same skill: readable on the default branch,
+      // denied in the draft's own workspace.
+      const perBranch: IAccessControl = {
+        canRead: async () => true,
+        canReadBatch: async (w: string, _e: string, paths: string[]) =>
+          new Map(paths.map((p) => [p, !(w === draftWsId && p.includes('/rfi/'))])),
+      } as unknown as IAccessControl;
+      const service = svc(perBranch);
+      expect(Object.keys(await named(service))).toEqual(['coding-guidelines']);
+      // Not `forbidden`: a draft skill the caller may not read there is one
+      // they must not learn exists.
+      expect(await service.getSkill(user, 'rfi', undefined, { branch: DRAFT })).toEqual({
+        ok: false,
+        error: 'not_found',
+      });
+      expect(await service.getSkill(user, 'rfi', 'scripts/build_xlsx.py', { branch: DRAFT })).toEqual({
+        ok: false,
+        error: 'not_found',
+      });
+      // The released answer is untouched by the draft's rules.
+      expect((await service.listSkills(user)).map((s) => s.name)).toContain('rfi');
+      expect((await service.getSkill(user, 'rfi')).ok).toBe(true);
+    });
+
+    test('a branch that does not exist is a 404 naming it, as on the file tools', async () => {
+      const service = svc();
+      await expect(service.listSkills(user, { branch: 'juan/typo' })).rejects.toMatchObject({
+        status: 404,
+        kind: 'branch-not-found',
+        branch: 'juan/typo',
+        message: 'There is no branch named juan/typo.',
+      });
+      await expect(service.getSkill(user, 'rfi', undefined, { branch: 'juan/typo' })).rejects.toMatchObject({
+        status: 404,
+        kind: 'branch-not-found',
+      });
+    });
+
+    test('naming the default branch answers exactly as naming nothing', async () => {
+      await writeDeck();
+      const service = svc();
+      expect(await service.listSkills(user, { branch: DEFAULT_BRANCH })).toEqual(await service.listSkills(user));
+      expect(await service.getSkill(user, 'rfi', undefined, { branch: DEFAULT_BRANCH })).toEqual(
+        await service.getSkill(user, 'rfi'),
+      );
+    });
+
+    test('a branch read is never cached: the next call sees what the agent just wrote', async () => {
+      const service = svc();
+      expect(Object.keys(await named(service))).not.toContain('make-deck');
+      await writeDeck();
+      // Same instance, no `invalidate()`: the released catalog is cached, a
+      // draft is not.
+      expect(Object.keys(await named(service))).toContain('make-deck');
+    });
+
+    test('the global set (no caller) can be read from a branch too', async () => {
+      await writeDeck();
+      const list = await svc().listSkills(undefined, { branch: DRAFT });
+      expect(list.find((s) => s.name === 'make-deck')).toMatchObject({ unmerged: true, branch: DRAFT });
     });
   });
 });
