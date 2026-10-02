@@ -12,7 +12,7 @@ import { libraryHomeForItemPath, pathForPlugin, LIBRARY_ROOT } from '../../route
 import { useLibrary } from '../../state/library-data';
 import { pluginHoldingPath, pluginLabel, pluginNameForPath } from '../../utils/plugin-summary';
 import { readOAuthFragment } from '../../utils/oauth-fragment';
-import type { ToolCapability } from '../../services/tools.api';
+import type { HiddenTool, ToolCapability } from '../../services/tools.api';
 import type { LibrarySkillSummary } from '../../services/library.api';
 import { ToolConnectionSection } from './ToolConnectionSection';
 import { ToolLogo } from '../ToolLogo';
@@ -277,6 +277,15 @@ export function ToolPage({
         />
       )}
 
+      {/* Above the capabilities, because it is the one thing on this page that
+          asks the reader to act, and because a tool missing from the
+          assistant's list is read as a Hexis fault until this says otherwise.
+          The backend sends it only to a writer of this tool, so there is no
+          permission check here. */}
+      {page.detail && (page.detail.hiddenTools?.length ?? 0) > 0 && (
+        <HiddenToolsSection tools={page.detail.hiddenTools ?? []} />
+      )}
+
       {page.detail && page.detail.capabilities.length > 0 && (
         <CapabilitiesSection capabilities={page.detail.capabilities} />
       )}
@@ -333,6 +342,41 @@ function Article({ children }: { children: ReactNode }) {
 
 function SectionHeading({ children }: { children: ReactNode }) {
   return <h2 className="mb-2.5 text-label font-semibold uppercase text-ink-faint">{children}</h2>;
+}
+
+/**
+ * The tools of this server no agent is offered, because their input schema is
+ * not valid JSON Schema as the server sent it.
+ *
+ * This is the whole reason the check exists. An AI client handed such a tool
+ * drops it and says nothing — the tool is simply missing for the agent — so
+ * without this section the only symptom is a capability that quietly does not
+ * work, with nothing anywhere to look at. Each entry names the tool and quotes
+ * the place in the schema and the reason, which is what the server's vendor
+ * needs to hear; Hexis does not rewrite the schema to make it valid.
+ */
+function HiddenToolsSection({ tools }: { tools: HiddenTool[] }) {
+  return (
+    <section className="mt-8">
+      <SectionHeading>Not offered to assistants</SectionHeading>
+      <Banner tone="urgent" role="note">
+        <ul className="space-y-1.5">
+          {tools.map((t) => (
+            <li key={t.name}>
+              <span className="font-semibold">{t.name}</span>
+              <span> — {t.marker}</span>
+            </li>
+          ))}
+        </ul>
+      </Banner>
+      <p className="mt-2 text-detail text-ink-muted">
+        {tools.length === 1 ? 'This tool is' : 'These tools are'} absent from every assistant's tool
+        list until the server sends a valid schema. The rest of this server's tools are unaffected,
+        and nothing here is rewritten to make the schema valid. The check runs when the server's
+        tools are loaded, so a corrected schema clears this on its own.
+      </p>
+    </section>
+  );
 }
 
 function CapabilitiesSection({ capabilities }: { capabilities: ToolCapability[] }) {

@@ -7,6 +7,7 @@ import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IToolManualService } from './tool-manuals.contract.js';
+import type { HiddenToolSource } from '../../shared/hidden-tools.js';
 
 /**
  * What `list_tool_setup` needs from the secrets vault (structurally satisfied
@@ -43,6 +44,12 @@ export function registerToolManualsTools(
     variableStatus: VariableStatusPort;
     /** Which branch tools are served from, and its clone. */
     kb: Pick<KbContext, 'defaultBranch' | 'defaultWorkspaceId'>;
+    /**
+     * Where a hidden tool's schema finding comes from (the MCP proxy).
+     * Optional: a deployment with no MCP surface has nothing to report, and
+     * `hiddenTools` is then empty everywhere.
+     */
+    hiddenTools?: HiddenToolSource;
   },
 ): void {
   registry.registerExternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
@@ -82,6 +89,13 @@ export function registerToolManualsTools(
       'is exactly what gates setting its shared secrets: the people who manage the file configure the tool. ' +
       'Secret VALUES are never returned and can never be set through a tool — an admin enters them in the ' +
       'tool editor; users sign in on /connect. ' +
+      '`hiddenTools` names any tool of THIS tool\'s server that Hexis keeps off every agent surface because ' +
+      'its input schema is not valid JSON Schema as the server sent it: the tool is absent from `tools/list`, ' +
+      'from `list_tools` and from the tool chain, and the entry quotes the place in the schema and the reason ' +
+      'so the people who manage the server can get it fixed. Nothing is rewritten to make it valid, and the ' +
+      'server\'s other tools are unaffected. Present only for a caller who may write the tool (`canWrite`), ' +
+      'and the check runs when the server\'s tools are loaded, so a corrected schema clears the entry on the ' +
+      'next load with nothing to restart. ' +
       '`invalid` names any `.tool` file the scan REFUSED, with the reason and its location: those files ' +
       'are the only ones missing — every other tool is listed and callable, and a refused file is listed ' +
       'again as a normal tool on the next call once it is fixed (or removed), with nothing to restart or ' +
@@ -123,6 +137,22 @@ export function registerToolManualsTools(
                 properties: { kind: { type: 'string' }, reason: { type: 'string' } },
               },
               canWrite: { type: 'boolean' },
+              hiddenTools: {
+                type: 'array',
+                description:
+                  'Tools of this server kept off every agent surface for an invalid input schema. Empty ' +
+                  'unless the caller may write this tool.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string', description: 'The name the tool would have been offered under.' },
+                    path: { type: 'string', description: 'JSON Pointer to the place in the schema that is not valid.' },
+                    reason: { type: 'string', description: 'Why that place is not valid, in the validator\'s words.' },
+                    marker: { type: 'string', description: 'The one sentence the tool page shows for this tool.' },
+                  },
+                  required: ['name', 'path', 'reason', 'marker'],
+                },
+              },
               variables: {
                 type: 'array',
                 items: {
@@ -144,7 +174,7 @@ export function registerToolManualsTools(
                 },
               },
             },
-            required: ['slug', 'name', 'path', 'type', 'canWrite', 'variables'],
+            required: ['slug', 'name', 'path', 'type', 'canWrite', 'hiddenTools', 'variables'],
           },
         },
         invalid: {
@@ -206,27 +236,35 @@ export function registerToolManualsTools(
       const status = await deps.variableStatus.statusFor(ctx.user.id, allKeys);
       const statusByKey = new Map(status.map((s) => [s.key, s]));
       const tools = await Promise.all(
-        manuals.map(async (m) => ({
-          slug: m.slug,
-          name: m.name,
-          path: m.path,
-          type: m.type,
-          setup: m.setup ?? null,
-          canWrite: await deps.accessControl.canWrite(defaultWs(), ctx.user.email, m.path),
-          variables: (m.variables ?? []).map((v) => {
-            const st = statusByKey.get(varKey(m.name, v.name));
-            const isOAuth = v.oauth != null;
-            return {
-              name: v.name,
-              scope: v.scope,
-              label: v.label ?? null,
-              oauth: isOAuth,
-              adminConfigured: st?.adminConfigured ?? false,
-              userConfigured: st?.userConfigured ?? false,
-              authorized: isOAuth ? (st?.userAuthorized ?? false) : null,
-            };
-          }),
-        })),
+        manuals.map(async (m) => {
+          const canWrite = await deps.accessControl.canWrite(defaultWs(), ctx.user.email, m.path);
+          return {
+            slug: m.slug,
+            name: m.name,
+            path: m.path,
+            type: m.type,
+            setup: m.setup ?? null,
+            canWrite,
+            // The marker goes only to the people who manage the server — the
+            // same verdict that gates setting its shared secrets. A caller who
+            // may only READ the tool is told nothing about it: they cannot fix
+            // the schema, and the tool is simply not among the ones they can call.
+            hiddenTools: canWrite ? (deps.hiddenTools?.hiddenFor(m.name) ?? []) : [],
+            variables: (m.variables ?? []).map((v) => {
+              const st = statusByKey.get(varKey(m.name, v.name));
+              const isOAuth = v.oauth != null;
+              return {
+                name: v.name,
+                scope: v.scope,
+                label: v.label ?? null,
+                oauth: isOAuth,
+                adminConfigured: st?.adminConfigured ?? false,
+                userConfigured: st?.userConfigured ?? false,
+                authorized: isOAuth ? (st?.userAuthorized ?? false) : null,
+              };
+            }),
+          };
+        }),
       );
       const onBranchOnly = pending.map((p) => ({ ...p, branch: branch! }));
       if (onBranchOnly.length === 0) return { tools, invalid, onBranchOnly };

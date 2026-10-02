@@ -456,6 +456,9 @@ export async function createCoreServer(
     // reports configuration booleans only; secret values never ride through tools.
     variableStatus: core.secretsVaultService,
     kb: core.kb,
+    // What the proxy's schema check found when each server's tools were last
+    // loaded — reported to a caller who may write the tool, nobody else.
+    hiddenTools: core.mcpService.hiddenTools,
   });
   // Overlay tool registrations (defs + module-hosted endpoints).
   ext.tools?.({

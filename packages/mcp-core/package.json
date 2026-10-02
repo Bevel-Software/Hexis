@@ -32,7 +32,8 @@
     "@utcp/code-mode": "^1.2.13",
     "@utcp/http": "^1.1.12",
     "@utcp/mcp": "^1.2.0",
-    "@utcp/sdk": "^1.2.0"
+    "@utcp/sdk": "^1.2.0",
+    "ajv": "^8.20.0"
   },
   "devDependencies": {
     "typescript": "^5.8.0",
