@@ -229,12 +229,18 @@ export class AgentUploadStore {
    * until the sweep drops it.
    */
   issue(user: { id: string }): IssuedUpload {
-    // Counted over the tokens that are still usable: an expired record waiting
-    // for the sweep is not one the user holds any more.
+    // Counted over what the user still HOLDS: a token that can still be used,
+    // and one whose expiry has passed but whose work has not ended — an upload
+    // still arriving, an apply still reading. Those keep a connection or a file
+    // open exactly as a live token does, so letting them fall out of the count
+    // at expiry would let a caller keep ten slow uploads going and ask for ten
+    // more. An expired record that is doing nothing is waiting for the sweep,
+    // and is not one the user holds.
     const now = Date.now();
     let open = 0;
     for (const record of this.records.values()) {
-      if (record.userId === user.id && record.expiresAt > now) open += 1;
+      if (record.userId !== user.id) continue;
+      if (record.expiresAt > now || this.pinned(record, now)) open += 1;
     }
     if (open >= this.maxOpenPerUser) {
       throw new UploadTokenError(
@@ -306,7 +312,13 @@ export class AgentUploadStore {
           // The real total, counted as it arrives: a `content-length` is the
           // sender's claim, and a chunked body makes none.
           if (bytes > this.maxBytes) throw new UploadTokenError(overLimit(bytes, this.maxBytes), 413);
-          await file.write(buf);
+          // To the last byte: one `write` may put down only part of what it
+          // was handed and say so in `bytesWritten`, and a chunk counted as
+          // received while half of it is on disk would land a file shorter
+          // than the size the answer names.
+          for (let written = 0; written < buf.byteLength; ) {
+            written += (await file.write(buf, written, buf.byteLength - written)).bytesWritten;
+          }
         }
       } finally {
         await file.close();

@@ -418,7 +418,43 @@ describe('request_file_upload', () => {
 
     // Applying one spends it, and its place is free again.
     await send(base, first.token, 'a.md', Buffer.from('a'));
-    await apply(base, { branch: DRAFT, token: first.token, destination: `${KB_DIR}/Drop` });
+    const landed = await apply(base, { branch: DRAFT, token: first.token, destination: `${KB_DIR}/Drop` });
+    expect(outcomeAt(landed, `${KB_DIR}/Drop/a.md`)).toMatchObject({ outcome: 'created' });
+    expect((await call(base, 'request_file_upload', {})).status).toBe(200);
+  });
+
+  /**
+   * A token whose expiry has passed is not held any more — unless its upload
+   * is still arriving. That one keeps a connection and a file open exactly as
+   * a live token does, and letting it fall out of the count at expiry let a
+   * caller keep a full set of slow uploads going and ask for another.
+   */
+  it('counts an upload still arriving as held, past its token\'s expiry', async () => {
+    const base = await start({ ttlMs: 150, maxOpenPerUser: 1 });
+    const { token } = await request(base);
+    let finish!: () => void;
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3]));
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        controller.close();
+      },
+    });
+    const arriving = fetch(`${base}/api/agent/uploads/${encodeURIComponent(token)}?filename=slow.bin`, {
+      method: 'POST',
+      body,
+      // Node's fetch requires this for a streamed request body.
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+    // Past the expiry, with the body still open.
+    await new Promise((r) => setTimeout(r, 400));
+    expect((await call(base, 'request_file_upload', {})).status).toBe(429);
+
+    // Once it has ended (refused: its token expired meanwhile), the place is free.
+    finish();
+    expect((await arriving).status).toBe(404);
     expect((await call(base, 'request_file_upload', {})).status).toBe(200);
   });
 

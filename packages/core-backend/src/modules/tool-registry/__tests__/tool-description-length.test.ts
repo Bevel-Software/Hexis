@@ -245,6 +245,7 @@ describe('every file tool ends with the pointer and carries no shared paragraph'
     'copy_file',
     'unzip',
     'execute_command',
+    'apply_file_upload',
   ];
 
   it('ends each description with the one sentence naming the shared rules', async () => {
