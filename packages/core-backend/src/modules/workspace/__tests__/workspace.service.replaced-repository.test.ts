@@ -89,20 +89,38 @@ function service(
 }
 
 /**
- * A git runner on which the SECOND read of a working copy's address comes back
- * only once `until` has: the read itself happens when it is asked for, so its
- * answer is about the copy that was there then, and the caller is handed it
- * late. Everything else runs as it is.
+ * A git runner that puts two callers' reads of a working copy's address in ONE
+ * order, the one that matters: both read the copy that is there, and the
+ * second is handed its answer only once `afterTheFirstMove` has come.
+ *
+ * Two holds, because holding the second answer back is only half of it. The
+ * FIRST answer is held until the second read has happened, so the first caller
+ * cannot move the copy before the second has looked at it — otherwise the
+ * second would read whatever replaced it, and the stale answer this is about
+ * would never exist. Then the second answer is held until the first move has
+ * ended. Neither can wait on the other forever: the first caller is held in its
+ * read, so no move is in flight for the second to wait on, and it always reads.
+ * Everything else runs as it is.
  */
-function withALateSecondAddressRead(until: Promise<void>): NodeGitRunner {
+function withTheSecondAddressReadHeldPastTheMove(afterTheFirstMove: Promise<void>): NodeGitRunner {
   let reads = 0;
+  let secondHasRead!: () => void;
+  const onceTheSecondHasRead = new Promise<void>((resolve) => {
+    secondHasRead = resolve;
+  });
   return new Proxy(new NodeGitRunner(), {
     get(target, prop, receiver) {
       if (prop !== 'run') return Reflect.get(target, prop, receiver);
       return async (cwd: string, args: string[], opts?: never) => {
         const answer = await target.run(cwd, args, opts);
         const readsTheAddress = args[0] === 'config' && args.includes('--get') && args.includes('remote.origin.url');
-        if (readsTheAddress && ++reads === 2) await until;
+        if (!readsTheAddress) return answer;
+        const mine = ++reads;
+        if (mine === 1) await onceTheSecondHasRead;
+        if (mine === 2) {
+          secondHasRead();
+          await afterTheFirstMove;
+        }
         return answer;
       };
     },
@@ -353,7 +371,7 @@ describe('what surrounds the setting aside of one working copy', () => {
         await move();
         firstMoveEnded();
       },
-      withALateSecondAddressRead(afterTheFirstMove),
+      withTheSecondAddressReadHeldPastTheMove(afterTheFirstMove),
     );
 
     const [first, second] = await Promise.all([svc.getOrCreateForBranch(BRANCH), svc.getOrCreateForBranch(BRANCH)]);
