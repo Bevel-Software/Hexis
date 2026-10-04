@@ -70,15 +70,21 @@ people see, so nothing is relabelled.
 older app cannot read a newer database. To go back, restore the backup you
 took before upgrading.
 
-### Personal data in the database is encrypted (0.23+)
+### Personal data in the database is encrypted (0.24+)
 
-From 0.23, personal data in the database — emails, display names, avatar
+From 0.24, personal data in the database — emails, display names, avatar
 URLs, change-request and review text, and the error messages of merges,
 queued commits and plugin join requests, including every copy of a name or
 email kept beside an approval, comment, lock or merge — is encrypted with a
 key derived from `SECRETS_ENC_KEY`, in addition to the secrets vault it
 already sealed. The first boot after the upgrade rewrites existing rows
 automatically.
+
+What is not encrypted is what names a place in the repository rather than a
+person: branch names and file paths. A draft branch is usually named after
+its author (`ada.lovelace/pricing-page`) and a personal folder after its
+owner, so those still say who worked where. They are in the repository's own
+history too, which this does not change.
 
 Two things are different about this upgrade:
 
