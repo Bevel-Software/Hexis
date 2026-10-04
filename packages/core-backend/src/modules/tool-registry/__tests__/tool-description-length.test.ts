@@ -95,6 +95,12 @@ async function hexisTools(): Promise<UtcpTool[]> {
     gate,
     new RoutineWritePolicyService(),
     new UuidSessionSink(),
+    undefined,
+    undefined,
+    // The two upload tools are mounted only when a store is supplied, and
+    // every real composition supplies one: without it they would be the two
+    // descriptions this suite never measured.
+    unused(),
   );
   registerWorkflowTools(registry, router, toolAuth, toolHandler, kb);
   registerPluginsTools(registry);

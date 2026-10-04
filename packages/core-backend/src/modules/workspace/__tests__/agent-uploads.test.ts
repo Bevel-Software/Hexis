@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from 'node:http';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import AdmZip from 'adm-zip';
@@ -112,6 +112,8 @@ interface StartOptions {
   userEmail?: string;
   ttlMs?: number;
   maxBytes?: number;
+  /** How many tokens one user may hold open at once. */
+  maxOpenPerUser?: number;
   /** Start the periodic sweep at this interval BEFORE any token is issued. */
   sweepEveryMs?: number;
   /** The store's listing seam, for a test that needs to hold a sweep open. */
@@ -179,6 +181,7 @@ async function start(options: StartOptions = {}): Promise<string> {
       tokenPrefix: 'bevel-up_',
       ...(options.ttlMs !== undefined ? { ttlMs: options.ttlMs } : {}),
       ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
+      ...(options.maxOpenPerUser !== undefined ? { maxOpenPerUser: options.maxOpenPerUser } : {}),
       ...(options.listRoot !== undefined ? { listRoot: options.listRoot } : {}),
     });
   if (options.sweepEveryMs !== undefined) uploads.startSweeping(options.sweepEveryMs);
@@ -398,6 +401,25 @@ describe('request_file_upload', () => {
     const base = await start();
     const [a, b] = [await request(base), await request(base)];
     expect(a.token).not.toBe(b.token);
+  });
+
+  /**
+   * A token is permission to put the deployment's whole upload limit on its
+   * disk for a TTL. Unbounded, one caller asks for a hundred and sends against
+   * all of them at once.
+   */
+  it('refuses another token once one user holds the most they may, and gives one back when it is applied', async () => {
+    const base = await start({ maxOpenPerUser: 2 });
+    const first = await request(base);
+    await request(base);
+    const refused = await call(base, 'request_file_upload', {});
+    expect(refused.status).toBe(429);
+    expect((await json<{ error: string }>(refused)).error).toContain('already hold 2 upload tokens');
+
+    // Applying one spends it, and its place is free again.
+    await send(base, first.token, 'a.md', Buffer.from('a'));
+    await apply(base, { branch: DRAFT, token: first.token, destination: `${KB_DIR}/Drop` });
+    expect((await call(base, 'request_file_upload', {})).status).toBe(200);
   });
 
   it('is on both tool surfaces, with apply_file_upload', async () => {
@@ -1244,17 +1266,37 @@ describe('the sweep', () => {
     expect(await readdir(uploadsDir)).toEqual([]);
   });
 
-  it('runs once the moment it starts, so bytes a dead process left behind go now', async () => {
+  it('runs once the moment it starts, so bytes a dead process left behind long ago go now', async () => {
     const base = await start();
-    // A file no record of THIS store names: what a restart finds, since the
-    // records live in memory and went with the process that issued them.
-    await writeFile(join(uploadsDir, 'upload-from-a-dead-process'), 'orphan');
+    // A file no record of THIS store names, older than any token could still
+    // be good for: what a restart finds, since the records live in memory and
+    // went with the process that issued them.
+    const orphan = join(uploadsDir, 'upload-from-a-dead-process');
+    await writeFile(orphan, 'orphan');
+    const longAgo = new Date(Date.now() - 60 * 60 * 1000);
+    await utimes(orphan, longAgo, longAgo);
     const { token } = await request(base);
     await uploads.drainSweep();
     expect(await readdir(uploadsDir)).toEqual([]);
     // The token issued alongside it is untouched — the sweep reclaims by what
     // the live records do NOT name.
     expect((await send(base, token, 'a.md', Buffer.from('a'))).status).toBe(200);
+  });
+
+  /**
+   * The records are one process's memory, and two processes share the staging
+   * directory whenever a deployment starts the new one before the old one has
+   * stopped. To each, the other's uploads are files no record names — and a
+   * sweep that deleted those at once took away bytes somebody had just been
+   * told were received, from under the apply about to land them.
+   */
+  it('leaves alone a fresh file it has no record of: it may be another process\'s upload', async () => {
+    const base = await start();
+    await writeFile(join(uploadsDir, 'upload-another-process-just-received'), 'theirs');
+    await request(base);
+    await uploads.drainSweep();
+    await uploads.sweepNow();
+    expect(await readdir(uploadsDir)).toEqual(['upload-another-process-just-received']);
   });
 
   it('stops deleting once it is stopped, so an evicted graph cannot sweep its replacement', async () => {

@@ -39,6 +39,31 @@ export const UPLOAD_TOKEN_REFUSAL =
   'That upload token cannot be used: it is unknown, already applied, expired, or was issued to someone else. ' +
   'Call `request_file_upload` for a new one.';
 
+/**
+ * How many tokens one user may hold open at once.
+ *
+ * A token is permission to put the deployment's whole upload limit on its
+ * disk for a TTL, and to hold a connection open while it arrives. Without a
+ * bound, one caller asks for a hundred and sends against all of them
+ * together. Ten is far more than the route's own use needs — one token carries
+ * a zip of any number of files — and a token is given back the moment it is
+ * applied or expires.
+ */
+export const MAX_OPEN_UPLOADS_PER_USER = 10;
+
+/** The refusal an over-limit upload gets, naming the limit that applied. */
+export function overLimit(bytes: number, maxBytes: number): string {
+  return (
+    `That upload is ${bytes} bytes, over this deployment's ${maxBytes} byte upload limit. ` +
+    'Send a smaller file, or split it across several uploads.'
+  );
+}
+
+/** What an upload with no body is told. */
+const EMPTY_UPLOAD =
+  'That upload carried no bytes. Send the file as the request body — e.g. ' +
+  '`curl -X POST --data-binary @<file> "<uploadUrl>?filename=<name>"`.';
+
 /** A refusal with the HTTP status the upload route and the apply tool both answer. */
 export class UploadTokenError extends Error {
   constructor(
@@ -99,9 +124,9 @@ interface UploadRecord {
   received?: ReceivedUpload;
   /**
    * Taken by an upload that is still writing its bytes. Set BEFORE the first
-   * `await` in {@link AgentUploadStore.attach}, so two uploads arriving at once
-   * cannot both pass the one-file-per-token check and then race each other's
-   * bytes onto the same path. Cleared only when an attach fails.
+   * `await` in {@link AgentUploadStore.receive}, so two uploads arriving at
+   * once cannot both pass the one-file-per-token check and then race each
+   * other's bytes onto the same path. Cleared only when a receive fails.
    */
   attaching: boolean;
   /** Held by an apply that is running: a second apply finds the token in use. */
@@ -123,6 +148,8 @@ export interface AgentUploadStoreOptions {
   tokenPrefix?: string;
   ttlMs?: number;
   maxBytes?: number;
+  /** How many tokens one user may hold open at once. Defaults to {@link MAX_OPEN_UPLOADS_PER_USER}. */
+  maxOpenPerUser?: number;
   /**
    * How the staging root is listed. Test seam — defaults to `fs.readdir`.
    *
@@ -174,6 +201,7 @@ export class AgentUploadStore {
   private readonly ttlMs: number;
   private readonly listRoot: (root: string) => Promise<string[]>;
   readonly maxBytes: number;
+  private readonly maxOpenPerUser: number;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   /** The sweep in flight, so a shutdown can wait for it — see {@link drainSweep}. */
   private sweeping: Promise<void> | null = null;
@@ -187,6 +215,7 @@ export class AgentUploadStore {
     this.ttlMs = options.ttlMs ?? UPLOAD_TOKEN_TTL_MS;
     this.listRoot = options.listRoot ?? ((root) => fs.readdir(root));
     this.maxBytes = options.maxBytes ?? MAX_UPLOAD_BYTES;
+    this.maxOpenPerUser = options.maxOpenPerUser ?? MAX_OPEN_UPLOADS_PER_USER;
   }
 
   /** The URL a token's bytes are sent to. The one spelling of this route's address. */
@@ -200,6 +229,20 @@ export class AgentUploadStore {
    * until the sweep drops it.
    */
   issue(user: { id: string }): IssuedUpload {
+    // Counted over the tokens that are still usable: an expired record waiting
+    // for the sweep is not one the user holds any more.
+    const now = Date.now();
+    let open = 0;
+    for (const record of this.records.values()) {
+      if (record.userId === user.id && record.expiresAt > now) open += 1;
+    }
+    if (open >= this.maxOpenPerUser) {
+      throw new UploadTokenError(
+        `You already hold ${open} upload tokens, the most one user may have open at once. Apply one of them with ` +
+          '`apply_file_upload`, or wait for one to expire, then ask again. One token carries a zip of any number of files.',
+        429,
+      );
+    }
     const token = this.tokenPrefix + randomBytes(32).toString('base64url');
     const expiresAt = Date.now() + this.ttlMs;
     this.records.set(hash(token), {
@@ -223,49 +266,69 @@ export class AgentUploadStore {
   }
 
   /**
-   * Store `data` against `token` and say what was received. One file per
-   * token: a second upload against the same token is refused, so a token
-   * cannot be used to keep replacing bytes an apply is about to land.
+   * Store the bytes of `body` against `token` and say what was received. One
+   * file per token: a second upload against the same token is refused, so a
+   * token cannot be used to keep replacing bytes an apply is about to land.
    *
-   * A name ending in `.zip` is read as an archive HERE, at upload time, so the
-   * answer can carry the entry count and so a corrupt archive is refused while
-   * the caller is still holding the file — rather than at apply time, when its
-   * token would already be spent.
+   * WRITTEN AS THEY ARRIVE, never gathered first. The body is up to the
+   * deployment's whole upload limit, and this is the one route a caller can
+   * send to without a session: held in memory, a handful of uploads at once
+   * cost the process several times that limit each (the chunks, the buffer
+   * they were joined into, the archive read over it). Streamed, an upload in
+   * flight costs one chunk.
+   *
+   * A name ending in `.zip` is read as an archive HERE, once the bytes are on
+   * disk, so the answer can carry the entry count and so a corrupt archive is
+   * refused while the caller is still holding the file — rather than at apply
+   * time, when its token would already be spent.
    */
-  async attach(token: string, filename: string, data: Buffer): Promise<ReceivedUpload> {
+  async receive(
+    token: string,
+    filename: string,
+    body: AsyncIterable<Buffer | string>,
+  ): Promise<ReceivedUpload> {
     const record = this.openRecord(token);
-    if (data.byteLength > this.maxBytes) {
-      throw new UploadTokenError(
-        `That upload is ${data.byteLength} bytes, over this deployment's ${this.maxBytes} byte limit. ` +
-          'Send a smaller file, or split it across several uploads.',
-        413,
-      );
-    }
-    const received: ReceivedUpload = { filename, bytes: data.byteLength, kind: 'file' };
-    if (filename.toLowerCase().endsWith('.zip')) {
-      let zip: AdmZip;
-      try {
-        zip = new AdmZip(data);
-        received.entries = zip.getEntries().length;
-      } catch (err) {
-        throw new UploadTokenError(
-          `"${filename}" is not a readable .zip archive: ${err instanceof Error ? err.message : String(err)}`,
-          422,
-        );
-      }
-      received.kind = 'zip';
-    }
     // RESERVED FIRST, before any `await`: two uploads arriving at once would
-    // otherwise both read `received === undefined`, both write, and the apply
-    // would land whichever set of bytes finished last — against a token whose
-    // answer described the other one.
+    // otherwise both find the token open, both write, and the apply would land
+    // whichever set of bytes finished last — against a token whose answer
+    // described the other one.
     record.attaching = true;
+    const stored = path.join(this.root, record.id);
+    let bytes = 0;
+    const received: ReceivedUpload = { filename, bytes: 0, kind: 'file' };
     try {
       await fs.mkdir(this.root, { recursive: true });
-      await fs.writeFile(path.join(this.root, record.id), data);
+      const file = await fs.open(stored, 'w');
+      try {
+        for await (const chunk of body) {
+          const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+          bytes += buf.byteLength;
+          // The real total, counted as it arrives: a `content-length` is the
+          // sender's claim, and a chunked body makes none.
+          if (bytes > this.maxBytes) throw new UploadTokenError(overLimit(bytes, this.maxBytes), 413);
+          await file.write(buf);
+        }
+      } finally {
+        await file.close();
+      }
+      if (bytes === 0) throw new UploadTokenError(EMPTY_UPLOAD, 400);
+      received.bytes = bytes;
+      if (filename.toLowerCase().endsWith('.zip')) {
+        try {
+          received.entries = new AdmZip(stored).getEntries().length;
+        } catch (err) {
+          throw new UploadTokenError(
+            `"${filename}" is not a readable .zip archive: ${err instanceof Error ? err.message : String(err)}`,
+            422,
+          );
+        }
+        received.kind = 'zip';
+      }
     } catch (err) {
       // Nothing was received, so the token is open again: the sender may retry
-      // with the same one rather than ask for another.
+      // with the same one rather than ask for another. Whatever part of the
+      // body reached the disk goes now, rather than at the next sweep.
+      await this.remove(record.id);
       record.attaching = false;
       throw err;
     }
@@ -351,15 +414,15 @@ export class AgentUploadStore {
 
   /**
    * Delete every record whose token has expired, with the bytes it was
-   * holding — then delete any file in the root that no LIVE record claims.
+   * holding — then delete any file in the root that no LIVE record claims and
+   * that has outlived every token that could name it.
    *
-   * The second half is what makes the first one true. A record can leave the
-   * map without its file being gone yet: `find` drops an expired record on the
-   * spot (so the refusal is immediate) and removes its bytes without waiting,
-   * and a process killed between the write and the apply leaves a file no map
-   * will ever mention again. Sweeping by what the records DON'T name closes
-   * both, and is the honest reading of the promise: an upload nobody applied
-   * is gone once its token has expired.
+   * The second half is what makes the first one true. A process killed between
+   * the write and the apply leaves a file no map will ever mention again, and
+   * sweeping by what the records DON'T name is the honest reading of the
+   * promise: an upload nobody applied does not stay. By AGE rather than at
+   * once, because a file this map does not name may be another process's (see
+   * the loop below).
    *
    * ONE record is kept past its expiry: one an apply has CLAIMED. Those bytes
    * are being read right now, and a sweep that deleted them would make the
@@ -399,7 +462,30 @@ export class AgentUploadStore {
       // landed while this sweep was reading the directory must not go on to
       // delete files a replacement store may already have issued ids for.
       if (this.stopped) return;
-      if (!live.has(name)) await this.remove(name);
+      if (live.has(name)) continue;
+      // A file this map does not name is not necessarily nobody's. The records
+      // are ONE PROCESS's memory, and two processes share this directory
+      // whenever a deployment restarts by starting the new one before the old
+      // one has stopped: to each, the other's uploads are files no record
+      // names. So such a file goes only once it is older than any token could
+      // still be good for — its TTL, and the grace an apply holding it is
+      // given. A process that died leaves its files for that long and no
+      // longer; a process that is alive never loses one in use.
+      if (await this.outlivedEveryToken(name, now)) await this.remove(name);
+    }
+  }
+
+  /**
+   * Whether the stored file `name` is older than any token that could still be
+   * naming it, in this process or another. A file that cannot be examined is
+   * left for the next sweep rather than judged.
+   */
+  private async outlivedEveryToken(name: string, now: number): Promise<boolean> {
+    try {
+      const { mtimeMs } = await fs.stat(path.join(this.root, name));
+      return now - mtimeMs > this.ttlMs + CLAIM_GRACE_MS;
+    } catch {
+      return false;
     }
   }
 
@@ -413,9 +499,9 @@ export class AgentUploadStore {
    * file no map mentions (the upload writes after the delete) or an apply
    * reading a path that has gone. The apply's pin has a grace, because a claim
    * can be abandoned by a process that dies; the upload's needs none, because
-   * `attach` always ends — it clears `attaching` on failure and sets `received`
-   * on success, and an attach whose TTL passed meanwhile deletes the record
-   * itself rather than leaving it pinned.
+   * `receive` always ends — it clears `attaching` on failure and sets
+   * `received` on success, and one whose TTL passed meanwhile deletes the
+   * record itself rather than leaving it pinned.
    */
   private pinned(record: UploadRecord, now: number): boolean {
     if (record.attaching && record.received === undefined) return true;
@@ -430,9 +516,8 @@ export class AgentUploadStore {
    *
    * The first sweep runs IMMEDIATELY, not one interval later, because the
    * records are in memory: a process that restarted holds no record of what
-   * the previous one stored, so every file in the root is already orphaned the
-   * moment this store starts. Waiting a full interval to notice would leave
-   * someone else's uploaded bytes on disk for no reason at all.
+   * the previous one stored, and what that one left behind long enough ago
+   * has no reason to wait a further interval.
    */
   startSweeping(intervalMs: number = SWEEP_INTERVAL_MS): void {
     if (this.sweepTimer) return;

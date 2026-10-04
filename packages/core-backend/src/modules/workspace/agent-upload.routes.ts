@@ -1,7 +1,7 @@
 import express from 'express';
 import { validateFilename } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
-import { AgentUploadStore, UploadTokenError } from './agent-upload.store.js';
+import { AgentUploadStore, UploadTokenError, overLimit } from './agent-upload.store.js';
 
 const log = logger('agent-uploads');
 
@@ -84,8 +84,8 @@ export function createAgentUploadRoutes(deps: AgentUploadRouteDeps): express.Rou
       // and a caller holding no token could learn which of its OTHER guesses
       // were well formed — "that is not a usable file name" is an answer only
       // somebody entitled to send a file should get. One refusal, nothing else.
-      // `attach` below asks again, under the same record, because that is where
-      // the token is actually spent.
+      // `receive` below asks again, under the same record, because that is
+      // where the token is actually spent.
       uploads.assertOpen(token);
       const filename = fileNameOf(req);
       if (filename === null) {
@@ -106,32 +106,17 @@ export function createAgentUploadRoutes(deps: AgentUploadRouteDeps): express.Rou
       }
       // Then the declared length, so a caller sending something far too large
       // is told the limit before it spends the bandwidth. The real total is
-      // checked again below — `content-length` is the sender's claim, not a fact.
+      // counted by the store as the bytes arrive — `content-length` is the
+      // sender's claim, not a fact.
       const declared = Number.parseInt(req.headers['content-length'] ?? '', 10);
       if (Number.isFinite(declared) && declared > uploads.maxBytes) {
         res.status(413).json({ error: overLimit(declared, uploads.maxBytes) });
         return;
       }
-      const chunks: Buffer[] = [];
-      let total = 0;
-      for await (const chunk of req) {
-        const buf = typeof chunk === 'string' ? Buffer.from(chunk) : (chunk as Buffer);
-        total += buf.length;
-        if (total > uploads.maxBytes) {
-          res.status(413).json({ error: overLimit(total, uploads.maxBytes) });
-          return;
-        }
-        chunks.push(buf);
-      }
-      if (total === 0) {
-        res.status(400).json({
-          error:
-            'That upload carried no bytes. Send the file as the request body — e.g. ' +
-            '`curl -X POST --data-binary @<file> "<uploadUrl>?filename=<name>"`.',
-        });
-        return;
-      }
-      res.json(await uploads.attach(token, filename, Buffer.concat(chunks)));
+      // The request itself, as a stream: the store writes the bytes to disk as
+      // they arrive and never holds the body. It refuses an empty body, one
+      // past the limit and an unreadable archive with its own status.
+      res.json(await uploads.receive(token, filename, req));
     } catch (err) {
       if (err instanceof UploadTokenError) {
         res.status(err.status).json({ error: err.message });
@@ -172,14 +157,6 @@ function tokenOf(req: express.Request): string {
   const header = req.headers['x-upload-token'];
   if (typeof header === 'string' && header.trim() !== '') return header.trim();
   return '';
-}
-
-/** The refusal an over-limit upload gets, naming the limit that applied. */
-function overLimit(bytes: number, maxBytes: number): string {
-  return (
-    `That upload is ${bytes} bytes, over this deployment's ${maxBytes} byte upload limit. ` +
-    'Send a smaller file, or split it across several uploads.'
-  );
 }
 
 /**
