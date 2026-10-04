@@ -28,6 +28,8 @@ import {
 import { createAgentUploadRoutes, isAgentUploadRawBodyPath } from '../agent-upload.routes.js';
 import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/write-access.js';
 import { MAX_UPLOAD_BYTES } from '../upload-limits.js';
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
+import { sharedFileRules } from '../../agent-instructions/shared-file-rules.js';
 
 /**
  * The upload route an agent lands files by, end to end: a token, bytes sent to
@@ -923,6 +925,52 @@ describe('apply_file_upload', () => {
     expect(batches).toEqual([]);
   });
 
+  /**
+   * The other way to lie about a size. The archive reader caps an inflation at
+   * the size the header declares — but only when that size is above zero, so an
+   * entry declaring ZERO passed the check above and was then inflated with no
+   * cap at all: four megabytes out of four kilobytes here, tens of gigabytes
+   * out of an upload at the limit.
+   */
+  it('refuses an entry whose header says it is empty and whose stream is not', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    const bomb = zipWithDeclaredSize('bomb.md', 'a'.repeat(4 * 1024 * 1024), 0);
+    expect(bomb.byteLength).toBeLessThan(16 * 1024);
+    await send(base, token, 'bomb.zip', bomb);
+    const answer = await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Bomb` });
+    expect(outcomeAt(answer, 'bomb.md')).toMatchObject({ outcome: 'refused', error: 'unreadable_entry' });
+    expect(outcomeAt(answer, 'bomb.md')?.message).toContain('declares an empty file');
+    expect(answer.count).toBe(0);
+    expect(batches).toEqual([]);
+  });
+
+  it('lands a file that really is empty', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    await send(base, token, 'drop.zip', zipOf({ 'empty.md': '', 'full.md': 'x' }));
+    const answer = await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Drop` });
+    expect(outcomeAt(answer, `${KB_DIR}/Drop/empty.md`)).toMatchObject({ outcome: 'created' });
+    expect(outcomeAt(answer, `${KB_DIR}/Drop/full.md`)).toMatchObject({ outcome: 'created' });
+  });
+
+  it('refuses the one entry that fails its checksum, and lands the others', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    const archive = zipOf({ 'bad.md': 'this entry will not match its checksum', 'fine.md': 'fine' });
+    // The CRC field of the FIRST entry, in both of its headers: 14 bytes into
+    // the local one, 16 into the central-directory one. A reader checks one or
+    // the other depending on the entry's flags.
+    const firstLocal = archive.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    const firstCentral = archive.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    archive.writeUInt32LE((archive.readUInt32LE(firstLocal + 14) ^ 0xffffffff) >>> 0, firstLocal + 14);
+    archive.writeUInt32LE((archive.readUInt32LE(firstCentral + 16) ^ 0xffffffff) >>> 0, firstCentral + 16);
+    await send(base, token, 'drop.zip', archive);
+    const answer = await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Drop` });
+    expect(outcomeAt(answer, 'bad.md')).toMatchObject({ outcome: 'refused', error: 'unreadable_entry' });
+    expect(outcomeAt(answer, `${KB_DIR}/Drop/fine.md`)).toMatchObject({ outcome: 'created' });
+  });
+
   // Scenario: a zip holds 60 entries.
   it('lists 25 paths with the total, and all of them when asked', async () => {
     const base = await start();
@@ -1274,11 +1322,22 @@ describe('the write tools name the upload route', () => {
       const description = def!.description;
       expect(description, name).toContain('request_file_upload');
       expect(description, name).toContain('apply_file_upload');
-      // The three cases the route exists for are named, not just the tools.
-      expect(description, name).toMatch(/truncated/i);
-      expect(description, name).toMatch(/escape/i);
-      expect(description, name).toMatch(/zip/i);
+      // And what goes that way, in the one sentence a description has room for.
+      expect(description, name).toMatch(/large, escape-heavy or binary/i);
     }
+  });
+
+  it('says why, and how, once — in the rules every file tool shares', () => {
+    // The three failures the route exists for are named where the full
+    // explanation lives: said on each of three descriptions, it took every one
+    // of them past the length a client cuts at.
+    const rule = sharedFileRules(DEFAULT_KB_LAYOUT).find((r) => r.id === 'upload-route');
+    expect(rule).toBeDefined();
+    expect(rule!.body).toMatch(/cut off mid-answer/);
+    expect(rule!.body).toMatch(/escapes fails to parse/);
+    expect(rule!.body).toMatch(/an image, a PDF or a zip/);
+    expect(rule!.body).toContain('`request_file_upload`');
+    expect(rule!.body).toContain('`apply_file_upload`');
   });
 });
 

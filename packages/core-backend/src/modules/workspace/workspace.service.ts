@@ -25,7 +25,7 @@ import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { assertRepoRootNameFree, normalizeWorkspacePath } from '../kb-fs/repo-path.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
-import { isZipNoiseEntry, zipEntryName, zipEntryNameRefusal, zipEntrySegments } from './zip-entry-rules.js';
+import { isZipNoiseEntry, readZipEntry, zipEntryName, zipEntryNameRefusal, zipEntrySegments } from './zip-entry-rules.js';
 import {
   GitInternalsError,
   PathNotFoundError,
@@ -2093,14 +2093,31 @@ export class WorkspaceService implements IWorkspaceService {
         continue;
       }
 
-      const data = entry.getData();
-      if (data.byteLength > UNZIP_MAX_ENTRY_BYTES) {
+      // Read through the one bounded reader (`readZipEntry`), never with the
+      // declared size above as the only bound: an entry that declares ZERO is
+      // inflated with no cap at all by the archive reader, so a few kilobytes
+      // could expand to whatever memory there is before the checks below ran.
+      // Capped at what is left of both limits, and a read that fails is this
+      // entry's refusal rather than the whole archive's.
+      const read = readZipEntry(
+        entry,
+        Math.min(UNZIP_MAX_ENTRY_BYTES, UNZIP_MAX_TOTAL_BYTES - totalUncompressed),
+      );
+      if (!read.ok && read.reason === 'unreadable') {
+        skipped.push({ path: rawName, reason: `Entry could not be read: ${read.detail}` });
+        continue;
+      }
+      if (!read.ok) {
         skipped.push({
           path: rawName,
-          reason: `Entry exceeds ${UNZIP_MAX_ENTRY_BYTES} byte per-file limit`,
+          reason:
+            totalUncompressed + UNZIP_MAX_ENTRY_BYTES > UNZIP_MAX_TOTAL_BYTES
+              ? `Archive exceeds ${UNZIP_MAX_TOTAL_BYTES} byte total uncompressed limit`
+              : `Entry exceeds ${UNZIP_MAX_ENTRY_BYTES} byte per-file limit`,
         });
         continue;
       }
+      const data = read.data;
       if (totalUncompressed + data.byteLength > UNZIP_MAX_TOTAL_BYTES) {
         skipped.push({
           path: rawName,

@@ -67,7 +67,14 @@ import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
 import { DestinationTakenError, inspectDestination } from '../../shared/rename-no-replace.js';
 import { AgentUploadStore, type ClaimedUpload } from './agent-upload.store.js';
-import { isSymlinkZipEntry, isZipNoiseEntry, zipEntryName, zipEntryNameRefusal, zipEntrySegments } from './zip-entry-rules.js';
+import {
+  isSymlinkZipEntry,
+  isZipNoiseEntry,
+  readZipEntry,
+  zipEntryName,
+  zipEntryNameRefusal,
+  zipEntrySegments,
+} from './zip-entry-rules.js';
 
 const log = logger('workspace-tools');
 
@@ -537,24 +544,22 @@ async function planUpload(
       planned.push({ path: rawName, error: 'invalid_entry', message: 'Path escapes destination' });
       continue;
     }
-    // The DECLARED uncompressed size first, BEFORE decompressing — the same
-    // order `unzip` reads it in, and for the same reason: a deflate stream can
-    // expand a thousandfold, so an entry whose own header says it will not fit
-    // the remaining budget must never be inflated to prove it. Checked again
-    // below against the bytes that actually arrived, because the header is the
-    // archive's claim, not a fact.
-    const declared = entry.header?.size ?? 0;
-    if (totalBytes + declared > APPLY_MAX_TOTAL_BYTES) {
-      planned.push({ path: rawName, error: 'too_large', message: tooLargeToApply() });
+    // Through the one bounded reader `unzip` uses too, capped at what is left
+    // of the budget: a deflate stream can expand a thousandfold, and the
+    // header's declared size is the archive's claim, not a fact — an entry
+    // declaring ZERO would otherwise be inflated with no cap at all (see
+    // `readZipEntry`). A read that fails is this entry's outcome and no more.
+    const read = readZipEntry(entry, APPLY_MAX_TOTAL_BYTES - totalBytes);
+    if (!read.ok) {
+      planned.push(
+        read.reason === 'too_large'
+          ? { path: rawName, error: 'too_large', message: tooLargeToApply() }
+          : { path: rawName, error: 'unreadable_entry', message: `"${rawName}" could not be read: ${read.detail}.` },
+      );
       continue;
     }
-    const data = entry.getData();
-    if (totalBytes + data.byteLength > APPLY_MAX_TOTAL_BYTES) {
-      planned.push({ path: rawName, error: 'too_large', message: tooLargeToApply() });
-      continue;
-    }
-    totalBytes += data.byteLength;
-    planned.push({ path: target, content: data });
+    totalBytes += read.data.byteLength;
+    planned.push({ path: target, content: read.data });
   }
   return planned;
 }
