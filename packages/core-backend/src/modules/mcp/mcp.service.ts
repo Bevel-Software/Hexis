@@ -450,17 +450,24 @@ export class McpService {
           dropped.push(t.mcpName);
           continue;
         }
-        if (seen.has(entry.name)) {
-          dropped.push(`${entry.name} (duplicate)`);
-          continue;
-        }
-        seen.add(entry.name);
         // Kept for the worked example in the meta-tool descriptions: it must
         // be derived from the tools THIS caller actually gets, not from the
         // whole catalog, or a connection-key caller is shown an example naming
         // a credential-gated tool the filter above just removed from its
         // listing — a copied call that cannot work.
+        //
+        // BEFORE the duplicate drop below, on purpose. A tool dropped from the
+        // LISTING for sharing its name with another is still in the catalog a
+        // chain dispatches to, so the chain sees two tools under one name and
+        // refuses the call as ambiguous. The example has to know about both to
+        // steer clear of either (`chainExample` skips a name two tools share);
+        // shown only the survivor, it took that name for a safe one.
         examplePool.push(t);
+        if (seen.has(entry.name)) {
+          dropped.push(`${entry.name} (duplicate)`);
+          continue;
+        }
+        seen.add(entry.name);
         // The four knowledge-base tools carry the purpose prefix: the one
         // pre-call channel every client shows the model, for the clients that
         // drop the handshake's `instructions`. Applied AFTER the credential

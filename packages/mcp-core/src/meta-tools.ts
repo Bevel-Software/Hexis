@@ -116,9 +116,11 @@ function callToolChainDescription(example: ChainExample, sharedRulesPointer?: st
   // the agent cannot trust is worse than the shape on its own, and `tools_info`
   // is one hop away either way.
   const worked = call ? ` A call that works exactly as written: \`return ${call};\`.` : '';
+  // A name the catalog really has, or no name: see `ChainExample.name`.
+  const forInstance = name ? ` (e.g. \`${name}\`)` : '';
   const howToWriteOne = [
     `Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function. Call tools as \`${ns}.<tool>({ body: { ...args } })\` with NO \`await\` (results are already resolved), and \`return\` the final value.${worked} Every argument a tool declares REQUIRED must be present — \`tools_info\` gives the exact shapes, and for the knowledge-base tools that includes \`branch\`. The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax), plus \`atob\`, \`btoa\`, \`TextEncoder\` and \`TextDecoder\` for base64 and UTF-8 bytes, as in a browser. There is no \`Buffer\`, no \`fetch\` and no \`require\`.`,
-    `Discover first: \`list_tools\` lists every tool in callable form (e.g. \`${name}\`); \`tools_info\` returns their exact argument + return shapes — do not guess. Batch multiple tool calls into one chain to avoid a round-trip per call. The chain runs with your own connection key, so it can only reach the tools you can already call directly.`,
+    `Discover first: \`list_tools\` lists every tool in callable form${forInstance}; \`tools_info\` returns their exact argument + return shapes — do not guess. Batch multiple tool calls into one chain to avoid a round-trip per call. The chain runs with your own connection key, so it can only reach the tools you can already call directly.`,
   ];
   if (sharedRulesPointer !== undefined) return `${howToWriteOne.join('\n\n')}${sharedRulesPointer}`;
   return [...howToWriteOne, CHAIN_FAILURES_RULE, CHAIN_LARGE_RESULTS_RULE, CHAIN_IMAGES_RULE].join('\n\n');
@@ -159,7 +161,7 @@ export function codeModeMetaTools(
   return [
     {
       name: 'list_tools',
-      description: `List every UTCP tool currently registered, in TypeScript-accessible form (e.g. \`${name}\`) for use inside \`call_tool_chain\`.`,
+      description: `List every UTCP tool currently registered, in TypeScript-accessible form${name ? ` (e.g. \`${name}\`)` : ''} for use inside \`call_tool_chain\`.`,
       inputSchema: { type: 'object', properties: {}, additionalProperties: false } as McpTool['inputSchema'],
     },
     {

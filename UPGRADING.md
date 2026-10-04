@@ -94,17 +94,38 @@ Two things are different about this upgrade:
   name and address as ciphertext, so a downgrade after the first start means
   restoring the database as it was before. Take a database backup first.
 
-That first start refuses to come up in two cases, and says which:
+That first start also removes two kinds of data, which is one more reason
+for the backup:
+
+- **Duplicate approvals and join requests.** Addresses are compared without
+  regard to case or surrounding whitespace from now on. Where one change
+  request holds two approvals of the same file at the same version from
+  `Ada@example.com` and `ada@example.com`, they are one person's approval
+  recorded twice: the earlier row is kept and the later one deleted. The same
+  goes for two requests to join one plugin. If your deployment really has two
+  people whose addresses differ only in case, give one of them another
+  address before upgrading.
+- **The name on a refused apply recorded before this release.** A change
+  request that could not be applied shows who tried. Older versions kept that
+  name without the address it belongs to, so it could not be found again when
+  the person's account is erased. The name is taken off those refusals; the
+  refusal, its reason and its time stay.
+
+That first start refuses to come up in three cases, and says which:
 
 - Two accounts share one address up to case and whitespace
   (`Alice@example.com` and `alice@example.com` could both exist before).
   The log names the conflicting user ids; merge or delete the duplicates,
   then start again.
-- A sealed row does not open with the configured key. From then on, every
-  start checks this: changing `SECRETS_ENC_KEY` is no longer a configuration
-  change but a re-keying of the database, and a start under a different key
-  stops instead of locking everyone out. Restore the key that sealed the
-  data.
+- `SECRETS_ENC_KEY` holds a character that is neither hex nor base64. Such a
+  key used to be accepted with that character skipped. Remove the stray
+  character: what is left is the key the deployment has been using all
+  along, so nothing sealed is lost.
+- A sealed row does not open with the configured key. From the second start
+  on, every start checks this: changing `SECRETS_ENC_KEY` is no longer a
+  configuration change but a re-keying of the database, and a start under a
+  different key stops instead of locking everyone out. Restore the key that
+  sealed the data.
 
 A process that serves several knowledge bases (`TENANTS_FILE`) seals each
 tenant's rows with that tenant's own key, the one derived for it from

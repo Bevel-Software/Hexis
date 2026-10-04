@@ -248,16 +248,22 @@ export function listedTools(tools: ProxiedTool[]): McpTool[] {
       dropped.push(tool.mcpName);
       continue;
     }
+    // Kept for the worked example in the meta-tool descriptions, which has to
+    // be derived from the tools this server really serves: an example naming
+    // one just dropped as non-listable is a call nobody can make.
+    //
+    // BEFORE the duplicate drop below, on purpose. A tool dropped from the
+    // LISTING for sharing its name with another is still in the catalog a
+    // chain dispatches to, so the chain sees two tools under one name and
+    // refuses the call as ambiguous. The example has to know about both to
+    // steer clear of either (`chainExample` skips a name two tools share).
+    examplePool.push(tool);
     if (seen.has(entry.name)) {
       dropped.push(`${entry.name} (duplicate)`);
       continue;
     }
     seen.add(entry.name);
     listed.push(entry);
-    // Kept for the worked example in the meta-tool descriptions, which has to
-    // be derived from the tools this listing really serves: an example naming
-    // one just dropped as non-listable or duplicate is a call nobody can make.
-    examplePool.push(tool);
   }
   // The examples in the meta-tools name the namespace THIS server registers
   // the deployment under (`hexis`), not the one the hosted endpoint uses
