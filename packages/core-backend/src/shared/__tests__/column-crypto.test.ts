@@ -62,9 +62,25 @@ describe('derivePiiKeys: seal / open / read', () => {
       expect(isEncryptedBlob(sealed)).toBe(true);
       expect(regex.test(sealed)).toBe(true);
     }
-    for (const unsealed of ['a@b.co', '', `${PII_CIPHERTEXT_PREFIX}abc:def:ghi`, new TokenCrypto(KEY).encrypt('x')]) {
-      expect(isEncryptedBlob(unsealed)).toBe(false);
-      expect(regex.test(unsealed)).toBe(false);
+    // The same blob with its padding spelled otherwise decodes to the same
+    // bytes, and the two predicates used to disagree about it: the database
+    // called it unsealed and selected it, this process called it sealed and
+    // skipped it, on every start. One answer, from one pattern.
+    const [iv, tag, ct] = keys.seal('a@b.co').slice(PII_CIPHERTEXT_PREFIX.length).split(':') as [string, string, string];
+    const respelled = [
+      `${PII_CIPHERTEXT_PREFIX}${iv}:${tag.replace(/=+$/, '')}:${ct}`,
+      `${PII_CIPHERTEXT_PREFIX}${iv}==:${tag}:${ct}`,
+      `${PII_CIPHERTEXT_PREFIX}${iv}:${tag}:${ct}\n`,
+    ];
+    for (const unsealed of [
+      'a@b.co',
+      '',
+      `${PII_CIPHERTEXT_PREFIX}abc:def:ghi`,
+      new TokenCrypto(KEY).encrypt('x'),
+      ...respelled,
+    ]) {
+      expect(isEncryptedBlob(unsealed), JSON.stringify(unsealed)).toBe(false);
+      expect(regex.test(unsealed), JSON.stringify(unsealed)).toBe(false);
     }
   });
 
@@ -95,6 +111,33 @@ describe('derivePiiKeys: seal / open / read', () => {
 
   it('refuses a key that is not 32 bytes', () => {
     expect(() => derivePiiKeys('too-short')).toThrow();
+  });
+
+  /**
+   * Node's base64 decoder skips what it does not know, so a key with one
+   * mistyped character still decoded — to 32 bytes that are another key, and
+   * data sealed under it opens with nothing the operator has written down.
+   */
+  it('refuses a key with a character neither hex nor base64 has, rather than deriving another key from it', () => {
+    // A stray character in the middle: skipped by the decoder, so the length
+    // check alone passes it.
+    const mistyped = `${KEY.slice(0, 10)}$${KEY.slice(10)}`;
+    expect(Buffer.from(mistyped, 'base64')).toHaveLength(32);
+    expect(() => derivePiiKeys(mistyped)).toThrow(/SECRETS_ENC_KEY is not hex or base64/);
+    expect(() => derivePiiKeys(`${KEY.slice(0, 20)} ${KEY.slice(20)}`)).toThrow(/not hex or base64/);
+  });
+
+  it('takes one key in any of its spellings: hex, base64, url-safe, unpadded, with whitespace around it', () => {
+    const raw = Buffer.from(KEY, 'base64');
+    const index = keys.index('a@b.co');
+    for (const spelled of [
+      raw.toString('hex'),
+      raw.toString('base64url'),
+      KEY.replace(/=+$/, ''),
+      `  ${KEY}\n`,
+    ]) {
+      expect(derivePiiKeys(spelled).index('a@b.co'), spelled).toBe(index);
+    }
   });
 });
 

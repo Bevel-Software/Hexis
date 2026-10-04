@@ -61,7 +61,19 @@ function decodeKey(raw: string): Buffer {
  * is then safe, because a bad key never gets that far.
  */
 export function assertKeyDecodesTo32Bytes(rawKey: string, envVarName: string): Buffer {
-  const key = decodeKey(rawKey);
+  // The SYNTAX first. Node's base64 decoder skips every character it does not
+  // know, so a key with one mistyped character still decodes — to 32 bytes
+  // that are a different key, which then seals data nothing else can open.
+  // Hex, or base64 in either alphabet with or without its padding; whitespace
+  // around it is the environment's, not the key's.
+  const trimmed = rawKey.trim();
+  if (!/^[0-9a-fA-F]{64}$/.test(trimmed) && !/^[A-Za-z0-9+/_-]+={0,2}$/.test(trimmed)) {
+    throw new Error(
+      `${envVarName} is not hex or base64: it holds a character neither encoding has. ` +
+        'Generate one with: `node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"`.',
+    );
+  }
+  const key = decodeKey(trimmed);
   if (key.length !== 32) {
     throw new Error(
       `${envVarName} must decode to 32 bytes (got ${key.length}). ` +

@@ -206,8 +206,10 @@ export const changeRequests = pgTable('change_requests', {
   applyFailedByName: encryptedText('apply_failed_by_name'),
   /**
    * Blind index of the email of the person named above — what account erasure
-   * finds their name by. Written and cleared with the name. NULL on a refusal
-   * recorded before the encryption release, which kept no address.
+   * finds their name by. Written and cleared with the name, so a name never
+   * stands without it: a refusal recorded before the encryption release kept
+   * no address, and its name is taken off at the first start on this release
+   * (`clearUnindexedRefusalNames` in `migrate.ts`).
    */
   applyFailedByEmailBidx: blindIndexText('apply_failed_by_email_bidx'),
   /** What refused the last apply: 'gate' (approvals), 'conflicts' (git), 'error' (anything else). */

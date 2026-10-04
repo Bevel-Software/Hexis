@@ -99,30 +99,33 @@ export function derivePiiKeys(secretsEncKey: string): PiiKeys {
 export const PII_CIPHERTEXT_PREFIX = 'pii:v1:';
 
 /**
- * Whether `value` is a PII ciphertext blob: the version prefix followed by
- * TokenCrypto's `iv:tag:ct` (12-byte IV, 16-byte tag, base64 parts). Used to
- * tell ciphertext from legacy plaintext during the backfill and on every read.
- */
-export function isEncryptedBlob(value: string): boolean {
-  if (!value.startsWith(PII_CIPHERTEXT_PREFIX)) return false;
-  const parts = value.slice(PII_CIPHERTEXT_PREFIX.length).split(':');
-  if (parts.length !== 3) return false;
-  const [iv, tag, ct] = parts;
-  if (!iv || !tag || !ct) return false;
-  const b64 = /^[A-Za-z0-9+/]+={0,2}$/;
-  if (!b64.test(iv) || !b64.test(tag) || !b64.test(ct)) return false;
-  return Buffer.from(iv, 'base64').length === 12 && Buffer.from(tag, 'base64').length === 16;
-}
-
-/**
- * The SQL (POSIX regex) counterpart of {@link isEncryptedBlob}: the version
- * prefix followed by base64 segments of the exact widths GCM produces
- * (12-byte IV → 16 chars, 16-byte tag → 22 chars + `==`). Lets the backfill
- * find unsealed rows with a `!~` predicate instead of scanning every row in
- * the app. Lives beside the blob format it mirrors — and is pinned to it by
- * `column-crypto.test.ts` — so the two cannot drift apart.
+ * The shape of a PII ciphertext blob, as ONE pattern both Postgres and this
+ * process read: the version prefix followed by base64 segments of the exact
+ * widths GCM produces (12-byte IV → 16 chars, 16-byte tag → 22 chars + `==`).
+ * Lets the backfill find unsealed rows with a `!~` predicate instead of
+ * scanning every row in the app.
+ *
+ * {@link isEncryptedBlob} is built FROM it rather than written beside it. The
+ * two used to be separate spellings of one idea, and they disagreed: the
+ * JavaScript one decoded each part and so took an unpadded tag for a 16-byte
+ * one, which this pattern does not. A value the two disagreed about was
+ * selected by the backfill's SQL as unsealed and then skipped by its
+ * JavaScript as sealed, on every start, and stayed in clear for good. The
+ * pattern uses nothing POSIX and JavaScript read differently.
  */
 export const PII_SEALED_SHAPE_SQL_REGEX = `^${PII_CIPHERTEXT_PREFIX}[A-Za-z0-9+/]{16}:[A-Za-z0-9+/]{22}==:[A-Za-z0-9+/]+={0,2}$`;
+
+const PII_SEALED_SHAPE = new RegExp(PII_SEALED_SHAPE_SQL_REGEX);
+
+/**
+ * Whether `value` has the shape of a PII ciphertext blob — exactly the values
+ * {@link PII_SEALED_SHAPE_SQL_REGEX} matches in the database, no more and no
+ * fewer. Shape only: whether the configured key OPENS it is `PiiKeys.open`'s
+ * answer, and a plaintext somebody typed in this shape passes here.
+ */
+export function isEncryptedBlob(value: string): boolean {
+  return PII_SEALED_SHAPE.test(value);
+}
 
 /**
  * A value on its way to the database that the handle's connection still has
