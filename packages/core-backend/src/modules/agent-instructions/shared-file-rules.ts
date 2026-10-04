@@ -56,12 +56,13 @@ const PRE_RENAME_AGENTS_FILE = 'CLAUDE.md';
  * limit. Measured against {@link sharedFileRulesSection} under the default
  * layout.
  *
- * 6,500 since the chain's own rules (what a failed chain and an oversized
- * result answer) moved in from `call_tool_chain`'s description: two paragraphs
- * that took that description past its cap, and that are true of every call
- * rather than of how to write one.
+ * 7,000 since two rules moved in from descriptions they took past their cap:
+ * the chain's own (what a failed chain and an oversized result answer), true
+ * of every call rather than of how to write one, and why large, escape-heavy
+ * and binary content goes by upload, which three write tools each said in
+ * full.
  */
-export const SHARED_FILE_RULES_CAP = 6_500;
+export const SHARED_FILE_RULES_CAP = 7_000;
 
 /** One shared rule: how the guide heads it, and the rule itself. */
 export interface SharedFileRule {
@@ -98,9 +99,8 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
         '(.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf, .eml/.msg); write_file, write_files and edit_file accept TEXT only — ' +
         'they refuse documents, images, archives and other binary files (legacy .doc/.ppt/.xls included) with kind ' +
         "`binary_not_writable`, naming the file's kind and the tool to use instead; copy_file, move_file and delete_file " +
-        'act on bytes of any kind and unzip extracts the entries of a `.zip`; new binary content arrives through ' +
-        'upload (`request_upload_token` + ' +
-        '`apply_upload` where offered, otherwise Upload in the app). file_stat reports `contentMode` ' +
+        'act on bytes of any kind and unzip extracts the entries of a `.zip`; new binary content arrives by upload ' +
+        '(see below). file_stat reports `contentMode` ' +
         '(`text` | `document` | `binary`) so you can decide before acting.\n\n' +
         'Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods) and PDFs read as EXTRACTED text under an ' +
         'honest `[extracted text of …]` header, with `[slide N]`/`[sheet: Name]`/`[page N]` markers — the extraction ' +
@@ -139,8 +139,22 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
         'sequences in arguments before sending, so content meant to CONTAIN an escape rather than what it stands for ' +
         '(the six characters backslash, `u`, `0`, `0`, `4`, `1`, say, rather than the letter `A`) can reach the tool ' +
         'already decoded — what arrives is stored byte for byte, so when that distinction matters, verify what landed ' +
-        '(`read_file`, or a hash) and send such content through the upload route (`request_upload_token` + ' +
-        '`apply_upload` where offered, otherwise Upload in the app), which lands it unchanged.',
+        '(`read_file`, or a hash) and send such content by upload (see below), which lands it unchanged.',
+    },
+    {
+      // The reason the upload route exists, said once. Each of the three tools
+      // that take content as a JSON string names the route in one sentence of
+      // its own; WHY a file should go that way, and how, is here.
+      id: 'upload-route',
+      heading: 'Large, escape-heavy and binary content goes by upload',
+      body:
+        'write_file, write_files and edit_file take content as a JSON string you have to type out in full, so a long ' +
+        'file is cut off mid-answer, a file full of backslashes or `\\u` escapes fails to parse as a parameter, and ' +
+        'an image, a PDF or a zip cannot be sent at all. For any of those: call `request_file_upload`, POST the file — ' +
+        'or one zip holding many files — to the address it answers with any HTTP client ' +
+        '(`curl -X POST --data-binary @<file> "<uploadUrl>?filename=<name>"`), then `apply_file_upload` to land it on ' +
+        'a branch in one commit. The bytes never pass through the conversation, so nothing is cut or mangled on the ' +
+        'way. A person can also use Upload in the app.',
     },
     {
       id: 'dry-run-confirm',

@@ -38,8 +38,7 @@ import { createGitInternalsRouteGuard } from './git-internals.middleware.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 import type { SkillSaveCheck } from './workspace.tools.js';
-
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
+import { MAX_UPLOAD_BYTES } from './upload-limits.js';
 
 /**
  * One file identity from one request field, or `null` when the caller sent

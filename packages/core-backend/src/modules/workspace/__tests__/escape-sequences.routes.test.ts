@@ -371,8 +371,12 @@ describe('what the write tools tell an agent about escape sequences', () => {
     // carried it was long enough for a client to cut the end off.
     const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'escape-sequences')!;
     expect(rule.body).toContain('some clients decode escape sequences in arguments before sending');
-    expect(rule.body).toContain('request_upload_token');
-    expect(rule.body).toContain('lands it unchanged');
+    // The way out is the upload route, which the rule after it spells out by
+    // the names of the tools this deployment serves.
+    expect(rule.body).toContain('by upload (see below), which lands it unchanged');
+    const upload = sharedFileRules(testKbContext().layout).find((r) => r.id === 'upload-route')!;
+    expect(upload.body).toContain('`request_file_upload`');
+    expect(upload.body).toContain('`apply_file_upload`');
     // It names the three tools it is about, so an agent reading the section
     // knows where it applies.
     for (const name of ['write_file', 'write_files', 'edit_file']) expect(rule.body, name).toContain(name);

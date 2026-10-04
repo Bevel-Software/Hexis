@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import nodeFs from 'node:fs/promises';
 import { join } from 'node:path';
+import AdmZip from 'adm-zip';
 import type { Router, RequestHandler } from 'express';
 import type { LocalFilesystem } from '@mastra/core/workspace';
 import type { IToolRegistry, JsonSchema } from '../tool-registry/tool.contract.js';
@@ -16,11 +17,17 @@ import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import { assertBranchProvided } from '../../shared/domain-errors.js';
+import { assertBranchProvided, GitInternalsError, WorkflowValidationError } from '../../shared/domain-errors.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a workflow service, so this stays inside the module boundary.
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
-import { assertInsideRepo, assertRepoRootNameFreeArgs, normalizePathArgs } from '../kb-fs/repo-path.js';
+import {
+  assertInsideRepo,
+  assertRepoRootNameFree,
+  assertRepoRootNameFreeArgs,
+  isInsideRepo,
+  normalizePathArgs,
+} from '../kb-fs/repo-path.js';
 import { GitGuardedFilesystem } from '../kb-fs/git-guarded-filesystem.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
@@ -44,6 +51,7 @@ import {
   isPlatformFolder,
   platformFileCreationRefusal,
   platformFileRefusal,
+  platformFileUploadRefusal,
   platformFolderRefusal,
   entryExistsMessage,
   type ExistingEntryKind,
@@ -58,6 +66,15 @@ import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
 import { DestinationTakenError, inspectDestination } from '../../shared/rename-no-replace.js';
+import { AgentUploadStore, type ClaimedUpload } from './agent-upload.store.js';
+import {
+  isSymlinkZipEntry,
+  isZipNoiseEntry,
+  readZipEntry,
+  zipEntryName,
+  zipEntryNameRefusal,
+  zipEntrySegments,
+} from './zip-entry-rules.js';
 
 const log = logger('workspace-tools');
 
@@ -196,6 +213,23 @@ const int = (description: string): JsonSchema => ({ type: 'integer', description
 const str = (description: string): JsonSchema => ({ type: 'string', description });
 
 /**
+ * The upload route, named on every tool that takes content as a JSON string.
+ *
+ * ONE sentence, and the tools' own: it is what stops the three failures the
+ * route was built for. An agent landing 27 files read each one and typed it
+ * out again as a tool argument: a 37 KB write was truncated mid-answer, a page
+ * of regex backslashes failed to parse as a JSON parameter, and a PNG could not
+ * be sent at all. None of that is discoverable from a refusal — a truncated
+ * write reports success — so the tools that invite it name where the bytes
+ * should go instead, in the description itself, for a client that reads
+ * nothing else. WHY, and how the route is used, is one of the shared rules
+ * (`agent-instructions/shared-file-rules.ts`): said in full on three
+ * descriptions it took each of them past the length a client cuts at.
+ */
+const UPLOAD_ROUTE_NOTE =
+  ' Large, escape-heavy or binary content does not go through here: use `request_file_upload` + `apply_file_upload`.';
+
+/**
  * A path input that names the clone folder, and says what happens when it does
  * not. The tools are rooted at the WORKSPACE dir, one level above the git clone,
  * so a path reaches git only when it starts with that folder — and a path that
@@ -232,6 +266,9 @@ const RESERVED_ROOT_NAME_TARGETS: Readonly<Record<string, readonly string[]>> = 
   copy_file: ['dest'],
   move_file: ['dest'],
   unzip: ['destination'],
+  // The folder the upload lands in. Each of its own paths is checked again
+  // inside the handler — an archive chooses its entry names, not the caller.
+  apply_file_upload: ['destination'],
 };
 
 function asText(content: string | Buffer): string {
@@ -272,7 +309,7 @@ const BINARY_USE_INSTEAD = ['upload', 'copy_file', 'move_file'] as const;
 function binaryNotWritable(fileKind: FileKind, explanation: string): ToolError {
   return new ToolError(
     `${explanation} [binary_not_writable: this file's kind is ${fileKind}; write_file, write_files and edit_file accept text only. ` +
-      'Use upload for new bytes (`request_upload_token` + `apply_upload` where offered, otherwise Upload in the app), ' +
+      'Use upload for new bytes (`request_file_upload` + `apply_file_upload`, or Upload in the app), ' +
       'or copy_file / move_file to place bytes that are already in the workspace.]',
     415,
     { kind: 'binary_not_writable', fileKind, useInstead: [...BINARY_USE_INSTEAD] },
@@ -393,6 +430,169 @@ function decideWrite(mode: WriteMode, path: string, exists: boolean): WriteOutco
   if (mode === 'update' && !exists) throw pathMissing(path);
   if (mode === 'update') return 'updated';
   return exists ? 'replaced' : 'created';
+}
+
+/**
+ * How many of an upload's paths the answer NAMES before it stops and says how
+ * many there were. A 300-file zip's full outcome list is pages of text an agent
+ * pays for on every call; 25 is enough to see the shape of what happened, and
+ * `total` plus `truncated` say that there is more. `all: true` asks for the
+ * rest, for a caller that really does have to read each one.
+ */
+const APPLY_ANSWER_CAP = 25;
+
+/**
+ * How many entries of one uploaded archive are landed, and how many bytes of
+ * uncompressed content in total.
+ *
+ * Tighter than `unzip`'s own caps on purpose. An apply lands its whole set as
+ * ONE commit, which means every entry's bytes are held in memory at once —
+ * the property that makes the commit atomic is the one that makes a zip bomb
+ * expensive. The upload itself is already bounded by the deployment's upload
+ * limit; these bound what that upload is allowed to expand into.
+ */
+const APPLY_MAX_ENTRIES = 5_000;
+const APPLY_MAX_TOTAL_BYTES = 128 * 1024 * 1024; // 128 MB uncompressed
+
+/**
+ * One path of an upload, as `apply_file_upload` plans it: the bytes to write,
+ * or the reason this path is refused before any gate is asked. A refused path
+ * carries the name the archive held rather than a workspace path, because for
+ * those the whole problem is that no workspace path can be built from it.
+ */
+interface PlannedUploadPath {
+  path: string;
+  content?: Buffer;
+  error?: string;
+  message?: string;
+}
+
+/**
+ * Turn a stored upload into one planned path per file.
+ *
+ * A single file is one path: the destination plus the name it was sent with.
+ * A zip is one path per member, with the member's folder structure kept under
+ * the destination — judged by the same entry rules `unzip` applies
+ * (`zip-entry-rules.ts`), plus one `unzip` does not have: an entry that is a
+ * symbolic LINK is refused outright. A zip stores a link as a member whose
+ * bytes are its target text, so a reader that ignored the mode bits would
+ * write that text out as a file — content nobody sent, under a name that was
+ * meant to point elsewhere.
+ */
+/** The refusal an entry gets when the archive would expand past what one commit lands. */
+function tooLargeToApply(): string {
+  return `This archive expands past the ${APPLY_MAX_TOTAL_BYTES} byte total the apply lands in one commit; this entry was not applied.`;
+}
+
+async function planUpload(
+  upload: ClaimedUpload,
+  destination: string,
+  kbDirName: string,
+): Promise<PlannedUploadPath[]> {
+  const bytes = await nodeFs.readFile(upload.absolutePath);
+  if (upload.kind !== 'zip') {
+    return [{ path: `${destination}/${upload.filename}`, content: bytes }];
+  }
+  let zip: AdmZip;
+  try {
+    zip = new AdmZip(bytes);
+  } catch (err) {
+    throw new ToolError(
+      `"${upload.filename}" could not be opened as a .zip archive: ${err instanceof Error ? err.message : String(err)}`,
+      422,
+      { code: 'unreadable_archive' },
+    );
+  }
+  const planned: PlannedUploadPath[] = [];
+  let seen = 0;
+  let totalBytes = 0;
+  for (const entry of zip.getEntries()) {
+    const rawName = zipEntryName(entry.entryName);
+    if (isZipNoiseEntry(rawName)) continue;
+    if (seen >= APPLY_MAX_ENTRIES) {
+      planned.push({
+        path: rawName || '(empty)',
+        error: 'too_many_entries',
+        message: `This archive holds more than ${APPLY_MAX_ENTRIES} entries; the rest were not applied.`,
+      });
+      continue;
+    }
+    seen++;
+    const nameRefusal = zipEntryNameRefusal(rawName);
+    if (nameRefusal !== null) {
+      planned.push({ path: rawName || '(empty)', error: 'invalid_entry', message: nameRefusal });
+      continue;
+    }
+    if (isSymlinkZipEntry(entry)) {
+      planned.push({
+        path: rawName,
+        error: 'link',
+        message: `"${rawName}" is a symbolic link, not a file; an upload lands files, never links.`,
+      });
+      continue;
+    }
+    // A folder comes into being with the files under it (the write path mkdirs
+    // each parent), so a directory member has nothing of its own to land.
+    if (entry.isDirectory) continue;
+    const segments = zipEntrySegments(rawName);
+    const target = [destination, ...segments].join('/');
+    // Belt and braces: `zipEntryNameRefusal` already refuses a `..` segment
+    // and a root-anchored name, so nothing should reach here that climbs out.
+    // The check stays because the cost of being wrong about that is bytes
+    // landing outside the folder the caller named.
+    if (!target.startsWith(`${destination}/`) || !isInsideRepo(target, kbDirName)) {
+      planned.push({ path: rawName, error: 'invalid_entry', message: 'Path escapes destination' });
+      continue;
+    }
+    // Through the one bounded reader `unzip` uses too, capped at what is left
+    // of the budget: a deflate stream can expand a thousandfold, and the
+    // header's declared size is the archive's claim, not a fact — an entry
+    // declaring ZERO would otherwise be inflated with no cap at all (see
+    // `readZipEntry`). A read that fails is this entry's outcome and no more.
+    const read = readZipEntry(entry, APPLY_MAX_TOTAL_BYTES - totalBytes);
+    if (!read.ok) {
+      planned.push(
+        read.reason === 'too_large'
+          ? { path: rawName, error: 'too_large', message: tooLargeToApply() }
+          : { path: rawName, error: 'unreadable_entry', message: `"${rawName}" could not be read: ${read.detail}.` },
+      );
+      continue;
+    }
+    totalBytes += read.data.byteLength;
+    planned.push({ path: target, content: read.data });
+  }
+  return planned;
+}
+
+/**
+ * Record on `entry` that this path was refused, saying what the gate that
+ * refused it said. Four kinds of refusal count as one path's outcome: a
+ * typed tool refusal (`exists`, `platform_file`, the mode gate), a permission
+ * refusal (the caller may not write this path, where the DESTINATION was
+ * writable), the git folder in any spelling, and a path-shape refusal from the
+ * repository rules. Anything else
+ * is not a verdict about this path — it is a gate failing — so it travels on
+ * and the whole apply fails loudly, exactly as it does in `write_files`.
+ */
+function refuseEntry(entry: Record<string, unknown>, err: unknown): void {
+  entry.outcome = 'refused';
+  if (err instanceof ToolError) {
+    const details = (err.details ?? {}) as { code?: string; kind?: string };
+    entry.error = details.code ?? details.kind ?? 'refused';
+    entry.message = err.message;
+    return;
+  }
+  if (err instanceof AccessDeniedError) {
+    entry.error = 'write-denied';
+    entry.message = err.message;
+    return;
+  }
+  if (err instanceof GitInternalsError || err instanceof WorkflowValidationError) {
+    entry.error = (err.payload as { kind?: string } | undefined)?.kind ?? 'refused';
+    entry.message = err.message;
+    return;
+  }
+  throw err;
 }
 
 /** The three modes, as a set the handler can check a raw argument against. */
@@ -639,6 +839,15 @@ export function registerWorkspaceTools(
    * verdict alone then decides, which differs only at a root.
    */
   changeGate?: IChangeReadGate,
+  /**
+   * The upload-token store behind `request_file_upload` / `apply_file_upload`
+   * — the route an agent lands bytes by, without their content passing
+   * through the model. Optional for the same reason the two above are: a tool
+   * harness that is about the file primitives need not stand one up. Every
+   * real composition wires it (`create-core-server.ts`), and without it the
+   * two tools are not mounted at all rather than mounted and broken.
+   */
+  uploads?: AgentUploadStore,
 ): void {
   const { kbDirName } = kb;
   /**
@@ -1870,7 +2079,8 @@ export function registerWorkspaceTools(
     gated: true,
     description:
       'Write a workspace TEXT file. The change is committed + pushed as you. Returns `{ path, bytes, outcome }`, where `outcome` is ' +
-      '`created`, `replaced` or `updated`.',
+      '`created`, `replaced` or `updated`.' +
+      UPLOAD_ROUTE_NOTE,
     inputs: {
       type: 'object',
       properties: {
@@ -1957,7 +2167,8 @@ export function registerWorkspaceTools(
       'Returns `{ count, files }`: one entry per REQUESTED path, in the order you gave them, each `{ path, outcome }` — ' +
       '`created` / `replaced` / `updated` for a path it wrote, or `refused` with `error` (the code) and `message` (why) for a ' +
       'path it could not. `count` is how many were written. A path it refuses — the mode said no, or the file is not text — ' +
-      'does not stop the others; read `files` to see what landed.',
+      'does not stop the others; read `files` to see what landed.' +
+      UPLOAD_ROUTE_NOTE,
     inputs: {
       type: 'object',
       properties: {
@@ -2126,7 +2337,8 @@ export function registerWorkspaceTools(
     name: 'edit_file',
     gated: true,
     description:
-      'Replace an exact string in a workspace TEXT file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you.',
+      'Replace an exact string in a workspace TEXT file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you.' +
+      UPLOAD_ROUTE_NOTE,
     inputs: {
       type: 'object',
       properties: {
@@ -2749,6 +2961,335 @@ export function registerWorkspaceTools(
       );
     },
   });
+
+  // ── uploads (bytes that never pass through the model) ───────────────────
+  //
+  // The pair exists because MCP tool arguments are JSON. Every byte an agent
+  // sends through `write_file` is first typed out by the model, which
+  // truncates long files, mangles backslash and `\u` escapes, and cannot carry
+  // a PNG at all. `request_file_upload` answers an address; the agent POSTs
+  // the file (or one zip holding many) there with any HTTP client;
+  // `apply_file_upload` lands it on a branch in one commit. The bytes go from
+  // the agent's disk to the server's and never enter a prompt.
+  //
+  /**
+   * Why one of an upload's paths may not be landed, judged on the path ALONE —
+   * or undefined when nothing about the name itself refuses it.
+   *
+   * The platform files are the whole of it. `access.md` governs who may read
+   * and write the folder it sits in, `roles.yaml` says which roles exist, and
+   * the agent guide is read as instructions: each is configuration the platform
+   * obeys, and each has a write path that CHECKS the change (the roles gate
+   * refuses an edit that would lock every admin out; a folder's access rules
+   * are judged against who is asking). Bytes arriving by upload meet none of
+   * those gates — they are a buffer the sender chose — so an upload never
+   * lands one, whatever else the caller may write. `unzip` has refused
+   * `roles.yaml` from an archive for the same reason; this is that rule, over
+   * all four names.
+   */
+  const platformFileReason = (wsPath: string): string | undefined => {
+    const rel = toKbRelative(wsPath, kbDirName);
+    return rel !== null && isPlatformFile(rel, kb.layout) ? platformFileUploadRefusal(rel) : undefined;
+  };
+
+  /**
+   * `apply_file_upload`'s handler: resolve the stored bytes into one path per
+   * file, judge each path the way `write_files` judges its own, and land the
+   * survivors as ONE commit.
+   *
+   * The judging is deliberately the same shape as `write_files`, down to the
+   * second verdict under the lock, because the promise the ticket makes is
+   * that an upload is judged "exactly as `write_file` would judge it". Three
+   * gates run per path and a path that fails one is that path's outcome and no
+   * more: the deployment's write hook, the platform-file rule above, and the
+   * `mode`. What is judged ONCE for the whole call is the destination — a
+   * caller who may not write the folder at all gets one refusal naming the
+   * change-request route, rather than the same refusal repeated per entry.
+   */
+  const applyFileUpload = async (
+    a: Record<string, unknown>,
+    ctx: ToolContext,
+    uploads: AgentUploadStore,
+  ): Promise<unknown> => {
+    const branch = a.branch as string;
+    const token = a.token;
+    if (typeof token !== 'string' || token === '') {
+      throw new ToolError(
+        'Name the `token` `request_file_upload` answered with, after POSTing the file to its `uploadUrl`.',
+        400,
+        { code: 'token-required' },
+      );
+    }
+    const mode = modeOf(a);
+    const destination = (a.destination as string).replace(/\/+$/, '');
+    assertInsideRepo(destination, kbDirName);
+    // CLAIMED, not consumed: an apply refused whole (a protected destination,
+    // an archive that will not open) leaves the token alive so the caller can
+    // retry somewhere else rather than send the bytes again. The claim is what
+    // keeps it single-use meanwhile — a second apply finds the token in use.
+    const upload = uploads.claim(token, ctx.user.id);
+    let spent = false;
+    try {
+      const fs = await ctx.getFilesystem(branch);
+      const root = await workspaceRoot(branch, ctx);
+      // The destination, once, for the whole call. On a protected branch a
+      // caller who may not write the folder gets the lock gate's own refusal —
+      // which `rethrowAsWriteDenial` turns into `write-denied` with the
+      // change-request steps — and nothing lands.
+      const blockedDest = await writeBlocked(branch, ctx, [destination]);
+      if (blockedDest.length > 0) throw await writeRefusal(branch, blockedDest[0], 'dir');
+      if ((await kindOf(fs, destination)) === 'file') {
+        throw new ToolError(
+          `"${displayPath(destination)}" is a file, not a folder — \`destination\` names the folder the upload lands in.`,
+          409,
+          { code: 'not_a_folder' },
+        );
+      }
+
+      const planned = await planUpload(upload, destination, kbDirName);
+      const paths = planned.filter((p) => p.content !== undefined).map((p) => p.path as string);
+      // One batched access read for every path, like `write_files` — empty on
+      // a draft branch, where changes reach a protected branch only through a
+      // change request.
+      const blocked = new Set(await writeBlocked(branch, ctx, paths));
+
+      const writes: { path: string; content: Buffer }[] = [];
+      const outcomes: Record<string, unknown>[] = [];
+      /** The `files` entry for `writes[i]`, so the under-lock verdict can revise it. */
+      const entryOf: Record<string, unknown>[] = [];
+      for (const item of planned) {
+        const entry: Record<string, unknown> = { path: item.path };
+        outcomes.push(entry);
+        if (item.content === undefined) {
+          entry.outcome = 'refused';
+          entry.error = item.error;
+          entry.message = item.message;
+          continue;
+        }
+        const wsPathOf = item.path;
+        try {
+          if (blocked.has(wsPathOf)) throw await writeRefusal(branch, wsPathOf);
+          const platform = platformFileReason(wsPathOf);
+          if (platform !== undefined) throw new ToolError(platform, 422, { code: 'platform_file' });
+          // The git folder is never a workspace path, in any spelling. A ZIP
+          // entry's name has already met this rule in `zipEntryNameRefusal`; a
+          // SINGLE uploaded file's has not — `.git` is a name the upload
+          // route's `validateFilename` accepts — and the preflight that reads
+          // the caller's own arguments never sees it either, because the name
+          // came from the upload, not from the call. Asked here so that path
+          // is REFUSED like any other, with the rest of the upload landing,
+          // rather than failing the whole apply from inside `writeFiles`.
+          assertNoGitInternalsSegment(wsPathOf);
+          assertRepoRootNameFree(wsPathOf, kbDirName);
+          // A link already on disk under the destination must not redirect
+          // these bytes — the rule `unzip` applies per entry, applied here on
+          // the path the write will take.
+          const link = await symlinkOnPath(root, wsPathOf);
+          if (link !== undefined) {
+            throw new ToolError(
+              `"${wsPathOf}" goes through the symbolic link "${link}"; an upload never follows links.`,
+              400,
+              { code: 'symlink' },
+            );
+          }
+          writePolicy.assertPathWritable(ctx.sessionId, wsPathOf);
+          await assertAgentWriteAllowed(agentAccessGate, ctx, branch, wsPathOf);
+          // An earlier entry of this same upload counts as existing, as it
+          // does in `write_files`: two `create` entries for one path are a
+          // mistake the commit would otherwise hide.
+          const exists =
+            writes.some((w) => w.path === wsPathOf) || (await kindOf(fs, wsPathOf)) !== null;
+          entry.outcome = decideWrite(mode, wsPathOf, exists);
+          writes.push({ path: wsPathOf, content: item.content });
+          entryOf.push(entry);
+        } catch (err) {
+          refuseEntry(entry, err);
+        }
+      }
+
+      // The mode gate again, with every path's lock held — the verdict the
+      // answer carries, for the reason `write_file` states at length. A path
+      // whose verdict changed under the lock is dropped from the batch and
+      // reported refused, leaving the rest to land.
+      const recheck = async (
+        pending: readonly { path: string; content: Buffer }[],
+      ): Promise<{ path: string; content: Buffer }[]> => {
+        const kept: { path: string; content: Buffer }[] = [];
+        for (let i = 0; i < pending.length; i++) {
+          const entry = entryOf[i];
+          try {
+            const exists =
+              kept.some((k) => k.path === pending[i].path) || (await kindOf(fs, pending[i].path)) !== null;
+            entry.outcome = decideWrite(mode, pending[i].path, exists);
+            kept.push(pending[i]);
+          } catch (err) {
+            refuseEntry(entry, err);
+          }
+        }
+        return kept;
+      };
+      if (writes.length > 0) {
+        // `write: true` guarantees a LockingFilesystem here; `writeFiles` lands
+        // the whole set as ONE commit and takes a Buffer as content, so bytes
+        // reach disk exactly as they were sent — no text decode anywhere on
+        // the way, which is what makes a PNG and a backslash-heavy page land
+        // with the checksum they were uploaded with.
+        const batching = fs as unknown as {
+          writeFiles(
+            writes: { path: string; content: Buffer }[],
+            summary: string,
+            deletes: string[],
+            check: (
+              pending: readonly { path: string; content: Buffer }[],
+            ) => Promise<{ path: string; content: Buffer }[]>,
+          ): Promise<void>;
+        };
+        // In the DESTINATION folder's TURN, which `delete_folder` takes over the
+        // same subtree (and `keepFolderOf` with it). `writeFiles` creates the
+        // destination, and any folder above a zip entry on the way to it, as
+        // part of landing the batch — and a folder delete running between that
+        // creation and the commit enumerates the folder's files BEFORE these
+        // exist and then removes the folder they are landing in, which is an
+        // answer saying `created` for bytes that are already gone. The turn is
+        // taken OUTSIDE `writeFiles`, so it is held across the under-lock
+        // recheck and the commit both, and in the same order the delete takes
+        // its own (the folder's turn first, then each path's lock), which is
+        // what keeps two callers from waiting on each other's half.
+        await ctx.workspaceService.withFolderTurn(workspaceIdForBranch(branch), destination, async () => {
+          await batching.writeFiles(writes, `Apply upload of ${writes.length} file(s)`, [], recheck);
+        });
+      }
+      // The token is spent once an ANSWER exists, even an answer in which
+      // every path was refused: the apply ran and said what happened at each
+      // path, and re-running it would say the same. Only a refusal that landed
+      // nothing AND answered nothing (thrown above) gives the token back.
+      spent = true;
+      await uploads.consume(token);
+      const listed = a.all === true ? outcomes : outcomes.slice(0, APPLY_ANSWER_CAP);
+      return {
+        destination,
+        count: outcomes.filter((o) => o.outcome !== 'refused').length,
+        total: outcomes.length,
+        files: listed,
+        ...(listed.length < outcomes.length ? { truncated: true } : {}),
+      };
+    } finally {
+      if (!spent) uploads.release(token);
+    }
+  };
+
+  // Mounted only when the composition supplied a store — see the `uploads`
+  // parameter. Core always does.
+  if (uploads) {
+    mount({
+      name: 'request_file_upload',
+      fileTool: false,
+      description:
+        // Within the description cap (`tool-registry/description-length.ts`):
+        // why a file goes this way is one of the shared rules, and the header
+        // spelling of the token is on the `uploadUrl` output, where the
+        // address it changes is.
+        'Ask for a one-time address to send FILE BYTES to, so their content never passes through this conversation. ' +
+        'Use it for anything `write_file` cannot carry faithfully: a large file, a file full of backslashes or `\\u` ' +
+        'escapes, a binary file (a PNG, a PDF, a zip), or many files at once (zip them). ' +
+        'Returns `{ uploadUrl, token, expiresAt, expiresInSeconds, maxBytes }`. THEN: ' +
+        '(1) POST the file as the raw request body to `uploadUrl` with `?filename=<name>` — ' +
+        '`curl -X POST --data-binary @skill.zip "<uploadUrl>?filename=skill.zip"` — which answers what it received; ' +
+        '(2) call `apply_file_upload` with the same `token`, a `branch` and a destination folder. ' +
+        'One token carries one file or one zip, is bound to you and expires at `expiresAt`: an upload nobody applies ' +
+        'by then is deleted, and one over `maxBytes` is refused when you send it, naming the limit.',
+      inputs: { type: 'object', properties: {}, additionalProperties: false },
+      outputs: {
+        type: 'object',
+        properties: {
+          uploadUrl: str(
+            'The absolute URL to POST the bytes to. Carries the token; add `?filename=<name>`. To keep the token out ' +
+              'of a URL — when the command line you send from is logged or shared — POST to this address without its ' +
+              'last (token) segment and send the token in an `x-upload-token` header instead.',
+          ),
+          token: str(
+            'The token itself — what `apply_file_upload` takes, and what an `x-upload-token` header carries when you ' +
+              'would rather it not sit in a URL. Treat it as a credential.',
+          ),
+          expiresAt: str('ISO-8601 instant after which the token, and any bytes sent with it, are gone.'),
+          expiresInSeconds: int('Seconds from now until `expiresAt`.'),
+          maxBytes: int('The largest upload this deployment accepts, in bytes.'),
+        },
+        required: ['uploadUrl', 'token', 'expiresAt', 'expiresInSeconds', 'maxBytes'],
+      },
+      // A read-scoped caller has nothing to do with an upload token: the only
+      // thing it unlocks is a write. Refused at the handler factory, by scope,
+      // before the token is minted.
+      write: true,
+      handler: async (_a, ctx: ToolContext) => uploads.issue(ctx.user),
+    });
+
+    mount({
+      name: 'apply_file_upload',
+      gated: true,
+      description:
+        'Land a file you have already uploaded (see `request_file_upload`) in a folder on a branch, in ONE commit, as you. ' +
+        'A single file lands under the name it was sent with; a zip lands as its entries, keeping their folder structure. ' +
+        'Returns `{ destination, count, total, files }`: one entry per path, each `{ path, outcome }` — `created` / ' +
+        '`replaced` / `updated`, or `refused` with `error` (the code) and `message` (why). `count` is how many landed and ' +
+        '`total` how many paths there were; `files` is cut to the first 25 unless you pass `all: true`. ' +
+        'Every path is judged one by one — by your write access, the platform-file rules and what is already there — ' +
+        'exactly as `write_file` judges it, and a refused path does not stop the others. ' +
+        'The token is single-use: it is spent by the apply that lands it, and refused if you use it twice, let it ' +
+        'expire, or present one issued to somebody else. `mode` means what it means on `write_file`.',
+      inputs: {
+        type: 'object',
+        properties: {
+          branch: BRANCH_INPUT,
+          token: str('The `token` from `request_file_upload`, after you have POSTed the file to its `uploadUrl`.'),
+          destination: wsPath(kbDirName, 'Folder the upload lands in (created if it is not there yet)'),
+          mode: WRITE_MODE_INPUT,
+          all: {
+            type: 'boolean',
+            description:
+              'List EVERY path in `files` instead of the first 25. `total` always says how many there were, so ask for ' +
+              'all only when you need to read each outcome.',
+          },
+          sessionId: SESSION_ID_INPUT,
+        },
+        required: ['branch', 'token', 'destination'],
+        additionalProperties: false,
+      },
+      outputs: {
+        type: 'object',
+        properties: {
+          destination: str('The folder the upload was applied to (echoes the input).'),
+          count: int('How many paths landed — the entries in `files` whose `outcome` is not `refused`.'),
+          total: int('How many paths the upload held, whether or not `files` lists them all.'),
+          files: {
+            type: 'array',
+            description: 'One entry per path, in the order the upload held them. Cut to 25 unless `all` was true.',
+            items: {
+              type: 'object',
+              properties: {
+                path: str('The workspace path this entry was judged at.'),
+                outcome: {
+                  type: 'string',
+                  enum: ['created', 'replaced', 'updated', 'refused'],
+                  description: 'What happened at this path. `refused` means nothing was written there.',
+                },
+                error: str('Present when `outcome` is `refused`: the refusal code — e.g. `exists`, `missing`, `invalid_entry`, `platform_file`, `write-denied`.'),
+                message: str('Present when `outcome` is `refused`: the full refusal, the same one `write_file` would have given.'),
+              },
+              required: ['path', 'outcome'],
+            },
+          },
+          truncated: { type: 'boolean', description: 'True when `files` was cut: `total` is larger than what it lists. Pass `all: true` for the rest.' },
+        },
+        required: ['destination', 'count', 'total', 'files'],
+      },
+      write: true,
+      // So a protected-branch refusal arrives as `write-denied`, with the
+      // change-request steps, exactly as it does from write_file.
+      proposable: true,
+      handler: async (a, ctx: ToolContext) => applyFileUpload(a, ctx, uploads),
+    });
+  }
 
   // ── shell (internal-only) ───────────────────────────────────────────────
   mount({

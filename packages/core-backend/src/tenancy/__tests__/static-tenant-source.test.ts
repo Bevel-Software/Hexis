@@ -27,6 +27,10 @@ describe('tenantConfigFrom', () => {
     expect(config.workspacesRoot).toBe(path.resolve('/srv/hexis/workspaces/acme-2'));
     expect(config.backupsRoot).toBe(path.resolve('/srv/hexis/backups/acme-2'));
     expect(config.spillRoot).toBe(path.resolve('/srv/hexis/tool-chain-spills/acme-2'));
+    // Per tenant like the rest: a shared staging root would let one tenant's
+    // upload sweep delete another's bytes, and both would be writing ids into
+    // one directory.
+    expect(config.agentUploadsRoot).toBe(path.resolve('/srv/hexis/agent-uploads/acme-2'));
     expect(config.docExtractCacheRoot).toBe(path.resolve('/srv/hexis/doc-extract-cache/acme-2'));
     expect(config.loopbackBaseUrl).toBe('http://127.0.0.1:3001/_tenant/acme-2');
   });

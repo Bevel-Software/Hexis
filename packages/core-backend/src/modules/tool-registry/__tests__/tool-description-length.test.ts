@@ -95,6 +95,12 @@ async function hexisTools(): Promise<UtcpTool[]> {
     gate,
     new RoutineWritePolicyService(),
     new UuidSessionSink(),
+    undefined,
+    undefined,
+    // The two upload tools are mounted only when a store is supplied, and
+    // every real composition supplies one: without it they would be the two
+    // descriptions this suite never measured.
+    unused(),
   );
   registerWorkflowTools(registry, router, toolAuth, toolHandler, kb);
   registerPluginsTools(registry);
@@ -239,6 +245,7 @@ describe('every file tool ends with the pointer and carries no shared paragraph'
     'copy_file',
     'unzip',
     'execute_command',
+    'apply_file_upload',
   ];
 
   it('ends each description with the one sentence naming the shared rules', async () => {

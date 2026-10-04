@@ -70,6 +70,7 @@ describe('the shared file rules are one text, in two places', () => {
       'write-mode',
       'images-in-pages',
       'escape-sequences',
+      'upload-route',
       'dry-run-confirm',
       'managed-items',
       'refused-for-permissions',
@@ -90,7 +91,10 @@ describe('the shared file rules are one text, in two places', () => {
       expect(text).toContain('`binary_not_writable`');
       expect(text).toContain('copy_file, move_file and delete_file act on bytes of any kind');
       expect(text).toContain('unzip extracts the entries of a `.zip`');
-      expect(text).toContain('`request_upload_token` + `apply_upload`');
+      // The upload path by the names of the tools this deployment serves.
+      expect(text).toContain('call `request_file_upload`');
+      expect(text).toContain('then `apply_file_upload`');
+      expect(text).not.toContain('request_upload_token');
       expect(text).toContain('`contentMode`');
       expect(text).toContain('.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf');
       expect(text).toContain('.eml/.msg');

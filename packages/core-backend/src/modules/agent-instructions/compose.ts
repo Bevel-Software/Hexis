@@ -77,12 +77,12 @@ export function platformInstructions(layout: KbLayout): string {
  * No client publishes a limit for `instructions` — what was observed being cut
  * was tool descriptions — so this is not a measured client limit but the
  * arithmetic ceiling of the parts, held low enough that it stays a plausible
- * system-prompt insert (~3,400 tokens): the header, the shared rules under their
+ * system-prompt insert (~3,500 tokens): the header, the shared rules under their
  * own cap, and the preamble under its cap plus the marker a cut appends. The
  * test is what makes it a ceiling rather than a hope: a shared rule that grew
  * past it fails before it reaches an agent.
  */
-export const INSTRUCTIONS_CAP = 13_500;
+export const INSTRUCTIONS_CAP = 14_000;
 
 /** The one-line marker that replaces everything past the preamble cap. */
 export const PREAMBLE_TRUNCATION_MARKER = `[preamble truncated at ${PREAMBLE_CAP.toLocaleString('en-US')} characters; shorten ${PREAMBLE_FILE}]`;
