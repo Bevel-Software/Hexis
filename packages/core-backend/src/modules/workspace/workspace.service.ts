@@ -495,6 +495,19 @@ export class WorkspaceService implements IWorkspaceService {
    * a conventional default branch isn't on the remote) just to run a global op.
    * Scans disk rather than the in-memory `branchDirs` map so clones that
    * survived a process restart are still found.
+   *
+   * INTERCHANGEABLE ONLY ONCE IT CAN REACH THE REMOTE. The clone handed back
+   * is one this process may never have opened, and opening a branch is the
+   * only other place a clone's credential helper is brought into line with the
+   * deployment's (`getOrCreateForBranch`). A clone made before the helper was
+   * persisted, or before a token was configured, has none — and it is exactly
+   * the kind that sorts first on disk, because it is old. Every repo-global
+   * operation then ran its fetches in a working copy that could not
+   * authenticate: the fetch failed, quietly, and each change request whose
+   * branch that clone had never seen was reported as `unknown branch`, list
+   * after list, while the branches sat on the remote. So the helper is stamped
+   * here too, before the clone is offered. A no-op for a clone already stamped
+   * in this process, and it never throws (see `stampCredentialHelper`).
    */
   async findAnyWorkspaceId(): Promise<string | null> {
     let entries: Array<{ name: string; isDirectory: () => boolean }>;
@@ -505,12 +518,15 @@ export class WorkspaceService implements IWorkspaceService {
     }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
+      const repoDir = path.join(this.workspacesRoot, entry.name, this.kbDirName);
       try {
-        await fs.access(path.join(this.workspacesRoot, entry.name, this.kbDirName, '.git'));
-        return entry.name;
+        await fs.access(path.join(repoDir, '.git'));
       } catch {
         // No `.git` — half-built or unrelated dir; keep looking.
+        continue;
       }
+      await this.refreshCredentialHelperIfStale(branchForWorkspaceId(entry.name), repoDir);
+      return entry.name;
     }
     return null;
   }
