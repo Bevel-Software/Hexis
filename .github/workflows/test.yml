@@ -20,6 +20,24 @@ jobs:
     # permission is ever flipped back to read/write in settings.
     permissions:
       contents: read
+    # A real Postgres for the tests that are about what the database ends up
+    # holding (`*.pg.test.ts`, today the personal-data backfill): they skip
+    # without `TEST_DATABASE_URL`, so this is what makes them run at all. The
+    # same major the compose file ships, pinned by digest for the reason the
+    # actions below are. The password guards nothing: the server lives for
+    # this job, on the runner, and each test works in a database it creates.
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     # Actions are pinned to reviewed commit SHAs (release tag alongside each):
     # this suite is what says a commit is good, so a moved or compromised tag
     # must not be able to tamper with the workspace that decides that.
@@ -67,6 +85,8 @@ jobs:
       # log that names it needs admin rights. Hiding the prefix turns every
       # failure into a public annotation on the check.
       - run: pnpm -r --reporter-hide-prefix run test
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
       # Design-system ratchet. The UI is migrating onto semantic tokens, so a
       # hard ban would fail against the remaining ~520 off-system call sites.

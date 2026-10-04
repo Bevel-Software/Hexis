@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('account-erasure');
-import { and, eq, notExists } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, notExists } from 'drizzle-orm';
+import { isEncryptedBlob } from '../../shared/column-crypto.js';
 import type { Database } from '../database/connection.js';
 import type { IReviewWorkflowService } from '../workflow/review-workflow/review-workflow.interface.js';
 import {
@@ -123,16 +124,33 @@ export class AccountErasureService implements IAccountErasureService {
   ) {}
 
   async listUsers(): Promise<AdminUserView[]> {
+    // Sorted in-process: `email` is ciphertext in the database, so ORDER BY
+    // would sort by IV noise. One row per team member.
     const rows = await this.db
       .select({ id: users.id, email: users.email, name: users.name, createdAt: users.createdAt })
-      .from(users)
-      .orderBy(users.email);
-    return rows.map((r) => ({ ...r, createdAt: r.createdAt.getTime() }));
+      .from(users);
+    return rows
+      .map((r) => ({ ...r, createdAt: r.createdAt.getTime() }))
+      .sort((a, b) => a.email.localeCompare(b.email));
   }
 
   async eraseUser(userId: string, opts: { erasureId?: string } = {}): Promise<boolean> {
     const [user] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!user) return false;
+
+    // Fail CLOSED on an undecryptable email. The encrypted column's read
+    // fallback returns the raw ciphertext when the configured key cannot open
+    // it (a rotated or wrong SECRETS_ENC_KEY); a blind index of that blob
+    // would match zero audit rows while the user delete still committed — an
+    // erasure that silently left the personal data behind. Nothing is
+    // deleted until the key is fixed.
+    if (isEncryptedBlob(user.email)) {
+      throw new Error(
+        `account-erasure: cannot decrypt the stored email for user id=${userId} with the ` +
+          'configured SECRETS_ENC_KEY — refusing to erase, because the email-keyed audit rows ' +
+          'could not be anonymised. Restore the correct key, then retry.',
+      );
+    }
 
     const target: ErasureTarget = {
       userId,
@@ -148,6 +166,14 @@ export class AccountErasureService implements IAccountErasureService {
     for (const p of this.participants) {
       if (p.before) await p.before(target);
     }
+
+    // Every email-keyed row below is matched through its blind index — the
+    // email columns are randomized ciphertext — and the index is rewritten to
+    // the placeholder's too, so no value keyed to the erased address survives.
+    // An index column is compared and written with the address it is the
+    // index of; the handle the statement runs on makes the index.
+    const emailBidx = target.email;
+    const erasedBidx = target.erasedEmail;
 
     const postCommit: Array<() => Promise<void>> = [];
     await this.db.transaction(async (tx) => {
@@ -180,7 +206,7 @@ export class AccountErasureService implements IAccountErasureService {
       // writing anything back — so no row is resurrected here either.
       await tx
         .delete(pluginJoinRequests)
-        .where(eq(pluginJoinRequests.requesterEmail, target.email));
+        .where(eq(pluginJoinRequests.requesterEmailBidx, emailBidx));
 
       // Audit rows: anonymize in place (no user FK on these; they key by email).
       //
@@ -197,23 +223,43 @@ export class AccountErasureService implements IAccountErasureService {
       });
       await tx
         .update(prMergeLog)
-        .set({ triggeredByEmail: target.erasedEmail, triggeredByName: target.erasedName })
-        .where(eq(prMergeLog.triggeredByEmail, target.email));
+        .set({ triggeredByEmail: target.erasedEmail, triggeredByEmailBidx: erasedBidx, triggeredByName: target.erasedName })
+        .where(eq(prMergeLog.triggeredByEmailBidx, emailBidx));
       await tx
         .update(prComments)
-        .set({ authorEmail: target.erasedEmail, authorName: target.erasedName })
-        .where(eq(prComments.authorEmail, target.email));
+        .set({ authorEmail: target.erasedEmail, authorEmailBidx: erasedBidx, authorName: target.erasedName })
+        .where(eq(prComments.authorEmailBidx, emailBidx));
       await tx
         .update(changeRequests)
-        .set({ authorEmail: target.erasedEmail, authorName: target.erasedName })
-        .where(eq(changeRequests.authorEmail, target.email));
+        .set({ authorEmail: target.erasedEmail, authorEmailBidx: erasedBidx, authorName: target.erasedName })
+        .where(eq(changeRequests.authorEmailBidx, emailBidx));
+      // The refusal a still-open request shows ("<name> could not apply
+      // this"), on requests of any author. One recorded before the encryption
+      // release kept no address to find it by, so those few are matched on
+      // the name itself, read back in-process: renaming a namesake's note to
+      // the placeholder loses nothing, leaving this person's name would.
+      await tx
+        .update(changeRequests)
+        .set({ applyFailedByName: target.erasedName, applyFailedByEmailBidx: erasedBidx })
+        .where(eq(changeRequests.applyFailedByEmailBidx, emailBidx));
+      const unindexed = await tx
+        .select({ id: changeRequests.id, name: changeRequests.applyFailedByName })
+        .from(changeRequests)
+        .where(and(isNotNull(changeRequests.applyFailedByName), isNull(changeRequests.applyFailedByEmailBidx)));
+      const namesakes = unindexed.filter((r) => r.name === user.name).map((r) => r.id);
+      if (namesakes.length > 0) {
+        await tx
+          .update(changeRequests)
+          .set({ applyFailedByName: target.erasedName, applyFailedByEmailBidx: erasedBidx })
+          .where(inArray(changeRequests.id, namesakes));
+      }
       // Queued-but-uncommitted saves: the eventual git commit is authored with
       // the placeholder instead of the erased identity. The file content still
       // lands — erasing an account must not lose other people's KB state.
       await tx
         .update(pendingCommits)
-        .set({ authorEmail: target.erasedEmail, authorName: target.erasedName })
-        .where(eq(pendingCommits.authorEmail, target.email));
+        .set({ authorEmail: target.erasedEmail, authorEmailBidx: erasedBidx, authorName: target.erasedName })
+        .where(eq(pendingCommits.authorEmailBidx, emailBidx));
 
       // Module-owned rows, before the users delete so FKs onto users are
       // still satisfiable — and so a participant that MISSES rows makes the
@@ -251,11 +297,11 @@ export class AccountErasureService implements IAccountErasureService {
     // approvals they make are their own.
     await this.db
       .update(prFileApprovals)
-      .set({ approverEmail: target.erasedEmail, approverName: target.erasedName })
+      .set({ approverEmail: target.erasedEmail, approverEmailBidx: erasedBidx, approverName: target.erasedName })
       .where(
         and(
-          eq(prFileApprovals.approverEmail, target.email),
-          notExists(this.db.select({ id: users.id }).from(users).where(eq(users.email, target.email))),
+          eq(prFileApprovals.approverEmailBidx, emailBidx),
+          notExists(this.db.select({ id: users.id }).from(users).where(eq(users.emailBidx, emailBidx))),
         ),
       );
 
@@ -272,11 +318,25 @@ export class AccountErasureService implements IAccountErasureService {
     // person, and their requests are their own.
     await this.db
       .update(changeRequests)
-      .set({ authorEmail: target.erasedEmail, authorName: target.erasedName })
+      .set({ authorEmail: target.erasedEmail, authorEmailBidx: erasedBidx, authorName: target.erasedName })
       .where(
         and(
-          eq(changeRequests.authorEmail, target.email),
-          notExists(this.db.select({ id: users.id }).from(users).where(eq(users.email, target.email))),
+          eq(changeRequests.authorEmailBidx, emailBidx),
+          notExists(this.db.select({ id: users.id }).from(users).where(eq(users.emailBidx, emailBidx))),
+        ),
+      );
+
+    // And the refusal note, for the apply this person was inside when the
+    // commit landed: recording it takes no lock and names no user row, so it
+    // can write their name after the rewrite above. Same statement, same
+    // guard, same reason.
+    await this.db
+      .update(changeRequests)
+      .set({ applyFailedByName: target.erasedName, applyFailedByEmailBidx: erasedBidx })
+      .where(
+        and(
+          eq(changeRequests.applyFailedByEmailBidx, emailBidx),
+          notExists(this.db.select({ id: users.id }).from(users).where(eq(users.emailBidx, emailBidx))),
         ),
       );
 

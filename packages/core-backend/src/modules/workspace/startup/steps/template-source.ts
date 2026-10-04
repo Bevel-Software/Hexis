@@ -1,8 +1,10 @@
 import path from 'node:path';
-import { gitignoreLiteral, renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
+import { gitignoreLiteral, renderKbLayoutPlaceholders, type KbLayout } from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME, isAbsence, type EntryStat, type IFsProbe } from '../../../../shared/fs.contract.js';
 import type { KbContext } from '../../../../shared/kb-context.js';
+
 import { PREAMBLE_FILE } from '../../../agent-instructions/compose.js';
+import { sharedFileRulesSection } from '../../../agent-instructions/shared-file-rules.js';
 import { defaultKbTemplateDir } from '../../../../assets.js';
 import { logger } from '../../../../shared/logging.js';
 
@@ -36,6 +38,42 @@ export const PACKAGED_FALLBACK_FILES: ReadonlySet<string> = new Set([PREAMBLE_FI
 export const TEMPLATE_SOURCE_FALLBACKS: ReadonlyMap<string, string> = new Map([
   ['.gitignore', 'gitignore.template'],
 ]);
+
+/**
+ * Where the managed guide asks for the rules every file tool shares. Not a
+ * layout placeholder: the layout renderer lives in `platform-shared`, which
+ * the frontend also reads, and the rules are backend text.
+ */
+export const SHARED_FILE_RULES_PLACEHOLDER = '{{sharedFileRules}}';
+
+/**
+ * Every placeholder a template file carries, filled: the layout's names on the
+ * text an author wrote, THEN the shared file rules dropped into the hole they
+ * left. ONE function, because the two writers of template content — the top-up
+ * step through {@link TemplateSource.read} and the empty-remote seeder, which
+ * streams files itself — must render identically or a freshly seeded knowledge
+ * base would carry a guide with a literal `{{sharedFileRules}}` in it.
+ *
+ * THAT ORDER, not the other one: the rules are already rendered for this
+ * layout (`sharedFileRulesSection` takes it), so running the layout renderer
+ * over them again would only reach text they STATE rather than contain — a
+ * folder a deployment really named `{{skillsDir}}` would come back as some
+ * other folder's name, and the rule would then point at a folder that is not
+ * the one it refuses a move out of. Injecting last leaves the section byte for
+ * byte what both channels carry, and costs nothing:
+ * `renderKbLayoutPlaceholders` touches only its own four tokens, so the
+ * placeholder for the rules survives the first pass untouched.
+ *
+ * A replacer FUNCTION for the rules: they carry dollar sequences (a `${VAR}`
+ * a template writes) that a string replacement would read as capture-group
+ * syntax.
+ */
+export function renderTemplateText(text: string, layout: KbLayout): string {
+  return renderKbLayoutPlaceholders(text, layout).replaceAll(
+    SHARED_FILE_RULES_PLACEHOLDER,
+    () => sharedFileRulesSection(layout),
+  );
+}
 
 /**
  * ONE template directory, read through ONE disk port — what both readers of
@@ -112,6 +150,16 @@ export class TemplateSource {
    * placeholders the template carries (`{{pluginsDir}}` …) are filled with
    * the names in effect. Every required file is text; a template without
    * placeholders passes through unchanged.
+   *
+   * `{{sharedFileRules}}` is filled from the ONE source text the MCP handshake
+   * also sends (see `shared-file-rules.ts`), so the rules every file tool
+   * shares are stated in the guide and in the instructions without being
+   * written twice. Filled AFTER the layout pass (see
+   * {@link renderTemplateText}): the rules come back already rendered for this
+   * layout, so a layout pass over them could only misread a name they STATE as
+   * a placeholder. The two passes do not collide — the layout renderer touches
+   * only its own four tokens, so `{{sharedFileRules}}` reaches the second pass
+   * untouched.
    */
   async read(relPath: string): Promise<string> {
     let raw: string;
@@ -134,13 +182,13 @@ export class TemplateSource {
     // reads as syntax (`#Guide.md`, `!Guide.md`, brackets) would hide nothing
     // written bare. Escaped there, and only there: everywhere else the
     // placeholder is prose. ONE render, with the escaped name as the layout's
-    // — a second pass over the rendered text would read a name that happens
-    // to contain a placeholder as one.
+    // — rendering twice over text already rendered would read a name that
+    // happens to contain a placeholder as one.
     const layout = this.kb.layout;
     if (relPath === IGNORE_FILENAME) {
-      return renderKbLayoutPlaceholders(raw, { ...layout, agentsFile: gitignoreLiteral(layout.agentsFile) });
+      return renderTemplateText(raw, { ...layout, agentsFile: gitignoreLiteral(layout.agentsFile) });
     }
-    return renderKbLayoutPlaceholders(raw, layout);
+    return renderTemplateText(raw, layout);
   }
 
   /**

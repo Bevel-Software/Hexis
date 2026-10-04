@@ -70,6 +70,58 @@ people see, so nothing is relabelled.
 older app cannot read a newer database. To go back, restore the backup you
 took before upgrading.
 
+### Personal data in the database is encrypted (0.23+)
+
+From 0.23, personal data in the database — emails, display names, avatar
+URLs, change-request and review text, and the error messages of merges,
+queued commits and plugin join requests, including every copy of a name or
+email kept beside an approval, comment, lock or merge — is encrypted with a
+key derived from `SECRETS_ENC_KEY`, in addition to the secrets vault it
+already sealed. The first boot after the upgrade rewrites existing rows
+automatically.
+
+Two things are different about this upgrade:
+
+- **Stop the old version before the new one starts.** The normal
+  `docker compose pull app && up -d` flow already replaces the container. A
+  deployer that starts the new container, waits for it to be healthy and only
+  then stops the old one (a rolling update) leaves the old version running on
+  a sealed database: it reads names and addresses as ciphertext, so a save it
+  accepts in that window can be committed to the knowledge base's git history
+  with `pii:v1:…` as its author, and every first sign-in it handles fails.
+  Turn rolling updates off for this one release, or stop the app first.
+- **There is no way back without a backup.** An older version reads every
+  name and address as ciphertext, so a downgrade after the first start means
+  restoring the database as it was before. Take a database backup first.
+
+That first start refuses to come up in two cases, and says which:
+
+- Two accounts share one address up to case and whitespace
+  (`Alice@example.com` and `alice@example.com` could both exist before).
+  The log names the conflicting user ids; merge or delete the duplicates,
+  then start again.
+- A sealed row does not open with the configured key. From then on, every
+  start checks this: changing `SECRETS_ENC_KEY` is no longer a configuration
+  change but a re-keying of the database, and a start under a different key
+  stops instead of locking everyone out. Restore the key that sealed the
+  data.
+
+A process that serves several knowledge bases (`TENANTS_FILE`) seals each
+tenant's rows with that tenant's own key, the one derived for it from
+`TENANT_MASTER_KEY` that already seals its stored credentials. Nothing new
+to set, and a tenant that leaves takes a dump its one key opens
+(docs/multi-tenant.md).
+
+What it changes for operations:
+
+- **Losing `SECRETS_ENC_KEY` now loses this data too**, not just stored
+  credentials. Keep a copy of the key somewhere safe *outside* the server —
+  a database backup can only be read back with the key that was in `.env`
+  when it was taken.
+- Database dumps contain ciphertext for these columns; ad-hoc SQL against
+  them (looking up a user by email in `psql`, say) no longer works — use
+  the app or its API instead.
+
 ## Backups
 
 Everything that matters lives in Postgres and the named Docker volumes; the

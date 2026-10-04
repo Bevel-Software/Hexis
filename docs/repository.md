@@ -129,8 +129,8 @@ screen asks you to confirm at the button, naming the way you leave and the
 way you move to. Opening a tab moves nothing either.
 
 - **The move takes effect when you confirm.** No restart is needed.
-- The deployment moves to the other repository, which starts without what
-  the current one holds.
+- The deployment moves to the other repository. Nothing is copied from the
+  one it leaves into the one it moves to.
 - Nothing is deleted. The repository you leave is untouched.
 - What happens to the deployment's working copies depends on the
   repository you move to, not on your answers:

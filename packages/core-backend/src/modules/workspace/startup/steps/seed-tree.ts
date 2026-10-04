@@ -1,14 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {
-  LEGACY_AGENTS_FILE,
-  renderKbLayoutPlaceholders,
-} from '@bevel-software/platform-shared';
+import { LEGACY_AGENTS_FILE } from '@bevel-software/platform-shared';
 import type { IFsProbe, ITreeWalker } from '../../../../shared/fs.contract.js';
 import type { KbContext } from '../../../../shared/kb-context.js';
 import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
 import { reservedRootDirs } from './template-files.step.js';
-import { TEMPLATE_SOURCE_FALLBACKS, TemplateSource } from './template-source.js';
+import { TEMPLATE_SOURCE_FALLBACKS, TemplateSource, renderTemplateText } from './template-source.js';
 import { assertNotGitInternals, hasGitInternalsSegment } from '../../../../shared/git-internals.js';
 import { GitInternalsError } from '../../../../shared/domain-errors.js';
 
@@ -192,7 +189,7 @@ class KbSeedTree {
     if (text === null) {
       await fs.copyFile(from, to);
     } else {
-      await fs.writeFile(to, renderKbLayoutPlaceholders(text, this.kb.layout), 'utf8');
+      await fs.writeFile(to, renderTemplateText(text, this.kb.layout), 'utf8');
     }
     await fs.chmod(to, (await fs.stat(from)).mode & 0o777);
   }

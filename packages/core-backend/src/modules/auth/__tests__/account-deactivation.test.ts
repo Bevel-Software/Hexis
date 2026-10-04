@@ -240,7 +240,8 @@ describe('AuthService.createAccount without a password', () => {
     const { db, captured } = makeFakeDb([[{ ...ROW, passwordHash: null }]]);
     const user = await new AuthService(db, makeConfig()).createAccount('Alice@Example.com', '');
     expect(user.email).toBe('alice@example.com');
-    expect(captured.values[0]).toEqual({ email: 'alice@example.com', name: 'alice' });
+    // The index column is written with the address; the handle indexes it.
+    expect(captured.values[0]).toEqual({ email: 'alice@example.com', emailBidx: 'alice@example.com', name: 'alice' });
   });
 
   it('asks the admission port, as any new account does', async () => {
