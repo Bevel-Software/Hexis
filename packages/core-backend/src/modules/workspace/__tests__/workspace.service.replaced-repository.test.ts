@@ -75,16 +75,38 @@ function service(
   kbRepoUrl: () => string,
   setAsideRoot?: string,
   aroundSetAside?: (workspaceId: string, move: () => Promise<void>) => Promise<void>,
+  gitRunner: NodeGitRunner = new NodeGitRunner(),
 ) {
   return new WorkspaceService(
     workspacesRoot,
     kbRepoUrl,
     testKbContext({ branchModel: { defaultBranch: BRANCH, protectedBranches: [BRANCH] } }),
     new NodeFs(),
-    new NodeGitRunner(),
+    gitRunner,
     setAsideRoot,
     aroundSetAside,
   );
+}
+
+/**
+ * A git runner on which the SECOND read of a working copy's address comes back
+ * only once `until` has: the read itself happens when it is asked for, so its
+ * answer is about the copy that was there then, and the caller is handed it
+ * late. Everything else runs as it is.
+ */
+function withALateSecondAddressRead(until: Promise<void>): NodeGitRunner {
+  let reads = 0;
+  return new Proxy(new NodeGitRunner(), {
+    get(target, prop, receiver) {
+      if (prop !== 'run') return Reflect.get(target, prop, receiver);
+      return async (cwd: string, args: string[], opts?: never) => {
+        const answer = await target.run(cwd, args, opts);
+        const readsTheAddress = args[0] === 'config' && args.includes('--get') && args.includes('remote.origin.url');
+        if (readsTheAddress && ++reads === 2) await until;
+        return answer;
+      };
+    },
+  });
 }
 
 const cloneDir = () => path.join(workspacesRoot, encodeURIComponent(BRANCH), 'knowledge-base');
@@ -306,6 +328,42 @@ describe('what surrounds the setting aside of one working copy', () => {
     expect(first.repoDir).toBe(second.repoDir);
     expect(await setAside()).toHaveLength(1);
     expect(await fs.readFile(path.join(cloneDir(), 'marker.txt'), 'utf8')).toBe('new repository');
+  });
+
+  /**
+   * The same two callers, in the order the test above only sometimes got. The
+   * second reads the old copy's address, and is handed the answer after the
+   * first has finished moving that copy — when nothing says a move is in
+   * flight any more, and what sits at the path is the fresh clone the first is
+   * making. It moved that too: a second set-aside, of a working copy of the
+   * RIGHT repository, taken from under the clone that was writing it.
+   */
+  it('moves it once when the second caller comes back with the old address after the move has ended', async () => {
+    const { replacement } = await onTheOldRepository();
+    let moves = 0;
+    let firstMoveEnded!: () => void;
+    const afterTheFirstMove = new Promise<void>((resolve) => {
+      firstMoveEnded = resolve;
+    });
+    const svc = service(
+      () => replacement,
+      undefined,
+      async (_workspaceId, move) => {
+        moves += 1;
+        await move();
+        firstMoveEnded();
+      },
+      withALateSecondAddressRead(afterTheFirstMove),
+    );
+
+    const [first, second] = await Promise.all([svc.getOrCreateForBranch(BRANCH), svc.getOrCreateForBranch(BRANCH)]);
+
+    expect(moves).toBe(1);
+    expect(first.repoDir).toBe(second.repoDir);
+    expect(await setAside()).toHaveLength(1);
+    expect(await fs.readFile(path.join(cloneDir(), 'marker.txt'), 'utf8')).toBe('new repository');
+    // And the clone both were served is whole: its address is the new one.
+    expect((await git(cloneDir(), ['config', '--get', 'remote.origin.url'])).trim()).toBe(replacement);
   });
 });
 
