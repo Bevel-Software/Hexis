@@ -688,6 +688,15 @@ export class WorkspaceService implements IWorkspaceService {
       const startedMeanwhile = this.inFlightSetAsides.get(branch);
       if (startedMeanwhile) {
         await startedMeanwhile;
+      } else if (this.discardsOf(id) !== discardsAtAdoption) {
+        // The copy whose address this call read is no longer there: a move
+        // began AND ended while it was being read. An in-flight entry is
+        // cleared the moment its move ends, so a caller that comes back after
+        // that finds nobody to wait for — and its answer is about a copy that
+        // has already been set aside. Acting on it would set aside whatever is
+        // at this path NOW, which is the fresh clone the first caller is in
+        // the middle of making. Nothing is left to move; the bootstrap below
+        // waits for that clone.
       } else {
         const kept = path.join(setAsideRootFor(this.workspacesRoot, this.setAsideRoot), setAsideStamp(), id);
         // What surrounds the move may wait, and the startup phase may set
@@ -698,6 +707,11 @@ export class WorkspaceService implements IWorkspaceService {
           if (this.discardsOf(id) !== discardsAtAdoption) return;
           await setAsideClone(repoDir, kept);
           moved = true;
+          // Said the way the startup phase says it: the copy at this path was
+          // taken away. That is what the check above reads, so every caller
+          // that looked at the old copy before this line knows its answer is
+          // stale, however late it comes back.
+          this.forgetClone(id);
         }).finally(() => {
           this.inFlightSetAsides.delete(branch);
         });
