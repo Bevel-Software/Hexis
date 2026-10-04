@@ -1175,6 +1175,9 @@ export async function createCoreServices(
       // For the needs-authorization setup link surfaced to external agents.
       publicFrontendUrl: config.publicFrontendUrl,
       readAgentPreamble: readPreamble,
+      // The guide's name the shared file rules spell, read per request so a name
+      // the setup save applies lands without a restart.
+      kbLayout: () => kb.layout,
       secretsScope,
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller

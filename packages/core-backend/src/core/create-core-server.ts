@@ -489,7 +489,7 @@ export async function createCoreServer(
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the
   // External agent access card. Same `manualAuth`, same router, as `all-tools`.
-  toolsRouter.use(createAgentInstructionsRoutes(core.manualAuthMiddleware, core.readAgentPreamble));
+  toolsRouter.use(createAgentInstructionsRoutes(core.manualAuthMiddleware, core.readAgentPreamble, () => core.kb.layout));
   // The fingerprint of the caller's released catalog. The local `hexis-mcp`
   // server polls it to learn that a manual or a skill changed under a
   // connection it cannot be pushed to; nothing else consults it. Same

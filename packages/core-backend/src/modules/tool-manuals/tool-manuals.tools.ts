@@ -65,32 +65,24 @@ export function registerToolManualsTools(
 
   const listSetupDef = toolDef({
     name: 'list_tool_setup',
+    // What each FIELD means is documented on the field, in `outputs` below:
+    // `setup.kind`, `variables` and `invalid` each carried a paragraph here,
+    // which made this description two thousand characters and so the first
+    // thing a client cut. The description says what the tool answers and the
+    // three things an agent cannot read off a field.
     description:
-      'Configuration status of every `.tool` the current user can access: what each tool needs set up and ' +
-      'what is already configured. Results are scoped to the caller — a `.tool` the caller cannot READ is ' +
-      'absent entirely, and all status flags reflect the caller\'s own state. Per tool: `setup` describes ' +
-      'an MCP server\'s sign-in requirement (`open` = none; `oauth-auto` = sign-in was configured ' +
-      'automatically; `oauth-manual` = the sign-in needs an OAuth app the owner registers with the provider: ' +
-      'a writer declares its client id on a `user`-scoped variable with an `oauth` block — in the plugin.json ' +
-      'extensions entry for an mcp.json server (endpoints are discovered from the server; PKCE is on by ' +
-      'default), or in the `.tool` file with explicit URLs — and pastes the client secret on the tool\'s page. ' +
-      '`setup.reason` is present only while something still blocks the sign-in and says what). ' +
-      'Per variable: whether the shared (admin) value is set, whether the CURRENT user has ' +
-      'set/authorized their own, and whether it is an OAuth sign-in (users authorize those on the /connect ' +
-      'page, never by typing a value). `canWrite` = the caller may write THAT `.tool` FILE (per-file access ' +
-      'from its frontmatter `write:`/`owner:` verbs and the access.md chain — NOT a platform role), which ' +
-      'is exactly what gates setting its shared secrets: the people who manage the file configure the tool. ' +
-      'Secret VALUES are never returned and can never be set through a tool — an admin enters them in the ' +
-      'tool editor; users sign in on /connect. ' +
-      '`invalid` names any `.tool` file the scan REFUSED, with the reason and its location: those files ' +
-      'are the only ones missing — every other tool is listed and callable, and a refused file is listed ' +
-      'again as a normal tool on the next call once it is fixed (or removed), with nothing to restart or ' +
-      'reconnect. ' +
-      'The listing is the RELEASED catalog, built from the default branch only: a server or `.tool` you ' +
-      'declared on a draft is not listed, not callable and not signed-in-able until that draft is merged. ' +
-      'Pass `branch` (the draft you wrote the declaration on) and `onBranchOnly` names every tool declared ' +
-      'there that the default branch does not serve yet — open a change request, then ask the user to ' +
-      'review and merge it in the app to activate it.',
+      'Configuration status of every `.tool` the current user can access: what each tool needs set up and what is ' +
+      'already configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER — a `.tool` it cannot ' +
+      'READ is absent entirely, and every flag is the caller\'s own state. ' +
+      'Secret VALUES are never returned and can never be set through a tool: an admin enters them in the tool editor, ' +
+      'and users sign in on /connect rather than typing a value. ' +
+      'What gates setting a tool\'s shared secrets is `canWrite` on the `.tool` FILE — per-file access from its ' +
+      'frontmatter `write:`/`owner:` verbs and the access.md chain, NOT a platform role: the people who manage the ' +
+      'file configure the tool. ' +
+      'The listing is the RELEASED catalog, built from the default branch only: a server or `.tool` you declared on a ' +
+      'draft is not listed, not callable and not signed-in-able until that draft is merged. Pass `branch` (the draft ' +
+      'you wrote the declaration on) and `onBranchOnly` names every tool declared there that the default branch does ' +
+      'not serve yet — open a change request, then ask the user to review and merge it in the app to activate it.',
     path: '/api/agent/tools/list_tool_setup',
     inputs: {
       type: 'object',
@@ -119,12 +111,32 @@ export function registerToolManualsTools(
               type: { type: 'string' },
               setup: {
                 type: ['object', 'null'],
-                description: 'MCP auto-discovery setup requirement; null for non-mcp tools.',
-                properties: { kind: { type: 'string' }, reason: { type: 'string' } },
+                description: "An MCP server's sign-in requirement; null for non-mcp tools.",
+                properties: {
+                  kind: {
+                    type: 'string',
+                    description:
+                      '`open` = no sign-in; `oauth-auto` = sign-in was configured automatically; `oauth-manual` = the ' +
+                      'sign-in needs an OAuth app the owner registers with the provider: a writer declares its client ' +
+                      'id on a `user`-scoped variable with an `oauth` block — in the plugin.json extensions entry for ' +
+                      'an mcp.json server (endpoints are discovered from the server; PKCE is on by default), or in the ' +
+                      '`.tool` file with explicit URLs — and pastes the client secret on the tool\'s page.',
+                  },
+                  reason: {
+                    type: 'string',
+                    description: 'Present only while something still blocks the sign-in, and says what.',
+                  },
+                },
               },
-              canWrite: { type: 'boolean' },
+              canWrite: {
+                type: 'boolean',
+                description: 'You may write this `.tool` FILE, which is what gates setting its shared secrets.',
+              },
               variables: {
                 type: 'array',
+                description:
+                  'What this tool needs configured, and by whom: per variable, whether the shared (admin) value is ' +
+                  'set and whether the CURRENT user has set or authorized their own.',
                 items: {
                   type: 'object',
                   properties: {
@@ -150,9 +162,10 @@ export function registerToolManualsTools(
         invalid: {
           type: 'array',
           description:
-            '`.tool` files the scan refused — the ONLY tools missing from `tools`. Each names the file and ' +
-            'why it was refused, with the line/column or field where the validation failed. Fix the file (or ' +
-            'delete it) and the next call lists it as a normal tool. Never contains a secret value.',
+            '`.tool` files the scan refused — the ONLY tools missing from `tools`; every other tool is listed and ' +
+            'callable. Each names the file and why it was refused, with the line/column or field where the validation ' +
+            'failed. Fix the file (or delete it) and the next call lists it as a normal tool, with nothing to restart ' +
+            'or reconnect. Never contains a secret value.',
           items: {
             type: 'object',
             properties: {

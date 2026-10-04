@@ -21,6 +21,7 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import { createMcpRoutes } from '../../mcp/mcp.routes.js';
 import { McpService } from '../../mcp/mcp.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { sharedFileRules, sharedFileRulesSection, sharedRulesPointer } from '../../agent-instructions/shared-file-rules.js';
 
 /**
  * Who decodes escape sequences in written content a second time — settled on
@@ -361,24 +362,29 @@ describe('escape sequences survive a write — call_tool_chain', () => {
 });
 
 describe('what the write tools tell an agent about escape sequences', () => {
-  it('warns on write_file, write_files and edit_file, and names the upload route', async () => {
+  it('states the warning once, in the shared rules, and in no description', async () => {
     const { descriptions } = await startPlatform();
     const served = await descriptions();
+    // It applies to the three tools that take content as a JSON string, so it is
+    // a SHARED rule: stated in the handshake instructions and in the managed
+    // agent guide, and repeated in no tool description — a description that
+    // carried it was long enough for a client to cut the end off.
+    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'escape-sequences')!;
+    expect(rule.body).toContain('some clients decode escape sequences in arguments before sending');
+    expect(rule.body).toContain('request_upload_token');
+    expect(rule.body).toContain('lands it unchanged');
+    // It names the three tools it is about, so an agent reading the section
+    // knows where it applies.
+    for (const name of ['write_file', 'write_files', 'edit_file']) expect(rule.body, name).toContain(name);
+    expect(sharedFileRulesSection(testKbContext().layout)).toContain(rule.body);
 
-    for (const name of ['write_file', 'write_files', 'edit_file']) {
-      const d = served[name];
-      expect(d, name).toBeDefined();
-      // Some clients decode before sending …
-      expect(d, name).toContain('some clients decode them in arguments before sending');
-      // … and the route that lands such content unchanged.
-      expect(d, name).toContain('request_upload_token');
-      expect(d, name).toContain('lands it unchanged');
-    }
-    // Said on the three tools that take content as a JSON string, and nowhere else.
     const carrying = Object.entries(served)
-      .filter(([, d]) => d.includes('some clients decode them in arguments before sending'))
-      .map(([n]) => n)
-      .sort();
-    expect(carrying).toEqual(['edit_file', 'write_file', 'write_files']);
+      .filter(([, d]) => d.includes('decode escape sequences in arguments before sending') || d.includes('some clients decode them in arguments'))
+      .map(([n]) => n);
+    expect(carrying).toEqual([]);
+    // Each of the three still points at where the warning is.
+    for (const name of ['write_file', 'write_files', 'edit_file']) {
+      expect(served[name], name).toContain(sharedRulesPointer(testKbContext().layout).trim());
+    }
   });
 });

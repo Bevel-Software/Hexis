@@ -38,6 +38,25 @@ export const PLATFORM_FILE_NAMES: readonly string[] = Object.freeze(
 /** The platform files that are read wherever they sit, not only at the root. */
 const PLATFORM_FILES_AT_ANY_DEPTH = new Set(['access.md', '.bevelignore']);
 
+/**
+ * The platform files split by the DEPTH they count at, which is the half of
+ * {@link isPlatformFile} that a name alone does not tell you: `access.md` and
+ * `.bevelignore` are platform files in any folder, `roles.yaml` and the agent
+ * guide only in the repository root.
+ *
+ * Exported because the agent-facing rules state that split in prose, and a
+ * prose list written by hand drifts from the predicate that actually refuses
+ * the move — an agent then declines a nested `roles.yaml` it may rename, or
+ * trusts that a nested `access.md` is ordinary content.
+ */
+export function platformFilesByDepth(layout: KbLayout): { anyDepth: readonly string[]; rootOnly: readonly string[] } {
+  const names = platformFileNames(layout);
+  return {
+    anyDepth: names.filter((name) => PLATFORM_FILES_AT_ANY_DEPTH.has(name)),
+    rootOnly: names.filter((name) => !PLATFORM_FILES_AT_ANY_DEPTH.has(name)),
+  };
+}
+
 /** The names under `layout`, as a set — rebuilt per call, because the guide's is configurable. */
 const platformFiles = (layout: KbLayout): ReadonlySet<string> => new Set(platformFileNames(layout));
 
