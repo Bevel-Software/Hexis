@@ -430,8 +430,10 @@ describe('request_file_upload', () => {
    * caller keep a full set of slow uploads going and ask for another.
    */
   it('counts an upload still arriving as held, past its token\'s expiry', async () => {
-    const base = await start({ ttlMs: 150, maxOpenPerUser: 1 });
+    const ttlMs = 1_000;
+    const base = await start({ ttlMs, maxOpenPerUser: 1 });
     const { token } = await request(base);
+    const issuedAt = Date.now();
     let finish!: () => void;
     const body = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -448,8 +450,18 @@ describe('request_file_upload', () => {
       // Node's fetch requires this for a streamed request body.
       duplex: 'half',
     } as RequestInit & { duplex: 'half' });
-    // Past the expiry, with the body still open.
-    await new Promise((r) => setTimeout(r, 400));
+    // The upload has REACHED the store — its first bytes are staged — while the
+    // token was still good. Waited for, not assumed from a delay: a request
+    // that arrived only after the expiry would be refused at the door, pinned
+    // by nothing, and this would be measuring something else.
+    const staged = Date.now() + 5_000;
+    while ((await readdir(uploadsDir).catch(() => [])).length === 0) {
+      expect(Date.now(), 'the upload never reached the store').toBeLessThan(staged);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(Date.now() - issuedAt, 'the upload arrived after its token had expired').toBeLessThan(ttlMs);
+    // Now past the expiry, with the body still open.
+    await new Promise((r) => setTimeout(r, Math.max(0, issuedAt + ttlMs + 150 - Date.now())));
     expect((await call(base, 'request_file_upload', {})).status).toBe(429);
 
     // Once it has ended (refused: its token expired meanwhile), the place is free.
