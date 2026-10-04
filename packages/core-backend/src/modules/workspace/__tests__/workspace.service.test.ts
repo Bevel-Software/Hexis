@@ -1181,6 +1181,63 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     await expect(fs.stat(path.join(repoDir, 'out', 'blocked-dir'))).rejects.toThrow();
   });
 
+  /**
+   * An archive reader caps the inflation at the size the header DECLARES, but
+   * only when that size is above zero: an entry declaring zero is inflated with
+   * no cap. So "check the declared size, then read" let a few kilobytes expand
+   * to whatever memory there was. Both headers are patched to say "empty" here,
+   * over four megabytes that deflate to four kilobytes.
+   */
+  it('refuses an entry whose header says it is empty and whose stream is not, and extracts the rest', async () => {
+    const { default: AdmZip } = await import('adm-zip');
+    const zip = new AdmZip();
+    zip.addFile('bomb.md', Buffer.alloc(4 * 1024 * 1024, 0x61));
+    const bomb = zip.toBuffer();
+    // The uncompressed-size field: 22 bytes into the local header, 24 into the
+    // central-directory one.
+    bomb.writeUInt32LE(0, bomb.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04])) + 22);
+    bomb.writeUInt32LE(0, bomb.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02])) + 24);
+    await fs.writeFile(path.join(repoDir, 'bomb.zip'), bomb);
+
+    const res = await svc.unzipFile(workspaceId, 'bomb.zip', 'out');
+
+    expect(res.extracted).toEqual([]);
+    expect(res.skipped).toHaveLength(1);
+    expect(res.skipped[0]).toMatchObject({ path: 'bomb.md' });
+    expect(res.skipped[0].reason).toContain('declares an empty file');
+    await expect(fs.stat(path.join(repoDir, 'out', 'bomb.md'))).rejects.toThrow();
+  });
+
+  it('extracts the other entries of an archive in which one fails its checksum', async () => {
+    const { default: AdmZip } = await import('adm-zip');
+    const zip = new AdmZip();
+    zip.addFile('bad.md', Buffer.from('this entry will not match its checksum'));
+    zip.addFile('fine.md', Buffer.from('fine'));
+    const archive = zip.toBuffer();
+    // The CRC field of the FIRST entry, in both of its headers: 14 bytes into
+    // the local one, 16 into the central-directory one. A reader checks one or
+    // the other depending on the entry's flags.
+    const firstLocal = archive.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    const firstCentral = archive.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    archive.writeUInt32LE((archive.readUInt32LE(firstLocal + 14) ^ 0xffffffff) >>> 0, firstLocal + 14);
+    archive.writeUInt32LE((archive.readUInt32LE(firstCentral + 16) ^ 0xffffffff) >>> 0, firstCentral + 16);
+    await fs.writeFile(path.join(repoDir, 'crc.zip'), archive);
+
+    const res = await svc.unzipFile(workspaceId, 'crc.zip', 'out');
+
+    expect(res.extracted).toEqual(['knowledge-base/out/fine.md']);
+    expect(res.skipped).toHaveLength(1);
+    expect(res.skipped[0].path).toBe('bad.md');
+    expect(res.skipped[0].reason).toContain('could not be read');
+  });
+
+  it('still extracts a file that really is empty', async () => {
+    await writeZip('empty.zip', { 'empty.md': '', 'full.md': 'x' });
+    const res = await svc.unzipFile(workspaceId, 'empty.zip', 'out');
+    expect(res.extracted.sort()).toEqual(['knowledge-base/out/empty.md', 'knowledge-base/out/full.md']);
+    expect((await fs.readFile(path.join(repoDir, 'out', 'empty.md'))).byteLength).toBe(0);
+  });
+
   it('does not create the destination directory when every entry is blocked', async () => {
     await writeZip('d.zip', { 'a.md': '1', 'b.md': '2' });
     const res = await svc.unzipFile(workspaceId, 'd.zip', 'out', async () => {

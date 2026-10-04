@@ -54,6 +54,7 @@ function parseDomainList(raw: string): string[] {
     .filter((d) => d.length > 0);
 }
 import { SpillStore } from '../modules/workspace/spill-store.js';
+import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
 import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
@@ -220,6 +221,8 @@ export interface CoreServices {
   /** The scope this graph's vault is registered under with the UTCP variable loader. */
   secretsScope: string;
   spillStore: SpillStore;
+  /** The bytes an agent uploaded, held until `apply_file_upload` lands them or their token expires. */
+  agentUploadStore: AgentUploadStore;
   docExtractService: DocExtractService;
   accessControl: AccessControlService;
   creatorAccess: CreatorAccessService;
@@ -357,7 +360,11 @@ export async function createCoreServices(
   // the default schema, so a single-tenant deployment keeps the lock ids and
   // the ledger it always had.
   const tenantKey = config.dbSchema === DEFAULT_DB_SCHEMA ? '' : config.dbSchema;
-  const db = getDb(config.databaseUrl, { schema: config.dbSchema });
+  // The handle holds this knowledge base's key for its personal-data columns:
+  // the same `SECRETS_ENC_KEY` that seals its stored credentials — its own
+  // derived one, for a tenant — so everything in the schema opens with one
+  // key and nothing in it opens with another tenant's.
+  const db = getDb(config.databaseUrl, { schema: config.dbSchema, piiKey: config.secretsEncKey });
   // A schema of its own is created on first use, so a tenant's first
   // activation needs nothing done by hand; `public` always exists. Then the
   // server is asked whether the connections really search that schema: a
@@ -377,6 +384,10 @@ export async function createCoreServices(
   // package runs its own squashed idempotent CORE history from the packaged
   // `migrations/` folder, tracked in `__drizzle_migrations_core`. An
   // enterprise overlay runs its own history AFTER this (see migrate.ts).
+  // `runCoreMigrations` also seals any pre-encryption plaintext PII rows and
+  // swaps the unique constraints onto the blind-index columns (see
+  // migrate.ts), under the same lock, before any service reads or writes a
+  // PII column.
   await runCoreMigrations(db, coreMigrationsDir());
 
   // Deployment settings come next, before ANY service is built: the KB remote
@@ -652,6 +663,17 @@ export async function createCoreServices(
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
   const spillStore = new SpillStore(config.spillRoot);
+  // The upload route an agent lands files by, so their content never passes
+  // through the model. Bytes live BESIDE the workspaces root (never inside
+  // one) until the apply commits them or the token expires — checked here
+  // rather than assumed, because a root configured inside a workspace would
+  // put bytes no gate has judged where the file tools read.
+  await assertUploadsRootOutsideWorkspaces(config.agentUploadsRoot, config.workspacesRoot);
+  const agentUploadStore = new AgentUploadStore({
+    root: config.agentUploadsRoot,
+    publicBaseUrl: config.publicBackendUrl,
+    tokenPrefix: config.uploadTokenPrefix,
+  });
   // Office-document/PDF text extraction for `read_file`/`grep`, cached by
   // content hash beside the workspaces root (see `DocExtractionCache`).
   const docExtractService = new DocExtractService(config.docExtractCacheRoot);
@@ -1167,6 +1189,9 @@ export async function createCoreServices(
       // For the needs-authorization setup link surfaced to external agents.
       publicFrontendUrl: config.publicFrontendUrl,
       readAgentPreamble: readPreamble,
+      // The guide's name the shared file rules spell, read per request so a name
+      // the setup save applies lands without a restart.
+      kbLayout: () => kb.layout,
       secretsScope,
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
@@ -1404,6 +1429,7 @@ export async function createCoreServices(
     kb,
     kbDirName,
     spillStore,
+    agentUploadStore,
     docExtractService,
     accessControl,
     creatorAccess,

@@ -14,16 +14,19 @@ import { SpillStore } from '../spill-store.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
+import { sharedFileRulesSection, sharedRulesPointer } from '../../agent-instructions/shared-file-rules.js';
 
 /**
  * What the platform TELLS AN AGENT about the conventions file, under the
  * default name and under a deployment's own.
  *
- * Descriptions only: the behaviour behind them is covered in
- * `workspace.tools.test.ts`, and what matters here is the text a remote agent
- * reads, which is the only place it learns that the organisation's own
- * `AGENTS.md` exists at all — it has no checkout, so no harness reads that file
- * for it.
+ * The conventions reminder and the platform-file list are SHARED RULES now —
+ * stated in the handshake instructions and in the managed agent guide, once
+ * each — so their wording is asserted against that one text. What each tool
+ * description still has to get right is the POINTER at the end, which names the
+ * guide by the name this deployment gave it; that is the only place a remote
+ * agent learns which file to open, and it has no checkout, so no harness reads
+ * that file for it.
  */
 const KB_DIR = 'knowledge-base';
 /** The context the tools read; a case applies a deployment's own names to it. */
@@ -61,21 +64,25 @@ async function listed(registry: ToolRegistry): Promise<Map<string, string>> {
 
 afterEach(() => kb.applyLayout({ ...DEFAULT_KB_LAYOUT }));
 
-describe('the conventions note every workspace tool carries', () => {
-  it('names AGENTS.md, and CLAUDE.md beside it, under the default name', async () => {
+describe("what names the guide, under the default name and under a deployment's own", () => {
+  it('names AGENTS.md, and CLAUDE.md beside it, under the default name', () => {
+    const rules = sharedFileRulesSection(kb.layout);
+    expect(rules).toContain(
+      'read `AGENTS.md` at the KB root — or `CLAUDE.md` on a knowledge base seeded before it was renamed',
+    );
+  });
+
+  it("points every entrypoint at the section, by the guide's own name", async () => {
     const byName = await descriptions();
     // On EVERY entrypoint, reads included: any of them can be a session's first.
     for (const name of ['grep', 'list_files', 'file_stat', 'write_file', 'move_file']) {
-      expect(byName.get(name), name).toContain(
-        'read `AGENTS.md` at the KB root — or `CLAUDE.md` on a knowledge base seeded before it was renamed',
-      );
+      expect(byName.get(name), name).toContain('see "Working with files" in AGENTS.md.');
     }
   });
 
-  it('names the configured file first and the organisation\'s own AGENTS.md second', async () => {
+  it("names the configured file first and the organisation's own AGENTS.md second", () => {
     kb.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
-    const byName = await descriptions();
-    const note = byName.get('grep') ?? '';
+    const note = sharedFileRulesSection(kb.layout);
     expect(note).toContain('read `HEXIS.md` at the KB root, then `AGENTS.md` if it also exists');
     expect(note).toContain("the organisation's own conventions");
     // Ours first: an agent that reads only one must read the platform's.
@@ -84,27 +91,23 @@ describe('the conventions note every workspace tool carries', () => {
     expect(note).toContain('`CLAUDE.md`');
   });
 
-  it('describes the platform files under the configured name, and no longer under AGENTS.md', async () => {
+  it('lists the platform files under the configured name, and no longer under AGENTS.md', () => {
     kb.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
-    const byName = await descriptions();
-    const stat = byName.get('file_stat') ?? '';
-    expect(stat).toContain('`access.md`, `roles.yaml`, `.bevelignore`, `HEXIS.md`');
-
-    for (const name of ['delete_file', 'move_file']) {
-      const text = byName.get(name) ?? '';
-      expect(text, name).toContain('`roles.yaml` or `HEXIS.md` at the repository root');
-      // The customer's file is content on such a deployment, so the rule that
-      // refuses a move must not claim it.
-      expect(text.replace(/`AGENTS\.md` if it also exists/g, ''), name).not.toContain(
-        'or `AGENTS.md` at the repository root',
-      );
-    }
+    const rules = sharedFileRulesSection(kb.layout);
+    // Listed with the depth each one counts at — `access.md` and
+    // `.bevelignore` govern the folder they sit in, the other two are read from
+    // the root — because the names alone would have an agent refuse a nested
+    // `HEXIS.md` it may rename.
+    expect(rules).toContain('`access.md` or `.bevelignore` in any folder, `roles.yaml` or `HEXIS.md` at the repository root');
+    // The customer's file is content on such a deployment, so the rule that
+    // refuses a move must not claim it.
+    expect(rules.replace(/`AGENTS\.md` if it also exists/g, '')).not.toContain('`AGENTS.md`');
   });
 
-  it('keeps naming AGENTS.md as a platform file under the default name', async () => {
-    const byName = await descriptions();
-    expect(byName.get('file_stat')).toContain('`access.md`, `roles.yaml`, `.bevelignore`, `AGENTS.md`');
-    expect(byName.get('delete_file')).toContain('`roles.yaml` or `AGENTS.md` at the repository root');
+  it('keeps naming AGENTS.md as a platform file under the default name', () => {
+    expect(sharedFileRulesSection(kb.layout)).toContain(
+      '`access.md` or `.bevelignore` in any folder, `roles.yaml` or `AGENTS.md` at the repository root',
+    );
   });
 
   /**
@@ -117,14 +120,14 @@ describe('the conventions note every workspace tool carries', () => {
   it('follows a layout applied after the tools were mounted', async () => {
     const registry = new ToolRegistry();
     const atMount = await descriptions(registry);
-    expect(atMount.get('grep')).toContain('read `AGENTS.md` at the KB root');
+    expect(atMount.get('grep')).toContain('in AGENTS.md.');
 
     kb.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
 
     const now = await listed(registry);
-    expect(now.get('grep')).toContain('read `HEXIS.md` at the KB root, then `AGENTS.md` if it also exists');
-    expect(now.get('file_stat')).toContain('`access.md`, `roles.yaml`, `.bevelignore`, `HEXIS.md`');
-    expect(now.get('delete_file')).toContain('`roles.yaml` or `HEXIS.md` at the repository root');
-    expect(now.get('move_file')).toContain('`roles.yaml` or `HEXIS.md` at the repository root');
+    for (const name of ['grep', 'file_stat', 'delete_file', 'move_file']) {
+      expect(now.get(name), name).toContain(sharedRulesPointer(kb.layout));
+      expect(now.get(name), name).not.toContain('in AGENTS.md.');
+    }
   });
 });

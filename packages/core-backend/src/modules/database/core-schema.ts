@@ -9,15 +9,32 @@
  * `enterprise-schema.ts`, which imports the FK targets (`users`,
  * `externalApiKeys`) from here. `schema.ts` re-exports both, so existing
  * imports keep working unchanged.
+ *
+ * PII columns (emails, display names, change-request/comment text) are
+ * `encryptedText` — AES-256-GCM ciphertext in the database, transparently
+ * decrypted on read (see `shared/column-crypto.ts`). Because the ciphertext is
+ * randomized, equality lookups and unique constraints on those columns go
+ * through their deterministic `*_bidx` companions (HMAC-SHA256 blind indexes,
+ * `blindIndexText`) — never `eq()` an encrypted column directly. A `*_bidx`
+ * column is written and compared WITH THE ADDRESS ITSELF; the database handle
+ * the statement runs on turns it into the index, under that handle's key.
  */
 import { sql } from 'drizzle-orm';
 import { boolean, check, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { blindIndexText, encryptedText } from '../../shared/column-crypto.js';
 
 export const users = pgTable('users', {
   id: uuid('id').defaultRandom().primaryKey(),
-  email: text('email').notNull().unique(),
-  name: text('name').notNull(),
-  avatarUrl: text('avatar_url'),
+  email: encryptedText('email').notNull(),
+  /**
+   * Blind index of the lowercased email — carries the uniqueness constraint
+   * and every lookup-by-email (login, upsert conflict target), which the
+   * randomized `email` ciphertext cannot. Write the email into it on every
+   * insert, and compare it with the email.
+   */
+  emailBidx: blindIndexText('email_bidx').notNull(),
+  name: encryptedText('name').notNull(),
+  avatarUrl: encryptedText('avatar_url'),
   /**
    * scrypt hash for password login (see auth/password-hash.ts). NULL for
    * accounts that only ever signed in via SSO — password login refuses them
@@ -52,7 +69,9 @@ export const users = pgTable('users', {
   deactivatedAt: timestamp('deactivated_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
-});
+}, (t) => ({
+  emailBidxUnq: uniqueIndex('users_email_bidx_unq').on(t.emailBidx),
+}));
 
 /**
  * Per-file owner approvals on a PR. A PR is mergeable-in-Bevel when every
@@ -69,15 +88,18 @@ export const prFileApprovals = pgTable('pr_file_approvals', {
   id: uuid('id').defaultRandom().primaryKey(),
   prNumber: integer('pr_number').notNull(),
   path: text('path').notNull(),
-  approverEmail: text('approver_email').notNull(),  // lowercased at insert
-  approverName: text('approver_name').notNull(),
+  approverEmail: encryptedText('approver_email').notNull(),  // lowercased at insert
+  /** Blind index of `approver_email` — the uniqueness key and eq() lookup. */
+  approverEmailBidx: blindIndexText('approver_email_bidx').notNull(),
+  approverName: encryptedText('approver_name').notNull(),
   headSha: text('head_sha').notNull(),
   approvedAt: timestamp('approved_at').defaultNow().notNull(),
 }, (t) => ({
   // Idempotency: approving the same path on the same SHA twice must be a no-op,
-  // not a duplicate row. Unique on the (PR, path, approver, headSha) tuple.
-  unq: uniqueIndex('pr_file_approvals_unq')
-    .on(t.prNumber, t.path, t.approverEmail, t.headSha),
+  // not a duplicate row. Unique on the (PR, path, approver, headSha) tuple —
+  // via the blind index, because the encrypted email is randomized.
+  unq: uniqueIndex('pr_file_approvals_bidx_unq')
+    .on(t.prNumber, t.path, t.approverEmailBidx, t.headSha),
   byPr: index('pr_file_approvals_by_pr').on(t.prNumber),
 }));
 
@@ -91,12 +113,15 @@ export const prFileApprovals = pgTable('pr_file_approvals', {
 export const prMergeLog = pgTable('pr_merge_log', {
   id: uuid('id').defaultRandom().primaryKey(),
   prNumber: integer('pr_number').notNull(),
-  triggeredByEmail: text('triggered_by_email').notNull(),
-  triggeredByName: text('triggered_by_name').notNull(),
+  triggeredByEmail: encryptedText('triggered_by_email').notNull(),
+  /** Blind index of `triggered_by_email` — GDPR-erasure lookup. */
+  triggeredByEmailBidx: blindIndexText('triggered_by_email_bidx').notNull(),
+  triggeredByName: encryptedText('triggered_by_name').notNull(),
   headShaAtMerge: text('head_sha_at_merge').notNull(),
   mergeMethod: text('merge_method').notNull(),
   succeeded: boolean('succeeded').notNull(),
-  error: text('error'),
+  // Encrypted: merge failure output can quote author identities and CR text.
+  error: encryptedText('error'),
   startedAt: timestamp('started_at').defaultNow().notNull(),
   completedAt: timestamp('completed_at'),
 }, (t) => ({
@@ -120,12 +145,15 @@ export const prMergeLog = pgTable('pr_merge_log', {
 export const prComments = pgTable('pr_comments', {
   id: uuid('id').defaultRandom().primaryKey(),
   prNumber: integer('pr_number').notNull(),
-  authorEmail: text('author_email').notNull(),
-  authorName: text('author_name').notNull(),
+  authorEmail: encryptedText('author_email').notNull(),
+  /** Blind index of `author_email` — GDPR-erasure lookup. */
+  authorEmailBidx: blindIndexText('author_email_bidx').notNull(),
+  authorName: encryptedText('author_name').notNull(),
   path: text('path'),
   line: integer('line'),
   headSha: text('head_sha').notNull(),
-  body: text('body').notNull(),
+  // Encrypted: review conversation exists only in this DB (never on GitHub).
+  body: encryptedText('body').notNull(),
   parentId: uuid('parent_id'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at'),
@@ -154,20 +182,36 @@ export const changeRequests = pgTable('change_requests', {
   number: integer('number').generatedAlwaysAsIdentity(),
   sourceBranch: text('source_branch').notNull(),
   targetBranch: text('target_branch').notNull(),
-  title: text('title').notNull(),
-  body: text('body').notNull().default(''),
-  authorEmail: text('author_email').notNull(), // lowercased at insert
-  authorName: text('author_name').notNull(),
+  // Encrypted: CR title/body exist only in this DB (the remote sees branches).
+  // The DB-level default '' bypasses toDriver, which is fine: the empty string
+  // is deliberately stored unencrypted (see encryptPii), so a defaulted row
+  // and an app-written empty body hold the identical representation.
+  title: encryptedText('title').notNull(),
+  body: encryptedText('body').notNull().default(''),
+  authorEmail: encryptedText('author_email').notNull(), // lowercased at insert
+  /** Blind index of `author_email` — GDPR-erasure lookup. */
+  authorEmailBidx: blindIndexText('author_email_bidx').notNull(),
+  authorName: encryptedText('author_name').notNull(),
   state: text('state').notNull().default('open'), // 'open' | 'merged' | 'closed'
   mergedSha: text('merged_sha'),
   // The last apply attempt that did not land (null when none, or once a gate
   // input it depended on changed). Persisted rather than only pushed to the
   // clicker so every viewer of the still-open request — its author first —
   // sees the refusal.
-  applyFailureReason: text('apply_failure_reason'),
+  // Encrypted: the reason can quote identities the way the merge log's error
+  // does, and the name is a person's.
+  applyFailureReason: encryptedText('apply_failure_reason'),
   applyFailureConflicts: boolean('apply_failure_conflicts'),
   applyFailedAt: timestamp('apply_failed_at'),
-  applyFailedByName: text('apply_failed_by_name'),
+  applyFailedByName: encryptedText('apply_failed_by_name'),
+  /**
+   * Blind index of the email of the person named above — what account erasure
+   * finds their name by. Written and cleared with the name, so a name never
+   * stands without it: a refusal recorded before the encryption release kept
+   * no address, and its name is taken off at the first start on this release
+   * (`clearUnindexedRefusalNames` in `migrate.ts`).
+   */
+  applyFailedByEmailBidx: blindIndexText('apply_failed_by_email_bidx'),
   /** What refused the last apply: 'gate' (approvals), 'conflicts' (git), 'error' (anything else). */
   applyFailureKind: text('apply_failure_kind'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -270,7 +314,7 @@ export const fileLocks = pgTable('file_locks', {
   branch: text('branch').notNull(),
   path: text('path').notNull(),
   holderUserId: uuid('holder_user_id').notNull().references(() => users.id),
-  holderName: text('holder_name').notNull(),
+  holderName: encryptedText('holder_name').notNull(),
   // How the lock was acquired. 'edit' (the default) is a normal write hold —
   // the holder is editing and the release publishes their bytes.
   // 'coordination' is a pure-mutex hold (see IWorkflowService.acquireLock)
@@ -331,8 +375,10 @@ export const pendingCommits = pgTable('pending_commits', {
   // Author attribution captured at enqueue. The denormalised name/email pair
   // lands on the eventual `git commit --author=` so the commit history shows
   // the human who triggered the save, not the worker.
-  authorEmail: text('author_email').notNull(),  // lowercased at insert
-  authorName: text('author_name').notNull(),
+  authorEmail: encryptedText('author_email').notNull(),  // lowercased at insert
+  /** Blind index of `author_email` — GDPR-erasure lookup. */
+  authorEmailBidx: blindIndexText('author_email_bidx').notNull(),
+  authorName: encryptedText('author_name').notNull(),
   queuedAt: timestamp('queued_at').defaultNow().notNull(),
   // `running` is set while the worker is mid-commit so a second worker
   // (e.g. after a restart with another instance still draining) doesn't
@@ -345,7 +391,8 @@ export const pendingCommits = pgTable('pending_commits', {
   // `needs_attention` + feedback notice instead of looping forever.
   recoveryAgentRuns: integer('recovery_agent_runs').notNull().default(0),
   lastAttemptedAt: timestamp('last_attempted_at'),
-  lastError: text('last_error'),
+  // Encrypted: git/agent failure output can quote author identities and paths.
+  lastError: encryptedText('last_error'),
 }, (t) => ({
   // Primary read pattern: drain in queued order, scoped to a workspace.
   byWorkspaceQueued: index('pending_commits_by_workspace_queued').on(t.workspaceId, t.queuedAt),
@@ -718,13 +765,15 @@ export const githubFacadeCodes = pgTable('github_facade_codes', {
  */
 export const pluginJoinRequests = pgTable('plugin_join_requests', {
   id: uuid('id').defaultRandom().primaryKey(),
-  requesterEmail: text('requester_email').notNull(), // lowercased at insert
+  requesterEmail: encryptedText('requester_email').notNull(), // lowercased at insert
+  /** Blind index of `requester_email` — the uniqueness key, the by-requester read and the erasure delete. */
+  requesterEmailBidx: blindIndexText('requester_email_bidx').notNull(),
   /** Denormalised for the commit/change-request authorship, like `file_locks.holder_name`. */
-  requesterName: text('requester_name').notNull(),
+  requesterName: encryptedText('requester_name').notNull(),
   pluginKey: text('plugin_key').notNull(),
   status: text('status').notNull().default('pending'),
-  /** What the git work said when it refused — shown to the requester verbatim. */
-  failureReason: text('failure_reason'),
+  /** What the git work said when it refused — shown to the requester verbatim. Encrypted: git quotes identities. */
+  failureReason: encryptedText('failure_reason'),
   changeRequestNumber: integer('change_request_number'),
   /**
    * When a process took this row's git work, and the whole of the mutual
@@ -770,8 +819,9 @@ export const pluginJoinRequests = pgTable('plugin_join_requests', {
 }, (t) => ({
   // One request per person per plugin — the DB's rule, not a caller's. Also
   // the index the plugin listing's by-requester read is served from.
-  requesterPluginUnq: uniqueIndex('plugin_join_requests_requester_plugin_unq')
-    .on(t.requesterEmail, t.pluginKey),
+  // Via the blind index, because the encrypted email is randomized.
+  requesterPluginUnq: uniqueIndex('plugin_join_requests_requester_bidx_plugin_unq')
+    .on(t.requesterEmailBidx, t.pluginKey),
   // The boot sweep: every row still `pending`, without a full scan.
   byStatus: index('plugin_join_requests_by_status').on(t.status),
   statusCheck: check(

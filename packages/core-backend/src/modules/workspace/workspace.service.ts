@@ -8,7 +8,6 @@ import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '
 import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   validateRelativePath,
-  validateFilename,
   FOLDER_PLACEHOLDER,
   isFolderPlaceholder,
   entryExistsMessage,
@@ -26,6 +25,7 @@ import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { assertRepoRootNameFree, normalizeWorkspacePath } from '../kb-fs/repo-path.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
+import { isZipNoiseEntry, readZipEntry, zipEntryName, zipEntryNameRefusal, zipEntrySegments } from './zip-entry-rules.js';
 import {
   GitInternalsError,
   PathNotFoundError,
@@ -495,6 +495,19 @@ export class WorkspaceService implements IWorkspaceService {
    * a conventional default branch isn't on the remote) just to run a global op.
    * Scans disk rather than the in-memory `branchDirs` map so clones that
    * survived a process restart are still found.
+   *
+   * INTERCHANGEABLE ONLY ONCE IT CAN REACH THE REMOTE. The clone handed back
+   * is one this process may never have opened, and opening a branch is the
+   * only other place a clone's credential helper is brought into line with the
+   * deployment's (`getOrCreateForBranch`). A clone made before the helper was
+   * persisted, or before a token was configured, has none — and it is exactly
+   * the kind that sorts first on disk, because it is old. Every repo-global
+   * operation then ran its fetches in a working copy that could not
+   * authenticate: the fetch failed, quietly, and each change request whose
+   * branch that clone had never seen was reported as `unknown branch`, list
+   * after list, while the branches sat on the remote. So the helper is stamped
+   * here too, before the clone is offered. A no-op for a clone already stamped
+   * in this process, and it never throws (see `stampCredentialHelper`).
    */
   async findAnyWorkspaceId(): Promise<string | null> {
     let entries: Array<{ name: string; isDirectory: () => boolean }>;
@@ -505,12 +518,15 @@ export class WorkspaceService implements IWorkspaceService {
     }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
+      const repoDir = path.join(this.workspacesRoot, entry.name, this.kbDirName);
       try {
-        await fs.access(path.join(this.workspacesRoot, entry.name, this.kbDirName, '.git'));
-        return entry.name;
+        await fs.access(path.join(repoDir, '.git'));
       } catch {
         // No `.git` — half-built or unrelated dir; keep looking.
+        continue;
       }
+      await this.refreshCredentialHelperIfStale(branchForWorkspaceId(entry.name), repoDir);
+      return entry.name;
     }
     return null;
   }
@@ -688,6 +704,15 @@ export class WorkspaceService implements IWorkspaceService {
       const startedMeanwhile = this.inFlightSetAsides.get(branch);
       if (startedMeanwhile) {
         await startedMeanwhile;
+      } else if (this.discardsOf(id) !== discardsAtAdoption) {
+        // The copy whose address this call read is no longer there: a move
+        // began AND ended while it was being read. An in-flight entry is
+        // cleared the moment its move ends, so a caller that comes back after
+        // that finds nobody to wait for — and its answer is about a copy that
+        // has already been set aside. Acting on it would set aside whatever is
+        // at this path NOW, which is the fresh clone the first caller is in
+        // the middle of making. Nothing is left to move; the bootstrap below
+        // waits for that clone.
       } else {
         const kept = path.join(setAsideRootFor(this.workspacesRoot, this.setAsideRoot), setAsideStamp(), id);
         // What surrounds the move may wait, and the startup phase may set
@@ -698,6 +723,11 @@ export class WorkspaceService implements IWorkspaceService {
           if (this.discardsOf(id) !== discardsAtAdoption) return;
           await setAsideClone(repoDir, kept);
           moved = true;
+          // Said the way the startup phase says it: the copy at this path was
+          // taken away. That is what the check above reads, so every caller
+          // that looked at the old copy before this line knows its answer is
+          // stale, however late it comes back.
+          this.forgetClone(id);
         }).finally(() => {
           this.inFlightSetAsides.delete(branch);
         });
@@ -1997,43 +2027,22 @@ export class WorkspaceService implements IWorkspaceService {
         continue;
       }
       processedCount++;
-      const rawName = entry.entryName.replace(/\\/g, '/');
+      const rawName = zipEntryName(entry.entryName);
 
-      if (
-        rawName.startsWith('__MACOSX/') ||
-        rawName === '__MACOSX' ||
-        rawName.endsWith('/.DS_Store') ||
-        rawName === '.DS_Store' ||
-        /(^|\/)\._/.test(rawName)
-      ) {
-        continue;
-      }
+      if (isZipNoiseEntry(rawName)) continue;
 
-      if (!rawName || rawName.startsWith('/') || /(^|\/)\.\.($|\/)/.test(rawName)) {
-        skipped.push({ path: rawName || '(empty)', reason: 'Invalid path' });
-        continue;
-      }
-
-      // An archive never writes into the git folder, whatever the entry's spelling.
-      if (hasGitInternalsSegment(rawName)) {
-        skipped.push({ path: rawName, reason: new GitInternalsError().message });
+      // What an entry's NAME may be — invalid path, the git folder in any
+      // spelling, a segment no filesystem keeps intact — is `zip-entry-rules`,
+      // so `apply_file_upload` judges the same names by the same rules rather
+      // than by a second copy of them.
+      const nameRefusal = zipEntryNameRefusal(rawName);
+      if (nameRefusal !== null) {
+        skipped.push({ path: rawName || '(empty)', reason: nameRefusal });
         continue;
       }
 
       const trimmed = rawName.replace(/\/+$/, '');
-      const segments = trimmed.split('/').filter((s) => s.length > 0);
-      let invalidReason: string | null = null;
-      for (const segment of segments) {
-        const reason = validateFilename(segment);
-        if (reason) {
-          invalidReason = reason;
-          break;
-        }
-      }
-      if (invalidReason) {
-        skipped.push({ path: rawName, reason: invalidReason });
-        continue;
-      }
+      const segments = zipEntrySegments(rawName);
 
       const targetAbsolute = path.resolve(destAbsolute, ...segments);
       const destRoot = path.resolve(destAbsolute);
@@ -2114,14 +2123,31 @@ export class WorkspaceService implements IWorkspaceService {
         continue;
       }
 
-      const data = entry.getData();
-      if (data.byteLength > UNZIP_MAX_ENTRY_BYTES) {
+      // Read through the one bounded reader (`readZipEntry`), never with the
+      // declared size above as the only bound: an entry that declares ZERO is
+      // inflated with no cap at all by the archive reader, so a few kilobytes
+      // could expand to whatever memory there is before the checks below ran.
+      // Capped at what is left of both limits, and a read that fails is this
+      // entry's refusal rather than the whole archive's.
+      const read = readZipEntry(
+        entry,
+        Math.min(UNZIP_MAX_ENTRY_BYTES, UNZIP_MAX_TOTAL_BYTES - totalUncompressed),
+      );
+      if (!read.ok && read.reason === 'unreadable') {
+        skipped.push({ path: rawName, reason: `Entry could not be read: ${read.detail}` });
+        continue;
+      }
+      if (!read.ok) {
         skipped.push({
           path: rawName,
-          reason: `Entry exceeds ${UNZIP_MAX_ENTRY_BYTES} byte per-file limit`,
+          reason:
+            totalUncompressed + UNZIP_MAX_ENTRY_BYTES > UNZIP_MAX_TOTAL_BYTES
+              ? `Archive exceeds ${UNZIP_MAX_TOTAL_BYTES} byte total uncompressed limit`
+              : `Entry exceeds ${UNZIP_MAX_ENTRY_BYTES} byte per-file limit`,
         });
         continue;
       }
+      const data = read.data;
       if (totalUncompressed + data.byteLength > UNZIP_MAX_TOTAL_BYTES) {
         skipped.push({
           path: rawName,

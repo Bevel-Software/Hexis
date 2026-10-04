@@ -164,6 +164,7 @@ export function tenantConfigFrom(record: TenantRecord, settings: TenantHostSetti
     workspacesRoot: path.resolve(settings.workspacesRoot, slug),
     backupsRoot: besideWorkspaces('backups'),
     spillRoot: besideWorkspaces('tool-chain-spills'),
+    agentUploadsRoot: besideWorkspaces('agent-uploads'),
     docExtractCacheRoot: besideWorkspaces('doc-extract-cache'),
     jwtSecret: secrets.jwtSecret,
     secretsEncKey: secrets.secretsEncKey,
