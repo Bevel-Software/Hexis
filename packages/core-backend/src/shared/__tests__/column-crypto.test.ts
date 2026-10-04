@@ -114,17 +114,33 @@ describe('derivePiiKeys: seal / open / read', () => {
   });
 
   /**
-   * Node's base64 decoder skips what it does not know, so a key with one
-   * mistyped character still decoded — to 32 bytes that are another key, and
-   * data sealed under it opens with nothing the operator has written down.
+   * Node's base64 decoder is forgiving in ways a key must not be. Every value
+   * below DECODES TO 32 BYTES, so the length check passes each of them, and
+   * none of them is a way those 32 bytes are written: a mistyped key that
+   * became another key, sealing data the value an operator wrote down will
+   * never open. The property is one, whatever the mistake was — what is
+   * written must be a spelling of what it decodes to.
    */
-  it('refuses a key with a character neither hex nor base64 has, rather than deriving another key from it', () => {
-    // A stray character in the middle: skipped by the decoder, so the length
-    // check alone passes it.
-    const mistyped = `${KEY.slice(0, 10)}$${KEY.slice(10)}`;
-    expect(Buffer.from(mistyped, 'base64')).toHaveLength(32);
-    expect(() => derivePiiKeys(mistyped)).toThrow(/SECRETS_ENC_KEY is not hex or base64/);
-    expect(() => derivePiiKeys(`${KEY.slice(0, 20)} ${KEY.slice(20)}`)).toThrow(/not hex or base64/);
+  it('refuses whatever decodes to 32 bytes without being a spelling of them', () => {
+    const unpadded = KEY.replace(/=+$/, '');
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    // The last character of 32 bytes carries four bits of the key and two
+    // that must be zero. Its neighbour in the alphabet sets one of those two.
+    const trailingBits = unpadded.slice(0, -1) + alphabet[alphabet.indexOf(unpadded.slice(-1)) + 1];
+    const mistakes = {
+      'a character the alphabet does not have': `${KEY.slice(0, 10)}$${KEY.slice(10)}`,
+      'a space in the middle': `${KEY.slice(0, 20)} ${KEY.slice(20)}`,
+      'more padding than its length takes': `${unpadded}==`,
+      'bits its last character should not carry': trailingBits,
+    };
+    for (const [mistake, written] of Object.entries(mistakes)) {
+      // The premise: only the round trip can tell this from a key.
+      expect(Buffer.from(written, 'base64'), mistake).toHaveLength(32);
+      expect(() => derivePiiKeys(written), mistake).toThrow(/SECRETS_ENC_KEY is not a clean hex or base64 spelling/);
+    }
+    // Padding in the MIDDLE ends the decoding there, so that one is short and
+    // the length check has always refused it.
+    expect(() => derivePiiKeys(`${unpadded.slice(0, 20)}=${unpadded.slice(20)}`)).toThrow(/must decode to 32 bytes/);
   });
 
   it('takes one key in any of its spellings: hex, base64, url-safe, unpadded, with whitespace around it', () => {
@@ -132,7 +148,9 @@ describe('derivePiiKeys: seal / open / read', () => {
     const index = keys.index('a@b.co');
     for (const spelled of [
       raw.toString('hex'),
+      raw.toString('hex').toUpperCase(),
       raw.toString('base64url'),
+      `${raw.toString('base64url')}=`,
       KEY.replace(/=+$/, ''),
       `  ${KEY}\n`,
     ]) {

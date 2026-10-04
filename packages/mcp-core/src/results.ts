@@ -206,20 +206,23 @@ export function withTransportDetail(message: string, status?: unknown, data?: un
  */
 function fieldsNotIn(message: string, data: unknown, skip: string): string | null {
   if (data === null || typeof data !== 'object' || Array.isArray(data)) return null;
-  const rest: Record<string, unknown> = {};
+  let unsaid: [string, unknown][];
   try {
-    for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
-      if (key === skip || value === undefined) continue;
+    unsaid = Object.entries(data as Record<string, unknown>).filter(([key, value]) => {
+      if (key === skip || value === undefined) return false;
       const scalar = typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
       const said = scalar ? String(value) : safeJsonText(value);
-      if (said.length > 0 && message.includes(said)) continue;
-      rest[key] = value;
-    }
+      return !(said.length > 0 && message.includes(said));
+    });
   } catch {
     return null;
   }
-  if (Object.keys(rest).length === 0) return null;
-  const text = safeJsonText(rest);
+  if (unsaid.length === 0) return null;
+  // `Object.fromEntries` DEFINES each entry, where an assignment would run a
+  // setter: a body is JSON from a server, any name is a legal key in it, and
+  // one called `__proto__` assigned into a plain object sets its prototype
+  // and vanishes from what is serialised. Defined, every key is just a key.
+  const text = safeJsonText(Object.fromEntries(unsaid));
   return text.length > 0 && text !== '{}' ? text : null;
 }
 

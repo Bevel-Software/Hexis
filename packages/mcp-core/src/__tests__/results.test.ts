@@ -146,6 +146,19 @@ describe('withTransportDetail', () => {
     );
   });
 
+  it('hands over every field of the body it has not said, whatever the field is called', () => {
+    // A body is JSON from a server, and any name is a legal key in it. Parsed,
+    // each is an own property — including the ones that mean something to a
+    // JavaScript object when ASSIGNED: copied by assignment, `__proto__` set
+    // the copy's prototype and was gone from what the caller was told.
+    for (const name of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+      const body = JSON.parse(`{"error":"refused","${name}":{"why":"it is a key like any other"}}`) as unknown;
+      expect(withTransportDetail('refused', undefined, body), name).toBe(
+        `refused Error data: {"${name}":{"why":"it is a key like any other"}}`,
+      );
+    }
+  });
+
   it('appends the body when the message is the generic transport line', () => {
     // The other shape the UTCP http transport throws: the reason is in `data`,
     // which `describeToolFailure` does not read, so the message says nothing

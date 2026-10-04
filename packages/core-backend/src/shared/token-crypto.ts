@@ -61,24 +61,39 @@ function decodeKey(raw: string): Buffer {
  * is then safe, because a bad key never gets that far.
  */
 export function assertKeyDecodesTo32Bytes(rawKey: string, envVarName: string): Buffer {
-  // The SYNTAX first. Node's base64 decoder skips every character it does not
-  // know, so a key with one mistyped character still decodes — to 32 bytes
-  // that are a different key, which then seals data nothing else can open.
-  // Hex, or base64 in either alphabet with or without its padding; whitespace
-  // around it is the environment's, not the key's.
-  const trimmed = rawKey.trim();
-  if (!/^[0-9a-fA-F]{64}$/.test(trimmed) && !/^[A-Za-z0-9+/_-]+={0,2}$/.test(trimmed)) {
-    throw new Error(
-      `${envVarName} is not hex or base64: it holds a character neither encoding has. ` +
-        'Generate one with: `node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"`.',
-    );
-  }
-  const key = decodeKey(trimmed);
+  // Whitespace around it is the environment's, not the key's.
+  const written = rawKey.trim();
+  const key = decodeKey(written);
   if (key.length !== 32) {
     throw new Error(
       `${envVarName} must decode to 32 bytes (got ${key.length}). ` +
         'Generate one with: `node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"`.',
     );
   }
+  // WHAT IS WRITTEN MUST BE A SPELLING OF WHAT IT DECODES TO. Node's decoder is
+  // forgiving in ways a key must not be: it skips a character it does not know,
+  // it stops at padding wherever padding stands, and it ignores bits a final
+  // character should not carry. Each of those turns a mistyped key into 32
+  // bytes — a DIFFERENT key, sealing data that the value an operator wrote
+  // down will never open. Asking which characters and which padding are
+  // acceptable is a list that is always one case short, so the question is put
+  // the other way round: encode the bytes again, and accept the value only
+  // when it is one of the ways those bytes are written.
+  if (!spellingsOf(key).includes(/^[0-9a-fA-F]{64}$/.test(written) ? written.toLowerCase() : written)) {
+    throw new Error(
+      `${envVarName} is not a clean hex or base64 spelling of a 32-byte key: it holds a character, a padding ` +
+        'or trailing bits the encoding does not have, which the decoder skipped. The key in use so far is what ' +
+        'it decoded to; print that key spelled properly with ' +
+        `\`node -e "console.log(Buffer.from(process.env.${envVarName}, 'base64').toString('base64'))"\` and set that.`,
+    );
+  }
   return key;
+}
+
+/** Every way 32 bytes are written as a key: hex, and base64 in either alphabet, padded or not. */
+function spellingsOf(key: Buffer): string[] {
+  const standard = key.toString('base64');
+  const urlSafe = key.toString('base64url');
+  const padding = standard.slice(standard.replace(/=+$/, '').length);
+  return [key.toString('hex'), standard, standard.replace(/=+$/, ''), urlSafe, urlSafe + padding];
 }

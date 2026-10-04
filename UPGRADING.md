@@ -111,21 +111,27 @@ for the backup:
   the person's account is erased. The name is taken off those refusals; the
   refusal, its reason and its time stay.
 
-That first start refuses to come up in three cases, and says which:
+That first start refuses to come up in two cases, and says which:
 
 - Two accounts share one address up to case and whitespace
   (`Alice@example.com` and `alice@example.com` could both exist before).
   The log names the conflicting user ids; merge or delete the duplicates,
   then start again.
-- `SECRETS_ENC_KEY` holds a character that is neither hex nor base64. Such a
-  key used to be accepted with that character skipped. Remove the stray
-  character: what is left is the key the deployment has been using all
-  along, so nothing sealed is lost.
-- A sealed row does not open with the configured key. From the second start
-  on, every start checks this: changing `SECRETS_ENC_KEY` is no longer a
-  configuration change but a re-keying of the database, and a start under a
-  different key stops instead of locking everyone out. Restore the key that
-  sealed the data.
+- `SECRETS_ENC_KEY` is not a clean hex or base64 spelling of its key: it
+  holds a character the encoding does not have, padding where none belongs,
+  or bits its last character should not carry. Such a value used to be
+  accepted with the odd part skipped, and the key in use is what it decoded
+  to. The refusal gives a one-line command that prints that same key spelled
+  properly; set the variable to what it prints, and nothing sealed is lost.
+
+And every start after it refuses in one more:
+
+- A sealed row does not open with the configured key. Changing
+  `SECRETS_ENC_KEY` is no longer a configuration change but a re-keying of
+  the database, and a start under a different key stops instead of locking
+  everyone out. Restore the key that sealed the data. The first start has
+  nothing sealed to check the key against, which is why this one begins with
+  the second.
 
 A process that serves several knowledge bases (`TENANTS_FILE`) seals each
 tenant's rows with that tenant's own key, the one derived for it from
