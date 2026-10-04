@@ -195,6 +195,7 @@ export class PendingCommitsService {
       .set({
         queuedAt: new Date(),
         authorEmail: email,
+        authorEmailBidx: email,
         authorName: input.authorName,
         // Reset transient counters — this is effectively a fresh enqueue.
         attempts: 0,
@@ -216,6 +217,7 @@ export class PendingCommitsService {
       branch: input.branch,
       path: input.path,
       authorEmail: email,
+      authorEmailBidx: email,
       authorName: input.authorName,
     });
   }
@@ -249,11 +251,13 @@ export class PendingCommitsService {
         ),
       );
     if ((rows[0]?.count ?? 0) > 0) return false;
+    const email = canonicalEmail(input.authorEmail);
     await this.db.insert(pendingCommits).values({
       workspaceId,
       branch: input.branch,
       path: input.path,
-      authorEmail: canonicalEmail(input.authorEmail),
+      authorEmail: email,
+      authorEmailBidx: email,
       authorName: input.authorName,
     });
     return true;

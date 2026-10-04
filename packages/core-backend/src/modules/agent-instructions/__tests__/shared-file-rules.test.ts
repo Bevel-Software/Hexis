@@ -73,6 +73,7 @@ describe('the shared file rules are one text, in two places', () => {
       'dry-run-confirm',
       'managed-items',
       'refused-for-permissions',
+      'tool-chain',
     ]);
     for (const rule of rules) {
       expect(instructions, rule.id).toContain(rule.body);

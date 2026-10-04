@@ -36,6 +36,7 @@ import {
   platformFilesByDepth,
   type KbLayout,
 } from '@bevel-software/platform-shared';
+import { CHAIN_FAILURES_RULE, CHAIN_LARGE_RESULTS_RULE } from '@bevel-software/platform-mcp-core';
 
 /** The heading the rules live under, in both places and in the pointer sentence. */
 export const SHARED_RULES_SECTION = 'Working with files';
@@ -54,8 +55,13 @@ const PRE_RENAME_AGENTS_FILE = 'CLAUDE.md';
  * description has only moved the cost if the section itself grows without
  * limit. Measured against {@link sharedFileRulesSection} under the default
  * layout.
+ *
+ * 6,500 since the chain's own rules (what a failed chain and an oversized
+ * result answer) moved in from `call_tool_chain`'s description: two paragraphs
+ * that took that description past its cap, and that are true of every call
+ * rather than of how to write one.
  */
-export const SHARED_FILE_RULES_CAP = 6_000;
+export const SHARED_FILE_RULES_CAP = 6_500;
 
 /** One shared rule: how the guide heads it, and the rule itself. */
 export interface SharedFileRule {
@@ -168,6 +174,16 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
         'A refusal is not necessarily the end of the road: the `write-denied` error says whether you may propose the ' +
         'change instead (create a branch from this one, repeat the call on it, then `open_change_request` into this ' +
         'branch) and lists those steps.',
+    },
+    {
+      // What a chain DOES, as opposed to how to write one — which stays in
+      // `call_tool_chain`'s own description. The sentences are `mcp-core`'s,
+      // the same ones a surface with no shared rules puts in the description
+      // itself, so the rule reads the same wherever an agent finds it. What a
+      // chained read does to an image is in the content rule above.
+      id: 'tool-chain',
+      heading: 'When several calls run as one chain',
+      body: `On call_tool_chain: ${CHAIN_FAILURES_RULE}\n\n${CHAIN_LARGE_RESULTS_RULE}`,
     },
   ];
 }

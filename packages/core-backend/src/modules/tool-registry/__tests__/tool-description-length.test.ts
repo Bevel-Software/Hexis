@@ -1,7 +1,13 @@
 import express from 'express';
 import { describe, expect, it } from 'vitest';
-import { CALL_TOOL_CHAIN_NAME, CODE_MODE_META_TOOLS, withSharedRulesPointer } from '@bevel-software/platform-mcp-core';
+import {
+  CALL_TOOL_CHAIN_NAME,
+  CHAIN_FAILURES_RULE,
+  CHAIN_LARGE_RESULTS_RULE,
+  codeModeMetaTools,
+} from '@bevel-software/platform-mcp-core';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { EXTERNAL_KB_MANUAL_NAME } from '../../tool-manuals/tool-manuals.contract.js';
 import { ToolRegistry } from '../tool-registry.js';
 import type { UtcpTool } from '../tool.contract.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
@@ -53,6 +59,21 @@ const emptyManuals = {
 /** A skill catalog with nothing in it — the per-user skill line is then one fixed sentence. */
 const emptySkills = { listSkills: async () => [] } as unknown as Parameters<typeof registerSkillsTools>[4];
 
+/**
+ * The meta-tools as the hosted endpoint builds them (`mcp.service.ts`):
+ * examples written against the namespace it registers the knowledge-base tools
+ * under and against the catalog it serves, and the chain ending in the pointer.
+ * So the chain description measured here carries the worked call a client is
+ * really sent, which is its longest form.
+ */
+function servedMetaTools(external: readonly UtcpTool[], pointer = sharedRulesPointer(testKbContext().layout)) {
+  return codeModeMetaTools(
+    EXTERNAL_KB_MANUAL_NAME,
+    external.map((t) => ({ utcpName: `${EXTERNAL_KB_MANUAL_NAME}.${t.name}`, inputSchema: t.inputs })),
+    { sharedRulesPointer: pointer },
+  );
+}
+
 /** Every tool Hexis itself registers, on both surfaces, deduplicated by name. */
 async function hexisTools(): Promise<UtcpTool[]> {
   const registry = new ToolRegistry();
@@ -88,8 +109,9 @@ async function hexisTools(): Promise<UtcpTool[]> {
   // The meta-tools as a client is served them: the chain carries its pointer
   // (`mcp.service.ts` appends it at the mount), so the catalog measured here is
   // the catalog that goes out rather than the unpointed constant.
-  const metaTools = withSharedRulesPointer(sharedRulesPointer(testKbContext().layout));
-  for (const tool of [...(await registry.listInternal()), ...(await registry.listExternal()), ...metaTools]) {
+  const external = (await registry.listExternal()) as UtcpTool[];
+  const metaTools = servedMetaTools(external);
+  for (const tool of [...(await registry.listInternal()), ...external, ...metaTools]) {
     byName.set(tool.name, tool as UtcpTool);
   }
   return [...byName.values()];
@@ -191,7 +213,9 @@ describe('no Hexis tool description is long enough to be cut', () => {
     // an oversight: if it ever reaches the catalog, the cap test above measures
     // it like everything else.
     const { createCallToolChainTool } = await import('../../code-mode/code-mode.tool.js');
-    const mastraTool = createCallToolChainTool(unused(), unused()) as unknown as { description: string };
+    const mastraTool = createCallToolChainTool(unused(), unused(), EXTERNAL_KB_MANUAL_NAME) as unknown as {
+      description: string;
+    };
     expect(mastraTool.description).toContain('UTCP CodeMode Tool Usage Guide');
     expect(mastraTool.description.length).toBeGreaterThan(TOOL_DESCRIPTION_CAP);
     expect((await hexisTools()).some((t) => t.description === mastraTool.description)).toBe(false);
@@ -252,22 +276,46 @@ describe('every file tool ends with the pointer and carries no shared paragraph'
 });
 
 describe('the shared rules describe the tools they name', () => {
-  it('ends the chain description with the pointer too, under the cap', () => {
-    // `call_tool_chain` carries a file rule of its own — what a chained read
-    // does to an IMAGE — and the clients that drop the handshake
-    // `instructions` see only descriptions, so it gets the same pointer every
-    // file tool ends with. Composed at the mount, because `mcp-core` may not
-    // spell a guide name that is a deployment setting.
+  it('ends the chain description with the pointer too, under the cap', async () => {
+    // What a chain does with a failure, a large result or an image is true of
+    // every call, so it is stated in the shared rules — and the clients that
+    // drop the handshake `instructions` see only descriptions, so the chain
+    // gets the same pointer every file tool ends with. Composed at the mount,
+    // because `mcp-core` may not spell a guide name that is a deployment
+    // setting.
     const pointer = sharedRulesPointer(testKbContext().layout);
-    const served = withSharedRulesPointer(pointer);
-    const chain = served.find((t) => t.name === CALL_TOOL_CHAIN_NAME)!;
-    expect(chain.description!.endsWith(pointer)).toBe(true);
-    expect(clientVisibleLength(chain as UtcpTool)).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
-    // The other two describe the registry, not a file: they gain nothing and
-    // are the very same objects.
-    for (const tool of served.filter((t) => t.name !== CALL_TOOL_CHAIN_NAME)) {
-      expect(tool.description).toBe(CODE_MODE_META_TOOLS.find((t) => t.name === tool.name)!.description);
+    const served = (await hexisTools()).find((t) => t.name === CALL_TOOL_CHAIN_NAME)!;
+    expect(served.description!.endsWith(pointer)).toBe(true);
+    expect(clientVisibleLength(served)).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
+    // The other two describe the registry, not what a call does: no pointer.
+    for (const tool of servedMetaTools([]).filter((t) => t.name !== CALL_TOOL_CHAIN_NAME)) {
+      expect(tool.description).not.toContain(pointer);
     }
+  });
+
+  it('states what a chain does in the shared rules, and not a second time on the chain', async () => {
+    // The pointer is only honest if the rules it points at are THERE. These
+    // two were paragraphs of the chain's description; they moved, whole, and a
+    // description that kept them as well would be the long one a client cuts.
+    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'tool-chain')!;
+    expect(rule.body).toContain(CHAIN_FAILURES_RULE);
+    expect(rule.body).toContain(CHAIN_LARGE_RESULTS_RULE);
+    const served = (await hexisTools()).find((t) => t.name === CALL_TOOL_CHAIN_NAME)!;
+    expect(served.description).not.toContain(CHAIN_FAILURES_RULE);
+    expect(served.description).not.toContain(CHAIN_LARGE_RESULTS_RULE);
+    // What a chained read does to an image was already one of the shared rules.
+    const content = sharedFileRules(testKbContext().layout).find((r) => r.id === 'content-kinds')!;
+    expect(content.body).toContain('image_omitted');
+  });
+
+  it('keeps the rules on the chain itself where no shared rules are served', () => {
+    // The standalone bridge proxies a deployment whose guide it cannot name, so
+    // it passes no pointer — and an agent there must still be told what a chain
+    // that timed out, or answered too much, or read an image, does.
+    const [chain] = codeModeMetaTools('hexis', []).filter((t) => t.name === CALL_TOOL_CHAIN_NAME);
+    expect(chain.description).toContain(CHAIN_FAILURES_RULE);
+    expect(chain.description).toContain(CHAIN_LARGE_RESULTS_RULE);
+    expect(chain.description).toContain('image_omitted');
   });
 
   it('names a dry run only on the tools that take one', async () => {

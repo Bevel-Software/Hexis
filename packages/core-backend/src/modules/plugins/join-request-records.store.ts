@@ -143,11 +143,14 @@ export class DbJoinRequestStore implements JoinRequestStore {
     pluginKey: string;
   }): Promise<JoinRequestRecord> {
     const requesterEmail = input.requesterEmail.toLowerCase();
+    // Keyed by the blind index throughout: the email column is randomized
+    // ciphertext, so the uniqueness and every lookup go through its index,
+    // which is written and compared with the address.
     const [inserted] = await this.db
       .insert(pluginJoinRequests)
-      .values({ requesterEmail, requesterName: input.requesterName, pluginKey: input.pluginKey })
+      .values({ requesterEmail, requesterEmailBidx: requesterEmail, requesterName: input.requesterName, pluginKey: input.pluginKey })
       .onConflictDoNothing({
-        target: [pluginJoinRequests.requesterEmail, pluginJoinRequests.pluginKey],
+        target: [pluginJoinRequests.requesterEmailBidx, pluginJoinRequests.pluginKey],
       })
       .returning();
     if (inserted) return toRecord(inserted);
@@ -170,7 +173,7 @@ export class DbJoinRequestStore implements JoinRequestStore {
       })
       .where(
         and(
-          eq(pluginJoinRequests.requesterEmail, requesterEmail),
+          eq(pluginJoinRequests.requesterEmailBidx, requesterEmail),
           eq(pluginJoinRequests.pluginKey, input.pluginKey),
         ),
       )
@@ -191,7 +194,7 @@ export class DbJoinRequestStore implements JoinRequestStore {
     const rows = await this.db
       .select()
       .from(pluginJoinRequests)
-      .where(eq(pluginJoinRequests.requesterEmail, requesterEmail.toLowerCase()));
+      .where(eq(pluginJoinRequests.requesterEmailBidx, requesterEmail));
     return rows.map(toRecord);
   }
 

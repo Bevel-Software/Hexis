@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import '@utcp/mcp'; // side effect: registers the 'mcp' UTCP communication protocol
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { CallTemplateSerializer } from '@utcp/sdk';
-import { retiredToolChainFailure, retiredToolInFailure, retiredToolMessage } from '../retired-tools.js';
+import { retiredToolInFailure, retiredToolMessage } from '../retired-tools.js';
 import { registerManual } from '../dispatch.js';
 import { dispatchMetaTool } from '../meta-tools.js';
 import { startFakeMcpServer } from './fake-mcp-server.js';
@@ -56,24 +56,22 @@ describe('retired tools', () => {
     expect(retiredToolInFailure('knowledge_base.merge_branch is not a function')).toBeUndefined();
   });
 
-  it('recognises a chain failure only in the shape the runner reports it', () => {
-    const failed = { result: null, logs: ['[ERROR] Code execution failed: TypeError: KNOWLEDGE_BASE.merge_change_request is not a function'] };
-    expect(retiredToolChainFailure(failed)).toMatch(PERSON_MERGES);
-    // A chain that succeeded is never rewritten, whatever it mentions.
-    expect(retiredToolChainFailure({ result: 'ok', logs: [] })).toBeUndefined();
-    // A null result without the runner's failure line is not a failed chain.
-    expect(retiredToolChainFailure({ result: null, logs: ['merge_change_request'] })).toBeUndefined();
+  it('recognises the failure a dead chain is reported with', () => {
+    // `runToolChain` hands the runner's reason straight to this matcher, so
+    // the shape it must recognise is the runner's own sentence. Whether a
+    // chain counts as DEAD at all is `chain-runtime.test.ts`'s business.
+    expect(
+      retiredToolInFailure('TypeError: KNOWLEDGE_BASE.merge_change_request is not a function'),
+    ).toMatch(PERSON_MERGES);
   });
 
   it('keeps the real reason a chain died when the retired name is only in its source', () => {
     // The chain mentions the name in a comment and dies of something else
     // entirely: replacing that with the migration notice would hide the only
     // clue the agent has.
-    const unrelated = {
-      result: null,
-      logs: ['[ERROR] Code execution failed: TypeError: KNOWLEDGE_BASE.read_file is not a function'],
-    };
-    expect(retiredToolChainFailure(unrelated)).toBeUndefined();
+    expect(
+      retiredToolInFailure('TypeError: KNOWLEDGE_BASE.read_file is not a function'),
+    ).toBeUndefined();
     expect(retiredToolInFailure('Request failed with status code 500')).toBeUndefined();
   });
 
