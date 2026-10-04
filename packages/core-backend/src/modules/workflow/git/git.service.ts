@@ -2959,10 +2959,18 @@ export class GitService implements IGitService {
       'fetch', '--no-write-fetch-head', 'origin',
       `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`,
       `+refs/heads/${headBranch}:refs/remotes/origin/${headBranch}`,
-    ]).catch((err: unknown) => this.notePrFetchFailure(cwd, err));
+    ]).then(
+      () => void this.prFetchFailureLoggedAt.delete(cwd),
+      (err: unknown) => this.notePrFetchFailure(cwd, err),
+    );
   }
 
-  /** When each working copy's change-request fetch failure was last logged. */
+  /**
+   * When each working copy's change-request fetch failure was last logged.
+   * Holds only the working copies that are failing NOW: an entry goes the
+   * moment that copy reaches the remote again, so the table never outgrows the
+   * clones that cannot fetch, however many come and go over a process's life.
+   */
   private readonly prFetchFailureLoggedAt = new Map<string, number>();
 
   /**
@@ -2984,7 +2992,12 @@ export class GitService implements IGitService {
    */
   private notePrFetchFailure(cwd: string, err: unknown): void {
     const message = err instanceof Error ? err.message : String(err);
-    if (isMissingRemoteBranchFailure(message)) return;
+    if (isMissingRemoteBranchFailure(message)) {
+      // The remote answered, and said the branch is not there: this working
+      // copy reaches it, so whatever was logged about it before is over.
+      this.prFetchFailureLoggedAt.delete(cwd);
+      return;
+    }
     const now = Date.now();
     if (now - (this.prFetchFailureLoggedAt.get(cwd) ?? 0) < 60_000) return;
     this.prFetchFailureLoggedAt.set(cwd, now);

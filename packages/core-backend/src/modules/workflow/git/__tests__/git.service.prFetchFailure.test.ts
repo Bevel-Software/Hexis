@@ -107,6 +107,49 @@ describe('a change request whose branches cannot be fetched', () => {
     expect(warnings(warn).filter((line) => line.includes('could not fetch change-request branches'))).toHaveLength(1);
   });
 
+  it('says it again once a minute has passed, and not before', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await runGit(repo, ['remote', 'set-url', 'origin', path.join(root, 'no-such-remote.git')]);
+    const git = service();
+    const said = () => warnings(warn).filter((line) => line.includes('could not fetch change-request branches'));
+    // Only the clock the service reads is moved: git itself runs for real.
+    const realNow = Date.now.bind(Date);
+    let ahead = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + ahead);
+
+    await git.changedPathsForPr(WORKSPACE, TRUNK, 'alice/feature').catch(() => undefined);
+    expect(said()).toHaveLength(1);
+
+    ahead = 30_000;
+    await git.changedPathsForPr(WORKSPACE, TRUNK, 'alice/feature').catch(() => undefined);
+    expect(said()).toHaveLength(1);
+
+    ahead = 61_000;
+    await git.changedPathsForPr(WORKSPACE, TRUNK, 'alice/feature').catch(() => undefined);
+    expect(said()).toHaveLength(2);
+  });
+
+  it('says it again at once for a working copy that reached the remote in between', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const git = service();
+    const said = () => warnings(warn).filter((line) => line.includes('could not fetch change-request branches'));
+    const broken = path.join(root, 'no-such-remote.git');
+
+    await runGit(repo, ['remote', 'set-url', 'origin', broken]);
+    await git.changedPathsForPr(WORKSPACE, TRUNK, 'alice/feature').catch(() => undefined);
+    expect(said()).toHaveLength(1);
+
+    // It reaches the remote again: what was said about it is over, and nothing
+    // of it is kept.
+    await runGit(repo, ['remote', 'set-url', 'origin', upstream]);
+    expect(await git.changedPathsForPr(WORKSPACE, TRUNK, 'alice/feature')).toEqual(['new.md']);
+
+    // So a failure right after is a new one, said without waiting out a minute.
+    await runGit(repo, ['remote', 'set-url', 'origin', broken]);
+    await git.changedPathsForPr(WORKSPACE, TRUNK, 'bob/other').catch(() => undefined);
+    expect(said()).toHaveLength(2);
+  });
+
   it('says nothing when the branch is simply gone from the remote: that is what a retired branch looks like', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
