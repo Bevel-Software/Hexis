@@ -183,6 +183,20 @@ async function start(
     await check?.();
     return plainWriteFile(path, content, options as never);
   };
+  // `LockingFilesystem.rewriteFile`: read, compute and write with the path
+  // "locked". The other writer runs first — where the real filesystem would be
+  // acquiring the lock — so `rewrite` reads what that writer left.
+  (fs as unknown as Record<string, unknown>).rewriteFile = async (
+    path: string,
+    rewrite: (current: Buffer | null) => string | Promise<string>,
+  ) => {
+    await runRaceHook();
+    const current = await fs.readFile(path).then(
+      (c) => (Buffer.isBuffer(c) ? c : Buffer.from(String(c), 'utf8')),
+      () => null,
+    );
+    return plainWriteFile(path, await rewrite(current));
+  };
   (fs as unknown as Record<string, unknown>).writeFiles = async (
     writes: { path: string; content: string }[],
     _summary: string,
@@ -361,6 +375,77 @@ describe('workspace file primitives', () => {
   it('edit_file 400s when old_string is missing', async () => {
     const base = await start();
     expect((await post(`${base}/api/agent/tools/edit_file`, { path: `${KB_DIR}/a.md`, old_string: 'nope', new_string: 'x' })).status).toBe(400);
+  });
+
+  it('edit_file writes new_string exactly as sent, `$` patterns included', async () => {
+    const base = await start();
+    const res = await post(`${base}/api/agent/tools/edit_file`, { path: `${KB_DIR}/a.md`, old_string: 'world', new_string: "cost: $& $1 $' $$" });
+    expect(res.status).toBe(200);
+    expect(String(await fs.readFile(`${KB_DIR}/a.md`))).toBe("hello\ncost: $& $1 $' $$\n");
+  });
+
+  /**
+   * An edit is a promise about the text it replaces, so that text has to be
+   * found in the file as it is when the write lands — read with the path's
+   * lock held, not at a preflight anybody may invalidate. `raceHook` is the
+   * other writer, running exactly where the real filesystem acquires the lock.
+   */
+  describe('edit_file looks for old_string in the file the write actually lands on', () => {
+    const EMPTY_OWNER = '# Assignee\n\n# Log';
+    const claim = (base: string, who: string) =>
+      post(`${base}/api/agent/tools/edit_file`, {
+        path: `${KB_DIR}/ticket.md`,
+        old_string: EMPTY_OWNER,
+        new_string: `# Assignee\n${who}\n\n# Log`,
+      });
+
+    it('refuses when another writer replaced that text after the preflight, and keeps their write', async () => {
+      const base = await start();
+      await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\n\n# Log\n- filed\n');
+      raceHook = async () => { await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\ncoder1\n\n# Log\n- filed\n'); };
+      const res = await claim(base, 'coder2');
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain('old_string not found');
+      expect(String(await fs.readFile(`${KB_DIR}/ticket.md`))).toBe('# Assignee\ncoder1\n\n# Log\n- filed\n');
+    });
+
+    it('applies the edit to what the other writer left when the text is still there', async () => {
+      const base = await start();
+      await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\n\n# Log\n- filed\n');
+      raceHook = async () => { await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\n\n# Log\n- filed\n- a line added meanwhile\n'); };
+      const res = await claim(base, 'coder2');
+      expect(res.status).toBe(200);
+      // Their line is kept: the new content was computed from the file as it was under the lock.
+      expect(String(await fs.readFile(`${KB_DIR}/ticket.md`))).toBe('# Assignee\ncoder2\n\n# Log\n- filed\n- a line added meanwhile\n');
+    });
+
+    it('refuses when the text became ambiguous after the preflight', async () => {
+      const base = await start();
+      await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\n\n# Log\n- filed\n');
+      raceHook = async () => { await fs.writeFile(`${KB_DIR}/ticket.md`, `${EMPTY_OWNER}\n${EMPTY_OWNER}\n`); };
+      const res = await claim(base, 'coder2');
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain('appears 2 times');
+      expect(String(await fs.readFile(`${KB_DIR}/ticket.md`))).toBe(`${EMPTY_OWNER}\n${EMPTY_OWNER}\n`);
+    });
+
+    it('answers not found when the file was deleted after the preflight, and does not recreate it', async () => {
+      const base = await start();
+      await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\n\n# Log\n- filed\n');
+      raceHook = async () => { await fs.deleteFile(`${KB_DIR}/ticket.md`); };
+      const res = await claim(base, 'coder2');
+      expect(res.status).toBe(404);
+      await expect(fs.readFile(`${KB_DIR}/ticket.md`)).rejects.toThrow();
+    });
+
+    it('counts replace_all over the file as it is under the lock', async () => {
+      const base = await start();
+      await fs.writeFile(`${KB_DIR}/ticket.md`, 'x x\n');
+      raceHook = async () => { await fs.writeFile(`${KB_DIR}/ticket.md`, 'x x x\n'); };
+      const res = await post(`${base}/api/agent/tools/edit_file`, { path: `${KB_DIR}/ticket.md`, old_string: 'x', new_string: 'y', replace_all: true });
+      expect(await res.json()).toMatchObject({ replaced: 3 });
+      expect(String(await fs.readFile(`${KB_DIR}/ticket.md`))).toBe('y y y\n');
+    });
   });
 
   it('list_files + file_stat', async () => {
@@ -3445,7 +3530,7 @@ describe('a write refused for permissions says whether and how to propose it', (
       throw err;
     };
     const target = fs as unknown as Record<string, unknown>;
-    for (const m of ['writeFile', 'deleteFile', 'moveFile', 'mkdir']) target[m] = refuse;
+    for (const m of ['writeFile', 'rewriteFile', 'deleteFile', 'moveFile', 'mkdir']) target[m] = refuse;
     target.copyFile = async (_src: string, dest: string) => refuse(dest);
     // `delete_folder` lands through the same batch with NO writes and the
     // folder's files as `deletes` — in production the refusal comes from the

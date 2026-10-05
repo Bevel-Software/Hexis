@@ -2373,14 +2373,43 @@ export function registerWorkspaceTools(
         const existing = await assertNotBinaryOverwrite(readers, path, fs);
         return asText(existing ?? (await fs.readFile(path)));
       });
-      const count = oldStr ? content.split(oldStr).length - 1 : 0;
-      if (count === 0) throw new ToolError('old_string not found in the file.', 400);
-      if (count > 1 && a.replace_all !== true) {
-        throw new ToolError(`old_string appears ${count} times — add more context to make it unique, or set replace_all.`, 400);
+      // The edit over ONE reading of the file: is `old_string` there, is it
+      // unique, and what the file becomes. `split`/`join`, not
+      // `String.replace`, which would read `$&` or `$1` in `new_string` as a
+      // pattern and write something the caller never sent.
+      const edit = (text: string): { updated: string; replaced: number } => {
+        const pieces = oldStr ? text.split(oldStr) : [text];
+        const count = pieces.length - 1;
+        if (count === 0) throw new ToolError('old_string not found in the file.', 400);
+        if (count > 1 && a.replace_all !== true) {
+          throw new ToolError(`old_string appears ${count} times — add more context to make it unique, or set replace_all.`, 400);
+        }
+        return { updated: pieces.join(newStr), replaced: count };
+      };
+      // A first verdict before any lock is taken, so an ordinary refusal costs
+      // no lock cycle. It is a verdict about a file anyone may still change.
+      let result = edit(content);
+      // The one the answer carries is taken again with the path's lock HELD,
+      // over the bytes read there (`write: true` guarantees the locking
+      // filesystem): read, verdict and write are one step nobody can get
+      // between. Taken before the lock only, two callers replacing the same
+      // text — two runners claiming a work item by filling its empty owner
+      // field — were BOTH told their edit landed, and the second silently
+      // overwrote the first. A filesystem without the method has no lock to
+      // read under, so the first verdict stands.
+      const locking = fs as unknown as {
+        rewriteFile?(path: string, rewrite: (current: Buffer | null) => string): Promise<void>;
+      };
+      if (typeof locking.rewriteFile === 'function') {
+        await locking.rewriteFile(path, (current) => {
+          if (current === null) throw notFound(path);
+          result = edit(asText(current));
+          return result.updated;
+        });
+      } else {
+        await fs.writeFile(path, result.updated);
       }
-      const updated = a.replace_all === true ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
-      await fs.writeFile(path, updated);
-      return { path, replaced: a.replace_all === true ? count : 1, ...(await saveWarnings(ctx, path, updated)) };
+      return { path, replaced: result.replaced, ...(await saveWarnings(ctx, path, result.updated)) };
     },
   });
 
