@@ -87,6 +87,18 @@ describe('GoogleServiceAccountTokenSource', () => {
     expect(claims).not.toHaveProperty('sub');
   });
 
+  it('sends scopes trimmed, however the whitespace was written', async () => {
+    const google = fakeGoogle();
+    const source = new GoogleServiceAccountTokenSource(google.fetchImpl);
+
+    await source.accessToken(auth({ scopes: ['  scope-a  ', 'scope-b scope-c'] }));
+    await source.accessToken(auth({ scopes: '  scope-d   scope-e ' }));
+
+    const scopeOf = (n: number) => decode(google.requests[n]!.body.get('assertion')!.split('.')[1]!).scope;
+    expect(scopeOf(0)).toBe('scope-a scope-b scope-c');
+    expect(scopeOf(1)).toBe('scope-d scope-e');
+  });
+
   it('keeps a token until a minute before it expires, then fetches a new one', async () => {
     const google = fakeGoogle();
     let now = 1_760_000_000_000;
@@ -144,18 +156,68 @@ describe('GoogleServiceAccountTokenSource', () => {
     expect((noKey as Error).message).toMatch(/no client_email or private_key/);
   });
 
-  it("passes on Google's reason for refusing, and caches nothing from a refusal", async () => {
+  it("passes on Google's reason for refusing, holds the same token back for a few seconds, then tries again", async () => {
     const google = fakeGoogle((n) =>
       n === 1
         ? Response.json({ error: 'invalid_grant', error_description: 'Invalid JWT Signature.' }, { status: 400 })
         : Response.json({ access_token: 'token-after-fix', expires_in: 3600 }),
     );
+    let now = 1_760_000_000_000;
+    const source = new GoogleServiceAccountTokenSource(google.fetchImpl, () => now);
+    const refusal = `Google refused the service account ${CLIENT_EMAIL} (HTTP 400): invalid_grant: Invalid JWT Signature.`;
+
+    await expect(source.accessToken(auth())).rejects.toThrow(refusal);
+    // Answered from memory: an outage is not met with an exchange per call.
+    now += 4_000;
+    await expect(source.accessToken(auth())).rejects.toThrow(refusal);
+    expect(google.requests).toHaveLength(1);
+
+    now += 1_000;
+    expect(await source.accessToken(auth())).toBe('token-after-fix');
+    expect(google.requests).toHaveLength(2);
+  });
+
+  it("holds back for Google's Retry-After, capped at a minute", async () => {
+    const google = fakeGoogle((n) =>
+      n === 1
+        ? Response.json({ error: 'rate_limited' }, { status: 429, headers: { 'Retry-After': '30' } })
+        : n === 2
+          ? Response.json({ error: 'rate_limited' }, { status: 429, headers: { 'Retry-After': '86400' } })
+          : Response.json({ access_token: 'token-3', expires_in: 3600 }),
+    );
+    let now = 1_760_000_000_000;
+    const source = new GoogleServiceAccountTokenSource(google.fetchImpl, () => now);
+
+    await expect(source.accessToken(auth())).rejects.toThrow(/HTTP 429/);
+    now += 29_000;
+    await expect(source.accessToken(auth())).rejects.toThrow(/HTTP 429/);
+    expect(google.requests).toHaveLength(1);
+
+    now += 1_000;
+    await expect(source.accessToken(auth())).rejects.toThrow(/HTTP 429/);
+    expect(google.requests).toHaveLength(2);
+    // A day-long Retry-After holds calls back for the cap, not the day.
+    now += 60_000;
+    expect(await source.accessToken(auth())).toBe('token-3');
+  });
+
+  it('shares one failed exchange between concurrent calls, and never holds back a corrected key', async () => {
+    const { privateKey: otherPem } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    });
+    const google = fakeGoogle((n) =>
+      n === 1 ? new Response('upstream down', { status: 503 }) : Response.json({ access_token: 'token-new-key', expires_in: 3600 }),
+    );
     const source = new GoogleServiceAccountTokenSource(google.fetchImpl);
 
-    await expect(source.accessToken(auth())).rejects.toThrow(
-      `Google refused the service account ${CLIENT_EMAIL} (HTTP 400): invalid_grant: Invalid JWT Signature.`,
-    );
-    expect(await source.accessToken(auth())).toBe('token-after-fix');
+    const results = await Promise.allSettled([source.accessToken(auth()), source.accessToken(auth()), source.accessToken(auth())]);
+    expect(results.map((r) => r.status)).toEqual(['rejected', 'rejected', 'rejected']);
+    expect(google.requests).toHaveLength(1);
+
+    const corrected = JSON.stringify({ ...JSON.parse(KEY_JSON), private_key_id: 'key-2', private_key: otherPem });
+    expect(await source.accessToken(auth({ credentials: corrected }))).toBe('token-new-key');
   });
 });
 
@@ -183,6 +245,16 @@ describe('the google_service_account auth type', () => {
     const serializer = new HttpCallTemplateSerializer();
     expect(() => serializer.validateDict(template({ auth_type: 'google_service_account', credentials: '${K}' }))).toThrow();
     expect(() => serializer.validateDict(template({ auth_type: 'google_service_account', scopes: 'a' }))).toThrow();
+  });
+
+  it('refuses blank scopes', () => {
+    const serializer = new HttpCallTemplateSerializer();
+    const withScopes = (scopes: unknown) =>
+      template({ auth_type: 'google_service_account', credentials: '${K}', scopes });
+
+    expect(() => serializer.validateDict(withScopes('   '))).toThrow();
+    expect(() => serializer.validateDict(withScopes(['a', '  ']))).toThrow();
+    expect(() => serializer.validateDict(withScopes(['  a  ', 'b']))).not.toThrow();
   });
 });
 

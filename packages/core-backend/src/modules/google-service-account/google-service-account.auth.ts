@@ -8,10 +8,12 @@ const GoogleServiceAccountAuthSchema = z.object({
     .string()
     .min(1)
     .describe('The service-account key JSON. Recommended to use a vault variable like "${GOOGLE_SA_KEY}".'),
+  // Trimmed before the length check, so a blank scope is refused here rather
+  // than reaching Google as an empty one.
   scopes: z
-    .union([z.string().min(1), z.array(z.string().min(1)).min(1)])
+    .union([z.string().trim().min(1), z.array(z.string().trim().min(1)).min(1)])
     .describe('OAuth scopes for the token, e.g. "https://www.googleapis.com/auth/adwords".'),
-  subject: z.string().min(1).optional().describe('User to impersonate under domain-wide delegation.'),
+  subject: z.string().trim().min(1).optional().describe('User to impersonate under domain-wide delegation.'),
 });
 
 class GoogleServiceAccountAuthSerializer extends Serializer<Auth> {

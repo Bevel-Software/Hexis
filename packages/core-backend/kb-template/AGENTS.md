@@ -601,7 +601,7 @@ tools:
 ---
 ```
 
-| field | | |
+| field | requirement | notes |
 |---|---|---|
 | `credentials` | required | always a `${VAR}`: the vault variable holding the key JSON Google issued for the service account (the whole file, or the file in base64). Admin-scoped, so a writer of the `.tool` stores it once on the tool's page. Never the key itself. |
 | `scopes` | required | the OAuth scopes the API needs: one scope, a space-separated list, or a list |

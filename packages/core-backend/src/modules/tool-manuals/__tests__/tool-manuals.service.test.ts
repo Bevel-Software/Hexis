@@ -214,8 +214,14 @@ describe('ToolManualService', () => {
     );
 
     const manual = await svc().resolveInlineManual('user@x.eu', 'google_ads');
-    const tools = (manual as { tools?: { name?: string }[] } | null)?.tools ?? [];
+    const tools = (manual as { tools?: { name?: string; tool_call_template?: { auth?: unknown } }[] } | null)?.tools ?? [];
     expect(tools.map((t) => t.name)).toEqual(['list_accessible_customers']);
+    // The auth block is what makes the call, so resolving must carry it through intact.
+    expect(tools[0]?.tool_call_template?.auth).toEqual({
+      auth_type: 'google_service_account',
+      credentials: '${GOOGLE_SA_KEY}',
+      scopes: 'https://www.googleapis.com/auth/adwords',
+    });
 
     const summary = (await svc().listAccessible('user@x.eu')).find((m) => m.name === 'google_ads')!;
     expect(summary.variables?.find((v) => v.name === 'GOOGLE_SA_KEY')?.scope).toBe('admin');

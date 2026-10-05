@@ -27,7 +27,11 @@ export interface IServiceAccountTokenSource {
 
 /** A service-account token could not be had. The message never carries the key. */
 export class ServiceAccountAuthError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** How long the same token should not be asked for again. */
+    readonly retryAfterMs: number = 5_000,
+  ) {
     super(message);
     this.name = 'ServiceAccountAuthError';
   }
