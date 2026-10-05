@@ -57,8 +57,9 @@ export interface SchemaDefect {
  * URI-valued construct a client really refuses is a `$ref` it cannot RESOLVE
  * (`can't resolve reference …` out of `compile`), and none is ever offered:
  * `sanitizeInputSchema` replaces an unresolvable or non-local `$ref` with `{}`
- * before the listing goes out. Both halves are pinned in
- * `__tests__/schema-validity.test.ts`.
+ * before the listing goes out. Each half is pinned where it belongs: what this
+ * check does NOT flag in `__tests__/schema-validity.test.ts`, and what the
+ * proxy offers in its place in `__tests__/schema-pass-through.test.ts`.
  *
  * The one format that does decide a client's verdict is `regex`, and that is
  * checked directly, below.
