@@ -573,6 +573,46 @@ For an `mcp.json` server the declaration lives in `plugin.json`, in the same ext
 
 That is the whole declaration: endpoints, PKCE and the resource indicator come from the server. Add `authorizationUrl`/`tokenUrl` only when `list_tool_setup` reports in `setup.reason` that they could not be discovered.
 
+### Calling a Google API as a service account: `auth_type: google_service_account`
+
+Some Google APIs (Google Ads, Tag Manager, BigQuery, Sheets, …) are called as a **service account**: one shared identity, no sign-in per person. Google does not accept the service account's key on a call. It accepts a short-lived token that has to be minted from the key, so a header holding `${VAR}` cannot do it. Name the key in an `auth` block on an inline tool's `tool_call_template` instead, and the platform mints the token at call time, keeps it until shortly before it expires, and sends it as `Authorization: Bearer <token>`:
+
+```yaml
+---
+id: google_ads
+type: inline
+variables:
+  - { name: GOOGLE_SA_KEY,   scope: admin, label: "Service-account key JSON" }
+  - { name: DEVELOPER_TOKEN, scope: admin, label: "Google Ads developer token" }
+tools:
+  - name: list_accessible_customers
+    description: List the Google Ads customers the service account can reach.
+    inputs: { type: object, properties: {} }
+    outputs: { type: object, properties: {} }
+    tool_call_template:
+      call_template_type: http
+      http_method: GET
+      url: https://googleads.googleapis.com/v22/customers:listAccessibleCustomers
+      headers: { developer-token: "${DEVELOPER_TOKEN}" }
+      auth:
+        auth_type: google_service_account
+        credentials: ${GOOGLE_SA_KEY}
+        scopes: https://www.googleapis.com/auth/adwords
+---
+```
+
+| field | requirement | notes |
+|---|---|---|
+| `credentials` | required | always a `${VAR}`: the vault variable holding the key JSON Google issued for the service account (the whole file, or the file in base64). Admin-scoped, so a writer of the `.tool` stores it once on the tool's page. Never the key itself. |
+| `scopes` | required | the OAuth scopes the API needs: one scope, a space-separated list, or a list |
+| `subject` | optional | a user's email to act as, for a service account granted domain-wide delegation |
+
+The token always comes from Google's own token endpoint; a `token_uri` inside the key is ignored. Give the service account access in the Google product itself (for example add its email as a user of the Google Ads account or the Tag Manager container), or every call is refused. A refusal names the service account and Google's reason, never the key.
+
+The block works in one place: an inline tool's `tool_call_template` with `call_template_type: http`. Anywhere else (an `sse`, `streamable_http` or `mcp` template, or a `type: http` / `type: mcp` tool that discovers its tools from a `url`) no token would be sent, so the `.tool` is refused and `list_tool_setup` names it under `invalid`, saying where the block was found. It works the same for a `remote: false` tool run by the local `hexis-mcp` server, which mints the token on the machine it runs on.
+
+A service account is one shared identity. To have each person call Google as themselves instead, do not use this block: declare a sign-in variable (`oauth`, above) and send it as `Authorization: Bearer ${VAR}`.
+
 ### Examples
 
 An `http` manual that authenticates with a shared org key and a per-user key:
