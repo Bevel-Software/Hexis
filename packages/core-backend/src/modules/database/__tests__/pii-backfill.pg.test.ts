@@ -4,10 +4,13 @@ import pg from 'pg';
 import { eq, inArray, sql } from 'drizzle-orm';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { closeDb, createDb, type Database } from '../connection.js';
-import { runCoreMigrations } from '../migrate.js';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { runCoreMigrations, runEnterpriseMigrations, runPiiBackfill, type PiiBackfillSpec } from '../migrate.js';
 import { prFileApprovals, users } from '../core-schema.js';
 import { coreMigrationsDir } from '../../../assets.js';
-import { derivePiiKeys, isEncryptedBlob } from '../../../shared/column-crypto.js';
+import { PII_CIPHERTEXT_PREFIX, derivePiiKeys, isEncryptedBlob } from '../../../shared/column-crypto.js';
 
 /**
  * Personal data in a real Postgres: what a database handle stores under its
@@ -149,11 +152,13 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
     await Promise.all(plain.splice(0).map((pool) => pool.end()));
   });
 
+  // With the tests' own timeout: every test leaves a scratch database, and
+  // dropping them one after the other outlasts the default for a hook.
   afterAll(async () => {
     await withAdmin(async (admin) => {
       for (const name of created) await admin.query(`drop database if exists ${name} with (force)`);
     });
-  });
+  }, TIMEOUT);
 
   describe('what a handle stores', () => {
     it(
@@ -554,6 +559,154 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
         expect(indexes).not.toContain('users_email_unique');
 
         expect(await everything(main.q)).toBe(untouched);
+      },
+      TIMEOUT,
+    );
+  });
+
+  /**
+   * An overlay seals columns of its own schema with the same backfill, by
+   * handing `runEnterpriseMigrations` a spec. Its table here has what core's
+   * own do not: two indexed addresses in one row, and one of them optional.
+   */
+  describe("an overlay's own tables", () => {
+    const NOTES: PiiBackfillSpec = {
+      name: 'overlay',
+      tables: [
+        {
+          table: 'team_notes',
+          key: ['id'],
+          encrypted: ['author_email', 'reviewer_email', 'body'],
+          bidx: [
+            { source: 'author_email', column: 'author_email_bidx' },
+            { source: 'reviewer_email', column: 'reviewer_email_bidx' },
+          ],
+        },
+      ],
+      marker: { table: 'team_notes', column: 'author_email_bidx' },
+      finalize: ['ALTER TABLE "team_notes" ALTER COLUMN "author_email_bidx" SET NOT NULL'],
+      keyName: 'OVERLAY_KEY',
+    };
+    // Typed before anything was sealed, in the very shape of a sealed value.
+    const shapedLikeSealed = `${PII_CIPHERTEXT_PREFIX}${'A'.repeat(16)}:${'A'.repeat(22)}==:AAAA`;
+
+    /** The overlay's migration history: the table, its index columns nullable as a SQL history must add them. */
+    function overlayHistory(): string {
+      const dir = mkdtempSync(path.join(tmpdir(), 'overlay-migrations-'));
+      mkdirSync(path.join(dir, 'meta'));
+      writeFileSync(
+        path.join(dir, 'meta', '_journal.json'),
+        JSON.stringify({ version: '7', dialect: 'postgresql', entries: [{ idx: 0, version: '7', when: 1, tag: '0000_notes', breakpoints: true }] }),
+      );
+      writeFileSync(
+        path.join(dir, '0000_notes.sql'),
+        `CREATE TABLE "team_notes" (
+           "id" serial PRIMARY KEY,
+           "author_email" text NOT NULL,
+           "author_email_bidx" text,
+           "reviewer_email" text,
+           "reviewer_email_bidx" text,
+           "body" text
+         );`,
+      );
+      return dir;
+    }
+
+    /** A database an older version of the overlay wrote to: its history applied, its rows in clear. */
+    async function overlayBeforeTheBackfill(key?: string): Promise<{ url: string; db: Database; q: Query; history: string }> {
+      const url = await scratchDatabase();
+      const db = handle(url, key ? { key } : {});
+      const history = overlayHistory();
+      await runEnterpriseMigrations(db, history);
+      const q = stored(url);
+      await q(`insert into team_notes (author_email, reviewer_email, body) values
+                 ('Ada@Example.com', ' Bo@example.com', 'hello'),
+                 ('cy@example.com', null, '${shapedLikeSealed}')`);
+      return { url, db, q, history };
+    }
+    const notes = (q: Query) => q(`select * from team_notes order by id`);
+
+    it(
+      'are sealed right after its history, with every index it declares, and a second start changes nothing',
+      async () => {
+        const { db, q, history } = await overlayBeforeTheBackfill();
+
+        await runEnterpriseMigrations(db, history, { piiBackfill: NOTES });
+
+        const [first, second] = await notes(q);
+        expect([first!.author_email, first!.reviewer_email, first!.body, second!.author_email].every(sealed)).toBe(true);
+        expect(opened(first!.author_email)).toBe('Ada@Example.com');
+        // Both addresses of a row are indexed, each under its own column.
+        expect(first!.author_email_bidx).toBe(keys.index('ada@example.com'));
+        expect(first!.reviewer_email_bidx).toBe(keys.index('bo@example.com'));
+        expect(second!.author_email_bidx).toBe(keys.index('cy@example.com'));
+        // An address that is not there has no index: not the index of the
+        // empty string, which every such row would share.
+        expect(second!.reviewer_email).toBeNull();
+        expect(second!.reviewer_email_bidx).toBeNull();
+        // A first backfill believes no shape: the text typed in the shape of
+        // a sealed value is sealed like any other, and reads back as typed.
+        expect(second!.body).not.toBe(shapedLikeSealed);
+        expect(opened(second!.body)).toBe(shapedLikeSealed);
+        // The marker is closed: no later row can be without its index.
+        await expect(q(`insert into team_notes (author_email) values ('x@example.com')`)).rejects.toThrow(/author_email_bidx/);
+
+        const after = JSON.stringify(await notes(q));
+        await runEnterpriseMigrations(db, history, { piiBackfill: NOTES });
+        expect(JSON.stringify(await notes(q))).toBe(after);
+      },
+      TIMEOUT,
+    );
+
+    it(
+      'are refused under a key that does not open them, named as the overlay names it',
+      async () => {
+        const { url, db, q, history } = await overlayBeforeTheBackfill();
+        await runEnterpriseMigrations(db, history, { piiBackfill: NOTES });
+        const before = JSON.stringify(await notes(q));
+
+        const rekeyed = handle(url, { key: randomBytes(32).toString('base64') });
+        await expect(runEnterpriseMigrations(rekeyed, history, { piiBackfill: NOTES })).rejects.toThrow(/OVERLAY_KEY does not open/);
+        expect(JSON.stringify(await notes(q))).toBe(before);
+      },
+      TIMEOUT,
+    );
+
+    it(
+      'are left untouched by a spec whose finalize does not close its marker',
+      async () => {
+        const { db, q } = await overlayBeforeTheBackfill();
+        const before = JSON.stringify(await notes(q));
+
+        // Committed, the next start would take these rows for unsealed again
+        // and seal the sealed. So it does not commit.
+        await expect(runPiiBackfill(db, { ...NOTES, finalize: [] })).rejects.toThrow(/left the marker column team_notes\.author_email_bidx nullable/);
+        expect(JSON.stringify(await notes(q))).toBe(before);
+      },
+      TIMEOUT,
+    );
+
+    it(
+      'are not read at all for a spec that could not be carried through',
+      async () => {
+        const { url, db, q } = await overlayBeforeTheBackfill();
+        const before = JSON.stringify(await notes(q));
+        const table = NOTES.tables[0]!;
+
+        // A marker that is no index of the spec's tables.
+        await expect(runPiiBackfill(db, { ...NOTES, marker: { table: 'team_notes', column: 'body' } })).rejects.toThrow(/is not a blind-index column/);
+        // An index of a column that is not sealed: its plaintext is never read.
+        await expect(
+          runPiiBackfill(db, { ...NOTES, tables: [{ ...table, encrypted: ['reviewer_email', 'body'] }] }),
+        ).rejects.toThrow(/indexes "author_email", which is not one of the table's encrypted columns/);
+        // A handle that holds no key.
+        await expect(runPiiBackfill(handle(url, { key: null }), NOTES)).rejects.toThrow(/holds no personal-data key/);
+        expect(JSON.stringify(await notes(q))).toBe(before);
+
+        // And a database the history was never applied to: nothing says the
+        // rows are sealed, so nothing is assumed.
+        const empty = handle(await scratchDatabase());
+        await expect(runPiiBackfill(empty, NOTES)).rejects.toThrow(/marker column team_notes\.author_email_bidx does not exist/);
       },
       TIMEOUT,
     );
