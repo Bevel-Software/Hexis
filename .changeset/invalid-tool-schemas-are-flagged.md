@@ -44,7 +44,7 @@ An agent that calls a hidden tool by name is told the tool is hidden because its
 **The marker, for whoever manages the server.** One sentence, built once in mcp-core so the two surfaces cannot drift: `Hidden from agents: its schema is invalid at /required/0 (must be a string).`
 
 - the tool page (`platform-core-frontend`) carries a `Not offered to assistants` section above the capabilities, naming each tool with its marker, and saying that the server's other tools are unaffected and that nothing is being rewritten;
-- `list_tool_setup` reports the same findings per tool as `hiddenTools` (`name`, `path`, `reason`, `marker`), and `GET /api/tools/:slug` carries them as `hiddenTools` for the page.
+- `list_tool_setup` reports the same findings per tool as `hiddenTools` (`name`, `path`, `reason`, `marker`), and `GET /api/tools/:slug` carries them as `hiddenTools` for the page. What a `hiddenTools` entry contains is documented on the FIELD rather than in the tool's description: the description sits under `TOOL_DESCRIPTION_CAP`, where a paragraph would be the part a client cuts, and it names the field in one sentence instead.
 
 Both are gated on the per-file write verdict — the same one that gates setting the tool's shared secrets. A caller who may only read the tool is told nothing: they cannot fix the schema, and the hidden tool is simply not among the ones they can call. The write check is only asked when there is something to show, so the healthy case costs no extra ACL round-trip.
 

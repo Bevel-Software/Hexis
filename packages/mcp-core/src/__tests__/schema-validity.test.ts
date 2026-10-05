@@ -150,6 +150,48 @@ describe('inputSchemaDefect', () => {
   it('does not object to a keyword it does not know, which no client refuses', () => {
     expect(inputSchemaDefect({ type: 'object', properties: {}, 'x-hubspot-widget': true })).toBeNull();
   });
+  /**
+   * The guard does not assert the meta-schema's own `format` annotations
+   * (`$id` and `$ref` as `uri-reference`), and this is where that decision is
+   * a check rather than a comment. Two things hold, and either alone settles
+   * it:
+   *
+   *  - a client COMPILES these. Run as the MCP SDK runs it
+   *    (`{ strict: false, validateFormats: true, validateSchema: false }` —
+   *    `validation/ajv-provider.js`), ajv accepts both schemas below, so
+   *    flagging them would hide a tool that works.
+   *  - asserting the formats would not catch them anyway: ajv-formats'
+   *    `uri-reference` accepts `http://[bad` and `http:// not a uri`, so
+   *    `validateFormats: true` changes no verdict in this family.
+   *
+   * What a client really refuses in this family is a `$ref` it cannot RESOLVE,
+   * and no such `$ref` is ever offered: `sanitizeInputSchema` replaces an
+   * unresolvable or non-local one with `{}` before the listing goes out — see
+   * `schema-pass-through.test.ts`.
+   */
+  it('does not flag a malformed `$id` or `$ref` URI, which no client refuses either', () => {
+    expect(inputSchemaDefect({ $id: 'http://[bad', type: 'object', properties: { a: { type: 'string' } } })).toBeNull();
+    expect(inputSchemaDefect({ $id: 'http:// not a uri', type: 'object', properties: {} })).toBeNull();
+    // An unresolvable `$ref` is not flagged HERE because it never reaches a
+    // client as a reference; the proxy's own test pins that half.
+    expect(
+      inputSchemaDefect({ type: 'object', properties: { a: { $ref: '#/$defs/not here' } }, $defs: {} }),
+    ).toBeNull();
+  });
+
+  /**
+   * The other side of the same line: `$anchor` is constrained by a PATTERN in
+   * the meta-schema rather than by a `format`, so the guard already catches a
+   * malformed one with formats switched off. Pinned so that a future
+   * `validateFormats` change shows up as a change in behaviour rather than in
+   * configuration.
+   */
+  it('still catches a malformed `$anchor`, which the meta-schema constrains by pattern', () => {
+    expect(inputSchemaDefect({ type: 'object', $anchor: '9 not an anchor' })).toEqual({
+      path: '/$anchor',
+      reason: 'must match pattern "^[A-Za-z_][-A-Za-z0-9._]*$"',
+    });
+  });
 
   it('quotes the place and the reason in the marker the owner reads', () => {
     expect(schemaDefectMarker({ path: '/required/0', reason: 'must be a string' })).toBe(

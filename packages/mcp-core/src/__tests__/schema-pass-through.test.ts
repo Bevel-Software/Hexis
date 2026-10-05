@@ -222,4 +222,36 @@ describe('a connected tool\'s input schema reaches clients as the server sent it
     });
     expect(inputSchemaDefect(listed)).toBeNull();
   });
+
+  it('offers a `$ref` it cannot resolve as `{}`, so no dangling reference is listed', () => {
+    // The OTHER half of the reason the validity guard does not assert the
+    // meta-schema's `uri-reference` formats: a reference a client cannot
+    // resolve is the one URI-valued construct it really refuses (ajv's
+    // `compile` throws "can't resolve reference"), and it never reaches a
+    // client as a reference at all. Both shapes degrade the same way — a local
+    // pointer into nothing, and a non-local one this proxy will not fetch.
+    const unresolvable = sanitizeInputSchema({
+      type: 'object',
+      properties: { a: { $ref: '#/$defs/not here' } },
+      $defs: {},
+    });
+    expect(unresolvable).toEqual({ type: 'object', properties: { a: {} } });
+
+    const nonLocal = sanitizeInputSchema({
+      type: 'object',
+      properties: { a: { $ref: 'https://example.com/schema.json' } },
+    });
+    expect(nonLocal).toEqual({ type: 'object', properties: { a: {} } });
+
+    // And a sibling beside such a `$ref` is kept, sanitized, rather than lost
+    // with the reference.
+    expect(
+      sanitizeInputSchema({
+        type: 'object',
+        properties: { a: { $ref: 'https://example.com/s.json', description: 'kept', format: 'int32' } },
+      }),
+    ).toEqual({ type: 'object', properties: { a: { description: 'kept' } } });
+
+    for (const listed of [unresolvable, nonLocal]) expect(inputSchemaDefect(listed)).toBeNull();
+  });
 });

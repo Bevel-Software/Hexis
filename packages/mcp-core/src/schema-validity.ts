@@ -45,11 +45,23 @@ export interface SchemaDefect {
  * `validateFormats: false` is the same rule applied to the META-schema's own
  * `format` annotations (`$id` and `$ref` as `uri-reference`, `$anchor` as a
  * pattern). An AI client never asserts those: the MCP SDK's validator runs
- * `{ strict: false, validateFormats: true, validateSchema: false }` — formats
- * on the INSTANCE, the schema document itself not meta-validated at all — and
- * a malformed `$id` or `$ref` compiles there without complaint. Asserting them
- * here would hide tools that every client accepts. The one format that does
- * decide a client's verdict is `regex`, and that is checked directly, below.
+ * `{ strict: false, validateFormats: true, validateSchema: false }`
+ * (`validation/ajv-provider.js`) — formats on the INSTANCE, the schema
+ * document itself not meta-validated at all — and a malformed `$id` or `$ref`
+ * compiles there without complaint. Asserting them here would hide tools that
+ * every client accepts.
+ *
+ * And it would not catch them either: ajv-formats' `uri-reference` accepts
+ * `http://[bad` and `http:// not a uri`, so switching assertions on changes no
+ * verdict in that family — it only adds the chance of a false one. The one
+ * URI-valued construct a client really refuses is a `$ref` it cannot RESOLVE
+ * (`can't resolve reference …` out of `compile`), and none is ever offered:
+ * `sanitizeInputSchema` replaces an unresolvable or non-local `$ref` with `{}`
+ * before the listing goes out. Both halves are pinned in
+ * `__tests__/schema-validity.test.ts`.
+ *
+ * The one format that does decide a client's verdict is `regex`, and that is
+ * checked directly, below.
  */
 const ajv = new Ajv2020({ strict: false, allErrors: false, validateFormats: false });
 
