@@ -375,9 +375,19 @@ async function assertNotBinaryOverwrite(
     if (isAbsence(err)) return undefined; // nothing there yet
     throw err;
   }
-  const refusal = reader.editRefusalForExisting(existing, path);
-  if (refusal !== null) throw binaryNotWritable('binary', refusal);
+  assertBytesTextEditable(readers, path, existing);
   return existing;
+}
+
+/**
+ * The same refusal, over bytes the caller already holds. Split out so a tool
+ * that reads the file more than once — `edit_file`, before the lock and again
+ * under it — judges EVERY reading with the one rule, and the bytes it replaces
+ * are always bytes this gate has seen.
+ */
+function assertBytesTextEditable(readers: FileReaderRegistry, path: string, existing: Buffer): void {
+  const refusal = readers.readerFor(path).editRefusalForExisting?.(existing, path) ?? null;
+  if (refusal !== null) throw binaryNotWritable('binary', refusal);
 }
 
 /** What a write is ALLOWED to do at a path. `create` is the default everywhere. */
@@ -2367,17 +2377,17 @@ export function registerWorkspaceTools(
       const path = a.path as string;
       const oldStr = a.old_string as string;
       const newStr = a.new_string as string;
-      // The overwrite gate already read the file when its reader asked the
-      // binary question — reuse those bytes instead of reading twice.
-      const content = await orNotFound(path, async () => {
-        const existing = await assertNotBinaryOverwrite(readers, path, fs);
-        return asText(existing ?? (await fs.readFile(path)));
-      });
-      // The edit over ONE reading of the file: is `old_string` there, is it
-      // unique, and what the file becomes. `split`/`join`, not
-      // `String.replace`, which would read `$&` or `$1` in `new_string` as a
-      // pattern and write something the caller never sent.
-      const edit = (text: string): { updated: string; replaced: number } => {
+      // Everything the tool decides about ONE reading of the file: may these
+      // bytes be edited as text at all, is `old_string` there, is it unique,
+      // and what the file becomes. One function, because the file is read
+      // twice — before the lock and under it — and a reading that skipped any
+      // of these questions would let bytes land that were never judged.
+      // `split`/`join`, not `String.replace`, which reads `$&`, `$'`, `` $` ``
+      // and `$$` in `new_string` as patterns and writes something the caller
+      // never sent.
+      const edit = (existing: Buffer): { updated: string; replaced: number } => {
+        assertBytesTextEditable(readers, path, existing);
+        const text = asText(existing);
         const pieces = oldStr ? text.split(oldStr) : [text];
         const count = pieces.length - 1;
         if (count === 0) throw new ToolError('old_string not found in the file.', 400);
@@ -2388,7 +2398,7 @@ export function registerWorkspaceTools(
       };
       // A first verdict before any lock is taken, so an ordinary refusal costs
       // no lock cycle. It is a verdict about a file anyone may still change.
-      let result = edit(content);
+      let result = edit(await orNotFound(path, async () => asBytes(await fs.readFile(path))));
       // The one the answer carries is taken again with the path's lock HELD,
       // over the bytes read there (`write: true` guarantees the locking
       // filesystem): read, verdict and write are one step nobody can get
@@ -2403,7 +2413,7 @@ export function registerWorkspaceTools(
       if (typeof locking.rewriteFile === 'function') {
         await locking.rewriteFile(path, (current) => {
           if (current === null) throw notFound(path);
-          result = edit(asText(current));
+          result = edit(current);
           return result.updated;
         });
       } else {

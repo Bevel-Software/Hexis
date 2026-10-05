@@ -191,9 +191,14 @@ async function start(
     rewrite: (current: Buffer | null) => string | Promise<string>,
   ) => {
     await runRaceHook();
+    // Absent is null; any other read failure is a failure, as in the real one.
     const current = await fs.readFile(path).then(
       (c) => (Buffer.isBuffer(c) ? c : Buffer.from(String(c), 'utf8')),
-      () => null,
+      (err: unknown) => {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+        throw err;
+      },
     );
     return plainWriteFile(path, await rewrite(current));
   };
@@ -436,6 +441,27 @@ describe('workspace file primitives', () => {
       const res = await claim(base, 'coder2');
       expect(res.status).toBe(404);
       await expect(fs.readFile(`${KB_DIR}/ticket.md`)).rejects.toThrow();
+    });
+
+    // Every question the tool asks of the file is asked of the bytes it is
+    // about to replace. An extensionless file may hold anything, and the app's
+    // own upload can swap it for a binary between the preflight and the lock.
+    // The binary still CONTAINS `old_string` here, so nothing but the
+    // "may these bytes be edited as text" question can refuse it.
+    it('refuses when the file became binary after the preflight, and leaves those bytes alone', async () => {
+      const base = await start();
+      await fs.writeFile(`${KB_DIR}/TICKET`, '# Assignee\n\n# Log\n- filed\n');
+      const binary = Buffer.concat([Buffer.from([0x00, 0xff, 0xfe, 0x00]), Buffer.from(`${EMPTY_OWNER}\n`, 'utf8')]);
+      raceHook = async () => { await fs.writeFile(`${KB_DIR}/TICKET`, binary); };
+      const res = await post(`${base}/api/agent/tools/edit_file`, {
+        path: `${KB_DIR}/TICKET`,
+        old_string: EMPTY_OWNER,
+        new_string: '# Assignee\ncoder2\n\n# Log',
+      });
+      expect(res.status).toBe(415);
+      expect(await res.json()).toMatchObject({ kind: 'binary_not_writable' });
+      const after = await fs.readFile(`${KB_DIR}/TICKET`);
+      expect(Buffer.from(after as Buffer).equals(binary)).toBe(true);
     });
 
     it('counts replace_all over the file as it is under the lock', async () => {
