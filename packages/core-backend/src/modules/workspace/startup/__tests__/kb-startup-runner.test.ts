@@ -10,7 +10,7 @@ import { KbStartupRunner } from '../kb-startup-runner.js';
 import { WorkspaceService } from '../../workspace.service.js';
 import { NodeGitRunner } from '../../../workflow/git/node-git-runner.js';
 import { ClassifiedFailure, classifyGitFailure, failureOf } from '../../../../shared/git-failure.js';
-import { gitCredentials } from '../../../../shared/git.contract.js';
+import { GitRunError, gitCredentials } from '../../../../shared/git.contract.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 /**
@@ -781,6 +781,145 @@ describe('KbStartupRunner', () => {
 
     await makeRunner([step('noop', async () => ({ outcome: 'ok' }))]).runAll();
     expect(await fs.readFile(path.join(local, 'unpushed.md'), 'utf8')).toBe('precious');
+  });
+});
+
+/**
+ * A clone that was cut short leaves a `.git` folder and no commit. Every
+ * start found it again, could do nothing with a branch that has no commit,
+ * and stopped: one such folder kept a whole deployment from starting.
+ */
+describe('KbStartupRunner — a working copy whose clone was never finished', () => {
+  const touchDefault = step('touch', async (ctx) => {
+    await (await ctx.defaultBranch()).repoDir();
+    return { outcome: 'ok' };
+  });
+  const local = () => path.join(workspacesRoot, DEFAULT_BRANCH, 'knowledge-base');
+
+  /** What an interrupted clone leaves: the repository made, its remote set, nothing checked out. */
+  async function halfMadeClone(): Promise<void> {
+    await fs.mkdir(local(), { recursive: true });
+    await git(local(), ['init', '-b', DEFAULT_BRANCH]);
+    await git(local(), ['remote', 'add', 'origin', upstream]);
+    await fs.writeFile(path.join(local(), 'left-here.txt'), 'somebody put this here', 'utf8');
+  }
+
+  it('is set aside, files and all, and cloned again, so the start goes through', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    const discarded: string[] = [];
+
+    await makeRunner([touchDefault], { onCloneDiscarded: (id: string) => void discarded.push(id) }).runAll();
+
+    // A real clone stands in its place.
+    expect(await fs.readFile(path.join(local(), 'marker.txt'), 'utf8')).toBe('seeded');
+    expect((await git(local(), ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()).toBe(DEFAULT_BRANCH);
+    // Nothing was deleted: what was in the folder is where set-aside copies go.
+    const runs = await fs.readdir(path.join(root, 'set-aside'));
+    expect(runs).toHaveLength(1);
+    const kept = path.join(root, 'set-aside', runs[0]!, DEFAULT_BRANCH);
+    expect(await fs.readFile(path.join(kept, 'left-here.txt'), 'utf8')).toBe('somebody put this here');
+    expect(discarded).toEqual([DEFAULT_BRANCH]);
+
+    // And the next start finds an ordinary clone: nothing more is set aside.
+    await makeRunner([touchDefault]).runAll();
+    expect(await fs.readdir(path.join(root, 'set-aside'))).toHaveLength(1);
+  });
+
+  it('leaves a working copy that has a commit exactly where it is', async () => {
+    await populatedUpstream();
+    await makeRunner([touchDefault]).runAll();
+    await fs.writeFile(path.join(local(), 'unpushed.md'), 'precious', 'utf8');
+    await git(local(), ['add', '-A']);
+    await git(local(), ['commit', '-m', 'committed but unpushed']);
+
+    await makeRunner([touchDefault]).runAll();
+
+    expect(await fs.readFile(path.join(local(), 'unpushed.md'), 'utf8')).toBe('precious');
+    expect(await fs.access(path.join(root, 'set-aside')).then(() => true, () => false)).toBe(false);
+  });
+
+  it('leaves a working copy alone when git could not say whether it has a commit', async () => {
+    await populatedUpstream();
+    await makeRunner([touchDefault]).runAll();
+    await fs.writeFile(path.join(local(), 'unpushed.md'), 'precious', 'utf8');
+    await git(local(), ['add', '-A']);
+    await git(local(), ['commit', '-m', 'committed but unpushed']);
+    // Git gives no answer to the one question: the deadline passes, as it
+    // does on a host under load. Everything else runs for real.
+    const real = new NodeGitRunner(undefined, credentials);
+    const gitRunner = {
+      defaultTimeoutMs: real.defaultTimeoutMs,
+      credentials: real.credentials,
+      run: (cwd: string, args: string[], opts?: object) =>
+        args.includes('--verify')
+          ? Promise.reject(new GitRunError('git rev-parse timed out', { timedOut: true }))
+          : real.run(cwd, args, opts),
+    };
+
+    const err = await makeRunner([touchDefault], { gitRunner })
+      .runAll()
+      .then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+
+    // "Could not tell" is not "has no commit": the start stops, the branch is
+    // named, and the work is where it was.
+    expect(err?.message).toContain(`the working copy of branch "${DEFAULT_BRANCH}" could not be prepared`);
+    expect(await fs.readFile(path.join(local(), 'unpushed.md'), 'utf8')).toBe('precious');
+    expect(await fs.access(path.join(root, 'set-aside')).then(() => true, () => false)).toBe(false);
+  });
+
+  // On a redeploy two processes share the volume for a few seconds. What the
+  // other one did while this one waited is what decides.
+  it('does not move a clone another process put in its place while this one waited', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    const beforeCloneSetAside = async () => {
+      await fs.rm(local(), { recursive: true, force: true });
+      await git(root, ['clone', '-b', DEFAULT_BRANCH, upstream, local()]);
+      await fs.writeFile(path.join(local(), 'theirs.txt'), 'the other process wrote this', 'utf8');
+    };
+
+    await makeRunner([touchDefault], { beforeCloneSetAside }).runAll();
+
+    expect(await fs.readFile(path.join(local(), 'theirs.txt'), 'utf8')).toBe('the other process wrote this');
+    expect(await fs.access(path.join(root, 'set-aside')).then(() => true, () => false)).toBe(false);
+  });
+
+  it('clones when another process moved the half-made clone away while this one waited', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    const beforeCloneSetAside = () => fs.rm(local(), { recursive: true, force: true });
+
+    await makeRunner([touchDefault], { beforeCloneSetAside }).runAll();
+
+    expect(await fs.readFile(path.join(local(), 'marker.txt'), 'utf8')).toBe('seeded');
+    expect(await fs.access(path.join(root, 'set-aside')).then(() => true, () => false)).toBe(false);
+  });
+
+  it('names the branch when a working copy cannot be prepared', async () => {
+    await populatedUpstream();
+    await makeRunner([touchDefault]).runAll();
+    // The clone is sound and has a commit, but git cannot read the branch it
+    // is to follow: the ref the fetch updates is damaged. Not a state this
+    // phase repairs, so the start stops, and says which working copy.
+    const refs = path.join(local(), '.git', 'refs', 'remotes', 'origin');
+    await fs.rm(path.join(local(), '.git', 'packed-refs'), { force: true });
+    await fs.mkdir(refs, { recursive: true });
+    await fs.writeFile(path.join(refs, DEFAULT_BRANCH), 'not a commit id\n', 'utf8');
+
+    const err = await makeRunner([touchDefault])
+      .runAll()
+      .then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+    expect(err).toBeInstanceOf(ClassifiedFailure);
+    expect(err?.message).toContain(`the working copy of branch "${DEFAULT_BRANCH}" could not be prepared`);
+    // Nothing was set aside for it: it has a commit, so it is somebody's work.
+    expect(await fs.access(path.join(root, 'set-aside')).then(() => true, () => false)).toBe(false);
   });
 });
 
