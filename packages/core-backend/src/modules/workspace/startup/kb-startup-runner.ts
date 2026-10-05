@@ -741,9 +741,49 @@ export class KbStartupRunner {
    * commit recovery owns that work, not this phase.
    */
   private async ensureClone(branch: string): Promise<string> {
+    try {
+      return await this.cloneOrUpdate(branch);
+    } catch (err) {
+      // One branch's working copy is what failed, and every boot visits all
+      // of them: said here, so the log names the one to look at. The kind of
+      // failure git's words were read as is kept, since the setup screen and
+      // the degraded start decide by it.
+      const message = `the working copy of branch "${branch}" could not be prepared: ${err instanceof Error ? err.message : String(err)}`;
+      throw new ClassifiedFailure(message, failureOf(err), { cause: err });
+    }
+  }
+
+  private async cloneOrUpdate(branch: string): Promise<string> {
     const workspaceDir = path.join(this.opts.workspacesRoot, workspaceIdForBranch(branch));
     const repoDir = path.join(workspaceDir, this.opts.kbDirName);
-    const hasGit = await fs.access(path.join(repoDir, '.git')).then(() => true, () => false);
+    let hasGit = await fs.access(path.join(repoDir, '.git')).then(() => true, () => false);
+    if (hasGit && !(await this.hasCommit(repoDir))) {
+      // A `.git` WITH NO COMMIT IS NOT A CLONE. It is what a clone leaves
+      // when it is cut short (the process stopped, the disk filled), and it
+      // is found again on every start: nothing below can fast-forward a
+      // branch that has no commit, so the boot failed on it for good, and
+      // one such folder kept the whole deployment from starting.
+      //
+      // It holds no commit, so no committed work of anyone's. It may still
+      // hold files somebody put there, so it is MOVED, never deleted, to
+      // where every other set-aside working copy goes, and cloned again.
+      const id = workspaceIdForBranch(branch);
+      const kept = path.join(setAsideRootFor(this.opts.workspacesRoot, this.opts.setAsideRoot), setAsideStamp(), id);
+      await this.opts.beforeCloneSetAside?.(id);
+      await setAsideClone(repoDir, kept);
+      startupLog.warn(
+        `working copy "${id}" has a git folder and no commit: a clone that was never finished. ` +
+          `Set aside at ${kept}; nothing was deleted, and it is cloned again now.`,
+      );
+      try {
+        await this.opts.onCloneDiscarded?.(id);
+      } catch (err) {
+        startupLog.warn(`could not finish setting the working copy "${id}" aside:`, {
+          detail: this.redact(err instanceof Error ? err.message : String(err)),
+        });
+      }
+      hasGit = false;
+    }
     if (!hasGit) {
       await fs.mkdir(workspaceDir, { recursive: true });
       await fs.rm(repoDir, { recursive: true, force: true });
@@ -773,6 +813,16 @@ export class KbStartupRunner {
       // Ahead or diverged: committed-but-unpushed work lives here; not ours to discard.
     }
     return repoDir;
+  }
+
+  /** Whether the repository at `repoDir` has a commit checked out. False for a clone that was cut short. */
+  private async hasCommit(repoDir: string): Promise<boolean> {
+    try {
+      await git(this.opts.gitRunner, repoDir, ['rev-parse', '--quiet', '--verify', 'HEAD^{commit}']);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** One commit per dirty branch; push; the replica carve-out on rejection. */
