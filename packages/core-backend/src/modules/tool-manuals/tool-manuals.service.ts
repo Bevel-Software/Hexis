@@ -7,6 +7,7 @@ import fs from 'node:fs/promises';
 import { parse as parseYaml } from 'yaml';
 import '@utcp/http'; // side effect: register the 'http' call-template type (http + inline sub-manuals)
 import '@utcp/mcp'; // side effect: register the 'mcp' call-template type (mcp `.tool` sources)
+import '../google-service-account/index.js'; // side effect: register the 'google_service_account' auth type
 // side effect: register the 'cli' call-template type for PARSING ONLY — the
 // executor is removed again, so this process cannot dispatch a shell command.
 import { containsCliCallTemplate } from './utcp-cli-parse-only.js';

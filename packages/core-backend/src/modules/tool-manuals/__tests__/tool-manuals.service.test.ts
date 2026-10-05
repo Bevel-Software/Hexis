@@ -183,6 +183,44 @@ describe('ToolManualService', () => {
     expect(manual).toBeNull();
   });
 
+  test('resolves an inline tool that calls Google as a service account, and surfaces the key variable', async () => {
+    // The auth block is what makes the call; the key it names has to reach the
+    // secrets UI as a shared variable or nobody can store it.
+    await writeFile(
+      join(root, wsId, KB_DIR, 'Plugins', 'google_ads.tool'),
+      JSON.stringify({
+        id: 'google_ads',
+        type: 'inline',
+        tools: [
+          {
+            name: 'list_accessible_customers',
+            description: 'List the customers the service account can reach.',
+            inputs: { type: 'object', properties: {} },
+            outputs: { type: 'object', properties: {} },
+            tool_call_template: {
+              call_template_type: 'http',
+              http_method: 'GET',
+              url: 'https://googleads.googleapis.com/v22/customers:listAccessibleCustomers',
+              headers: { 'developer-token': '${DEVELOPER_TOKEN}' },
+              auth: {
+                auth_type: 'google_service_account',
+                credentials: '${GOOGLE_SA_KEY}',
+                scopes: 'https://www.googleapis.com/auth/adwords',
+              },
+            },
+          },
+        ],
+      }),
+    );
+
+    const manual = await svc().resolveInlineManual('user@x.eu', 'google_ads');
+    const tools = (manual as { tools?: { name?: string }[] } | null)?.tools ?? [];
+    expect(tools.map((t) => t.name)).toEqual(['list_accessible_customers']);
+
+    const summary = (await svc().listAccessible('user@x.eu')).find((m) => m.name === 'google_ads')!;
+    expect(summary.variables?.find((v) => v.name === 'GOOGLE_SA_KEY')?.scope).toBe('admin');
+  });
+
   test('manual names are alphanumeric (no underscores) for variable namespacing', async () => {
     root = await mkdtemp(join(tmpdir(), 'tools2-'));
     const tools = join(root, wsId, KB_DIR, 'Plugins');

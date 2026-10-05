@@ -99,6 +99,10 @@ import {
   McpOAuthDiscoveryService,
   registerBevelSecretsVariableLoader,
 } from '../modules/secrets-vault/index.js';
+import {
+  GoogleServiceAccountTokenSource,
+  installGoogleServiceAccountAuth,
+} from '../modules/google-service-account/index.js';
 import { ConnectionProbeService } from '../modules/connection-probe/index.js';
 import { GitService } from '../modules/workflow/git/git.service.js';
 import { NodeGitRunner } from '../modules/workflow/git/node-git-runner.js';
@@ -1070,6 +1074,12 @@ export async function createCoreServices(
   // UTCP's and process-wide while the vault is this graph's.
   const secretsScope = tenantKey ? `${config.tenantId}/${config.dbSchema}` : DEFAULT_SECRETS_SCOPE;
   registerBevelSecretsVariableLoader(secretsVaultService, secretsScope);
+  // Teach the `http` protocol `auth_type: google_service_account`: the key a
+  // `.tool` names from the vault is turned into a short-lived bearer token at
+  // call time. The protocol is process-wide like the one it replaces, and its
+  // tokens are keyed by the key itself, so a second knowledge base installing
+  // it again only starts a fresh cache.
+  installGoogleServiceAccountAuth(new GoogleServiceAccountTokenSource());
 
   // Deleting ONE tool from its page — the owner's verb, the other end of the
   // promise that made them the owner. Built here because it is the one service
