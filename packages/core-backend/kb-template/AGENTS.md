@@ -607,7 +607,7 @@ tools:
 | `scopes` | required | the OAuth scopes the API needs: one scope, a space-separated list, or a list |
 | `subject` | optional | a user's email to act as, for a service account granted domain-wide delegation |
 
-The token always comes from Google's own token endpoint; a `token_uri` inside the key is ignored. Give the service account access in the Google product itself (for example add its email as a user of the Google Ads account or the Tag Manager container), or every call is refused. A refusal names the service account and Google's reason, never the key.
+The token always comes from Google's own token endpoint; a `token_uri` inside the key is ignored. Give the service account access in the Google product itself (for example add its email as a user of the Google Ads account or the Tag Manager container), or that product refuses every call with an error of its own. When Google refuses the key itself (a revoked key, a scope the account may not have, a subject without delegation), the error names the service account and Google's reason, never the key.
 
 The block works in one place: an inline tool's `tool_call_template` with `call_template_type: http`. Anywhere else (an `sse`, `streamable_http` or `mcp` template, or a `type: http` / `type: mcp` tool that discovers its tools from a `url`) no token would be sent, so the `.tool` is refused and `list_tool_setup` names it under `invalid`, saying where the block was found. It works the same for a `remote: false` tool run by the local `hexis-mcp` server, which mints the token on the machine it runs on.
 

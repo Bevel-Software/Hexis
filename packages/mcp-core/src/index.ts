@@ -132,6 +132,7 @@ export {
   GoogleServiceAccountTokenSource,
   ServiceAccountAuthError,
   findUnservedGoogleServiceAccountAuth,
+  holdsLiteralGoogleServiceAccountKey,
   installGoogleServiceAccountAuth,
   isGoogleServiceAccountAuth,
   type GoogleServiceAccountAuth,

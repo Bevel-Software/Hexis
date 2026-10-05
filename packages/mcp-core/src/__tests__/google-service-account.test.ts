@@ -11,6 +11,7 @@ import {
   GoogleServiceAccountTokenSource,
   ServiceAccountAuthError,
   findUnservedGoogleServiceAccountAuth,
+  holdsLiteralGoogleServiceAccountKey,
   installGoogleServiceAccountAuth,
   type GoogleServiceAccountAuth,
   type IServiceAccountTokenSource,
@@ -177,6 +178,21 @@ describe('GoogleServiceAccountTokenSource', () => {
     now += 1_000;
     expect(await source.accessToken(auth())).toBe('token-after-fix');
     expect(google.requests).toHaveLength(2);
+  });
+
+  it('answers a refusal, and remembers it, for a response that is JSON but holds no fields', async () => {
+    // `null`, a number and a list all parse; none has a field to read.
+    for (const text of ['null', '7', '[]', '"ok"']) {
+      for (const status of [200, 400]) {
+        const google = fakeGoogle(() => new Response(text, { status, headers: { 'Content-Type': 'application/json' } }));
+        const source = new GoogleServiceAccountTokenSource(google.fetchImpl);
+        const refusal = status === 200 ? "Google's token response had no access_token" : `Google refused the service account ${CLIENT_EMAIL} (HTTP 400)`;
+        await expect(source.accessToken(auth()), `${text} ${status}`).rejects.toBeInstanceOf(ServiceAccountAuthError);
+        await expect(source.accessToken(auth()), `${text} ${status}`).rejects.toThrow(refusal);
+        // Held back like any other refusal: the second call made no exchange.
+        expect(google.requests, `${text} ${status}`).toHaveLength(1);
+      }
+    }
   });
 
   it("holds back for Google's Retry-After, capped at a minute", async () => {
@@ -348,6 +364,43 @@ describe('where the auth type may sit', () => {
     let deep: Record<string, unknown> = { call_template_type: 'sse', auth: authBlock };
     for (let i = 0; i < 200_000; i++) deep = { inner: deep };
     expect(findUnservedGoogleServiceAccountAuth(deep, [])).toBe('a `sse` call template');
+  });
+});
+
+describe('a key written in the document', () => {
+  const block = (credentials: unknown) => ({ auth_type: 'google_service_account', credentials, scopes: 'https://www.googleapis.com/auth/adwords' });
+  const template = (credentials: unknown) => ({ tools: [{ tool_call_template: { call_template_type: 'http', auth: block(credentials) } }] });
+
+  it('is found whatever it is written as, and one variable reference is not one', () => {
+    const written = [
+      KEY_JSON,
+      Buffer.from(KEY_JSON).toString('base64'),
+      // A reference with anything beside it is still text in the file.
+      '${GOOGLE_SA_KEY}' + KEY_JSON,
+      // A name with no `$` is not a reference: it is the text "GOOGLE_SA_KEY".
+      'GOOGLE_SA_KEY',
+      '',
+    ];
+    for (const [i, credentials] of written.entries()) {
+      expect(holdsLiteralGoogleServiceAccountKey(template(credentials)), `case ${i}`).toBe(true);
+    }
+    for (const reference of ['${GOOGLE_SA_KEY}', '$GOOGLE_SA_KEY', '  ${KEY_2}  ']) {
+      expect(holdsLiteralGoogleServiceAccountKey(template(reference)), reference).toBe(false);
+    }
+  });
+
+  it('is found in a block nothing acts on, and among blocks that only name a variable', () => {
+    // At the root of a discovered manual no token would ever be minted from it. It is readable all the same.
+    expect(holdsLiteralGoogleServiceAccountKey({ type: 'http', url: 'https://x.example.com', auth: block(KEY_JSON) })).toBe(true);
+    expect(holdsLiteralGoogleServiceAccountKey({ a: template('${K}'), b: [template('$K'), { deep: { deeper: template(KEY_JSON) } }] })).toBe(true);
+    expect(holdsLiteralGoogleServiceAccountKey({ a: template('${K}'), b: [template('$K')] })).toBe(false);
+  });
+
+  it('leaves every other auth type, and a document with none, alone', () => {
+    expect(holdsLiteralGoogleServiceAccountKey({ auth: { auth_type: 'api_key', api_key: 'a-literal-of-another-kind' } })).toBe(false);
+    expect(holdsLiteralGoogleServiceAccountKey(null)).toBe(false);
+    // What is not a string is not a key; the auth type's own schema refuses it.
+    expect(holdsLiteralGoogleServiceAccountKey(template(undefined))).toBe(false);
   });
 });
 

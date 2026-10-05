@@ -61,28 +61,76 @@ const NAMEABLE_CALL_TEMPLATE_TYPES = ['sse', 'streamable_http', 'mcp', 'cli'];
  * type it does not know as no credentials at all, so such a tool would save
  * cleanly and then call Google unauthenticated.
  *
- * Every block in the document is found, at any depth. The walk keeps its own
- * stack, so a deeply nested document cannot overflow the call stack, and it
- * does not re-enter an object it has seen: a YAML anchor aliased inside itself
- * parses to a cyclic object.
+ * Every block in the document is found, at any depth (see
+ * `googleServiceAccountBlocks`), and the first one in document order that
+ * nothing will act on is the one named.
  */
 export function findUnservedGoogleServiceAccountAuth(doc: unknown, toolCallTemplates: readonly unknown[]): string | null {
   const served = new Set<unknown>(toolCallTemplates);
+  for (const { parent, key } of googleServiceAccountBlocks(doc)) {
+    // Judged by where it sits, so once per place it appears: an aliased
+    // block can be served in one place and ignored in another.
+    const where = unservedPlacement(parent, key, served);
+    if (where) return where;
+  }
+  return null;
+}
+
+/** `${NAME}` or `$NAME`, as UTCP spells a variable, and nothing else around it. */
+const ONE_VARIABLE_REFERENCE = /^\s*(?:\$\{[a-zA-Z0-9_]+\}|\$[a-zA-Z0-9_]+)\s*$/;
+
+/**
+ * Whether any `google_service_account` block in `doc` has its key WRITTEN IN
+ * THE DOCUMENT: a `credentials` that is anything but one variable reference.
+ *
+ * The document is a `.tool`, which is knowledge-base content: it is committed
+ * to the repository, and read by everyone and every agent that can read the
+ * knowledge base. A key written into it is a key all of them hold, for as
+ * long as the history keeps it. So the place for the key is the vault, and
+ * `credentials` only ever names the variable.
+ *
+ * Asked of the document as its author wrote it, wherever the block sits: a
+ * key in a block nothing will act on is just as readable. It cannot be asked
+ * where the auth type itself is validated, because that also runs on the
+ * template AFTER its variables were substituted, where `credentials` is the
+ * key and has to be.
+ *
+ * Says only that one was found. It never returns, quotes or measures the
+ * value: what it would be describing is the secret.
+ */
+export function holdsLiteralGoogleServiceAccountKey(doc: unknown): boolean {
+  for (const { block } of googleServiceAccountBlocks(doc)) {
+    const { credentials } = block as { credentials?: unknown };
+    // Not a string is not a key either; the auth type's own schema refuses it.
+    if (typeof credentials === 'string' && !ONE_VARIABLE_REFERENCE.test(credentials)) return true;
+  }
+  return false;
+}
+
+/**
+ * Every `google_service_account` auth block in `doc`, at any depth, with the
+ * object it sits in and the key it sits under, in document order.
+ *
+ * The walk keeps its own stack, so a deeply nested document cannot overflow
+ * the call stack, and it does not re-enter an object it has seen: a YAML
+ * anchor aliased inside itself parses to a cyclic object. A block is yielded
+ * once per place it appears, since an aliased one sits in several.
+ */
+function* googleServiceAccountBlocks(
+  doc: unknown,
+): Generator<{ block: GoogleServiceAccountAuth; parent?: Record<string, unknown>; key?: string }> {
   const seen = new WeakSet<object>();
   const pending: { node: unknown; parent?: Record<string, unknown>; key?: string }[] = [{ node: doc }];
   for (let next = pending.pop(); next; next = pending.pop()) {
     const { node, parent, key } = next;
     if (!node || typeof node !== 'object') continue;
     if (isGoogleServiceAccountAuth(node)) {
-      // Judged by where it sits, so once per place it appears: an aliased
-      // block can be served in one place and ignored in another.
-      const where = unservedPlacement(parent, key, served);
-      if (where) return where;
+      yield { block: node, parent, key };
       continue;
     }
     if (seen.has(node)) continue;
     seen.add(node);
-    // Pushed in reverse, so the first block in document order is the one named.
+    // Pushed in reverse, so blocks come out in document order.
     if (Array.isArray(node)) {
       for (let i = node.length - 1; i >= 0; i--) pending.push({ node: node[i] });
     } else {
@@ -91,7 +139,6 @@ export function findUnservedGoogleServiceAccountAuth(doc: unknown, toolCallTempl
       for (let i = keys.length - 1; i >= 0; i--) pending.push({ node: obj[keys[i]!], parent: obj, key: keys[i] });
     }
   }
-  return null;
 }
 
 /** Why a block under `parent[key]` is acted on by nothing, or null when it is. */

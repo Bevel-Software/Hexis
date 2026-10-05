@@ -285,6 +285,55 @@ describe('ToolManualService', () => {
     expect(catalog.tools.map((m) => m.name)).toContain('overhttp');
   });
 
+  test('refuses a `.tool` that holds a service-account key itself, wherever the block sits, and never repeats it', async () => {
+    // A `.tool` is committed and read by everyone who can read the knowledge
+    // base, so the key lives in the vault and the file only names it.
+    const key = JSON.stringify({ type: 'service_account', client_email: 'ads@proj.iam.gserviceaccount.com', private_key: 'MIIEvQIBADANBgkq-NOT-A-REAL-KEY' });
+    const withCredentials = (credentials: unknown, callTemplateType = 'http') =>
+      JSON.stringify({
+        type: 'inline',
+        tools: [
+          {
+            name: 'list',
+            description: 'List.',
+            inputs: { type: 'object', properties: {} },
+            outputs: { type: 'object', properties: {} },
+            tool_call_template: {
+              call_template_type: callTemplateType,
+              http_method: 'GET',
+              url: 'https://googleads.googleapis.com/v22/customers',
+              auth: { auth_type: 'google_service_account', credentials, scopes: 'https://www.googleapis.com/auth/adwords' },
+            },
+          },
+        ],
+      });
+    const plugins = join(root, wsId, KB_DIR, 'Plugins');
+    await writeFile(join(plugins, 'pasted_key.tool'), withCredentials(key));
+    await writeFile(join(plugins, 'pasted_base64.tool'), withCredentials(Buffer.from(key).toString('base64')));
+    // A variable with the key, or anything else, written around it is still text in the file.
+    await writeFile(join(plugins, 'beside_a_variable.tool'), withCredentials('${GOOGLE_SA_KEY}' + key));
+    // In a block nothing acts on, the key is just as readable: that it is there is said first.
+    await writeFile(join(plugins, 'key_over_sse.tool'), withCredentials(key, 'sse'));
+    await writeFile(join(plugins, 'braced.tool'), withCredentials('${GOOGLE_SA_KEY}'));
+    await writeFile(join(plugins, 'bare.tool'), withCredentials(' $GOOGLE_SA_KEY '));
+
+    const catalog = await svc().listAccessibleCatalog('user@x.eu');
+
+    const reasonFor = (file: string) => catalog.invalid.find((i) => i.path === `Plugins/${file}`)?.reason ?? '';
+    for (const file of ['pasted_key.tool', 'pasted_base64.tool', 'beside_a_variable.tool', 'key_over_sse.tool']) {
+      expect(reasonFor(file), file).toContain('something other than a vault variable as its `credentials`');
+      expect(reasonFor(file), file).toContain('Secrets Vault');
+    }
+    // Nothing of what was pasted comes back in the answer, in either spelling.
+    const answer = JSON.stringify(catalog);
+    expect(answer).not.toMatch(/NOT-A-REAL-KEY|iam\.gserviceaccount/);
+    expect(answer).not.toContain(Buffer.from(key).toString('base64').slice(0, 40));
+    // Either spelling of one variable is what the field is for.
+    expect(reasonFor('braced.tool')).toBe('');
+    expect(reasonFor('bare.tool')).toBe('');
+    expect(catalog.tools.map((m) => m.name)).toEqual(expect.arrayContaining(['braced', 'bare']));
+  });
+
   test('manual names are alphanumeric (no underscores) for variable namespacing', async () => {
     root = await mkdtemp(join(tmpdir(), 'tools2-'));
     const tools = join(root, wsId, KB_DIR, 'Plugins');

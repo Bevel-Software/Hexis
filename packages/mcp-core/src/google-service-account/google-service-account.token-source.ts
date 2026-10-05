@@ -110,7 +110,13 @@ export class GoogleServiceAccountTokenSource implements IServiceAccountTokenSour
       throw new ServiceAccountAuthError(`Google's token endpoint could not be reached: ${reason}`);
     }
 
-    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    // Whatever came back is read as an object of fields or as none. A body
+    // that is not JSON, and one that is JSON but no object (`null`, a number,
+    // a list), both carry no field to read: reading one off `null` would
+    // throw a TypeError instead of the refusal below, past the code that
+    // remembers a failure and says who was refused.
+    const parsed: unknown = await res.json().catch(() => null);
+    const body = (parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}) as Record<string, unknown>;
     if (!res.ok) {
       // Google says why in `error` and `error_description` (a revoked key, a
       // scope the account may not have, a subject without delegation); neither

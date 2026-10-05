@@ -23,4 +23,6 @@ The auth type lives in `@bevel-software/platform-mcp-core` and is registered whe
 
 The block works on one thing, an inline tool's `http` call template. On any other call template (`sse`, `streamable_http`, `mcp`), or on a tool that discovers its tools from a `url`, no token would be sent and every call would reach Google unauthenticated. Such a `.tool` is now refused when it is read, and `list_tool_setup` names it under `invalid` with where the block was found.
 
+`credentials` takes one vault variable and nothing else. A `.tool` is committed to the knowledge base and read by everyone who can read it, so a file that holds the key itself there, as JSON, in base64 or beside a variable, is refused when it is read and listed under `invalid`, without the value being repeated.
+
 The key variable surfaces in the secrets UI and in `list_tool_setup` like any other `${VAR}`, admin-scoped by default. The AGENTS.md template documents the block with a Google Ads example, and points to a sign-in variable for the case where each person should call Google as themselves.
