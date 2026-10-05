@@ -1203,12 +1203,18 @@ export function normalizeToolManual(
   // `http` call template. Anywhere else it validates and is then sent as no
   // credentials at all, so the tool would save cleanly and call Google
   // unauthenticated, with Google's 401 the only hint. Refused here instead,
-  // naming where the block was found.
-  const unserved = findUnservedGoogleServiceAccountAuth(obj);
+  // naming where the block was found. The templates below are the only ones
+  // this file's tools are called through: a `tools` list on a file that is not
+  // `inline` is never read, so nothing in it counts.
+  const toolCallTemplates =
+    type === 'inline' && Array.isArray(obj.tools)
+      ? obj.tools.map((tool: unknown) => (tool && typeof tool === 'object' ? (tool as Record<string, unknown>).tool_call_template : undefined))
+      : [];
+  const unserved = findUnservedGoogleServiceAccountAuth(obj, toolCallTemplates);
   if (unserved) {
     throw new Error(
-      `\`auth_type: google_service_account\` is on ${unserved === 'no call template' ? 'something that is not a call template' : `a \`${unserved}\` call template`}, ` +
-        'where no token would be sent. It works only on an inline tool whose `tool_call_template` has `call_template_type: http`.',
+      `\`auth_type: google_service_account\` is on ${unserved}, where no token would be sent. ` +
+        "It works only as the `auth` of an inline tool's `tool_call_template` with `call_template_type: http`.",
     );
   }
 

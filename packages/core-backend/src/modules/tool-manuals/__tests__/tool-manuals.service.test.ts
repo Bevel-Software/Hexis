@@ -257,6 +257,16 @@ describe('ToolManualService', () => {
       join(plugins, 'discovered.tool'),
       JSON.stringify({ type: 'http', url: 'https://api.example.com/utcp', auth: serviceAccount }),
     );
+    // Looking like an `http` call template is not enough: a discovered manual
+    // reads neither a block at its root nor a `tools` list, whatever they say.
+    await writeFile(
+      join(plugins, 'dressed_root.tool'),
+      JSON.stringify({ type: 'http', url: 'https://api.example.com/utcp', call_template_type: 'http', auth: serviceAccount }),
+    );
+    await writeFile(
+      join(plugins, 'unread_tools.tool'),
+      JSON.stringify({ ...JSON.parse(inlineOver('http')), type: 'http', url: 'https://api.example.com/utcp' }),
+    );
     await writeFile(join(plugins, 'over_http.tool'), inlineOver('http'));
 
     const catalog = await svc().listAccessibleCatalog('user@x.eu');
@@ -264,8 +274,10 @@ describe('ToolManualService', () => {
     const reasonFor = (file: string) => catalog.invalid.find((i) => i.path === `Plugins/${file}`)?.reason ?? '';
     expect(reasonFor('over_sse.tool')).toContain('a `sse` call template');
     expect(reasonFor('over_streamable.tool')).toContain('a `streamable_http` call template');
-    expect(reasonFor('discovered.tool')).toContain('not a call template');
-    for (const file of ['over_sse.tool', 'over_streamable.tool', 'discovered.tool']) {
+    expect(reasonFor('discovered.tool')).toContain("not a call template's `auth`");
+    expect(reasonFor('dressed_root.tool')).toContain('no tool is called through');
+    expect(reasonFor('unread_tools.tool')).toContain('no tool is called through');
+    for (const file of ['over_sse.tool', 'over_streamable.tool', 'discovered.tool', 'dressed_root.tool', 'unread_tools.tool']) {
       expect(reasonFor(file)).toContain('`call_template_type: http`');
     }
     // The one place it works is left alone.

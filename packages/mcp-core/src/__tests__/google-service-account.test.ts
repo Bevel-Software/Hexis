@@ -262,48 +262,92 @@ describe('the google_service_account auth type', () => {
 
 describe('where the auth type may sit', () => {
   const authBlock = { auth_type: 'google_service_account', credentials: '${K}', scopes: 'a' };
-  const inlineTool = (template: Record<string, unknown>) => ({
-    type: 'inline',
-    tools: [{ name: 't', tool_call_template: template }],
-  });
+  /** A document of tools, and the answer for it when its tools are called through `tools[].tool_call_template`. */
+  const unservedIn = (templates: Record<string, unknown>[], rest: Record<string, unknown> = {}) => {
+    const doc = { ...rest, tools: templates.map((template, i) => ({ name: `t${i}`, tool_call_template: template })) };
+    return findUnservedGoogleServiceAccountAuth(doc, templates);
+  };
+  const NOT_AN_AUTH = "somewhere that is not a call template's `auth`";
+  const NOT_CALLED_THROUGH = 'an `http` call template that no tool is called through';
 
-  it('is served on an http call template, however the type is written', () => {
-    expect(findUnservedGoogleServiceAccountAuth(inlineTool({ call_template_type: 'http', url: 'https://x', auth: authBlock }))).toBeNull();
-    expect(findUnservedGoogleServiceAccountAuth(inlineTool({ call_template_type: ' HTTP ', url: 'https://x', auth: authBlock }))).toBeNull();
+  it('is served as the auth of an http template a tool is called through, however the type is written', () => {
+    expect(unservedIn([{ call_template_type: 'http', url: 'https://x', auth: authBlock }])).toBeNull();
+    expect(unservedIn([{ call_template_type: ' HTTP ', url: 'https://x', auth: authBlock }])).toBeNull();
   });
 
   it.each(['sse', 'streamable_http', 'mcp'])('names a %s call template, whose protocol would send no token', (type) => {
-    expect(findUnservedGoogleServiceAccountAuth(inlineTool({ call_template_type: type, url: 'https://x', auth: authBlock }))).toBe(type);
+    expect(unservedIn([{ call_template_type: type, url: 'https://x', auth: authBlock }])).toBe(`a \`${type}\` call template`);
   });
 
-  it('names a block that is on no call template at all', () => {
-    expect(findUnservedGoogleServiceAccountAuth({ type: 'http', url: 'https://x', auth: authBlock })).toBe('no call template');
+  it('describes a call template type it does not know, rather than quoting what the file wrote', () => {
+    const written = 'ghp_a-token-pasted-into-the-wrong-field';
+    const where = unservedIn([{ call_template_type: written, auth: authBlock }]);
+    expect(where).toBe('a call template that is not an `http` one');
+    expect(where).not.toContain(written);
+  });
+
+  it('is not served by an http template that no tool is called through', () => {
+    // The shape alone proves nothing: the same object, in a document whose
+    // tools are not called through it, is read by nobody.
+    const template = { call_template_type: 'http', url: 'https://x', auth: authBlock };
+    expect(findUnservedGoogleServiceAccountAuth({ tools: [{ name: 't', tool_call_template: template }] }, [])).toBe(NOT_CALLED_THROUGH);
+    // At the root of a file that discovers its tools from a url.
+    expect(findUnservedGoogleServiceAccountAuth({ type: 'http', call_template_type: 'http', url: 'https://x', auth: authBlock }, [])).toBe(
+      NOT_CALLED_THROUGH,
+    );
+    // Nested inside a template that IS served.
+    expect(unservedIn([{ call_template_type: 'http', url: 'https://x', inner: { call_template_type: 'http', auth: authBlock } }])).toBe(
+      NOT_CALLED_THROUGH,
+    );
+  });
+
+  it('is not served anywhere that is not a call template’s auth', () => {
+    expect(findUnservedGoogleServiceAccountAuth({ type: 'http', url: 'https://x', auth: authBlock }, [])).toBe(NOT_AN_AUTH);
+    // `auth_tools` is read when a manual is discovered, never on a tool call.
+    expect(unservedIn([{ call_template_type: 'http', url: 'https://x', auth_tools: authBlock }])).toBe(NOT_AN_AUTH);
+    expect(findUnservedGoogleServiceAccountAuth(authBlock, [])).toBe(NOT_AN_AUTH);
+    expect(findUnservedGoogleServiceAccountAuth([authBlock], [])).toBe(NOT_AN_AUTH);
   });
 
   it('finds one misplaced block among served ones, at any depth', () => {
-    const doc = {
-      type: 'inline',
-      tools: [
-        { name: 'ok', tool_call_template: { call_template_type: 'http', url: 'https://x', auth: authBlock } },
-        { name: 'nested', tool_call_template: { call_template_type: 'http', url: 'https://x', inner: [{ call_template_type: 'sse', auth: authBlock }] } },
-      ],
-    };
-    expect(findUnservedGoogleServiceAccountAuth(doc)).toBe('sse');
+    expect(
+      unservedIn([
+        { call_template_type: 'http', url: 'https://x', auth: authBlock },
+        { call_template_type: 'http', url: 'https://x', inner: [{ deeper: { call_template_type: 'sse', auth: authBlock } }] },
+      ]),
+    ).toBe('a `sse` call template');
+  });
+
+  it('judges a block by each place it sits, when one block is written once and used twice', () => {
+    // What a YAML anchor produces: the same object under two parents.
+    const shared = { ...authBlock };
+    expect(
+      unservedIn([
+        { call_template_type: 'http', url: 'https://x', auth: shared },
+        { call_template_type: 'sse', url: 'https://y', auth: shared },
+      ]),
+    ).toBe('a `sse` call template');
   });
 
   it('leaves every other auth type, and a document with none, alone', () => {
-    expect(findUnservedGoogleServiceAccountAuth(inlineTool({ call_template_type: 'sse', auth: { auth_type: 'api_key', api_key: '${K}' } }))).toBeNull();
-    expect(findUnservedGoogleServiceAccountAuth(null)).toBeNull();
-    expect(findUnservedGoogleServiceAccountAuth('google_service_account')).toBeNull();
+    expect(unservedIn([{ call_template_type: 'sse', auth: { auth_type: 'api_key', api_key: '${K}' } }])).toBeNull();
+    expect(findUnservedGoogleServiceAccountAuth(null, [])).toBeNull();
+    expect(findUnservedGoogleServiceAccountAuth('google_service_account', [])).toBeNull();
   });
 
   it('terminates on a document that contains itself', () => {
     const cyclic: Record<string, unknown> = { call_template_type: 'sse', auth: authBlock };
     cyclic.self = cyclic;
-    expect(findUnservedGoogleServiceAccountAuth(cyclic)).toBe('sse');
+    expect(findUnservedGoogleServiceAccountAuth(cyclic, [])).toBe('a `sse` call template');
     const benign: Record<string, unknown> = { call_template_type: 'http', auth: authBlock };
     benign.self = benign;
-    expect(findUnservedGoogleServiceAccountAuth(benign)).toBeNull();
+    expect(findUnservedGoogleServiceAccountAuth(benign, [benign])).toBeNull();
+  });
+
+  it('reads a document nested far deeper than the call stack is', () => {
+    let deep: Record<string, unknown> = { call_template_type: 'sse', auth: authBlock };
+    for (let i = 0; i < 200_000; i++) deep = { inner: deep };
+    expect(findUnservedGoogleServiceAccountAuth(deep, [])).toBe('a `sse` call template');
   });
 });
 
