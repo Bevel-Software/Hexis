@@ -901,6 +901,28 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     const own = await this.git.appliedMergeCommitOnTarget(baseWorkspace.id, cr.targetBranch, prNumber);
     if (!own) return null;
 
+    // The attempt is logged BEFORE the row is finalized, in the same order the
+    // merge path logs its own: a log write that fails must not leave a request
+    // recorded as merged with no attempt behind it, and failing here fails
+    // before anything is committed, so the retry is clean (cubic P2 on #347).
+    const triggeredByEmail = canonicalEmail(user.email);
+    const [logRow] = await this.db
+      .insert(prMergeLog)
+      .values({
+        prNumber,
+        triggeredByEmail,
+        triggeredByEmailBidx: triggeredByEmail,
+        triggeredByName: user.name,
+        headShaAtMerge: headSha,
+        mergeMethod: MERGE_METHOD,
+        succeeded: false,
+        // Not an error — the one thing a reader of this row has to know is that
+        // no merge was performed under it, because it had already been
+        // performed. Written at the start so it survives a crash in between.
+        error: `Finalizing an earlier attempt's merge commit ${own}; nothing is merged by this one.`,
+      })
+      .returning({ id: prMergeLog.id });
+
     // Same CAS as the merge path: a concurrent finalization wins and we say so
     // rather than overwriting its terminal state.
     const completedAt = new Date();
@@ -909,22 +931,22 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .set({ state: 'merged', mergedSha: own, closedAt: completedAt, updatedAt: completedAt })
       .where(and(eq(changeRequests.id, cr.id), eq(changeRequests.state, 'open')))
       .returning({ id: changeRequests.id });
-    if (!updated) throw new MergeBlockedError(['This change request has already been merged.']);
-
-    const triggeredByEmail = canonicalEmail(user.email);
-    await this.db.insert(prMergeLog).values({
-      prNumber,
-      triggeredByEmail,
-      triggeredByEmailBidx: triggeredByEmail,
-      triggeredByName: user.name,
-      headShaAtMerge: headSha,
-      mergeMethod: MERGE_METHOD,
-      succeeded: true,
-      completedAt,
-      // Not an error — the one thing a reader of this row has to know is that no
-      // merge was performed under it, because it had already been performed.
-      error: `Finalized an earlier attempt's merge commit ${own}; nothing was merged by this one.`,
-    });
+    if (!updated) {
+      const raceError = 'Change request was merged by a concurrent request; this attempt did not finalize it.';
+      await this.db
+        .update(prMergeLog)
+        .set({ succeeded: false, completedAt, error: raceError })
+        .where(eq(prMergeLog.id, logRow.id));
+      throw new MergeBlockedError(['This change request has already been merged.']);
+    }
+    await this.db
+      .update(prMergeLog)
+      .set({
+        succeeded: true,
+        completedAt,
+        error: `Finalized an earlier attempt's merge commit ${own}; nothing was merged by this one.`,
+      })
+      .where(eq(prMergeLog.id, logRow.id));
     log.warn(
       `change request #${prNumber} was already merged as ${own} but its row was never updated; recorded it now.`,
     );

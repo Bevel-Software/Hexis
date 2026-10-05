@@ -243,6 +243,37 @@ describe('GitService.mergeChangeRequest', () => {
     expect(await stale.appliedMergeCommitOnTarget(staleWsId, BASE, 8)).toBeNull();
   });
 
+  // Fail CLOSED when the target cannot be refreshed. What the caller does with
+  // an answer is record it as the request's published state, so a decision taken
+  // on a stale tracking ref could finalize a request with a commit the published
+  // branch no longer carries — and a clone with no tracking ref at all would
+  // turn the gate's clean refusal into a git error (cubic P1 on #347).
+  it('answers null when the target cannot be refreshed, stale ref or no ref', async () => {
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+      await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+    });
+
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
+    const merged = await git.mergeChangeRequest(
+      baseWsId, 'alice/add', BASE,
+      { subject: mergeCommitSubject('Add feature', 7), body: 'Merged via Bevel' }, USER,
+      { appliedChangeNumber: 7 },
+    );
+    expect(merged.kind).toBe('merged');
+    if (merged.kind !== 'merged') return;
+    // The commit IS in this clone, and origin/BASE still names it.
+    expect((await gitOut(baseRepo, ['rev-parse', `origin/${BASE}`])).trim()).toBe(merged.mergeCommit);
+
+    // Now the remote is unreachable. The stale ref must not be scanned.
+    await runGit(baseRepo, ['remote', 'set-url', 'origin', path.join(root, 'gone.git')]);
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 7)).toBeNull();
+
+    // And with no tracking ref either, it still answers rather than throwing.
+    await runGit(baseRepo, ['update-ref', '-d', `refs/remotes/origin/${BASE}`]);
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 7)).toBeNull();
+  });
+
   // The merge commit a later attempt recovers is matched on the number alone, so
   // a request that landed a DIFFERENT change under its own number is not offered
   // another request's commit — and `git log --grep` finding the number in a

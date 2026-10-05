@@ -60,10 +60,21 @@ const APPROVED: FileApprovalState = {
   viewerCanApprove: false,
 };
 
-/** Every `update(...).set(...)` the merge performs, with the table it targeted. */
-type Captured = { table: unknown; values: Record<string, unknown> };
+/**
+ * Every write the merge performs, in order, with the table it targeted and
+ * whether it was an insert or an update — the ORDER is part of what one of the
+ * tests below pins.
+ */
+type Captured = { kind: 'insert' | 'update'; table: unknown; values: Record<string, unknown> };
 
-function makeDb(captured: Captured[]): Database {
+/**
+ * The row the service reads is a PARAMETER, not a constant: `mergePr` and
+ * `finalizeAlreadyApplied` both re-validate the lifecycle against the row rather
+ * than against the caller's `state` argument, and a stub that always answers
+ * `open` leaves those guards unreachable — a regression that dropped one would
+ * still pass (cubic P3 on #347).
+ */
+function makeDb(captured: Captured[], row: Record<string, unknown> = CR_ROW): Database {
   const thenable = (data: unknown) => {
     const p = Promise.resolve(data) as Promise<unknown> & { limit: () => Promise<unknown> };
     p.limit = () => Promise.resolve(data);
@@ -71,12 +82,17 @@ function makeDb(captured: Captured[]): Database {
   };
   return {
     select: () => ({
-      from: (table: unknown) => ({ where: () => thenable(table === changeRequests ? [CR_ROW] : []) }),
+      from: (table: unknown) => ({ where: () => thenable(table === changeRequests ? [row] : []) }),
     }),
-    insert: () => ({ values: () => ({ returning: async () => [{ id: 'merge-log-1' }] }) }),
+    insert: (table: unknown) => ({
+      values: (values: Record<string, unknown>) => {
+        captured.push({ kind: 'insert', table, values });
+        return { returning: async () => [{ id: 'merge-log-1' }] };
+      },
+    }),
     update: (table: unknown) => ({
       set: (values: Record<string, unknown>) => {
-        captured.push({ table, values });
+        captured.push({ kind: 'update', table, values });
         return {
           where: () => {
             const t = thenable(undefined) as unknown as Promise<unknown> & {
@@ -112,7 +128,7 @@ function makeService(mergeResult: AppliedMergeResult) {
   const merge = () =>
     svc.mergePr(CR_ROW.number, USER, HEAD_SHA, [APPROVED], 'open', CR_ROW.title, BASE, 'ws-1');
   /** The values written to the change request row (not the merge log). */
-  const crUpdate = () => captured.find((c) => c.table === changeRequests)?.values;
+  const crUpdate = () => captured.find((c) => c.kind === 'update' && c.table === changeRequests)?.values;
   return { merge, crUpdate, mergeChangeRequest };
 }
 
@@ -176,7 +192,15 @@ describe('mergePr — which commit the row records', () => {
  * and the request stays fileless and un-appliable for good. The gate has to ask
  * the ownership question itself.
  */
-function makeStuckService(own: string | null, rowState = 'open') {
+function makeStuckService(
+  own: string | null,
+  // The two states a merge is decided against, kept APART because the service
+  // treats them apart: `gateState` is the caller's (what drove the gate it
+  // clicked), `rowState` is the authoritative row's. A stale caller passing
+  // 'open' for a row that is already terminal is exactly what the row-level
+  // guard is for.
+  { gateState = 'open', rowState = 'open' }: { gateState?: string; rowState?: string } = {},
+) {
   const captured: Captured[] = [];
   const mergeChangeRequest = vi.fn<(...args: unknown[]) => Promise<AppliedMergeResult>>(async () => ({
     kind: 'merged',
@@ -188,7 +212,7 @@ function makeStuckService(own: string | null, rowState = 'open') {
     getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-base' })),
   } as unknown as WorkspaceService;
   const svc = new ReviewWorkflowService(
-    makeDb(captured),
+    makeDb(captured, { ...CR_ROW, state: rowState }),
     {} as unknown as IAccessControl,
     workspace,
     { mergeChangeRequest, appliedMergeCommitOnTarget } as unknown as GitService,
@@ -196,9 +220,9 @@ function makeStuckService(own: string | null, rowState = 'open') {
   // NO approvals: an already-applied request has no file to approve, which is
   // exactly what makes it indistinguishable from an empty one at the gate.
   const merge = () =>
-    svc.mergePr(CR_ROW.number, USER, HEAD_SHA, [], rowState as 'open', CR_ROW.title, BASE, 'ws-1');
-  const crUpdate = () => captured.find((c) => c.table === changeRequests)?.values;
-  return { merge, crUpdate, mergeChangeRequest, appliedMergeCommitOnTarget };
+    svc.mergePr(CR_ROW.number, USER, HEAD_SHA, [], gateState as 'open', CR_ROW.title, BASE, 'ws-1');
+  const crUpdate = () => captured.find((c) => c.kind === 'update' && c.table === changeRequests)?.values;
+  return { merge, crUpdate, captured, mergeChangeRequest, appliedMergeCommitOnTarget };
 }
 
 describe('mergePr — a request whose merge commit was pushed but never recorded', () => {
@@ -233,11 +257,45 @@ describe('mergePr — a request whose merge commit was pushed but never recorded
   it('does not go looking when the hard block is the request\'s state', async () => {
     // A closed or merged request earns its own refusal, and must keep it: the
     // recovery is only ever about the empty-file-set block.
-    const { merge, appliedMergeCommitOnTarget, crUpdate } = makeStuckService('a-commit', 'closed');
+    const { merge, appliedMergeCommitOnTarget, crUpdate } = makeStuckService('a-commit', { gateState: 'closed', rowState: 'closed' });
 
     await expect(merge()).rejects.toThrow('This pull request is closed.');
 
     expect(appliedMergeCommitOnTarget).not.toHaveBeenCalled();
     expect(crUpdate()).toBeUndefined();
+  });
+
+  it('refuses when the AUTHORITATIVE row is already terminal, whatever the caller passed', async () => {
+    // The caller's gate inputs were resolved before a concurrent apply landed,
+    // so it still says `open` while the row says `merged`. The recovery runs
+    // ahead of `mergePr`'s own lifecycle re-check, so its own row-state guard is
+    // the only thing between a stale click and a second finalization.
+    const { merge, crUpdate, appliedMergeCommitOnTarget } = makeStuckService('a-commit', {
+      gateState: 'open',
+      rowState: 'merged',
+    });
+
+    await expect(merge()).rejects.toThrow('no file changes to approve');
+
+    expect(appliedMergeCommitOnTarget).not.toHaveBeenCalled();
+    expect(crUpdate()).toBeUndefined();
+  });
+
+  it('logs the attempt before it finalizes the row, and completes the log after', async () => {
+    // Order matters: a log write that failed after the CAS would leave a request
+    // recorded as merged with no attempt behind it, and the caller erroring on a
+    // request that IS merged. The attempt goes in first, carrying the commit it
+    // is about, and is completed once the row is won.
+    const { merge, captured } = makeStuckService('the-commit-the-first-attempt-pushed');
+
+    await merge();
+
+    const inserted = captured.find((c) => c.kind === 'insert');
+    expect(inserted?.values).toMatchObject({ succeeded: false, mergeMethod: 'merge' });
+    expect(String(inserted?.values.error)).toContain('the-commit-the-first-attempt-pushed');
+    // The log's completion comes AFTER the change request row is finalized.
+    const order = captured.map((c) => (c.kind === 'insert' ? 'log-insert' : c.table === changeRequests ? 'cr' : 'log-update'));
+    expect(order).toEqual(['log-insert', 'cr', 'log-update']);
+    expect(captured[2].values).toMatchObject({ succeeded: true });
   });
 });

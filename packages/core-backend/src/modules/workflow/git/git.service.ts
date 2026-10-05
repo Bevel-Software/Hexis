@@ -1654,10 +1654,14 @@ export class GitService implements IGitService {
    * merge never gets its turn (cubic P2 on #347). The gate asks here instead.
    *
    * The target ref is refreshed first, because the attempt that pushed the
-   * commit may have run in another process or another clone. A fetch that fails
-   * is not fatal: the walk then runs on what this clone already has and, finding
-   * nothing, answers null — which leaves the caller refusing, exactly as it did
-   * before this method existed.
+   * commit may have run in another process or another clone — and a fetch that
+   * FAILS answers null without looking, which is the only safe answer: what the
+   * caller does with a commit is record it as this request's published state, so
+   * a decision taken on a stale tracking ref could finalize a request with a
+   * commit the published branch no longer carries, and a clone that has no
+   * tracking ref at all would turn the gate's clean refusal into a git error
+   * (cubic P1 on #347). No authority, no answer; the caller then refuses exactly
+   * as it did before this method existed.
    */
   async appliedMergeCommitOnTarget(
     baseWorkspaceId: string,
@@ -1666,10 +1670,17 @@ export class GitService implements IGitService {
   ): Promise<string | null> {
     assertValidBranchName(targetBranch);
     const cwd = await this.repoDir(baseWorkspaceId);
-    await this.git(cwd, [
+    const refreshed = await this.git(cwd, [
       'fetch', '--no-write-fetch-head', 'origin',
       `+refs/heads/${targetBranch}:refs/remotes/origin/${targetBranch}`,
-    ]).catch(() => undefined);
+    ]).then(() => true, () => false);
+    if (!refreshed) {
+      log.warn(
+        `could not refresh "${targetBranch}" to look for change request #${number}'s merge commit, ` +
+          'so it is reported as owning none.',
+      );
+      return null;
+    }
     return this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, number);
   }
 
