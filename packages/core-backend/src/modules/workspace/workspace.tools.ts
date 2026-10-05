@@ -353,17 +353,17 @@ function assertNotDocumentEdit(readers: FileReaderRegistry, path: string): void 
  *
  * Costs one read of the existing file, and only for readers that ask the
  * question. A path with nothing at it is a CREATE: there is nothing to destroy.
- * Returns the bytes it read (so a caller that needs the content next —
- * `edit_file` — does not read the file a second time), or undefined when it
- * had no reason to read or nothing existed.
+ * For the tools that REPLACE a file without needing what it held (`write_file`,
+ * `write_files`); `edit_file` holds the bytes already and asks
+ * `assertBytesTextEditable` of each reading it takes.
  */
 async function assertNotBinaryOverwrite(
   readers: FileReaderRegistry,
   path: string,
   fs: { readFile(p: string): Promise<string | Buffer> },
-): Promise<Buffer | undefined> {
+): Promise<void> {
   const reader = readers.readerFor(path);
-  if (reader.editRefusalForExisting === undefined) return undefined;
+  if (reader.editRefusalForExisting === undefined) return;
   let existing: Buffer;
   try {
     existing = asBytes(await fs.readFile(path));
@@ -372,11 +372,10 @@ async function assertNotBinaryOverwrite(
     // FileNotFoundError carry the disk's absence codes). Any other failure —
     // permissions, I/O — means the existing content could not be inspected:
     // propagate it rather than let the write destroy bytes the gate never saw.
-    if (isAbsence(err)) return undefined; // nothing there yet
+    if (isAbsence(err)) return; // nothing there yet
     throw err;
   }
   assertBytesTextEditable(readers, path, existing);
-  return existing;
 }
 
 /**
