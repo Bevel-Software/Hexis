@@ -35,6 +35,51 @@ export function isGoogleServiceAccountAuth(auth: unknown): auth is GoogleService
   );
 }
 
+/** The one call template type whose protocol turns the key into a token. */
+const SERVED_CALL_TEMPLATE_TYPE = 'http';
+
+/**
+ * Where in `doc` a `google_service_account` auth block sits on something that
+ * will not act on it, or null when every one is on an `http` call template.
+ *
+ * UTCP validates an auth type on any call template that takes an `auth`, but
+ * only the `http` protocol mints the token. Every other protocol sends an auth
+ * type it does not know as no credentials at all, so such a tool would save
+ * cleanly and then call Google unauthenticated. The answer names what the
+ * block was found on (`sse`, `mcp`, …), or `no call template` for a block that
+ * is not on a call template at all.
+ *
+ * A deep, cycle-safe walk, for the reasons `containsCliCallTemplate` in the
+ * platform gives: templates nest inside templates, and a YAML anchor aliased
+ * inside itself parses to a cyclic object.
+ */
+export function findUnservedGoogleServiceAccountAuth(doc: unknown): string | null {
+  const seen = new WeakSet<object>();
+  const walk = (node: unknown): string | null => {
+    if (!node || typeof node !== 'object') return null;
+    if (seen.has(node)) return null;
+    seen.add(node);
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const found = walk(item);
+        if (found) return found;
+      }
+      return null;
+    }
+    const obj = node as Record<string, unknown>;
+    if (isGoogleServiceAccountAuth(obj.auth)) {
+      const type = typeof obj.call_template_type === 'string' ? obj.call_template_type.toLowerCase().trim() : '';
+      if (type !== SERVED_CALL_TEMPLATE_TYPE) return type || 'no call template';
+    }
+    for (const value of Object.values(obj)) {
+      const found = walk(value);
+      if (found) return found;
+    }
+    return null;
+  };
+  return walk(doc);
+}
+
 // Register the auth type on module load, so a `.tool` naming it validates
 // wherever UTCP parses a call template: the inline manual route, the preview,
 // and the client re-validating a template after substituting its variables.

@@ -1,5 +1,6 @@
-// Importing this module registers the `google_service_account` auth type with UTCP.
-export { isGoogleServiceAccountAuth } from './google-service-account.auth.js';
+// Importing this module registers the `google_service_account` auth type with
+// UTCP and puts the `http` protocol that acts on it in place of the stock one.
+export { isGoogleServiceAccountAuth, findUnservedGoogleServiceAccountAuth } from './google-service-account.auth.js';
 export { GoogleAuthHttpProtocol, installGoogleServiceAccountAuth } from './google-auth-http.protocol.js';
 export { GoogleServiceAccountTokenSource, GOOGLE_TOKEN_URL } from './google-service-account.token-source.js';
 export {

@@ -609,6 +609,10 @@ tools:
 
 The token always comes from Google's own token endpoint; a `token_uri` inside the key is ignored. Give the service account access in the Google product itself (for example add its email as a user of the Google Ads account or the Tag Manager container), or every call is refused. A refusal names the service account and Google's reason, never the key.
 
+The block works in one place: an inline tool's `tool_call_template` with `call_template_type: http`. Anywhere else (an `sse`, `streamable_http` or `mcp` template, or a `type: http` / `type: mcp` tool that discovers its tools from a `url`) no token would be sent, so the `.tool` is refused and `list_tool_setup` names it under `invalid`, saying where the block was found. It works the same for a `remote: false` tool run by the local `hexis-mcp` server, which mints the token on the machine it runs on.
+
+A service account is one shared identity. To have each person call Google as themselves instead, do not use this block: declare a sign-in variable (`oauth`, above) and send it as `Authorization: Bearer ${VAR}`.
+
 ### Examples
 
 An `http` manual that authenticates with a shared org key and a per-user key:

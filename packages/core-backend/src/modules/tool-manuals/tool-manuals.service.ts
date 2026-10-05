@@ -7,7 +7,6 @@ import fs from 'node:fs/promises';
 import { parse as parseYaml } from 'yaml';
 import '@utcp/http'; // side effect: register the 'http' call-template type (http + inline sub-manuals)
 import '@utcp/mcp'; // side effect: register the 'mcp' call-template type (mcp `.tool` sources)
-import '../google-service-account/index.js'; // side effect: register the 'google_service_account' auth type
 // side effect: register the 'cli' call-template type for PARSING ONLY — the
 // executor is removed again, so this process cannot dispatch a shell command.
 import { containsCliCallTemplate } from './utcp-cli-parse-only.js';
@@ -17,6 +16,9 @@ import {
   DefaultVariableSubstitutor,
   type CallTemplate,
 } from '@utcp/sdk';
+// Also a side effect: loading the package registers the 'google_service_account'
+// auth type, so a `.tool` naming it validates here.
+import { findUnservedGoogleServiceAccountAuth } from '@bevel-software/platform-mcp-core';
 import { descriptorsFromMcpJson } from './mcp-json-discovery.js';
 import type { PluginSource } from '../plugins/discovery/plugin-source.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
@@ -1195,6 +1197,19 @@ export function normalizeToolManual(
       );
     }
     descriptor.remote = false;
+  }
+
+  // A Google service-account `auth` block works on one thing: an inline tool's
+  // `http` call template. Anywhere else it validates and is then sent as no
+  // credentials at all, so the tool would save cleanly and call Google
+  // unauthenticated, with Google's 401 the only hint. Refused here instead,
+  // naming where the block was found.
+  const unserved = findUnservedGoogleServiceAccountAuth(obj);
+  if (unserved) {
+    throw new Error(
+      `\`auth_type: google_service_account\` is on ${unserved === 'no call template' ? 'something that is not a call template' : `a \`${unserved}\` call template`}, ` +
+        'where no token would be sent. It works only on an inline tool whose `tool_call_template` has `call_template_type: http`.',
+    );
   }
 
   if (type === 'inline') {

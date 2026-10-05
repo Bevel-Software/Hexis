@@ -1,14 +1,16 @@
 import { createVerify, generateKeyPairSync } from 'node:crypto';
-import type { Server as HttpServer } from 'node:http';
+import { createServer, type Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import express from 'express';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { CommunicationProtocol, UtcpClient } from '@utcp/sdk';
+import { CommunicationProtocol, UtcpClient, UtcpClientConfigSerializer } from '@utcp/sdk';
 import { HttpCallTemplateSerializer } from '@utcp/http';
+// The package's own entry point: what the platform and the local server load.
 import {
   GOOGLE_TOKEN_URL,
+  GoogleAuthHttpProtocol,
   GoogleServiceAccountTokenSource,
   ServiceAccountAuthError,
+  findUnservedGoogleServiceAccountAuth,
   installGoogleServiceAccountAuth,
   type GoogleServiceAccountAuth,
   type IServiceAccountTokenSource,
@@ -258,8 +260,60 @@ describe('the google_service_account auth type', () => {
   });
 });
 
+describe('where the auth type may sit', () => {
+  const authBlock = { auth_type: 'google_service_account', credentials: '${K}', scopes: 'a' };
+  const inlineTool = (template: Record<string, unknown>) => ({
+    type: 'inline',
+    tools: [{ name: 't', tool_call_template: template }],
+  });
+
+  it('is served on an http call template, however the type is written', () => {
+    expect(findUnservedGoogleServiceAccountAuth(inlineTool({ call_template_type: 'http', url: 'https://x', auth: authBlock }))).toBeNull();
+    expect(findUnservedGoogleServiceAccountAuth(inlineTool({ call_template_type: ' HTTP ', url: 'https://x', auth: authBlock }))).toBeNull();
+  });
+
+  it.each(['sse', 'streamable_http', 'mcp'])('names a %s call template, whose protocol would send no token', (type) => {
+    expect(findUnservedGoogleServiceAccountAuth(inlineTool({ call_template_type: type, url: 'https://x', auth: authBlock }))).toBe(type);
+  });
+
+  it('names a block that is on no call template at all', () => {
+    expect(findUnservedGoogleServiceAccountAuth({ type: 'http', url: 'https://x', auth: authBlock })).toBe('no call template');
+  });
+
+  it('finds one misplaced block among served ones, at any depth', () => {
+    const doc = {
+      type: 'inline',
+      tools: [
+        { name: 'ok', tool_call_template: { call_template_type: 'http', url: 'https://x', auth: authBlock } },
+        { name: 'nested', tool_call_template: { call_template_type: 'http', url: 'https://x', inner: [{ call_template_type: 'sse', auth: authBlock }] } },
+      ],
+    };
+    expect(findUnservedGoogleServiceAccountAuth(doc)).toBe('sse');
+  });
+
+  it('leaves every other auth type, and a document with none, alone', () => {
+    expect(findUnservedGoogleServiceAccountAuth(inlineTool({ call_template_type: 'sse', auth: { auth_type: 'api_key', api_key: '${K}' } }))).toBeNull();
+    expect(findUnservedGoogleServiceAccountAuth(null)).toBeNull();
+    expect(findUnservedGoogleServiceAccountAuth('google_service_account')).toBeNull();
+  });
+
+  it('terminates on a document that contains itself', () => {
+    const cyclic: Record<string, unknown> = { call_template_type: 'sse', auth: authBlock };
+    cyclic.self = cyclic;
+    expect(findUnservedGoogleServiceAccountAuth(cyclic)).toBe('sse');
+    const benign: Record<string, unknown> = { call_template_type: 'http', auth: authBlock };
+    benign.self = benign;
+    expect(findUnservedGoogleServiceAccountAuth(benign)).toBeNull();
+  });
+});
+
+describe('loading the package', () => {
+  it('leaves the service-account-aware protocol in place of the stock http one', () => {
+    expect(CommunicationProtocol.communicationProtocols['http']).toBeInstanceOf(GoogleAuthHttpProtocol);
+  });
+});
+
 describe('a tool call through the service-account-aware http protocol', () => {
-  const stockHttp = CommunicationProtocol.communicationProtocols['http'];
   const seen: GoogleServiceAccountAuth[] = [];
   const tokens: IServiceAccountTokenSource = {
     accessToken: async (a) => {
@@ -271,49 +325,52 @@ describe('a tool call through the service-account-aware http protocol', () => {
   let base: string;
 
   beforeAll(async () => {
-    const app = express();
-    app.get('/manual', (_req, res) => {
-      res.json({
-        utcp_version: '1.1.0',
-        manual_version: '1.0.0',
-        tools: [
-          {
-            name: 'whoami',
-            description: 'Echo the Authorization header the API received.',
-            inputs: { type: 'object', properties: {} },
-            outputs: { type: 'object', properties: {} },
-            tool_call_template: {
-              call_template_type: 'http',
-              http_method: 'GET',
-              url: `${base}/echo`,
-              auth: { auth_type: 'google_service_account', credentials: '${SA_KEY}', scopes: 'scope-a' },
-            },
+    const manual = () => ({
+      utcp_version: '1.1.0',
+      manual_version: '1.0.0',
+      tools: [
+        {
+          name: 'whoami',
+          description: 'Echo the Authorization header the API received.',
+          inputs: { type: 'object', properties: {} },
+          outputs: { type: 'object', properties: {} },
+          tool_call_template: {
+            call_template_type: 'http',
+            http_method: 'GET',
+            url: `${base}/echo`,
+            auth: { auth_type: 'google_service_account', credentials: '${SA_KEY}', scopes: 'scope-a' },
           },
-          {
-            name: 'plain',
-            description: 'A call that names no auth.',
-            inputs: { type: 'object', properties: {} },
-            outputs: { type: 'object', properties: {} },
-            tool_call_template: { call_template_type: 'http', http_method: 'GET', url: `${base}/echo` },
-          },
-        ],
-      });
+        },
+        {
+          name: 'plain',
+          description: 'A call that names no auth.',
+          inputs: { type: 'object', properties: {} },
+          outputs: { type: 'object', properties: {} },
+          tool_call_template: { call_template_type: 'http', http_method: 'GET', url: `${base}/echo` },
+        },
+      ],
     });
-    app.get('/echo', (req, res) => res.json({ authorization: req.headers.authorization ?? null }));
-    server = await new Promise<HttpServer>((resolve) => {
-      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    server = createServer((req, res) => {
+      const body = req.url === '/manual' ? manual() : { authorization: req.headers.authorization ?? null };
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
     });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    // Answer for Google: the protocol the package installed, with these tokens.
     installGoogleServiceAccountAuth(tokens);
   });
 
   afterAll(async () => {
-    CommunicationProtocol.communicationProtocols['http'] = stockHttp!;
+    // Back to what loading the package left: the real token source.
+    installGoogleServiceAccountAuth();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
   it('sends the minted token as a bearer header, with the key filled in from the variables', async () => {
-    const client = await UtcpClient.create(process.cwd(), { variables: { gads_SA_KEY: 'the-stored-key' } });
+    const client = await UtcpClient.create(
+      process.cwd(),
+      new UtcpClientConfigSerializer().validateDict({ variables: { gads_SA_KEY: 'the-stored-key' } }),
+    );
     const registered = await client.registerManual({
       name: 'gads',
       call_template_type: 'http',

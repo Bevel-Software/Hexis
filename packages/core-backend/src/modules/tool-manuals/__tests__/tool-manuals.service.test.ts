@@ -227,6 +227,52 @@ describe('ToolManualService', () => {
     expect(summary.variables?.find((v) => v.name === 'GOOGLE_SA_KEY')?.scope).toBe('admin');
   });
 
+  test('refuses a Google service-account auth block where no token would be sent, and says where', async () => {
+    // Only the `http` protocol mints the token. On any other template the
+    // block validates and is then sent as no credentials at all, so the file
+    // is refused when it is read rather than left to fail at Google.
+    const serviceAccount = {
+      auth_type: 'google_service_account',
+      credentials: '${GOOGLE_SA_KEY}',
+      scopes: 'https://www.googleapis.com/auth/adwords',
+    };
+    const inlineOver = (callTemplateType: string) =>
+      JSON.stringify({
+        type: 'inline',
+        tools: [
+          {
+            name: 'events',
+            description: 'Stream events.',
+            inputs: { type: 'object', properties: {} },
+            outputs: { type: 'object', properties: {} },
+            tool_call_template: { call_template_type: callTemplateType, url: 'https://api.example.com/events', auth: serviceAccount },
+          },
+        ],
+      });
+    const plugins = join(root, wsId, KB_DIR, 'Plugins');
+    await writeFile(join(plugins, 'over_sse.tool'), inlineOver('sse'));
+    await writeFile(join(plugins, 'over_streamable.tool'), inlineOver('streamable_http'));
+    // Not on a call template at all: a discovered manual takes only a url and headers.
+    await writeFile(
+      join(plugins, 'discovered.tool'),
+      JSON.stringify({ type: 'http', url: 'https://api.example.com/utcp', auth: serviceAccount }),
+    );
+    await writeFile(join(plugins, 'over_http.tool'), inlineOver('http'));
+
+    const catalog = await svc().listAccessibleCatalog('user@x.eu');
+
+    const reasonFor = (file: string) => catalog.invalid.find((i) => i.path === `Plugins/${file}`)?.reason ?? '';
+    expect(reasonFor('over_sse.tool')).toContain('a `sse` call template');
+    expect(reasonFor('over_streamable.tool')).toContain('a `streamable_http` call template');
+    expect(reasonFor('discovered.tool')).toContain('not a call template');
+    for (const file of ['over_sse.tool', 'over_streamable.tool', 'discovered.tool']) {
+      expect(reasonFor(file)).toContain('`call_template_type: http`');
+    }
+    // The one place it works is left alone.
+    expect(reasonFor('over_http.tool')).toBe('');
+    expect(catalog.tools.map((m) => m.name)).toContain('overhttp');
+  });
+
   test('manual names are alphanumeric (no underscores) for variable namespacing', async () => {
     root = await mkdtemp(join(tmpdir(), 'tools2-'));
     const tools = join(root, wsId, KB_DIR, 'Plugins');

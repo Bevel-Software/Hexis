@@ -1,6 +1,7 @@
 import { CommunicationProtocol, type CallTemplate, type IUtcpClient } from '@utcp/sdk';
 import { HttpCommunicationProtocol, type HttpCallTemplate } from '@utcp/http';
 import { isGoogleServiceAccountAuth } from './google-service-account.auth.js';
+import { GoogleServiceAccountTokenSource } from './google-service-account.token-source.js';
 import type { IServiceAccountTokenSource } from './service-account-token.contract.js';
 
 /**
@@ -42,10 +43,20 @@ export class GoogleAuthHttpProtocol extends HttpCommunicationProtocol {
 }
 
 /**
- * Put the service-account-aware protocol in place of the stock `http` one.
- * UTCP's protocol registry is process-wide and each client copies it when it
- * is built, so this runs in the composition root before any client exists.
+ * Put the service-account-aware protocol in place of the stock `http` one,
+ * minting tokens from `tokens`. Exported so a suite can answer for Google;
+ * a process never needs to call it, since loading this module already has.
  */
-export function installGoogleServiceAccountAuth(tokens: IServiceAccountTokenSource): void {
+export function installGoogleServiceAccountAuth(
+  tokens: IServiceAccountTokenSource = new GoogleServiceAccountTokenSource(),
+): void {
   CommunicationProtocol.communicationProtocols['http'] = new GoogleAuthHttpProtocol(tokens);
 }
+
+// Installed on module load, the way `@utcp/http` installs the protocol this
+// one replaces: once per process, before any client exists (a client copies
+// the registry when it is built). The import of `@utcp/http` above has already
+// run its own registration by the time this line does, whatever order the
+// importing module lists the two in. One token cache then serves the process;
+// its entries are keyed by the key itself, so knowledge bases never share one.
+installGoogleServiceAccountAuth();
