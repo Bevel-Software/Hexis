@@ -306,25 +306,31 @@ const BACKFILL_BATCH_ROWS = 500;
  * mistyped `SECRETS_ENC_KEY` would otherwise go unnoticed here — sealed rows
  * are exactly the ones the scan skips — and surface only as every login
  * failing and every lookup by email missing, because the blind indexes would
- * be computed under the new key. One sealed value per COLUMN: all rows of a
- * deployment are sealed under one key, so any one of them answers for the
- * rest. Refusing the start is the loud failure; re-keying a database is a
- * deliberate operation, not a boot.
+ * be computed under the new key. One sealed value per table is enough: all
+ * rows of a deployment are sealed under one key, so any one of them answers
+ * for the rest. Refusing the start is the loud failure; re-keying a database
+ * is a deliberate operation, not a boot.
  *
- * Every sealed column is asked, not one chosen to stand for its table. A
- * column may hold nothing in any row (an optional address nobody gave, an
- * error text that never occurred), and a check that looked only there would
- * find no sample, say nothing, and let a wrong key through to a table whose
- * other columns are full of values it cannot open.
+ * The sample is a sealed value from WHICHEVER column has one, not from a
+ * column chosen to stand for its table. A column may hold nothing in any
+ * row (an optional address nobody gave, an error text that never occurred),
+ * and a check that looked only there would find no sample, say nothing, and
+ * let a wrong key through to a table whose other columns are full of values
+ * it cannot open.
  */
 async function assertKeyOpensSealedRows(tx: Executor, keys: PiiKeys, spec: Pick<PiiBackfillSpec, 'tables' | 'keyName'>): Promise<void> {
   for (const t of spec.tables) {
-    // One statement per table: a sealed value of each column, where it has one.
-    const samples = t.encrypted.map(
-      (col) =>
-        sql`(SELECT convert_to(${ident(col)}, 'UTF8') FROM ${ident(t.table)} WHERE ${ident(col)} ~ ${PII_SEALED_SHAPE_SQL_REGEX} LIMIT 1) AS ${ident(col)}`,
+    // ONE pass over the table, which ends at the first row that has a sealed
+    // value in ANY of its sealed columns: on a sealed database, the first
+    // row. Whatever that row holds sealed is tried. (A value in it that is
+    // not sealed opens as itself, so it is no evidence either way.)
+    const sealedSomewhere = sql.join(
+      t.encrypted.map((col) => sql`${ident(col)} ~ ${PII_SEALED_SHAPE_SQL_REGEX}`),
+      sql` OR `,
     );
-    const sample = await tx.execute(sql`SELECT ${sql.join(samples, sql`, `)}`);
+    const sample = await tx.execute(
+      sql`SELECT ${sql.join(t.encrypted.map(asStored), sql`, `)} FROM ${ident(t.table)} WHERE ${sealedSomewhere} LIMIT 1`,
+    );
     const row = (sample.rows[0] ?? {}) as Record<string, unknown>;
     for (const col of t.encrypted) {
       const value = storedText(row[col]);
