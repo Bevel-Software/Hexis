@@ -4,10 +4,10 @@ import pg from 'pg';
 import { eq, inArray, sql } from 'drizzle-orm';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { closeDb, createDb, type Database } from '../connection.js';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { runCoreMigrations, runEnterpriseMigrations, runPiiBackfill, type PiiBackfillSpec } from '../migrate.js';
+import { runCoreMigrations, runEnterpriseMigrations, runPiiBackfill, type PiiBackfillSpec, type PiiBlindIndex } from '../migrate.js';
 import { prFileApprovals, users } from '../core-schema.js';
 import { coreMigrationsDir } from '../../../assets.js';
 import { PII_CIPHERTEXT_PREFIX, derivePiiKeys, isEncryptedBlob } from '../../../shared/column-crypto.js';
@@ -48,6 +48,8 @@ type Query = (text: string) => Promise<Row[]>;
 const created: string[] = [];
 const open: Database[] = [];
 const plain: pg.Pool[] = [];
+/** Temporary folders a test made (an overlay's migration history); removed in `afterAll`. */
+const folders: string[] = [];
 
 async function withAdmin<T>(fn: (admin: pg.Client) => Promise<T>): Promise<T> {
   const admin = new pg.Client({ connectionString: ADMIN_URL });
@@ -158,6 +160,7 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
     await withAdmin(async (admin) => {
       for (const name of created) await admin.query(`drop database if exists ${name} with (force)`);
     });
+    for (const folder of folders) rmSync(folder, { recursive: true, force: true });
   }, TIMEOUT);
 
   describe('what a handle stores', () => {
@@ -593,6 +596,7 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
     /** The overlay's migration history: the table, its index columns nullable as a SQL history must add them. */
     function overlayHistory(): string {
       const dir = mkdtempSync(path.join(tmpdir(), 'overlay-migrations-'));
+      folders.push(dir);
       mkdirSync(path.join(dir, 'meta'));
       writeFileSync(
         path.join(dir, 'meta', '_journal.json'),
@@ -668,6 +672,58 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
         const rekeyed = handle(url, { key: randomBytes(32).toString('base64') });
         await expect(runEnterpriseMigrations(rekeyed, history, { piiBackfill: NOTES })).rejects.toThrow(/OVERLAY_KEY does not open/);
         expect(JSON.stringify(await notes(q))).toBe(before);
+      },
+      TIMEOUT,
+    );
+
+    it(
+      'are refused under a wrong key even where the first column of a table holds nothing sealed',
+      async () => {
+        const { url, db, q, history } = await overlayBeforeTheBackfill();
+        await runEnterpriseMigrations(db, history, { piiBackfill: NOTES });
+        // Nobody has a reviewer: that column has no sealed value to try a key
+        // on, and it is the column this spec lists first. The authors' do.
+        await q(`update team_notes set reviewer_email = null, reviewer_email_bidx = null`);
+        const table = NOTES.tables[0]!;
+        const reviewerFirst: PiiBackfillSpec = {
+          ...NOTES,
+          tables: [{ ...table, encrypted: ['reviewer_email', 'author_email', 'body'], bidx: [...(table.bidx as PiiBlindIndex[])].reverse() }],
+        };
+        const before = JSON.stringify(await notes(q));
+
+        const rekeyed = handle(url, { key: randomBytes(32).toString('base64') });
+        await expect(runPiiBackfill(rekeyed, reviewerFirst)).rejects.toThrow(/team_notes\.author_email is sealed with a key the configured OVERLAY_KEY does not open/);
+        expect(JSON.stringify(await notes(q))).toBe(before);
+        // The right key is still let through.
+        await runPiiBackfill(db, reviewerFirst);
+      },
+      TIMEOUT,
+    );
+
+    it(
+      'keep an index exactly where its source is, and equal where the sources are',
+      async () => {
+        const { db, q, history } = await overlayBeforeTheBackfill();
+        // An empty string is a value: two rows that hold it hold the same one.
+        await q(`insert into team_notes (author_email, reviewer_email) values ('di@example.com', ''), ('ed@example.com', '')`);
+        await runEnterpriseMigrations(db, history, { piiBackfill: NOTES });
+
+        const rows = await notes(q);
+        // A NULL source has no index; an empty one has the index the handle
+        // itself writes for an empty value, so a row is found by it whoever
+        // wrote it; and it stays the empty string, which seals to itself.
+        expect(rows.map((r) => r.reviewer_email_bidx)).toEqual([keys.index('bo@example.com'), null, keys.index(''), keys.index('')]);
+        expect(rows.slice(2).map((r) => r.reviewer_email)).toEqual(['', '']);
+
+        // A source emptied to NULL behind the application's back leaves its
+        // index answering for an address the row no longer holds. The next
+        // start takes it away, and touches nothing else.
+        await q(`update team_notes set reviewer_email = null where id = 1`);
+        const untouched = JSON.stringify((await notes(q)).slice(1));
+        await runEnterpriseMigrations(db, history, { piiBackfill: NOTES });
+        const after = await notes(q);
+        expect(after[0]).toMatchObject({ reviewer_email: null, reviewer_email_bidx: null, author_email_bidx: keys.index('ada@example.com') });
+        expect(JSON.stringify(after.slice(1))).toBe(untouched);
       },
       TIMEOUT,
     );

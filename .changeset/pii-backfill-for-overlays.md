@@ -12,6 +12,6 @@ A deployment built on this package declares `encryptedText` and `blindIndexText`
 
 The rules are core's own and are not the spec's to choose: one transaction; a first run that trusts no shape; a later run that first checks the key opens what is sealed, and refuses naming the key as the spec calls it (`keyName`); columns read as stored; writes that pin what they read. A spec that would leave its marker nullable is refused and nothing is committed, because the next start would then seal the sealed rows again.
 
-Two things a table of core's never needed: a table may have several blind indexes (`bidx` takes one or a list), and an index whose source is NULL stays NULL instead of becoming the index of the empty string.
+Three things a table of core's never needed. A table may have several blind indexes (`bidx` takes one or a list). An index is there exactly where its source is: a NULL source has no index, where it used to get the index of the empty string, and an index left beside a source that was emptied to NULL is taken away. An empty string is a value and keeps the index the handle itself writes for one. And the key is tried on a sealed value of every sealed column, not of one column per table, so a column that holds nothing cannot let a wrong key through.
 
 Core's own backfill runs through the same function; nothing changes for a deployment that has no sealed columns of its own.

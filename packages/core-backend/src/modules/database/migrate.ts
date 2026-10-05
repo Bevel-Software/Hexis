@@ -306,23 +306,35 @@ const BACKFILL_BATCH_ROWS = 500;
  * mistyped `SECRETS_ENC_KEY` would otherwise go unnoticed here — sealed rows
  * are exactly the ones the scan skips — and surface only as every login
  * failing and every lookup by email missing, because the blind indexes would
- * be computed under the new key. One sealed value per table is enough: all
- * rows of a deployment are sealed under one key. Refusing the start is the
- * loud failure; re-keying a database is a deliberate operation, not a boot.
+ * be computed under the new key. One sealed value per COLUMN: all rows of a
+ * deployment are sealed under one key, so any one of them answers for the
+ * rest. Refusing the start is the loud failure; re-keying a database is a
+ * deliberate operation, not a boot.
+ *
+ * Every sealed column is asked, not one chosen to stand for its table. A
+ * column may hold nothing in any row (an optional address nobody gave, an
+ * error text that never occurred), and a check that looked only there would
+ * find no sample, say nothing, and let a wrong key through to a table whose
+ * other columns are full of values it cannot open.
  */
 async function assertKeyOpensSealedRows(tx: Executor, keys: PiiKeys, spec: Pick<PiiBackfillSpec, 'tables' | 'keyName'>): Promise<void> {
   for (const t of spec.tables) {
-    const col = indexesOf(t)[0]?.source ?? t.encrypted[0]!;
-    const sample = await tx.execute(
-      sql`SELECT ${asStored(col)} FROM ${ident(t.table)} WHERE ${ident(col)} ~ ${PII_SEALED_SHAPE_SQL_REGEX} LIMIT 1`,
+    // One statement per table: a sealed value of each column, where it has one.
+    const samples = t.encrypted.map(
+      (col) =>
+        sql`(SELECT convert_to(${ident(col)}, 'UTF8') FROM ${ident(t.table)} WHERE ${ident(col)} ~ ${PII_SEALED_SHAPE_SQL_REGEX} LIMIT 1) AS ${ident(col)}`,
     );
-    const value = storedText((sample.rows[0] as Record<string, unknown> | undefined)?.[col]);
-    if (typeof value === 'string' && !keys.open(value).ok) {
-      throw new Error(
-        `PII encryption: ${t.table}.${col} is sealed with a key the configured ${keyNameOf(spec)} ` +
-          'does not open — refusing to start. ' +
-          'Restore the key that sealed it; changing the key is a re-keying of the database, not a configuration change.',
-      );
+    const sample = await tx.execute(sql`SELECT ${sql.join(samples, sql`, `)}`);
+    const row = (sample.rows[0] ?? {}) as Record<string, unknown>;
+    for (const col of t.encrypted) {
+      const value = storedText(row[col]);
+      if (typeof value === 'string' && !keys.open(value).ok) {
+        throw new Error(
+          `PII encryption: ${t.table}.${col} is sealed with a key the configured ${keyNameOf(spec)} ` +
+            'does not open — refusing to start. ' +
+            'Restore the key that sealed it; changing the key is a re-keying of the database, not a configuration change.',
+        );
+      }
     }
   }
 }
@@ -346,12 +358,15 @@ async function backfillTable(
   ];
   // Only rows with work left: the ciphertext prefix makes "unsealed" a plain
   // SQL predicate, so a fully-sealed table costs one empty-result query.
-  // An index is owed only where its source holds something: a column that
-  // may be NULL (an optional address) has no index to make for those rows,
-  // and asking for them would return them on every start for nothing.
+  // AN INDEX IS THERE EXACTLY WHERE ITS SOURCE IS. A row is owed work when
+  // the two disagree, either way: a source with no index beside it, and an
+  // index left beside a source that has since been emptied to NULL (which
+  // would go on answering for an address the row no longer holds). A source
+  // that is NULL with no index is how an optional address looks, and is not
+  // asked for: it would come back on every start for nothing.
   const pending = [
     ...t.encrypted.map((col) => needsSealing(col, trustShape)),
-    ...indexes.map((index) => sql`(${ident(index.column)} IS NULL AND ${ident(index.source)} IS NOT NULL)`),
+    ...indexes.map((index) => sql`((${ident(index.column)} IS NULL) <> (${ident(index.source)} IS NULL))`),
   ];
   const keyTuple = sql`(${sql.join(t.key.map((k) => sql`${ident(k)}::text`), sql`, `)})`;
   // A blob, as far as this pass may believe one. On a first backfill nothing
@@ -397,10 +412,24 @@ async function backfillTable(
         // the key cannot open.
         const source = row[index.source];
         const stored = row[index.column];
-        // Nothing to index where the source holds nothing: the index of an
-        // absent address is no index, not the index of the empty string,
-        // which every such row would then share.
-        if (typeof source !== 'string') continue;
+        // NULL is "no value", and has no index: not the index of the empty
+        // string, which every row without an address would then share where
+        // a plain unique index let any number of NULLs stand. An index found
+        // beside a NULL source is taken away, pinned to what was read like
+        // every other write here.
+        //
+        // The EMPTY STRING is a value, and keeps its index: it is what the
+        // handle writes for one (`blindIndexText`), so a row is found by it
+        // whether the application wrote it or this did, and two empty
+        // strings are equal under a unique index, as they were in clear.
+        if (typeof source !== 'string') {
+          if (stored != null) {
+            sets.push(sql`${ident(index.column)} = NULL`);
+            where.push(sql`${ident(index.column)} = ${stored}`);
+            where.push(sql`${ident(index.source)} IS NULL`);
+          }
+          continue;
+        }
         const text = source;
         const sealingSource = text !== '' && !sealedAlready(text);
         if (sealingSource || stored == null) {
