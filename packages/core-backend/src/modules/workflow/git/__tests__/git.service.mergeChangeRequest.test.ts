@@ -210,6 +210,39 @@ describe('GitService.mergeChangeRequest', () => {
     expect((await gitOut(verify, ['rev-parse', 'HEAD'])).trim()).toBe(pushed);
   });
 
+  // The same ownership question, asked WITHOUT a merge — the form the approval
+  // gate needs, because the gate refuses the retry before any merge runs. It
+  // must hold in the two conditions that are true by then: the source branch is
+  // retired, and the clone asking is not the clone that pushed.
+  it('finds the merge commit a request owns on the target from another clone, with no source branch left', async () => {
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+      await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+    });
+    // Cloned BEFORE the merge, so it can only know the commit by fetching.
+    const staleWsId = 'stale';
+    const staleRepo = path.join(root, staleWsId, 'knowledge-base');
+    await fs.mkdir(path.join(root, staleWsId), { recursive: true });
+    await runGit(root, ['clone', '-b', BASE, upstream, staleRepo]);
+
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
+    const merged = await git.mergeChangeRequest(
+      baseWsId, 'alice/add', BASE,
+      { subject: mergeCommitSubject('Add feature', 7), body: 'Merged via Bevel' }, USER,
+      { appliedChangeNumber: 7 },
+    );
+    expect(merged.kind).toBe('merged');
+    if (merged.kind !== 'merged') return;
+
+    // Retired, as applying a change request retires it.
+    await runGit(root, ['-C', upstream, 'branch', '-D', 'alice/add']);
+
+    const stale = new GitService(stubWorkspaceService(staleWsId, staleRepo), new WorkflowHooks(), testKbContext());
+    expect(await stale.appliedMergeCommitOnTarget(staleWsId, BASE, 7)).toBe(merged.mergeCommit);
+    // A number nothing on the target was merged under owns nothing.
+    expect(await stale.appliedMergeCommitOnTarget(staleWsId, BASE, 8)).toBeNull();
+  });
+
   // The merge commit a later attempt recovers is matched on the number alone, so
   // a request that landed a DIFFERENT change under its own number is not offered
   // another request's commit — and `git log --grep` finding the number in a

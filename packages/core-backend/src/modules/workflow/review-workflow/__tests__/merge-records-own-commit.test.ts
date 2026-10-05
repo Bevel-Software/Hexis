@@ -164,3 +164,80 @@ describe('mergePr — which commit the row records', () => {
     expect(opts.appliedChangeNumber).toBe(CR_ROW.number);
   });
 });
+
+/**
+ * The retry the row-recording fix is FOR, reached the way production reaches it.
+ *
+ * When an attempt pushes the merge commit and then fails to write the row, the
+ * request stays open with its change already on the target — so it differs from
+ * the target by nothing, its file list is empty, and the approval gate refuses
+ * the next attempt ("no file changes to approve") before any merge runs. The
+ * recovery inside `mergeChangeRequest` is therefore never reached from the app,
+ * and the request stays fileless and un-appliable for good. The gate has to ask
+ * the ownership question itself.
+ */
+function makeStuckService(own: string | null, rowState = 'open') {
+  const captured: Captured[] = [];
+  const mergeChangeRequest = vi.fn<(...args: unknown[]) => Promise<AppliedMergeResult>>(async () => ({
+    kind: 'merged',
+    sha: 'should-not-be-reached',
+    mergeCommit: null,
+  }));
+  const appliedMergeCommitOnTarget = vi.fn(async () => own);
+  const workspace = {
+    getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-base' })),
+  } as unknown as WorkspaceService;
+  const svc = new ReviewWorkflowService(
+    makeDb(captured),
+    {} as unknown as IAccessControl,
+    workspace,
+    { mergeChangeRequest, appliedMergeCommitOnTarget } as unknown as GitService,
+  );
+  // NO approvals: an already-applied request has no file to approve, which is
+  // exactly what makes it indistinguishable from an empty one at the gate.
+  const merge = () =>
+    svc.mergePr(CR_ROW.number, USER, HEAD_SHA, [], rowState as 'open', CR_ROW.title, BASE, 'ws-1');
+  const crUpdate = () => captured.find((c) => c.table === changeRequests)?.values;
+  return { merge, crUpdate, mergeChangeRequest, appliedMergeCommitOnTarget };
+}
+
+describe('mergePr — a request whose merge commit was pushed but never recorded', () => {
+  it('records that commit instead of refusing, and merges nothing', async () => {
+    const { merge, crUpdate, mergeChangeRequest, appliedMergeCommitOnTarget } =
+      makeStuckService('the-commit-the-first-attempt-pushed');
+
+    const result = await merge();
+
+    expect(crUpdate()).toMatchObject({
+      state: 'merged',
+      mergedSha: 'the-commit-the-first-attempt-pushed',
+    });
+    expect(result.sha).toBe('the-commit-the-first-attempt-pushed');
+    // Asked of the TARGET branch's own workspace, for this request's number.
+    expect(appliedMergeCommitOnTarget).toHaveBeenCalledWith('ws-base', BASE, CR_ROW.number);
+    // Nothing was merged, committed or pushed: the merge already happened.
+    expect(mergeChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a request that owns no merge commit', async () => {
+    // The genuinely empty request. The hard block is the right answer for it,
+    // and the probe is what tells the two apart.
+    const { merge, crUpdate, mergeChangeRequest } = makeStuckService(null);
+
+    await expect(merge()).rejects.toThrow('no file changes to approve');
+
+    expect(crUpdate()).toBeUndefined();
+    expect(mergeChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it('does not go looking when the hard block is the request\'s state', async () => {
+    // A closed or merged request earns its own refusal, and must keep it: the
+    // recovery is only ever about the empty-file-set block.
+    const { merge, appliedMergeCommitOnTarget, crUpdate } = makeStuckService('a-commit', 'closed');
+
+    await expect(merge()).rejects.toThrow('This pull request is closed.');
+
+    expect(appliedMergeCommitOnTarget).not.toHaveBeenCalled();
+    expect(crUpdate()).toBeUndefined();
+  });
+});

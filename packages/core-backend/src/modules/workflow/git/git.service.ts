@@ -1641,6 +1641,39 @@ export class GitService implements IGitService {
   }
 
   /**
+   * The merge commit change request `number` OWNS on `targetBranch`, or null when
+   * the target carries none. Asks the published target only — no source branch,
+   * no working tree, nothing merged, nothing written.
+   *
+   * This is the same question {@link mergeChangeRequest} answers for itself when
+   * it finds nothing to merge, asked WITHOUT attempting a merge at all. The
+   * merge path cannot be the only way to ask it: a request whose merge commit
+   * was pushed by an attempt that then failed to record the row has an empty
+   * diff against the target, so the approval gate refuses the retry ("no file
+   * changes to approve") BEFORE any merge runs, and the recovery inside the
+   * merge never gets its turn (cubic P2 on #347). The gate asks here instead.
+   *
+   * The target ref is refreshed first, because the attempt that pushed the
+   * commit may have run in another process or another clone. A fetch that fails
+   * is not fatal: the walk then runs on what this clone already has and, finding
+   * nothing, answers null — which leaves the caller refusing, exactly as it did
+   * before this method existed.
+   */
+  async appliedMergeCommitOnTarget(
+    baseWorkspaceId: string,
+    targetBranch: string,
+    number: number,
+  ): Promise<string | null> {
+    assertValidBranchName(targetBranch);
+    const cwd = await this.repoDir(baseWorkspaceId);
+    await this.git(cwd, [
+      'fetch', '--no-write-fetch-head', 'origin',
+      `+refs/heads/${targetBranch}:refs/remotes/origin/${targetBranch}`,
+    ]).catch(() => undefined);
+    return this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, number);
+  }
+
+  /**
    * The newest merge commit reachable from `targetRef` that is change request
    * `number`'s OWN, or null if the target carries none.
    *
@@ -1656,8 +1689,10 @@ export class GitService implements IGitService {
    * commit, whose subject names this number. Deciding it here with the same
    * predicate means the writer records only what the reader will accept. The
    * walk is bounded by `--grep` (the number, as a fixed string) and capped,
-   * since the subject check still has to confirm a body-only match; it runs on
-   * the empty-merge path only, never on an ordinary merge.
+   * since the subject check still has to confirm a body-only match. Never on an
+   * ordinary merge: the two callers are the empty-merge case here and
+   * {@link appliedMergeCommitOnTarget}, which the approval gate asks before it
+   * refuses a retry that has nothing left to merge.
    */
   private async ownMergeCommitOn(
     cwd: string,

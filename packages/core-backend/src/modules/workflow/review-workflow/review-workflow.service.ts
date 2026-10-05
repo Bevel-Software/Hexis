@@ -45,6 +45,14 @@ import {
 // trail — squashing would collapse them into one. A merge commit preserves every
 // commit on the branch.
 const MERGE_METHOD = 'merge' as const;
+
+/**
+ * The hard block an empty file set earns — named, because two places have to
+ * agree on it: the gate that raises it, and `finalizeAlreadyApplied`, which
+ * recognises it as the one refusal that can mean "already applied" rather than
+ * "nothing to apply".
+ */
+const NOTHING_TO_APPROVE = 'This pull request has no file changes to approve.';
 const EVERYONE_CANONICAL = 'everyone';
 
 /**
@@ -240,7 +248,7 @@ function evaluateGateParts(input: MergeGateInput): { hardReasons: string[]; warn
   // mergeable either — a PR that touches no files shouldn't be opened in
   // the first place, let alone merged.
   if (input.approvals.length === 0 && input.state === 'open') {
-    reasons.push('This pull request has no file changes to approve.');
+    reasons.push(NOTHING_TO_APPROVE);
   }
 
   // Ownership enforcement binds every file with an eligible approver,
@@ -672,7 +680,17 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     // opted into bypass; with bypass, the bypassed warnings get inlined in the
     // merge commit body so git history captures the decision.
     const gate = evaluateGateParts({ prNumber, state, approvals });
-    if (gate.hardReasons.length > 0) throw new MergeBlockedError(gate.hardReasons);
+    if (gate.hardReasons.length > 0) {
+      // One of those reasons can mean the opposite of what it says. "No file
+      // changes to approve" is also what an ALREADY APPLIED request looks like:
+      // its change is on the target, so it differs from it by nothing. That is
+      // the state a request is left in when an attempt pushed its merge commit
+      // and then failed to record the row — and refusing the retry here is what
+      // kept the recovery inside the merge from ever running (cubic P2 on #347).
+      const recovered = await this.finalizeAlreadyApplied(prNumber, user, headSha, gate.hardReasons);
+      if (recovered) return recovered;
+      throw new MergeBlockedError(gate.hardReasons);
+    }
     if (gate.warnings.length > 0 && !opts.bypass) {
       throw new MergeBlockedError(gate.warnings);
     }
@@ -828,6 +846,90 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       sha: mergeResult.sha,
       mergedAt: completedAt.toISOString(),
     };
+  }
+
+  /**
+   * Record a change request that is ALREADY applied — its merge commit is on the
+   * target — and that the gate was about to refuse for having nothing to merge.
+   * Null when the request owns no such commit, which is every other reason an
+   * approval set can be empty.
+   *
+   * The case this exists for: an attempt pushed the merge commit and then failed
+   * to write the row (a transient database fault in between). The request stays
+   * `open` while its change is on the target, so the diff that produces its file
+   * list — and with it every approval the gate reads — is empty. The retry is
+   * then refused BEFORE the merge runs, which is where the recovery inside
+   * `mergeChangeRequest` sits, so the request can never be finalized: it is
+   * fileless, author-only, and un-appliable for good, with the commit holding
+   * its files sitting on the target unreferenced (cubic P2 on #347).
+   *
+   * Nothing is merged, committed or pushed here. The only write is the row that
+   * should have been written by the attempt that pushed, and the merge-log entry
+   * that says this caller finalized it.
+   *
+   * Narrow on purpose:
+   *   • exactly ONE hard reason, and it is the empty-file-set one. A request that
+   *     is already `merged` or `closed` has its own reason and must keep it.
+   *   • the row must still be `open`, read here and re-checked by the CAS below.
+   *   • the commit must be the request's OWN, by the same subject predicate the
+   *     reader verifies with (`mergeCommitSubjectNames`), so this records only
+   *     what `appliedChangeShas` will accept. No branch name a user can choose
+   *     can produce that subject — `assertValidBranchName` forbids both the space
+   *     and the `#` the agent `merge_branch` subject would need.
+   *
+   * Who may trigger it needs no extra check: the app resolves the request's
+   * detail for the caller first and refuses when it answers nothing, and a
+   * request with no readable file list is visible to its author alone. So the
+   * author is the one who can finalize their own stuck request.
+   */
+  private async finalizeAlreadyApplied(
+    prNumber: number,
+    user: AuthUser,
+    headSha: string,
+    hardReasons: string[],
+  ): Promise<MergePrResult | null> {
+    if (hardReasons.length !== 1 || hardReasons[0] !== NOTHING_TO_APPROVE) return null;
+
+    const [cr] = await this.db
+      .select()
+      .from(changeRequests)
+      .where(eq(changeRequests.number, prNumber))
+      .limit(1);
+    if (!cr || cr.state !== 'open' || !cr.targetBranch) return null;
+
+    const baseWorkspace = await this.workspaceService.getOrCreateForBranch(cr.targetBranch);
+    const own = await this.git.appliedMergeCommitOnTarget(baseWorkspace.id, cr.targetBranch, prNumber);
+    if (!own) return null;
+
+    // Same CAS as the merge path: a concurrent finalization wins and we say so
+    // rather than overwriting its terminal state.
+    const completedAt = new Date();
+    const [updated] = await this.db
+      .update(changeRequests)
+      .set({ state: 'merged', mergedSha: own, closedAt: completedAt, updatedAt: completedAt })
+      .where(and(eq(changeRequests.id, cr.id), eq(changeRequests.state, 'open')))
+      .returning({ id: changeRequests.id });
+    if (!updated) throw new MergeBlockedError(['This change request has already been merged.']);
+
+    const triggeredByEmail = canonicalEmail(user.email);
+    await this.db.insert(prMergeLog).values({
+      prNumber,
+      triggeredByEmail,
+      triggeredByEmailBidx: triggeredByEmail,
+      triggeredByName: user.name,
+      headShaAtMerge: headSha,
+      mergeMethod: MERGE_METHOD,
+      succeeded: true,
+      completedAt,
+      // Not an error — the one thing a reader of this row has to know is that no
+      // merge was performed under it, because it had already been performed.
+      error: `Finalized an earlier attempt's merge commit ${own}; nothing was merged by this one.`,
+    });
+    log.warn(
+      `change request #${prNumber} was already merged as ${own} but its row was never updated; recorded it now.`,
+    );
+
+    return { prNumber, sha: own, mergedAt: completedAt.toISOString() };
   }
 
   async cancelPr(
