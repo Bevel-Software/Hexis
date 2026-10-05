@@ -824,12 +824,16 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .where(and(eq(changeRequests.id, cr.id), eq(changeRequests.state, 'open')))
       .returning({ id: changeRequests.id });
     if (!updatedCr) {
-      // A concurrent merge won the CAS between our lifecycle re-check and here.
-      // Our own git merge was a harmless idempotent no-op, but this attempt did
-      // NOT finalize the CR. Finalize this log row with an explanatory error and
-      // a completedAt so it doesn't linger as a phantom `succeeded=false,
-      // error=null` entry that a "failed merges" audit query would misread.
-      const raceError = 'Change request was merged by a concurrent request; this attempt did not finalize it.';
+      // Something else moved the row out of `open` between our lifecycle
+      // re-check and here. Our own git merge was a harmless idempotent no-op,
+      // but this attempt did NOT finalize the CR. Finalize this log row with an
+      // explanatory error and a completedAt so it doesn't linger as a phantom
+      // `succeeded=false, error=null` entry that a "failed merges" audit query
+      // would misread — and say only what the lost CAS proves, which is that the
+      // row was no longer open: a cancel closes it too, and naming a concurrent
+      // MERGE would file that cancellation under the wrong cause (cubic P2 on
+      // #347, raised against the copy of this line in `finalizeAlreadyApplied`).
+      const raceError = 'Change request was no longer open; this attempt did not finalize it.';
       await this.db
         .update(prMergeLog)
         .set({ succeeded: false, completedAt, error: raceError })
@@ -932,12 +936,27 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .where(and(eq(changeRequests.id, cr.id), eq(changeRequests.state, 'open')))
       .returning({ id: changeRequests.id });
     if (!updated) {
-      const raceError = 'Change request was merged by a concurrent request; this attempt did not finalize it.';
+      // The CAS loses to ANY terminal transition, not just a merge: `cancelPr`
+      // closes a request the same way. So the row is re-read and the reason it
+      // actually carries is what goes into the audit line and into the refusal
+      // — a cancellation filed as "a concurrent merge won" sends whoever reads
+      // pr_merge_log after the fact to the wrong cause (cubic P2 on #347).
+      const [current] = await this.db
+        .select({ state: changeRequests.state })
+        .from(changeRequests)
+        .where(eq(changeRequests.id, cr.id))
+        .limit(1);
+      const raceError =
+        `Change request was no longer open (${current?.state ?? 'row missing'}); this attempt did not finalize it.`;
       await this.db
         .update(prMergeLog)
         .set({ succeeded: false, completedAt, error: raceError })
         .where(eq(prMergeLog.id, logRow.id));
-      throw new MergeBlockedError(['This change request has already been merged.']);
+      throw new MergeBlockedError([
+        current?.state === 'merged'
+          ? 'This change request has already been merged.'
+          : 'This change request is closed.',
+      ]);
     }
     await this.db
       .update(prMergeLog)

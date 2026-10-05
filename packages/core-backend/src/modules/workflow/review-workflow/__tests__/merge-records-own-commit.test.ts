@@ -68,13 +68,21 @@ const APPROVED: FileApprovalState = {
 type Captured = { kind: 'insert' | 'update'; table: unknown; values: Record<string, unknown> };
 
 /**
- * The row the service reads is a PARAMETER, not a constant: `mergePr` and
- * `finalizeAlreadyApplied` both re-validate the lifecycle against the row rather
- * than against the caller's `state` argument, and a stub that always answers
- * `open` leaves those guards unreachable — a regression that dropped one would
- * still pass (cubic P3 on #347).
+ * What the row says, and whether the CAS wins, are PARAMETERS, not constants.
+ * `mergePr` and `finalizeAlreadyApplied` both re-validate the lifecycle against
+ * the row rather than against the caller's `state` argument, and a stub that
+ * always answers `open` and always wins leaves those paths unreachable — a
+ * regression that dropped one would still pass (cubic P3 on #347).
+ *
+ * `rows` is consumed in order and its last entry repeats, so a test can say
+ * what the row looked like when the attempt started and what it says when the
+ * lost CAS is explained.
  */
-function makeDb(captured: Captured[], row: Record<string, unknown> = CR_ROW): Database {
+function makeDb(
+  captured: Captured[],
+  { rows = [CR_ROW], casWon = true }: { rows?: Record<string, unknown>[]; casWon?: boolean } = {},
+): Database {
+  let crReads = 0;
   const thenable = (data: unknown) => {
     const p = Promise.resolve(data) as Promise<unknown> & { limit: () => Promise<unknown> };
     p.limit = () => Promise.resolve(data);
@@ -82,7 +90,14 @@ function makeDb(captured: Captured[], row: Record<string, unknown> = CR_ROW): Da
   };
   return {
     select: () => ({
-      from: (table: unknown) => ({ where: () => thenable(table === changeRequests ? [row] : []) }),
+      from: (table: unknown) => ({
+        where: () => {
+          if (table !== changeRequests) return thenable([]);
+          const row = rows[Math.min(crReads, rows.length - 1)];
+          crReads += 1;
+          return thenable([row]);
+        },
+      }),
     }),
     insert: (table: unknown) => ({
       values: (values: Record<string, unknown>) => {
@@ -98,8 +113,10 @@ function makeDb(captured: Captured[], row: Record<string, unknown> = CR_ROW): Da
             const t = thenable(undefined) as unknown as Promise<unknown> & {
               returning: () => Promise<unknown>;
             };
-            // Non-empty, so the CAS counts as won and the merge finalizes.
-            t.returning = () => Promise.resolve([{ id: CR_ROW.id }]);
+            // Empty for the change request row means the CAS was lost: something
+            // else moved it out of `open` first.
+            t.returning = () =>
+              Promise.resolve(table === changeRequests && !casWon ? [] : [{ id: CR_ROW.id }]);
             return t;
           },
         };
@@ -199,8 +216,21 @@ function makeStuckService(
   // clicked), `rowState` is the authoritative row's. A stale caller passing
   // 'open' for a row that is already terminal is exactly what the row-level
   // guard is for.
-  { gateState = 'open', rowState = 'open' }: { gateState?: string; rowState?: string } = {},
+  {
+    gateState = 'open',
+    rowState = 'open',
+    casWon = true,
+    // What the row says when the lost CAS is explained — a cancel closes a
+    // request just as a merge does, and the audit line must not guess.
+    stateAfterCas = 'merged',
+  }: {
+    gateState?: string;
+    rowState?: string;
+    casWon?: boolean;
+    stateAfterCas?: string;
+  } = {},
 ) {
+  const rows = [{ ...CR_ROW, state: rowState }, { ...CR_ROW, state: stateAfterCas }];
   const captured: Captured[] = [];
   const mergeChangeRequest = vi.fn<(...args: unknown[]) => Promise<AppliedMergeResult>>(async () => ({
     kind: 'merged',
@@ -212,7 +242,7 @@ function makeStuckService(
     getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-base' })),
   } as unknown as WorkspaceService;
   const svc = new ReviewWorkflowService(
-    makeDb(captured, { ...CR_ROW, state: rowState }),
+    makeDb(captured, { rows, casWon }),
     {} as unknown as IAccessControl,
     workspace,
     { mergeChangeRequest, appliedMergeCommitOnTarget } as unknown as GitService,
@@ -297,5 +327,37 @@ describe('mergePr — a request whose merge commit was pushed but never recorded
     const order = captured.map((c) => (c.kind === 'insert' ? 'log-insert' : c.table === changeRequests ? 'cr' : 'log-update'));
     expect(order).toEqual(['log-insert', 'cr', 'log-update']);
     expect(captured[2].values).toMatchObject({ succeeded: true });
+  });
+  it('names the state the row actually ended in when the CAS is lost to a CANCEL', async () => {
+    // A cancel closes a request exactly as a merge does, and both lose this CAS.
+    // Filing a cancellation as "a concurrent merge won" sends whoever reads
+    // pr_merge_log afterwards to the wrong cause (cubic P2 on #347).
+    const { merge, captured } = makeStuckService('a-commit', {
+      casWon: false,
+      stateAfterCas: 'closed',
+    });
+
+    await expect(merge()).rejects.toThrow('This change request is closed.');
+
+    const logUpdate = captured.filter((c) => c.kind === 'update' && c.table !== changeRequests).pop();
+    expect(logUpdate?.values).toMatchObject({ succeeded: false });
+    expect(String(logUpdate?.values.error)).toBe(
+      'Change request was no longer open (closed); this attempt did not finalize it.',
+    );
+    expect(String(logUpdate?.values.error)).not.toContain('concurrent');
+  });
+
+  it('says merged, and refuses as merged, when the CAS is lost to another merge', async () => {
+    const { merge, captured } = makeStuckService('a-commit', {
+      casWon: false,
+      stateAfterCas: 'merged',
+    });
+
+    await expect(merge()).rejects.toThrow('This change request has already been merged.');
+
+    const logUpdate = captured.filter((c) => c.kind === 'update' && c.table !== changeRequests).pop();
+    expect(String(logUpdate?.values.error)).toBe(
+      'Change request was no longer open (merged); this attempt did not finalize it.',
+    );
   });
 });

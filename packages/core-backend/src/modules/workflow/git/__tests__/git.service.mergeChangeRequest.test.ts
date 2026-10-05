@@ -243,12 +243,15 @@ describe('GitService.mergeChangeRequest', () => {
     expect(await stale.appliedMergeCommitOnTarget(staleWsId, BASE, 8)).toBeNull();
   });
 
-  // Fail CLOSED when the target cannot be refreshed. What the caller does with
-  // an answer is record it as the request's published state, so a decision taken
-  // on a stale tracking ref could finalize a request with a commit the published
-  // branch no longer carries — and a clone with no tracking ref at all would
-  // turn the gate's clean refusal into a git error (cubic P1 on #347).
-  it('answers null when the target cannot be refreshed, stale ref or no ref', async () => {
+  // One variable at a time, because the two halves of the P1 are not the same
+  // claim. With the remote REACHABLE, a missing tracking ref is not a hazard at
+  // all: the refresh names its destination explicitly, so it recreates the ref
+  // and the walk has what it needs. With the remote UNREACHABLE, there is no
+  // authority for an answer, and the stale ref the clone still holds must not be
+  // scanned — what the caller does with a commit is record it as the request's
+  // published state, and a ref it could not refresh may name a commit the
+  // published branch no longer carries (cubic P1 on #347).
+  it('recreates a missing tracking ref, and refuses to read a stale one', async () => {
     const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
     await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
       await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
@@ -262,15 +265,17 @@ describe('GitService.mergeChangeRequest', () => {
     );
     expect(merged.kind).toBe('merged');
     if (merged.kind !== 'merged') return;
-    // The commit IS in this clone, and origin/BASE still names it.
+    // The commit IS in this clone, and origin/BASE names it.
     expect((await gitOut(baseRepo, ['rev-parse', `origin/${BASE}`])).trim()).toBe(merged.mergeCommit);
 
-    // Now the remote is unreachable. The stale ref must not be scanned.
-    await runGit(baseRepo, ['remote', 'set-url', 'origin', path.join(root, 'gone.git')]);
-    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 7)).toBeNull();
-
-    // And with no tracking ref either, it still answers rather than throwing.
+    // Variable 1: no tracking ref, remote reachable. The refresh brings it back.
     await runGit(baseRepo, ['update-ref', '-d', `refs/remotes/origin/${BASE}`]);
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 7)).toBe(merged.mergeCommit);
+    expect((await gitOut(baseRepo, ['rev-parse', `origin/${BASE}`])).trim()).toBe(merged.mergeCommit);
+
+    // Variable 2: tracking ref present and naming the commit, remote gone. No
+    // authority, no answer — the ref is not scanned.
+    await runGit(baseRepo, ['remote', 'set-url', 'origin', path.join(root, 'gone.git')]);
     expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 7)).toBeNull();
   });
 
