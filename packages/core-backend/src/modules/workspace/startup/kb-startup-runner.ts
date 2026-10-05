@@ -770,19 +770,28 @@ export class KbStartupRunner {
       const id = workspaceIdForBranch(branch);
       const kept = path.join(setAsideRootFor(this.opts.workspacesRoot, this.opts.setAsideRoot), setAsideStamp(), id);
       await this.opts.beforeCloneSetAside?.(id);
-      await setAsideClone(repoDir, kept);
-      startupLog.warn(
-        `working copy "${id}" has a git folder and no commit: a clone that was never finished. ` +
-          `Set aside at ${kept}; nothing was deleted, and it is cloned again now.`,
-      );
-      try {
-        await this.opts.onCloneDiscarded?.(id);
-      } catch (err) {
-        startupLog.warn(`could not finish setting the working copy "${id}" aside:`, {
-          detail: this.redact(err instanceof Error ? err.message : String(err)),
-        });
+      // Looked at AGAIN, now that the wait above is over. On a redeploy two
+      // processes share this volume for a few seconds, and the other may
+      // have dealt with this folder meanwhile: moved it (nothing is here to
+      // move, and moving would fail the start) or already cloned into its
+      // place (a clone with a commit, which is never this phase's to move).
+      // What is found now decides, not what was found before the wait.
+      hasGit = await fs.access(path.join(repoDir, '.git')).then(() => true, () => false);
+      if (hasGit && !(await this.hasCommit(repoDir))) {
+        await setAsideClone(repoDir, kept);
+        startupLog.warn(
+          `working copy "${id}" has a git folder and no commit: a clone that was never finished. ` +
+            `Set aside at ${kept}; nothing was deleted, and it is cloned again now.`,
+        );
+        try {
+          await this.opts.onCloneDiscarded?.(id);
+        } catch (err) {
+          startupLog.warn(`could not finish setting the working copy "${id}" aside:`, {
+            detail: this.redact(err instanceof Error ? err.message : String(err)),
+          });
+        }
+        hasGit = false;
       }
-      hasGit = false;
     }
     if (!hasGit) {
       await fs.mkdir(workspaceDir, { recursive: true });
@@ -815,13 +824,25 @@ export class KbStartupRunner {
     return repoDir;
   }
 
-  /** Whether the repository at `repoDir` has a commit checked out. False for a clone that was cut short. */
+  /**
+   * Whether the repository at `repoDir` has a commit checked out. False for a
+   * clone that was cut short.
+   *
+   * False ONLY when git itself answered that there is none: with `--quiet
+   * --verify` that is exit status 1 and nothing else. A git that timed out,
+   * could not be started, or could not read the repository has not said the
+   * working copy is empty, and "could not tell" is no reason to move
+   * someone's work: that failure is thrown, and stops the start with the
+   * branch named.
+   */
   private async hasCommit(repoDir: string): Promise<boolean> {
     try {
       await git(this.opts.gitRunner, repoDir, ['rev-parse', '--quiet', '--verify', 'HEAD^{commit}']);
       return true;
-    } catch {
-      return false;
+    } catch (err) {
+      const ran = err instanceof Error ? err.cause : undefined;
+      if (ran instanceof GitRunError && !ran.timedOut && ran.exitCode === 1) return false;
+      throw err;
     }
   }
 
