@@ -16,7 +16,8 @@ import { SpillStore } from '../../workspace/spill-store.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
-import { PLATFORM_HEADER } from '../../agent-instructions/index.js';
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
+import { platformInstructions } from '../../agent-instructions/index.js';
 import { startFakeDownstreamMcpServer, type FakeDownstreamMcpServer } from './fake-downstream-mcp-server.js';
 import { registerBevelSecretsVariableLoader } from '../../secrets-vault/secrets-variable-loader.js';
 import type { ForcedRefreshOutcome, ISecretsVaultService } from '../../secrets-vault/secrets-vault.contract.js';
@@ -483,13 +484,13 @@ describe('per-request identity: catalog, metering and continuity', () => {
 });
 
 describe('agent instructions over the real transport', () => {
-  it('the initialize result carries the header and the preamble body inline', async () => {
+  it('the initialize result carries the platform text and the preamble body inline', async () => {
     const { baseUrl } = await startPlatform({
       readAgentPreamble: async () => 'Acme builds solar farms.\n\n<!-- private -->Look in Projects/ first.',
     });
     const { client } = await connectSdkClient(baseUrl);
     const instructions = client.getInstructions();
-    expect(instructions).toBe(`${PLATFORM_HEADER}\n\nAcme builds solar farms.\n\nLook in Projects/ first.`);
+    expect(instructions).toBe(`${platformInstructions(DEFAULT_KB_LAYOUT)}\n\nAcme builds solar farms.\n\nLook in Projects/ first.`);
     expect(instructions).not.toContain('private');
   });
 

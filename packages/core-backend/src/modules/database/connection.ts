@@ -234,12 +234,27 @@ export function getDb(databaseUrl: string, opts: DbOptions = {}): Database {
   if (!db) {
     db = createDb(databaseUrl, opts);
     cache.set(key, db);
-  } else if (opts.piiKey !== undefined && piiKeys.get(db)?.of !== opts.piiKey) {
+  } else if (opts.piiKey !== undefined && !holdsKey(db, opts.piiKey)) {
     // One schema is one knowledge base and one key. Handing back the cached
     // pool would seal this caller's rows under the other caller's key.
     throw new Error(`The database handle for schema "${dbSchema}" is already open with a different personal-data key.`);
   }
   return db;
+}
+
+/**
+ * Whether `db` was opened with the key `piiKey` spells. The KEY, not its
+ * spelling: `SECRETS_ENC_KEY` may be written as hex or as base64, and one
+ * process can be handed the same 32 bytes both ways — refusing the second as
+ * "a different key" would refuse a caller that holds the right one. Compared
+ * through what the two derive, so no key material is held here to compare.
+ */
+function holdsKey(db: Database, piiKey: string): boolean {
+  const held = piiKeys.get(db);
+  if (!held) return false;
+  if (held.of === piiKey) return true;
+  const probe = 'same-key?';
+  return held.keys.index(probe) === derivePiiKeys(piiKey).index(probe);
 }
 
 /**

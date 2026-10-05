@@ -18,12 +18,9 @@ import { mergeGroupsIntoRoles, parseRolesYaml } from '../../../../access-model/a
 import { TemplateFilesStep } from '../template-files.step.js';
 import { buildSeedTree } from '../seed-tree.js';
 import { defaultKbTemplateDir } from '../../../../../assets.js';
-import {
-  DEFAULT_KB_LAYOUT,
-  agentsFilePointerSentence,
-  renderKbLayoutPlaceholders,
-} from '@bevel-software/platform-shared';
-import { PLATFORM_HEADER, TOOL_PREFIX_LINE, composeAgentInstructions } from '../../../../agent-instructions/index.js';
+import { DEFAULT_KB_LAYOUT, agentsFilePointerSentence } from '@bevel-software/platform-shared';
+import { renderTemplateText } from '../template-source.js';
+import { TOOL_PREFIX_LINE, composeAgentInstructions, platformInstructions } from '../../../../agent-instructions/index.js';
 import { testKbContext } from '../../../../../__tests__/kb-context.js';
 
 const execFileAsync = promisify(execFile);
@@ -148,7 +145,10 @@ const PREAMBLE_IGNORE_BLOCK =
 
 /** The template as the step writes it under the default layout — placeholders rendered. */
 async function template(name: string): Promise<string> {
-  return renderKbLayoutPlaceholders(await fs.readFile(path.join(TEMPLATE_DIR, name), 'utf8'), DEFAULT_KB_LAYOUT);
+  // `renderTemplateText`, not the layout renderer alone: the managed guide also
+  // asks for the shared file rules, and a fixture rendered with half the
+  // placeholders filled would read as drifted on every boot.
+  return renderTemplateText(await fs.readFile(path.join(TEMPLATE_DIR, name), 'utf8'), DEFAULT_KB_LAYOUT);
 }
 
 /** Every required file + reserved root already present, from the real template. */
@@ -695,7 +695,7 @@ describe('TemplateFilesStep', () => {
     expect((await git(dir, ['rev-list', '--count', 'HEAD'])).trim()).toBe('1');
   });
 
-  it('ships a template that composes to the platform header alone: one comment, nothing broadcast', async () => {
+  it('ships a template that composes to the platform text alone: one comment, nothing broadcast', async () => {
     const shipped = await template('mcp-description.md');
     expect(shipped.trimStart().startsWith('<!--')).toBe(true);
     expect(shipped.trimEnd().endsWith('-->')).toBe(true);
@@ -705,7 +705,7 @@ describe('TemplateFilesStep', () => {
     expect(shipped).toContain('first paragraph under about 220');
     expect(shipped).not.toContain('{{');
     const composed = composeAgentInstructions(shipped);
-    expect(composed.instructions).toBe(PLATFORM_HEADER);
+    expect(composed.instructions).toBe(platformInstructions(DEFAULT_KB_LAYOUT));
     expect(composed.toolPrefix).toBe(TOOL_PREFIX_LINE);
     expect(composed.unterminatedComment).toBe(false);
     expect(composed.preambleChars).toBe(0);

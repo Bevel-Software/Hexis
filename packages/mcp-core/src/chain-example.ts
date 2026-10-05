@@ -37,8 +37,13 @@ export interface ChainExampleTool {
 export interface ChainExample {
   /** The namespace, as the chain runtime spells it. */
   namespace: string;
-  /** A callable NAME from the catalog — safe to print on its own, no arguments implied. */
-  name: string;
+  /**
+   * A callable NAME from the catalog — safe to print on its own, no arguments
+   * implied. Null when the catalog affords none (it is empty, or every name in
+   * it is shared by two tools): a name nothing here serves is the very thing
+   * an agent copies into a chain and watches die of `ReferenceError`.
+   */
+  name: string | null;
   /**
    * A complete call that works as written, or null when the catalog affords
    * none. Null prints no example at all rather than a call that would fail:
@@ -179,8 +184,17 @@ function scalarLiteral(value: unknown): string | null {
   return null;
 }
 
-/** An object key, bare when it is an identifier and quoted when it is not. */
+/**
+ * An object key, bare when it is an identifier and quoted when it is not.
+ *
+ * `__proto__` is neither. In an object literal, `__proto__: v` does not create
+ * a property — it SETS THE PROTOTYPE, and quoting it (`'__proto__': v`) does
+ * exactly the same. So a copied example would send the tool an object without
+ * the argument its schema requires. Only the computed form is an ordinary own
+ * property.
+ */
 function propertyKey(key: string): string {
+  if (key === '__proto__') return `[${quote(key)}]`;
   return /^[A-Za-z_$][\w$]*$/.test(key) ? key : quote(key);
 }
 
@@ -280,8 +294,10 @@ export function chainExample(namespace: string, tools: readonly ChainExampleTool
   const pool = own.length > 0 ? own : unambiguous;
   // The NAME example. `read_file` is preferred because every surface has it
   // and an agent reading the description recognises it; printed without
-  // arguments, so its required `branch` is not at stake here.
-  const name = pool.find((t) => t.name.endsWith('read_file'))?.name ?? pool[0]?.name ?? `${ns}.read_file`;
+  // arguments, so its required `branch` is not at stake here. From the pool or
+  // not at all: with nothing to draw on, `<namespace>.read_file` would be a
+  // name this surface invented.
+  const name = pool.find((t) => t.name.endsWith('read_file'))?.name ?? pool[0]?.name ?? null;
   // The CALL example: the simplest call the catalog fully determines.
   let best: { name: string; value: WrittenValue } | undefined;
   for (const tool of pool) {

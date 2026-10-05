@@ -143,7 +143,8 @@ export function createListToolsTool(
   const { name } = chainExample(namespace, tools);
   return createTool({
     id: 'list_tools',
-    description: `Returns a list of all UTCP tool names currently registered, in their TypeScript-accessible form (e.g. \`${name}\`).`,
+    // A name the catalog really has, or none: see `ChainExample.name`.
+    description: `Returns a list of all UTCP tool names currently registered, in their TypeScript-accessible form${name ? ` (e.g. \`${name}\`)` : ''}.`,
     inputSchema: z.object({}),
     execute: async () => {
       const tools = await client.config.tool_repository.getTools();

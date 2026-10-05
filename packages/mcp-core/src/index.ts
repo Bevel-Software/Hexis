@@ -53,6 +53,10 @@ export {
   chainNamespaceExample,
   META_TOOL_NAMES,
   CALL_TOOL_CHAIN_MAX_OUTPUT,
+  CALL_TOOL_CHAIN_NAME,
+  CHAIN_FAILURES_RULE,
+  CHAIN_LARGE_RESULTS_RULE,
+  type CodeModeMetaToolsOptions,
   type SpillPort,
   dispatchMetaTool,
 } from './meta-tools.js';

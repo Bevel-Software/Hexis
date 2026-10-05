@@ -11,8 +11,12 @@ import { SpillStore } from '../../workspace/spill-store.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
-import { PLATFORM_HEADER, TOOL_PREFIX_LINE } from '../../agent-instructions/index.js';
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
+import { TOOL_PREFIX_LINE, platformInstructions, sharedRulesPointer } from '../../agent-instructions/index.js';
 import type { AgentEventInput, IAgentEventRecorder } from '../../audit/audit.contract.js';
+
+/** The platform-owned part of the handshake text: the header plus the shared file rules. */
+const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT);
 
 /**
  * End-to-end proxy test: a real express app serving the registry-driven tool
@@ -260,6 +264,25 @@ describe('McpService (UTCP→MCP proxy)', () => {
     // {body} envelope UTCP dispatches on (and that call_tool_chain documents).
     const askSchema = byName.ask.inputSchema as { properties: { body?: { properties?: Record<string, unknown> } } };
     expect(askSchema.properties.body?.properties?.prompt).toBeDefined();
+  });
+
+  it('ends the served call_tool_chain description with the shared-rules pointer', async () => {
+    // What a chained read does to an IMAGE is one of the rules the file tools
+    // share, so it is stated once — in the handshake instructions and in the
+    // managed guide — and the chain, like every file tool, ends with the one
+    // sentence saying where. The clients that drop `instructions` have only
+    // descriptions to go on, so that sentence is their way to the rule.
+    const client = await setup();
+    const { tools } = await client.listTools();
+    const chain = tools.find((t) => t.name === 'call_tool_chain')!;
+    const pointer = sharedRulesPointer(DEFAULT_KB_LAYOUT);
+    expect(chain.description!.endsWith(pointer)).toBe(true);
+    // Once, and not on the two meta-tools that describe the registry rather
+    // than a file.
+    expect(chain.description!.split(pointer)).toHaveLength(2);
+    for (const name of ['list_tools', 'tools_info']) {
+      expect(tools.find((t) => t.name === name)!.description, name).not.toContain(pointer);
+    }
   });
 
   it('a $defs/$ref tool schema survives tools/list and a real MCP client accepts it', async () => {
@@ -565,17 +588,17 @@ describe('McpService — per-user credential pre-check', () => {
 describe('McpService — agent instructions', () => {
   const KB_TOOLS = ['start_session', 'grep', 'list_files', 'read_file'];
 
-  it('sends the header and the preamble as the session\'s instructions', async () => {
+  it("sends the platform text and the preamble as the session's instructions", async () => {
     const client = await setup({ readAgentPreamble: async () => 'Acme builds solar farms.\n\nProjects live in Projects/.' });
-    expect(client.getInstructions()).toBe(`${PLATFORM_HEADER}\n\nAcme builds solar farms.\n\nProjects live in Projects/.`);
+    expect(client.getInstructions()).toBe(`${PLATFORM}\n\nAcme builds solar farms.\n\nProjects live in Projects/.`);
   });
 
-  it('sends the header alone when no reader is wired', async () => {
+  it('sends the platform text alone when no reader is wired', async () => {
     const client = await setup();
-    expect(client.getInstructions()).toBe(PLATFORM_HEADER);
+    expect(client.getInstructions()).toBe(PLATFORM);
   });
 
-  it('a throwing reader still yields a session, with the header as its instructions and a warning', async () => {
+  it('a throwing reader still yields a session, with the platform text as its instructions and a warning', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const client = await setup({
       readAgentPreamble: async () => {
@@ -583,7 +606,7 @@ describe('McpService — agent instructions', () => {
       },
       extraTools: KB_TOOLS,
     });
-    expect(client.getInstructions()).toBe(PLATFORM_HEADER);
+    expect(client.getInstructions()).toBe(PLATFORM);
     // The error itself rides along, so a terminal shows its stack.
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('mcp-description.md'),

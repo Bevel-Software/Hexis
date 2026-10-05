@@ -297,9 +297,14 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
         expect(sealed(bo.avatar_url)).toBe(true);
 
         // change_requests: the text, the author, the recorded refusal; the
-        // body the database defaulted to '' stays ''.
+        // body the database defaulted to '' stays ''. The NAME on the refusal
+        // goes: an older version kept no address beside it, so nothing could
+        // ever find it again for the person it names.
         const [cr] = await q(`select * from change_requests`);
-        expect([cr!.title, cr!.author_email, cr!.author_name, cr!.apply_failure_reason, cr!.apply_failed_by_name].every(sealed)).toBe(true);
+        expect([cr!.title, cr!.author_email, cr!.author_name, cr!.apply_failure_reason].every(sealed)).toBe(true);
+        expect(cr!.apply_failed_by_name).toBeNull();
+        expect(cr!.apply_failed_by_email_bidx).toBeNull();
+        expect(cr!.apply_failed_at).not.toBeNull();
         expect(cr!.body).toBe('');
         expect(opened(cr!.apply_failure_reason)).toBe('bo@example.com is not an approver');
         expect(cr!.author_email_bidx).toBe(keys.index('ada@example.com'));
@@ -358,6 +363,89 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
         // And the application reads it back as it was written.
         const [read] = await db.select().from(users).where(eq(users.emailBidx, 'ADA@EXAMPLE.COM '));
         expect(read).toMatchObject({ email: 'Ada@Example.com', name: 'Ada', avatarUrl: null });
+      },
+      TIMEOUT,
+    );
+
+    /**
+     * A blob is recognised by its shape, and a title or a name is text a
+     * person chose. Before the first backfill nothing is sealed, so a value in
+     * that shape is plaintext: trusted, it stayed in clear for good, and the
+     * one the key check sampled refused the start under the right key.
+     */
+    it(
+      'seals a value an older version stored in the very shape of a sealed one, and starts',
+      async () => {
+        const { db, q } = await beforeTheBackfill(await scratchDatabase());
+        await plantLegacyRows(q);
+        // Shaped exactly like a blob, under no key at all — and the same with
+        // its tag written unpadded, which the two predicates used to disagree
+        // about.
+        const exact = `pii:v1:${'A'.repeat(16)}:${'B'.repeat(22)}==:Q2xlYXI=`;
+        const unpadded = `pii:v1:${'A'.repeat(16)}:${'B'.repeat(22)}:Q2xlYXI=`;
+        await q(`update users set name = '${exact}' where email = 'bo@example.com'`);
+        await q(`update pr_comments set body = '${unpadded}'`);
+        await q(`update file_locks set holder_name = '${exact}'`);
+
+        await runCoreMigrations(db, coreMigrationsDir());
+
+        const [bo] = await q(`select name from users where email_bidx = '${keys.index('bo@example.com')}'`);
+        expect(bo!.name).not.toBe(exact);
+        expect(opened(bo!.name)).toBe(exact);
+        const [comment] = await q(`select body from pr_comments`);
+        expect(comment!.body).not.toBe(unpadded);
+        expect(opened(comment!.body)).toBe(unpadded);
+        const [lock] = await q(`select holder_name from file_locks`);
+        expect(opened(lock!.holder_name)).toBe(exact);
+        // And what the application reads back is what was typed.
+        const [read] = await db.select().from(users).where(eq(users.emailBidx, 'bo@example.com'));
+        expect(read!.name).toBe(exact);
+        // A second start finds nothing left to do, and is not refused.
+        const after = await everything(q);
+        await runCoreMigrations(db, coreMigrationsDir());
+        expect(await everything(q)).toBe(after);
+      },
+      TIMEOUT,
+    );
+
+    it(
+      'seals a table larger than one batch, every row of it',
+      async () => {
+        const { db, q } = await beforeTheBackfill(await scratchDatabase());
+        await plantLegacyRows(q);
+        await q(`insert into pr_comments (pr_number, author_email, author_name, head_sha, body)
+          select n, 'ada@example.com', 'Ada', 'abc', 'comment ' || n from generate_series(2, 1300) n`);
+
+        await runCoreMigrations(db, coreMigrationsDir());
+
+        const [left] = await q(`select count(*)::int as n from pr_comments where body not like 'pii:v1:%' or author_email_bidx is null`);
+        expect(left!.n).toBe(0);
+        const [all] = await q(`select count(*)::int as n from pr_comments`);
+        expect(all!.n).toBe(1300);
+        const [one] = await q(`select body from pr_comments where pr_number = 1300`);
+        expect(opened(one!.body)).toBe('comment 1300');
+      },
+      TIMEOUT,
+    );
+
+    it(
+      'keeps the name on a refusal that has its index, and takes it off one that has none',
+      async () => {
+        const { db, q } = await beforeTheBackfill(await scratchDatabase());
+        await plantLegacyRows(q);
+        await runCoreMigrations(db, coreMigrationsDir());
+        // Recorded on this release: the name with the index of its address.
+        await q(`update change_requests set apply_failed_by_name = '${keys.seal('Bo')}', apply_failed_by_email_bidx = '${keys.index('bo@example.com')}'`);
+        // And one an older version, still running, wrote beside it: a name alone.
+        await q(`insert into change_requests (source_branch, target_branch, title, author_email, author_email_bidx, author_name, apply_failure_reason, apply_failed_by_name, apply_failed_at)
+          values ('e', 'main', '${keys.seal('Another')}', '${keys.seal('ada@example.com')}', '${keys.index('ada@example.com')}', '${keys.seal('Ada')}', 'refused', 'Bo', now())`);
+
+        await runCoreMigrations(db, coreMigrationsDir());
+
+        const rows = await q(`select source_branch, apply_failed_by_name, apply_failure_reason from change_requests order by source_branch`);
+        expect(opened(rows[0]!.apply_failed_by_name)).toBe('Bo');
+        expect(rows[1]!.apply_failed_by_name).toBeNull();
+        expect(opened(rows[1]!.apply_failure_reason)).toBe('refused');
       },
       TIMEOUT,
     );

@@ -262,6 +262,14 @@ describe('createShutdown', () => {
             order.push('backgroundJobs.drain');
           },
         },
+        agentUploadStore: {
+          stopSweeping() {
+            order.push('agentUploadStore.stopSweeping');
+          },
+          async drainSweep() {
+            order.push('agentUploadStore.drainSweep');
+          },
+        },
         db: {
           $client: {
             async end() {
@@ -289,7 +297,12 @@ describe('createShutdown', () => {
       'server.close',
       'server.closeAllConnections',
       'backgroundJobs.stopSweeping',
+      // The upload sweep is stopped in the same breath as the other timers,
+      // and drained before the pool goes: a graph that is stopping must not
+      // leave a sweep walking the staging root its replacement will stage into.
+      'agentUploadStore.stopSweeping',
       'backgroundJobs.drain',
+      'agentUploadStore.drainSweep',
       'commitWorker.stop',
       'db.end',
     ]);
@@ -310,7 +323,13 @@ describe('createShutdown', () => {
     d.finishClose();
     await settle();
     // The jobs are still running: nothing after them has run.
-    expect(d.order).toEqual(['server.close', 'server.closeAllConnections', 'backgroundJobs.stopSweeping', 'backgroundJobs.drain']);
+    expect(d.order).toEqual([
+      'server.close',
+      'server.closeAllConnections',
+      'backgroundJobs.stopSweeping',
+      'agentUploadStore.stopSweeping',
+      'backgroundJobs.drain',
+    ]);
     release();
     await done;
     expect(d.order.slice(-2)).toEqual(['commitWorker.stop', 'db.end']);
@@ -339,6 +358,7 @@ describe('createShutdown', () => {
     const d = deps();
     // A stop that lands mid-boot: the services exist, the jobs do not.
     delete (d.deps as { backgroundJobs?: unknown }).backgroundJobs;
+    delete (d.deps as { agentUploadStore?: unknown }).agentUploadStore;
     const shutdown = createShutdown(d.deps as never);
     const done = shutdown('SIGTERM');
     await settle();
@@ -363,7 +383,12 @@ describe('createShutdown', () => {
     await settle();
     d.finishClose();
     await done;
-    expect(d.order.slice(-3)).toEqual(['backgroundJobs.drain', 'commitWorker.stop', 'db.end']);
+    expect(d.order.slice(-4)).toEqual([
+      'backgroundJobs.drain',
+      'agentUploadStore.drainSweep',
+      'commitWorker.stop',
+      'db.end',
+    ]);
   });
 
   it('does not hang on a step that never finishes, and still runs the rest', async () => {
@@ -376,7 +401,9 @@ describe('createShutdown', () => {
       'server.close',
       'server.closeAllConnections',
       'backgroundJobs.stopSweeping',
+      'agentUploadStore.stopSweeping',
       'backgroundJobs.drain',
+      'agentUploadStore.drainSweep',
       'commitWorker.stop',
       'db.end',
     ]);
@@ -413,6 +440,14 @@ describe('stopCore', () => {
             order.push('backgroundJobs.drain');
           },
         },
+        agentUploadStore: {
+          stopSweeping() {
+            order.push('agentUploadStore.stopSweeping');
+          },
+          async drainSweep() {
+            order.push('agentUploadStore.drainSweep');
+          },
+        },
         startupRetry: {
           stop() {
             order.push('startupRetry.stop');
@@ -436,11 +471,29 @@ describe('stopCore', () => {
     await stopCore(g.core as never);
     expect(g.order).toEqual([
       'backgroundJobs.stopSweeping',
+      'agentUploadStore.stopSweeping',
       'startupRetry.stop',
       'backgroundJobs.drain',
+      'agentUploadStore.drainSweep',
       'commitWorker.stop',
       'db.end',
     ]);
+  });
+
+  it('stops the upload sweep, so an evicted tenant cannot sweep its own replacement', async () => {
+    const g = graph();
+    await stopCore(g.core as never);
+    // This is the eviction path: the next activation of the same tenant builds
+    // a new store over the SAME staging directory with an empty record map, so
+    // a sweep left running from this graph would read the replacement's files
+    // as orphans and delete them under an apply about to read them. Both
+    // halves, in order — the timer cleared, then the sweep in flight awaited
+    // before anything else lets go.
+    const stopped = g.order.indexOf('agentUploadStore.stopSweeping');
+    const drained = g.order.indexOf('agentUploadStore.drainSweep');
+    expect(stopped).toBeGreaterThanOrEqual(0);
+    expect(stopped).toBeLessThan(drained);
+    expect(drained).toBeLessThan(g.order.indexOf('db.end'));
   });
 
   it('forgets the graph\'s secrets scope, so a descriptor that outlives it resolves nothing', async () => {
@@ -459,14 +512,28 @@ describe('stopCore', () => {
     const g = graph();
     const core = { ...g.core, startupRetry: null, secretsScope: undefined };
     await stopCore(core as never);
-    expect(g.order).toEqual(['backgroundJobs.stopSweeping', 'backgroundJobs.drain', 'commitWorker.stop', 'db.end']);
+    expect(g.order).toEqual([
+      'backgroundJobs.stopSweeping',
+      'agentUploadStore.stopSweeping',
+      'backgroundJobs.drain',
+      'agentUploadStore.drainSweep',
+      'commitWorker.stop',
+      'db.end',
+    ]);
   });
 
   it('does not wait past the budget for a worker that never stops, and still ends the pool', async () => {
     const g = graph();
     const core = { ...g.core, commitWorker: { stop: () => new Promise<void>(() => undefined) } };
     await stopCore(core as never, { deadlineMs: 50 });
-    expect(g.order).toEqual(['backgroundJobs.stopSweeping', 'startupRetry.stop', 'backgroundJobs.drain', 'db.end']);
+    expect(g.order).toEqual([
+      'backgroundJobs.stopSweeping',
+      'agentUploadStore.stopSweeping',
+      'startupRetry.stop',
+      'backgroundJobs.drain',
+      'agentUploadStore.drainSweep',
+      'db.end',
+    ]);
   });
 });
 

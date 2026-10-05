@@ -428,6 +428,15 @@ export interface CoreStopDeps {
    * to it. Optional: a caller that has not built them yet passes nothing.
    */
   backgroundJobs?: { stopSweeping(): void; drain(): Promise<void> };
+  /**
+   * The agent upload store, whose own sweep deletes staged bytes nobody
+   * applied. Stopped with this graph because the next graph for the same
+   * tenant stages into the SAME directory with an empty record map: a sweep
+   * left running from a store that is gone would read the replacement's files
+   * as orphans and delete them under an apply that is about to read them.
+   * Optional: a caller that has not built one passes nothing.
+   */
+  agentUploadStore?: { stopSweeping(): void; drainSweep(): Promise<void> };
   /** The startup phase's retry, if the boot left one asking — see {@link BootableCore.startupRetry}. */
   startupRetry?: { stop(): void } | null;
   /** The database — its pool is ended last, once nothing above can still need it. */
@@ -511,6 +520,10 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // earliest point the interval is dead weight. Synchronous and unfailing
   // — it just clears an interval — so it needs no budget of its own.
   deps.backgroundJobs?.stopSweeping();
+  // And the upload store's sweep, for the same reason and in the same breath:
+  // synchronous, and it only clears an interval and tells a sweep already
+  // running to stop deleting.
+  deps.agentUploadStore?.stopSweeping();
   // A startup phase still asking for an unreachable remote stops asking:
   // synchronous, and nothing after it must be able to clone into a
   // workspaces folder that is about to belong to nobody.
@@ -523,6 +536,12 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // — which is the recovery every crash already gets.
   if (deps.backgroundJobs) {
     await bounded(deps.backgroundJobs.drain(), remaining(), 'finishing the background jobs', log);
+  }
+  // The sweep in flight when the interval was cleared: awaited so the next
+  // graph for this tenant cannot start staging bytes while a store it has
+  // never heard of is still walking the same directory.
+  if (deps.agentUploadStore) {
+    await bounded(deps.agentUploadStore.drainSweep(), remaining(), 'finishing the upload sweep', log);
   }
   await bounded(deps.commitWorker.stop(), remaining(), 'stopping the commit worker', log);
   if (deps.secretsScope !== undefined) unregisterBevelSecretsVariableLoader(deps.secretsScope);

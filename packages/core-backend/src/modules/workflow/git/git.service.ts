@@ -3257,7 +3257,53 @@ export class GitService implements IGitService {
       'fetch', '--no-write-fetch-head', 'origin',
       `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`,
       `+refs/heads/${headBranch}:refs/remotes/origin/${headBranch}`,
-    ]).catch(() => undefined);
+    ]).then(
+      () => void this.prFetchFailureLoggedAt.delete(cwd),
+      (err: unknown) => this.notePrFetchFailure(cwd, err),
+    );
+  }
+
+  /**
+   * When each working copy's change-request fetch failure was last logged.
+   * Holds only the working copies that are failing NOW: an entry goes the
+   * moment that copy reaches the remote again, so the table never outgrows the
+   * clones that cannot fetch, however many come and go over a process's life.
+   */
+  private readonly prFetchFailureLoggedAt = new Map<string, number>();
+
+  /**
+   * Say WHY a change request's branches could not be fetched, when the reason
+   * is not the one that is expected.
+   *
+   * The fetch stays best-effort, so the caller goes on to resolve the refs
+   * from whatever the clone already has. One failure is ordinary and says
+   * nothing: a branch that is gone from the remote, which is what a retired
+   * source branch looks like. Every OTHER failure is the working copy being
+   * unable to reach the remote at all — a credential it does not have, a host
+   * that does not answer — and swallowed, it resurfaced one step later as
+   * `unknown branch` for a branch that was sitting on the remote the whole
+   * time. A deployment logged that for every open change request on every
+   * list, and nothing in the log said the fetch had been refused.
+   *
+   * Logged once a minute per working copy at most: the list asks once per open
+   * request, and the reason is the same for all of them.
+   */
+  private notePrFetchFailure(cwd: string, err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err);
+    if (isMissingRemoteBranchFailure(message)) {
+      // The remote answered, and said the branch is not there: this working
+      // copy reaches it, so whatever was logged about it before is over.
+      this.prFetchFailureLoggedAt.delete(cwd);
+      return;
+    }
+    const now = Date.now();
+    if (now - (this.prFetchFailureLoggedAt.get(cwd) ?? 0) < 60_000) return;
+    this.prFetchFailureLoggedAt.set(cwd, now);
+    log.warn(
+      `could not fetch change-request branches in the working copy "${path.basename(path.dirname(cwd))}": ` +
+        'a branch it has not seen will be reported as unknown, though it may be on the remote.',
+      { detail: redactGitToken(message, this.credentials.token()) },
+    );
   }
 
   /** Unified-diff patch for one file across the CR range (rename-aware). */
