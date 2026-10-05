@@ -183,6 +183,157 @@ describe('ToolManualService', () => {
     expect(manual).toBeNull();
   });
 
+  test('resolves an inline tool that calls Google as a service account, and surfaces the key variable', async () => {
+    // The auth block is what makes the call; the key it names has to reach the
+    // secrets UI as a shared variable or nobody can store it.
+    await writeFile(
+      join(root, wsId, KB_DIR, 'Plugins', 'google_ads.tool'),
+      JSON.stringify({
+        id: 'google_ads',
+        type: 'inline',
+        tools: [
+          {
+            name: 'list_accessible_customers',
+            description: 'List the customers the service account can reach.',
+            inputs: { type: 'object', properties: {} },
+            outputs: { type: 'object', properties: {} },
+            tool_call_template: {
+              call_template_type: 'http',
+              http_method: 'GET',
+              url: 'https://googleads.googleapis.com/v22/customers:listAccessibleCustomers',
+              headers: { 'developer-token': '${DEVELOPER_TOKEN}' },
+              auth: {
+                auth_type: 'google_service_account',
+                credentials: '${GOOGLE_SA_KEY}',
+                scopes: 'https://www.googleapis.com/auth/adwords',
+              },
+            },
+          },
+        ],
+      }),
+    );
+
+    const manual = await svc().resolveInlineManual('user@x.eu', 'google_ads');
+    const tools = (manual as { tools?: { name?: string; tool_call_template?: { auth?: unknown } }[] } | null)?.tools ?? [];
+    expect(tools.map((t) => t.name)).toEqual(['list_accessible_customers']);
+    // The auth block is what makes the call, so resolving must carry it through intact.
+    expect(tools[0]?.tool_call_template?.auth).toEqual({
+      auth_type: 'google_service_account',
+      credentials: '${GOOGLE_SA_KEY}',
+      scopes: 'https://www.googleapis.com/auth/adwords',
+    });
+
+    const summary = (await svc().listAccessible('user@x.eu')).find((m) => m.name === 'google_ads')!;
+    expect(summary.variables?.find((v) => v.name === 'GOOGLE_SA_KEY')?.scope).toBe('admin');
+  });
+
+  test('refuses a Google service-account auth block where no token would be sent, and says where', async () => {
+    // Only the `http` protocol mints the token. On any other template the
+    // block validates and is then sent as no credentials at all, so the file
+    // is refused when it is read rather than left to fail at Google.
+    const serviceAccount = {
+      auth_type: 'google_service_account',
+      credentials: '${GOOGLE_SA_KEY}',
+      scopes: 'https://www.googleapis.com/auth/adwords',
+    };
+    const inlineOver = (callTemplateType: string) =>
+      JSON.stringify({
+        type: 'inline',
+        tools: [
+          {
+            name: 'events',
+            description: 'Stream events.',
+            inputs: { type: 'object', properties: {} },
+            outputs: { type: 'object', properties: {} },
+            tool_call_template: { call_template_type: callTemplateType, url: 'https://api.example.com/events', auth: serviceAccount },
+          },
+        ],
+      });
+    const plugins = join(root, wsId, KB_DIR, 'Plugins');
+    await writeFile(join(plugins, 'over_sse.tool'), inlineOver('sse'));
+    await writeFile(join(plugins, 'over_streamable.tool'), inlineOver('streamable_http'));
+    // Not on a call template at all: a discovered manual takes only a url and headers.
+    await writeFile(
+      join(plugins, 'discovered.tool'),
+      JSON.stringify({ type: 'http', url: 'https://api.example.com/utcp', auth: serviceAccount }),
+    );
+    // Looking like an `http` call template is not enough: a discovered manual
+    // reads neither a block at its root nor a `tools` list, whatever they say.
+    await writeFile(
+      join(plugins, 'dressed_root.tool'),
+      JSON.stringify({ type: 'http', url: 'https://api.example.com/utcp', call_template_type: 'http', auth: serviceAccount }),
+    );
+    await writeFile(
+      join(plugins, 'unread_tools.tool'),
+      JSON.stringify({ ...JSON.parse(inlineOver('http')), type: 'http', url: 'https://api.example.com/utcp' }),
+    );
+    await writeFile(join(plugins, 'over_http.tool'), inlineOver('http'));
+
+    const catalog = await svc().listAccessibleCatalog('user@x.eu');
+
+    const reasonFor = (file: string) => catalog.invalid.find((i) => i.path === `Plugins/${file}`)?.reason ?? '';
+    expect(reasonFor('over_sse.tool')).toContain('a `sse` call template');
+    expect(reasonFor('over_streamable.tool')).toContain('a `streamable_http` call template');
+    expect(reasonFor('discovered.tool')).toContain("not a call template's `auth`");
+    expect(reasonFor('dressed_root.tool')).toContain('no tool is called through');
+    expect(reasonFor('unread_tools.tool')).toContain('no tool is called through');
+    for (const file of ['over_sse.tool', 'over_streamable.tool', 'discovered.tool', 'dressed_root.tool', 'unread_tools.tool']) {
+      expect(reasonFor(file)).toContain('`call_template_type: http`');
+    }
+    // The one place it works is left alone.
+    expect(reasonFor('over_http.tool')).toBe('');
+    expect(catalog.tools.map((m) => m.name)).toContain('overhttp');
+  });
+
+  test('refuses a `.tool` that holds a service-account key itself, wherever the block sits, and never repeats it', async () => {
+    // A `.tool` is committed and read by everyone who can read the knowledge
+    // base, so the key lives in the vault and the file only names it.
+    const key = JSON.stringify({ type: 'service_account', client_email: 'ads@proj.iam.gserviceaccount.com', private_key: 'MIIEvQIBADANBgkq-NOT-A-REAL-KEY' });
+    const withCredentials = (credentials: unknown, callTemplateType = 'http') =>
+      JSON.stringify({
+        type: 'inline',
+        tools: [
+          {
+            name: 'list',
+            description: 'List.',
+            inputs: { type: 'object', properties: {} },
+            outputs: { type: 'object', properties: {} },
+            tool_call_template: {
+              call_template_type: callTemplateType,
+              http_method: 'GET',
+              url: 'https://googleads.googleapis.com/v22/customers',
+              auth: { auth_type: 'google_service_account', credentials, scopes: 'https://www.googleapis.com/auth/adwords' },
+            },
+          },
+        ],
+      });
+    const plugins = join(root, wsId, KB_DIR, 'Plugins');
+    await writeFile(join(plugins, 'pasted_key.tool'), withCredentials(key));
+    await writeFile(join(plugins, 'pasted_base64.tool'), withCredentials(Buffer.from(key).toString('base64')));
+    // A variable with the key, or anything else, written around it is still text in the file.
+    await writeFile(join(plugins, 'beside_a_variable.tool'), withCredentials('${GOOGLE_SA_KEY}' + key));
+    // In a block nothing acts on, the key is just as readable: that it is there is said first.
+    await writeFile(join(plugins, 'key_over_sse.tool'), withCredentials(key, 'sse'));
+    await writeFile(join(plugins, 'braced.tool'), withCredentials('${GOOGLE_SA_KEY}'));
+    await writeFile(join(plugins, 'bare.tool'), withCredentials(' $GOOGLE_SA_KEY '));
+
+    const catalog = await svc().listAccessibleCatalog('user@x.eu');
+
+    const reasonFor = (file: string) => catalog.invalid.find((i) => i.path === `Plugins/${file}`)?.reason ?? '';
+    for (const file of ['pasted_key.tool', 'pasted_base64.tool', 'beside_a_variable.tool', 'key_over_sse.tool']) {
+      expect(reasonFor(file), file).toContain('something other than a vault variable as its `credentials`');
+      expect(reasonFor(file), file).toContain('Secrets Vault');
+    }
+    // Nothing of what was pasted comes back in the answer, in either spelling.
+    const answer = JSON.stringify(catalog);
+    expect(answer).not.toMatch(/NOT-A-REAL-KEY|iam\.gserviceaccount/);
+    expect(answer).not.toContain(Buffer.from(key).toString('base64').slice(0, 40));
+    // Either spelling of one variable is what the field is for.
+    expect(reasonFor('braced.tool')).toBe('');
+    expect(reasonFor('bare.tool')).toBe('');
+    expect(catalog.tools.map((m) => m.name)).toEqual(expect.arrayContaining(['braced', 'bare']));
+  });
+
   test('manual names are alphanumeric (no underscores) for variable namespacing', async () => {
     root = await mkdtemp(join(tmpdir(), 'tools2-'));
     const tools = join(root, wsId, KB_DIR, 'Plugins');

@@ -120,3 +120,21 @@ export {
 } from './code-mode-names.js';
 
 export { printable } from './printable.js';
+
+// Loading this package teaches UTCP `auth_type: google_service_account`, on
+// both surfaces alike: the auth type validates and the `http` protocol mints
+// the token. A side effect of the import, like the `@utcp/http` registration
+// it builds on, so neither surface has a step to forget.
+export {
+  GOOGLE_SERVICE_ACCOUNT_AUTH_TYPE,
+  GOOGLE_TOKEN_URL,
+  GoogleAuthHttpProtocol,
+  GoogleServiceAccountTokenSource,
+  ServiceAccountAuthError,
+  findUnservedGoogleServiceAccountAuth,
+  holdsLiteralGoogleServiceAccountKey,
+  installGoogleServiceAccountAuth,
+  isGoogleServiceAccountAuth,
+  type GoogleServiceAccountAuth,
+  type IServiceAccountTokenSource,
+} from './google-service-account/index.js';

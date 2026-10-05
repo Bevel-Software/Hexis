@@ -16,6 +16,9 @@ import {
   DefaultVariableSubstitutor,
   type CallTemplate,
 } from '@utcp/sdk';
+// Also a side effect: loading the package registers the 'google_service_account'
+// auth type, so a `.tool` naming it validates here.
+import { findUnservedGoogleServiceAccountAuth, holdsLiteralGoogleServiceAccountKey } from '@bevel-software/platform-mcp-core';
 import { descriptorsFromMcpJson } from './mcp-json-discovery.js';
 import type { PluginSource } from '../plugins/discovery/plugin-source.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
@@ -1194,6 +1197,40 @@ export function normalizeToolManual(
       );
     }
     descriptor.remote = false;
+  }
+
+  // A service account's KEY IS NEVER WRITTEN IN A `.tool`. The file is
+  // knowledge-base content: committed, and read by everyone and every agent
+  // that can read the knowledge base. So `credentials` names the vault
+  // variable and nothing else, and a file that holds anything else there is
+  // refused before the block's placement is even looked at: a key in a block
+  // nothing acts on is just as readable. The refusal does not quote the value.
+  if (holdsLiteralGoogleServiceAccountKey(obj)) {
+    throw new Error(
+      '`auth_type: google_service_account` has something other than a vault variable as its `credentials`. ' +
+        'Write `credentials: ${GOOGLE_SA_KEY}` and store the key in the Secrets Vault under that name: a `.tool` is ' +
+        'read by everyone who can read the knowledge base. If a real key was saved in this file, treat it as ' +
+        'exposed and replace it at Google; removing it here does not take it out of the history.',
+    );
+  }
+
+  // A Google service-account `auth` block works on one thing: an inline tool's
+  // `http` call template. Anywhere else it validates and is then sent as no
+  // credentials at all, so the tool would save cleanly and call Google
+  // unauthenticated, with Google's 401 the only hint. Refused here instead,
+  // naming where the block was found. The templates below are the only ones
+  // this file's tools are called through: a `tools` list on a file that is not
+  // `inline` is never read, so nothing in it counts.
+  const toolCallTemplates =
+    type === 'inline' && Array.isArray(obj.tools)
+      ? obj.tools.map((tool: unknown) => (tool && typeof tool === 'object' ? (tool as Record<string, unknown>).tool_call_template : undefined))
+      : [];
+  const unserved = findUnservedGoogleServiceAccountAuth(obj, toolCallTemplates);
+  if (unserved) {
+    throw new Error(
+      `\`auth_type: google_service_account\` is on ${unserved}, where no token would be sent. ` +
+        "It works only as the `auth` of an inline tool's `tool_call_template` with `call_template_type: http`.",
+    );
   }
 
   if (type === 'inline') {
