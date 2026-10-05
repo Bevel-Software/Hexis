@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { eq, inArray, sql } from 'drizzle-orm';
@@ -748,6 +748,12 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
         const { url, db, q } = await overlayBeforeTheBackfill();
         const before = JSON.stringify(await notes(q));
         const table = NOTES.tables[0]!;
+        // Everything the backfill asks the database, it asks inside the one
+        // transaction it opens. So "not read" is checked where it would
+        // happen: these refusals must come before any transaction is opened,
+        // which unchanged rows alone would not show.
+        const keyless = handle(url, { key: null });
+        const opened = [vi.spyOn(db, 'transaction'), vi.spyOn(db, 'execute'), vi.spyOn(keyless, 'transaction'), vi.spyOn(keyless, 'execute')];
 
         // A marker that is no index of the spec's tables.
         await expect(runPiiBackfill(db, { ...NOTES, marker: { table: 'team_notes', column: 'body' } })).rejects.toThrow(/is not a blind-index column/);
@@ -756,7 +762,11 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
           runPiiBackfill(db, { ...NOTES, tables: [{ ...table, encrypted: ['reviewer_email', 'body'] }] }),
         ).rejects.toThrow(/indexes "author_email", which is not one of the table's encrypted columns/);
         // A handle that holds no key.
-        await expect(runPiiBackfill(handle(url, { key: null }), NOTES)).rejects.toThrow(/holds no personal-data key/);
+        await expect(runPiiBackfill(keyless, NOTES)).rejects.toThrow(/holds no personal-data key/);
+        for (const spy of opened) {
+          expect(spy).not.toHaveBeenCalled();
+          spy.mockRestore();
+        }
         expect(JSON.stringify(await notes(q))).toBe(before);
 
         // And a database the history was never applied to: nothing says the
