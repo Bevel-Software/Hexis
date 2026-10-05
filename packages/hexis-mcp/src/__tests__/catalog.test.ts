@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import type { Tool as UtcpTool } from '@utcp/sdk';
-import { flattenManualTool, type ProxiedTool } from '@bevel-software/platform-mcp-core';
+import { CHAIN_TIMEOUT_MAX_MS, flattenManualTool, type ProxiedTool } from '@bevel-software/platform-mcp-core';
 import { localManualTemplates, remoteManualTemplate, REMOTE_MANUAL_NAME } from '../manuals.js';
 import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { discoverTools, getSkillPrompt, listSkillPrompts, listedTools, withoutRemoteMetaTools } from '../server.js';
@@ -221,6 +221,83 @@ describe('listedTools', () => {
     expect(
       flattenManualTool(utcp('local_toolbox.local_toolbox.local_echo'), REMOTE_MANUAL_NAME).mcpName,
     ).toBe('local_toolbox_local_toolbox_local_echo');
+  });
+
+  /**
+   * The namespace in the meta-tools' examples is THIS server's, not the hosted
+   * endpoint's. The description used to be fixed text naming `KNOWLEDGE_BASE`,
+   * which no chain on this connection can call: a copied example died of
+   * `ReferenceError: KNOWLEDGE_BASE is not defined`, which is how this was
+   * reported.
+   */
+  it('writes the meta-tools examples against this server\'s own namespace', () => {
+    const utcp = (name: string) =>
+      ({ name, description: '', inputs: { type: 'object', properties: {} } }) as unknown as UtcpTool;
+    // The real shape: the remote manual is MCP-protocol and its single server
+    // shares the manual's name, so the tool arrives three segments deep and
+    // the chain spells it `hexis.hexis_read_file`.
+    const listed = listedTools([flattenManualTool(utcp('hexis.hexis.read_file'), REMOTE_MANUAL_NAME)]);
+    const chainTool = listed.find((t) => t.name === 'call_tool_chain')!;
+    expect(chainTool.description).toContain('hexis.hexis_read_file');
+    expect(chainTool.description).not.toContain('KNOWLEDGE_BASE');
+    expect(listed.find((t) => t.name === 'list_tools')!.description).toContain('hexis.hexis_read_file');
+  });
+
+  /**
+   * The worked example must come from the tools this listing really serves. A
+   * tool dropped as non-listable or duplicate is not one of them, so an example
+   * naming it is a call nobody can make.
+   */
+  it('never writes the worked example against a tool it dropped from the listing', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const utcp = (name: string) =>
+      ({ name, description: '', inputs: { type: 'object', properties: {} } }) as unknown as UtcpTool;
+    const good = flattenManualTool(utcp('hexis.hexis.start_session'), REMOTE_MANUAL_NAME);
+    // A name the MCP grammar refuses, so `toListedTool` drops it.
+    const bad = { ...flattenManualTool(utcp('hexis.hexis.read_file'), REMOTE_MANUAL_NAME), mcpName: 'has a space' };
+    const chainTool = listedTools([bad, good]).find((t) => t.name === 'call_tool_chain')!;
+    expect(chainTool.description).toContain('return hexis.hexis_start_session(');
+    expect(chainTool.description).not.toContain('hexis.hexis_read_file');
+  });
+
+  /**
+   * Two tools the LISTING takes for one (their names flatten alike) are both
+   * still in the catalog a chain dispatches to, which refuses the name as
+   * ambiguous. The example has to steer clear of that name — and it can only
+   * do so when it is shown both, not just the one the listing kept.
+   */
+  it('writes no example against a name two tools share, though the listing kept one of them', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const colliding = (utcpName: string): ProxiedTool => ({
+      utcpName,
+      mcpName: 'hexis_s_a',
+      description: '',
+      inputSchema: { type: 'object', properties: {} },
+      manualName: REMOTE_MANUAL_NAME,
+    });
+    const listed = listedTools([colliding('hexis.s.a'), colliding('hexis.s_a')]);
+    expect(listed.filter((t) => t.name === 'hexis_s_a')).toHaveLength(1);
+    for (const meta of ['list_tools', 'call_tool_chain']) {
+      const description = listed.find((t) => t.name === meta)!.description!;
+      expect(description, meta).not.toContain('hexis.s_a');
+      expect(description, meta).not.toContain('A call that works exactly as written');
+    }
+  });
+
+  it('tells a chain it has the four browser globals, and that a timeout is answered', () => {
+    const chainTool = listedTools([tool('read_file')]).find((t) => t.name === 'call_tool_chain')!;
+    for (const name of ['atob', 'btoa', 'TextEncoder', 'TextDecoder']) {
+      expect(chainTool.description).toContain(name);
+    }
+    // The SENTENCE that says a chain past its timeout is answered. The word
+    // `timeout` alone proves nothing: it is the argument's name and is in the
+    // description whatever it says about what happens.
+    expect(chainTool.description).toContain('Failures are answered, never dropped');
+    expect(chainTool.description).toMatch(/one that outlives `timeout` \(.*\) comes back saying so/);
+    // The constant, not its current value: the description renders
+    // `${CHAIN_TIMEOUT_MAX_MS} ms` and a literal here would let the cap change
+    // in one place and not the other without a single test failing.
+    expect(chainTool.description).toContain(String(CHAIN_TIMEOUT_MAX_MS));
   });
 
   it('drops a tool a meta-tool would shadow, so the listing never advertises an uncallable name', () => {

@@ -16,7 +16,8 @@ import { SpillStore } from '../../workspace/spill-store.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
-import { PLATFORM_HEADER } from '../../agent-instructions/index.js';
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
+import { platformInstructions } from '../../agent-instructions/index.js';
 import { startFakeDownstreamMcpServer, type FakeDownstreamMcpServer } from './fake-downstream-mcp-server.js';
 import { registerBevelSecretsVariableLoader } from '../../secrets-vault/secrets-variable-loader.js';
 import type { ForcedRefreshOutcome, ISecretsVaultService } from '../../secrets-vault/secrets-vault.contract.js';
@@ -483,13 +484,13 @@ describe('per-request identity: catalog, metering and continuity', () => {
 });
 
 describe('agent instructions over the real transport', () => {
-  it('the initialize result carries the header and the preamble body inline', async () => {
+  it('the initialize result carries the platform text and the preamble body inline', async () => {
     const { baseUrl } = await startPlatform({
       readAgentPreamble: async () => 'Acme builds solar farms.\n\n<!-- private -->Look in Projects/ first.',
     });
     const { client } = await connectSdkClient(baseUrl);
     const instructions = client.getInstructions();
-    expect(instructions).toBe(`${PLATFORM_HEADER}\n\nAcme builds solar farms.\n\nLook in Projects/ first.`);
+    expect(instructions).toBe(`${platformInstructions(DEFAULT_KB_LAYOUT)}\n\nAcme builds solar farms.\n\nLook in Projects/ first.`);
     expect(instructions).not.toContain('private');
   });
 
@@ -1280,12 +1281,26 @@ describe('a connected tool whose schema is invalid is not offered to agents', ()
     expect(info.interfaces).toContain('fine');
     expect(info.not_found).toEqual(['notion.srv_broken']);
 
-    // And a chain that calls it dies on a tool that is not there.
+    // And a chain that calls it dies on a tool that is not there — the
+    // namespace is bound, the member is simply absent, so the isolate's own
+    // reason NAMES it. Asserted on that reason rather than on a prefix: the
+    // chain reports a failure as `isError` with the thrown text, and a test
+    // pinned to the wrapper's wording passes while the tool is still bound.
     const chain = await client.callTool({
       name: 'call_tool_chain',
       arguments: { code: 'return notion.srv_broken({ body: {} });' },
     });
-    expect(toolText(chain)).toContain('ERROR');
+    expect(chain.isError).toBe(true);
+    expect(toolText(chain)).toContain('notion.srv_broken is not a function');
+
+    // The same chain, same namespace, on the sibling: bound and callable. This
+    // is what makes the line above a statement about the HIDDEN tool rather
+    // than about a namespace the chain could not reach at all.
+    const sibling = await client.callTool({
+      name: 'call_tool_chain',
+      arguments: { code: 'return notion.srv_fine({ body: {} });' },
+    });
+    expect(sibling.isError).toBeFalsy();
   });
 
   it('answers an agent that calls the hidden tool by name, without quoting the schema to it', async () => {

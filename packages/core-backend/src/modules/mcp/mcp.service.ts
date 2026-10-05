@@ -27,7 +27,7 @@ import {
 } from '@utcp/sdk';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import {
-  CODE_MODE_META_TOOLS,
+  codeModeMetaTools,
   META_TOOL_NAMES,
   dispatchMetaTool,
   dispatchToolCall,
@@ -43,6 +43,7 @@ import {
   type SkillSummary,
   type LoadedSkill,
 } from '@bevel-software/platform-mcp-core';
+import type { KbLayout } from '@bevel-software/platform-shared';
 import { bevelSecretsLoaderConfig } from '../secrets-vault/index.js';
 import {
   scopesCovered,
@@ -67,6 +68,7 @@ import {
   composeAgentInstructions,
   prefixToolDescription,
   PREFIXED_TOOLS,
+  sharedRulesPointer,
   type AgentPreambleReader,
   type ComposedAgentInstructions,
 } from '../agent-instructions/index.js';
@@ -93,6 +95,13 @@ export interface McpProxyOptions {
    * carries the platform header alone.
    */
   readAgentPreamble?: AgentPreambleReader;
+  /**
+   * The layout in effect, read per request: the shared file rules name the
+   * managed guide, and a deployment may rename it after boot (the setup save
+   * applies a name without a restart). A GETTER, so nothing snapshots the
+   * pre-setup default. Absent, the rules name `AGENTS.md`.
+   */
+  kbLayout?: () => KbLayout;
   /** Bounds of the downstream (`mcp.json`) connection pool; defaults are 4h idle / 5000 entries. */
   downstreamPool?: Pick<DownstreamPoolOptions<unknown>, 'idleTtlMs' | 'maxEntries' | 'now'>;
   /**
@@ -453,12 +462,26 @@ export class McpService {
       const seen = new Set(META_TOOL_NAMES);
       const dropped: string[] = [];
       const direct: McpTool[] = [];
+      const examplePool: ProxiedTool[] = [];
       for (const t of listed) {
         const entry = toListedTool(t); // logs its own reason on a name/schema drop
         if (!entry) {
           dropped.push(t.mcpName);
           continue;
         }
+        // Kept for the worked example in the meta-tool descriptions: it must
+        // be derived from the tools THIS caller actually gets, not from the
+        // whole catalog, or a connection-key caller is shown an example naming
+        // a credential-gated tool the filter above just removed from its
+        // listing — a copied call that cannot work.
+        //
+        // BEFORE the duplicate drop below, on purpose. A tool dropped from the
+        // LISTING for sharing its name with another is still in the catalog a
+        // chain dispatches to, so the chain sees two tools under one name and
+        // refuses the call as ambiguous. The example has to know about both to
+        // steer clear of either (`chainExample` skips a name two tools share);
+        // shown only the survivor, it took that name for a safe one.
+        examplePool.push(t);
         if (seen.has(entry.name)) {
           dropped.push(`${entry.name} (duplicate)`);
           continue;
@@ -475,18 +498,33 @@ export class McpService {
             : entry,
         );
       }
+      // The meta-tools' examples name the namespace THIS endpoint registers the
+      // knowledge-base tools under, and a tool this caller is really served, so
+      // a chain copied out of the description runs. Built here rather than held
+      // as a constant: the local MCP server registers the same tools under a
+      // different name, and one fixed example is necessarily wrong on one of the
+      // two surfaces.
+      //
+      // The chain's description ends with the same pointer every file tool ends
+      // with: what a chain does with a failure, a large result or an image is
+      // stated once, in the shared rules, and the clients that drop
+      // `instructions` have the description and the guide to go on. Composed
+      // here because the guide's name is this deployment's setting.
+      const metaTools = codeModeMetaTools(EXTERNAL_KB_MANUAL_NAME, examplePool, {
+        sharedRulesPointer: sharedRulesPointer(this.opts.kbLayout?.()),
+      });
       // Log only when a tool was dropped (name/schema/duplicate) — that's the
       // anomaly worth surfacing, since a downstream client would otherwise hide
       // it by rejecting the whole response.
       if (dropped.length) {
         log.warn(
-          `tools/list: serving ${CODE_MODE_META_TOOLS.length + direct.length} tool(s); ` +
+          `tools/list: serving ${metaTools.length + direct.length} tool(s); ` +
             `dropped ${dropped.length} non-listable: ${dropped.join(', ')}`,
         );
       }
       return {
         // Code-mode meta-tools first, then every validated direct tool.
-        tools: [...CODE_MODE_META_TOOLS, ...direct],
+        tools: [...metaTools, ...direct],
       };
     });
 
@@ -650,13 +688,14 @@ export class McpService {
    * fails over its preamble.
    */
   private async composeAgentInstructions(): Promise<ComposedAgentInstructions> {
+    const layout = this.opts.kbLayout?.();
     const read = this.opts.readAgentPreamble;
-    if (!read) return composeAgentInstructions(null);
+    if (!read) return composeAgentInstructions(null, layout);
     try {
-      return composeAgentInstructions(await read());
+      return composeAgentInstructions(await read(), layout);
     } catch (err) {
-      log.warn('could not read mcp-description.md; this request gets the platform header alone:', { err });
-      return composeAgentInstructions(null);
+      log.warn('could not read mcp-description.md; this request gets the platform text alone:', { err });
+      return composeAgentInstructions(null, layout);
     }
   }
 

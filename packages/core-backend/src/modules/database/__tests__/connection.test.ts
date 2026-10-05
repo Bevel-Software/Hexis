@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { describe, it, expect, afterEach } from 'vitest';
 import {
   DEFAULT_DB_SCHEMA,
@@ -86,6 +87,17 @@ describe('getDb', () => {
     expect(b).not.toBe(a1);
     expect(plain).not.toBe(a1);
     expect(getDb(URL, { schema: DEFAULT_DB_SCHEMA })).toBe(plain);
+  });
+
+  it('hands the cached pool to a caller holding the same key spelled otherwise, and refuses another key', () => {
+    const raw = randomBytes(32);
+    const first = getDb(URL, { schema: 'keyed', piiKey: raw.toString('base64') });
+    opened.push(first);
+    // The same 32 bytes as hex: one key, so one pool.
+    expect(getDb(URL, { schema: 'keyed', piiKey: raw.toString('hex') })).toBe(first);
+    expect(() => getDb(URL, { schema: 'keyed', piiKey: randomBytes(32).toString('base64') })).toThrow(
+      /already open with a different personal-data key/,
+    );
   });
 
   it('opens a fresh pool after the cached one was closed', async () => {

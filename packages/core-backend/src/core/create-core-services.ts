@@ -54,6 +54,7 @@ function parseDomainList(raw: string): string[] {
     .filter((d) => d.length > 0);
 }
 import { SpillStore } from '../modules/workspace/spill-store.js';
+import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
 import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
@@ -220,6 +221,8 @@ export interface CoreServices {
   /** The scope this graph's vault is registered under with the UTCP variable loader. */
   secretsScope: string;
   spillStore: SpillStore;
+  /** The bytes an agent uploaded, held until `apply_file_upload` lands them or their token expires. */
+  agentUploadStore: AgentUploadStore;
   docExtractService: DocExtractService;
   accessControl: AccessControlService;
   creatorAccess: CreatorAccessService;
@@ -660,6 +663,17 @@ export async function createCoreServices(
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
   const spillStore = new SpillStore(config.spillRoot);
+  // The upload route an agent lands files by, so their content never passes
+  // through the model. Bytes live BESIDE the workspaces root (never inside
+  // one) until the apply commits them or the token expires — checked here
+  // rather than assumed, because a root configured inside a workspace would
+  // put bytes no gate has judged where the file tools read.
+  await assertUploadsRootOutsideWorkspaces(config.agentUploadsRoot, config.workspacesRoot);
+  const agentUploadStore = new AgentUploadStore({
+    root: config.agentUploadsRoot,
+    publicBaseUrl: config.publicBackendUrl,
+    tokenPrefix: config.uploadTokenPrefix,
+  });
   // Office-document/PDF text extraction for `read_file`/`grep`, cached by
   // content hash beside the workspaces root (see `DocExtractionCache`).
   const docExtractService = new DocExtractService(config.docExtractCacheRoot);
@@ -1175,6 +1189,9 @@ export async function createCoreServices(
       // For the needs-authorization setup link surfaced to external agents.
       publicFrontendUrl: config.publicFrontendUrl,
       readAgentPreamble: readPreamble,
+      // The guide's name the shared file rules spell, read per request so a name
+      // the setup save applies lands without a restart.
+      kbLayout: () => kb.layout,
       secretsScope,
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
@@ -1417,6 +1434,7 @@ export async function createCoreServices(
     kb,
     kbDirName,
     spillStore,
+    agentUploadStore,
     docExtractService,
     accessControl,
     creatorAccess,

@@ -38,6 +38,25 @@ export const PLATFORM_FILE_NAMES: readonly string[] = Object.freeze(
 /** The platform files that are read wherever they sit, not only at the root. */
 const PLATFORM_FILES_AT_ANY_DEPTH = new Set(['access.md', '.bevelignore']);
 
+/**
+ * The platform files split by the DEPTH they count at, which is the half of
+ * {@link isPlatformFile} that a name alone does not tell you: `access.md` and
+ * `.bevelignore` are platform files in any folder, `roles.yaml` and the agent
+ * guide only in the repository root.
+ *
+ * Exported because the agent-facing rules state that split in prose, and a
+ * prose list written by hand drifts from the predicate that actually refuses
+ * the move — an agent then declines a nested `roles.yaml` it may rename, or
+ * trusts that a nested `access.md` is ordinary content.
+ */
+export function platformFilesByDepth(layout: KbLayout): { anyDepth: readonly string[]; rootOnly: readonly string[] } {
+  const names = platformFileNames(layout);
+  return {
+    anyDepth: names.filter((name) => PLATFORM_FILES_AT_ANY_DEPTH.has(name)),
+    rootOnly: names.filter((name) => !PLATFORM_FILES_AT_ANY_DEPTH.has(name)),
+  };
+}
+
 /** The names under `layout`, as a set — rebuilt per call, because the guide's is configurable. */
 const platformFiles = (layout: KbLayout): ReadonlySet<string> => new Set(platformFileNames(layout));
 
@@ -87,6 +106,26 @@ export function platformFileRefusal(pathOrName: string): string {
  */
 export function platformFileCreationRefusal(pathOrName: string): string {
   return `${baseName(pathOrName)} is a platform file name; a move cannot create a platform file.`;
+}
+
+/**
+ * The sentence an UPLOAD is refused with when one of its paths would land a
+ * platform file — a zip carrying an `access.md`, a `.bevelignore`, a
+ * `roles.yaml` or the agent guide, or a single file sent under one of those
+ * names.
+ *
+ * Its own sentence rather than the move's, because the thing being kept out is
+ * different: a move cannot CREATE a platform file, and an upload cannot land
+ * one at all, in either sense — the bytes arrive outside every gate that reads
+ * these files as configuration. What governs a folder's access and which roles
+ * exist has to be written where the write is checked, so the refusal names the
+ * two tools that check it.
+ */
+export function platformFileUploadRefusal(pathOrName: string): string {
+  return (
+    `${baseName(pathOrName)} is a platform file and is never landed by an upload — ` +
+    'change it with edit_file or write_file, where the change is checked.'
+  );
 }
 
 /**

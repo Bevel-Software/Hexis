@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CODE_MODE_META_TOOLS } from '../meta-tools.js';
+import { codeModeMetaTools } from '../meta-tools.js';
 import { inputSchemaDefect, schemaDefectMarker } from '../schema-validity.js';
 
 describe('inputSchemaDefect', () => {
@@ -162,9 +162,38 @@ describe('inputSchemaDefect', () => {
  * Hexis's own tools, so Hexis never ships what it hides other servers' tools
  * for. These are the meta-tools every surface advertises; the REST tool defs
  * are checked where they are built, in `platform-core-backend`.
+ *
+ * `codeModeMetaTools` is a FUNCTION of the namespace, the catalog it writes
+ * its worked example against and the shared-rules pointer, so the defs are
+ * built per mount rather than being one constant. Both ends of that range are
+ * measured: a bare mount (no namespace, no catalog) and a mount with both. The
+ * arguments shape DESCRIPTIONS rather than schemas, which is exactly the claim
+ * worth pinning — a future argument that reached a schema would fail here.
  */
 describe("Hexis's own meta-tool schemas", () => {
-  it.each(CODE_MODE_META_TOOLS.map((t) => [t.name, t] as const))('%s declares valid JSON Schema', (_name, tool) => {
-    expect(inputSchemaDefect(tool.inputSchema)).toBeNull();
+  const mounts = [
+    ['bare', codeModeMetaTools('', [])],
+    [
+      'as mounted',
+      codeModeMetaTools('hexis', [{ utcpName: 'hexis.read_file', inputSchema: { type: 'object', properties: {} } }], {
+        sharedRulesPointer: 'The shared rules are in AGENTS.md.',
+      }),
+    ],
+  ] as const;
+
+  it.each(mounts.flatMap(([mount, tools]) => tools.map((t) => [`${t.name} (${mount})`, t] as const)))(
+    '%s declares valid JSON Schema',
+    (_label, tool) => {
+      expect(inputSchemaDefect(tool.inputSchema)).toBeNull();
+    },
+  );
+
+  it('measures every meta-tool a mount advertises, not a subset', () => {
+    // A new meta-tool must arrive in this suite by being advertised, not by
+    // being added to a list here — so the count is read off the mount.
+    for (const [mount, tools] of mounts) {
+      expect(tools.length, mount).toBeGreaterThanOrEqual(3);
+      expect(tools.map((t) => t.name), mount).toContain('list_tools');
+    }
   });
 });

@@ -198,6 +198,8 @@ Write access is not evidence that a file belongs somewhere.
   folder you happen to be able to write to; a wrong guess is discovered much
   later than a question.
 
+{{sharedFileRules}}
+
 ## Access control
 
 Access to any path — reading it as much as writing it — is governed by

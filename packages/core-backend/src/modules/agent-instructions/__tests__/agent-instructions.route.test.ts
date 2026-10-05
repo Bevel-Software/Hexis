@@ -6,7 +6,11 @@ import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.in
 import type { InternalTokenService } from '../../tool-auth/internal-token.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import { createAgentInstructionsRoutes } from '../agent-instructions.routes.js';
-import { PLATFORM_HEADER, TOOL_PREFIX_LINE } from '../compose.js';
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
+import { TOOL_PREFIX_LINE, platformInstructions } from '../compose.js';
+
+/** The platform-owned text the route leads with: header + the shared file rules. */
+const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT);
 
 /**
  * `GET /agent/instructions` behind the REAL manual-auth gate, with the three
@@ -61,7 +65,7 @@ describe('GET /agent/instructions', () => {
       expect(res.status, bearer).toBe(200);
       expect(res.headers.get('cache-control')).toBe('no-store');
       const body = (await res.json()) as Record<string, unknown>;
-      expect(body.instructions).toBe(`${PLATFORM_HEADER}\n\nAcme builds solar farms.`);
+      expect(body.instructions).toBe(`${PLATFORM}\n\nAcme builds solar farms.`);
       expect(body.toolPrefix).toBe(`${TOOL_PREFIX_LINE} Acme builds solar farms.`);
       expect(body).toMatchObject({
         truncated: false,
@@ -79,12 +83,12 @@ describe('GET /agent/instructions', () => {
     expect((await fetch(url, { headers: { Authorization: 'Bearer not-a-session' } })).status).toBe(401);
   });
 
-  it('a missing file yields the header alone', async () => {
+  it('a missing file yields the platform text alone', async () => {
     const url = await serve(async () => null);
     const res = await fetch(url, { headers: { Authorization: `Bearer ${CONNECTION_KEY}` } });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { instructions: string; toolPrefix: string; preambleChars: number };
-    expect(body.instructions).toBe(PLATFORM_HEADER);
+    expect(body.instructions).toBe(PLATFORM);
     expect(body.toolPrefix).toBe(TOOL_PREFIX_LINE);
     expect(body.preambleChars).toBe(0);
   });

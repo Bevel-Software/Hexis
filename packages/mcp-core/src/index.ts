@@ -42,6 +42,7 @@ export {
 
 export {
   describeToolFailure,
+  withTransportDetail,
   toCallToolResult,
   renderProgress,
   toolError,
@@ -54,12 +55,39 @@ export {
 } from './results.js';
 
 export {
-  CODE_MODE_META_TOOLS,
+  codeModeMetaTools,
+  chainNamespaceExample,
   META_TOOL_NAMES,
   CALL_TOOL_CHAIN_MAX_OUTPUT,
+  CALL_TOOL_CHAIN_NAME,
+  CHAIN_FAILURES_RULE,
+  CHAIN_LARGE_RESULTS_RULE,
+  type CodeModeMetaToolsOptions,
   type SpillPort,
   dispatchMetaTool,
 } from './meta-tools.js';
+
+export {
+  CHAIN_RUNTIME_PRELUDE,
+  CHAIN_TIMEOUT_DEFAULT_MS,
+  CHAIN_TIMEOUT_MAX_MS,
+  CHAIN_TIMEOUT_MIN_MS,
+  type ChainNamespaces,
+  type ToolChainOutcome,
+  chainNamespaces,
+  chainOutOfMemoryMessage,
+  chainTimeoutMessage,
+  describeChainFailure,
+  runToolChain,
+  unknownNamespaceMessage,
+  withChainRuntime,
+} from './chain-runtime.js';
+
+export {
+  type ChainExample,
+  type ChainExampleTool,
+  chainExample,
+} from './chain-example.js';
 
 export { registerManual, dispatchToolCall } from './dispatch.js';
 
@@ -68,7 +96,6 @@ export {
   RETIRED_TOOL_NAMES,
   retiredToolMessage,
   retiredToolInFailure,
-  retiredToolChainFailure,
 } from './retired-tools.js';
 
 export {
