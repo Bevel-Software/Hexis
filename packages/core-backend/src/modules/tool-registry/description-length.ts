@@ -12,7 +12,7 @@
 
 import { TOOL_PREFIX_CAP } from '@bevel-software/platform-shared';
 import { PREFIXED_TOOLS } from '../agent-instructions/compose.js';
-import { SHARED_RULES_POINTER_MAX, sharedRulesPointer } from '../agent-instructions/shared-file-rules.js';
+import { GUIDE_FIRST_SENTENCE } from './guide-first.js';
 import type { UtcpTool } from './tool.contract.js';
 
 /**
@@ -60,9 +60,10 @@ export const CLIENT_SHORT_CUT = 500;
 
 /**
  * Where the tool's OWN opening sentence ends in the text a client is handed:
- * the purpose prefix counted at its cap, as in {@link clientVisibleLength}, and
- * the pointer not counted at all, since it is the part a short cut is meant to
- * take.
+ * the purpose prefix counted at its cap, as in {@link clientVisibleLength},
+ * and the guide-first sentence every listed tool opens with counted as the
+ * text it is — a client that cuts at 500 must still reach the sentence saying
+ * what the tool does, past that one.
  *
  * A description with no sentence-ending punctuation counts whole — the honest
  * answer for text that never finishes a sentence.
@@ -71,10 +72,10 @@ export function firstSentenceEnd(tool: Pick<UtcpTool, 'name' | 'description'>): 
   const prefix = PREFIXED_TOOLS.has(tool.name) ? TOOL_PREFIX_CAP + 2 : 0;
   const description = tool.description ?? '';
   if (description === '') return prefix;
-  const pointer = sharedRulesPointer();
-  const own = description.endsWith(pointer) ? description.slice(0, -pointer.length) : description;
+  const opener = description.startsWith(`${GUIDE_FIRST_SENTENCE} `) ? GUIDE_FIRST_SENTENCE.length + 1 : 0;
+  const own = description.slice(opener);
   const firstSentence = own.match(/^[\s\S]*?[.!?](?=\s|$)/)?.[0] ?? own;
-  return prefix + firstSentence.length;
+  return prefix + opener + firstSentence.length;
 }
 
 /**
@@ -85,11 +86,8 @@ export function firstSentenceEnd(tool: Pick<UtcpTool, 'name' | 'description'>): 
  * the cap is what an admin may grow their text to without being told, so a
  * description that only fits beside a short prefix does not really fit.
  *
- * The pointer sentence is measured the same way: it ends every file tool's
- * description, and whatever pointer a description actually carries is
- * discounted and charged at {@link SHARED_RULES_POINTER_MAX} — one sentence on
- * every deployment, so the two are the same length today, and a pointer that
- * ever varied again would still be charged at its longest.
+ * The guide-first sentence every listed tool opens with is already in the
+ * description the registry lists, so it is measured as the text it is.
  */
 export function clientVisibleLength(tool: Pick<UtcpTool, 'name' | 'description'>): number {
   const own = tool.description?.length ?? 0;
@@ -98,13 +96,6 @@ export function clientVisibleLength(tool: Pick<UtcpTool, 'name' | 'description'>
   // blank line after it. Measuring that as zero would under-report the only
   // text the client got.
   if (own === 0) return PREFIXED_TOOLS.has(tool.name) ? TOOL_PREFIX_CAP : 0;
-  // The pointer at its worst case rather than at this layout's: swap the one
-  // it carries for the longest it could be. A description that does not end
-  // with it (`start_session`, the proxied tools) is charged nothing.
-  const pointer = sharedRulesPointer();
-  const atWorstPointer = tool.description!.endsWith(pointer)
-    ? own - pointer.length + SHARED_RULES_POINTER_MAX
-    : own;
   // `+ 2` for the blank line `prefixToolDescription` puts between the two.
-  return PREFIXED_TOOLS.has(tool.name) ? atWorstPointer + TOOL_PREFIX_CAP + 2 : atWorstPointer;
+  return PREFIXED_TOOLS.has(tool.name) ? own + TOOL_PREFIX_CAP + 2 : own;
 }

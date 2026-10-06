@@ -73,7 +73,6 @@ const LAYOUT_KEYS: readonly string[] = [
   'knowledgeBaseDir',
   'skillsDir',
   'pluginsDir',
-  'agentsFile',
 ];
 /** The branch model, as setting keys. */
 const BRANCH_KEYS: readonly string[] = ['defaultBranch', 'protectedBranches'];

@@ -107,9 +107,9 @@ never a file someone edited — and takes the rule that hid them out of
 never served.
 
 The **Agent guide file** setting that let you give the written guide another
-name is retired. A deployment that saved one keeps it as an alias: a
-`read_file` of that name answers with the guide as well, so nothing you told
-your agents stops working.
+name is gone: the guide is read as `AGENTS.md` on every deployment. A name a
+deployment saved earlier is ignored; the first start on this version removes
+the copy written under it like any other.
 
 ## Configuring by environment instead of the setup screen
 

@@ -71,8 +71,8 @@ Access to any path — reading it as much as writing it — is governed by
   `read:` grant so what they put there is visible to them (a loose FILE
   directly at a root has no folder to carry that grant and is not excepted).
   And an Admin — or the deployment owner — may change the files directly in
-  the repository root (`roles.yaml`, `access.md`, `groups.yaml`, `{{agentsFile}}`,
-  …) even when the root grants read to nobody: the same rescue the write
+  the repository root (`roles.yaml`, `access.md`, `groups.yaml`, …) even when
+  the root grants read to nobody: the same rescue the write
   floor gives them, so a tree whose root rules lock everyone out stays
   repairable from inside the app. That rescue stops at the root; a subfolder
   an admin cannot read is closed to them like to anyone else.

@@ -283,22 +283,20 @@ describe('DeploymentSettingsService — KB layout', () => {
 
   /**
    * The guide's name was a setting while the guide was written to disk. It is
-   * retired: the setup screen no longer offers it and a save naming it is
-   * refused as unknown — but a name a deployment saved before stays in effect
-   * as the alias a read of the guide answers to, so nothing that deployment
-   * told its agents stops working.
+   * gone: the setup screen no longer offers it, a save naming it is refused
+   * as unknown, and the guide is read as `AGENTS.md` on every deployment
+   * whatever a deployment saved before.
    */
-  it('no longer takes the guide name from a save, and still honours one saved before', async () => {
+  it('knows no guide name any more: a save naming one is refused, and the layout always says AGENTS.md', async () => {
     const { db } = makeDb();
     const settings = new DeploymentSettingsService(db, ENC_KEY);
     await expect(settings.save({ agentsFile: 'HEXIS.md' }, null)).rejects.toMatchObject({
       problems: { agentsFile: 'Unknown setting.' },
     });
+    await expect(settings.save({ agentsFile: 'HEXIS.md' }, null, 'deployment')).rejects.toMatchObject({
+      problems: { agentsFile: 'Unknown setting.' },
+    });
     expect(settings.resolveKbLayout().agentsFile).toBe('AGENTS.md');
-    // Written the way the deployment wrote it, from the flow that owned it.
-    await settings.save({ agentsFile: 'HEXIS.md' }, null, 'deployment');
-    expect(settings.resolveKbLayout().agentsFile).toBe('HEXIS.md');
-    // And the retired setting is not in the list the setup screen renders.
     expect(settings.describe().map((s) => s.key)).not.toContain('agentsFile');
   });
 

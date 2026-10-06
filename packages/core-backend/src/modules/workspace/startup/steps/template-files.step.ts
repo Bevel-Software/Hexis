@@ -198,7 +198,6 @@ export class TemplateFilesStep implements OnServerStart {
     // Read ONCE per branch: a value re-read between the write and the ignore
     // rule could disagree with itself.
     const layout = this.kb.layout;
-    const agentsFile = layout.agentsFile;
 
     for (const rel of requiredFiles(layout)) {
       // `lstat`, not `exists`: a DIRECTORY or SYMLINK squatting a required
@@ -238,7 +237,7 @@ export class TemplateFilesStep implements OnServerStart {
             ),
             `${layout.pluginsDir}/`,
           ),
-          [agentsFile, LEGACY_AGENTS_FILE, PRE_RENAME_AGENTS_FILE],
+          [LEGACY_AGENTS_FILE, PRE_RENAME_AGENTS_FILE],
         );
       }
       branch.write(rel, content);
@@ -299,7 +298,7 @@ export class TemplateFilesStep implements OnServerStart {
         add: [PREAMBLE_IGNORE_PATTERN],
         drop: [`${this.kb.layout.skillsDir}/`],
         dropEvery: [`${this.kb.layout.pluginsDir}/`],
-        guideNames: [...retired, agentsFile, LEGACY_AGENTS_FILE, PRE_RENAME_AGENTS_FILE],
+        guideNames: [...retired, LEGACY_AGENTS_FILE, PRE_RENAME_AGENTS_FILE],
       })),
     );
 

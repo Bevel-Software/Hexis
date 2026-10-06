@@ -23,8 +23,8 @@
  * Both places get the SAME string, from {@link sharedFileRulesSection} — not
  * two hand-mirrored copies. A rule written twice is a rule that drifts, and a
  * drifted rule is worse than a repeated one, because the agent cannot tell
- * which copy is current. Each description ends instead with
- * {@link sharedRulesPointer}, one sentence naming the section and the guide.
+ * which copy is current. Each description opens instead with the one
+ * sentence sending the agent to the guide (`tool-registry/guide-first.ts`).
  *
  * Pure text, a function of the layout only: the guide's name is a deployment
  * setting (an alias a deployment chose before the guide left the disk), so
@@ -32,8 +32,6 @@
  */
 
 import {
-  DEFAULT_KB_LAYOUT,
-  agentsFileOf,
   LEGACY_AGENTS_FILE,
   platformFilesByDepth,
   type KbLayout,
@@ -86,12 +84,11 @@ export interface SharedFileRule {
  * ones that said "this tool" or "this call" name the tools instead.
  */
 export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
-  const agentsFile = agentsFileOf(layout);
   return [
     {
       id: 'agent-guide',
       heading: "This knowledge base's own conventions",
-      body: conventionsRule(agentsFile),
+      body: conventionsRule(),
     },
     {
       id: 'content-kinds',
@@ -232,13 +229,12 @@ function platformFileList(layout: KbLayout): string {
  * fallback because a knowledge base seeded before the rename may still carry
  * one its people edited.
  */
-function conventionsRule(agentsFile: string): string {
-  const alias = agentsFile === LEGACY_AGENTS_FILE ? '' : ` (or \`${agentsFile}\` here)`;
+function conventionsRule(): string {
   return (
-    `Before your first read or change in a workspace, read \`${LEGACY_AGENTS_FILE}\` at the KB root${alias}: it ` +
-    "answers with the platform's guide to this knowledge base, after the organisation's own conventions file of " +
-    'that name when it has one, and you should follow both (`get_agent_guide` returns the guide alone). A ' +
-    `\`${PRE_RENAME_AGENTS_FILE}\` at the KB root is the organisation's own too: read it if it exists.`
+    "Before your first read or change in a workspace, call `get_agent_guide` and read the platform's guide " +
+    `(whole, or one section at a time). read_file on \`${LEGACY_AGENTS_FILE}\` at the KB root answers with the same ` +
+    "guide, after the organisation's own conventions file of that name when it has one: follow both. A " +
+    `\`${PRE_RENAME_AGENTS_FILE}\` at the KB root is the organisation's own too; read it as well.`
   );
 }
 
@@ -254,24 +250,4 @@ export function sharedFileRulesSection(layout: KbLayout): string {
   return `## ${SHARED_RULES_SECTION}\n\n${body}`;
 }
 
-/**
- * The one sentence a tool description ends with, in place of the paragraphs it
- * used to carry. Short on purpose: it costs every description the same ~100
- * characters, and its whole job is to name the section and where to read it.
- * The same sentence on every deployment: the guide is reached by one name and
- * one tool everywhere, so no deployment setting moves its length.
- *
- * Takes the layout for the callers that pass one; nothing in the sentence
- * depends on it any more.
- */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars -- callers pass the layout they serve; the sentence no longer depends on it
-export function sharedRulesPointer(_layout: KbLayout = DEFAULT_KB_LAYOUT): string {
-  return ` Shared rules for all file tools: see "${SHARED_RULES_SECTION}" in the agent guide (get_agent_guide).`;
-}
 
-/**
- * The most the pointer can ever cost a description. What the description cap
- * is measured against, the way the tool prefix is measured at ITS cap rather
- * than at whatever the current admin wrote. One sentence, so one length.
- */
-export const SHARED_RULES_POINTER_MAX = sharedRulesPointer().length;

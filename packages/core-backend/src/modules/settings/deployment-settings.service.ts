@@ -7,7 +7,6 @@ import { deploymentSettings } from '../database/core-schema.js';
 import {
   DEFAULT_KB_LAYOUT,
   type KbLayout,
-  validateAgentsFileName,
   validateBranchModel,
   validateKbLayout,
   validateKbRootName,
@@ -228,12 +227,13 @@ export const CORE_SETTINGS: SettingDef[] = [
   /**
    * The KB layout: the three root folders a deployment may rename so hexis can
    * read a repository laid out by someone else (`skills/` and `plugins/` in
-   * lowercase, say), and the name a deployment once gave the agent guide (an
-   * alias a read answers to; see `agentsFile` below).
+   * lowercase, say). The agent guide's name is not among them any more: the
+   * guide is served by the platform as `AGENTS.md` everywhere, and a name a
+   * deployment saved for the written guide is ignored.
    * Restart-to-apply like the branch model — the names are applied once at boot
    * through `configureKbLayout` and served to the browser once by
    * `/api/config`. Each has a default, so an unset field means the default, not
-   * an unconfigured deployment. Checked as a QUARTET in `save`: the four must
+   * an unconfigured deployment. Checked as a TRIO in `save`: the three must
    * differ, and one field alone cannot see the other three.
    *
    * NO `envVar`, on any of the four. Layout is deployment configuration that is
@@ -262,27 +262,6 @@ export const CORE_SETTINGS: SettingDef[] = [
     validate: validateKbRootName,
     restartToApply: true,
     unsetMeans: DEFAULT_KB_LAYOUT.pluginsDir,
-  },
-  {
-    /**
-     * The name the agent guide was WRITTEN under while it was a file in the
-     * repository. RETIRED: the guide is served from code now (see
-     * `modules/agent-guide`), under `AGENTS.md` and, on a deployment that
-     * saved a name here before the change, under that name too — so the
-     * saved value is still read, as an alias a read answers to, and never
-     * offered on the setup screen again (`internal`, like the GitHub App's
-     * own fields). Its own validator says what a guide may be called; the
-     * quartet check in `plan` is what keeps it clear of the three folder names
-     * it is saved beside.
-     */
-    key: 'agentsFile',
-    section: 'knowledge-base',
-    internal: true,
-    // Judged against the default roots here; the quartet check in `plan`
-    // judges it against the roots the same save puts in effect.
-    validate: (v) => validateAgentsFileName(v, DEFAULT_KB_LAYOUT),
-    restartToApply: true,
-    unsetMeans: DEFAULT_KB_LAYOUT.agentsFile,
   },
 
 
@@ -578,7 +557,7 @@ export class DeploymentSettingsService {
       knowledgeBaseDir: this.resolve('knowledgeBaseDir') || DEFAULT_KB_LAYOUT.knowledgeBaseDir,
       skillsDir: this.resolve('skillsDir') || DEFAULT_KB_LAYOUT.skillsDir,
       pluginsDir: this.resolve('pluginsDir') || DEFAULT_KB_LAYOUT.pluginsDir,
-      agentsFile: this.resolve('agentsFile') || DEFAULT_KB_LAYOUT.agentsFile,
+      agentsFile: DEFAULT_KB_LAYOUT.agentsFile,
     };
   }
 
@@ -813,12 +792,12 @@ export class DeploymentSettingsService {
       if (problem) problems.protectedBranches = problem;
     }
 
-    // The layout quartet is the other cross-field rule: three folder names and
-    // a guide file name that must all differ. Judged on the layout this save
-    // WOULD produce, with the default standing in for anything neither written
-    // nor stored — so renaming the plugins folder to what the guide is already
-    // called is refused whichever of the two the save names.
-    const layoutKeys = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir', 'agentsFile'] as const;
+    // The layout trio is the other cross-field rule: three folder names that
+    // must all differ. Judged on the layout this save WOULD produce, with the
+    // default standing in for anything neither written nor stored — so
+    // renaming one folder to what another is already called is refused
+    // whichever of the two the save names.
+    const layoutKeys = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'] as const;
     if (toWrite.some((w) => (layoutKeys as readonly string[]).includes(w.key))) {
       const effective = (key: (typeof layoutKeys)[number]) =>
         toWrite.find((w) => w.key === key)?.value || this.resolve(key) || DEFAULT_KB_LAYOUT[key];
@@ -826,7 +805,6 @@ export class DeploymentSettingsService {
         knowledgeBaseDir: effective('knowledgeBaseDir'),
         skillsDir: effective('skillsDir'),
         pluginsDir: effective('pluginsDir'),
-        agentsFile: effective('agentsFile'),
       });
       // Against the field being written — the first one in the batch — since
       // any of the three could be the one that collides.
@@ -854,7 +832,7 @@ export class DeploymentSettingsService {
           knowledgeBaseDir: effective('knowledgeBaseDir'),
           skillsDir: effective('skillsDir'),
           pluginsDir: effective('pluginsDir'),
-          agentsFile: effective('agentsFile'),
+          agentsFile: DEFAULT_KB_LAYOUT.agentsFile,
         });
       } catch (err) {
         // Against the field this save is writing — the checkout name when that

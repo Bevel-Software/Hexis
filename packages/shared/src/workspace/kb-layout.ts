@@ -117,14 +117,10 @@ export let PLUGINS_DIR = 'Plugins';
  * The guide is no longer a file: the backend composes it from text the code
  * owns and serves it through `get_agent_guide` and through a `read_file` of
  * this name (see core-backend's `modules/agent-guide`), after the knowledge
- * base's own file of that name when it has one. The name is still a setting
- * because it was one while the guide was written to disk: a deployment that
- * renamed the guide then (`HEXIS.md`, say) told its agents that name, and a
- * read of it still answers with the guide. `AGENTS.md` always does, whatever
- * the setting says. Nothing is written under either name any more.
- *
- * A live binding like the three roots above — read it inside a function body,
- * never capture it at module scope.
+ * base's own file of that name when it has one. ONE name on every
+ * deployment: the setting that let a deployment rename the written guide is
+ * gone, and a value it saved is ignored. The layout field below stays for
+ * the shape every consumer reads, and always carries this name.
  */
 export let AGENTS_FILE = 'AGENTS.md';
 

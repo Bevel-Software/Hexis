@@ -10,11 +10,9 @@ import {
 } from '../compose.js';
 import {
   SHARED_FILE_RULES_CAP,
-  SHARED_RULES_POINTER_MAX,
   SHARED_RULES_SECTION,
   sharedFileRules,
   sharedFileRulesSection,
-  sharedRulesPointer,
 } from '../shared-file-rules.js';
 
 /**
@@ -94,38 +92,26 @@ describe('the shared file rules are one text, in two places', () => {
    * organisation's own conventions file beside it — which is what a
    * `read_file` of that name serves first.
    */
-  it('tells an agent to read AGENTS.md first, and that the organisation\'s own file comes with it', () => {
+  it('tells an agent to call get_agent_guide first, and that AGENTS.md answers with the same guide after the organisation\'s own', () => {
     const rule = sharedFileRules(DEFAULT_KB_LAYOUT).find((r) => r.id === 'agent-guide')!.body;
-    expect(rule).toContain('read `AGENTS.md` at the KB root');
+    expect(rule).toContain("call `get_agent_guide` and read the platform's guide");
+    expect(rule).toContain('read_file on `AGENTS.md` at the KB root answers with the same guide');
     expect(rule).toContain("after the organisation's own conventions file of that name");
-    expect(rule).toContain('`get_agent_guide` returns the guide alone');
     // The pre-rename name is still offered, for a knowledge base that kept one.
     expect(rule).toContain('`CLAUDE.md`');
-    // Under the default name nothing else is named: there is one name to read.
-    expect(rule).not.toContain('or `');
   });
 
-  it('names the alias a deployment saved for the guide, beside the one name every agent knows', () => {
+  it('names one guide on every deployment, whatever name a deployment once saved for the written one', () => {
     const layout = { ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' };
     const section = sharedFileRulesSection(layout);
-    expect(section).toContain('read `AGENTS.md` at the KB root (or `HEXIS.md` here)');
+    expect(section).toBe(sharedFileRulesSection(DEFAULT_KB_LAYOUT));
+    expect(section).not.toContain('HEXIS.md');
     expect(composeAgentInstructions(null, layout).instructions).toContain(section);
     // The guide is not a platform file under any name: the list a move
     // refuses does not carry it.
     expect(section).toContain('`access.md` or `.bevelignore` in any folder, `roles.yaml` at the repository root');
-    expect(section).not.toContain('`roles.yaml` or `HEXIS.md`');
   });
 
-  it('points at the section with one short sentence, the same on every deployment', () => {
-    expect(sharedRulesPointer(DEFAULT_KB_LAYOUT)).toBe(
-      ' Shared rules for all file tools: see "Working with files" in the agent guide (get_agent_guide).',
-    );
-    // No deployment setting moves it: the guide is reached the same way everywhere.
-    for (const agentsFile of [undefined, 'HEXIS.md', `${'x'.repeat(252)}.md`]) {
-      expect(sharedRulesPointer({ ...DEFAULT_KB_LAYOUT, agentsFile })).toBe(sharedRulesPointer(DEFAULT_KB_LAYOUT));
-    }
-    expect(SHARED_RULES_POINTER_MAX).toBe(sharedRulesPointer().length);
-  });
 });
 
 describe('the handshake text stays inside the length it pins', () => {

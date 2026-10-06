@@ -66,10 +66,10 @@ import {
   composeAgentInstructions,
   prefixToolDescription,
   PREFIXED_TOOLS,
-  sharedRulesPointer,
   type AgentPreambleReader,
   type ComposedAgentInstructions,
 } from '../agent-instructions/index.js';
+import { GUIDE_FIRST_SENTENCE } from '../tool-registry/guide-first.js';
 
 /**
  * Configuration for the loopback proxy. `loopbackBaseUrl` is the backend's own
@@ -486,14 +486,23 @@ export class McpService {
       // different name, and one fixed example is necessarily wrong on one of the
       // two surfaces.
       //
-      // The chain's description ends with the same pointer every file tool ends
-      // with: what a chain does with a failure, a large result or an image is
-      // stated once, in the shared rules, and the clients that drop
-      // `instructions` have the description and the guide to go on. Composed
-      // here because the guide's name is this deployment's setting.
+      // What a chain does with a failure, a large result or an image is
+      // stated once, in the shared rules — in the guide and in the handshake
+      // instructions — and not on the chain itself (an EMPTY pointer is how
+      // `mcp-core` is told the rules are served elsewhere). Like every tool of
+      // the platform's own, each meta-tool opens with the one sentence saying
+      // what to do before any of them, which is where those rules are. The
+      // registry puts the sentence on the tools it lists; the meta-tools are
+      // built here, so here it is.
       const metaTools = codeModeMetaTools(EXTERNAL_KB_MANUAL_NAME, examplePool, {
-        sharedRulesPointer: sharedRulesPointer(this.opts.kbLayout?.()),
-      });
+        sharedRulesPointer: '',
+      }).map((tool) => ({
+        ...tool,
+        description:
+          tool.description && !tool.description.startsWith(GUIDE_FIRST_SENTENCE)
+            ? `${GUIDE_FIRST_SENTENCE} ${tool.description}`
+            : tool.description,
+      }));
       // Log only when a tool was dropped (name/schema/duplicate) — that's the
       // anomaly worth surfacing, since a downstream client would otherwise hide
       // it by rejecting the whole response.
