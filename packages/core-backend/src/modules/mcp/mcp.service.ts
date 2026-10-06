@@ -53,6 +53,7 @@ import {
 import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.js';
 import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
 import type { SpillStore } from '../workspace/spill-store.js';
+import type { HiddenToolSource } from '../../shared/hidden-tools.js';
 import { seedBevelHostedManualVars } from '../../shared/utcp-namespace.js';
 import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
 import type { IAgentEventRecorder } from '../audit/audit.contract.js';
@@ -60,6 +61,7 @@ import { RequestAudit } from '../audit/request-audit.js';
 import { ManualFailureMemo } from './manual-failure-memo.js';
 import { DownstreamPool, POOL_KEY_SEPARATOR, type DownstreamPoolOptions, type Lease } from './downstream-pool.js';
 import { SurfaceLogThrottle } from './surface-log-throttle.js';
+import { ToolSchemaGuard, type ScreenedHiddenTool } from './tool-schema-guard.js';
 import { DownstreamRefreshGuard, isDownstreamTokenRejection } from './downstream-token-refresh.js';
 import { printable } from '../../shared/printable.js';
 import {
@@ -166,6 +168,14 @@ interface RequestSurface {
    * They differ only when the name holds a non-word character (`my-server`).
    */
   catalogNames: ReadonlyMap<string, string>;
+  /**
+   * The tools this request's load took OFF the surface for an invalid schema,
+   * by the name an agent would have called them by. Carried on the surface
+   * rather than read back out of the guard: it is this caller's own load, so a
+   * call answered from it cannot answer about a schema some other caller's
+   * connection was shown.
+   */
+  hidden: ReadonlyMap<string, ScreenedHiddenTool>;
 }
 
 /** A manual off the surface for want of a sign-in — see {@link RequestSurface.unavailable}. */
@@ -272,6 +282,15 @@ export class McpService {
    * server's tools.
    */
   private readonly knownDownstreamTools = new Map<string, { definition: string; tools: UtcpTool[] }>();
+
+  /**
+   * The JSON Schema check on connected tools, and the memory of what it found.
+   * Process-wide rather than per request, because a schema's validity is a
+   * property of the server and not of the caller — and because the point of
+   * remembering is that the check runs when a server's tools are loaded, not
+   * once per request and never on a tool call. See {@link ToolSchemaGuard}.
+   */
+  private readonly toolSchemas = new ToolSchemaGuard();
 
   // The downstream connection pool for `mcp` manuals — see the class doc.
   private readonly downstream: DownstreamPool<PooledDownstream>;
@@ -513,7 +532,7 @@ export class McpService {
     });
 
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-      const { client, tools, unavailable, catalogNames } = await requestSurface();
+      const { client, tools, unavailable, catalogNames, hidden: hiddenTools } = await requestSurface();
       const toolName = request.params.name;
       const args = request.params.arguments ?? {};
       if (META_TOOL_NAMES.has(toolName)) {
@@ -554,6 +573,24 @@ export class McpService {
       };
       const proxied = tools.find((t) => t.mcpName === toolName);
       if (!proxied) {
+        // A tool this process hid for an invalid schema: say that, rather than
+        // "Unknown tool" about a tool the agent has every reason to think
+        // exists. The place and the reason are deliberately NOT here — they are
+        // for the people who manage the server, who are the only ones who can
+        // act on them.
+        const hidden = hiddenTools.get(toolName);
+        if (hidden) {
+          // The UTCP name, as every other audit path records a tool: the
+          // flattened agent name loses the server segment of a multi-segment
+          // `<manual>.<server>.<tool>`, and an audit trail that names a
+          // different tool than the rest of the trail is worse than none.
+          if (audit) await audit.denied(hidden.utcpName, args);
+          return toolError(
+            `The "${toolName}" tool is hidden from agents because its schema is invalid, so it cannot be ` +
+              `called. The people who manage its server can see the place in the schema and the reason, on ` +
+              `the tool's page in Hexis and through \`list_tool_setup\`.`,
+          );
+        }
         // Not on the surface — but if the name belongs to a manual that is off
         // it only because this caller's sign-in is gone (and nothing in this
         // process has seen its tools yet), the honest answer is the sign-in
@@ -629,7 +666,7 @@ export class McpService {
     const manuals = await this.fetchManualTemplates(loopbackBearer);
     const catalogMs = performance.now() - started;
     const client = await this.buildClient(loopbackBearer, userId, manuals);
-    const { tools, unavailable, catalogNames } = await this.discoverTools(client, manuals, userId);
+    const { tools, unavailable, catalogNames, hidden } = await this.discoverTools(client, manuals, userId);
     const totalMs = performance.now() - started;
     // Per user: on a shape change or once per interval, never per request —
     // see SurfaceLogThrottle for why both halves matter.
@@ -644,7 +681,7 @@ export class McpService {
           (decision.suppressed > 0 ? ` [+${decision.suppressed} identical rebuild(s) since last line]` : ''),
       );
     }
-    return { client, tools, unavailable, catalogNames };
+    return { client, tools, unavailable, catalogNames, hidden };
   }
 
   /**
@@ -801,13 +838,29 @@ export class McpService {
     client: CodeModeUtcpClient,
     manuals: CallTemplate[],
     userId: string,
-  ): Promise<{ tools: ProxiedTool[]; unavailable: UnavailableManual[]; catalogNames: Map<string, string> }> {
+  ): Promise<{
+    tools: ProxiedTool[];
+    unavailable: UnavailableManual[];
+    catalogNames: Map<string, string>;
+    hidden: Map<string, ScreenedHiddenTool>;
+  }> {
     const routes = new Map<string, DownstreamRoute>();
     const unavailable: UnavailableManual[] = [];
+    // Taken BEFORE a single manual is registered, so it ranks this load by the
+    // freshness of what it is about to read — see ToolSchemaGuard.beginLoad.
+    const loadId = this.toolSchemas.beginLoad();
     const catalogNames = new Map<string, string>();
     for (const m of manuals) {
       if (m.call_template_type === 'mcp') catalogNames.set(utcpManualName(m), String(m.name));
     }
+    // Every manual's catalog name, which is how the owner-facing surfaces know
+    // it. `catalogNames` above is the credential catalog's map and covers `mcp`
+    // manuals only; the schema check is about the tools of every connected
+    // server, so it needs the whole list. Taken HERE, before registration:
+    // registering a manual renames the template in place, so `m.name` read
+    // afterwards is the rewritten identifier and `my-server` would be recorded
+    // as `my_server` — a name no tool page ever looks up.
+    const manualCatalogNames = new Map(manuals.map((m) => [utcpManualName(m), String(m.name)]));
     // The shared layer rewrites every manual name (`[^\w]` → `_`) and tools
     // route by the rewritten prefix, so two manuals whose names rewrite to one
     // identifier would silently share it. Sequential registration used to
@@ -887,11 +940,65 @@ export class McpService {
     if (kbFailure && !kbFailure.ok) throw new Error(`Bevel tool discovery failed: ${kbFailure.error}`);
     if (routes.size > 0) routeToDownstream(client, routes);
     const utcpTools = await client.getTools();
-    return {
-      tools: utcpTools.map((tool: UtcpTool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME)),
-      unavailable,
-      catalogNames,
-    };
+    const flattened = utcpTools.map((tool: UtcpTool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME));
+    const { tools, hidden } = await this.hideInvalidSchemas(client, flattened, manualCatalogNames, userId, loadId);
+    return { tools, unavailable, catalogNames, hidden };
+  }
+
+  /**
+   * Check the input schema of every tool the servers just advertised, and take
+   * the invalid ones OFF the client's tool repository.
+   *
+   * The repository is the single place `tools/list`, `list_tools`/`tools_info`
+   * and the TypeScript interfaces `call_tool_chain` generates are all built
+   * from, so removing a tool here removes it from all three — which is what
+   * "not offered to agents" has to mean. Its siblings are untouched: the check
+   * is per tool, so one bad schema costs that tool and nothing else of the
+   * server.
+   *
+   * A client would otherwise drop such a tool itself, silently, and the agent
+   * would be left without it and without a reason. Hidden here, the reason
+   * reaches the people who manage the server (see {@link ToolSchemaGuard}).
+   */
+  private async hideInvalidSchemas(
+    client: CodeModeUtcpClient,
+    tools: ProxiedTool[],
+    catalogNames: ReadonlyMap<string, string>,
+    userId: string,
+    loadId: number,
+  ): Promise<{ tools: ProxiedTool[]; hidden: Map<string, ScreenedHiddenTool> }> {
+    const byManual = new Map<string, ProxiedTool[]>();
+    // EVERY manual of this surface is screened, including the ones that
+    // advertised nothing. A server that removed its last invalid tool, and one
+    // whose tools never loaded at all (a sign-in that has gone), both come
+    // through here with an empty group — and an empty group is what clears the
+    // marker. Screening only the groups that have tools would leave the tool
+    // page, `list_tool_setup` and the hidden-tool answer on a call all
+    // reporting a defect this process can no longer see.
+    for (const manual of catalogNames.values()) byManual.set(manual, []);
+    for (const tool of tools) {
+      const manual = catalogNames.get(tool.manualName) ?? tool.manualName;
+      byManual.set(manual, [...(byManual.get(manual) ?? []), tool]);
+    }
+    const found = this.toolSchemas.screen(userId, loadId, byManual);
+    const hidden = new Map<string, ScreenedHiddenTool>();
+    for (const tool of found.values()) hidden.set(tool.name, tool);
+    if (found.size === 0) return { tools, hidden };
+    for (const utcpName of found.keys()) {
+      await client.config.tool_repository.removeTool(utcpName);
+    }
+    // Logged every time rather than throttled: a hidden tool is the one thing
+    // about this surface that a person has to act on, and it is rare.
+    log.warn(
+      `hiding ${found.size} connected tool(s) whose input schema is not valid JSON Schema: ` +
+        `${[...found.values()].map((t) => `${t.name} (${t.path}: ${t.reason})`).join(', ')}`,
+    );
+    return { tools: tools.filter((tool) => !found.has(tool.utcpName)), hidden };
+  }
+
+  /** The schema findings the owner-facing surfaces report — see {@link ToolSchemaGuard}. */
+  get hiddenTools(): HiddenToolSource {
+    return this.toolSchemas;
   }
 
   /**

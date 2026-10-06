@@ -1231,6 +1231,11 @@ export async function createCoreServices(
   // so a just-repaired credential is retried on the very next request instead
   // of waiting out the failure memo's TTL, and pooled downstream connections.
   secretsVaultService.onMutation((changedUserId) => mcpService.onSecretsChanged(changedUserId));
+  // The proxy is the one place a connected server's tools are loaded, so it is
+  // the one place their schemas are checked — and the tool catalog is where the
+  // people who manage a server read what it found. Setter injection, like the
+  // OAuth discovery above: the proxy is constructed after the catalog.
+  toolManualService.setHiddenTools(mcpService.hiddenTools);
   // MCP OAuth 2.1 authorization server (our own AS): lets MCP clients with no
   // pre-shared connection key connect via the standard 401 → discovery → DCR →
   // authorize (PKCE) flow. The authorize step routes the browser to /connect
