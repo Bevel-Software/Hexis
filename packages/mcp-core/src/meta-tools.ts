@@ -25,7 +25,7 @@ import {
  *
  * What a chain DOES, though — to a failure, to a large result, to an image —
  * is true of every call, and those rules are stated once, in the handshake
- * instructions and in the platform-managed agent guide, rather than on each
+ * instructions and in the platform's agent guide, rather than on each
  * tool they cover. So on a surface that has those rules the chain description
  * ends with the same pointer sentence every file tool ends with, composed
  * where the tool is served and the guide's configured name is known

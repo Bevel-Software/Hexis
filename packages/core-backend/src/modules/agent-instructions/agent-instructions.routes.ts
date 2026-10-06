@@ -28,8 +28,9 @@ export function createAgentInstructionsRoutes(
   readPreamble: AgentPreambleReader,
   /**
    * The layout in effect, read per request — the shared file rules name the
-   * managed guide, whose name the setup save may change without a restart.
-   * Optional so a construction with no layout in hand gets `AGENTS.md`.
+   * guide by the name a deployment saved for it, which the setup save may
+   * change without a restart. Optional so a construction with no layout in
+   * hand gets `AGENTS.md`.
    */
   kbLayout?: () => KbLayout,
 ): express.Router {

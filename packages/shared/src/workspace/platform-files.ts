@@ -1,7 +1,6 @@
 import {
   DEFAULT_KB_LAYOUT,
   FIXED_PLATFORM_FILE_NAMES,
-  agentsFileOf,
   reservedRootDirNames,
   type KbLayout,
 } from './kb-layout.js';
@@ -9,28 +8,26 @@ import {
 /**
  * The files the platform reads as configuration, not content. `access.md`
  * governs the folder it sits in and `.bevelignore` layers like `.gitignore`,
- * so both count at any depth; `roles.yaml` and the agent guide are read from
- * the repository root only, so a nested file of either name is ordinary
- * content. Moving one changes what the platform enforces, so moves refuse them.
+ * so both count at any depth; `roles.yaml` is read from the repository root
+ * only, so a nested file of that name is ordinary content. Moving one changes
+ * what the platform enforces, so moves refuse them.
  *
- * A FUNCTION OF THE LAYOUT, not a constant, and that is the whole of the
- * configurable-guide change on this side: the guide's name is a deployment
- * setting, so the fourth platform file is `HEXIS.md` on one deployment and
- * `AGENTS.md` on the next — and on the first, a root `AGENTS.md` is the
- * CUSTOMER'S own conventions file, which has to move and delete like any page.
- * Every gate asks this with the layout it serves rather than reading a list
- * captured at module load.
+ * The agent guide is NOT among them. It was, while the platform wrote it to
+ * the repository root; the backend serves it from code now (core-backend's
+ * `modules/agent-guide`), and a root `AGENTS.md` — or a file under whatever
+ * name a deployment once gave the guide — is the organisation's own
+ * conventions page, which moves and deletes like any other.
+ *
+ * Still a FUNCTION OF THE LAYOUT, so every gate asks the question the same
+ * way it asks the others, and a file the layout makes a platform file again
+ * one day needs no caller to change.
  */
-export function platformFileNames(layout: KbLayout): readonly string[] {
-  return [...FIXED_PLATFORM_FILE_NAMES, agentsFileOf(layout)];
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- the layout is the question's shape, kept for every caller (see above)
+export function platformFileNames(_layout: KbLayout): readonly string[] {
+  return [...FIXED_PLATFORM_FILE_NAMES];
 }
 
-/**
- * The platform file names under the DEFAULT layout — what they were before the
- * guide could be renamed. Kept for callers that want the default answer rather
- * than this deployment's; anything judging a real path asks
- * {@link platformFileNames}, which knows what this deployment called its guide.
- */
+/** The platform file names under the DEFAULT layout — the same three on every deployment. */
 export const PLATFORM_FILE_NAMES: readonly string[] = Object.freeze(
   platformFileNames(DEFAULT_KB_LAYOUT),
 );
@@ -41,8 +38,8 @@ const PLATFORM_FILES_AT_ANY_DEPTH = new Set(['access.md', '.bevelignore']);
 /**
  * The platform files split by the DEPTH they count at, which is the half of
  * {@link isPlatformFile} that a name alone does not tell you: `access.md` and
- * `.bevelignore` are platform files in any folder, `roles.yaml` and the agent
- * guide only in the repository root.
+ * `.bevelignore` are platform files in any folder, `roles.yaml` only in the
+ * repository root.
  *
  * Exported because the agent-facing rules state that split in prose, and a
  * prose list written by hand drifts from the predicate that actually refuses
@@ -111,7 +108,7 @@ export function platformFileCreationRefusal(pathOrName: string): string {
 /**
  * The sentence an UPLOAD is refused with when one of its paths would land a
  * platform file — a zip carrying an `access.md`, a `.bevelignore`, a
- * `roles.yaml` or the agent guide, or a single file sent under one of those
+ * `roles.yaml`, or a single file sent under one of those
  * names.
  *
  * Its own sentence rather than the move's, because the thing being kept out is
@@ -151,7 +148,7 @@ export function platformFolderRefusal(repoRelativeDir: string): string {
 
 /**
  * Whether the platform file at `repoRelativePath` sits directly in the
- * repository root — the copy every one of the four is read from there, and so
+ * repository root — the copy every one of the three is read from there, and so
  * never the misplaced one: it is the copy a restore puts back. A nested
  * `access.md` or `.bevelignore` is a platform file too, but it layers on top
  * of the root's rather than standing in for it, which is why moving the
@@ -165,7 +162,7 @@ export function isRootPlatformFile(repoRelativePath: string, layout: KbLayout): 
  * The place a misplaced platform file is allowed to be put back, when
  * `repoRelativeDestination` names one, and null when it does not.
  *
- * `roles.yaml` and the agent guide are read from the repository root and
+ * `roles.yaml` is read from the repository root and
  * nowhere else, so their one required location is the root. A nested `.bevelignore` is
  * read too (it layers, see `BevelIgnoreStack`), yet a restore of one lands at
  * the root only — a deliberate narrowing of the exception, not a claim about
@@ -204,8 +201,8 @@ export function platformRestoreDestination(
  * Three things make the shape, and all three are about the move rather than
  * about the source's current standing:
  *
- *  - the source is NAMED like a platform file. A nested `roles.yaml`, or a
- *    nested copy of the agent guide, is ordinary content where it sits
+ *  - the source is NAMED like a platform file. A nested `roles.yaml` is
+ *    ordinary content where it sits
  *    (`isPlatformFile` says so, and moving it needs no exception), but it is
  *    still the copy a restore carries back to the root — judging the shape on
  *    `isPlatformFile` would skip the exception for exactly the two files the

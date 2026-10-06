@@ -85,12 +85,11 @@ export function firstSentenceEnd(tool: Pick<UtcpTool, 'name' | 'description'>): 
  * the cap is what an admin may grow their text to without being told, so a
  * description that only fits beside a short prefix does not really fit.
  *
- * The pointer sentence is measured the same way, for the same reason. It ends
- * every file tool's description and its length moves with a DEPLOYMENT SETTING
- * — the guide's file name — so a description measured beside the nine
- * characters of `AGENTS.md` would pass here and arrive cut on a deployment
- * that renamed its guide. Whatever pointer a description actually carries is
- * discounted and charged at {@link SHARED_RULES_POINTER_MAX} instead.
+ * The pointer sentence is measured the same way: it ends every file tool's
+ * description, and whatever pointer a description actually carries is
+ * discounted and charged at {@link SHARED_RULES_POINTER_MAX} — one sentence on
+ * every deployment, so the two are the same length today, and a pointer that
+ * ever varied again would still be charged at its longest.
  */
 export function clientVisibleLength(tool: Pick<UtcpTool, 'name' | 'description'>): number {
   const own = tool.description?.length ?? 0;

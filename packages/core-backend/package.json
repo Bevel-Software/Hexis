@@ -23,6 +23,7 @@
     "src",
     "migrations",
     "kb-template",
+    "agent-guide",
     "THIRD-PARTY-NOTICES.md"
   ],
   "engines": {

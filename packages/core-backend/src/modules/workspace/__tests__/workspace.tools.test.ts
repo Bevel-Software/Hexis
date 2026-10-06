@@ -98,6 +98,8 @@ let unzipEntries: string[] = [];
 let folderTurns: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
 let writePolicy: RoutineWritePolicyService;
+/** What the platform's guide reads as, for the tests about the guide's name. */
+let guideText = 'THE PLATFORM GUIDE\n';
 /**
  * The focused branch the resolved `ToolContext` carries — mirrors the branch an
  * internal token bakes for the in-process agent. A test sets it to prove a
@@ -297,7 +299,7 @@ async function start(
     recoveryBotEmail: RECOVERY_BOT,
     hooks,
     notes,
-  }, writePolicy, {} as never /* sessionSink — start_session not exercised here */);
+  }, writePolicy, {} as never /* sessionSink — start_session not exercised here */, undefined, undefined, undefined, async () => guideText);
   app.use('/api', router);
   httpServer = await new Promise<HttpServer>((r) => {
     const s = app.listen(0, () => r(s));
@@ -1093,6 +1095,137 @@ describe('write modes and per-path outcomes', () => {
     })).json()) as BatchAnswer;
     expect(both.count).toBe(2);
     expect(both.files.map((f) => f.outcome)).toEqual(['replaced', 'created']);
+  });
+});
+
+/**
+ * The agent guide at the repository root. It is not a file: `read_file` of
+ * its name answers with the platform's guide, after the knowledge base's own
+ * file of that name when it has one, and `file_stat` says what is there.
+ */
+describe("the agent guide at the guide's name", () => {
+  const GUIDE = `${KB_DIR}/AGENTS.md`;
+  const read = (base: string, p = GUIDE, extra: Record<string, unknown> = {}) =>
+    post(`${base}/api/agent/tools/read_file`, { path: p, ...extra }).then((r) => r.json() as Promise<{ path: string; content: string }>);
+  const statOf = (base: string, p = GUIDE) =>
+    post(`${base}/api/agent/tools/file_stat`, { path: p }).then((r) => r.json() as Promise<Record<string, unknown>>);
+
+  it('answers with the guide when the knowledge base has no file of that name', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n' });
+    // By the root-anchored and the prefix-less spellings too, like any path.
+    expect((await read(base, `/${GUIDE}`)).content).toBe('THE PLATFORM GUIDE\n');
+    expect((await read(base, 'AGENTS.md')).content).toBe('THE PLATFORM GUIDE\n');
+    // Sliced like any content.
+    expect((await read(base, GUIDE, { offset: 4, limit: 8 })).content).toBe('PLATFORM');
+  });
+
+  it("puts the knowledge base's own AGENTS.md first, then the separator, then the guide", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nWrite tickets in the present tense.\n');
+    const { content } = await read(base);
+    expect(content.startsWith('# Acme\n\nWrite tickets in the present tense.\n\n---\n')).toBe(true);
+    expect(content.endsWith('\n\nTHE PLATFORM GUIDE\n')).toBe(true);
+    expect(content).toContain("The text above is this knowledge base's own conventions file.");
+  });
+
+  it('never serves a copy of the guide an earlier release left on disk a second time', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Knowledge base\n\n> **This file is managed by the platform.** Stale.\n');
+    expect((await read(base)).content).toBe('THE PLATFORM GUIDE\n');
+  });
+
+  it("never tells a caller who may not read the knowledge base's own file that it exists", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const denied = await start('read', denyReads(new Set(['AGENTS.md'])));
+    // Nothing of theirs there: the guide is everyone's.
+    const absent = await read(denied);
+    const absentStat = await statOf(denied);
+    expect(absent.content).toBe('THE PLATFORM GUIDE\n');
+    // A file they may not read answers EXACTLY as no file does — a refusal
+    // would be the one thing the platform never says about a restricted
+    // file, which is that it is there.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nThe secret conventions.\n');
+    const closed = await post(`${denied}/api/agent/tools/read_file`, { path: GUIDE });
+    expect(closed.status).toBe(200);
+    expect(await closed.json()).toEqual(absent);
+    expect(await statOf(denied)).toEqual(absentStat);
+  });
+
+  it("serves the knowledge base's own file to a caller who may read it", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const allowed = await start('read');
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nThe conventions.\n');
+    expect((await read(allowed)).content).toContain('The conventions.');
+  });
+
+  it("answers the guide alone when the knowledge base's own file vanishes between the probe and the read", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    // The file is there when it is probed and gone when it is read: a
+    // concurrent delete, which is the absent case and never a failure.
+    const probed = fs.stat.bind(fs);
+    let vanish = false;
+    (fs as unknown as Record<string, unknown>).stat = async (p: string) => {
+      const st = await probed(p);
+      if (vanish && p.endsWith('AGENTS.md')) {
+        vanish = false;
+        await fs.deleteFile(p);
+      }
+      return st;
+    };
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    vanish = true;
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n' });
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    vanish = true;
+    expect(await statOf(base)).toMatchObject({ platformGuide: true });
+  });
+
+  it('leaves a folder at the guide\'s name to the ordinary stat, and never reads it as a copy', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    await fs.mkdir(`${KB_DIR}/AGENTS.md`);
+    const folder = await statOf(base);
+    expect(folder).toMatchObject({ type: 'directory' });
+    expect(folder.platformGuide).toBeUndefined();
+  });
+
+  it('is a nested AGENTS.md no concern of: that is a file like any other', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/Handbook/AGENTS.md`, '# Handbook\n');
+    expect((await read(base, `${KB_DIR}/Handbook/AGENTS.md`)).content).toBe('# Handbook\n');
+    expect((await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/Handbook/HEXIS.md` })).status).toBe(404);
+  });
+
+  it('file_stat says a text file is there to read, and that nothing can be written, moved or deleted at it', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    expect(await statOf(base)).toMatchObject({
+      name: 'AGENTS.md',
+      type: 'file',
+      size: Buffer.byteLength('THE PLATFORM GUIDE\n'),
+      platformGuide: true,
+      managed: true,
+      movable: false,
+      deletable: false,
+      contentMode: 'text',
+      textEditable: false,
+      access: { read: true, write: false },
+    });
+    // With a file of the knowledge base's own there, stat describes THAT file.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    const own = await statOf(base);
+    expect(own).toMatchObject({ name: 'AGENTS.md', type: 'file', managed: false, movable: true, textEditable: true });
+    expect(own.platformGuide).toBeUndefined();
+    // A copy an earlier release wrote is what read_file does not serve, so
+    // stat says the same thing it says for no file at all.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Knowledge base\n\n> **This file is managed by the platform.** Stale.\n');
+    expect(await statOf(base)).toMatchObject({ platformGuide: true, managed: true, movable: false });
   });
 });
 
@@ -2998,19 +3131,17 @@ describe('preflight for moves and deletes', () => {
       expect(await exists(args.src)).toBe(true);
     });
 
-    it('every one of the four platform files gets the same sentence, and the agent never gets the admin restore', async () => {
+    it('every one of the three platform files gets the same sentence, and the agent never gets the admin restore', async () => {
       // The agent move tool has no exception: the recovery move is a person's,
       // made as an admin, and an agent is neither.
       const base = await seeded();
       await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
-      await fs.writeFile(KB('AGENTS.md'), 'agents\n');
       await fs.writeFile(KB('.bevelignore'), '*.tmp\n');
       await fs.writeFile(KB('Misplaced/access.md'), '---\nread: everyone\n---\n');
       const cases: [string, string][] = [
         [KB('access.md'), KB('Sales/access.md')],
         [KB('roles.yaml'), KB('Sales/roles.yaml')],
         [KB('.bevelignore'), KB('Sales/.bevelignore')],
-        [KB('AGENTS.md'), KB('Sales/AGENTS.md')],
         // Including the shape of the admin's recovery move: a misplaced
         // access.md into a folder that has none. A person holding the Admin
         // role is allowed exactly this move from the UI; the agent is not.
@@ -3120,15 +3251,19 @@ describe('preflight for moves and deletes', () => {
   describe('what counts as the platform\'s own, and what a move or delete may reach', () => {
     const caseSensitiveDisk = process.platform === 'linux';
 
-    it('roles.yaml and AGENTS.md are platform files only at the root; access.md and .bevelignore at any depth', async () => {
+    it('roles.yaml is a platform file only at the root; access.md and .bevelignore at any depth; AGENTS.md nowhere', async () => {
       const base = await seeded();
       await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
       await fs.writeFile(KB('Sales/roles.yaml'), 'content');
+      await fs.writeFile(KB('AGENTS.md'), 'content');
       await fs.writeFile(KB('Sales/AGENTS.md'), 'content');
       await fs.writeFile(KB('Sales/.bevelignore'), '*.tmp\n');
       const managed = async (p: string) => (await call(base, 'file_stat', { path: KB(p) })).body.managed;
       expect(await managed('roles.yaml')).toBe(true);
       expect(await managed('Sales/roles.yaml')).toBe(false);
+      // The organisation's own conventions file: the guide is served from
+      // code, so nothing under this name is the platform's.
+      expect(await managed('AGENTS.md')).toBe(false);
       expect(await managed('Sales/AGENTS.md')).toBe(false);
       expect(await managed('Sales/.bevelignore')).toBe(true);
       expect((await call(base, 'move_file', { src: KB('Sales/roles.yaml'), dest: KB('Sales/old-roles.yaml') })).body).toMatchObject({ moved: true });

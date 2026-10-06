@@ -23,7 +23,6 @@ import { UuidSessionSink } from '../../workspace/session-sink.js';
 import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
 import { CLIENT_SHORT_CUT, TOOL_DESCRIPTION_CAP, clientVisibleLength, firstSentenceEnd } from '../description-length.js';
 import {
-  POINTER_GUIDE_NAME_BUDGET,
   SHARED_RULES_POINTER_MAX,
   TOOL_PREFIX_CAP,
   sharedFileRules,
@@ -156,30 +155,18 @@ describe('no Hexis tool description is long enough to be cut', () => {
     ).toEqual([]);
   });
 
-  it('holds the cap on a deployment that renamed its guide, not only under the default', async () => {
-    // The pointer ends every file tool's description and its length moves with
-    // a deployment setting, so a cap checked only against the nine characters
-    // of `AGENTS.md` guarantees nothing about the catalog a renamed deployment
-    // serves. Two things make it hold: the pointer is bounded by construction
-    // (past `POINTER_GUIDE_NAME_BUDGET` the guide is named by its role), and
-    // `clientVisibleLength` charges the worst case rather than this layout's.
+  it('charges every file tool the pointer at its longest, which is the one pointer every deployment serves', async () => {
+    // The pointer ends every file tool's description. It no longer moves with
+    // a deployment setting — the guide is reached the same way everywhere —
+    // so the worst case `clientVisibleLength` charges is the pointer itself,
+    // and the literal catalog fits by the same measure.
     const tools = await hexisTools();
-    const atWorst = tools
-      .map((t) => ({ tool: t.name, chars: clientVisibleLength(t) }))
-      .filter((m) => m.chars > TOOL_DESCRIPTION_CAP);
-    expect(atWorst, atWorst.map((m) => `${m.tool}: ${m.chars}`).join('\n')).toEqual([]);
-
-    // And measured literally, under the longest guide name a deployment can
-    // actually configure: every description still fits.
-    const longest = `${'x'.repeat(252)}.md`;
-    const pointerHere = sharedRulesPointer(testKbContext().layout);
-    const pointerThere = sharedRulesPointer({ ...testKbContext().layout, agentsFile: longest });
-    expect(pointerThere.length).toBeLessThanOrEqual(SHARED_RULES_POINTER_MAX);
-    for (const tool of tools) {
-      if (!tool.description?.endsWith(pointerHere)) continue;
-      const asRenamed = tool.description.slice(0, -pointerHere.length) + pointerThere;
-      const chars = clientVisibleLength({ name: tool.name, description: asRenamed });
-      expect(chars, `${tool.name} on a renamed deployment`).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
+    const pointer = sharedRulesPointer(testKbContext().layout);
+    expect(pointer.length).toBe(SHARED_RULES_POINTER_MAX);
+    const pointed = tools.filter((t) => t.description?.endsWith(pointer));
+    expect(pointed.length).toBeGreaterThan(0);
+    for (const tool of pointed) {
+      expect(clientVisibleLength(tool), tool.name).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
     }
   });
 

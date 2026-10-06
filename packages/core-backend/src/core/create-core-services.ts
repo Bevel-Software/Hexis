@@ -138,6 +138,7 @@ import { unmeteredLlmUsage, type ILlmUsageMeter } from '../modules/tool-auth/llm
 import { McpService } from '../modules/mcp/mcp.service.js';
 import { AgentAuditService, retentionDaysFrom } from '../modules/audit/agent-audit.service.js';
 import { readAgentPreamble, type AgentPreambleReader } from '../modules/agent-instructions/index.js';
+import { composeAgentGuide, type AgentGuideReader } from '../modules/agent-guide/index.js';
 import { createMcpAuthMiddleware } from '../modules/mcp/mcp-auth.middleware.js';
 import { BevelOAuthProvider } from '../modules/mcp/oauth/bevel-oauth-provider.js';
 import { getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
@@ -239,6 +240,12 @@ export interface CoreServices {
    * and `GET /api/agent/instructions`. See modules/agent-instructions.
    */
   readAgentPreamble: AgentPreambleReader;
+  /**
+   * Composes the platform's agent guide for the layout in effect, through
+   * the distribution's hook when it passed one: what `get_agent_guide` and a
+   * `read_file` of the guide's name answer. See modules/agent-guide.
+   */
+  agentGuide: AgentGuideReader;
   mcpServerEditService: McpServerEditService;
   /** Deleting one tool — the owner's verb (see ToolDeleteService). */
   toolDeleteService: ToolDeleteService;
@@ -606,10 +613,7 @@ export async function createCoreServices(
     // backfill would walk a tree still missing those manifests.
     new PluginDisplayNamesStep(disk, kb),
     new PersonalSpacesStep(disk, kb),
-    // A getter, not a value: the step is built here, while the process may
-    // still hold the defaults, and the save that completes first-run setup
-    // applies the admin's answer afterwards.
-    new TemplateFilesStep(disk, kb, extraDirs, () => settings.resolveAgentsFileLink()),
+    new TemplateFilesStep(disk, kb, extraDirs),
     new RolesYamlStep(disk, [config.adminEmail]),
     ...(ports.kbStartupSteps ?? []),
   ];
@@ -1168,6 +1172,10 @@ export async function createCoreServices(
   // the proxy below composes in-process per request; the agent-facing route
   // serves the same composition to the local bridge and the frontend card.
   const readPreamble: AgentPreambleReader = () => readAgentPreamble(workspaceService, kb, disk);
+  // The guide every agent is told to read first, composed when asked for —
+  // the layout is read per call, so a name the setup save applies lands
+  // without a restart, and the distribution's hook sees every composition.
+  const agentGuide: AgentGuideReader = () => composeAgentGuide(kb.layout, ports.agentGuide, { kbDirName });
   // The Audit log. Records through the proxy below (every call an external
   // agent makes), reads keys through the key service so their shape is
   // defined once, and prunes past the retention setting — read per sweep, so
@@ -1440,6 +1448,7 @@ export async function createCoreServices(
     toolManualService,
     pendingToolsService,
     readAgentPreamble: readPreamble,
+    agentGuide,
     pluginIndexService,
     pluginProvisionService,
     joinRequestsService,
