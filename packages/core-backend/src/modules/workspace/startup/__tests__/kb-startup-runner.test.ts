@@ -85,6 +85,8 @@ function runnerOpts(steps: OnServerStart[], overrides: Record<string, unknown> =
     defaultBranch: () => DEFAULT_BRANCH,
     protectedBranches: () => PROTECTED,
     seedAdminEmails: ['admin@example.com'],
+    // An unfinished clone made by a suite is abandoned the moment it exists.
+    unfinishedCloneQuietMs: 0,
     steps,
     buildSeedTree: async (dir: string) => {
       await fs.writeFile(path.join(dir, 'seeded.md'), 'from template', 'utf8');
@@ -897,6 +899,95 @@ describe('KbStartupRunner — a working copy whose clone was never finished', ()
 
     expect(await fs.readFile(path.join(local(), 'marker.txt'), 'utf8')).toBe('seeded');
     expect(await fs.access(path.join(root, 'set-aside')).then(() => true, () => false)).toBe(false);
+  });
+
+  it('carries on when the half-made clone is taken away in the instant before the move', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    // The folder goes right after git has answered, for the last time before
+    // the move, that it holds no commit.
+    const real = new NodeGitRunner(undefined, credentials);
+    let asked = 0;
+    const gitRunner = {
+      defaultTimeoutMs: real.defaultTimeoutMs,
+      credentials: real.credentials,
+      run: async (cwd: string, args: string[], opts?: object) => {
+        if (!args.includes('--verify') || ++asked !== 3) return real.run(cwd, args, opts);
+        try {
+          return await real.run(cwd, args, opts);
+        } finally {
+          await fs.rm(local(), { recursive: true, force: true });
+        }
+      },
+    };
+    const discarded: string[] = [];
+
+    await makeRunner([touchDefault], { gitRunner, onCloneDiscarded: (id: string) => void discarded.push(id) }).runAll();
+
+    expect(await fs.readFile(path.join(local(), 'marker.txt'), 'utf8')).toBe('seeded');
+    // This start moved nothing, so it says nothing was moved.
+    expect(discarded).toEqual([]);
+    expect(await fs.readdir(path.join(root, 'set-aside'))).toEqual([]);
+  });
+
+  it('tells the listener a second time when the first telling fails', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    let told = 0;
+    const onCloneDiscarded = async () => {
+      if (++told === 1) throw new Error('the queue could not be reached');
+    };
+
+    await makeRunner([touchDefault], { onCloneDiscarded }).runAll();
+
+    expect(told).toBe(2);
+    expect(await fs.readFile(path.join(local(), 'marker.txt'), 'utf8')).toBe('seeded');
+  });
+
+  it('does not remove a clone somebody started at the path once it was announced empty', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    // Told the copy is gone, the rest of the process may clone there at once.
+    const onCloneDiscarded = async () => {
+      await git(root, ['clone', '-b', DEFAULT_BRANCH, upstream, local()]);
+      await fs.writeFile(path.join(local(), 'theirs.txt'), 'a branch being opened wrote this', 'utf8');
+    };
+
+    await makeRunner([touchDefault], { onCloneDiscarded }).runAll();
+
+    expect(await fs.readFile(path.join(local(), 'theirs.txt'), 'utf8')).toBe('a branch being opened wrote this');
+    expect(await fs.readdir(path.join(root, 'set-aside'))).toHaveLength(1);
+  });
+
+  it('leaves a clone that is still being written, and uses it once it is finished', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    // Somebody is still cloning: it finishes while this start waits for quiet.
+    const finishing = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await git(local(), ['fetch', 'origin']);
+      await git(local(), ['checkout', DEFAULT_BRANCH]);
+    })();
+
+    await makeRunner([touchDefault], { unfinishedCloneQuietMs: 5_000 }).runAll();
+    await finishing;
+
+    // Theirs, where it was, with what was in it: nothing was set aside.
+    expect(await fs.readFile(path.join(local(), 'left-here.txt'), 'utf8')).toBe('somebody put this here');
+    expect(await fs.readFile(path.join(local(), 'marker.txt'), 'utf8')).toBe('seeded');
+    expect(await fs.access(path.join(root, 'set-aside')).then(() => true, () => false)).toBe(false);
+  });
+
+  it('sets an unfinished clone aside only once nothing has written to it for the quiet time', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    const started = Date.now();
+
+    await makeRunner([touchDefault], { unfinishedCloneQuietMs: 1_500 }).runAll();
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_000);
+    expect(await fs.readFile(path.join(local(), 'marker.txt'), 'utf8')).toBe('seeded');
+    expect(await fs.readdir(path.join(root, 'set-aside'))).toHaveLength(1);
   });
 
   it('names the branch when a working copy cannot be prepared', async () => {
