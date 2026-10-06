@@ -1670,12 +1670,16 @@ export class GitService implements IGitService {
   ): Promise<string | null> {
     assertValidBranchName(targetBranch);
     const cwd = await this.repoDir(baseWorkspaceId);
-    // The fetch runs outside the workspace mutex, as every fetch in this
-    // service does (see `fetchLocks`): it writes only `refs/remotes/origin/*`
-    // and new objects, never HEAD, the index or the working tree, and holding
-    // the mutex through a network round trip would park every other git op
-    // behind the origin. The read that follows is a local one, and takes the
-    // mutex like `appliedChangeShas` does.
+    // The fetch runs outside the workspace mutex, the way the implicit and
+    // per-request fetches do (see `fetchLocks`, `fetchPrRefs`): it writes only
+    // `refs/remotes/origin/*` and new objects, never HEAD, the index or the
+    // working tree, so nothing it does needs serializing against a checkout or
+    // a commit, and holding the mutex through a network round trip would park
+    // every other git op behind the origin. (`mergeChangeRequest` fetches under
+    // the mutex for a reason this method lacks: its fetch is one step of a
+    // merge whose working tree must not move between the fetch and the push.)
+    // The read that follows is a local one, and takes the mutex like
+    // `appliedChangeShas` does.
     const refreshed = await this.git(cwd, [
       'fetch', '--no-write-fetch-head', 'origin',
       `+refs/heads/${targetBranch}:refs/remotes/origin/${targetBranch}`,
