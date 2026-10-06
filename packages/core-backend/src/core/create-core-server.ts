@@ -26,6 +26,7 @@ import {
   registerToolManualsTools,
 } from '../modules/tool-manuals/index.js';
 import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
+import { registerChangeRequestReadTools } from '../modules/workflow/agent-tools/change-request-read.tools.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
 import {
@@ -456,6 +457,10 @@ export async function createCoreServer(
   // `get_skill`. Warnings only; it never refuses a save.
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
   registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb);
+  // The five read tools over change requests. Separate from the workflow tools
+  // because they are the only ones that gate their whole payload on the
+  // caller's read access, so they take the access service and nothing else.
+  registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
   registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore);
   // The agent upload route, on the same router as the tool endpoints so it
   // mounts ahead of the JWT `/api` mounts below — but WITHOUT `toolAuth`: its
