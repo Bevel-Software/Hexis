@@ -7,6 +7,7 @@ export {
   isAgentGuidePath,
   isManagedGuide,
   withPlatformGuideAppended,
+  type AgentGuideContext,
   type AgentGuideHook,
   type AgentGuideReader,
   type AgentGuideSection,

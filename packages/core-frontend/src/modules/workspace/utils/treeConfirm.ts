@@ -31,8 +31,9 @@ function repoRelative(wsRelativePath: string, kbDirName: string | null): string 
  *
  * Judged on the path's REPO-relative form, because that is what the platform
  * reads: `roles.yaml` counts at the repository root only, so a nested file of
- * that name is ordinary content and stays draggable. (An `AGENTS.md` is
- * content wherever it sits: the platform's guide is served from code, not
+ * that name is ordinary content and stays draggable. (A file under the
+ * guide's name — `AGENTS.md`, or the name a deployment saved for the guide —
+ * is content wherever it sits: the platform's guide is served from code, not
  * written to the tree.) Outside the KB clone, and before `kbDirName` is
  * known, nothing is refused here — the server is the gate and says the same
  * sentence.

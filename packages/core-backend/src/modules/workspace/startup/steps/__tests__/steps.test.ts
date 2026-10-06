@@ -715,6 +715,26 @@ describe('TemplateFilesStep: the guide copies earlier releases wrote', () => {
     expect(await git(dir, ['log', '--format=%B', '-1'])).toContain('Remove the platform-written #Guide[1].md and CLAUDE.md');
   });
 
+  it('finds a copy under a name the deployment no longer uses, and leaves a root note of the organisation\'s own', async () => {
+    // Renamed twice while the guide was a file: a copy under the first name
+    // is still there, hidden by the rule that release appended, and nothing
+    // in today's settings remembers the name. The header does.
+    const scaffold = await fullScaffold();
+    scaffold['OLD-GUIDE.md'] = MANAGED_GUIDE_COPY;
+    scaffold['Welcome.md'] = '# Welcome\n\nStart with the handbook.\n';
+    scaffold['.bevelignore'] = `${OLD_RELEASE_IGNORE}\n# The platform's agent guide.\nOLD-GUIDE.md\n`;
+    await seedUpstream(scaffold);
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await exists(dir, 'OLD-GUIDE.md')).toBe(false);
+    expect(norm(await fs.readFile(path.join(dir, 'Welcome.md'), 'utf8'))).toBe('# Welcome\n\nStart with the handbook.\n');
+    const lines = await ignoreLines(dir);
+    expect(lines).not.toContain('OLD-GUIDE.md');
+    expect(lines).not.toContain('AGENTS.md');
+    expect(await git(dir, ['log', '--format=%B', '-1'])).toContain('Remove the platform-written OLD-GUIDE.md');
+  });
+
   it('leaves a root AGENTS.md that is a symbolic link exactly where it points', async () => {
     // Following the link would read the managed header at the other end and
     // delete the organisation's entry.

@@ -148,7 +148,7 @@ export function platformFolderRefusal(repoRelativeDir: string): string {
 
 /**
  * Whether the platform file at `repoRelativePath` sits directly in the
- * repository root — the copy every one of the four is read from there, and so
+ * repository root — the copy every one of the three is read from there, and so
  * never the misplaced one: it is the copy a restore puts back. A nested
  * `access.md` or `.bevelignore` is a platform file too, but it layers on top
  * of the root's rather than standing in for it, which is why moving the
@@ -201,8 +201,8 @@ export function platformRestoreDestination(
  * Three things make the shape, and all three are about the move rather than
  * about the source's current standing:
  *
- *  - the source is NAMED like a platform file. A nested `roles.yaml`, or a
- *    nested copy of it, is ordinary content where it sits
+ *  - the source is NAMED like a platform file. A nested `roles.yaml` is
+ *    ordinary content where it sits
  *    (`isPlatformFile` says so, and moving it needs no exception), but it is
  *    still the copy a restore carries back to the root — judging the shape on
  *    `isPlatformFile` would skip the exception for exactly the two files the

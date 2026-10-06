@@ -151,7 +151,10 @@ class KbSeedTree {
     // `AGENTS.md` is the organisation's own text is seeded as the content it
     // is.
     if (relDir === '' && (name === LEGACY_AGENTS_FILE || name === this.kb.layout.agentsFile)) {
-      const text = asText(await fs.readFile(await this.templates.pathOf(name)));
+      // Judged the way the copy below judges: a binary under the name is
+      // spotted from its first bytes and never read whole.
+      const source = await this.templates.pathOf(name);
+      const text = (await headHasNul(source)) ? null : asText(await fs.readFile(source));
       if (text !== null && isManagedGuide(text)) return;
     }
     await this.copyTemplateFile(relDir ? path.join(relDir, name) : name, dest);

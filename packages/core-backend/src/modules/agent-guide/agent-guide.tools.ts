@@ -29,8 +29,9 @@ export function registerAgentGuideTool(
     description:
       "The platform's guide to this knowledge base: its layout, where a new file goes, the rules every file tool " +
       'shares, access control, skills and tool manuals. Read it before your first read or change. Returns ' +
-      '`{ guide }`, the whole guide as markdown. The same text comes back from `read_file` on `AGENTS.md` at the ' +
-      "KB root, after the knowledge base's own AGENTS.md when it has one.",
+      '`{ guide }`, the whole guide as markdown. The same text comes back from `read_file` on the guide\'s name at the ' +
+      "KB root (`AGENTS.md`, or the name this deployment gave the guide), after the knowledge base's own file of " +
+      'that name when it has one.',
     path: `/api/agent/tools/${GET_AGENT_GUIDE_TOOL}`,
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {

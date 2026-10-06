@@ -45,7 +45,7 @@ describe('get_agent_guide', () => {
       const body = (def!.inputs as { properties: { body: { properties?: Record<string, unknown> } } }).properties.body;
       expect(Object.keys(body.properties ?? {})).toEqual([]);
       expect(def!.description).toContain('Read it before your first read or change');
-      expect(def!.description).toContain('`read_file` on `AGENTS.md`');
+      expect(def!.description).toContain("`read_file` on the guide's name at the KB root (`AGENTS.md`, or the name this deployment gave the guide)");
     }
 
     const web = express();

@@ -238,7 +238,7 @@ export class TemplateFilesStep implements OnServerStart {
             ),
             `${layout.pluginsDir}/`,
           ),
-          agentsFile,
+          [agentsFile, LEGACY_AGENTS_FILE, PRE_RENAME_AGENTS_FILE],
         );
       }
       branch.write(rel, content);
@@ -274,7 +274,8 @@ export class TemplateFilesStep implements OnServerStart {
     //
     // And the guide's rules go the same way as the skills root's. Every
     // release that wrote the guide to disk hid it with a rule of its own —
-    // under `AGENTS.md`, under the name a deployment gave the guide, and
+    // under `AGENTS.md`, under the name a deployment gave the guide (any
+    // name it ever gave it: the copies found at the root say which), and
     // under `CLAUDE.md` for the copy that predates the rename. The guide is
     // not on disk any more, so a root file under any of those names is the
     // organisation's own conventions page, which they must be able to see
@@ -284,6 +285,11 @@ export class TemplateFilesStep implements OnServerStart {
     // is theirs and stays. ONE read-modify-write for all the rules: separate
     // passes would each read the on-disk file and a later declared write
     // would lose an earlier one's.
+    //
+    // The copies come out FIRST, so the names they were found under are
+    // known when the rules are reconciled.
+    const retired = await this.retireGuideCopies(repoDir, branch);
+    added.push(...retired);
     added.push(
       ...(await this.reconcileIgnoreRules(repoDir, branch, {
         // The preamble rule is respelled before it is added: a knowledge base
@@ -293,13 +299,9 @@ export class TemplateFilesStep implements OnServerStart {
         add: [PREAMBLE_IGNORE_PATTERN],
         drop: [`${this.kb.layout.skillsDir}/`],
         dropEvery: [`${this.kb.layout.pluginsDir}/`],
-        agentsFile,
+        guideNames: [...retired, agentsFile, LEGACY_AGENTS_FILE, PRE_RENAME_AGENTS_FILE],
       })),
     );
-
-    // The guide copies earlier releases wrote, out of the repository.
-    const retired = await this.retireGuideCopies(repoDir, branch, agentsFile);
-    added.push(...retired);
 
     added.push(...this.ensureRequiredDirs(repoDir, branch, await this.missingDirs(repoDir)));
 
@@ -317,32 +319,42 @@ export class TemplateFilesStep implements OnServerStart {
 
   /**
    * The copies of the guide the platform wrote to the repository root while
-   * the guide was a file — under the name this deployment gave it, under
-   * `AGENTS.md`, and under `CLAUDE.md` from before the rename — removed when
-   * the platform can PROVE it wrote them, and otherwise left exactly alone.
+   * the guide was a file — under `AGENTS.md`, under `CLAUDE.md` from before
+   * the rename, and under every name a deployment ever gave the guide —
+   * removed when the platform can PROVE it wrote them, and otherwise left
+   * exactly alone.
    *
-   * Removal is gated on the managed header and nothing else. The header is
-   * the one fact that tells a copy of ours from a file of theirs: the
-   * organisation's own `AGENTS.md`, a `CLAUDE.md` its people edited, must be
-   * found byte for byte untouched. A SYMLINK or a directory under the name
-   * is left as it is: reading a link follows it, so a link pointing at a copy
-   * of the guide — or at any other file carrying the header — would read as
-   * ours and the removal would take the organisation's entry. Links are never
-   * followed anywhere else in the platform, and they are not followed here.
+   * Found by SCANNING the root's markdown files rather than by the names the
+   * deployment knows today: a deployment that renamed the guide more than
+   * once left a copy under each earlier name, and the current setting
+   * remembers only the last. The header is what makes a scan safe, and the
+   * one fact that tells a copy of ours from a file of theirs: the
+   * organisation's own `AGENTS.md`, a `CLAUDE.md` its people edited, a note
+   * of theirs that happens to sit at the root, must all be found byte for
+   * byte untouched. A SYMLINK or a directory is left as it is: reading a link
+   * follows it, so a link pointing at a copy of the guide — or at any other
+   * file carrying the header — would read as ours and the removal would take
+   * the organisation's entry. Links are never followed anywhere else in the
+   * platform, and they are not followed here.
    *
-   * Returns the names removed, for the note.
+   * Returns the names removed, in name order, for the note and for the
+   * ignore rules that hid them.
    */
-  private async retireGuideCopies(repoDir: string, branch: KbBranch, agentsFile: string): Promise<string[]> {
+  private async retireGuideCopies(repoDir: string, branch: KbBranch): Promise<string[]> {
     const removed: string[] = [];
-    for (const name of new Set([agentsFile, LEGACY_AGENTS_FILE, PRE_RENAME_AGENTS_FILE])) {
-      const found = await this.disk.lstatOrNull(path.join(repoDir, name));
-      if (found === null || !found.isFile()) continue;
+    const entries = await fs.readdir(repoDir, { withFileTypes: true });
+    // `isFile` is false for a link, which is the point (see above).
+    const candidates = entries
+      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.md'))
+      .map((entry) => entry.name)
+      .sort();
+    for (const name of candidates) {
       let current: string;
       try {
         current = await this.disk.readTextFile(path.join(repoDir, name));
       } catch (err) {
-        // Gone between the probe and the read — a concurrent delete reads as
-        // the absence it is, on the same terms as the probe above.
+        // Gone between the listing and the read — a concurrent delete reads
+        // as the absence it is.
         if (isAbsence(err)) continue;
         throw err;
       }
@@ -421,8 +433,8 @@ export class TemplateFilesStep implements OnServerStart {
       dropEvery?: string[];
       /** `[from, to]` pairs: a rule an earlier release wrote, and its spelling now. */
       respell?: ReadonlyArray<readonly [string, string]>;
-      /** The guide's configured name: the platform's own rules for the guide come out (see {@link withoutPlatformGuideRules}). */
-      agentsFile: string;
+      /** Every name the guide was ever hidden under here: the platform's own rules for them come out (see {@link withoutPlatformGuideRules}). */
+      guideNames: readonly string[];
     },
   ): Promise<string[]> {
     let current: string;
@@ -446,7 +458,7 @@ export class TemplateFilesStep implements OnServerStart {
       (text, pattern) => withoutIgnoreLine(text, pattern),
       rules.drop.reduce((text, pattern) => withoutPlatformIgnorePattern(text, pattern), added),
     );
-    const merged = withoutPlatformGuideRules(dropped, rules.agentsFile);
+    const merged = withoutPlatformGuideRules(dropped, rules.guideNames);
     if (merged === current) return [];
     branch.write(IGNORE_FILENAME, merged);
     return [IGNORE_FILENAME];
@@ -525,21 +537,27 @@ function followsTemplateHygieneBlock(kept: readonly string[]): boolean {
 
 /**
  * `text` without the rules THE PLATFORM WROTE to hide the guide while it was a
- * file: the `AGENTS.md` line under its own comment (either spelling) or in
- * the slot at the end of the template's own repo-hygiene block
- * ({@link TEMPLATE_HYGIENE_BLOCK_ABOVE_AGENTS_RULE}); the line for the name a
- * deployment gave the guide, under the platform's comment; and the
- * `CLAUDE.md` line under the two-line comment the template carried it with.
- * Each goes with its comment.
+ * file, under each of `names`: the `AGENTS.md` line under its own comment
+ * (either spelling) or in the slot at the end of the template's own
+ * repo-hygiene block ({@link TEMPLATE_HYGIENE_BLOCK_ABOVE_AGENTS_RULE}); the
+ * `CLAUDE.md` line under the two-line comment the template carried it with,
+ * or under the platform's comment; and the line for any other name a
+ * deployment gave the guide, under the platform's comment. Each goes with
+ * its comment.
  *
  * The guide is not on disk any more, which is what makes every one of these
  * lines wrong: it hides a file the platform never writes, which is therefore
  * the organisation's own. A `!AGENTS.md` negation is not the rule and stays,
  * as everywhere else here, and so does a bare rule an operator wrote by hand.
  */
-export function withoutPlatformGuideRules(text: string, agentsFile: string): string {
-  const named = agentsFile === LEGACY_AGENTS_FILE ? text : withoutPlatformIgnorePattern(text, gitignoreLiteral(agentsFile));
-  return withoutPlatformClaudeRule(withoutPlatformAgentsRule(named));
+export function withoutPlatformGuideRules(text: string, names: readonly string[]): string {
+  let out = text;
+  for (const name of new Set(names)) {
+    if (name === LEGACY_AGENTS_FILE) out = withoutPlatformAgentsRule(out);
+    else if (name === PRE_RENAME_AGENTS_FILE) out = withoutPlatformClaudeRule(withoutPlatformIgnorePattern(out, name));
+    else out = withoutPlatformIgnorePattern(out, gitignoreLiteral(name));
+  }
+  return out;
 }
 
 /** The two comment lines the packaged template carried above its `CLAUDE.md` rule, in order. */

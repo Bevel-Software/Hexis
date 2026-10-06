@@ -3,10 +3,12 @@
 Decide by what the file IS, not by which folder you already hold rights in.
 Write access is not evidence that a file belongs somewhere.
 
-- **Any document goes under `{{knowledgeBaseDir}}/`.** Knowledge, notes,
+- **A document goes under `{{knowledgeBaseDir}}/`.** Knowledge, notes,
   reports, tickets, specifications, plans, meeting minutes — anything written
-  to be read by a person. That is what the root is for, and its shape inside
-  is yours to choose.
+  to be read by a person — unless a section of this guide below, or the
+  `README.md` of a folder this deployment reserves, names a more specific
+  home for that kind of file. That is what the root is for, and its shape
+  inside is yours to choose.
 - **A shared skill goes under `{{skillsDir}}/`**, or under
   `{{pluginsDir}}/<Plugin>/skills/<skill>/SKILL.md` when it belongs to one
   plugin alone. A person's private skill goes in their own space (`my_plugin`).

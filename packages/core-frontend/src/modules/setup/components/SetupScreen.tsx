@@ -243,12 +243,13 @@ const isRootFolderKey = (key: string): key is (typeof ROOT_FOLDER_KEYS)[number] 
   (ROOT_FOLDER_KEYS as readonly string[]).includes(key);
 
 /**
- * The knowledge-base LAYOUT fields — the three folders and the agent guide's
- * file name — which render together, under the connection test whose listing
- * the folders are checked against, rather than with the connection fields
- * above it.
+ * The knowledge-base LAYOUT fields — the three folders — which render
+ * together, under the connection test whose listing they are checked
+ * against, rather than with the connection fields above it. (The guide's
+ * file name was one of them while the guide was written to disk; it is
+ * served by the platform now and has no field.)
  */
-const LAYOUT_KEYS: readonly (keyof KbLayout)[] = [...ROOT_FOLDER_KEYS, 'agentsFile'];
+const LAYOUT_KEYS: readonly (keyof KbLayout)[] = [...ROOT_FOLDER_KEYS];
 const isLayoutKey = (key: string): boolean => (LAYOUT_KEYS as readonly string[]).includes(key);
 
 /** How a near-miss folder differs from the configured name, as the warning words it. */
@@ -1701,11 +1702,10 @@ export function SetupScreen({
                 )}
                 </SectionFields>
 
-                {/* The layout: the three root folders and the agent guide's
-                    file name, in the main section, directly under the test
-                    whose listing the folders are checked against — the
-                    connection fields above it stay next to the button that
-                    proves them. */}
+                {/* The layout: the three root folders, in the main section,
+                    directly under the test whose listing they are checked
+                    against — the connection fields above it stay next to the
+                    button that proves them. */}
                 {fields.filter((f) => isLayoutKey(f.key)).map((f) => renderField(f))}
 
                 {/* Everything a normal setup never touches, out of the way but

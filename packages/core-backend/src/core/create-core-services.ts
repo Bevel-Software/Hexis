@@ -1175,7 +1175,7 @@ export async function createCoreServices(
   // The guide every agent is told to read first, composed when asked for —
   // the layout is read per call, so a name the setup save applies lands
   // without a restart, and the distribution's hook sees every composition.
-  const agentGuide: AgentGuideReader = () => composeAgentGuide(kb.layout, ports.agentGuide);
+  const agentGuide: AgentGuideReader = () => composeAgentGuide(kb.layout, ports.agentGuide, { kbDirName });
   // The Audit log. Records through the proxy below (every call an external
   // agent makes), reads keys through the key service so their shape is
   // defined once, and prunes past the retention setting — read per sweep, so

@@ -31,7 +31,7 @@ url: https://api.example.com/utcp
 
 (A file with no `---` fence is the legacy form — the whole file is the object, so a bare JSON `.tool` still works.)
 
-**`id` = variable namespace.** The `id` is the manual's stable identity: it's the UTCP namespace secrets bind to (`<id>_<VAR>`) and its route slug. It must be lowercase `snake_case` and **unique** across all `.tool` files. Resolution is `id` → `name` → the file name (so a `name:` alone works, same as the id system uses for every file). If two files collide, the one saved most recently through the app is auto-suffixed (`my_tool` → `my_tool2`). **Access** declared here gates who can use and edit that tool, exactly like a node's own frontmatter (most specific; overrides the folder `access.md`).
+**`id` = variable namespace.** The `id` is the manual's stable identity: it's the UTCP namespace secrets bind to (`<id>_<VAR>`) and its route slug. It must be lowercase `snake_case` and **unique** across all `.tool` files. Resolution is `id` → `name` → the file name (so a `name:` alone works, same as the id system uses for every file). If two files collide, the second is REFUSED, not renamed: a suffix would silently bind a configured secret to a different file, so the catalog keeps one and names the other as a duplicate until it is renamed by hand. **Access** declared here gates who can use and edit that tool, exactly like a node's own frontmatter (most specific; overrides the folder `access.md`).
 
 **Frontmatter `id` = address.** This is generic, not tool-specific: ANY `.md` or `.tool` file whose frontmatter declares an `id` (or a lowercase snake_case/kebab `name`) is addressable at `/workspace/<branch>/<id>` in the app, exactly like a knowledge node — tools, skills (`SKILL.md`), and plain notes alike. Graph nodes win an id collision; files without frontmatter stay path-addressed.
 
@@ -43,7 +43,7 @@ To actually USE those tools, run the workspace as a local MCP server:
 npx @bevel-software/hexis-mcp --url <workspace-url> --key <connection-key>
 ```
 
-It serves everything the hosted endpoint serves **plus** the local-only tools, because it runs on the machine where they exist. Remote tools still execute on the server, so their shared keys and OAuth sign-ins keep working untouched; a local-only tool's own `${VAR}`s come from the environment of whatever launched the command (your MCP client's config), since the Secrets Vault never leaves the server. Reading the `.tool` and wiring the server into your client by hand still works and is the fallback when the command is unavailable.
+It serves everything the hosted endpoint serves **plus** the local-only tools, because it runs on the machine where they exist. Remote tools still execute on the server, so their shared keys and OAuth sign-ins keep working untouched; a local-only tool's own `${VAR}`s are fetched by `hexis-mcp` from this workspace's Secrets Vault with the connection key, and from the environment of whatever launched the command (your MCP client's config) for any the vault does not hold. Reading the `.tool` and wiring the server into your client by hand still works and is the fallback when the command is unavailable.
 
 ### Referencing secrets — `${VAR}` and the `variables` block
 

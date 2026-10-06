@@ -1763,18 +1763,35 @@ export function registerWorkspaceTools(
    */
   const ownGuideFile = async (branch: string, ctx: ToolContext, p: string): Promise<string | null> => {
     const fs = await ctx.getFilesystem(branch);
-    let bytes: Buffer;
-    try {
-      bytes = asBytes(await fs.readFile(p));
-    } catch (err) {
-      if (isAbsence(err)) return null;
-      throw err;
-    }
+    // Existence first, then the hook and the gate, then the bytes — the order
+    // the ordinary read keeps, so nothing of theirs is read before they are
+    // allowed to read it.
+    if (!(await existsAt(fs, p))) return null;
     await notifyAgentRead(agentAccessGate, ctx, branch, p);
     await assertCanRead(readGateFor(branch, ctx), p);
+    const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
     const result = await readers.readerFor(p).read(bytes, p);
     const text = result.kind === 'text' ? result.text : result.kind === 'image' ? result.note : result.message;
     return isManagedGuide(text) ? null : text;
+  };
+
+  /** Whether something is at `p` on `fs` — absence is false, any other failure is thrown. */
+  const existsAt = async (fs: LocalFilesystem, p: string): Promise<boolean> =>
+    fs.stat(p).then(
+      () => true,
+      (err: unknown) => {
+        if (isAbsence(err)) return false;
+        throw err;
+      },
+    );
+
+  /**
+   * Whether the file at `p` is a copy of the guide an earlier release wrote
+   * (recognised by its header) — read as text, which such a copy always is.
+   */
+  const isStaleGuideCopy = async (fs: LocalFilesystem, p: string): Promise<boolean> => {
+    const result = await readers.readerFor(p).read(asBytes(await fs.readFile(p)), p);
+    return result.kind === 'text' && isManagedGuide(result.text);
   };
 
   mount({
@@ -1914,21 +1931,17 @@ export function registerWorkspaceTools(
     handler: async (a, ctx: ToolContext) => {
       const p = a.path as string;
       const branch = a.branch as string;
-      // The guide's name with no file of the knowledge base's own under it:
-      // what `read_file` answers there is the platform's guide, so stat says
-      // a text file is there to read — ungated, like the read — and that
-      // nothing can be moved, deleted or written at it through these tools.
-      // A file of the knowledge base's own under that name is a file like
-      // any other, and the ordinary answer below describes it.
+      // The guide's name with no file of the knowledge base's own under it —
+      // or a copy of the guide an earlier release wrote, which `read_file`
+      // does not serve either: what a read answers there is the platform's
+      // guide, so stat says a text file is there to read — ungated, like the
+      // read — and that nothing can be moved, deleted or written at it
+      // through these tools. A file of the knowledge base's own under that
+      // name is a file like any other, and the ordinary answer below
+      // describes it.
       if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '', kb.layout)) {
         const fs = await ctx.getFilesystem(branch);
-        const own = await fs.stat(p).then(
-          () => true,
-          (err: unknown) => {
-            if (isAbsence(err)) return false;
-            throw err;
-          },
-        );
+        const own = (await existsAt(fs, p)) && !(await isStaleGuideCopy(fs, p));
         if (!own) {
           const guide = await agentGuide();
           return {

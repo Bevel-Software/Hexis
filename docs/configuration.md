@@ -7,7 +7,7 @@ screen* can be left unset and configured in the app at first sign-in.
 **Anything set in the environment wins over the setup screen**, so a value you
 pin in `.env` cannot be changed out from under you in the UI. The one
 exception is the knowledge-base layout — the three root folders and the agent
-guide's file name — which is entered in the app and nowhere else; see the
+three root folder names — which are entered in the app and nowhere else; see the
 *retired* rows below.
 
 [`.env.example`](../.env.example) documents every variable in full.

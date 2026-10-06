@@ -8,7 +8,7 @@ Access to any path — reading it as much as writing it — is governed by
   `group:<Name>` entries that give the role to a whole group (see *Giving a
   role to a group* below). Role names are
   case- and whitespace-insensitive (`Admin` = `admin` = `ADMIN`; `Product Team`
-  = `product team`). The reserved name `deny` cannot be used, and neither can
+  = `product team`). The reserved names `deny` and `everyone` cannot be used, and neither can
   names starting with `role/` or `plugin/` — those spellings are tokens in
   access entries (below). One exception to the file's authority: the
   **deployment admin** — the address the server configuration sets as

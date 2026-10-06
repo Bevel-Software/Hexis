@@ -147,17 +147,53 @@ export async function coreAgentGuideSections(layout: KbLayout): Promise<AgentGui
   );
 }
 
+/** What the guide is composed for, beyond the layout. */
+export interface AgentGuideContext {
+  /**
+   * The name of the repository's checkout folder inside a workspace, which
+   * the file tools take paths under (`knowledge-base/` by default). Rendered
+   * into `{{kbDirName}}` so the paths the guide shows are the paths this
+   * deployment's tools report back.
+   */
+  kbDirName?: string;
+}
+
+/** The checkout folder's name when none is given — core's own default. */
+const DEFAULT_KB_DIR_NAME = 'knowledge-base';
+
 /**
  * The guide as an agent reads it: core's sections through the distribution's
  * hook (when there is one), rendered for the layout, joined by blank lines,
  * ending in one newline.
+ *
+ * A hook may append, replace and drop sections, with ONE exception: the
+ * shared file rules ({@link WORKING_WITH_FILES_SECTION_ID}) must come back,
+ * as core's or as the hook's own replacement. Every file tool's description
+ * ends by pointing at that section, and a client that drops the handshake
+ * instructions has the guide as the only place to read the rules — a guide
+ * without them would point agents at nothing. A hook that drops it is a
+ * composition error, thrown rather than served.
  */
-export async function composeAgentGuide(layout: KbLayout, hook?: AgentGuideHook): Promise<string> {
+export async function composeAgentGuide(
+  layout: KbLayout,
+  hook?: AgentGuideHook,
+  context: AgentGuideContext = {},
+): Promise<string> {
   const resolved = resolveKbLayout(layout);
   const core = await coreAgentGuideSections(resolved);
   const sections = hook ? await hook(core, resolved) : core;
+  if (!sections.some((section) => section.id === WORKING_WITH_FILES_SECTION_ID)) {
+    throw new Error(
+      `The agent guide hook dropped the "${WORKING_WITH_FILES_SECTION_ID}" section, which every file tool points at. ` +
+        'Keep it, or replace it under the same id.',
+    );
+  }
+  const kbDirName = context.kbDirName?.trim() || DEFAULT_KB_DIR_NAME;
   const rendered = sections.map((section) =>
-    (section.literal ? section.body : renderKbLayoutPlaceholders(section.body, resolved)).trim(),
+    (section.literal
+      ? section.body
+      : renderKbLayoutPlaceholders(section.body.replaceAll('{{kbDirName}}', () => kbDirName), resolved)
+    ).trim(),
   );
   return `${rendered.filter((body) => body.length > 0).join('\n\n')}\n`;
 }
@@ -173,7 +209,10 @@ export const PLATFORM_GUIDE_SEPARATOR =
   "---\n\n_The text above is this knowledge base's own conventions file. The platform's guide follows; `get_agent_guide` returns it on its own._";
 
 export function withPlatformGuideAppended(ownText: string, guide: string): string {
-  const own = ownText.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
+  const own = ownText.replace(/\r\n?/g, '\n').trim();
+  // A file with nothing in it has nothing to put first, and a separator
+  // above nothing would claim a conventions file that says nothing.
+  if (own.length === 0) return guide;
   return `${own}\n\n${PLATFORM_GUIDE_SEPARATOR}\n\n${guide}`;
 }
 

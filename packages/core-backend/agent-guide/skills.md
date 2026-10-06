@@ -19,7 +19,9 @@ metadata:
 
 The body is the instructions, in plain markdown. `allowed-tools` entries are
 tool names from the `.tool` manuals and MCP servers of the plugins that hold
-the skill. `metadata.version` is semver; `list_skills` reports it, and
+the skill, and the agent client's own tools beside them (`Bash`, `Read`,
+`Bash(git:*)` and the like, which the platform leaves to the client).
+`metadata.version` is semver; `list_skills` reports it, and
 `get_skill` with a `version` loads the skill as it was when it last declared
 that version (omit `version` for the latest). Any other `metadata` keys are
 the author's own notes — the catalog carries the file as it is and acts on

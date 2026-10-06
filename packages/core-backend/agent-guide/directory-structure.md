@@ -1,7 +1,7 @@
 ## Directory Structure
 
 ```text
-knowledge-base/
+{{kbDirName}}/
 ├── {{knowledgeBaseDir}}/        ← the knowledge itself; organise it however suits you
 ├── {{skillsDir}}/               ← shared skills, organised by who owns them
 ├── {{pluginsDir}}/              ← one folder per plugin: its tools, and links to skills
@@ -11,15 +11,16 @@ knowledge-base/
 
 (The three root names above are this deployment's own — a deployment may
 rename them in its setup screen, and this guide is rendered with the names in
-effect each time it is written.)
+effect each time it is composed.)
 
 Tool paths are workspace-relative, and the workspace root holds this
-repository as the `knowledge-base/` folder: a file in it is
-`knowledge-base/{{knowledgeBaseDir}}/Foo.md`. Write the prefix where you can —
-it is the path every tool reports back — but a path without it is PLACED under
-`knowledge-base/` rather than refused, so `{{knowledgeBaseDir}}/Foo.md` names that
-same file, and so does the root-anchored `/knowledge-base/{{knowledgeBaseDir}}/Foo.md`
-the app's Copy path gives you. Nothing you send can land beside the repository,
+repository as the `{{kbDirName}}/` folder (this deployment's own name for its
+checkout): a file in it is `{{kbDirName}}/{{knowledgeBaseDir}}/Foo.md`. Write
+the prefix where you can — it is the path every tool reports back — but a
+path without it is PLACED under `{{kbDirName}}/` rather than refused, so
+`{{knowledgeBaseDir}}/Foo.md` names that same file, and so does the
+root-anchored `/{{kbDirName}}/{{knowledgeBaseDir}}/Foo.md` the app's Copy
+path gives you. Nothing you send can land beside the repository,
 where git would never see it. `.` or `..` segments, backslashes and every other
 absolute path are refused.
 

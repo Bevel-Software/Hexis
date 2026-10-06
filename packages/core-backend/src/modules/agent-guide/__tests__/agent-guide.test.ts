@@ -117,10 +117,34 @@ describe('the guide is composed from the platform\'s sections', () => {
     expect(seen).toEqual(['Docs', 'AGENTS.md']);
   });
 
-  it('puts the knowledge base\'s own file first, then a separator, then the guide', () => {
+  it('refuses a hook that drops the shared file rules, which every file tool points at', async () => {
+    await expect(
+      composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => sections.filter((s) => s.id !== WORKING_WITH_FILES_SECTION_ID)),
+    ).rejects.toThrow(/dropped the "working-with-files" section/);
+    // Replacing it under the same id is the hook's right.
+    const replaced = await composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) =>
+      sections.map((s) => (s.id === WORKING_WITH_FILES_SECTION_ID ? { id: s.id, body: '## Working with files\n\nOurs.\n' } : s)),
+    );
+    expect(section(replaced, '## Working with files')).toContain('Ours.');
+  });
+
+  it('names the checkout folder this deployment uses, so the paths it shows are the paths the tools take', async () => {
+    const guide = await composeAgentGuide(DEFAULT_KB_LAYOUT, undefined, { kbDirName: 'repo' });
+    expect(guide).toContain('repository as the `repo/` folder');
+    expect(guide).toContain('`repo/KnowledgeBase/Foo.md`');
+    expect(guide).not.toContain('knowledge-base/');
+    expect(guide).not.toContain('{{kbDirName}}');
+    // Core's own default when none is given.
+    expect(await composeAgentGuide(DEFAULT_KB_LAYOUT)).toContain('`knowledge-base/KnowledgeBase/Foo.md`');
+  });
+
+  it('puts the knowledge base\'s own file first, then a separator, then the guide — and nothing before the guide when the file is empty', () => {
     const joined = withPlatformGuideAppended('# Acme\r\n\r\nWrite tickets in the present tense.\r\n\r\n', 'THE GUIDE\n');
     expect(joined).toBe(`# Acme\n\nWrite tickets in the present tense.\n\n${PLATFORM_GUIDE_SEPARATOR}\n\nTHE GUIDE\n`);
     expect(PLATFORM_GUIDE_SEPARATOR.startsWith('---\n')).toBe(true);
+    // A file with nothing in it has nothing to put first.
+    expect(withPlatformGuideAppended('', 'THE GUIDE\n')).toBe('THE GUIDE\n');
+    expect(withPlatformGuideAppended('\n\n', 'THE GUIDE\n')).toBe('THE GUIDE\n');
   });
 
   it('answers at the guide\'s name in the repository root, under AGENTS.md and under a saved alias, and nowhere else', () => {

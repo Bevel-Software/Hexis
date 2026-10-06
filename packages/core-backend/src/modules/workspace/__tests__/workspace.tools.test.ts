@@ -1175,6 +1175,10 @@ describe("the agent guide at the guide's name", () => {
     const own = await statOf(base);
     expect(own).toMatchObject({ name: 'AGENTS.md', type: 'file', managed: false, movable: true, textEditable: true });
     expect(own.platformGuide).toBeUndefined();
+    // A copy an earlier release wrote is what read_file does not serve, so
+    // stat says the same thing it says for no file at all.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Knowledge base\n\n> **This file is managed by the platform.** Stale.\n');
+    expect(await statOf(base)).toMatchObject({ platformGuide: true, managed: true, movable: false });
   });
 });
 
