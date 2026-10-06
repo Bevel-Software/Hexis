@@ -4,7 +4,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
-import { agentDisplayName, agentStoreKey, holdInitialize, registrationName } from '../handshake.js';
+import { agentDisplayName, agentStoreKey, holdInitialize, identityLine, registrationName } from '../handshake.js';
 
 describe('agent names', () => {
   it('names the well-known clients the way a person does, and title-cases the rest', () => {
@@ -15,9 +15,25 @@ describe('agent names', () => {
     expect(agentDisplayName({ name: '   ' })).toBe('Unknown agent');
   });
 
-  it('registers as the agent on this machine, or as the plain machine name when no agent is known', () => {
+  it('registers as the agent on this machine, and never as the local server itself', () => {
     expect(registrationName({ name: 'claude-code' }, 'LAPTOP-1')).toBe('Claude Code · local server on LAPTOP-1');
-    expect(registrationName(null, 'LAPTOP-1')).toBe('hexis-mcp on LAPTOP-1');
+    // A guessed program name reads the same way: the Audit log shows an agent, not hexis-mcp.
+    expect(registrationName({ name: 'Claude', guessed: true }, 'LAPTOP-1')).toBe('Claude · local server on LAPTOP-1');
+    expect(registrationName({ name: 'Cursor', guessed: true }, 'LAPTOP-1')).toBe('Cursor · local server on LAPTOP-1');
+    // No name from anywhere: say so, instead of "hexis-mcp on LAPTOP-1".
+    expect(registrationName(null, 'LAPTOP-1')).toBe('Unknown agent · local server on LAPTOP-1');
+  });
+
+  it('says on one line who it signs in as and where the name came from', () => {
+    expect(identityLine({ name: 'claude-code', version: '2.1.273' }, 'LAPTOP-1', '0.26.0')).toBe(
+      '[hexis-mcp 0.26.0] signing in as "Claude Code · local server on LAPTOP-1" — named by the client\'s handshake ("claude-code" 2.1.273)',
+    );
+    expect(identityLine({ name: 'Claude', guessed: true }, 'LAPTOP-1', '0.26.0')).toBe(
+      '[hexis-mcp 0.26.0] signing in as "Claude · local server on LAPTOP-1" — guessed from the parent process "Claude"; the client named itself to nobody',
+    );
+    expect(identityLine(null, 'LAPTOP-1', '0.26.0')).toBe(
+      '[hexis-mcp 0.26.0] signing in as "Unknown agent · local server on LAPTOP-1" — the client named itself to nobody and no parent process could be read',
+    );
   });
 
   it('keys the stored credential by a bounded, file-safe slug of the raw name', () => {

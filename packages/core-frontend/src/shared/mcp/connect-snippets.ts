@@ -436,7 +436,10 @@ export function hexisMcpJsonSnippet(baseUrl: string, bearer?: string): string {
       mcpServers: {
         [MCP_SERVER_KEY]: {
           command: 'npx',
-          args: ['-y', '@bevel-software/hexis-mcp'],
+          // `@latest`, spelled out: a bare name lets npx reuse whatever
+          // version its cache holds, and a machine that first ran the server
+          // before agents were named kept signing in as "hexis-mcp on <host>".
+          args: ['-y', '@bevel-software/hexis-mcp@latest'],
           env: {
             HEXIS_URL: baseUrl,
             ...(bearer ? { HEXIS_CONNECTION_KEY: bearer } : {}),
@@ -464,6 +467,6 @@ export function hexisMcpClaudeCommand(baseUrl: string, bearer?: string): string 
     `claude mcp add ${MCP_SERVER_KEY}` +
     ` --env HEXIS_URL="${escapeForDoubleQuotes(baseUrl)}"` +
     (bearer ? ` --env HEXIS_CONNECTION_KEY="${escapeForDoubleQuotes(bearer)}"` : '') +
-    ` -- npx -y @bevel-software/hexis-mcp`
+    ` -- npx -y @bevel-software/hexis-mcp@latest`
   );
 }
