@@ -236,7 +236,7 @@ export const CORE_SETTINGS: SettingDef[] = [
    * an unconfigured deployment. Checked as a TRIO in `save`: the three must
    * differ, and one field alone cannot see the other three.
    *
-   * NO `envVar`, on any of the four. Layout is deployment configuration that is
+   * NO `envVar`, on any of the three. Layout is deployment configuration that is
    * entered once in the app; the three that used to be environment-driven are
    * imported into their saved setting on the first boot after the upgrade
    * ({@link DeploymentSettingsService.importLegacyLayoutEnv}) so nothing

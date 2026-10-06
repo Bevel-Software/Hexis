@@ -103,6 +103,15 @@ describe('the guide is composed from the platform\'s sections', () => {
     expect(sections.find((s) => s.id === 'where-a-new-file-goes')!.title).toBe('Where a new file goes');
     expect(sections.find((s) => s.id === 'skills')!.title).toContain('Skills (`Skills/');
     expect(joinGuideSections(sections)).toBe(await composeAgentGuide(DEFAULT_KB_LAYOUT));
+    // A heading closed with its own run of `#` is titled without it, and a
+    // section that opens with no heading is titled by its id.
+    const added = await agentGuideSections(DEFAULT_KB_LAYOUT, (all) => [
+      ...all,
+      { id: 'custom', body: '## Custom ##\n\nX.\n' },
+      { id: 'bare', body: 'No heading here.\n' },
+    ]);
+    expect(added.find((s) => s.id === 'custom')!.title).toBe('Custom');
+    expect(added.find((s) => s.id === 'bare')!.title).toBe('bare');
   });
 
   /**

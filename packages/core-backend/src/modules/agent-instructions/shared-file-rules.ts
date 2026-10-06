@@ -232,9 +232,9 @@ function platformFileList(layout: KbLayout): string {
 function conventionsRule(): string {
   return (
     "Before your first read or change in a workspace, call `get_agent_guide` and read the platform's guide " +
-    `(whole, or one section at a time). read_file on \`${LEGACY_AGENTS_FILE}\` at the KB root answers with the same ` +
+    `(whole, or one section). read_file on \`${LEGACY_AGENTS_FILE}\` at the KB root answers with the same ` +
     "guide, after the organisation's own conventions file of that name when it has one: follow both. A " +
-    `\`${PRE_RENAME_AGENTS_FILE}\` at the KB root is the organisation's own too; read it as well.`
+    `\`${PRE_RENAME_AGENTS_FILE}\` at the KB root is the organisation's own too; read it if it exists.`
   );
 }
 

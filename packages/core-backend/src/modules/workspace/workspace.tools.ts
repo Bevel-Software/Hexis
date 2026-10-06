@@ -736,6 +736,8 @@ async function grepWalk(
   gate: ReadGate,
   notifyRead: (path: string) => Promise<void>,
   docs: DocGrepState,
+  /** A file the walk leaves to its caller: never opened, never counted against `max`. */
+  skip: (path: string) => boolean = () => false,
 ): Promise<void> {
   if (out.length >= max || depth > 12) return;
   let entries;
@@ -753,7 +755,9 @@ async function grepWalk(
     if (e.type !== 'directory' && isFolderPlaceholder(e.name)) continue;
     const p = dir ? `${dir}/${e.name}` : e.name;
     if (e.type === 'directory') {
-      await grepWalk(fs, p, re, out, max, depth + 1, gate, notifyRead, docs);
+      await grepWalk(fs, p, re, out, max, depth + 1, gate, notifyRead, docs, skip);
+    } else if (skip(p)) {
+      continue;
     } else {
       // Opening a file is a read of it, even when the walk started at a root
       // the read hook was already told about — so every file the walk opens
@@ -2189,9 +2193,11 @@ export function registerWorkspaceTools(
       // `read_file` answers there. The composed text is what is searched —
       // the knowledge base's own readable file first, then the platform's
       // guide — under the guide's path and with the line numbers a read of
-      // it gives, so the walk's own matches in that file (the same lines)
-      // are replaced rather than repeated. A file the caller may not read
-      // is absent from it, as it is from the read.
+      // it gives. The walk leaves that one file to this: a match the walk
+      // made there would be the same line again, and one it COUNTED against
+      // `max_results` would be a file later in the tree never searched while
+      // the answer says nothing was cut. A file the caller may not read is
+      // absent from it, as it is from the read.
       const guidePath = `${kbDirName}/${AGENT_GUIDE_FILE}`;
       const rel = toKbRelative(searchRoot, kbDirName);
       const coversGuide =
@@ -2208,10 +2214,8 @@ export function registerWorkspaceTools(
             gate,
             (p) => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p),
             docs,
+            (p) => p === guidePath,
           );
-          const walked = out.filter((m) => m.path !== guidePath);
-          out.length = 0;
-          out.push(...walked);
         }
         const lines = (await guideAt(a.branch as string, ctx, guidePath)).split('\n');
         for (let i = 0; i < lines.length && out.length < max; i++) {

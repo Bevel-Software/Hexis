@@ -222,10 +222,14 @@ export async function agentGuideSections(
     .filter((section) => section.body.length > 0);
 }
 
-/** The heading's text, or the id when the section opens with no heading. */
+/**
+ * The heading's text, or the id when the section opens with no heading. An
+ * ATX heading may close with a run of `#` of its own (`## Custom ##`); that
+ * is a delimiter, not part of the title.
+ */
 function titleOf(body: string, id: string): string {
   const first = body.split('\n', 1)[0] ?? '';
-  const heading = /^#{1,6}\s+(.*)$/.exec(first);
+  const heading = /^#{1,6}\s+(.*?)(?:\s+#+)?\s*$/.exec(first);
   return heading ? heading[1]!.trim() : id;
 }
 

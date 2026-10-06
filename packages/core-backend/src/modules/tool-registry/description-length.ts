@@ -5,9 +5,10 @@
  * where the text specific to the tool sits, after whatever shared preamble it
  * carried. Agents reported `file_stat`, `read_file`, `write_file` and
  * `write_files` arriving ending in "[truncated]". The rules those descriptions
- * shared now live in one place (see `agent-instructions/shared-file-rules.ts`)
- * and each description ends with one sentence pointing there, which is what
- * makes the cap below reachable rather than aspirational.
+ * shared now live in one place (see `agent-instructions/shared-file-rules.ts`,
+ * served in the guide `get_agent_guide` returns) and each description OPENS
+ * with the one sentence sending the agent there (`guide-first.ts`), which is
+ * what makes the cap below reachable rather than aspirational.
  */
 
 import { TOOL_PREFIX_CAP } from '@bevel-software/platform-shared';
@@ -25,8 +26,10 @@ import type { UtcpTool } from './tool.contract.js';
  * could answer: no useful description of `move_file` fits in 500. What answers
  * that one is the ORDER of the text, which is why the deployment's purpose line
  * is prepended rather than appended (see `prefixToolDescription`) and why every
- * description now leads with what the tool does and ends with the pointer: a
- * cut at 500 then takes the pointer and leaves the tool. The other cut is the
+ * description now opens with the guide-first sentence and then what the tool
+ * does, with the tool's own detail last: a cut at 500 keeps the sentence and
+ * the tool's first sentence (see `firstSentenceEnd`) and takes the detail,
+ * which the guide states in full anyway. The other cut is the
  * four-figure one agents reported on `file_stat`, `read_file`, `write_file` and
  * `write_files`, and 1,200 sits below it with room to spare.
  *

@@ -12,7 +12,7 @@ The guide is now composed from text that ships with the platform, at the moment 
 
 The first start on this version removes the copies earlier versions wrote from every protected branch — only a copy that still carries the platform's own header, never a file someone edited — and takes the rule that hid them out of `.bevelignore`. A copy left on a draft is recognised the same way and never served.
 
-The **Agent guide file** setting is retired, with the pointer sentence it offered to keep in a repository's own `AGENTS.md`. A deployment that saved a name keeps it as a read alias, so nothing it told its agents stops working.
+The **Agent guide file** setting is retired, with the pointer sentence it offered to keep in a repository's own `AGENTS.md`. The guide is read as `AGENTS.md` on every deployment; a name a deployment saved for the written one is ignored.
 
 For a distribution: `CorePorts.agentGuide` takes a function that receives the platform's sections and the layout and returns the sections the guide is composed from — append your own, replace one by id, or drop one (the shared file rules section must come back, as the platform's or as yours) — so every change to the rest of the guide reaches your deployments without a copy to maintain. A `kb-template/AGENTS.md` a distribution still ships is not seeded any more.
 

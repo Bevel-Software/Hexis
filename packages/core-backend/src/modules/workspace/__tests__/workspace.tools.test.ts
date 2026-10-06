@@ -1235,6 +1235,19 @@ describe("the agent guide at the guide's name", () => {
     ]);
     expect((await grep(base, 'needle', GUIDE)).matches).toEqual(composed);
 
+    // The own file does not use up `max_results` twice: the walk leaves it to
+    // the composed search, so a file later in the tree is still reached when
+    // the own file alone has more matches than the cap. Without that, the
+    // walk filled the cap from AGENTS.md, those matches were dropped as
+    // duplicates, and Handbook/ was never searched.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, `# Acme\n\n${'needle\n'.repeat(5)}`);
+    const capped = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', max_results: 3 })).json()) as {
+      matches: { path: string }[];
+    };
+    expect(capped.matches.map((m) => m.path)).toContain(`${KB_DIR}/Handbook/a.md`);
+    expect(capped.matches).toHaveLength(3);
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nOur needle rule.\n');
+
     // A caller who may not read the own file searches the guide alone, from
     // the root and at the path — as read_file answers them, with no sign that
     // anything of the organisation's is there.

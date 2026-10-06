@@ -15,10 +15,11 @@ import { withGuideFirst } from './guide-first.js';
  * each list per request. Insertion order is preserved (static tools first, then
  * provider-built ones); a duplicate static name within a surface throws.
  *
- * Every listed tool opens with the one sentence saying what to do before any
- * of them (`guide-first.ts`): applied here, at the one place both surfaces
- * list from, so no module that registers a tool has to remember it and no
- * surface can serve a tool without it.
+ * Every listed tool but the guide's own (`get_agent_guide`, which is what the
+ * sentence points at) opens with the one sentence saying what to do before
+ * any of them (`guide-first.ts`): applied here, at the one place both
+ * surfaces list from, so no module that registers a tool has to remember it
+ * and no surface can serve a tool without it.
  */
 export class ToolRegistry implements IToolRegistry {
   private readonly external = new Map<string, UtcpTool>();

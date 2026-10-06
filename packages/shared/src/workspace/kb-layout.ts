@@ -119,8 +119,11 @@ export let PLUGINS_DIR = 'Plugins';
  * this name (see core-backend's `modules/agent-guide`), after the knowledge
  * base's own file of that name when it has one. ONE name on every
  * deployment: the setting that let a deployment rename the written guide is
- * gone, and a value it saved is ignored. The layout field below stays for
- * the shape every consumer reads, and always carries this name.
+ * gone, and the settings layer no longer reads a value it saved — the layout
+ * it produces carries this name. The field stays on the layout for the shape
+ * every consumer reads, and the helpers here (`agentsFileOf`,
+ * `configureKbLayout`) still apply whatever a caller puts in it, so the one
+ * name is the producer's doing, not this module's.
  */
 export let AGENTS_FILE = 'AGENTS.md';
 

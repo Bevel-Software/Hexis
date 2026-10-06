@@ -27,7 +27,9 @@ import {
   sharedFileRules,
 } from '../../agent-instructions/index.js';
 import { isPlatformFile, platformFilesByDepth } from '@bevel-software/platform-shared';
-import { GUIDE_FIRST_SENTENCE } from '../guide-first.js';
+import { GET_AGENT_GUIDE_TOOL, GUIDE_FIRST_SENTENCE, guideFirstDescription } from '../guide-first.js';
+import { registerAgentGuideTool } from '../../agent-guide/agent-guide.tools.js';
+import { agentGuideSections } from '../../agent-guide/agent-guide.js';
 
 /**
  * The cap exists because clients cut a long tool description, and they cut it
@@ -69,8 +71,9 @@ function servedMetaTools(external: readonly UtcpTool[]) {
     EXTERNAL_KB_MANUAL_NAME,
     external.map((t) => ({ utcpName: `${EXTERNAL_KB_MANUAL_NAME}.${t.name}`, inputSchema: t.inputs })),
     { sharedRulesPointer: '' },
-    // As the hosted endpoint serves them: opening with the guide-first sentence.
-  ).map((t) => ({ ...t, description: `${GUIDE_FIRST_SENTENCE} ${t.description}` }));
+    // As the hosted endpoint serves them: opening with the guide-first
+    // sentence, through the one helper the endpoint itself uses.
+  ).map((t) => ({ ...t, description: guideFirstDescription(t.description) }));
 }
 
 /** Every tool Hexis itself registers, on both surfaces, deduplicated by name. */
@@ -109,6 +112,9 @@ async function hexisTools(): Promise<UtcpTool[]> {
     variableStatus: unused(),
     kb,
   });
+  // The guide's own tool, with the platform's sections: the one description
+  // that lists the sections is measured with the list it really carries.
+  registerAgentGuideTool(registry, router, toolAuth, toolHandler, () => agentGuideSections(kb.layout));
 
   const byName = new Map<string, UtcpTool>();
   // The meta-tools as a client is served them (`mcp.service.ts` opens each
@@ -161,7 +167,12 @@ describe('no Hexis tool description is long enough to be cut', () => {
     const tools = await hexisTools();
     const opened = tools.filter((t) => t.description?.startsWith(`${GUIDE_FIRST_SENTENCE} `));
     expect(opened.length).toBeGreaterThan(0);
-    expect(tools.filter((t) => !t.description?.startsWith(GUIDE_FIRST_SENTENCE)).map((t) => t.name)).toEqual([]);
+    // The guide's own tool is the one exception: it is what the sentence
+    // points at, and it is in the catalog measured here so the cap holds on
+    // it too (see the first test).
+    expect(tools.filter((t) => !t.description?.startsWith(GUIDE_FIRST_SENTENCE)).map((t) => t.name)).toEqual([
+      GET_AGENT_GUIDE_TOOL,
+    ]);
     for (const tool of opened) {
       expect(clientVisibleLength(tool), tool.name).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
     }

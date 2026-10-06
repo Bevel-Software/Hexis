@@ -288,8 +288,13 @@ describe('DeploymentSettingsService — KB layout', () => {
    * whatever a deployment saved before.
    */
   it('knows no guide name any more: a save naming one is refused, and the layout always says AGENTS.md', async () => {
-    const { db } = makeDb();
+    const { db, rows } = makeDb();
+    // The row a deployment saved while the setting existed is still in its
+    // database. It is loaded like any other row, and changes nothing.
+    rows.push({ key: 'agentsFile', value: 'HEXIS.md', encrypted: false });
     const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.load();
+    expect(settings.resolveKbLayout().agentsFile).toBe('AGENTS.md');
     await expect(settings.save({ agentsFile: 'HEXIS.md' }, null)).rejects.toMatchObject({
       problems: { agentsFile: 'Unknown setting.' },
     });

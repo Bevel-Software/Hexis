@@ -69,7 +69,7 @@ import {
   type AgentPreambleReader,
   type ComposedAgentInstructions,
 } from '../agent-instructions/index.js';
-import { GUIDE_FIRST_SENTENCE } from '../tool-registry/guide-first.js';
+import { guideFirstDescription } from '../tool-registry/guide-first.js';
 
 /**
  * Configuration for the loopback proxy. `loopbackBaseUrl` is the backend's own
@@ -496,13 +496,7 @@ export class McpService {
       // built here, so here it is.
       const metaTools = codeModeMetaTools(EXTERNAL_KB_MANUAL_NAME, examplePool, {
         sharedRulesPointer: '',
-      }).map((tool) => ({
-        ...tool,
-        description:
-          tool.description && !tool.description.startsWith(GUIDE_FIRST_SENTENCE)
-            ? `${GUIDE_FIRST_SENTENCE} ${tool.description}`
-            : tool.description,
-      }));
+      }).map((tool) => ({ ...tool, description: guideFirstDescription(tool.description) }));
       // Log only when a tool was dropped (name/schema/duplicate) — that's the
       // anomaly worth surfacing, since a downstream client would otherwise hide
       // it by rejecting the whole response.

@@ -1,6 +1,7 @@
 import type { Router, RequestHandler } from 'express';
 import type { IToolRegistry, UtcpTool } from '../tool-registry/tool.contract.js';
 import { GET_AGENT_GUIDE_TOOL } from '../tool-registry/guide-first.js';
+import { TOOL_DESCRIPTION_CAP } from '../tool-registry/description-length.js';
 import { ToolError } from '../tool-helpers/tool.contract.js';
 import { toolDef } from '../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
@@ -33,19 +34,25 @@ export function registerAgentGuideTool(
 ): void {
   const build = async (): Promise<UtcpTool> => {
     const list = await sections();
+    const describe = (sectionList: string) =>
+      "The platform's guide to this knowledge base: its layout, where a new file goes, the rules every file tool " +
+      'shares, access control, skills and tool manuals. ALWAYS call this first and read the guide before you do ' +
+      'anything else in the platform. Returns `{ guide }` as markdown: the whole guide, or one section when ' +
+      '`section` names one. The same text comes back from `read_file` on `' +
+      AGENT_GUIDE_FILE +
+      "` at the KB root, after the knowledge base's own " +
+      AGENT_GUIDE_FILE +
+      ` when it has one. Sections: ${sectionList}.`;
+    // Every id, always: an id a client cut off the end is a section an agent
+    // cannot ask for. The titles are the part that gives way — a distribution
+    // that adds enough sections to push the description past the cap gets the
+    // ids alone, which is what the `section` argument takes anyway.
+    const titled = describe(list.map((s) => `\`${s.id}\` (${s.title})`).join(', '));
+    const description =
+      titled.length <= TOOL_DESCRIPTION_CAP ? titled : describe(list.map((s) => `\`${s.id}\``).join(', '));
     return toolDef({
       name: GET_AGENT_GUIDE_TOOL,
-      description:
-        "The platform's guide to this knowledge base: its layout, where a new file goes, the rules every file tool " +
-        'shares, access control, skills and tool manuals. ALWAYS call this first and read the guide before you do ' +
-        'anything else in the platform. Returns `{ guide }` as markdown: the whole guide, or one section when ' +
-        '`section` names one. The same text comes back from `read_file` on `' +
-        AGENT_GUIDE_FILE +
-        "` at the KB root, after the knowledge base's own " +
-        AGENT_GUIDE_FILE +
-        ' when it has one. Sections: ' +
-        list.map((s) => `\`${s.id}\` (${s.title})`).join(', ') +
-        '.',
+      description,
       path: `/api/agent/tools/${GET_AGENT_GUIDE_TOOL}`,
       inputs: {
         type: 'object',

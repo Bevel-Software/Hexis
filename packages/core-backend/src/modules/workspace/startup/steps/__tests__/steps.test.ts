@@ -685,6 +685,36 @@ describe('TemplateFilesStep: the guide copies earlier releases wrote', () => {
     expect(await git(dir, ['log', '--format=%s', '-1'])).toContain('.bevelignore');
   });
 
+  it("stops hiding the organisation's own file under a name a deployment once gave the guide, with no copy left to find it by", async () => {
+    // A deployment saved `HEXIS.md` for the guide; the organisation then made
+    // that file its own (no platform header left), and the rule the platform
+    // appended for the name is still hiding it. The saved name is not read
+    // any more, and no managed copy names it either: the rule is known by the
+    // comment the platform wrote above it, under either of its two spellings.
+    const scaffold = await fullScaffold();
+    scaffold['HEXIS.md'] = CUSTOMER_GUIDE;
+    scaffold['Guide.md'] = CUSTOMER_GUIDE;
+    scaffold['.bevelignore'] =
+      `${OLD_RELEASE_IGNORE}\n# The platform's agent guide.\nHEXIS.md\n` +
+      '\n# Added by the platform: the conventions doc is not node content.\nGuide.md\n' +
+      // A negation and a hand-written rule under neither comment stay.
+      '!Notes.md\n# mine\nPrivate.md\n';
+    await seedUpstream(scaffold);
+    await makeRunner([new TemplateFilesStep(new NodeFs(), kbContext)]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, 'HEXIS.md'), 'utf8'))).toBe(CUSTOMER_GUIDE);
+    expect(norm(await fs.readFile(path.join(dir, 'Guide.md'), 'utf8'))).toBe(CUSTOMER_GUIDE);
+    const lines = await ignoreLines(dir);
+    expect(lines).not.toContain('HEXIS.md');
+    expect(lines).not.toContain('Guide.md');
+    expect(lines).not.toContain("# The platform's agent guide.");
+    expect(lines).not.toContain('# Added by the platform: the conventions doc is not node content.');
+    expect(lines).toContain('!Notes.md');
+    expect(lines).toContain('# mine');
+    expect(lines).toContain('Private.md');
+  });
+
   it("keeps a rule the operator wrote by hand — provenance is the platform's comment or its template slot", async () => {
     const scaffold = await fullScaffold();
     scaffold['.bevelignore'] = '# mine\nAGENTS.md\nMyStuff/\n';
