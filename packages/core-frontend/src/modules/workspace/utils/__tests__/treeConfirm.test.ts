@@ -225,7 +225,7 @@ const KB = 'knowledge-base';
  * the sidebar cannot drift from the endpoint it would have called.
  */
 describe('platformFileMoveRefusal', () => {
-  it('refuses the four platform files where the platform reads them', () => {
+  it('refuses the three platform files where the platform reads them', () => {
     expect(platformFileMoveRefusal(`${KB}/access.md`, KB))
       .toBe('access.md is a platform file and stays in its folder.');
     expect(platformFileMoveRefusal(`${KB}/Sales/access.md`, KB))
@@ -234,32 +234,29 @@ describe('platformFileMoveRefusal', () => {
       .toBe('.bevelignore is a platform file and stays in its folder.');
     expect(platformFileMoveRefusal(`${KB}/roles.yaml`, KB))
       .toBe('roles.yaml is a platform file and stays in its folder.');
-    expect(platformFileMoveRefusal(`${KB}/AGENTS.md`, KB))
-      .toBe('AGENTS.md is a platform file and stays in its folder.');
   });
 
-  it('leaves content alone, including a nested roles.yaml or AGENTS.md the platform never reads', () => {
+  it('leaves content alone, including a nested roles.yaml the platform never reads, and any AGENTS.md', () => {
     expect(platformFileMoveRefusal(`${KB}/Sales/deal.md`, KB)).toBeNull();
     expect(platformFileMoveRefusal(`${KB}/Sales/roles.yaml`, KB)).toBeNull();
+    // The organisation's own conventions file, at the root or anywhere: the
+    // platform's guide is served from code, so nothing under this name is ours.
+    expect(platformFileMoveRefusal(`${KB}/AGENTS.md`, KB)).toBeNull();
     expect(platformFileMoveRefusal(`${KB}/Sales/AGENTS.md`, KB)).toBeNull();
     // Exact spelling, as the platform reads it.
     expect(platformFileMoveRefusal(`${KB}/Sales/Access.md`, KB)).toBeNull();
   });
 
   /**
-   * The tree's copy of the rule reads the layout the browser was served, so a
-   * deployment that renamed its guide gets the same two answers here as it
-   * does from the server: ours is managed, theirs is a page.
+   * A deployment that gave the written guide a name of its own, back when it
+   * was written: that name is a read alias now, not a file, so a file under
+   * it is content like any other.
    */
-  it('follows the configured guide name — and lets go of AGENTS.md when it differs', () => {
+  it('refuses nothing under a guide name a deployment saved', () => {
     configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
-    expect(platformFileMoveRefusal(`${KB}/HEXIS.md`, KB))
-      .toBe('HEXIS.md is a platform file and stays in its folder.');
-    // The customer's own conventions file moves, renames and deletes like any
-    // page — which is the whole point of naming ours something else.
+    expect(platformFileMoveRefusal(`${KB}/HEXIS.md`, KB)).toBeNull();
     expect(platformFileMoveRefusal(`${KB}/AGENTS.md`, KB)).toBeNull();
     expect(platformFileDragRefusal(`${KB}/AGENTS.md`, KB, false)).toBeNull();
-    // Root-only, like `roles.yaml`: a nested copy of ours is content too.
     expect(platformFileMoveRefusal(`${KB}/Sales/HEXIS.md`, KB)).toBeNull();
   });
 
@@ -289,7 +286,6 @@ describe('platformFileDragRefusal', () => {
     expect(platformFileDragRefusal(`${KB}/access.md`, KB, true)).toBe(sentence('access.md'));
     expect(platformFileDragRefusal(`${KB}/roles.yaml`, KB, true)).toBe(sentence('roles.yaml'));
     expect(platformFileDragRefusal(`${KB}/.bevelignore`, KB, true)).toBe(sentence('.bevelignore'));
-    expect(platformFileDragRefusal(`${KB}/AGENTS.md`, KB, true)).toBe(sentence('AGENTS.md'));
   });
 
   it('leaves ordinary content alone for either of them', () => {

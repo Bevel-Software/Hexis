@@ -5,15 +5,12 @@ import {
   KNOWLEDGE_BASE_DIR,
   PLUGINS_DIR,
   SKILLS_DIR,
-  agentsFilePointerSentence,
   configureKbLayout,
   currentKbLayout,
   isPlatformFile,
-  mentionsAgentsFile,
   platformFileNames,
   pluginOfPath,
   renderKbLayoutPlaceholders,
-  retargetAgentsFilePointer,
   reservedRootDirNames,
   validateAgentsFileName,
   validateKbLayout,
@@ -193,106 +190,19 @@ describe('KB layout — the agent guide\'s file name', () => {
     expect(renderKbLayoutPlaceholders('see {{agentsFile}}', DEFAULT_KB_LAYOUT)).toBe('see AGENTS.md');
   });
 
-  test('the platform-file gate follows the name: ours is managed, theirs is content', () => {
-    expect(platformFileNames(DEFAULT_KB_LAYOUT)).toEqual([
-      'access.md',
-      'roles.yaml',
-      '.bevelignore',
-      'AGENTS.md',
-    ]);
-    expect(platformFile('AGENTS.md')).toBe(true);
-
-    configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
-    expect(platformFileNames(currentKbLayout())).toEqual(['access.md', 'roles.yaml', '.bevelignore', 'HEXIS.md']);
-    // The guide the platform writes is immovable and undeletable…
-    expect(platformFile('HEXIS.md')).toBe(true);
-    // …and the customer's own AGENTS.md is a page like any other.
+  test('the guide is no platform file under any name: a root AGENTS.md is the organisation\'s own page', () => {
+    // The platform's guide is served from code and never written to the
+    // repository, so nothing under its name is the platform's to protect.
+    expect(platformFileNames(DEFAULT_KB_LAYOUT)).toEqual(['access.md', 'roles.yaml', '.bevelignore']);
     expect(platformFile('AGENTS.md')).toBe(false);
-    // Still root-only, as `roles.yaml` is: a nested copy is content.
-    expect(platformFile('KnowledgeBase/HEXIS.md')).toBe(false);
-  });
+    expect(platformFile('roles.yaml')).toBe(true);
 
-  test('the pointer sentence is one sentence, naming the guide twice, from one place', () => {
-    expect(agentsFilePointerSentence('HEXIS.md')).toBe(
-      'Read [HEXIS.md](./HEXIS.md) before working in this knowledge base — ' +
-        "it is the platform's guide to its layout, files and rules.",
-    );
+    // A name a deployment saved for the written guide is a read alias now,
+    // not a file, and makes no platform file either.
     configureKbLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
-    expect(agentsFilePointerSentence(currentKbLayout().agentsFile)).toContain('HEXIS.md');
+    expect(platformFileNames(currentKbLayout())).toEqual(['access.md', 'roles.yaml', '.bevelignore']);
+    expect(platformFile('HEXIS.md')).toBe(false);
+    expect(platformFile('AGENTS.md')).toBe(false);
   });
 
-  /**
-   * A guide name is a FILE NAME: spaces, brackets, parentheses, `#` and `%`
-   * all pass `validateFilename`, and every one of them means something in an
-   * inline link. The label must not end early and the destination must still
-   * point at the file.
-   */
-  test('the pointer sentence links correctly for a name full of markdown punctuation', () => {
-    const name = 'Our [Agent] Guide (v2).md';
-    expect(validateGuideName(name)).toBeNull();
-    const sentence = agentsFilePointerSentence(name);
-    // The label cannot end early: the brackets in it are escaped…
-    expect(sentence).toContain('[Our \\[Agent\\] Guide (v2).md]');
-    // …and the destination is percent-encoded, parentheses included — a bare
-    // `)` would close the link half way through the name.
-    expect(sentence).toContain('(./Our%20%5BAgent%5D%20Guide%20%28v2%29.md)');
-    // The ordinary name reads as it always has — no escapes, nothing encoded.
-    expect(agentsFilePointerSentence('AGENTS.md')).toContain('[AGENTS.md](./AGENTS.md)');
-  });
-
-  test('the pointer sentence encodes a name that would otherwise open a URL fragment', () => {
-    // `#` is legal in a filename and opens a fragment in a URL: `./#2 Guide.md`
-    // links to the customer's OWN file with a fragment, not to the guide.
-    expect(validateGuideName('#2 Guide.md')).toBeNull();
-    expect(agentsFilePointerSentence('#2 Guide.md')).toContain('(./%232%20Guide.md)');
-    // `%` is legal too, and an unencoded one is a malformed escape.
-    expect(agentsFilePointerSentence('100%.md')).toContain('(./100%25.md)');
-  });
-
-  /**
-   * The startup step asks this before appending, and it has to recognise the
-   * sentence the LAST boot wrote — whose spelling of the name is escaped in
-   * the label and encoded in the destination. Asking for the raw name alone
-   * would append a second copy on every boot after the first.
-   */
-  test('a file already carrying the pointer sentence counts as mentioning the guide', () => {
-    for (const name of ['AGENTS.md', 'Our [Agent] Guide (v2).md', '#2 Guide.md', '100%.md']) {
-      const appended = `# Acme\n\n${agentsFilePointerSentence(name)}\n`;
-      expect(mentionsAgentsFile(appended, name), name).toBe(true);
-    }
-    // A file that says nothing about the guide still reads as silent…
-    expect(mentionsAgentsFile('# Acme\n\nWrite tickets in the present tense.\n', 'HEXIS.md')).toBe(false);
-    // …and the customer's own plain mention counts, in their own words.
-    expect(mentionsAgentsFile('See HEXIS.md for the platform.', 'HEXIS.md')).toBe(true);
-  });
-
-  /**
-   * A second rename. The sentence written for the previous guide points at a
-   * file that is no longer there, and the new name appears nowhere in the
-   * text — so it has to be recognised by its SHAPE and aimed again.
-   */
-  test('a pointer sentence the platform wrote is retargeted, whatever guide it named', () => {
-    for (const before of ['HEXIS.md', 'Our [Agent] Guide (v2).md', '#2 Guide.md']) {
-      const text = `# Acme\n\n${agentsFilePointerSentence(before)}\n`;
-      expect(retargetAgentsFilePointer(text, 'GUIDE.md'), before).toBe(
-        `# Acme\n\n${agentsFilePointerSentence('GUIDE.md')}\n`,
-      );
-    }
-    // Already aimed right: ours, and unchanged — which is not the same answer
-    // as "none of ours here", and the caller tells them apart.
-    const current = `# Acme\n\n${agentsFilePointerSentence('GUIDE.md')}\n`;
-    expect(retargetAgentsFilePointer(current, 'GUIDE.md')).toBe(current);
-  });
-
-  test('leaves a file holding nothing of the platform\'s alone', () => {
-    // Null, not the text: there is nothing of ours to aim, so the caller goes
-    // on to ask whether the customer mentioned the guide themselves.
-    expect(retargetAgentsFilePointer('# Acme\n\nWrite tickets in the present tense.\n', 'GUIDE.md')).toBeNull();
-    // Their own link to their own file is not our sentence.
-    expect(retargetAgentsFilePointer('Read [notes](./notes.md) before working here.', 'GUIDE.md')).toBeNull();
-    // Our opening words, their sentence.
-    expect(
-      retargetAgentsFilePointer('Read [HEXIS.md](./HEXIS.md) when you have a moment.', 'GUIDE.md'),
-    ).toBeNull();
-  });
 });

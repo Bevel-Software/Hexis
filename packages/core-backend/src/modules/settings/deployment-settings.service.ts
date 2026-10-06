@@ -228,7 +228,8 @@ export const CORE_SETTINGS: SettingDef[] = [
   /**
    * The KB layout: the three root folders a deployment may rename so hexis can
    * read a repository laid out by someone else (`skills/` and `plugins/` in
-   * lowercase, say), and the file name of the managed agent guide.
+   * lowercase, say), and the name a deployment once gave the agent guide (an
+   * alias a read answers to; see `agentsFile` below).
    * Restart-to-apply like the branch model — the names are applied once at boot
    * through `configureKbLayout` and served to the browser once by
    * `/api/config`. Each has a default, so an unset field means the default, not
@@ -264,34 +265,24 @@ export const CORE_SETTINGS: SettingDef[] = [
   },
   {
     /**
-     * The managed agent guide's file name. Its own validator says what a guide
-     * may be called; the quartet check in `plan` is what keeps it clear of the
-     * three folder names it is saved beside.
+     * The name the agent guide was WRITTEN under while it was a file in the
+     * repository. RETIRED: the guide is served from code now (see
+     * `modules/agent-guide`), under `AGENTS.md` and, on a deployment that
+     * saved a name here before the change, under that name too — so the
+     * saved value is still read, as an alias a read answers to, and never
+     * offered on the setup screen again (`internal`, like the GitHub App's
+     * own fields). Its own validator says what a guide may be called; the
+     * quartet check in `plan` is what keeps it clear of the three folder names
+     * it is saved beside.
      */
     key: 'agentsFile',
     section: 'knowledge-base',
+    internal: true,
     // Judged against the default roots here; the quartet check in `plan`
     // judges it against the roots the same save puts in effect.
     validate: (v) => validateAgentsFileName(v, DEFAULT_KB_LAYOUT),
     restartToApply: true,
     unsetMeans: DEFAULT_KB_LAYOUT.agentsFile,
-  },
-  {
-    /**
-     * Whether to keep the platform's one-sentence pointer in a customer's own
-     * `AGENTS.md` — the admin's consent to the only text the platform ever adds
-     * to a file it does not own. On unless it is explicitly turned off, because
-     * a renamed guide nothing points at is a guide no coding agent will find.
-     *
-     * Restart-to-apply like the name it belongs to: the check runs once per
-     * start, in the KB startup phase.
-     */
-    key: 'agentsFileLink',
-    section: 'knowledge-base',
-    validate: (v) => (v === 'true' || v === 'false' ? null : 'Use "true" or "false".'),
-    restartToApply: true,
-    // On unless explicitly turned off — the reading `resolveAgentsFileLink` applies.
-    unsetMeans: 'true',
   },
 
 
@@ -589,16 +580,6 @@ export class DeploymentSettingsService {
       pluginsDir: this.resolve('pluginsDir') || DEFAULT_KB_LAYOUT.pluginsDir,
       agentsFile: this.resolve('agentsFile') || DEFAULT_KB_LAYOUT.agentsFile,
     };
-  }
-
-  /**
-   * Whether the platform should keep its pointer sentence in a customer-owned
-   * `AGENTS.md`. On unless the admin turned it off — an unset setting is a
-   * deployment that never saw the checkbox, and the sentence is what makes a
-   * renamed guide findable at all.
-   */
-  resolveAgentsFileLink(): boolean {
-    return this.resolve('agentsFileLink') !== 'false';
   }
 
   /**

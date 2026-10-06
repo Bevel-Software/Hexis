@@ -67,9 +67,10 @@ describe('restoring a platform file', () => {
     // only because it is the file that says who the admin is — the repository
     // that lost that one too is the last case in this file.
     const svc = service();
-    for (const name of ['.bevelignore', 'AGENTS.md']) {
-      expect(await svc.canRestorePlatformFile(WS, ADMIN, name)).toBe(true);
-    }
+    expect(await svc.canRestorePlatformFile(WS, ADMIN, '.bevelignore')).toBe(true);
+    // The agent guide is not a platform file: it is served from code, never
+    // written to the root, so a root `AGENTS.md` is content and no restore.
+    expect(await svc.canRestorePlatformFile(WS, ADMIN, 'AGENTS.md')).toBe(false);
     // Nothing is missing at `roles.yaml`: the root has one. A move is a rename
     // on disk, so landing another there would REPLACE the admin model rather
     // than put it back, and no exception carries that.
@@ -95,9 +96,9 @@ describe('restoring a platform file', () => {
     expect(await svc.canRestorePlatformFile(WS, ENGINEER, 'Sales/Legal/access.md')).toBe(false);
   });
 
-  it('the three root-only names are a restore at the root and nowhere else', async () => {
+  it('the root-only names are a restore at the root and nowhere else', async () => {
     const svc = service();
-    for (const dest of ['Sales/roles.yaml', 'Sales/.bevelignore', 'Sales/AGENTS.md']) {
+    for (const dest of ['Sales/roles.yaml', 'Sales/.bevelignore']) {
       expect(await svc.canRestorePlatformFile(WS, ADMIN, dest)).toBe(false);
     }
   });
@@ -113,14 +114,14 @@ describe('restoring a platform file', () => {
 
   it('a non-admin never gets the exception, wherever it would land', async () => {
     const svc = service();
-    for (const dest of ['roles.yaml', '.bevelignore', 'AGENTS.md', 'access.md', 'Legal/access.md']) {
+    for (const dest of ['roles.yaml', '.bevelignore', 'access.md', 'Legal/access.md']) {
       expect(await svc.canRestorePlatformFile(WS, ENGINEER, dest)).toBe(false);
     }
   });
 
   it('the deployment owner is an admin for it, and an ordinary destination is not a restore for anyone', async () => {
     const svc = service();
-    expect(await svc.canRestorePlatformFile(WS, OWNER, 'AGENTS.md')).toBe(true);
+    expect(await svc.canRestorePlatformFile(WS, OWNER, '.bevelignore')).toBe(true);
     for (const email of [ADMIN, OWNER]) {
       expect(await svc.canRestorePlatformFile(WS, email, 'Sales/deal.md')).toBe(false);
       expect(await svc.canRestorePlatformFile(WS, email, 'Sales/notes.md')).toBe(false);

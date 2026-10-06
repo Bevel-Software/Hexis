@@ -79,35 +79,37 @@ at boot, so if you run more than one, restart the others after changing SSO
   **only** signup boundary. Without it, anyone with an account at the issuer
   can sign in.
 
-## The agent guide's file name
+## The agent guide
 
-The platform writes a managed agent guide to the top of the repository and
-refreshes it on every start. It is called `AGENTS.md` by default — which is
-also the name coding agents look for by convention, so a repository that
-already has one of its own would have it overwritten.
+The platform's guide for agents — the repository's layout, where a new file
+goes, the rules every file tool shares, access control, skills and tool
+manuals — is not a file in your repository. The platform composes it when an
+agent asks for it, from text that ships with the platform, so it is always
+the guide for the version you run.
 
-Set **Agent guide file** (setup screen, and Deployment settings afterwards) to
-a name of your own — `HEXIS.md`, say — and:
+An agent gets it two ways:
 
-- the managed guide is written and refreshed under that name instead;
-- your `AGENTS.md` becomes ordinary content: never written, never refreshed,
-  never hidden from the file tree, and movable and deletable like any page;
-- an `AGENTS.md` the platform itself wrote is removed on the next start (only
-  when its content still carries the platform's managed header — an edited or
-  hand-written one is left exactly as it is);
-- every instruction an agent reads names your guide first and tells it to read
-  `AGENTS.md` too, so a remote agent with no checkout still sees your own
-  conventions.
+- the `get_agent_guide` tool returns the guide on its own;
+- a `read_file` of `AGENTS.md` at the top of the repository returns it too.
+  When your repository has an `AGENTS.md` of its own, that file comes first,
+  whole, and the platform's guide follows it after a marked separator.
 
-Beside the field is the exact sentence the platform offers to keep at the end
-of your `AGENTS.md`, pointing at the guide, and a checkbox — on by default —
-to keep it there. While it is ticked, each start looks for the guide's name
-anywhere in your file and appends the sentence only when it is missing; a
-mention in your own words counts. No `AGENTS.md` is ever created for this.
+Your `AGENTS.md` is yours: the platform never writes to it, never hides it
+from the file tree, and it moves and deletes like any other page. Put your own
+conventions there; every agent is told to read both. The guide names the
+folders as you called them in setup.
 
-The name must be one file name (no folders), end in `.md`, and differ from
-`CLAUDE.md`, from the other platform files and from the three root folders.
-Restart to apply, like the folder names.
+Earlier versions wrote the guide into the repository and refreshed it on every
+start. The first start on this version removes those copies from every
+protected branch — only a copy that still carries the platform's own header,
+never a file someone edited — and takes the rule that hid them out of
+`.bevelignore`. A copy left on a draft branch is recognised the same way and
+never served.
+
+The **Agent guide file** setting that let you give the written guide another
+name is retired. A deployment that saved one keeps it as an alias: a
+`read_file` of that name answers with the guide as well, so nothing you told
+your agents stops working.
 
 ## Configuring by environment instead of the setup screen
 
@@ -117,8 +119,7 @@ steps at first sign-in and pins them against later change in the UI, which is
 what you want for a deployment managed by config-as-code.
 
 The knowledge-base layout is the exception: `KB_KNOWLEDGE_BASE_DIR`,
-`KB_SKILLS_DIR` and `KB_PLUGINS_DIR` are retired, and the agent guide's file
-name never had a variable. On the first start after upgrading, each of those
+`KB_SKILLS_DIR` and `KB_PLUGINS_DIR` are retired. On the first start after upgrading, each of those
 three still present in the environment is imported once into its saved
 setting, with a log line naming the variable to delete; where a saved value
 already differs, the saved value wins and the start warns that the variable is

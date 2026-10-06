@@ -40,9 +40,11 @@ export const TEMPLATE_SOURCE_FALLBACKS: ReadonlyMap<string, string> = new Map([
 ]);
 
 /**
- * Where the managed guide asks for the rules every file tool shares. Not a
- * layout placeholder: the layout renderer lives in `platform-shared`, which
- * the frontend also reads, and the rules are backend text.
+ * Where a template file may ask for the rules every file tool shares. The
+ * packaged template no longer does — the guide is composed in code, see
+ * `modules/agent-guide` — but a distribution's template may. Not a layout
+ * placeholder: the layout renderer lives in `platform-shared`, which the
+ * frontend also reads, and the rules are backend text.
  */
 export const SHARED_FILE_RULES_PLACEHOLDER = '{{sharedFileRules}}';
 

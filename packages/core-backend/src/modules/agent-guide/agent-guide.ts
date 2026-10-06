@@ -1,0 +1,190 @@
+/**
+ * The platform's agent guide: what every agent is told to read before its
+ * first read or change in a knowledge base — the layout, where a new file
+ * goes, the rules every file tool shares, access control, skills and tool
+ * manuals.
+ *
+ * It is TEXT THE CODE OWNS, not a file in the repository. It used to be
+ * written to every protected branch as `AGENTS.md` and refreshed on every
+ * start, which had three costs: a repository that already had an `AGENTS.md`
+ * of its own lost it or had to rename ours; a distribution that wanted to add
+ * to the guide had to fork the whole file and then drifted from every change
+ * made here; and the file sat in git history on every branch, hidden from the
+ * tree by an ignore rule it had to keep writing. Now the guide is composed
+ * from SECTIONS at the moment an agent asks for it — `get_agent_guide`, or a
+ * `read_file` of the guide's name at the repository root — and a distribution
+ * shapes it with a hook that sees the sections and returns the sections it
+ * wants (append, replace or drop by id), so what Hexis says reaches it without
+ * a copy to maintain.
+ *
+ * The sections ship as markdown files in the package's `agent-guide/` folder
+ * (see `assets.ts`), one per section, with the layout placeholders the old
+ * template carried (`{{knowledgeBaseDir}}`, `{{skillsDir}}`, `{{pluginsDir}}`,
+ * `{{agentsFile}}`). ONE section is computed rather than read: the rules every
+ * file tool shares, which the MCP handshake also sends — the same string in
+ * both places, from `shared-file-rules.ts`, so a rule cannot be changed in one
+ * and left stale in the other.
+ */
+
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {
+  agentsFileOf,
+  renderKbLayoutPlaceholders,
+  resolveKbLayout,
+  type KbLayout,
+} from '@bevel-software/platform-shared';
+import { agentGuideDir } from '../../assets.js';
+import { sharedFileRulesSection } from '../agent-instructions/shared-file-rules.js';
+
+/** One section of the guide. */
+export interface AgentGuideSection {
+  /**
+   * Stable id, so a distribution's hook can replace or drop a section by name
+   * and a test can say which one went missing. Core's ids are the
+   * {@link CORE_SECTION_IDS}.
+   */
+  id: string;
+  /**
+   * The section's markdown, heading included (`## …`). May carry the layout
+   * placeholders; they are rendered with the names in effect when the guide is
+   * composed, so a section can name the knowledge folder without knowing what
+   * this deployment calls it.
+   */
+  body: string;
+  /**
+   * The body is FINAL: already rendered, and not to be passed through the
+   * placeholder renderer. Set on the computed shared-rules section, which is
+   * rendered for the layout by the code that builds it; rendering it again
+   * could only misread a folder name it STATES as a placeholder.
+   */
+  literal?: boolean;
+}
+
+/**
+ * A distribution's say over the guide. Called with core's sections, in order,
+ * and the layout in effect; returns the sections the guide is composed from.
+ * Append to the array to add sections, map over it to replace one by id,
+ * filter it to drop one. Called on every composition, so a hook that reads
+ * something live (a feature flag, a setting) is read each time.
+ */
+export type AgentGuideHook = (
+  sections: readonly AgentGuideSection[],
+  layout: Required<KbLayout>,
+) => readonly AgentGuideSection[] | Promise<readonly AgentGuideSection[]>;
+
+/** Composes the guide for the layout in effect — the shape every consumer reads. */
+export type AgentGuideReader = () => Promise<string>;
+
+/** The computed section: the rules every file tool shares. */
+export const WORKING_WITH_FILES_SECTION_ID = 'working-with-files';
+
+/**
+ * Core's sections, in reading order. Every id but the shared-rules one names
+ * a file in the package's `agent-guide/` folder.
+ */
+export const CORE_SECTION_IDS: readonly string[] = Object.freeze([
+  'introduction',
+  'directory-structure',
+  'where-a-new-file-goes',
+  WORKING_WITH_FILES_SECTION_ID,
+  'access-control',
+  'skills',
+  'tool-manuals',
+  'conventions',
+  'finding-things',
+]);
+
+/**
+ * The one phrase that proves a root guide file is the platform's and not the
+ * customer's. The packaged guide carried it in its header for as long as the
+ * guide was a file, under every release; a customer file would have to quote
+ * the platform's own claim about itself verbatim to be mistaken for one, and
+ * the consequence of the mistake is a deletion — which is why nothing looser
+ * will do. Still read on every start, to take the copies earlier releases
+ * wrote out of the repository (see template-files.step.ts), and on every read
+ * of the guide's name, so a copy still on a draft is not served twice.
+ */
+const MANAGED_GUIDE_MARKER = '**This file is managed by the platform.**';
+
+/** Whether `text` is a copy of the guide a release wrote to disk, of any vintage. */
+export function isManagedGuide(text: string): boolean {
+  return text.includes(MANAGED_GUIDE_MARKER);
+}
+
+/** The raw section files, read once per process: the package does not change while it runs. */
+let coreSectionFiles: Promise<ReadonlyMap<string, string>> | null = null;
+
+async function readCoreSectionFiles(): Promise<ReadonlyMap<string, string>> {
+  const dir = agentGuideDir();
+  const entries = await Promise.all(
+    CORE_SECTION_IDS.filter((id) => id !== WORKING_WITH_FILES_SECTION_ID).map(
+      async (id) => [id, await fs.readFile(path.join(dir, `${id}.md`), 'utf8')] as const,
+    ),
+  );
+  return new Map(entries);
+}
+
+/**
+ * Core's sections for `layout`: the files, placeholders unrendered, with the
+ * shared-rules section computed and in its place. What a distribution's hook
+ * is handed.
+ */
+export async function coreAgentGuideSections(layout: KbLayout): Promise<AgentGuideSection[]> {
+  coreSectionFiles ??= readCoreSectionFiles();
+  let files: ReadonlyMap<string, string>;
+  try {
+    files = await coreSectionFiles;
+  } catch (err) {
+    // A failed read is not cached: the next composition tries the disk again.
+    coreSectionFiles = null;
+    throw err;
+  }
+  return CORE_SECTION_IDS.map((id) =>
+    id === WORKING_WITH_FILES_SECTION_ID
+      ? { id, body: sharedFileRulesSection(layout), literal: true }
+      : { id, body: files.get(id)! },
+  );
+}
+
+/**
+ * The guide as an agent reads it: core's sections through the distribution's
+ * hook (when there is one), rendered for the layout, joined by blank lines,
+ * ending in one newline.
+ */
+export async function composeAgentGuide(layout: KbLayout, hook?: AgentGuideHook): Promise<string> {
+  const resolved = resolveKbLayout(layout);
+  const core = await coreAgentGuideSections(resolved);
+  const sections = hook ? await hook(core, resolved) : core;
+  const rendered = sections.map((section) =>
+    (section.literal ? section.body : renderKbLayoutPlaceholders(section.body, resolved)).trim(),
+  );
+  return `${rendered.filter((body) => body.length > 0).join('\n\n')}\n`;
+}
+
+/**
+ * What a `read_file` of the guide's name answers when the knowledge base has an
+ * `AGENTS.md` of its own: their text first, whole, then a rule and one line
+ * saying what follows, then the platform's guide. Theirs first because it is
+ * the more specific of the two, and the line between so neither is read as
+ * part of the other.
+ */
+export const PLATFORM_GUIDE_SEPARATOR =
+  "---\n\n_The text above is this knowledge base's own conventions file. The platform's guide follows; `get_agent_guide` returns it on its own._";
+
+export function withPlatformGuideAppended(ownText: string, guide: string): string {
+  const own = ownText.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
+  return `${own}\n\n${PLATFORM_GUIDE_SEPARATOR}\n\n${guide}`;
+}
+
+/**
+ * Whether a repository-relative path is where the guide is read — the
+ * configured name at the repository root, or `AGENTS.md` there when the
+ * deployment once renamed the guide (the name agents were told, and the name
+ * coding agents look for by convention). Exact spelling, like every platform
+ * path.
+ */
+export function isAgentGuidePath(repoRelativePath: string, layout: KbLayout): boolean {
+  const norm = repoRelativePath.replace(/^\.?\/+/, '').replace(/\/+$/, '');
+  return norm === agentsFileOf(layout) || norm === 'AGENTS.md';
+}

@@ -136,14 +136,14 @@ describe('a platform file stays in its folder', () => {
     await fs.rm(h.workspaceDir, { recursive: true, force: true });
   });
 
-  // Each of the four, at a place the platform reads it from. `access.md` and
-  // `.bevelignore` are read wherever they sit; `roles.yaml` and `AGENTS.md`
-  // are read from the repository root only.
+  // Each of the three, at a place the platform reads it from. `access.md` and
+  // `.bevelignore` are read wherever they sit; `roles.yaml` is read from the
+  // repository root only. (`AGENTS.md` is not among them: the agent guide is
+  // served from code, so a root `AGENTS.md` is the organisation's own page.)
   const PLATFORM_FILES = [
     { name: 'access.md', at: `${KB}/Sales/access.md` },
     { name: '.bevelignore', at: `${KB}/Sales/.bevelignore` },
     { name: 'roles.yaml', at: `${KB}/roles.yaml` },
-    { name: 'AGENTS.md', at: `${KB}/AGENTS.md` },
   ];
 
   it.each(PLATFORM_FILES)('refuses a rename of $name with the sentence', async ({ name, at }) => {
@@ -188,13 +188,12 @@ describe('a platform file stays in its folder', () => {
     },
   );
 
-  // The recovery move, for each of the four, from the place a misplaced copy
+  // The recovery move, for each of the three, from the place a misplaced copy
   // is actually found to the place the platform reads it.
   const RESTORES = [
     { name: 'access.md', from: `${KB}/Misplaced/access.md`, to: `${KB}/access.md`, dest: 'access.md' },
     { name: '.bevelignore', from: `${KB}/Misplaced/.bevelignore`, to: `${KB}/.bevelignore`, dest: '.bevelignore' },
     { name: 'roles.yaml', from: `${KB}/Misplaced/roles.yaml`, to: `${KB}/roles.yaml`, dest: 'roles.yaml' },
-    { name: 'AGENTS.md', from: `${KB}/Misplaced/AGENTS.md`, to: `${KB}/AGENTS.md`, dest: 'AGENTS.md' },
   ];
 
   it.each(RESTORES)(
@@ -318,11 +317,15 @@ describe('a platform file stays in its folder', () => {
     }
   });
 
-  it('a nested roles.yaml or AGENTS.md is ordinary content and moves freely', async () => {
-    // They are read from the root and nowhere else, so a nested file of
-    // either name carries no platform meaning to protect.
+  it('a nested roles.yaml, and an AGENTS.md anywhere, are ordinary content and move freely', async () => {
+    // `roles.yaml` is read from the root and nowhere else, so a nested file
+    // of that name carries no platform meaning to protect. An `AGENTS.md` is
+    // never read as configuration: the platform's guide is served from code,
+    // so the organisation's own file moves and renames like any page, at the
+    // root included.
     expect((await move(h, `${KB}/Sales/roles.yaml`, `${KB}/Sales/old-roles.yaml`)).status).toBe(200);
     expect((await move(h, `${KB}/Sales/AGENTS.md`, `${KB}/Legal/AGENTS.md`)).status).toBe(200);
-    expect(h.moveEntry).toHaveBeenCalledTimes(2);
+    expect((await move(h, `${KB}/AGENTS.md`, `${KB}/Handbook/AGENTS.md`)).status).toBe(200);
+    expect(h.moveEntry).toHaveBeenCalledTimes(3);
   });
 });

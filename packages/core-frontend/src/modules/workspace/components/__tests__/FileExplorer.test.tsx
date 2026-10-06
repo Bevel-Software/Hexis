@@ -3149,9 +3149,10 @@ describe('FileExplorer: platform files stay put', () => {
           file(`${KB}/access.md`),
           file(`${KB}/roles.yaml`),
           file(`${KB}/.bevelignore`),
+          // The organisation's own conventions file: the platform's guide is
+          // served from code, so an AGENTS.md is content wherever it sits —
+          // the server says the same.
           file(`${KB}/AGENTS.md`),
-          // Read from the repository root and nowhere else, so a nested one
-          // is ordinary content — the server says the same.
           file(`${KB}/Handbook/AGENTS.md`),
           file(`${KB}/Handbook/notes.md`),
           { name: 'Sales', relativePath: `${KB}/Sales`, type: 'directory', children: [] },
@@ -3160,7 +3161,7 @@ describe('FileExplorer: platform files stay put', () => {
     ],
   });
 
-  const PLATFORM = ['access.md', 'roles.yaml', '.bevelignore', 'AGENTS.md'];
+  const PLATFORM = ['access.md', 'roles.yaml', '.bevelignore'];
 
   let alertSpy: ReturnType<typeof vi.spyOn>;
 
@@ -3364,12 +3365,13 @@ describe('FileExplorer: platform files stay put', () => {
     expect(rename).toHaveAttribute('title', sentence('access.md'));
   });
 
-  it('a nested AGENTS.md is content, not a platform file: it drags like any other row', () => {
+  it('an AGENTS.md is content, not a platform file, at the root and nested: it drags like any other row', () => {
     renderExplorer({ fileTree: TREE });
-    // Both rows are named AGENTS.md; the nested one is the second.
     const rows = screen.getAllByText('AGENTS.md').map((n) => n.closest('button')!);
-    const nested = rows.find((r) => r.getAttribute('data-tree-path') === `${KB}/Handbook/AGENTS.md`);
-    expect(nested).toHaveAttribute('draggable', 'true');
+    for (const at of [`${KB}/AGENTS.md`, `${KB}/Handbook/AGENTS.md`]) {
+      const row = rows.find((r) => r.getAttribute('data-tree-path') === at);
+      expect(row, at).toHaveAttribute('draggable', 'true');
+    }
   });
 });
 

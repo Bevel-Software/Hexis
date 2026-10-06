@@ -27,6 +27,7 @@ import {
 } from '../modules/tool-manuals/index.js';
 import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
+import { registerAgentGuideTool } from '../modules/agent-guide/index.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
 import {
   registerSkillsTools,
@@ -456,7 +457,9 @@ export async function createCoreServer(
   // `get_skill`. Warnings only; it never refuses a save.
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
   registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide);
+  // The guide on its own, beside the file tools that serve it by name.
+  registerAgentGuideTool(core.toolRegistry, toolsRouter, ta, th, core.agentGuide);
   // The agent upload route, on the same router as the tool endpoints so it
   // mounts ahead of the JWT `/api` mounts below — but WITHOUT `toolAuth`: its
   // whole credential is the single-use token in its path, which is the point

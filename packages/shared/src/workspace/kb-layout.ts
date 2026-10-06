@@ -111,18 +111,17 @@ export let SKILLS_DIR = 'Skills';
 export let PLUGINS_DIR = 'Plugins';
 
 /**
- * The file name of the platform's MANAGED agent guide at the repository root —
- * the document every connected agent is told to read first, written and
- * refreshed from the packaged template on every start.
+ * The name the platform's agent guide is READ BY at the repository root — the
+ * document every connected agent is told to read first.
  *
- * Configurable for one reason: `AGENTS.md` is the name coding agents look for
- * by convention, so a customer arriving with a repository of their own very
- * often already HAS one, and under the default name the platform would
- * overwrite it on the first boot and on every boot after. Renaming the managed
- * guide (`HEXIS.md`, say) hands that name back: `AGENTS.md` becomes ordinary
- * content the platform never writes, never refreshes and never hides, and the
- * customer's file is the one that points at ours (see
- * {@link agentsFilePointerSentence}).
+ * The guide is no longer a file: the backend composes it from text the code
+ * owns and serves it through `get_agent_guide` and through a `read_file` of
+ * this name (see core-backend's `modules/agent-guide`), after the knowledge
+ * base's own file of that name when it has one. The name is still a setting
+ * because it was one while the guide was written to disk: a deployment that
+ * renamed the guide then (`HEXIS.md`, say) told its agents that name, and a
+ * read of it still answers with the guide. `AGENTS.md` always does, whatever
+ * the setting says. Nothing is written under either name any more.
  *
  * A live binding like the three roots above — read it inside a function body,
  * never capture it at module scope.
@@ -130,12 +129,13 @@ export let PLUGINS_DIR = 'Plugins';
 export let AGENTS_FILE = 'AGENTS.md';
 
 /**
- * The name the managed guide had when it was the only name it could have.
+ * The name the guide had when it was the only name it could have, and the
+ * name it is always read by now.
  *
  * Referenced ONLY by the code that has to tell OUR file from THEIRS — the
- * boot-time removal of a platform-written `AGENTS.md`, the ignore rule that
- * stops hiding it, the instruction telling an agent to read the customer's
- * file too. In the spirit of {@link LEGACY_GROUPS_DIR}: a second live spelling
+ * boot-time removal of the guide copies earlier releases wrote, the ignore
+ * rule that stops hiding them, the instruction telling an agent what to read
+ * first. In the spirit of {@link LEGACY_GROUPS_DIR}: a second live spelling
  * of the CURRENT name is how two layouts start being supported by accident, so
  * this one is a constant and means exactly one thing.
  */
@@ -143,11 +143,11 @@ export const LEGACY_AGENTS_FILE = 'AGENTS.md';
 
 /**
  * The platform files whose names are FIXED — the ones no deployment renames.
- * The guide is the fourth platform file and is deliberately absent here: its
- * name is {@link AGENTS_FILE}, and `platform-files.ts` composes the two into
- * the set every gate reads.
+ * The guide is NOT a platform file: nothing is written under its name, so a
+ * root `AGENTS.md` (or whatever the deployment once called the guide) is the
+ * organisation's own conventions page, movable and deletable like any other.
  *
- * It lives in this module rather than beside that composition because the
+ * It lives in this module rather than beside `platform-files.ts` because the
  * LAYOUT has to validate against it (a guide may not be called `access.md`),
  * and `platform-files.ts` already reads this module — the other direction
  * would be a cycle.
@@ -196,137 +196,11 @@ export function agentsFileOf(layout: KbLayout): string {
  * a leading `#` is a comment and a leading `!` a negation (the rule would
  * silently hide nothing), `[`, `]`, `*` and `?` are globs, and a backslash is
  * the escape itself. Each is escaped so the pattern names exactly the file.
+ * Read by the startup step that takes the platform's own rule for the guide
+ * OUT of an ignore file an earlier release wrote it into.
  */
 export function gitignoreLiteral(name: string): string {
   return name.replace(/[[\]*?\\]/g, '\\$&').replace(/^([#!])/, '\\$1');
-}
-
-/**
- * The ONE sentence the platform offers to keep in a customer's own
- * `AGENTS.md`, pointing at the managed guide beside it.
- *
- * Defined here, once, because two surfaces must produce the identical text:
- * the deployment-settings field previews it before the admin consents, and the
- * startup step appends it. A sentence written twice is a sentence that drifts,
- * and a drifted one appends a SECOND copy to every customer file on the boot
- * after the drift — which is the one thing this whole feature exists to stop.
- *
- * A guide name is a FILE NAME, not an identifier: everything `validateFilename`
- * admits can appear in it — spaces, brackets, parentheses, `#`, `%` — and each
- * of those means something in an inline link. So the link is BUILT rather than
- * interpolated: the label backslash-escaped ({@link markdownLinkLabel}), the
- * destination percent-encoded ({@link agentsFileLinkPath}). A name that only
- * parenthesised would break the destination; `#` would turn the rest of the
- * name into a URL fragment, and the link would point at the customer's own
- * file.
- *
- * Neither spelling need match the name as it is on disk, so nothing may ask
- * whether this sentence is present by searching for the RAW name — see
- * {@link mentionsAgentsFile}, which is how the startup step asks.
- */
-export function agentsFilePointerSentence(agentsFile: string): string {
-  return `Read [${markdownLinkLabel(agentsFile)}](${agentsFileLinkPath(agentsFile)})${POINTER_SENTENCE_TAIL}`;
-}
-
-/**
- * Everything of the sentence that does NOT depend on the guide's name — split
- * out so the one definition above can also be RECOGNISED, by the pattern below,
- * when the name it was written with is no longer the name in effect.
- */
-const POINTER_SENTENCE_TAIL =
-  " before working in this knowledge base — it is the platform's guide to its layout, files and rules.";
-
-/**
- * A pointer sentence the platform wrote, naming ANY guide.
- *
- * The label admits a backslash escape (`\[`, `\]`) because that is what
- * {@link markdownLinkLabel} puts there; the destination cannot contain a `)`
- * or a newline because {@link agentsFileLinkPath} encodes both. Anchored at
- * both ends by text the platform fixed, so the shape is the provenance —
- * a customer would have to reproduce our sentence word for word to be taken
- * for us, which is the same bar the managed-guide header sets.
- */
-const POINTER_SENTENCE_PATTERN = new RegExp(
-  `Read \\[(?:[^\\]\\n\\\\]|\\\\[\\s\\S])*\\]\\(\\.\\/[^)\\n]*\\)${escapeRegExp(POINTER_SENTENCE_TAIL)}`,
-  'g',
-);
-
-/** `text` as a literal inside a regular expression. */
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * `text` with every pointer sentence THE PLATFORM WROTE aimed at `agentsFile`
- * — or null when it holds none of ours.
- *
- * This is what a SECOND rename needs. The guide's name is a setting an admin
- * may change again: a knowledge base whose `AGENTS.md` was given a sentence
- * pointing at `HEXIS.md` and is then renamed to `GUIDE.md` must have that
- * sentence aimed at the new file, not a second one appended beneath a first
- * that now points at nothing. Asking only whether the NEW name is mentioned
- * cannot see that — the old sentence does not mention it.
- *
- * Returning the text unchanged (rather than null) when the sentence is already
- * right is deliberate: "ours and correct" and "not ours at all" are different
- * answers, and only the caller knows that the second one means "consider
- * appending".
- */
-export function retargetAgentsFilePointer(text: string, agentsFile: string): string | null {
-  let found = false;
-  const wanted = agentsFilePointerSentence(agentsFile);
-  const updated = text.replace(POINTER_SENTENCE_PATTERN, () => {
-    found = true;
-    return wanted;
-  });
-  return found ? updated : null;
-}
-
-/**
- * `text` as an inline link's LABEL: the characters that would end the label or
- * start emphasis or code inside it, backslash-escaped. Nothing else is touched
- * — a filename is read by people, and `AGENTS\.md` helps no one.
- */
-function markdownLinkLabel(text: string): string {
-  return text.replace(/[\\[\]`*_]/g, (c) => `\\${c}`);
-}
-
-/**
- * The guide as an inline link's DESTINATION: `./` and the name, percent-encoded.
- *
- * `encodeURI` does most of it (a space, a bracket, and `%` itself, so an
- * already-encoded-looking name is not decoded by a reader). Three more are
- * encoded by hand because `encodeURI` leaves them and each one ENDS the path
- * early: `#` opens a fragment, and `(`/`)` close the destination in
- * CommonMark's bare form. `?` and the rest of the URL-significant set are
- * already refused by {@link validateFilename}.
- *
- * An ordinary name has none of these and comes out exactly as it went in.
- */
-function agentsFileLinkPath(agentsFile: string): string {
-  return `./${encodeURI(agentsFile).replace(/[#()]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`;
-}
-
-/**
- * Whether `text` already points at the guide — the ONE question the startup
- * step asks before appending {@link agentsFilePointerSentence} to a customer's
- * own `AGENTS.md`.
- *
- * The plain name is the answer that matters: a mention in the customer's own
- * words, a heading, a link they wrote, all count, and the platform stays out
- * of a file it does not own. The other two spellings are the platform's OWN,
- * and they are here for idempotence: the sentence writes the name escaped in
- * the label and encoded in the destination, so on a punctuated name the file
- * the last boot wrote need not contain the raw name at all. Asking only for
- * that one would append a second copy on the next boot, and a third on the
- * one after — the exact failure this feature exists to prevent.
- */
-export function mentionsAgentsFile(text: string, agentsFile: string): boolean {
-  return (
-    text.includes(agentsFile) ||
-    text.includes(markdownLinkLabel(agentsFile)) ||
-    text.includes(agentsFileLinkPath(agentsFile))
-  );
 }
 
 /**
@@ -350,22 +224,16 @@ export function validateKbRootName(name: string): string | null {
 }
 
 /**
- * What is wrong with the agent guide's file name, or null.
+ * What is wrong with the agent guide's name, or null. The rules date from when
+ * the guide was written to disk under this name; a saved name still has to be
+ * one the read tools can answer to, so they stand:
  *
- * The rules, and what each one is for:
- *
- *  - ONE FILE NAME. The name is joined onto the repository root and read from
- *    there and nowhere else, so a separator would name a file the platform
- *    would write but never read back.
- *  - A MARKDOWN NAME. The guide is a markdown document that people open in the
- *    app and agents read as text; `.md` is also what the per-file access rules
- *    apply to, so a guide under any other extension would take its folder's
- *    rules and stop being readable by everyone.
- *  - NOT `CLAUDE.md`. That is the guide's own pre-rename name; knowledge bases
- *    seeded before the rename still carry one, and it stays legacy content
- *    rather than becoming a second managed file.
- *  - NOT ANOTHER PLATFORM FILE. Two platform roles on one path means whichever
- *    writer runs last wins, silently.
+ *  - ONE FILE NAME. The name is read at the repository root and nowhere else.
+ *  - A MARKDOWN NAME. The guide is markdown that agents read as text.
+ *  - NOT `CLAUDE.md`. That is the guide's own pre-rename name; a knowledge
+ *    base seeded before the rename may still carry one of its own.
+ *  - NOT ANOTHER PLATFORM FILE. A read of `access.md` must answer with the
+ *    access rules, not the guide.
  *  - NOT A ROOT FOLDER'S NAME, compared case-insensitively like the roots are
  *    to each other: the workspaces live on case-insensitive filesystems, where
  *    a file `Docs.md` and a folder `docs.md` are one entry.
@@ -530,13 +398,13 @@ export function isDefaultKbLayout(layout: KbLayout): boolean {
 }
 
 /**
- * Render the layout placeholders a managed template carries —
+ * Render the layout placeholders a managed text carries —
  * `{{knowledgeBaseDir}}`, `{{skillsDir}}`, `{{pluginsDir}}`, `{{agentsFile}}`
- * — with the names in effect. The packaged guide and `.bevelignore` are
- * written this way so a deployment that renamed its roots hands the agent a
- * guide that names the folders it will actually find, and a deployment that
- * renamed the guide gets a guide naming the file it lives in. Text without
- * placeholders passes through unchanged.
+ * — with the names in effect. The agent guide's sections and the packaged
+ * `.bevelignore` are written this way so a deployment that renamed its roots
+ * hands the agent a guide that names the folders it will actually find, and
+ * one that gave the guide a name of its own gets a guide naming it. Text
+ * without placeholders passes through unchanged.
  */
 export function renderKbLayoutPlaceholders(text: string, layout: KbLayout): string {
   // Replacer FUNCTIONS: a string replacement would interpret `$&`, `$$` and
