@@ -1774,7 +1774,13 @@ export function registerWorkspaceTools(
     // theirs is read, or noted as read, before they are allowed to read it.
     if (!(await ownGuideReadable(fs, branch, ctx, p))) return null;
     await notifyAgentRead(agentAccessGate, ctx, branch, p);
-    const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
+    // Gone between the probe and the read — a concurrent delete — is the
+    // absent case: the guide alone, as a read a moment later would answer.
+    const bytes = await fs.readFile(p).then(asBytes, (err: unknown) => {
+      if (isAbsence(err)) return null;
+      throw err;
+    });
+    if (bytes === null) return null;
     const result = await readers.readerFor(p).read(bytes, p);
     const text = result.kind === 'text' ? result.text : result.kind === 'image' ? result.note : result.message;
     return isManagedGuide(text) ? null : text;
@@ -1818,7 +1824,14 @@ export function registerWorkspaceTools(
       },
     );
     if (type !== 'file') return false;
-    const result = await readers.readerFor(p).read(asBytes(await fs.readFile(p)), p);
+    // Gone between the stat and the read — a concurrent delete — is the
+    // absent case, which the caller already answers for; not a failure.
+    const bytes = await fs.readFile(p).then(asBytes, (err: unknown) => {
+      if (isAbsence(err)) return null;
+      throw err;
+    });
+    if (bytes === null) return false;
+    const result = await readers.readerFor(p).read(bytes, p);
     return result.kind === 'text' && isManagedGuide(result.text);
   };
 

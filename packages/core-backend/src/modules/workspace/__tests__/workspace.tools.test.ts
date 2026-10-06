@@ -1162,6 +1162,29 @@ describe("the agent guide at the guide's name", () => {
     expect((await read(allowed)).content).toContain('The conventions.');
   });
 
+  it("answers the guide alone when the knowledge base's own file vanishes between the probe and the read", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    // The file is there when it is probed and gone when it is read: a
+    // concurrent delete, which is the absent case and never a failure.
+    const probed = fs.stat.bind(fs);
+    let vanish = false;
+    (fs as unknown as Record<string, unknown>).stat = async (p: string) => {
+      const st = await probed(p);
+      if (vanish && p.endsWith('AGENTS.md')) {
+        vanish = false;
+        await fs.deleteFile(p);
+      }
+      return st;
+    };
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    vanish = true;
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n' });
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    vanish = true;
+    expect(await statOf(base)).toMatchObject({ platformGuide: true });
+  });
+
   it('leaves a folder at the guide\'s name to the ordinary stat, and never reads it as a copy', async () => {
     guideText = 'THE PLATFORM GUIDE\n';
     const base = await start();
