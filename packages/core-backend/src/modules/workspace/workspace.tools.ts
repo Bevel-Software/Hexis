@@ -1810,12 +1810,15 @@ export function registerWorkspaceTools(
     );
 
   /**
-   * Whether the entry at `p` is a copy of the guide an earlier release wrote
-   * (recognised by its header). Only a plain file can be one: a folder at the
-   * guide's name is an ordinary entry, left to the ordinary stat, and never
-   * read — reading a folder is an error, not an absence.
+   * Whether what is at `p` is an entry of the knowledge base's own for the
+   * ordinary stat to describe: anything there except a plain file that is a
+   * copy of the guide an earlier release wrote (recognised by its header).
+   * A folder at the guide's name is theirs and is never read — reading a
+   * folder is an error, not an absence. Nothing there, at the stat or at the
+   * read a moment later (a concurrent delete), is the absent case, which the
+   * caller answers with the guide.
    */
-  const isStaleGuideCopy = async (fs: LocalFilesystem, p: string): Promise<boolean> => {
+  const isOwnEntryStill = async (fs: LocalFilesystem, p: string): Promise<boolean> => {
     const type = await fs.stat(p).then(
       (st) => st.type,
       (err: unknown) => {
@@ -1823,16 +1826,15 @@ export function registerWorkspaceTools(
         throw err;
       },
     );
-    if (type !== 'file') return false;
-    // Gone between the stat and the read — a concurrent delete — is the
-    // absent case, which the caller already answers for; not a failure.
+    if (type === undefined) return false;
+    if (type !== 'file') return true;
     const bytes = await fs.readFile(p).then(asBytes, (err: unknown) => {
       if (isAbsence(err)) return null;
       throw err;
     });
     if (bytes === null) return false;
     const result = await readers.readerFor(p).read(bytes, p);
-    return result.kind === 'text' && isManagedGuide(result.text);
+    return !(result.kind === 'text' && isManagedGuide(result.text));
   };
 
   mount({
@@ -1984,7 +1986,7 @@ export function registerWorkspaceTools(
       // ordinary answer below describes it.
       if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '', kb.layout)) {
         const fs = await ctx.getFilesystem(branch);
-        const own = (await ownGuideReadable(fs, branch, ctx, p)) && !(await isStaleGuideCopy(fs, p));
+        const own = (await ownGuideReadable(fs, branch, ctx, p)) && (await isOwnEntryStill(fs, p));
         if (!own) {
           const guide = await agentGuide();
           return {
