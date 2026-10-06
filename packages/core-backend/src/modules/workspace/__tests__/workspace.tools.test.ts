@@ -1153,10 +1153,22 @@ describe("the agent guide at the guide's name", () => {
     expect(closed.status).toBe(200);
     expect(await closed.json()).toEqual(absent);
     expect(await statOf(denied)).toEqual(absentStat);
-    // And a caller who may read it gets it, as before.
+  });
+
+  it("serves the knowledge base's own file to a caller who may read it", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
     const allowed = await start('read');
     await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nThe conventions.\n');
     expect((await read(allowed)).content).toContain('The conventions.');
+  });
+
+  it('leaves a folder at the guide\'s name to the ordinary stat, and never reads it as a copy', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    await fs.mkdir(`${KB_DIR}/AGENTS.md`);
+    const folder = await statOf(base);
+    expect(folder).toMatchObject({ type: 'directory' });
+    expect(folder.platformGuide).toBeUndefined();
   });
 
   it('is a nested AGENTS.md no concern of: that is a file like any other', async () => {

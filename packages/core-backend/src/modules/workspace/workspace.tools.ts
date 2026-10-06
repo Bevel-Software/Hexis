@@ -1804,10 +1804,20 @@ export function registerWorkspaceTools(
     );
 
   /**
-   * Whether the file at `p` is a copy of the guide an earlier release wrote
-   * (recognised by its header) — read as text, which such a copy always is.
+   * Whether the entry at `p` is a copy of the guide an earlier release wrote
+   * (recognised by its header). Only a plain file can be one: a folder at the
+   * guide's name is an ordinary entry, left to the ordinary stat, and never
+   * read — reading a folder is an error, not an absence.
    */
   const isStaleGuideCopy = async (fs: LocalFilesystem, p: string): Promise<boolean> => {
+    const type = await fs.stat(p).then(
+      (st) => st.type,
+      (err: unknown) => {
+        if (isAbsence(err)) return undefined;
+        throw err;
+      },
+    );
+    if (type !== 'file') return false;
     const result = await readers.readerFor(p).read(asBytes(await fs.readFile(p)), p);
     return result.kind === 'text' && isManagedGuide(result.text);
   };

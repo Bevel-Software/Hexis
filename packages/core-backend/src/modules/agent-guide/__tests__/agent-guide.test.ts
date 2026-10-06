@@ -145,6 +145,11 @@ describe('the guide is composed from the platform\'s sections', () => {
     // A file with nothing in it has nothing to put first.
     expect(withPlatformGuideAppended('', 'THE GUIDE\n')).toBe('THE GUIDE\n');
     expect(withPlatformGuideAppended('\n\n', 'THE GUIDE\n')).toBe('THE GUIDE\n');
+    // Their whitespace is markdown and stays: indentation is code, two
+    // trailing spaces are a hard break.
+    expect(withPlatformGuideAppended('    code\nline  \nnext\n', 'THE GUIDE\n')).toBe(
+      `    code\nline  \nnext\n\n${PLATFORM_GUIDE_SEPARATOR}\n\nTHE GUIDE\n`,
+    );
   });
 
   it('answers at the guide\'s name in the repository root, under AGENTS.md and under a saved alias, and nowhere else', () => {
@@ -159,9 +164,16 @@ describe('the guide is composed from the platform\'s sections', () => {
     expect(isAgentGuidePath('', aliased)).toBe(false);
   });
 
-  it('recognises a copy an earlier release wrote to disk by its header, and nothing else', () => {
+  it('recognises a copy an earlier release wrote to disk by its header line, and nothing else', () => {
+    // The header as every release wrote it: a blockquote under the title.
     expect(isManagedGuide('# Knowledge base\n\n> **This file is managed by the platform.** It lives at…\n')).toBe(true);
+    expect(isManagedGuide('# Company Knowledge graph\n\nThis is a git-backed knowledge graph.\n\n> **This file is managed by the platform.** Every server restart\n> replaces it.\n')).toBe(true);
     expect(isManagedGuide('# Acme conventions\n\nThis file is managed by us.\n')).toBe(false);
+    // The organisation's own note that QUOTES the platform's sentence in its
+    // body is theirs: the sentence is not in a header blockquote near the top.
+    expect(isManagedGuide('# On the old guide\n\nThe platform used to write a file that opened with **This file is managed by the platform.** and refreshed it.\n')).toBe(false);
+    const deep = `# Notes\n${'\n'.repeat(20)}> **This file is managed by the platform.** (quoted from the old guide)\n`;
+    expect(isManagedGuide(deep)).toBe(false);
   });
 });
 

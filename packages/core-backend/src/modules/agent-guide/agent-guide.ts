@@ -96,20 +96,27 @@ export const CORE_SECTION_IDS: readonly string[] = Object.freeze([
 ]);
 
 /**
- * The one phrase that proves a root guide file is the platform's and not the
- * customer's. The packaged guide carried it in its header for as long as the
- * guide was a file, under every release; a customer file would have to quote
- * the platform's own claim about itself verbatim to be mistaken for one, and
- * the consequence of the mistake is a deletion — which is why nothing looser
- * will do. Still read on every start, to take the copies earlier releases
- * wrote out of the repository (see template-files.step.ts), and on every read
- * of the guide's name, so a copy still on a draft is not served twice.
+ * The one line that proves a root guide file is the platform's and not the
+ * customer's: the blockquote the packaged guide opened with for as long as
+ * the guide was a file, under every release. Asked for WHERE the header put
+ * it — a blockquote line among the first lines of the file — and not anywhere
+ * in the text: a note of the organisation's own that quotes the platform's
+ * sentence in its body must not read as ours, because the consequence of the
+ * mistake is a deletion. Still read on every start, to take the copies
+ * earlier releases wrote out of the repository (see template-files.step.ts),
+ * and on every read of the guide's name, so a copy still on a draft is not
+ * served twice.
  */
-const MANAGED_GUIDE_MARKER = '**This file is managed by the platform.**';
+const MANAGED_GUIDE_HEADER_LINE = '> **This file is managed by the platform.**';
+
+/** How far down a file the header's blockquote can sit: under the title and a sentence or two, never further. */
+const MANAGED_GUIDE_HEADER_WITHIN_LINES = 12;
 
 /** Whether `text` is a copy of the guide a release wrote to disk, of any vintage. */
 export function isManagedGuide(text: string): boolean {
-  return text.includes(MANAGED_GUIDE_MARKER);
+  return text
+    .split('\n', MANAGED_GUIDE_HEADER_WITHIN_LINES)
+    .some((line) => line.trimStart().startsWith(MANAGED_GUIDE_HEADER_LINE));
 }
 
 /** The raw section files, read once per process: the package does not change while it runs. */
@@ -209,10 +216,13 @@ export const PLATFORM_GUIDE_SEPARATOR =
   "---\n\n_The text above is this knowledge base's own conventions file. The platform's guide follows; `get_agent_guide` returns it on its own._";
 
 export function withPlatformGuideAppended(ownText: string, guide: string): string {
-  const own = ownText.replace(/\r\n?/g, '\n').trim();
+  // Their text as they wrote it, line endings normalised and the trailing
+  // newlines folded into the one blank line before the separator. Nothing
+  // else is touched: leading indentation and trailing spaces are markdown.
+  const own = ownText.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
   // A file with nothing in it has nothing to put first, and a separator
   // above nothing would claim a conventions file that says nothing.
-  if (own.length === 0) return guide;
+  if (own.trim().length === 0) return guide;
   return `${own}\n\n${PLATFORM_GUIDE_SEPARATOR}\n\n${guide}`;
 }
 
