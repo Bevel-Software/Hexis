@@ -985,7 +985,7 @@ describe('KbStartupRunner — a working copy whose clone was never finished', ()
 
     await makeRunner([touchDefault], { unfinishedCloneQuietMs: 1_500 }).runAll();
 
-    expect(Date.now() - started).toBeGreaterThanOrEqual(1_000);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_350);
     expect(await fs.readFile(path.join(local(), 'marker.txt'), 'utf8')).toBe('seeded');
     expect(await fs.readdir(path.join(root, 'set-aside'))).toHaveLength(1);
   });

@@ -11,4 +11,4 @@ Setting an unfinished clone aside at start no longer gets in the way of anything
 - After a move, the start reads the path again before cloning. A clone that somebody else began there in the meantime is kept, never removed.
 - The work queued against a working copy that was set aside is released a second time if the first attempt fails, before the replacement clone is used.
 
-A start that meets a clone cut short by a restart now waits up to a minute before setting it aside.
+A start that meets a clone cut short by a restart sets it aside only after nothing has written to it for a minute. One that is still being written to keeps the start waiting, up to the longest a clone may take.
