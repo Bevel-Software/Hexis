@@ -581,7 +581,7 @@ describe('browser flow', () => {
         token_endpoint_auth_method: 'none',
         grant_types: ['authorization_code', 'refresh_token'],
       });
-      expect(String(authority.record.dcr[0]!.client_name)).toContain('hexis-mcp on ');
+      expect(String(authority.record.dcr[0]!.client_name)).toMatch(/^Unknown agent · local server on .+/);
 
       // The verifier that reached the token endpoint is the challenge's preimage
       // — asserted here directly, on top of the stub's own enforcement.

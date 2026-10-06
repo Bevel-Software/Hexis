@@ -430,7 +430,8 @@ export async function authorizeInBrowser(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        client_name: options.clientName ?? `hexis-mcp on ${os.hostname()}`,
+        // One rule for the registered name (handshake.ts): never the server itself.
+        client_name: options.clientName ?? registrationName(null, os.hostname()),
         redirect_uris: [redirectUri],
         grant_types: ['authorization_code', 'refresh_token'],
         response_types: ['code'],

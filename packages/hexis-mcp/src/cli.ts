@@ -1,13 +1,17 @@
 #!/usr/bin/env node
+// First, so that it runs before every other import's module body (see the file).
+import './stdout-guard.js';
 import { readFileSync } from 'node:fs';
+import os from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { ConfigError, USAGE, resolveConfig, type HexisMcpConfig } from './config.js';
 import { DeploymentError, resolveMcpUrl } from './deployment.js';
-import { holdInitialize } from './handshake.js';
+import { holdInitialize, identityLine } from './handshake.js';
 import { OAuthError, establishOAuthConfig } from './oauth.js';
+import { guessAgentFromAncestry } from './parent-process.js';
 import { preflight } from './preflight.js';
 import { beginOrderlyExit, makeExitAfterShutdown, type ShutdownHolder } from './teardown.js';
 
@@ -112,6 +116,11 @@ async function main(): Promise<void> {
       return;
     }
     transport = handshake.transport;
+    // A client that named itself to nobody gets a guess from the process
+    // tree, so the Audit log shows an agent rather than the local server.
+    // The guess is a guess; the line below says so where the client logs it.
+    const agent = handshake.agent ?? (await guessAgentFromAncestry());
+    process.stderr.write(`${identityLine(agent, os.hostname(), packageVersion())}\n`);
     try {
       // Discovery starts from the deployment's OWN MCP endpoint; `/api/config`
       // is unauthenticated, so resolving it needs no credential — which is
@@ -119,7 +128,7 @@ async function main(): Promise<void> {
       const mcpUrl = await resolveMcpUrl({ baseUrl: resolved.baseUrl, connectionKey: '' });
       config = await establishOAuthConfig(resolved.baseUrl, mcpUrl, {
         noOpen: resolved.noOpen,
-        agent: handshake.agent,
+        agent,
       });
     } catch (err) {
       // The transport is already reading stdin, and a flowing stdin keeps the
