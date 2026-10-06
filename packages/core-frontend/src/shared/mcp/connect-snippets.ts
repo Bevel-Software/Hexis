@@ -393,7 +393,7 @@ export function langdockSnippet(mcpUrl: string, bearer: string): string {
 }
 
 /* ------------------------------------------------------------------ *
- * The LOCAL server (`npx @bevel-software/hexis-mcp`): the same workspace
+ * The LOCAL server (`npx @bevel-software/hexis-mcp@latest`): the same workspace
  * as a stdio server on the member's own machine, which is the only place
  * a plugin's local-only tools — stdio servers, localhost services — can
  * run. It serves everything the hosted endpoint serves plus those. It
@@ -421,8 +421,8 @@ export function workspaceBaseUrl(): string {
  * The JSON block that runs the workspace as a LOCAL MCP server. Read by the
  * same clients as `jsonConfigSnippet` — Claude Desktop, Cursor, Windsurf,
  * Cline, anything that loads servers from a JSON config — but the entry
- * spawns `npx @bevel-software/hexis-mcp` instead of pointing at the hosted
- * endpoint, so the command needs Node on the machine.
+ * spawns `npx @bevel-software/hexis-mcp@latest` instead of pointing at the
+ * hosted endpoint, so the command needs Node on the machine.
  *
  * Without a bearer there is NO key field at all: keyless is the interactive
  * mode, where the server opens the person's browser to sign in on first run

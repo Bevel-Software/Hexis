@@ -1,3 +1,5 @@
+import { Console } from 'node:console';
+
 /**
  * stdout is the protocol channel of a stdio MCP server: every byte written to
  * it is read by the client as JSON-RPC. Not every line written to it is ours.
@@ -7,13 +9,16 @@
  * takes the answer with it: in one session the tools never arrived, because
  * the reply to `tools/list` was lost exactly so.
  *
- * So every console method that would write to stdout is pointed at stderr,
- * where MCP clients collect server logs. This module is imported FIRST by the
- * entry point: ES module imports run in order, so the redirect is in place
- * before any later import's module body, and before `main()` runs.
+ * So the global console is replaced by one whose BOTH streams are stderr,
+ * where MCP clients collect server logs. One instance, not a list of
+ * methods: `log`, `info`, `debug`, `dir`, `table`, `count`, `timeEnd`,
+ * `group` and whatever Node adds next all write where that instance's
+ * stdout points, with their formatting, counters and timers intact.
+ *
+ * This module is imported FIRST by the entry point: ES module imports run
+ * in order, so the replacement is in place before any later import's module
+ * body, and before `main()` runs.
  */
-console.log = console.error;
-console.info = console.error;
-console.debug = console.error;
+globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr });
 
 export {};

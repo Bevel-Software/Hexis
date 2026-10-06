@@ -1,5 +1,6 @@
 import type { Transport, TransportSendOptions } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { JSONRPCMessage, MessageExtraInfo } from '@modelcontextprotocol/sdk/types.js';
+import { printable } from '@bevel-software/platform-mcp-core';
 
 /**
  * Who is running this local server — learned from the MCP handshake.
@@ -53,6 +54,7 @@ const KNOWN_AGENTS: Readonly<Record<string, string>> = {
   codex: 'Codex',
   'codex-mcp-client': 'Codex',
   'gemini-cli-mcp-client': 'Gemini CLI',
+  'gemini-cli': 'Gemini CLI',
   'visual studio code': 'VS Code',
   // Program names, for an identity guessed from the parent process. `claude`
   // is both the Claude Desktop app and the Claude Code CLI on disk, so the
@@ -104,12 +106,15 @@ export function registrationName(agent: AgentIdentity | null, host: string): str
  * client's server log, instead of being a mystery for a week.
  */
 export function identityLine(agent: AgentIdentity | null, host: string, version: string): string {
-  const as = `signing in as "${registrationName(agent, host)}"`;
+  // The client's name and version, and the host name, are not ours: each is
+  // rendered `printable`, so a newline or an escape in them cannot forge a
+  // second log line or paint the terminal.
+  const as = `signing in as ${printable(registrationName(agent, host))}`;
   const from = !agent
     ? 'the client named itself to nobody and no parent process could be read'
     : agent.guessed
-      ? `guessed from the parent process "${agent.name}"; the client named itself to nobody`
-      : `named by the client's handshake ("${agent.name}"${agent.version ? ` ${agent.version}` : ''})`;
+      ? `guessed from the parent process (${printable(agent.name)}); the client named itself to nobody`
+      : `named by the client's handshake (${printable(agent.name)}${agent.version ? ` ${printable(agent.version)}` : ''})`;
   return `[hexis-mcp ${version}] ${as} — ${from}`;
 }
 

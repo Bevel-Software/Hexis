@@ -10,11 +10,18 @@ import type { AgentIdentity } from './handshake.js';
  * the agent.
  *
  * The agent is somewhere up the process tree: it spawns `npx`, which spawns
- * `node`, which runs this file — on Windows with `cmd` in between. So the
- * walk skips the plumbing (shells, package runners, the runtime itself) and
- * stops at the first process that is something else. One process-table read
- * per guess, never one per hop: the table is one short command on every
- * platform, and a guess is made once, at sign-in.
+ * `node`, which runs this file — with shells in between, and on Windows
+ * `cmd`. The walk goes up from the parent and stops at the first ancestor
+ * it can NAME: a program on the list below, recognised by its executable,
+ * its macOS bundle, or — for an agent that runs on a runtime such as `node`
+ * — by the package or script its command line names. Everything else is
+ * passed over, plumbing and unknown alike: a terminal, an ssh daemon, a
+ * container runtime, an Electron helper are not agents, and a name the
+ * list does not know is not a guess, it is a mystery, which the Audit log
+ * must not carry. No match in a bounded number of hops is "no guess".
+ *
+ * One process-table read per guess, never one per hop: the table is one or
+ * two short commands on every platform, and a guess is made once, at sign-in.
  *
  * Nothing here is authoritative. A client that names itself always wins, and
  * the sign-in says on stderr when the name was guessed.
@@ -23,60 +30,110 @@ import type { AgentIdentity } from './handshake.js';
 export interface ProcessRow {
   pid: number;
   ppid: number;
-  /** The executable's base name as the platform reports it (`Claude.exe`, `node`). */
+  /** The executable as the platform reports it: `Claude.exe`, `node`, or a full path on macOS and Linux. */
   name: string;
+  /** The full command line, when the platform gives it. */
+  command?: string;
 }
 
 export type ProcessTable = () => Promise<ProcessRow[]>;
 
-/** The runtime, the runners and the shells between an agent and this process. */
-const PLUMBING =
-  /^(node|nodejs|npm|npx|pnpm|pnpx|yarn|bun|bunx|deno|corepack|cmd|sh|bash|zsh|fish|dash|pwsh|powershell|conhost|wsl|wslhost|env|sudo|login|script|tmux|screen)$/i;
+/**
+ * The agents this guess can name. `key` is a KNOWN_AGENTS key (handshake.ts),
+ * so the guess is displayed exactly like a handshake that said the same.
+ * `program` matches the executable's base name (suffix off) or the macOS
+ * bundle name; `command` matches the command line of a RUNTIME process —
+ * `node …/@anthropic-ai/claude-code/cli.js`, `node /usr/local/bin/claude` —
+ * because a runtime is named by what it runs, not by its own binary.
+ */
+const AGENTS: ReadonlyArray<{ key: string; program: RegExp; command?: RegExp }> = [
+  // Claude.app and claude.exe are Claude Desktop or Claude Code's native
+  // binary; Claude Code installed with npm runs on node, as its package or
+  // its `claude` bin shim.
+  { key: 'claude', program: /^claude$/i, command: /@anthropic-ai[\\/]claude-code|[\\/]claude(\.[cm]?js)?(?=["'\s]|$)/i },
+  { key: 'cursor', program: /^cursor( helper.*)?$/i },
+  { key: 'windsurf', program: /^windsurf( helper.*)?$/i },
+  { key: 'code', program: /^(code|code - insiders|visual studio code)( helper.*)?$/i },
+  { key: 'codium', program: /^(codium|vscodium)( helper.*)?$/i },
+  { key: 'zed', program: /^zed$/i },
+  { key: 'codex', program: /^codex$/i, command: /@openai[\\/]codex|[\\/]codex(\.[cm]?js)?(?=["'\s]|$)/i },
+  { key: 'gemini-cli', program: /^gemini$/i, command: /@google[\\/]gemini-cli|[\\/]gemini(\.[cm]?js)?(?=["'\s]|$)/i },
+  { key: 'cline', program: /^cline$/i, command: /[\\/]cline(\.[cm]?js)?(?=["'\s]|$)/i },
+];
+
+/** A process whose identity is in its command line, not its executable. */
+const RUNTIME = /^(node|nodejs|bun|deno|electron|python[0-9.]*)$/i;
 
 const exec = promisify(execFile);
 const TABLE_TIMEOUT_MS = 4_000;
 
-/** The platform's process table as `pid ppid name` rows; empty when it cannot be read. */
+/** The platform's process table; empty when it cannot be read. */
 export const readProcessTable: ProcessTable = async () => {
   try {
     if (process.platform === 'win32') {
+      // One tab-separated row per process; a command line may be empty for
+      // a process this user may not inspect.
       const { stdout } = await exec(
         'powershell.exe',
         [
           '-NoProfile',
           '-NonInteractive',
           '-Command',
-          'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $($_.Name)" }',
+          'Get-CimInstance Win32_Process | ForEach-Object { @($_.ProcessId, $_.ParentProcessId, $_.Name, $_.CommandLine) -join [char]9 }',
         ],
         { timeout: TABLE_TIMEOUT_MS, windowsHide: true },
       );
-      return parseRows(stdout);
+      const rows: ProcessRow[] = [];
+      for (const line of stdout.split(/\r?\n/)) {
+        const [pid, ppid, name, ...command] = line.split('\t');
+        if (!pid || !ppid || !name || !/^\d+$/.test(pid) || !/^\d+$/.test(ppid)) continue;
+        rows.push({ pid: Number(pid), ppid: Number(ppid), name, command: command.join('\t') });
+      }
+      return rows;
     }
-    const { stdout } = await exec('ps', ['-axo', 'pid=,ppid=,comm='], { timeout: TABLE_TIMEOUT_MS });
-    return parseRows(stdout);
+    // `comm` can be a full path with spaces ("…/Visual Studio Code.app/…"),
+    // so it is read on its own and the command lines joined by pid.
+    const [{ stdout: tree }, { stdout: commands }] = await Promise.all([
+      exec('ps', ['-axo', 'pid=,ppid=,comm='], { timeout: TABLE_TIMEOUT_MS }),
+      exec('ps', ['-axo', 'pid=,args='], { timeout: TABLE_TIMEOUT_MS }),
+    ]);
+    const commandByPid = new Map<number, string>();
+    for (const line of commands.split('\n')) {
+      const m = /^\s*(\d+)\s+(.*?)\s*$/.exec(line);
+      if (m) commandByPid.set(Number(m[1]), m[2]!);
+    }
+    const rows: ProcessRow[] = [];
+    for (const line of tree.split('\n')) {
+      const m = /^\s*(\d+)\s+(\d+)\s+(.*?)\s*$/.exec(line);
+      if (!m) continue;
+      const pid = Number(m[1]);
+      rows.push({ pid, ppid: Number(m[2]), name: m[3]!, command: commandByPid.get(pid) });
+    }
+    return rows;
   } catch {
     return [];
   }
 };
 
-function parseRows(stdout: string): ProcessRow[] {
-  const rows: ProcessRow[] = [];
-  for (const line of stdout.split(/\r?\n/)) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
-    if (!m) continue;
-    // `comm` on macOS and Linux may be a full path; the name wanted is the program's.
-    const name = m[3]!.split(/[\\/]/).pop() ?? m[3]!;
-    rows.push({ pid: Number(m[1]), ppid: Number(m[2]), name });
+/** The agent a process row is, by the list above, or null for anything else. */
+function agentOf(row: ProcessRow): string | null {
+  const program = (row.name.split(/[\\/]/).pop() ?? row.name).replace(/\.(exe|app)$/i, '').trim();
+  // On macOS the executable inside a bundle may be generic ("Electron" for
+  // VS Code); the bundle's own name says what it is.
+  const bundle = /([^\\/]+)\.app(?=[\\/]|$)/i.exec(row.name)?.[1];
+  for (const agent of AGENTS) {
+    if (agent.program.test(program) || (bundle && agent.program.test(bundle))) return agent.key;
+    if (agent.command && row.command && RUNTIME.test(program) && agent.command.test(row.command)) return agent.key;
   }
-  return rows;
+  return null;
 }
 
 /**
- * The first ancestor of `startPid` that is not plumbing, as an identity
- * marked `guessed` — or null when the table cannot be read, the chain ends,
- * or only plumbing is found. Bounded in hops and loop-safe: a table that
- * reports a cycle (a reaped parent whose pid was reused) ends the walk
- * instead of spinning.
+ * The nearest ancestor of `startPid` that is an agent this module can name,
+ * as an identity marked `guessed` — or null when the table cannot be read,
+ * the chain ends, or no ancestor within `maxHops` is one. Loop-safe: a
+ * table that reports a cycle (a reaped parent whose pid was reused) ends the
+ * walk instead of spinning.
  */
 export async function guessAgentFromAncestry(
   startPid: number = process.ppid,
@@ -93,10 +150,8 @@ export async function guessAgentFromAncestry(
     seen.add(pid);
     const row = byPid.get(pid);
     if (!row) return null;
-    // The base name, with the platform's suffix off: a table that reports a
-    // full path (as `ps` can) is read the same way as one that does not.
-    const program = (row.name.split(/[\\/]/).pop() ?? row.name).replace(/\.(exe|app)$/i, '').trim();
-    if (program && !PLUMBING.test(program)) return { name: program, guessed: true };
+    const key = agentOf(row);
+    if (key) return { name: key, guessed: true };
     pid = row.ppid;
   }
   return null;
