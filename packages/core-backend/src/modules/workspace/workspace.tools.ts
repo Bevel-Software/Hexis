@@ -1756,23 +1756,41 @@ export function registerWorkspaceTools(
   /**
    * The knowledge base's OWN file at the guide's path, read as any file is —
    * through the read hook and the access gate — or null when there is none,
-   * or when what is there is a copy of the platform's guide an earlier
-   * release wrote (recognised by its header), which the guide served beside
-   * it would only repeat. A file that is not text (a binary squatting the
-   * name) is read for what it is: its honest textual answer.
+   * when the caller MAY NOT READ IT, or when what is there is a copy of the
+   * platform's guide an earlier release wrote (recognised by its header),
+   * which the guide served beside it would only repeat. A file that is not
+   * text (a binary squatting the name) is read for what it is: its honest
+   * textual answer.
+   *
+   * A file the caller may not read answers EXACTLY as no file does: the guide
+   * alone, with nothing said. A refusal here would tell a caller the root
+   * denies that a conventions file exists, which is the one thing the
+   * platform never tells about a file someone may not read — a restricted
+   * node is indistinguishable from an absent one on every other read.
    */
   const ownGuideFile = async (branch: string, ctx: ToolContext, p: string): Promise<string | null> => {
     const fs = await ctx.getFilesystem(branch);
-    // Existence first, then the hook and the gate, then the bytes — the order
-    // the ordinary read keeps, so nothing of theirs is read before they are
-    // allowed to read it.
-    if (!(await existsAt(fs, p))) return null;
+    // Existence first, then the gate, then the hook and the bytes — nothing of
+    // theirs is read, or noted as read, before they are allowed to read it.
+    if (!(await ownGuideReadable(fs, branch, ctx, p))) return null;
     await notifyAgentRead(agentAccessGate, ctx, branch, p);
-    await assertCanRead(readGateFor(branch, ctx), p);
     const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
     const result = await readers.readerFor(p).read(bytes, p);
     const text = result.kind === 'text' ? result.text : result.kind === 'image' ? result.note : result.message;
     return isManagedGuide(text) ? null : text;
+  };
+
+  /**
+   * Whether there is a file of the knowledge base's own at the guide's path
+   * that THIS caller may read. False for nothing there and for a file the
+   * access rules close to them, on purpose and without distinction (see
+   * {@link ownGuideFile}).
+   */
+  const ownGuideReadable = async (fs: LocalFilesystem, branch: string, ctx: ToolContext, p: string): Promise<boolean> => {
+    if (!(await existsAt(fs, p))) return false;
+    const gate = readGateFor(branch, ctx);
+    const rel = toKbRelative(p, gate.kbDirName);
+    return rel === null || (await gate.accessControl.canRead(gate.workspaceId, gate.userEmail, rel));
   };
 
   /** Whether something is at `p` on `fs` — absence is false, any other failure is thrown. */
@@ -1932,16 +1950,18 @@ export function registerWorkspaceTools(
       const p = a.path as string;
       const branch = a.branch as string;
       // The guide's name with no file of the knowledge base's own under it —
-      // or a copy of the guide an earlier release wrote, which `read_file`
-      // does not serve either: what a read answers there is the platform's
-      // guide, so stat says a text file is there to read — ungated, like the
-      // read — and that nothing can be moved, deleted or written at it
-      // through these tools. A file of the knowledge base's own under that
-      // name is a file like any other, and the ordinary answer below
-      // describes it.
+      // or one the caller may not read, or a copy of the guide an earlier
+      // release wrote, none of which `read_file` serves: what a read answers
+      // there is the platform's guide, so stat says a text file is there to
+      // read — ungated, like the read — and that nothing can be moved,
+      // deleted or written at it through these tools. The three cases get
+      // ONE answer on purpose: a different one for the file the caller may
+      // not read would tell them it exists. A file of the knowledge base's
+      // own that the caller may read is a file like any other, and the
+      // ordinary answer below describes it.
       if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '', kb.layout)) {
         const fs = await ctx.getFilesystem(branch);
-        const own = (await existsAt(fs, p)) && !(await isStaleGuideCopy(fs, p));
+        const own = (await ownGuideReadable(fs, branch, ctx, p)) && !(await isStaleGuideCopy(fs, p));
         if (!own) {
           const guide = await agentGuide();
           return {

@@ -1138,13 +1138,25 @@ describe("the agent guide at the guide's name", () => {
     expect((await read(base)).content).toBe('THE PLATFORM GUIDE\n');
   });
 
-  it("gates the knowledge base's own file like any read, and the guide alone not at all", async () => {
+  it("never tells a caller who may not read the knowledge base's own file that it exists", async () => {
     guideText = 'THE PLATFORM GUIDE\n';
     const denied = await start('read', denyReads(new Set(['AGENTS.md'])));
     // Nothing of theirs there: the guide is everyone's.
-    expect((await read(denied)).content).toBe('THE PLATFORM GUIDE\n');
-    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
-    expect((await post(`${denied}/api/agent/tools/read_file`, { path: GUIDE })).status).toBe(403);
+    const absent = await read(denied);
+    const absentStat = await statOf(denied);
+    expect(absent.content).toBe('THE PLATFORM GUIDE\n');
+    // A file they may not read answers EXACTLY as no file does — a refusal
+    // would be the one thing the platform never says about a restricted
+    // file, which is that it is there.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nThe secret conventions.\n');
+    const closed = await post(`${denied}/api/agent/tools/read_file`, { path: GUIDE });
+    expect(closed.status).toBe(200);
+    expect(await closed.json()).toEqual(absent);
+    expect(await statOf(denied)).toEqual(absentStat);
+    // And a caller who may read it gets it, as before.
+    const allowed = await start('read');
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nThe conventions.\n');
+    expect((await read(allowed)).content).toContain('The conventions.');
   });
 
   it('is a nested AGENTS.md no concern of: that is a file like any other', async () => {
