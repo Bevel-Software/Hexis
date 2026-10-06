@@ -19,6 +19,8 @@ import { Console } from 'node:console';
  * in order, so the replacement is in place before any later import's module
  * body, and before `main()` runs.
  */
-globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr });
+// `console.Console` is part of Node's console and stays: a dependency that
+// builds its own `new console.Console(…)` must still find the constructor.
+globalThis.console = Object.assign(new Console({ stdout: process.stderr, stderr: process.stderr }), { Console });
 
 export {};

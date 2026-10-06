@@ -1,3 +1,4 @@
+import { Writable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 // Importing the module is the act under test: it replaces this worker's console.
 import '../stdout-guard.js';
@@ -34,5 +35,19 @@ describe('stdout guard', () => {
     // The protocol's own writes are untouched.
     process.stdout.write('{"jsonrpc":"2.0"}\n');
     expect(out).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps console.Console, so a dependency can still build a console of its own', () => {
+    expect(typeof console.Console).toBe('function');
+    const chunks: string[] = [];
+    const sink = new Writable({
+      write(chunk, _encoding, done) {
+        chunks.push(String(chunk));
+        done();
+      },
+    });
+    const own = new console.Console(sink);
+    own.log('mine');
+    expect(chunks.join('')).toContain('mine');
   });
 });

@@ -38,17 +38,33 @@ describe('guessing the agent from the process tree', () => {
   });
 
   it('names a macOS app by its bundle, whatever the binary inside is called', async () => {
+    // The binary is `Electron`, a name the list does not know; the bundle says what it is.
     const rows: ProcessRow[] = [
       { pid: 1, ppid: 0, name: '/sbin/launchd' },
       { pid: 20, ppid: 1, name: '/Applications/Visual Studio Code.app/Contents/MacOS/Electron' },
-      { pid: 30, ppid: 20, name: '/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)' },
-      { pid: 40, ppid: 30, name: 'node', command: 'npm exec @bevel-software/hexis-mcp@latest' },
+      { pid: 40, ppid: 20, name: 'node', command: 'npm exec @bevel-software/hexis-mcp@latest' },
       { pid: 50, ppid: 40, name: 'node' },
     ];
     expect(await guessAgentFromAncestry(40, table(rows))).toEqual({ name: 'code', guessed: true });
-    rows[1] = { pid: 20, ppid: 1, name: '/Applications/Cursor.app/Contents/MacOS/Cursor' };
-    rows[2] = { pid: 30, ppid: 20, name: '/Applications/Cursor.app/Contents/Frameworks/Cursor Helper (Plugin).app/Contents/MacOS/Cursor Helper (Plugin)' };
+    rows[1] = { pid: 20, ppid: 1, name: '/Applications/Visual Studio Code - Insiders.app/Contents/MacOS/Electron' };
+    expect(await guessAgentFromAncestry(40, table(rows))).toEqual({ name: 'code', guessed: true });
+    rows[1] = { pid: 20, ppid: 1, name: '/Applications/Cursor.app/Contents/MacOS/Electron' };
     expect(await guessAgentFromAncestry(40, table(rows))).toEqual({ name: 'cursor', guessed: true });
+    // A bundle that is not an agent names nothing, Electron or not.
+    rows[1] = { pid: 20, ppid: 1, name: '/Applications/Slack.app/Contents/MacOS/Electron' };
+    expect(await guessAgentFromAncestry(40, table(rows))).toBeNull();
+  });
+
+  it("names an app's helper process by its stem, on every platform's spelling", async () => {
+    const helper = (name: string): ProcessRow[] => [
+      { pid: 20, ppid: 1, name },
+      { pid: 40, ppid: 20, name: 'node', command: 'npm exec @bevel-software/hexis-mcp@latest' },
+    ];
+    expect(await guessAgentFromAncestry(40, table(helper('/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)')))).toEqual({ name: 'code', guessed: true });
+    expect(await guessAgentFromAncestry(40, table(helper('Cursor Helper (Plugin)')))).toEqual({ name: 'cursor', guessed: true });
+    expect(await guessAgentFromAncestry(40, table(helper('Code - Insiders.exe')))).toEqual({ name: 'code', guessed: true });
+    expect(await guessAgentFromAncestry(40, table(helper('code-insiders')))).toEqual({ name: 'code', guessed: true });
+    expect(await guessAgentFromAncestry(40, table(helper('Windsurf Helper (Renderer)')))).toEqual({ name: 'windsurf', guessed: true });
   });
 
   it('answers null when nothing above it is an agent it knows — a terminal, a daemon or a script is not a guess', async () => {

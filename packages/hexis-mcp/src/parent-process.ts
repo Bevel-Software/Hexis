@@ -53,7 +53,9 @@ const AGENTS: ReadonlyArray<{ key: string; program: RegExp; command?: RegExp }> 
   { key: 'claude', program: /^claude$/i, command: /@anthropic-ai[\\/]claude-code|[\\/]claude(\.[cm]?js)?(?=["'\s]|$)/i },
   { key: 'cursor', program: /^cursor( helper.*)?$/i },
   { key: 'windsurf', program: /^windsurf( helper.*)?$/i },
-  { key: 'code', program: /^(code|code - insiders|visual studio code)( helper.*)?$/i },
+  // `Code.exe` / `Code - Insiders.exe` on Windows, `code` / `code-insiders`
+  // on Linux, the `Visual Studio Code[ - Insiders].app` bundle on macOS.
+  { key: 'code', program: /^(code|code - insiders|code-insiders|visual studio code( - insiders)?)( helper.*)?$/i },
   { key: 'codium', program: /^(codium|vscodium)( helper.*)?$/i },
   { key: 'zed', program: /^zed$/i },
   { key: 'codex', program: /^codex$/i, command: /@openai[\\/]codex|[\\/]codex(\.[cm]?js)?(?=["'\s]|$)/i },
