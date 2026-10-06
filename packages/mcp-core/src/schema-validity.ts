@@ -43,26 +43,32 @@ export interface SchemaDefect {
  * tool that works is worse than listing one whose schema is merely unusual.
  *
  * `validateFormats: false` is the same rule applied to the META-schema's own
- * `format` annotations (`$id` and `$ref` as `uri-reference`, `$anchor` as a
- * pattern). An AI client never asserts those: the MCP SDK's validator runs
+ * `format` annotations (`$id` and `$ref` as `uri-reference`, `pattern` as
+ * `regex`). Switching them on is INERT, which is worth knowing before anyone
+ * reaches for it: `validateSchema` does not assert the meta-schema's formats
+ * at all, so every schema gets the same verdict with `validateFormats: true`
+ * as with it off — including `pattern: "["`, which ajv-formats' own `regex`
+ * function rejects when called directly. The switch changes configuration,
+ * not behaviour; `__tests__/schema-validity.test.ts` pins that.
+ *
+ * It would be the wrong thing to want in any case. An AI client never
+ * meta-validates the schema document: the MCP SDK's validator runs
  * `{ strict: false, validateFormats: true, validateSchema: false }`
  * (`validation/ajv-provider.js`) — formats on the INSTANCE, the schema
- * document itself not meta-validated at all — and a malformed `$id` or `$ref`
- * compiles there without complaint. Asserting them here would hide tools that
- * every client accepts.
+ * document itself never checked against the meta-schema — so a malformed
+ * `$id` or `$ref` compiles there without complaint, and flagging one here
+ * would hide a tool every client accepts. The one URI-valued construct a
+ * client really refuses is a `$ref` it cannot RESOLVE (`can't resolve
+ * reference …` out of `compile`), and no format assertion catches that one
+ * either; none is ever offered, because `sanitizeInputSchema` replaces an
+ * unresolvable or non-local `$ref` with `{}` before the listing goes out.
+ * Each half is pinned where it belongs: what this check does NOT flag in
+ * `__tests__/schema-validity.test.ts`, and what the proxy offers in place of
+ * such a `$ref` in `__tests__/schema-pass-through.test.ts`.
  *
- * And it would not catch them either: ajv-formats' `uri-reference` accepts
- * `http://[bad` and `http:// not a uri`, so switching assertions on changes no
- * verdict in that family — it only adds the chance of a false one. The one
- * URI-valued construct a client really refuses is a `$ref` it cannot RESOLVE
- * (`can't resolve reference …` out of `compile`), and none is ever offered:
- * `sanitizeInputSchema` replaces an unresolvable or non-local `$ref` with `{}`
- * before the listing goes out. Each half is pinned where it belongs: what this
- * check does NOT flag in `__tests__/schema-validity.test.ts`, and what the
- * proxy offers in its place in `__tests__/schema-pass-through.test.ts`.
- *
- * The one format that does decide a client's verdict is `regex`, and that is
- * checked directly, below.
+ * So the one format that does decide a client's verdict is `regex` — a client
+ * COMPILES a `pattern` — and because the meta-check misses it under either
+ * setting, it is checked directly, below.
  */
 const ajv = new Ajv2020({ strict: false, allErrors: false, validateFormats: false });
 

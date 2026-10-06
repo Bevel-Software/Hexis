@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import Ajv2020 from 'ajv/dist/2020.js';
 import { codeModeMetaTools } from '../meta-tools.js';
 import { inputSchemaDefect, schemaDefectMarker } from '../schema-validity.js';
 
@@ -191,6 +192,49 @@ describe('inputSchemaDefect', () => {
       path: '/$anchor',
       reason: 'must match pattern "^[A-Za-z_][-A-Za-z0-9._]*$"',
     });
+  });
+
+  /**
+   * The remedy a reader naturally reaches for here — "register the draft
+   * formats and switch assertions on instead of disabling them" — is INERT,
+   * and this pins that instead of leaving it an argument in a comment.
+   *
+   * `ajv.validateSchema` does not assert the meta-schema's own `format`
+   * annotations at all, even though the bundled 2020-12 meta-schemas carry
+   * them: `uri-reference` on `$id`/`$ref`, `regex` on `pattern`. So every one
+   * of these passes the meta-check with `validateFormats: true` exactly as it
+   * does with it off.
+   *
+   * Which is also why the dedicated regex walk is not redundant with the
+   * meta-check. `pattern: "["` is the one schema in this corpus a client
+   * really refuses — `ajv.compile` throws `Invalid regular expression` on it —
+   * the meta-check misses it under EITHER setting, and only the dedicated walk
+   * catches it. A future change to `validateFormats` therefore has to justify
+   * itself by behaviour, because by itself it has none.
+   */
+  it('would flag nothing more with format assertions on, which is why `pattern` is checked directly', () => {
+    const badPattern = { type: 'object', properties: { x: { type: 'string', pattern: '[' } } };
+    const corpus: Record<string, unknown>[] = [
+      badPattern,
+      { $id: 'http://[bad', type: 'object' },
+      { $id: 'http:// not a uri', type: 'object' },
+      { type: 'object', properties: { x: { $ref: 'http://[bad' } } },
+    ];
+    const asserting = new Ajv2020({ strict: false, allErrors: false, validateFormats: true });
+    const offAndOn = corpus.map((schema) => ({
+      withFormatsOn: asserting.validateSchema(schema) === true,
+      guardVerdict: inputSchemaDefect(schema),
+    }));
+    // Formats on: the meta-schema accepts every one of them.
+    expect(offAndOn.map((entry) => entry.withFormatsOn)).toEqual([true, true, true, true]);
+    // The guard's own verdicts are unchanged by that — only the `pattern` is
+    // flagged, and by the regex walk rather than by any format.
+    expect(offAndOn.map((entry) => entry.guardVerdict)).toEqual([
+      { path: '/properties/x/pattern', reason: 'must be a valid regular expression' },
+      null,
+      null,
+      null,
+    ]);
   });
 
   it('quotes the place and the reason in the marker the owner reads', () => {

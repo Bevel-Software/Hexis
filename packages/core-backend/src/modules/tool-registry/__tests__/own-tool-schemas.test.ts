@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { inputSchemaDefect } from '@bevel-software/platform-mcp-core';
 import { ToolRegistry } from '../tool-registry.js';
 import { registerWorkflowTools } from '../../workflow/agent-tools/workflow.tools.js';
+import { registerChangeRequestReadTools } from '../../workflow/agent-tools/change-request-read.tools.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
 import { registerSkillsTools } from '../../skills/skills.tools.js';
 import { registerPluginsTools } from '../../plugins/plugins.tools.js';
@@ -57,6 +58,11 @@ const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) 
   {
     name: 'registerWorkflowTools',
     register: (registry) => registerWorkflowTools(registry, express.Router(), pass, handler, testKbContext()),
+  },
+  {
+    name: 'registerChangeRequestReadTools',
+    register: (registry) =>
+      registerChangeRequestReadTools(registry, express.Router(), pass, handler, nothing, testKbContext()),
   },
   {
     name: 'registerWorkspaceTools',
