@@ -21,6 +21,26 @@ export interface ToolCapability {
   description: string | null;
 }
 
+/**
+ * One tool of this server that Hexis keeps off every agent surface because its
+ * input schema is not valid JSON Schema as the server sent it.
+ *
+ * The backend sends these ONLY to a caller who may write the tool: the people
+ * who manage the server are the only ones who can get the schema fixed, and a
+ * reader has nothing to do with the knowledge. So the page may render whatever
+ * arrives, with no permission check of its own.
+ */
+export interface HiddenTool {
+  /** The name the tool would have been offered to agents under. */
+  name: string;
+  /** JSON Pointer to the place in the schema that is not valid. */
+  path: string;
+  /** Why that place is not valid, in the validator's own words. */
+  reason: string;
+  /** The sentence to show, built on the server so every surface says the same thing. */
+  marker: string;
+}
+
 export interface ToolManualDetail {
   slug: string;
   name: string;
@@ -35,6 +55,13 @@ export interface ToolManualDetail {
    * same "nothing to show" as a remote one.
    */
   capabilities: ToolCapability[];
+  /**
+   * Hidden-for-an-invalid-schema findings about THIS tool's server. Empty for
+   * a healthy server, and empty for a caller who may not write the tool.
+   * Optional on the wire so the page still renders against a backend that does
+   * not serve the field yet.
+   */
+  hiddenTools?: HiddenTool[];
 }
 
 async function unwrap(res: Response, fallback: string): Promise<never> {

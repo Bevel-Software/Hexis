@@ -32,6 +32,7 @@ import { RESERVED_VARIABLE_NAMES, findReservedVariableRef } from '../../shared/v
 import { extractFrontmatter, resolveDeclaredId, isValidId, dedupeById } from '../../shared/frontmatter-id.js';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
+import type { HiddenToolSource } from '../../shared/hidden-tools.js';
 import {
   utcpNamespacePrefix,
   utcpNamespacedKey,
@@ -239,6 +240,8 @@ export type McpAuthDiscoveryResult =
 export class ToolManualService implements IToolManualService {
   private readonly cache: TtlCache<ScanResult>;
   private mcpAuthDiscovery?: McpAuthDiscoveryPort;
+  /** Where a hidden tool's schema finding comes from; absent until wired. */
+  private hiddenTools?: HiddenToolSource;
   /**
    * The refused set as it was last written to the log, so the warnings are
    * logged ONCE PER CHANGE rather than once per scan. A broken `.tool` sits
@@ -288,6 +291,10 @@ export class ToolManualService implements IToolManualService {
     this.mcpAuthDiscovery = discovery;
   }
 
+  setHiddenTools(source: HiddenToolSource): void {
+    this.hiddenTools = source;
+  }
+
   invalidate(): void {
     this.cache.invalidate();
     this.inFlightScan = null;
@@ -317,10 +324,20 @@ export class ToolManualService implements IToolManualService {
     // model, no second place for the access rules to drift.
     const found = (await this.accessibleManuals(userEmail)).find((m) => m.slug === slug);
     if (!found) return null;
+    // The marker is for whoever manages the server: the same per-file write
+    // verdict that gates setting the tool's shared secrets. A reader sees
+    // nothing of it — they can neither fix the schema nor do anything with the
+    // knowledge that one of the server's tools is off. The write check is
+    // asked only when there is something to show, so the healthy case (every
+    // tool of every server) costs no ACL round-trip.
+    const hidden = this.hiddenTools?.hiddenFor(found.name) ?? [];
+    const mayManage =
+      hidden.length > 0 && (await this.accessControl.canWrite(this.kb.defaultWorkspaceId(), userEmail, found.path));
     return {
       ...toSummary(found),
       description: found.description ?? null,
       capabilities: capabilitiesOf(found),
+      hiddenTools: mayManage ? hidden : [],
     };
   }
 

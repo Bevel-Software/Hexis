@@ -387,6 +387,9 @@ importers:
       '@utcp/sdk':
         specifier: ^1.2.0
         version: 1.2.0
+      ajv:
+        specifier: ^8.20.0
+        version: 8.20.0
       zod:
         specifier: ^4.0.0
         version: 4.4.3

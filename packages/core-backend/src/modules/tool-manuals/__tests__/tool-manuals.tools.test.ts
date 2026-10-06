@@ -9,6 +9,7 @@ import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { registerToolManualsTools } from '../tool-manuals.tools.js';
 import type { IToolManualService } from '../tool-manuals.contract.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import type { HiddenTool, HiddenToolSource } from '../../../shared/hidden-tools.js';
 
 /**
  * `list_tool_setup` MUST respect the same access controls as every other tool
@@ -93,7 +94,16 @@ const externalApiKeyService = {
     t === 'bevel_alice' ? { user: ALICE, tokenId: 'tok-a' } : t === 'bevel_bob' ? { user: BOB, tokenId: 'tok-b' } : null,
 } as never;
 
-async function start(): Promise<string> {
+/** What the proxy's schema check found for `weather`, when a test wires one in. */
+const HIDDEN_WEATHER_TOOL: HiddenTool = {
+  manual: 'weather',
+  name: 'weather_srv_forecast',
+  path: '/properties/value/anyOf/0/required/0',
+  reason: 'must be a string',
+  marker: 'Hidden from agents: its schema is invalid at /properties/value/anyOf/0/required/0 (must be a string).',
+};
+
+async function start(hiddenTools?: HiddenToolSource): Promise<string> {
   const registry = new ToolRegistry();
   const internalToken = new InternalTokenService({ secret: 'test-secret' });
   const toolAuth = createToolAuthMiddleware(externalApiKeyService, internalToken);
@@ -116,6 +126,7 @@ async function start(): Promise<string> {
     accessControl,
     variableStatus: { statusFor },
     kb: testKbContext(),
+    hiddenTools,
   });
   app.use('/api', router);
 
@@ -180,6 +191,41 @@ describe('list_tool_setup — access controls resolved for the caller', () => {
     // default-deny the catalog itself applies.
     const bob = (await (await callSetup(base, 'bevel_bob')).json()) as { invalid: unknown[] };
     expect(bob.invalid).toEqual([]);
+  });
+
+  it('marks a tool hidden for an invalid schema, to the caller who may manage the server', async () => {
+    const base = await start({
+      hiddenFor: (manual) => (manual === 'weather' ? [HIDDEN_WEATHER_TOOL] : []),
+    });
+
+    const alice = (await (await callSetup(base, 'bevel_alice')).json()) as {
+      tools: { slug: string; hiddenTools: HiddenTool[] }[];
+    };
+    // Alice writes `weather`, so she is the one who can get the schema fixed.
+    expect(alice.tools.find((t) => t.slug === 'weather')!.hiddenTools).toEqual([HIDDEN_WEATHER_TOOL]);
+    // The marker names the tool, the place and the reason, in one sentence.
+    expect(alice.tools.find((t) => t.slug === 'weather')!.hiddenTools[0].marker).toBe(
+      'Hidden from agents: its schema is invalid at /properties/value/anyOf/0/required/0 (must be a string).',
+    );
+    // Nothing is wrong with `billing`, which Alice cannot write anyway.
+    expect(alice.tools.find((t) => t.slug === 'billing')!.hiddenTools).toEqual([]);
+
+    // Bob READS `weather` and cannot write it: the marker is not his to see.
+    // He has no way to fix the schema, and the hidden tool is simply not among
+    // the ones he can call.
+    const bob = (await (await callSetup(base, 'bevel_bob')).json()) as {
+      tools: { slug: string; hiddenTools: HiddenTool[] }[];
+    };
+    expect(bob.tools.map((t) => t.slug)).toEqual(['weather']);
+    expect(bob.tools[0].hiddenTools).toEqual([]);
+  });
+
+  it('reports no hidden tool when no MCP surface has loaded a server yet', async () => {
+    const base = await start(); // no source wired, as a deployment without the proxy
+    const alice = (await (await callSetup(base, 'bevel_alice')).json()) as {
+      tools: { slug: string; hiddenTools: HiddenTool[] }[];
+    };
+    for (const tool of alice.tools) expect(tool.hiddenTools).toEqual([]);
   });
 
   it('rejects an unauthenticated call outright', async () => {
