@@ -284,8 +284,10 @@ export class TemplateFilesStep implements OnServerStart {
     // passes would each read the on-disk file and a later declared write
     // would lose an earlier one's.
     //
-    // The copies come out FIRST, so the names they were found under are
-    // known when the rules are reconciled.
+    // The copies come out first only so the one commit this step makes can
+    // name them in its subject; the rule pass below does not read the names
+    // — a guide rule is known by the platform's comment above it, whatever
+    // name it spells.
     const retired = await this.retireGuideCopies(repoDir, branch);
     added.push(...retired);
     added.push(

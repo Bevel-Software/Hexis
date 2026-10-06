@@ -78,24 +78,25 @@ export function registerToolManualsTools(
     // so the first thing a client cut. The description says what the tool
     // answers and the four things an agent cannot read off a field.
     //
-    // It sits a few characters under `TOOL_DESCRIPTION_CAP`, which is why the
-    // secrets sentence is the short form: adding the `hiddenTools` clause had
-    // to come out of the same budget, and what a hidden tool's entry CONTAINS
-    // is on the field below rather than repeated here.
+    // It sits a few characters under `TOOL_DESCRIPTION_CAP` WITH the guide-first
+    // sentence the registry puts in front of it (`tool-registry/guide-first.ts`),
+    // which is why every sentence here is the short form: the `hiddenTools`
+    // clause and that opener both came out of the same budget, and what a
+    // hidden tool's entry CONTAINS is on the field below rather than here.
     description:
       'Configuration status of every `.tool` the current user can access: what each tool needs set up and what is ' +
-      'already configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER — a `.tool` it cannot ' +
-      'READ is absent entirely, and every flag is the caller\'s own state. ' +
+      'already configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER: a `.tool` it cannot ' +
+      'READ is absent, and every flag is the caller\'s own. ' +
       'Secret VALUES are never returned and can never be set through a tool: an admin enters them in the tool ' +
       'editor; users sign in on /connect. ' +
-      'What gates setting a tool\'s shared secrets is `canWrite` on the `.tool` FILE — per-file access from its ' +
-      'frontmatter `write:`/`owner:` verbs and the access.md chain, NOT a platform role: the people who manage the ' +
-      'file configure the tool. ' +
-      '`hiddenTools` names any tool of this server Hexis hides from agents because its schema is invalid. ' +
+      'Setting a tool\'s shared secrets is gated by `canWrite` on the `.tool` FILE (its frontmatter ' +
+      '`write:`/`owner:` verbs and the access.md chain), NOT by a platform role: who manages the file configures ' +
+      'the tool. ' +
+      '`hiddenTools` names the tools Hexis hides from agents for an invalid schema. ' +
       'The listing is the RELEASED catalog, built from the default branch only: a server or `.tool` you declared on a ' +
-      'draft is not listed, not callable and not signed-in-able until that draft is merged. Pass `branch` (the draft ' +
-      'you wrote the declaration on) and `onBranchOnly` names every tool declared there that the default branch does ' +
-      'not serve yet — open a change request and ask the user to merge it in the app to activate it.',
+      'draft is not listed, callable or signed-in-able until it is merged. Pass `branch` (the draft you wrote the ' +
+      'declaration on) and `onBranchOnly` names every tool declared there that the default branch does not serve ' +
+      'yet — open a change request and ask the user to merge it in the app to activate it.',
     path: '/api/agent/tools/list_tool_setup',
     inputs: {
       type: 'object',
