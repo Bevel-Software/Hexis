@@ -29,7 +29,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
-  agentsFileOf,
+
   renderKbLayoutPlaceholders,
   resolveKbLayout,
   type KbLayout,
@@ -126,7 +126,9 @@ async function readCoreSectionFiles(): Promise<ReadonlyMap<string, string>> {
   const dir = agentGuideDir();
   const entries = await Promise.all(
     CORE_SECTION_IDS.filter((id) => id !== WORKING_WITH_FILES_SECTION_ID).map(
-      async (id) => [id, await fs.readFile(path.join(dir, `${id}.md`), 'utf8')] as const,
+      // Line endings normalised: a checkout on Windows may carry CRLF, and the
+      // guide is one text with one ending wherever it is served from.
+      async (id) => [id, (await fs.readFile(path.join(dir, `${id}.md`), 'utf8')).replace(/\r\n?/g, '\n')] as const,
     ),
   );
   return new Map(entries);
@@ -168,24 +170,36 @@ export interface AgentGuideContext {
 /** The checkout folder's name when none is given — core's own default. */
 const DEFAULT_KB_DIR_NAME = 'knowledge-base';
 
+/** One section of the guide as an agent reads it: rendered, with the heading's text as its title. */
+export interface RenderedGuideSection {
+  id: string;
+  /** The heading line's text, without its `#`s — what the tool lists the section as. */
+  title: string;
+  /** The section's markdown, heading included, rendered for the layout. */
+  body: string;
+}
+
+/** Composes the guide's sections for the layout in effect — what the guide tool reads. */
+export type AgentGuideSectionsReader = () => Promise<RenderedGuideSection[]>;
+
 /**
- * The guide as an agent reads it: core's sections through the distribution's
- * hook (when there is one), rendered for the layout, joined by blank lines,
- * ending in one newline.
+ * The guide's sections as an agent reads them: core's sections through the
+ * distribution's hook (when there is one), rendered for the layout, each
+ * with its title. The whole guide is these joined (see
+ * {@link composeAgentGuide}); `get_agent_guide` also serves one at a time.
  *
  * A hook may append, replace and drop sections, with ONE exception: the
  * shared file rules ({@link WORKING_WITH_FILES_SECTION_ID}) must come back,
- * as core's or as the hook's own replacement. Every file tool's description
- * ends by pointing at that section, and a client that drops the handshake
- * instructions has the guide as the only place to read the rules — a guide
- * without them would point agents at nothing. A hook that drops it is a
- * composition error, thrown rather than served.
+ * as core's or as the hook's own replacement. A client that drops the
+ * handshake instructions has the guide as the only place to read the rules
+ * — a guide without them would leave agents nothing to read. A hook that
+ * drops it is a composition error, thrown rather than served.
  */
-export async function composeAgentGuide(
+export async function agentGuideSections(
   layout: KbLayout,
   hook?: AgentGuideHook,
   context: AgentGuideContext = {},
-): Promise<string> {
+): Promise<RenderedGuideSection[]> {
   const resolved = resolveKbLayout(layout);
   const core = await coreAgentGuideSections(resolved);
   const sections = hook ? await hook(core, resolved) : core;
@@ -196,13 +210,44 @@ export async function composeAgentGuide(
     );
   }
   const kbDirName = context.kbDirName?.trim() || DEFAULT_KB_DIR_NAME;
-  const rendered = sections.map((section) =>
-    (section.literal
-      ? section.body
-      : renderKbLayoutPlaceholders(section.body.replaceAll('{{kbDirName}}', () => kbDirName), resolved)
-    ).trim(),
-  );
-  return `${rendered.filter((body) => body.length > 0).join('\n\n')}\n`;
+  return sections
+    .map((section) => {
+      const body = (
+        section.literal
+          ? section.body
+          : renderKbLayoutPlaceholders(section.body.replaceAll('{{kbDirName}}', () => kbDirName), resolved)
+      ).trim();
+      return { id: section.id, title: titleOf(body, section.id), body };
+    })
+    .filter((section) => section.body.length > 0);
+}
+
+/**
+ * The heading's text, or the id when the section opens with no heading. An
+ * ATX heading may close with a run of `#` of its own (`## Custom ##`); that
+ * is a delimiter, not part of the title.
+ */
+function titleOf(body: string, id: string): string {
+  const first = body.split('\n', 1)[0] ?? '';
+  const heading = /^#{1,6}\s+(.*?)(?:\s+#+)?\s*$/.exec(first);
+  return heading ? heading[1]!.trim() : id;
+}
+
+/**
+ * The guide as an agent reads it whole: the sections joined by blank lines,
+ * ending in one newline.
+ */
+export async function composeAgentGuide(
+  layout: KbLayout,
+  hook?: AgentGuideHook,
+  context: AgentGuideContext = {},
+): Promise<string> {
+  return joinGuideSections(await agentGuideSections(layout, hook, context));
+}
+
+/** The sections as one document, the way `composeAgentGuide` joins them. */
+export function joinGuideSections(sections: readonly RenderedGuideSection[]): string {
+  return `${sections.map((section) => section.body).join('\n\n')}\n`;
 }
 
 /**
@@ -226,14 +271,15 @@ export function withPlatformGuideAppended(ownText: string, guide: string): strin
   return `${own}\n\n${PLATFORM_GUIDE_SEPARATOR}\n\n${guide}`;
 }
 
+/** The one name the guide is read by: `AGENTS.md` at the repository root, the name coding agents look for. */
+export const AGENT_GUIDE_FILE = 'AGENTS.md';
+
 /**
- * Whether a repository-relative path is where the guide is read — the
- * configured name at the repository root, or `AGENTS.md` there when the
- * deployment once renamed the guide (the name agents were told, and the name
- * coding agents look for by convention). Exact spelling, like every platform
- * path.
+ * Whether a repository-relative path is where the guide is read — `AGENTS.md`
+ * at the repository root, exactly spelled, like every platform path. One
+ * name on every deployment: there is no setting for it any more.
  */
-export function isAgentGuidePath(repoRelativePath: string, layout: KbLayout): boolean {
+export function isAgentGuidePath(repoRelativePath: string): boolean {
   const norm = repoRelativePath.replace(/^\.?\/+/, '').replace(/\/+$/, '');
-  return norm === agentsFileOf(layout) || norm === 'AGENTS.md';
+  return norm === AGENT_GUIDE_FILE;
 }

@@ -4,13 +4,14 @@ This is a git-backed knowledge base. You are the primary agent responsible for
 maintaining it.
 
 > **This guide is served by the platform.** It is not a file in the
-> repository: `get_agent_guide` returns it, and so does `read_file` on
-> `{{agentsFile}}` at the repository root — after the knowledge base's own
-> `{{agentsFile}}`, when it has one. An `{{agentsFile}}` you find on disk is the
-> organisation's own conventions file, written by its people; follow it, and
-> never write this text into it. Deployment- or team-specific conventions
-> belong there, or in files of your own anywhere under `{{knowledgeBaseDir}}/`,
-> linked from wherever they are needed.
+> repository: `get_agent_guide` returns it, whole or one section at a time,
+> and so does `read_file` on `AGENTS.md` at the repository root — after the
+> knowledge base's own `AGENTS.md`, when it has one; `grep` searches it there
+> too. An `AGENTS.md` you find on disk is the organisation's own conventions
+> file, written by its people; follow it, and never write this text into it.
+> Deployment- or team-specific conventions belong there, or in files of your
+> own anywhere under `{{knowledgeBaseDir}}/`, linked from wherever they are
+> needed.
 
 **Read `mcp-description.md` at the repository root first.** It says what this
 knowledge base contains and when to consult it. Agents connected over MCP

@@ -464,7 +464,7 @@ export async function createCoreServer(
   registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
   registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide);
   // The guide on its own, beside the file tools that serve it by name.
-  registerAgentGuideTool(core.toolRegistry, toolsRouter, ta, th, core.agentGuide);
+  registerAgentGuideTool(core.toolRegistry, toolsRouter, ta, th, core.agentGuideSections);
   // The agent upload route, on the same router as the tool endpoints so it
   // mounts ahead of the JWT `/api` mounts below — but WITHOUT `toolAuth`: its
   // whole credential is the single-use token in its path, which is the point

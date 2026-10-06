@@ -14,7 +14,8 @@ import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
-import { sharedFileRules, sharedFileRulesSection, sharedRulesPointer } from '../../agent-instructions/shared-file-rules.js';
+import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
+import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
 import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workflow-hooks.js';
@@ -1202,6 +1203,62 @@ describe("the agent guide at the guide's name", () => {
     expect((await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/Handbook/HEXIS.md` })).status).toBe(404);
   });
 
+  it('grep finds the guide where read_file serves it: from the root and at its own path, own file first, denied file absent', async () => {
+    guideText = '# Guide\n\nName every needle you plant.\n';
+    const grep = (base: string, pattern: string, path?: string) =>
+      post(`${base}/api/agent/tools/grep`, path === undefined ? { pattern } : { pattern, path }).then(
+        (r) => r.json() as Promise<{ matches: { path: string; line: number; text: string }[] }>,
+      );
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/Handbook/a.md`, 'a needle on disk\n');
+    // A search of the whole knowledge base reaches the guide, under the path
+    // a read of it answers to, with the line number that read gives.
+    const fromRoot = await grep(base, 'needle');
+    expect(fromRoot.matches).toContainEqual({ path: GUIDE, line: 3, text: 'Name every needle you plant.' });
+    expect(fromRoot.matches).toContainEqual({ path: `${KB_DIR}/Handbook/a.md`, line: 1, text: 'a needle on disk' });
+    // A search of the guide's own path is a search of what read_file answers.
+    expect((await grep(base, 'needle', GUIDE)).matches).toEqual([{ path: GUIDE, line: 3, text: 'Name every needle you plant.' }]);
+    expect((await grep(base, 'needle', 'AGENTS.md')).matches).toEqual([{ path: GUIDE, line: 3, text: 'Name every needle you plant.' }]);
+    // A search under a folder does not reach a file that is not under it.
+    expect((await grep(base, 'needle', `${KB_DIR}/Handbook`)).matches.map((m) => m.path)).toEqual([`${KB_DIR}/Handbook/a.md`]);
+
+    // With the knowledge base's own AGENTS.md, the search covers the composed
+    // text — the own file first, then the guide — and once: the walk's own
+    // matches in that file are the same lines, so they are not repeated.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nOur needle rule.\n');
+    const { content } = await read(base);
+    const guideLine = content.split('\n').indexOf('Name every needle you plant.') + 1;
+    const composed = (await grep(base, 'needle')).matches.filter((m) => m.path === GUIDE);
+    expect(composed).toEqual([
+      { path: GUIDE, line: 3, text: 'Our needle rule.' },
+      { path: GUIDE, line: guideLine, text: 'Name every needle you plant.' },
+    ]);
+    expect((await grep(base, 'needle', GUIDE)).matches).toEqual(composed);
+
+    // The own file does not use up `max_results` twice: the walk leaves it to
+    // the composed search, so a file later in the tree is still reached when
+    // the own file alone has more matches than the cap. Without that, the
+    // walk filled the cap from AGENTS.md, those matches were dropped as
+    // duplicates, and Handbook/ was never searched.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, `# Acme\n\n${'needle\n'.repeat(5)}`);
+    const capped = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', max_results: 3 })).json()) as {
+      matches: { path: string }[];
+    };
+    expect(capped.matches.map((m) => m.path)).toContain(`${KB_DIR}/Handbook/a.md`);
+    expect(capped.matches).toHaveLength(3);
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nOur needle rule.\n');
+
+    // A caller who may not read the own file searches the guide alone, from
+    // the root and at the path — as read_file answers them, with no sign that
+    // anything of the organisation's is there.
+    const denied = await start('read', denyReads(new Set(['AGENTS.md'])));
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nOur needle rule.\n');
+    for (const found of [await grep(denied, 'needle'), await grep(denied, 'needle', GUIDE)]) {
+      expect(found.matches.filter((m) => m.path === GUIDE)).toEqual([{ path: GUIDE, line: 3, text: 'Name every needle you plant.' }]);
+      expect(JSON.stringify(found)).not.toContain('Acme');
+    }
+  });
+
   it('file_stat says a text file is there to read, and that nothing can be written, moved or deleted at it', async () => {
     guideText = 'THE PLATFORM GUIDE\n';
     const base = await start();
@@ -1847,19 +1904,18 @@ describe('office documents and PDFs', () => {
     expect(await readContent(base, `${KB_DIR}/deck.pptx`)).toContain('Original');
   });
 
-  it('every mounted tool ends with the one sentence pointing at the shared rules, and repeats none of them', async () => {
+  it('every mounted tool opens with the one sentence sending the agent to the guide, and repeats none of the rules', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
-    const pointer = sharedRulesPointer(testKbContext().layout);
     // The shell is in the list too: it carried the agent-guide reminder before,
     // and that reminder is one of the rules that moved.
     const mounted = ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'delete_folder', 'mkdir', 'move_file', 'copy_file', 'unzip', 'execute_command'];
     for (const name of mounted) {
       const def = tools.find((t) => t.name === name);
       expect(def, name).toBeDefined();
-      expect(def!.description!.endsWith(pointer), name).toBe(true);
-      // Once, at the end — not once per paragraph that used to be appended.
-      expect(def!.description!.split(pointer), name).toHaveLength(2);
+      expect(def!.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `), name).toBe(true);
+      // Once, at the front — not once per paragraph that used to be appended.
+      expect(def!.description!.split(GUIDE_FIRST_SENTENCE), name).toHaveLength(2);
       // EVERY shared rule, in full, is in the two shared places now (see
       // agent-instructions/__tests__/shared-file-rules.test.ts) and in no
       // description. Checked on the whole body rather than on a phrase: the
@@ -1873,10 +1929,11 @@ describe('office documents and PDFs', () => {
       expect(def!.description, name).not.toContain('Content rule (the same on every file tool)');
       expect(def!.description, name).not.toContain('Before your first read or change in a workspace');
     }
-    // start_session carried none of the shared paragraphs and gains no pointer:
-    // it touches no file. External-only, so it is looked up on that surface.
+    // start_session touches no file, yet it opens with the same sentence: the
+    // guide is read before ANYTHING in the platform, a session included.
+    // External-only, so it is looked up on that surface.
     const external = await toolRegistry.listExternal();
-    expect(external.find((t) => t.name === 'start_session')!.description).not.toContain(pointer);
+    expect(external.find((t) => t.name === 'start_session')!.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `)).toBe(true);
   });
 
   describe('binary capability contract: a text file, a document, an image and a zip', () => {
@@ -3632,7 +3689,7 @@ describe('preflight for moves and deletes', () => {
       // is stated once in the shared rules rather than on each of them.
       expect(sharedFileRulesSection(testKbContext().layout)).toContain('`write-denied`');
       for (const name of ['move_file', 'delete_file', 'delete_folder']) {
-        expect((await def(name)).description, name).toContain(sharedRulesPointer(testKbContext().layout));
+        expect((await def(name)).description.startsWith(GUIDE_FIRST_SENTENCE), name).toBe(true);
       }
     });
   });
@@ -4410,22 +4467,22 @@ describe('tool descriptions and the deployment note', () => {
     expect(all.get('read_file')!.description).not.toContain('Stay within one');
   });
 
-  it("a registered note lands after every gated tool's own text, ahead of the shared-rules pointer, and on the sessionId input", async () => {
+  it("a registered note lands after every gated tool's own text, behind the guide-first opening, and on the sessionId input", async () => {
     await start();
     notes.registerGatedToolNote(' One folder per conversation.');
     notes.registerSessionIdNote(' It also pins that folder.');
     const all = await defs();
-    // The POINTER is last, always: that is the one sentence an agent needs to
-    // find the shared rules, and a description cut short must not lose it. The
-    // deployment's note sits directly before it, after the tool's own text.
-    const pointer = sharedRulesPointer(testKbContext().layout);
+    // The guide-first sentence is FIRST, always: that is the one instruction
+    // an agent needs, and a description cut short from the end must not lose
+    // it. The deployment's note is last, after the tool's own text.
     for (const name of ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'delete_folder', 'mkdir', 'move_file', 'copy_file', 'unzip']) {
-      expect(all.get(name)!.description.endsWith(` One folder per conversation.${pointer}`), name).toBe(true);
+      expect(all.get(name)!.description.startsWith(`${GUIDE_FIRST_SENTENCE} `), name).toBe(true);
+      expect(all.get(name)!.description.endsWith(' One folder per conversation.'), name).toBe(true);
       expect(sessionIdDescriptionOf(all.get(name)!), name).toBe(`${SESSION_ID_DESCRIPTION} It also pins that folder.`);
     }
     // `execute_command` is internal-only, so it is checked on that surface.
     const internal = new Map((await toolRegistry.listInternal()).map((t) => [t.name, t]));
-    expect(internal.get('execute_command')!.description.endsWith(` One folder per conversation.${pointer}`)).toBe(true);
+    expect(internal.get('execute_command')!.description.endsWith(' One folder per conversation.')).toBe(true);
   });
 
   it('a tool that is not gated carries no note', async () => {

@@ -3,9 +3,13 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
+import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
+import { TOOL_DESCRIPTION_CAP } from '../../tool-registry/description-length.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import type { ToolContext } from '../../tool-helpers/tool.contract.js';
+import { toolDef } from '../../tool-helpers/tool-def.js';
 import { GET_AGENT_GUIDE_TOOL, registerAgentGuideTool } from '../agent-guide.tools.js';
+import type { RenderedGuideSection } from '../agent-guide.js';
 
 let server: Server | null = null;
 
@@ -14,8 +18,14 @@ afterEach(async () => {
   server = null;
 });
 
+const SECTIONS: RenderedGuideSection[] = [
+  { id: 'introduction', title: 'Knowledge base', body: '# Knowledge base\n\nRead me.' },
+  { id: 'access-control', title: 'Access control', body: '## Access control\n\nWho may do what.' },
+  { id: 'knowledge-graph', title: 'Knowledge graph', body: '## Knowledge graph\n\nA distribution added this one.' },
+];
+
 describe('get_agent_guide', () => {
-  it('is on both surfaces, takes nothing, and answers with the guide composed when asked', async () => {
+  async function serve() {
     const registry = new ToolRegistry();
     const router = express.Router();
     // Stands in for the connection-key auth: the caller is a signed-in reader.
@@ -36,17 +46,19 @@ describe('get_agent_guide', () => {
           throw new Error('the guide reads no file');
         },
       }) as unknown as ToolContext;
-    let calls = 0;
-    registerAgentGuideTool(registry, router, auth, createToolHandlerFactory(resolve), async () => `guide #${++calls}`);
-    for (const list of [registry.listExternal(), registry.listInternal()]) {
-      const def = (await list).find((t) => t.name === GET_AGENT_GUIDE_TOOL);
-      expect(def).toBeDefined();
-      // The def wraps a tool's inputs as its request `body`; this one declares none.
-      const body = (def!.inputs as { properties: { body: { properties?: Record<string, unknown> } } }).properties.body;
-      expect(Object.keys(body.properties ?? {})).toEqual([]);
-      expect(def!.description).toContain('Read it before your first read or change');
-      expect(def!.description).toContain("`read_file` on the guide's name at the KB root (`AGENTS.md`, or the name this deployment gave the guide)");
-    }
+    let reads = 0;
+    let current: RenderedGuideSection[] = SECTIONS;
+    registerAgentGuideTool(registry, router, auth, createToolHandlerFactory(resolve), async () => {
+      reads += 1;
+      return current;
+    });
+    const sectionsNow = (sections: RenderedGuideSection[]) => {
+      current = sections;
+    };
+    // Another tool beside it, to see what the catalog does to each.
+    registry.registerExternalTool(
+      toolDef({ name: 'read_file', description: 'Read a file.', path: '/api/agent/tools/read_file', inputs: { type: 'object', properties: {} }, tags: [] }),
+    );
 
     const web = express();
     web.use(express.json());
@@ -55,14 +67,84 @@ describe('get_agent_guide', () => {
       const s = web.listen(0, '127.0.0.1', () => resolve(s));
     });
     const port = (server.address() as AddressInfo).port;
-    const call = () =>
-      fetch(`http://127.0.0.1:${port}/api/agent/tools/${GET_AGENT_GUIDE_TOOL}`, {
+    const call = async (body: Record<string, unknown> = {}) => {
+      const res = await fetch(`http://127.0.0.1:${port}/api/agent/tools/${GET_AGENT_GUIDE_TOOL}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: 'Bearer x' },
-        body: '{}',
+        body: JSON.stringify(body),
       });
-    expect(await (await call()).json()).toEqual({ guide: 'guide #1' });
-    // Composed per call, never cached here: a layout applied later is seen.
-    expect(await (await call()).json()).toEqual({ guide: 'guide #2' });
+      return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+    };
+    return { registry, call, reads: () => reads, sectionsNow };
+  }
+
+  it('is on both surfaces, says to call it first, and lists the sections the guide has now', async () => {
+    const { registry } = await serve();
+    for (const list of [registry.listExternal(), registry.listInternal()]) {
+      const def = (await list).find((t) => t.name === GET_AGENT_GUIDE_TOOL);
+      expect(def).toBeDefined();
+      expect(def!.description).toContain('ALWAYS call this first and read the guide before you do anything else');
+      expect(def!.description).toContain("`read_file` on `AGENTS.md` at the KB root");
+      // The sections, a distribution's own included, by id and title.
+      expect(def!.description).toContain(
+        'Sections: `introduction` (Knowledge base), `access-control` (Access control), `knowledge-graph` (Knowledge graph).',
+      );
+      // The one tool that does not open with "call get_agent_guide first".
+      expect(def!.description.startsWith(GUIDE_FIRST_SENTENCE)).toBe(false);
+      // The def wraps a tool's inputs as its request `body`; this one takes `section` and nothing else.
+      const body = (def!.inputs as { properties: { body: { properties?: Record<string, unknown> } } }).properties.body;
+      expect(Object.keys(body.properties ?? {})).toEqual(['section']);
+    }
+  });
+
+  it('puts the guide-first sentence at the front of every other tool the catalog lists', async () => {
+    const { registry } = await serve();
+    const read = (await registry.listExternal()).find((t) => t.name === 'read_file')!;
+    expect(read.description).toBe(`${GUIDE_FIRST_SENTENCE} Read a file.`);
+  });
+
+  it('returns the whole guide, or one section by id, composed when asked', async () => {
+    const { call, reads, sectionsNow } = await serve();
+    expect(await call()).toEqual({
+      status: 200,
+      body: { guide: '# Knowledge base\n\nRead me.\n\n## Access control\n\nWho may do what.\n\n## Knowledge graph\n\nA distribution added this one.\n' },
+    });
+    expect(await call({ section: 'access-control' })).toEqual({
+      status: 200,
+      body: { guide: '## Access control\n\nWho may do what.', section: 'access-control', title: 'Access control' },
+    });
+    // A section the guide does not have is refused with the ones it has.
+    const unknown = await call({ section: 'nope' });
+    expect(unknown.status).toBe(400);
+    expect(String(unknown.body.error)).toContain('The guide has no section "nope". Sections: `introduction`, `access-control`, `knowledge-graph`.');
+    // Composed per call, never cached here: what the reader answers NOW is
+    // what the next call returns, so a layout applied later is seen.
+    expect(reads()).toBe(3);
+    sectionsNow([{ id: 'introduction', title: 'Renamed', body: '# Renamed\n\nThe layout changed.' }]);
+    expect(await call()).toEqual({ status: 200, body: { guide: '# Renamed\n\nThe layout changed.\n' } });
+    expect(await call({ section: 'introduction' })).toMatchObject({ status: 200, body: { title: 'Renamed' } });
+    expect((await call({ section: 'access-control' })).status).toBe(400);
+    expect(reads()).toBe(6);
+  });
+
+  it('keeps every section id in the description when a distribution adds more than the titles leave room for', async () => {
+    // A client cuts a long description from the end, and an id cut off is a
+    // section an agent cannot ask for. So the ids are what the description
+    // keeps; the titles are what it gives up, and only once they do not fit.
+    const { registry, sectionsNow } = await serve();
+    const many = Array.from({ length: 40 }, (_, i) => ({
+      id: `section-${i}`,
+      title: `A title long enough that forty of them do not fit, number ${i}`,
+      body: `## Title ${i}\n\nBody.`,
+    }));
+    sectionsNow([...SECTIONS, ...many]);
+    const def = (await registry.listExternal()).find((t) => t.name === GET_AGENT_GUIDE_TOOL)!;
+    expect(def.description!.length).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
+    for (const section of [...SECTIONS, ...many]) expect(def.description).toContain(`\`${section.id}\``);
+    expect(def.description).not.toContain('(Knowledge base)');
+    // With the platform's few, the titles are there.
+    sectionsNow(SECTIONS);
+    const few = (await registry.listExternal()).find((t) => t.name === GET_AGENT_GUIDE_TOOL)!;
+    expect(few.description).toContain('`introduction` (Knowledge base)');
   });
 });

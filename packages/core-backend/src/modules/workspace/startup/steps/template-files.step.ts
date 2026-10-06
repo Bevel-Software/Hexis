@@ -2,7 +2,6 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   LEGACY_AGENTS_FILE,
-  gitignoreLiteral,
   validateKbRootName,
   type KbLayout,
 } from '@bevel-software/platform-shared';
@@ -198,7 +197,6 @@ export class TemplateFilesStep implements OnServerStart {
     // Read ONCE per branch: a value re-read between the write and the ignore
     // rule could disagree with itself.
     const layout = this.kb.layout;
-    const agentsFile = layout.agentsFile;
 
     for (const rel of requiredFiles(layout)) {
       // `lstat`, not `exists`: a DIRECTORY or SYMLINK squatting a required
@@ -238,7 +236,7 @@ export class TemplateFilesStep implements OnServerStart {
             ),
             `${layout.pluginsDir}/`,
           ),
-          [agentsFile, LEGACY_AGENTS_FILE, PRE_RENAME_AGENTS_FILE],
+          [LEGACY_AGENTS_FILE, PRE_RENAME_AGENTS_FILE],
         );
       }
       branch.write(rel, content);
@@ -286,8 +284,10 @@ export class TemplateFilesStep implements OnServerStart {
     // passes would each read the on-disk file and a later declared write
     // would lose an earlier one's.
     //
-    // The copies come out FIRST, so the names they were found under are
-    // known when the rules are reconciled.
+    // The copies come out first only so the one commit this step makes can
+    // name them in its subject; the rule pass below does not read the names
+    // — a guide rule is known by the platform's comment above it, whatever
+    // name it spells.
     const retired = await this.retireGuideCopies(repoDir, branch);
     added.push(...retired);
     added.push(
@@ -299,7 +299,10 @@ export class TemplateFilesStep implements OnServerStart {
         add: [PREAMBLE_IGNORE_PATTERN],
         drop: [`${this.kb.layout.skillsDir}/`],
         dropEvery: [`${this.kb.layout.pluginsDir}/`],
-        guideNames: [...retired, agentsFile, LEGACY_AGENTS_FILE, PRE_RENAME_AGENTS_FILE],
+        // The two names the template itself shipped a rule for. A rule under
+        // any other name — a retired copy's, or a name no copy is left to
+        // tell — is known by the platform's comment above it instead.
+        guideNames: [LEGACY_AGENTS_FILE, PRE_RENAME_AGENTS_FILE],
       })),
     );
 
@@ -433,7 +436,7 @@ export class TemplateFilesStep implements OnServerStart {
       dropEvery?: string[];
       /** `[from, to]` pairs: a rule an earlier release wrote, and its spelling now. */
       respell?: ReadonlyArray<readonly [string, string]>;
-      /** Every name the guide was ever hidden under here: the platform's own rules for them come out (see {@link withoutPlatformGuideRules}). */
+      /** The names the template itself shipped a guide rule for; a rule under any other name is known by its comment (see {@link withoutPlatformGuideRules}). */
       guideNames: readonly string[];
     },
   ): Promise<string[]> {
@@ -537,12 +540,15 @@ function followsTemplateHygieneBlock(kept: readonly string[]): boolean {
 
 /**
  * `text` without the rules THE PLATFORM WROTE to hide the guide while it was a
- * file, under each of `names`: the `AGENTS.md` line under its own comment
- * (either spelling) or in the slot at the end of the template's own
- * repo-hygiene block ({@link TEMPLATE_HYGIENE_BLOCK_ABOVE_AGENTS_RULE}); the
- * `CLAUDE.md` line under the two-line comment the template carried it with,
- * or under the platform's comment; and the line for any other name a
- * deployment gave the guide, under the platform's comment. Each goes with
+ * file. Under WHATEVER name: every rule sitting directly under one of the two
+ * comments the platform wrote above the guide's rule
+ * ({@link withoutPlatformConventionsRules}) — the name a deployment saved for
+ * the guide is not read any more, so the rule for it is known by its comment
+ * and by nothing else. Then the two names the template itself shipped a rule
+ * for, under each of `names`: the `AGENTS.md` line in the slot at the end of
+ * the template's own repo-hygiene block
+ * ({@link TEMPLATE_HYGIENE_BLOCK_ABOVE_AGENTS_RULE}) and the `CLAUDE.md` line
+ * under the two-line comment the template carried it with. Each goes with
  * its comment.
  *
  * The guide is not on disk any more, which is what makes every one of these
@@ -551,13 +557,45 @@ function followsTemplateHygieneBlock(kept: readonly string[]): boolean {
  * as everywhere else here, and so does a bare rule an operator wrote by hand.
  */
 export function withoutPlatformGuideRules(text: string, names: readonly string[]): string {
-  let out = text;
+  let out = withoutPlatformConventionsRules(text);
   for (const name of new Set(names)) {
     if (name === LEGACY_AGENTS_FILE) out = withoutPlatformAgentsRule(out);
-    else if (name === PRE_RENAME_AGENTS_FILE) out = withoutPlatformClaudeRule(withoutPlatformIgnorePattern(out, name));
-    else out = withoutPlatformIgnorePattern(out, gitignoreLiteral(name));
+    else if (name === PRE_RENAME_AGENTS_FILE) out = withoutPlatformClaudeRule(out);
   }
   return out;
+}
+
+/**
+ * `text` without every rule line that sits DIRECTLY under one of the two
+ * comments the platform wrote above the guide's rule while the guide was a
+ * file ({@link PLATFORM_RULE_COMMENT}, {@link AGENTS_RULE_COMMENT}), whatever
+ * name the rule spells — `AGENTS.md`, `CLAUDE.md`, or the escaped form of a
+ * name a deployment chose — and without that comment, plus the blank line
+ * that opened the appended block. Those two comments were written above
+ * nothing else, so the comment is the whole provenance: a rule for a name
+ * nobody remembers is retired exactly like one for a name still known. A
+ * `!negation`, a blank or a further comment under the comment is not a rule
+ * and stays, comment included.
+ */
+function withoutPlatformConventionsRules(text: string): string {
+  const lines = text.split('\n');
+  const kept: string[] = [];
+  for (const line of lines) {
+    const above = kept[kept.length - 1]?.trim();
+    const rule = line.trim();
+    const ours =
+      (above === PLATFORM_RULE_COMMENT || above === AGENTS_RULE_COMMENT) &&
+      rule !== '' &&
+      !rule.startsWith('#') &&
+      !rule.startsWith('!');
+    if (!ours) {
+      kept.push(line);
+      continue;
+    }
+    kept.pop();
+    if (kept.length > 1 && kept[kept.length - 1]?.trim() === '') kept.pop();
+  }
+  return kept.join('\n');
 }
 
 /** The two comment lines the packaged template carried above its `CLAUDE.md` rule, in order. */

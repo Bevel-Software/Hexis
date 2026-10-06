@@ -138,7 +138,12 @@ import { unmeteredLlmUsage, type ILlmUsageMeter } from '../modules/tool-auth/llm
 import { McpService } from '../modules/mcp/mcp.service.js';
 import { AgentAuditService, retentionDaysFrom } from '../modules/audit/agent-audit.service.js';
 import { readAgentPreamble, type AgentPreambleReader } from '../modules/agent-instructions/index.js';
-import { composeAgentGuide, type AgentGuideReader } from '../modules/agent-guide/index.js';
+import {
+  agentGuideSections,
+  joinGuideSections,
+  type AgentGuideReader,
+  type AgentGuideSectionsReader,
+} from '../modules/agent-guide/index.js';
 import { createMcpAuthMiddleware } from '../modules/mcp/mcp-auth.middleware.js';
 import { BevelOAuthProvider } from '../modules/mcp/oauth/bevel-oauth-provider.js';
 import { getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
@@ -246,6 +251,8 @@ export interface CoreServices {
    * `read_file` of the guide's name answer. See modules/agent-guide.
    */
   agentGuide: AgentGuideReader;
+  /** The same guide as its sections, each with its title — what `get_agent_guide` lists and serves one of. */
+  agentGuideSections: AgentGuideSectionsReader;
   mcpServerEditService: McpServerEditService;
   /** Deleting one tool — the owner's verb (see ToolDeleteService). */
   toolDeleteService: ToolDeleteService;
@@ -1175,7 +1182,9 @@ export async function createCoreServices(
   // The guide every agent is told to read first, composed when asked for —
   // the layout is read per call, so a name the setup save applies lands
   // without a restart, and the distribution's hook sees every composition.
-  const agentGuide: AgentGuideReader = () => composeAgentGuide(kb.layout, ports.agentGuide, { kbDirName });
+  const agentGuideSectionsReader: AgentGuideSectionsReader = () =>
+    agentGuideSections(kb.layout, ports.agentGuide, { kbDirName });
+  const agentGuide: AgentGuideReader = async () => joinGuideSections(await agentGuideSectionsReader());
   // The Audit log. Records through the proxy below (every call an external
   // agent makes), reads keys through the key service so their shape is
   // defined once, and prunes past the retention setting — read per sweep, so
@@ -1454,6 +1463,7 @@ export async function createCoreServices(
     pendingToolsService,
     readAgentPreamble: readPreamble,
     agentGuide,
+    agentGuideSections: agentGuideSectionsReader,
     pluginIndexService,
     pluginProvisionService,
     joinRequestsService,

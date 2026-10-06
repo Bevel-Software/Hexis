@@ -59,6 +59,7 @@ import {
 import type { KbContext } from '../../shared/kb-context.js';
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import {
+  AGENT_GUIDE_FILE,
   isAgentGuidePath,
   isManagedGuide,
   withPlatformGuideAppended,
@@ -66,7 +67,6 @@ import {
 } from '../agent-guide/agent-guide.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import { rethrowAsWriteDenial } from './write-denial.js';
-import { sharedRulesPointer } from '../agent-instructions/shared-file-rules.js';
 import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
 import { logger } from '../../shared/logging.js';
@@ -736,6 +736,8 @@ async function grepWalk(
   gate: ReadGate,
   notifyRead: (path: string) => Promise<void>,
   docs: DocGrepState,
+  /** A file the walk leaves to its caller: never opened, never counted against `max`. */
+  skip: (path: string) => boolean = () => false,
 ): Promise<void> {
   if (out.length >= max || depth > 12) return;
   let entries;
@@ -753,7 +755,9 @@ async function grepWalk(
     if (e.type !== 'directory' && isFolderPlaceholder(e.name)) continue;
     const p = dir ? `${dir}/${e.name}` : e.name;
     if (e.type === 'directory') {
-      await grepWalk(fs, p, re, out, max, depth + 1, gate, notifyRead, docs);
+      await grepWalk(fs, p, re, out, max, depth + 1, gate, notifyRead, docs, skip);
+    } else if (skip(p)) {
+      continue;
     } else {
       // Opening a file is a read of it, even when the walk started at a root
       // the read hook was already told about — so every file the walk opens
@@ -1504,8 +1508,7 @@ export function registerWorkspaceTools(
     const requiresBranch = ((spec.inputs as { required?: string[] }).required ?? []).includes('branch');
     const describe = (): string =>
       (typeof spec.description === 'function' ? spec.description() : spec.description) +
-      (spec.gated ? agentAccessGate.notes.gatedToolNote() : '') +
-      sharedRulesPointer(kb.layout);
+      (spec.gated ? agentAccessGate.notes.gatedToolNote() : '');
     const def = toolDef({
       name: spec.name,
       description: describe(),
@@ -1637,7 +1640,7 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint the id of this conversation, which the KnowledgeBase tools take as `sessionId`. Call this ONCE, at the start of your work and only once per run — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id explicitly as `sessionId` on every subsequent KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it — there is no half-made session to clean up. If a retry lands after a success you simply hold two independent ids, which is harmless: keep passing the one id you have already used for the rest of the run and ignore the other. Returns `{ sessionId }`.',
+      'Mint the id of this conversation, which the KnowledgeBase tools take as `sessionId`. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id as `sessionId` on every later KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
@@ -1716,10 +1719,8 @@ export function registerWorkspaceTools(
       // noted — and comes first, with the guide after it. A copy of the
       // guide an earlier release wrote to disk (still on a draft, say) is
       // recognised by its header and not served a second time.
-      if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '', kb.layout)) {
-        const guide = await agentGuide();
-        const own = await ownGuideFile(a.branch as string, ctx, p);
-        return { path: p, content: slice(own === null ? guide : withPlatformGuideAppended(own, guide)) };
+      if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '')) {
+        return { path: p, content: slice(await guideAt(a.branch as string, ctx, p)) };
       }
       await notifyAgentRead(agentAccessGate, ctx, a.branch as string, p);
       await assertCanRead(readGateFor(a.branch as string, ctx), p);
@@ -1768,6 +1769,13 @@ export function registerWorkspaceTools(
    * platform never tells about a file someone may not read — a restricted
    * node is indistinguishable from an absent one on every other read.
    */
+  /** What a read of the guide's path answers: the guide, after the knowledge base's own readable file when it has one. */
+  const guideAt = async (branch: string, ctx: ToolContext, p: string): Promise<string> => {
+    const guide = await agentGuide!();
+    const own = await ownGuideFile(branch, ctx, p);
+    return own === null ? guide : withPlatformGuideAppended(own, guide);
+  };
+
   const ownGuideFile = async (branch: string, ctx: ToolContext, p: string): Promise<string | null> => {
     const fs = await ctx.getFilesystem(branch);
     // Existence first, then the gate, then the hook and the bytes — nothing of
@@ -1984,7 +1992,7 @@ export function registerWorkspaceTools(
       // not read would tell them it exists. A file of the knowledge base's
       // own that the caller may read is a file like any other, and the
       // ordinary answer below describes it.
-      if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '', kb.layout)) {
+      if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '')) {
         const fs = await ctx.getFilesystem(branch);
         const own = (await ownGuideReadable(fs, branch, ctx, p)) && (await isOwnEntryStill(fs, p));
         if (!own) {
@@ -2180,7 +2188,41 @@ export function registerWorkspaceTools(
             : await searchRootKind(fs, searchRoot);
       /** Why a single-file search found nothing, when "no matches" would be a lie. */
       let fileNote: string | undefined;
-      if (kind === 'directory') {
+      // The guide is searched where it is read: a search of the repository
+      // root covers it, and a search of its own path is a search of what
+      // `read_file` answers there. The composed text is what is searched —
+      // the knowledge base's own readable file first, then the platform's
+      // guide — under the guide's path and with the line numbers a read of
+      // it gives. The walk leaves that one file to this: a match the walk
+      // made there would be the same line again, and one it COUNTED against
+      // `max_results` would be a file later in the tree never searched while
+      // the answer says nothing was cut. A file the caller may not read is
+      // absent from it, as it is from the read.
+      const guidePath = `${kbDirName}/${AGENT_GUIDE_FILE}`;
+      const rel = toKbRelative(searchRoot, kbDirName);
+      const coversGuide =
+        agentGuide !== undefined && (kind === 'directory' ? rel === null : isAgentGuidePath(rel ?? ''));
+      if (coversGuide) {
+        if (kind === 'directory') {
+          await grepWalk(
+            fs,
+            searchRoot,
+            re,
+            out,
+            max,
+            0,
+            gate,
+            (p) => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p),
+            docs,
+            (p) => p === guidePath,
+          );
+        }
+        const lines = (await guideAt(a.branch as string, ctx, guidePath)).split('\n');
+        for (let i = 0; i < lines.length && out.length < max; i++) {
+          re.lastIndex = 0;
+          if (re.test(lines[i]!)) out.push({ path: guidePath, line: i + 1, text: lines[i]!.slice(0, 300) });
+        }
+      } else if (kind === 'directory') {
         await grepWalk(
           fs,
           searchRoot,

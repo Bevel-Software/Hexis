@@ -6,10 +6,12 @@ import {
   CORE_SECTION_IDS,
   PLATFORM_GUIDE_SEPARATOR,
   WORKING_WITH_FILES_SECTION_ID,
+  agentGuideSections,
   composeAgentGuide,
   coreAgentGuideSections,
   isAgentGuidePath,
   isManagedGuide,
+  joinGuideSections,
   withPlatformGuideAppended,
   type AgentGuideSection,
 } from '../agent-guide.js';
@@ -73,20 +75,43 @@ describe('the guide is composed from the platform\'s sections', () => {
     expect(odd).toContain(sharedFileRulesSection({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: '{{skillsDir}}', skillsDir: 'Playbooks' }));
   });
 
-  it('says it is served, not written, and names the file it is read as — under the deployment\'s name for it', async () => {
+  it('says it is served, not written, and names the one file it is read as', async () => {
     const intro = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '# Knowledge base').replace(/\n> ?/g, ' ');
     expect(intro).toContain('**This guide is served by the platform.**');
-    expect(intro).toContain('`get_agent_guide` returns it');
+    expect(intro).toContain('`get_agent_guide` returns it, whole or one section at a time');
     expect(intro).toContain('`read_file` on `AGENTS.md` at the repository root');
+    expect(intro).toContain('`grep` searches it there too');
     expect(intro).toContain('never write this text into it');
     // The old header, which proved a file on disk was the platform's, is gone
     // from the served text — or every read would look like a stale copy.
     expect(isManagedGuide(await composeAgentGuide(DEFAULT_KB_LAYOUT))).toBe(false);
-    const aliased = (await composeAgentGuide({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' })).replace(/\n> ?/g, ' ');
-    expect(aliased).toContain('`read_file` on `HEXIS.md` at the repository root');
+    // One name on every deployment: a name saved for the written guide changes nothing.
+    const stale = await composeAgentGuide({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+    expect(stale).not.toContain('HEXIS.md');
+    expect(stale).toBe(await composeAgentGuide(DEFAULT_KB_LAYOUT));
     // And points at the preamble first, before the platform mechanics.
     const guide = await composeAgentGuide(DEFAULT_KB_LAYOUT);
     expect(guide.indexOf('mcp-description.md')).toBeLessThan(guide.indexOf('## Directory Structure'));
+    // One line ending throughout, whatever the checkout wrote the files with.
+    expect(guide).not.toContain('\r');
+  });
+
+  it('serves the guide as sections with titles, the whole being the sections joined', async () => {
+    const sections = await agentGuideSections(DEFAULT_KB_LAYOUT);
+    expect(sections.map((s) => s.id)).toEqual(CORE_SECTION_IDS);
+    expect(sections.find((s) => s.id === 'introduction')!.title).toBe('Knowledge base');
+    expect(sections.find((s) => s.id === 'where-a-new-file-goes')!.title).toBe('Where a new file goes');
+    expect(sections.find((s) => s.id === 'skills')!.title).toContain('Skills (`Skills/');
+    expect(joinGuideSections(sections)).toBe(await composeAgentGuide(DEFAULT_KB_LAYOUT));
+    // A heading closed with its own run of `#` is titled without it, and a
+    // section that opens with no heading is titled by its id.
+    const added = await agentGuideSections(DEFAULT_KB_LAYOUT, (all) => [
+      ...all,
+      { id: 'custom', body: '## Custom ##\n\nX.\n' },
+      { id: 'bare', body: 'No heading here.\n' },
+    ]);
+    expect(added.find((s) => s.id === 'custom')!.title).toBe('Custom');
+    expect(added.find((s) => s.id === 'bare')!.title).toBe('bare');
   });
 
   /**
@@ -152,16 +177,13 @@ describe('the guide is composed from the platform\'s sections', () => {
     );
   });
 
-  it('answers at the guide\'s name in the repository root, under AGENTS.md and under a saved alias, and nowhere else', () => {
-    expect(isAgentGuidePath('AGENTS.md', DEFAULT_KB_LAYOUT)).toBe(true);
-    expect(isAgentGuidePath('/AGENTS.md', DEFAULT_KB_LAYOUT)).toBe(true);
-    expect(isAgentGuidePath('Handbook/AGENTS.md', DEFAULT_KB_LAYOUT)).toBe(false);
-    expect(isAgentGuidePath('agents.md', DEFAULT_KB_LAYOUT)).toBe(false);
-    expect(isAgentGuidePath('HEXIS.md', DEFAULT_KB_LAYOUT)).toBe(false);
-    const aliased = { ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' };
-    expect(isAgentGuidePath('HEXIS.md', aliased)).toBe(true);
-    expect(isAgentGuidePath('AGENTS.md', aliased)).toBe(true);
-    expect(isAgentGuidePath('', aliased)).toBe(false);
+  it('answers at AGENTS.md in the repository root, and nowhere else', () => {
+    expect(isAgentGuidePath('AGENTS.md')).toBe(true);
+    expect(isAgentGuidePath('/AGENTS.md')).toBe(true);
+    expect(isAgentGuidePath('Handbook/AGENTS.md')).toBe(false);
+    expect(isAgentGuidePath('agents.md')).toBe(false);
+    expect(isAgentGuidePath('HEXIS.md')).toBe(false);
+    expect(isAgentGuidePath('')).toBe(false);
   });
 
   it('recognises a copy an earlier release wrote to disk by its header line, and nothing else', () => {

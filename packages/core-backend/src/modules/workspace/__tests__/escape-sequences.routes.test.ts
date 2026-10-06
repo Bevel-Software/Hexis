@@ -21,7 +21,8 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import { createMcpRoutes } from '../../mcp/mcp.routes.js';
 import { McpService } from '../../mcp/mcp.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { sharedFileRules, sharedFileRulesSection, sharedRulesPointer } from '../../agent-instructions/shared-file-rules.js';
+import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
+import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 
 /**
  * Who decodes escape sequences in written content a second time — settled on
@@ -386,9 +387,9 @@ describe('what the write tools tell an agent about escape sequences', () => {
       .filter(([, d]) => d.includes('decode escape sequences in arguments before sending') || d.includes('some clients decode them in arguments'))
       .map(([n]) => n);
     expect(carrying).toEqual([]);
-    // Each of the three still points at where the warning is.
+    // Each of the three still opens by sending the agent to the guide, where the warning is.
     for (const name of ['write_file', 'write_files', 'edit_file']) {
-      expect(served[name], name).toContain(sharedRulesPointer(testKbContext().layout).trim());
+      expect(served[name]!.startsWith(GUIDE_FIRST_SENTENCE), name).toBe(true);
     }
   });
 });
