@@ -44,6 +44,13 @@ function latestRowMoment(row: {
 }
 
 const LIST_PR_CACHE_TTL_MS = 30_000;
+/**
+ * How many applied requests' file lists are remembered at once. Each is a
+ * short path list, so this is about a deployment that applies requests for
+ * years never growing the map without bound; past it the map is cleared whole,
+ * and the next list read fills it again.
+ */
+const MAX_REMEMBERED_APPLIED_CHANGES = 5000;
 const DETAIL_CACHE_TTL_MS = 30_000;
 
 type ChangeRequestRow = typeof changeRequests.$inferSelect;
@@ -173,6 +180,12 @@ export class PullRequestService implements IPullRequestService {
    * list cache stores, so it lives and dies with them.
    */
   private routingPaths = new WeakMap<PullRequestSummary, string[]>();
+  /**
+   * The files an APPLIED request landed, per clone and merge commit. A merge
+   * commit is immutable, so its answer is good for the life of the process;
+   * nothing invalidates this, and nothing needs to. See {@link touchedPathsFor}.
+   */
+  private readonly appliedChanges = new Map<string, { paths: string[]; pairs: ChangedPathPair[] }>();
   /**
    * Per-CR detail cache, keyed by `${workspaceId ?? 'global'}:${viewer}:${number}`.
    * The payload includes per-file approvals resolved against the caller's
@@ -317,8 +330,21 @@ export class PullRequestService implements IPullRequestService {
     const source = changeSourceFor(row);
     if (source.kind === 'none') return empty;
     if (source.kind === 'commit') {
+      // Remembered once read: a merge commit never changes, so neither does
+      // its diff, and a list of a few hundred applied requests would otherwise
+      // run four git processes per row on every call. Only an ANSWER is kept.
+      // A commit this clone does not hold yet rejects, and that is this row's
+      // turn to be fetched, so the next read asks again.
+      const key = `${workspaceId}\u0000${source.applied.mergeSha}\u0000${source.applied.number}`;
+      const known = this.appliedChanges.get(key);
+      if (known) return known;
       return this.gitService
         .changedPathsAndPairsOfAppliedChange(workspaceId, source.applied)
+        .then((answer) => {
+          if (this.appliedChanges.size >= MAX_REMEMBERED_APPLIED_CHANGES) this.appliedChanges.clear();
+          this.appliedChanges.set(key, answer);
+          return answer;
+        })
         .catch(degrade('changedPathsAndPairsOfAppliedChange'));
     }
     return this.gitService
