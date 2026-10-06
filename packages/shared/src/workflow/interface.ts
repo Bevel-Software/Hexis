@@ -437,6 +437,16 @@ export interface IWorkflowService {
   // ── Change Requests ───────────────────────────────────────────────────────
 
   listChangeRequests(opts?: { fresh?: boolean }): Promise<ChangeRequest[]>;
+  /**
+   * Change requests in ANY of `states`, newest first. `listChangeRequests`
+   * answers the open ones only — the app's lists are all about what is still
+   * being decided — so a reader catching up on what HAPPENED (the agent read
+   * tools' `state: closed` / `state: all`) needs this one.
+   */
+  listChangeRequestsByState(
+    states: ChangeRequestState[],
+    opts?: { fresh?: boolean },
+  ): Promise<ChangeRequest[]>;
   /** Change requests authored by the given user (matched on stored author identity). */
   listChangeRequestsAuthoredBy(
     emailOrLogin: string,

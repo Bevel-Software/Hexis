@@ -954,7 +954,12 @@ describe('PullRequestService — a recorded or cleared refusal reaches cached li
         ensureRemotesFetched: async () => undefined,
       } as unknown as WorkspaceService,
       {} as unknown as IAccessControl,
-      { changedPathsForPr: async () => ['Plugins/x/SKILL.md'] } as unknown as GitService,
+      {
+        changedPathsAndPairsForPr: async () => ({
+          paths: ['Plugins/x/SKILL.md'],
+          pairs: [{ path: 'Plugins/x/SKILL.md' }],
+        }),
+      } as unknown as GitService,
     );
 
     expect((await svc.listOpenPrs())[0]!.lastApplyFailure).toBeNull();

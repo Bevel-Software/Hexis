@@ -2,8 +2,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { logger } from '../../../shared/logging.js';
 import type {
+  AppliedChangeRef,
+  AppliedMergeResult,
   AuthUser,
   BranchInfo,
+  ChangedPathPair,
   CommitAttribution,
   IGitService,
   RemoteSyncPullResult,
@@ -13,6 +16,7 @@ import type {
   WorkingTreeStatus,
 } from '@bevel-software/platform-shared';
 import { isFolderPlaceholder } from '@bevel-software/platform-shared';
+import { mergeCommitSubjectNames } from './merge-commit.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -1442,7 +1446,9 @@ export class GitService implements IGitService {
    * the new base and re-merge on top of it. Conflicts are deterministic — they
    * return immediately (no retry) so the caller can route into resolution.
    *
-   * Returns the merge commit SHA, or the conflicting paths.
+   * Returns the state the target is left at (`sha`) together with the merge
+   * commit this change request owns (`mergeCommit`, null when there is none), or
+   * the conflicting paths.
    */
   async mergeChangeRequest(
     baseWorkspaceId: string,
@@ -1477,11 +1483,31 @@ export class GitService implements IGitService {
        * instead of falling back to the stale one.
        */
       authorize?: (target: { sha: string; changedPaths: string[] }) => Promise<void>;
+      /**
+       * The change request this merge applies, when it is one (the agent
+       * `merge_branch` path merges no request and leaves it unset).
+       *
+       * It is what lets the "nothing to merge" case tell apart a request that
+       * never had anything to land from one whose merge commit an EARLIER
+       * attempt already pushed — see {@link ownMergeCommitOn}. Without it the
+       * second is indistinguishable from the first, and finalizing it would
+       * forget the only commit its files can be read from.
+       */
+      appliedChangeNumber?: number;
     } = {},
-  ): Promise<{ kind: 'merged'; sha: string } | { kind: 'conflicts'; paths: string[] }> {
+  ): Promise<AppliedMergeResult> {
     assertValidBranchName(sourceBranch);
     assertValidBranchName(targetBranch);
     assertValidAuthor(user);
+    // The same single-line rule `commit` applies, and for a sharper reason here:
+    // `git commit -m` takes the first PARAGRAPH of this string as the subject, so
+    // a blank line inside it would silently push everything after the break into
+    // the body — including the `(#N)` an applied request is read back by.
+    // `mergeCommitSubject` already flattens the title it builds from; this is the
+    // guard that keeps any other caller from reintroducing the break.
+    if (/\n\s*\n/.test(commit.subject)) {
+      throw new WorkflowValidationError('merge commit subject must be a single paragraph');
+    }
     const MAX_ATTEMPTS = 3;
     return this.mutex.run(baseWorkspaceId, async () => {
       const cwd = await this.repoDir(baseWorkspaceId);
@@ -1561,13 +1587,29 @@ export class GitService implements IGitService {
           );
         }
 
-        // Nothing staged ⇒ base already contains source (empty CR). The base tip
-        // is the "merged" state; report it without an empty commit.
+        // Nothing staged ⇒ the target already contains the source. The target tip
+        // is the "merged" state; report it without an empty commit — but NOT as
+        // this request's own merge commit. It is whatever landed on the target
+        // last, usually another request's merge commit, and a reader that took it
+        // for this request's would answer with that other request's files under
+        // this number (cubic P1 on #347).
+        //
+        // There are two ways to arrive here, and they differ in exactly one
+        // thing: whether this request has a merge commit on the target already.
+        // An EMPTY request never had anything to land and has none. A request
+        // whose previous attempt pushed its merge commit and then failed to
+        // finalize the row (a transient database fault between the push and the
+        // update) has one, and it is the only place its file list survives — so
+        // it is looked for rather than assumed absent (cubic P2 on #347).
         const { stdout: staged } = await this.git(cwd, ['diff', '--cached', '--name-only']);
         if (staged.trim() === '') {
           const { stdout: sha } = await this.git(cwd, ['rev-parse', 'HEAD']);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);
-          return { kind: 'merged' as const, sha: sha.trim() };
+          const own =
+            opts.appliedChangeNumber === undefined
+              ? null
+              : await this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, opts.appliedChangeNumber);
+          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: own };
         }
 
         await this.git(cwd, [
@@ -1581,7 +1623,8 @@ export class GitService implements IGitService {
         try {
           await this.git(cwd, ['push', 'origin', `HEAD:refs/heads/${targetBranch}`]);
           this.accessControl?.invalidate(baseWorkspaceId);
-          return { kind: 'merged' as const, sha: sha.trim() };
+          // A commit of this request's own, with the subject the reader verifies.
+          return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: sha.trim() };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           // Base moved under us — reset to the new tip and re-merge next loop.
@@ -1595,6 +1638,98 @@ export class GitService implements IGitService {
         `merge push to "${targetBranch}" kept being rejected after ${MAX_ATTEMPTS} attempts (base moving concurrently)`,
       );
     });
+  }
+
+  /**
+   * The merge commit change request `number` OWNS on `targetBranch`, or null when
+   * the target carries none. Asks the published target only — no source branch,
+   * no working tree, nothing merged, nothing written.
+   *
+   * This is the same question {@link mergeChangeRequest} answers for itself when
+   * it finds nothing to merge, asked WITHOUT attempting a merge at all. The
+   * merge path cannot be the only way to ask it: a request whose merge commit
+   * was pushed by an attempt that then failed to record the row has an empty
+   * diff against the target, so the approval gate refuses the retry ("no file
+   * changes to approve") BEFORE any merge runs, and the recovery inside the
+   * merge never gets its turn (cubic P2 on #347). The gate asks here instead.
+   *
+   * The target ref is refreshed first, because the attempt that pushed the
+   * commit may have run in another process or another clone — and a fetch that
+   * FAILS answers null without looking, which is the only safe answer: what the
+   * caller does with a commit is record it as this request's published state, so
+   * a decision taken on a stale tracking ref could finalize a request with a
+   * commit the published branch no longer carries, and a clone that has no
+   * tracking ref at all would turn the gate's clean refusal into a git error
+   * (cubic P1 on #347). No authority, no answer; the caller then refuses exactly
+   * as it did before this method existed.
+   */
+  async appliedMergeCommitOnTarget(
+    baseWorkspaceId: string,
+    targetBranch: string,
+    number: number,
+  ): Promise<string | null> {
+    assertValidBranchName(targetBranch);
+    const cwd = await this.repoDir(baseWorkspaceId);
+    // The fetch runs outside the workspace mutex, the way the implicit and
+    // per-request fetches do (see `fetchLocks`, `fetchPrRefs`): it writes only
+    // `refs/remotes/origin/*` and new objects, never HEAD, the index or the
+    // working tree, so nothing it does needs serializing against a checkout or
+    // a commit, and holding the mutex through a network round trip would park
+    // every other git op behind the origin. (`mergeChangeRequest` fetches under
+    // the mutex for a reason this method lacks: its fetch is one step of a
+    // merge whose working tree must not move between the fetch and the push.)
+    // The read that follows is a local one, and takes the mutex like
+    // `appliedChangeShas` does.
+    const refreshed = await this.git(cwd, [
+      'fetch', '--no-write-fetch-head', 'origin',
+      `+refs/heads/${targetBranch}:refs/remotes/origin/${targetBranch}`,
+    ]).then(() => true, () => false);
+    if (!refreshed) {
+      log.warn(
+        `could not refresh "${targetBranch}" to look for change request #${number}'s merge commit, ` +
+          'so it is reported as owning none.',
+      );
+      return null;
+    }
+    return this.mutex.run(baseWorkspaceId, () => this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, number));
+  }
+
+  /**
+   * The newest merge commit reachable from `targetRef` that is change request
+   * `number`'s OWN, or null if the target carries none.
+   *
+   * Asked when a merge finds nothing to merge, to tell "this request never had
+   * anything to land" apart from "a previous attempt already landed it". The
+   * second happens when the push succeeded and the row update did not — the
+   * merge commit is on the target, and if this attempt then records no sha the
+   * request becomes permanently fileless, readable by its author alone, with the
+   * commit that holds its files still sitting there unreferenced (cubic P2 on
+   * #347).
+   *
+   * The two conditions are the reader's own (`appliedChangeShas`): a merge
+   * commit, whose subject names this number. Deciding it here with the same
+   * predicate means the writer records only what the reader will accept. The
+   * walk is bounded by `--grep` (the number, as a fixed string) and capped,
+   * since the subject check still has to confirm a body-only match. Never on an
+   * ordinary merge: the two callers are the empty-merge case here and
+   * {@link appliedMergeCommitOnTarget}, which the approval gate asks before it
+   * refuses a retry that has nothing left to merge.
+   */
+  private async ownMergeCommitOn(
+    cwd: string,
+    targetRef: string,
+    number: number,
+  ): Promise<string | null> {
+    const { stdout } = await this.git(cwd, [
+      'log', '--merges', '--fixed-strings', `--grep=(#${number})`,
+      '--format=%H%x00%s', '-n', '20', targetRef,
+    ]);
+    for (const line of stdout.split('\n')) {
+      const [sha, subject] = line.split('\0');
+      if (!sha || subject === undefined) continue;
+      if (mergeCommitSubjectNames(subject, number)) return sha.trim();
+    }
+    return null;
   }
 
   /** Conflicted paths from a half-done merge, parsed from porcelain status. */
@@ -2557,73 +2692,254 @@ export class GitService implements IGitService {
     return this.mutex.run(workspaceId, async () => {
       const baseRef = opts.at ? opts.at.baseSha : await this.resolvePublishedBranchRef(cwd, baseBranch);
       const headRef = opts.at ? opts.at.headSha : await this.resolvePublishedBranchRef(cwd, headBranch);
-      const range = `${baseRef}...${headRef}`; // three-dot = changes on head since merge-base
+      // three-dot = changes on head since merge-base
+      return this.prFilesForRange(cwd, `${baseRef}...${headRef}`, patchCap);
+    });
+  }
 
-      const [{ stdout: nameStatusOut }, { stdout: numstatOut }] = await Promise.all([
-        this.git(cwd, ['diff', '-M', '-z', '--name-status', range]),
-        this.git(cwd, ['diff', '-M', '-z', '--numstat', range]),
-      ]);
-      let statuses = parseNameStatusZ(nameStatusOut);
-      let counts = parseNumstatZ(numstatOut);
-      // roles.yaml can NEVER change through a merge — `preserveBaseRolesYaml`
-      // restores the base copy onto the source branch before every merge — so
-      // listing it as "changed" claims something the merge will not do, and
-      // (worse) makes its approval a requirement for a change that cannot
-      // land. Filter it from the review surface entirely; the neutralisation
-      // reads the raw refs itself and is unaffected. Both lists are filtered
-      // IN STEP so the index-zip below stays aligned.
-      // The empty-folder placeholder is filtered the same way: it is never
-      // content, so it is not a file to review or approve. It still merges
-      // with the rest, and `changedPathsForPr` keeps it, so a request that
-      // only creates a folder is not mistaken for an empty one and closed.
-      // An empty file deleted as its folder gets the (equally empty)
-      // placeholder reads to `-M` as a RENAME onto it; the real side of such
-      // a pair is first made the plain removal (or addition) it is, so
-      // dropping the placeholder never drops the file with it.
-      statuses = statuses.map(withoutPlaceholderRename);
-      if (statuses.some((s) => s.path === 'roles.yaml' || isFolderPlaceholder(s.path))) {
-        const keep = statuses.map((s) => s.path !== 'roles.yaml' && !isFolderPlaceholder(s.path));
-        statuses = statuses.filter((_, i) => keep[i]);
-        if (counts.length === keep.length) counts = counts.filter((_, i) => keep[i]);
+  /**
+   * The changed-file list over one already-decided diff `range`, with the
+   * statuses, the +/- counts and up to `patchCap` patches — everything
+   * `changedFilesForPr` does once it knows which two commits it is comparing.
+   *
+   * Separated from the ref resolution because a change request has a second
+   * diff that means exactly the same thing and resolves nothing: the one a
+   * MERGE COMMIT holds, read against its first parent. Both must filter
+   * `roles.yaml` and the folder placeholder the same way and zip the two
+   * `--name-status` / `--numstat` lists by the same index, or a merged request
+   * would answer a different file list from the one it answered while open.
+   *
+   * The caller holds the workspace reservation; this takes none.
+   */
+  private async prFilesForRange(
+    cwd: string,
+    range: string,
+    patchCap: number,
+  ): Promise<PullRequestFile[]> {
+    const [{ stdout: nameStatusOut }, { stdout: numstatOut }] = await Promise.all([
+      this.git(cwd, ['diff', '-M', '-z', '--name-status', range]),
+      this.git(cwd, ['diff', '-M', '-z', '--numstat', range]),
+    ]);
+    let statuses = parseNameStatusZ(nameStatusOut);
+    let counts = parseNumstatZ(numstatOut);
+    // roles.yaml can NEVER change through a merge — `preserveBaseRolesYaml`
+    // restores the base copy onto the source branch before every merge — so
+    // listing it as "changed" claims something the merge will not do, and
+    // (worse) makes its approval a requirement for a change that cannot
+    // land. Filter it from the review surface entirely; the neutralisation
+    // reads the raw refs itself and is unaffected. Both lists are filtered
+    // IN STEP so the index-zip below stays aligned.
+    // The empty-folder placeholder is filtered the same way: it is never
+    // content, so it is not a file to review or approve. It still merges
+    // with the rest, and `changedPathsForPr` keeps it, so a request that
+    // only creates a folder is not mistaken for an empty one and closed.
+    // An empty file deleted as its folder gets the (equally empty)
+    // placeholder reads to `-M` as a RENAME onto it; the real side of such
+    // a pair is first made the plain removal (or addition) it is, so
+    // dropping the placeholder never drops the file with it.
+    statuses = statuses.map(withoutPlaceholderRename);
+    if (statuses.some((s) => s.path === 'roles.yaml' || isFolderPlaceholder(s.path))) {
+      const keep = statuses.map((s) => s.path !== 'roles.yaml' && !isFolderPlaceholder(s.path));
+      statuses = statuses.filter((_, i) => keep[i]);
+      if (counts.length === keep.length) counts = counts.filter((_, i) => keep[i]);
+    }
+
+    // `--name-status` and `--numstat` enumerate the same files in the same
+    // order (same `-M` over the same range), so we zip by index. If the two
+    // ever disagree in length, the index alignment is unsafe — fall back to
+    // zeroed counts (statuses/paths stay correct) rather than pin the wrong
+    // +/- to a file.
+    const aligned = counts.length === statuses.length;
+    if (!aligned) {
+      crLog.warn(
+        `diff name-status/numstat length mismatch (${statuses.length} vs ${counts.length}) ` +
+          `for ${range} — reporting file list without +/- counts`,
+      );
+    }
+
+    const files: PullRequestFile[] = statuses.map((s, i) => {
+      const c = (aligned ? counts[i] : undefined) ?? { additions: 0, deletions: 0, isBinary: false };
+      return {
+        path: s.path,
+        previousPath: s.previousPath,
+        status: s.status,
+        additions: c.additions,
+        deletions: c.deletions,
+        patch: undefined,
+        isBinary: c.isBinary,
+        sha: '',
+        rawUrl: '',
+      };
+    });
+
+    // Generate per-file patches for the first `patchCap` non-binary files.
+    let generated = 0;
+    for (const f of files) {
+      if (generated >= patchCap) break;
+      if (f.isBinary) continue;
+      f.patch = await this.filePatchForPr(cwd, range, f);
+      generated += 1;
+    }
+    return files;
+  }
+
+  /**
+   * The FIRST PARENT of a commit, resolved — the other end of the diff one
+   * commit introduced, and the check that this clone holds the commit at all.
+   *
+   * This is how an applied change request is read back. Its source branch is
+   * retired, so there are no two branch refs left to diff; what is left is the
+   * merge commit the row records, whose first parent is the target as it stood
+   * before the merge and whose tree is the target with the change in it. The
+   * diff between the two is precisely what the request applied — and it is
+   * immutable, which the branch pair never was.
+   *
+   * First-parent and TWO dots, both deliberately. A three-dot diff would be
+   * read from the merge base of the two parents, i.e. it would re-report the
+   * source branch's whole history rather than what landed. `^1` is the target
+   * side for a merge commit, and for a squashed or fast-forwarded commit it is
+   * simply the commit before — the same answer either way.
+   *
+   * Throws `WorkflowValidationError` whenever the recorded commit cannot be
+   * PROVEN to be this request's own merge commit — see
+   * {@link appliedChangeShas}. Every caller reads that as "the file set could
+   * not be resolved" and falls back to its own fail-closed answer, which is what
+   * a clone that has not fetched the merge yet must get: no files, never
+   * somebody else's.
+   */
+  private async appliedEnds(
+    cwd: string,
+    applied: AppliedChangeRef,
+  ): Promise<{ baseSha: string; headSha: string }> {
+    const { mergeSha, number } = applied;
+    if (!/^[0-9a-f]{40,64}$/.test(mergeSha)) {
+      throw new WorkflowValidationError(`invalid commit sha: ${mergeSha}`);
+    }
+    const revParse = async (rev: string): Promise<string | null> => {
+      try {
+        // One question, both answers: `--verify --quiet` prints what it resolved
+        // and exits 1 if there is nothing to resolve.
+        const { stdout } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', rev]);
+        return stdout.trim();
+      } catch (err) {
+        // Exit 1 under --quiet is git's own "no such object": this clone does
+        // not have the commit, or the commit has no such parent. Anything else
+        // (a deadline, a broken repository) is the caller's to see.
+        if (err instanceof GitRunError && !err.timedOut && err.exitCode === 1) return null;
+        throw err;
       }
+    };
+    // The SECOND parent first, because its absence is the whole P1: a merge
+    // `--no-ff` always has one, and a commit that does not is not a merge this
+    // request made. Asking for it also answers "is this commit here at all".
+    const headSha = await revParse(`${mergeSha}^2^{commit}`);
+    if (!headSha) {
+      throw new WorkflowValidationError(
+        `commit ${mergeSha} is not a merge commit in this clone, so it cannot be change request #${number}'s`,
+      );
+    }
+    const baseSha = await revParse(`${mergeSha}^1^{commit}`);
+    if (!baseSha) {
+      throw new WorkflowValidationError(`no first parent for commit ${mergeSha}`);
+    }
+    const { stdout: subject } = await this.git(cwd, ['log', '-1', '--format=%s', mergeSha]);
+    if (!mergeCommitSubjectNames(subject, number)) {
+      throw new WorkflowValidationError(
+        `commit ${mergeSha} is not the merge commit of change request #${number}`,
+      );
+    }
+    return { baseSha, headSha };
+  }
 
-      // `--name-status` and `--numstat` enumerate the same files in the same
-      // order (same `-M` over the same range), so we zip by index. If the two
-      // ever disagree in length, the index alignment is unsafe — fall back to
-      // zeroed counts (statuses/paths stay correct) rather than pin the wrong
-      // +/- to a file.
-      const aligned = counts.length === statuses.length;
-      if (!aligned) {
-        crLog.warn(
-          `diff name-status/numstat length mismatch (${statuses.length} vs ${counts.length}) ` +
-            `for ${range} — reporting file list without +/- counts`,
-        );
-      }
+  /**
+   * The two commits an APPLIED change request spanned, recovered from the merge
+   * commit its row records: the target as it stood before the merge (`^1`) and
+   * the source tip that was merged (`^2`).
+   *
+   * These are what the detail of a merged request reports as its `baseSha` and
+   * `headSha`, and the `headSha` matters beyond being informative: an approval
+   * row stores the source head it was given against, and the detail calls an
+   * approval stale when that sha is not the detail's `headSha`. Answering the
+   * merge commit itself there would report every approval a merged request ever
+   * collected as stale, and every file of it as unapproved — the opposite of
+   * what happened.
+   *
+   * ## Why the commit is VERIFIED rather than taken
+   *
+   * `merged_sha` is not reliably a commit this request created. When the target
+   * already contains the source there is nothing to merge, so
+   * `mergeChangeRequest` writes no commit and reports the TARGET TIP as the
+   * merged state — and in a deployment that lands everything through change
+   * requests, that tip is usually ANOTHER request's merge commit. Reading "the
+   * recorded commit's own change" then answers with somebody else's files under
+   * this request's number: the request looks like it changed files it never
+   * touched, and becomes visible to whoever may read THOSE (cubic P1 on #347).
+   *
+   * So three things must hold, and all three are cheap:
+   *
+   *   1. the commit is in this clone,
+   *   2. it has a SECOND parent — `mergeChangeRequest` merges `--no-ff`, so
+   *      every merge commit it writes has one, and a commit that has none was
+   *      not written by a merge,
+   *   3. its subject names THIS request — see `merge-commit.ts`.
+   *
+   * Anything else fails closed: no files, so author-only, rather than a file
+   * list that belongs to another change. The write side no longer records a
+   * no-op merge's sha at all, so for rows written from now on all three hold by
+   * construction; the verification is what protects the rows written before it.
+   */
+  async appliedChangeShas(
+    workspaceId: string,
+    applied: AppliedChangeRef,
+  ): Promise<{ baseSha: string; headSha: string }> {
+    const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () => this.appliedEnds(cwd, applied));
+  }
 
-      const files: PullRequestFile[] = statuses.map((s, i) => {
-        const c = (aligned ? counts[i] : undefined) ?? { additions: 0, deletions: 0, isBinary: false };
-        return {
-          path: s.path,
-          previousPath: s.previousPath,
-          status: s.status,
-          additions: c.additions,
-          deletions: c.deletions,
-          patch: undefined,
-          isBinary: c.isBinary,
-          sha: '',
-          rawUrl: '',
-        };
-      });
+  /**
+   * The changed-file list an APPLIED change request landed, read from its merge
+   * commit against that commit's first parent, and shaped the way
+   * `changedFilesForPr` shapes a branch pair — how an applied request is read
+   * back, since its source branch is retired and the merge commit is what is
+   * left of it.
+   *
+   * TWO dots, from the first parent. A three-dot diff would be read from the
+   * merge base of the merge commit's two parents, i.e. it would re-report the
+   * source branch's whole history instead of what landed on the target.
+   *
+   * Verified, not assumed — see {@link appliedChangeShas}. No fetch: the commit
+   * is in this clone or this rejects.
+   */
+  async changedFilesOfAppliedChange(
+    workspaceId: string,
+    applied: AppliedChangeRef,
+    opts: { patchCap?: number } = {},
+  ): Promise<PullRequestFile[]> {
+    const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () => {
+      const { baseSha } = await this.appliedEnds(cwd, applied);
+      return this.prFilesForRange(cwd, `${baseSha}..${applied.mergeSha}`, opts.patchCap ?? 400);
+    });
+  }
 
-      // Generate per-file patches for the first `patchCap` non-binary files.
-      let generated = 0;
-      for (const f of files) {
-        if (generated >= patchCap) break;
-        if (f.isBinary) continue;
-        f.patch = await this.filePatchForPr(cwd, range, f);
-        generated += 1;
-      }
-      return files;
+  /**
+   * The same applied change as the two path views a change-request SUMMARY needs
+   * — the flat touched-path list and the rename-aware pairs — out of one
+   * `git diff`, exactly as {@link changedPathsAndPairsForPr} does for a branch
+   * pair. Same verification and same no-fetch contract.
+   */
+  async changedPathsAndPairsOfAppliedChange(
+    workspaceId: string,
+    applied: AppliedChangeRef,
+  ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }> {
+    const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () => {
+      const { baseSha } = await this.appliedEnds(cwd, applied);
+      const entries = await this.prChangedEntriesForRange(
+        cwd,
+        `${baseSha}..${applied.mergeSha}`,
+      );
+      return { paths: flattenChangedPaths(entries, {}), pairs: changedPathPairs(entries) };
     });
   }
 
@@ -2702,32 +3018,70 @@ export class GitService implements IGitService {
     headRef: string,
     opts: { forAccessCheck?: boolean } = {},
   ): Promise<string[]> {
-    const { stdout } = await this.git(cwd, [
-      'diff', '-M', '-z', '--name-status', `${baseRef}...${headRef}`,
-    ]);
-    // Deduped: both sides of a rename can collide with another entry's path.
-    return [
-      ...new Set(
-        parseNameStatusZ(stdout)
-          // A rename onto or off the placeholder is a real file removed or
-          // added (see `withoutPlaceholderRename`): both of its paths are
-          // touched, or filtering the placeholder would lose the file.
-          //
-          // Authorizing the change needs both sides of EVERY rename, not just
-          // the placeholder's: git reports a rename under its new name alone,
-          // and the old name is a path the change deletes.
-          .flatMap((s) =>
-            s.previousPath &&
-            (opts.forAccessCheck || isFolderPlaceholder(s.path) || isFolderPlaceholder(s.previousPath))
-              ? [s.previousPath, s.path]
-              : [s.path],
-          )
-          // Same rule as `changedFilesForPr`: a roles.yaml change never
-          // survives a merge, so it is not a touched path for routing or
-          // summaries either.
-          .filter((p) => opts.forAccessCheck || p !== 'roles.yaml'),
-      ),
-    ];
+    return flattenChangedPaths(await this.prChangedEntriesAt(cwd, baseRef, headRef), opts);
+  }
+
+  /**
+   * The same diff, left as parsed ENTRIES: each changed file with the path it
+   * came from when git detected a rename.
+   *
+   * The flat path list cannot express that pairing, and a caller deciding what
+   * someone may READ needs it. A file renamed out of a folder the caller cannot
+   * open is readable under neither of its names — the diff of a rename shows
+   * the old side's content — and a flat list that offers both paths unlabelled
+   * cannot say which new file the closed old path belongs to. `forAccessCheck`
+   * solves the write side of this by taking the union; a read gate needs the
+   * pairing itself.
+   */
+  private async prChangedEntriesAt(
+    cwd: string,
+    baseRef: string,
+    headRef: string,
+  ): Promise<NameStatusEntry[]> {
+    return this.prChangedEntriesForRange(cwd, `${baseRef}...${headRef}`);
+  }
+
+  /**
+   * The same parsed entries over an already-decided `range`, so a merge
+   * commit's own diff ({@link firstParentRange}) is read by the same parser as a
+   * change request's branch pair.
+   */
+  private async prChangedEntriesForRange(
+    cwd: string,
+    range: string,
+  ): Promise<NameStatusEntry[]> {
+    const { stdout } = await this.git(cwd, ['diff', '-M', '-z', '--name-status', range]);
+    return parseNameStatusZ(stdout);
+  }
+
+  /**
+   * One diff, both views of it: the flat touched-path list every existing
+   * caller reads, and the rename-aware pairs a read gate needs. The change-
+   * request summary builder wants both, and must not pay for two `git diff`s
+   * to get them — it is on the list path that is polled every 60s.
+   */
+  async changedPathsAndPairsForPr(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+    opts: { fetch?: boolean } = {},
+  ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }> {
+    assertValidBranchName(baseBranch);
+    assertValidBranchName(headBranch);
+    const cwd = await this.repoDir(workspaceId);
+    // Same ref pinning and the same fetch skip as `changedPathsForPr`, for the
+    // same reasons spelled out there.
+    const pinned =
+      opts.fetch === false ? await this.publishedPrCommits(cwd, baseBranch, headBranch) : null;
+    if (!pinned) {
+      await this.fetchPrRefs(cwd, baseBranch, headBranch);
+    }
+    return this.mutex.run(workspaceId, async () => {
+      const baseRef = pinned ? pinned.base : await this.resolvePublishedBranchRef(cwd, baseBranch);
+      const headRef = pinned ? pinned.head : await this.resolvePublishedBranchRef(cwd, headBranch);
+      const entries = await this.prChangedEntriesAt(cwd, baseRef, headRef);
+      return { paths: flattenChangedPaths(entries, {}), pairs: changedPathPairs(entries) };
+    });
   }
 
   /**
@@ -3616,6 +3970,67 @@ interface NameStatusEntry {
  * Parse `git diff -M -z --name-status` output. NUL-separated tokens: each record
  * is `<statusLetter>\0<path>`, or for a rename/copy `<Rxxx|Cxxx>\0<old>\0<new>`.
  */
+/**
+ * The flat touched-path list of a parsed `--name-status` diff. Lifted out of
+ * `prChangedPathsAt` unchanged, so the pair-returning reader can share one
+ * diff with it rather than running a second.
+ */
+function flattenChangedPaths(
+  entries: NameStatusEntry[],
+  opts: { forAccessCheck?: boolean } = {},
+): string[] {
+  // Deduped: both sides of a rename can collide with another entry's path.
+  return [
+    ...new Set(
+      entries
+        // A rename onto or off the placeholder is a real file removed or
+        // added (see `withoutPlaceholderRename`): both of its paths are
+        // touched, or filtering the placeholder would lose the file.
+        //
+        // Authorizing the change needs both sides of EVERY rename, not just
+        // the placeholder's: git reports a rename under its new name alone,
+        // and the old name is a path the change deletes.
+        .flatMap((s) =>
+          s.previousPath &&
+          (opts.forAccessCheck || isFolderPlaceholder(s.path) || isFolderPlaceholder(s.previousPath))
+            ? [s.previousPath, s.path]
+            : [s.path],
+        )
+        // Same rule as `changedFilesForPr`: a roles.yaml change never
+        // survives a merge, so it is not a touched path for routing or
+        // summaries either.
+        .filter((p) => opts.forAccessCheck || p !== 'roles.yaml'),
+    ),
+  ];
+}
+
+/**
+ * The changed files of a diff as read-gate pairs: every file the request
+ * proposes, carrying the path it was renamed from when it has one.
+ *
+ * Normalised and filtered EXACTLY as `changedFilesForPr` does it, through the
+ * same `withoutPlaceholderRename` and the same two drops — because this is the
+ * file set a change-request LIST decides visibility over and that one is the
+ * file set its DETAIL decides over, and the two answering differently is how a
+ * list comes to advertise a request its own detail refuses (or to hide one the
+ * detail serves). Any future change to one filter belongs in both.
+ */
+function changedPathPairs(entries: NameStatusEntry[]): ChangedPathPair[] {
+  const byPath = new Map<string, ChangedPathPair>();
+  for (const raw of entries) {
+    // A rename between a real file and the placeholder is a removal or an
+    // addition of the real side; after this, the placeholder filter below
+    // cannot take the file with it.
+    const entry = withoutPlaceholderRename(raw);
+    if (isFolderPlaceholder(entry.path) || entry.path === 'roles.yaml') continue;
+    byPath.set(entry.path, {
+      path: entry.path,
+      ...(entry.previousPath ? { previousPath: entry.previousPath } : {}),
+    });
+  }
+  return [...byPath.values()];
+}
+
 export function parseNameStatusZ(out: string): NameStatusEntry[] {
   const tokens = out.split('\0');
   const entries: NameStatusEntry[] = [];
