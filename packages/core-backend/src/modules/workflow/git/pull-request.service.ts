@@ -47,10 +47,11 @@ const LIST_PR_CACHE_TTL_MS = 30_000;
 /**
  * How many applied requests' file lists are remembered at once. Each is a
  * short path list, so this is about a deployment that applies requests for
- * years never growing the map without bound; past it the map is cleared whole,
- * and the next list read fills it again.
+ * years never growing the map without bound. Past it, what is remembered
+ * stays and new answers are not kept — see `touchedPathsFor` for why nothing
+ * is evicted.
  */
-const MAX_REMEMBERED_APPLIED_CHANGES = 5000;
+const MAX_REMEMBERED_APPLIED_CHANGES = 20_000;
 const DETAIL_CACHE_TTL_MS = 30_000;
 
 type ChangeRequestRow = typeof changeRequests.$inferSelect;
@@ -341,8 +342,13 @@ export class PullRequestService implements IPullRequestService {
       return this.gitService
         .changedPathsAndPairsOfAppliedChange(workspaceId, source.applied)
         .then((answer) => {
-          if (this.appliedChanges.size >= MAX_REMEMBERED_APPLIED_CHANGES) this.appliedChanges.clear();
-          this.appliedChanges.set(key, answer);
+          // Full: what is remembered stays, and this answer is simply not
+          // kept. A list scans every applied row in one pass, so clearing or
+          // evicting here would throw out entries the SAME pass is about to
+          // ask for again, and a deployment past the cap would recompute
+          // every row on every list. Kept, the rows past the cap are the only
+          // ones that cost git anything.
+          if (this.appliedChanges.size < MAX_REMEMBERED_APPLIED_CHANGES) this.appliedChanges.set(key, answer);
           return answer;
         })
         .catch(degrade('changedPathsAndPairsOfAppliedChange'));
