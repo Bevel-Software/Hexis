@@ -187,6 +187,43 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     );
   }
 
+  /**
+   * Write a file whose new content DEPENDS on what it holds: the read, the
+   * computing of the new bytes and the write all happen with the path's lock
+   * held, so what lands is derived from the very bytes it replaces.
+   *
+   * `writeFile` cannot give that. Its content is fixed before the lock is
+   * taken, so a caller that read the file first is writing over a state
+   * anyone may have moved in between: an `edit_file` replacing an empty owner
+   * field with one name would silently overwrite another name written a
+   * moment earlier, and both callers would be told their edit landed.
+   *
+   * `rewrite` receives the file as it is under the lock (null when nothing is
+   * there) and answers the bytes to write. Throwing refuses: nothing is
+   * written, the lock is released untouched, and the caller gets what was
+   * thrown.
+   */
+  async rewriteFile(
+    inputPath: string,
+    rewrite: (current: Buffer | null) => FileContent | Promise<FileContent>,
+  ): Promise<void> {
+    await this.assertNotGitInternals(inputPath);
+    this.assertInsideRepo(inputPath);
+    const validate = this.lockContext.validateWrite;
+    let toWrite: FileContent | null = null;
+    return this.withLock(
+      inputPath,
+      () => super.writeFile(inputPath, toWrite as FileContent),
+      async () => {
+        const next = await rewrite(await this.readIfExists(inputPath));
+        // The pre-disk gate judges the bytes that will land, as it does for
+        // every other write, and here those exist only now.
+        await validate?.(inputPath, next);
+        toWrite = next;
+      },
+    );
+  }
+
   override async appendFile(inputPath: string, content: FileContent): Promise<void> {
     await this.assertNotGitInternals(inputPath);
     this.assertInsideRepo(inputPath);

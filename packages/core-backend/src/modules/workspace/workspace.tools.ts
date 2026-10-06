@@ -353,17 +353,17 @@ function assertNotDocumentEdit(readers: FileReaderRegistry, path: string): void 
  *
  * Costs one read of the existing file, and only for readers that ask the
  * question. A path with nothing at it is a CREATE: there is nothing to destroy.
- * Returns the bytes it read (so a caller that needs the content next —
- * `edit_file` — does not read the file a second time), or undefined when it
- * had no reason to read or nothing existed.
+ * For the tools that REPLACE a file without needing what it held (`write_file`,
+ * `write_files`); `edit_file` holds the bytes already and asks
+ * `assertBytesTextEditable` of each reading it takes.
  */
 async function assertNotBinaryOverwrite(
   readers: FileReaderRegistry,
   path: string,
   fs: { readFile(p: string): Promise<string | Buffer> },
-): Promise<Buffer | undefined> {
+): Promise<void> {
   const reader = readers.readerFor(path);
-  if (reader.editRefusalForExisting === undefined) return undefined;
+  if (reader.editRefusalForExisting === undefined) return;
   let existing: Buffer;
   try {
     existing = asBytes(await fs.readFile(path));
@@ -372,12 +372,21 @@ async function assertNotBinaryOverwrite(
     // FileNotFoundError carry the disk's absence codes). Any other failure —
     // permissions, I/O — means the existing content could not be inspected:
     // propagate it rather than let the write destroy bytes the gate never saw.
-    if (isAbsence(err)) return undefined; // nothing there yet
+    if (isAbsence(err)) return; // nothing there yet
     throw err;
   }
-  const refusal = reader.editRefusalForExisting(existing, path);
+  assertBytesTextEditable(readers, path, existing);
+}
+
+/**
+ * The same refusal, over bytes the caller already holds. Split out so a tool
+ * that reads the file more than once — `edit_file`, before the lock and again
+ * under it — judges EVERY reading with the one rule, and the bytes it replaces
+ * are always bytes this gate has seen.
+ */
+function assertBytesTextEditable(readers: FileReaderRegistry, path: string, existing: Buffer): void {
+  const refusal = readers.readerFor(path).editRefusalForExisting?.(existing, path) ?? null;
   if (refusal !== null) throw binaryNotWritable('binary', refusal);
-  return existing;
 }
 
 /** What a write is ALLOWED to do at a path. `create` is the default everywhere. */
@@ -2367,20 +2376,49 @@ export function registerWorkspaceTools(
       const path = a.path as string;
       const oldStr = a.old_string as string;
       const newStr = a.new_string as string;
-      // The overwrite gate already read the file when its reader asked the
-      // binary question — reuse those bytes instead of reading twice.
-      const content = await orNotFound(path, async () => {
-        const existing = await assertNotBinaryOverwrite(readers, path, fs);
-        return asText(existing ?? (await fs.readFile(path)));
-      });
-      const count = oldStr ? content.split(oldStr).length - 1 : 0;
-      if (count === 0) throw new ToolError('old_string not found in the file.', 400);
-      if (count > 1 && a.replace_all !== true) {
-        throw new ToolError(`old_string appears ${count} times — add more context to make it unique, or set replace_all.`, 400);
+      // Everything the tool decides about ONE reading of the file: may these
+      // bytes be edited as text at all, is `old_string` there, is it unique,
+      // and what the file becomes. One function, because the file is read
+      // twice — before the lock and under it — and a reading that skipped any
+      // of these questions would let bytes land that were never judged.
+      // `split`/`join`, not `String.replace`, which reads `$&`, `$'`, `` $` ``
+      // and `$$` in `new_string` as patterns and writes something the caller
+      // never sent.
+      const edit = (existing: Buffer): { updated: string; replaced: number } => {
+        assertBytesTextEditable(readers, path, existing);
+        const text = asText(existing);
+        const pieces = oldStr ? text.split(oldStr) : [text];
+        const count = pieces.length - 1;
+        if (count === 0) throw new ToolError('old_string not found in the file.', 400);
+        if (count > 1 && a.replace_all !== true) {
+          throw new ToolError(`old_string appears ${count} times — add more context to make it unique, or set replace_all.`, 400);
+        }
+        return { updated: pieces.join(newStr), replaced: count };
+      };
+      // A first verdict before any lock is taken, so an ordinary refusal costs
+      // no lock cycle. It is a verdict about a file anyone may still change.
+      let result = edit(await orNotFound(path, async () => asBytes(await fs.readFile(path))));
+      // The one the answer carries is taken again with the path's lock HELD,
+      // over the bytes read there (`write: true` guarantees the locking
+      // filesystem): read, verdict and write are one step nobody can get
+      // between. Taken before the lock only, two callers replacing the same
+      // text — two runners claiming a work item by filling its empty owner
+      // field — were BOTH told their edit landed, and the second silently
+      // overwrote the first. A filesystem without the method has no lock to
+      // read under, so the first verdict stands.
+      const locking = fs as unknown as {
+        rewriteFile?(path: string, rewrite: (current: Buffer | null) => string): Promise<void>;
+      };
+      if (typeof locking.rewriteFile === 'function') {
+        await locking.rewriteFile(path, (current) => {
+          if (current === null) throw notFound(path);
+          result = edit(current);
+          return result.updated;
+        });
+      } else {
+        await fs.writeFile(path, result.updated);
       }
-      const updated = a.replace_all === true ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
-      await fs.writeFile(path, updated);
-      return { path, replaced: a.replace_all === true ? count : 1, ...(await saveWarnings(ctx, path, updated)) };
+      return { path, replaced: result.replaced, ...(await saveWarnings(ctx, path, result.updated)) };
     },
   });
 

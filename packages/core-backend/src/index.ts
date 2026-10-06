@@ -53,6 +53,13 @@ export {
   runCoreMigrations,
   runEnterpriseMigrations,
   runPiiEncryptionBackfill,
+  // The same backfill for an overlay's own sealed columns: its spec goes to
+  // `runEnterpriseMigrations`, or to `runPiiBackfill` under a lock of its own.
+  runPiiBackfill,
+  type PiiBackfillExecutor,
+  type PiiBackfillSpec,
+  type PiiBackfillTable,
+  type PiiBlindIndex,
 } from './modules/database/migrate.js';
 export {
   getDb,

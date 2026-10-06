@@ -409,6 +409,99 @@ describe('LockingFilesystem — the caller judges under the lock', () => {
     expect(workflow.releaseLock).not.toHaveBeenCalled();
   });
 
+  it('rewriteFile reads, computes and writes with the lock HELD, from the bytes on disk at that moment', async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/Foo.md'), 'owner: \n');
+
+    const workflow = makeWorkflow();
+    const order: string[] = [];
+    (workflow.acquireLock as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      order.push('acquire');
+      // Another writer lands while this call waits for the lock.
+      await fs.writeFile(path.join(root, 'knowledge-base/Foo.md'), 'owner: alice\n');
+      return { acquired: true, lock: { holderName: 'Alice' } };
+    });
+    (workflow.releaseLock as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      order.push('release');
+      return null;
+    });
+
+    let seen = '';
+    await layer(workflow).rewriteFile('knowledge-base/Foo.md', (current) => {
+      order.push('rewrite');
+      seen = current!.toString('utf8');
+      return `${seen}note: kept\n`;
+    });
+
+    expect(order).toEqual(['acquire', 'rewrite', 'release']);
+    // It was handed what the other writer left, not what was there when the call began.
+    expect(seen).toBe('owner: alice\n');
+    expect(await fs.readFile(path.join(root, 'knowledge-base/Foo.md'), 'utf-8')).toBe('owner: alice\nnote: kept\n');
+    expect(workflow.releaseLock).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/Foo.md', USER);
+  });
+
+  it('a rewriteFile that throws writes nothing, releases UNTOUCHED, and gives the caller its own error', async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/Foo.md'), 'theirs\n');
+
+    const workflow = makeWorkflow();
+    const refusal = new Error('old text is gone');
+    await expect(
+      layer(workflow).rewriteFile('knowledge-base/Foo.md', () => {
+        throw refusal;
+      }),
+    ).rejects.toBe(refusal);
+
+    expect(await fs.readFile(path.join(root, 'knowledge-base/Foo.md'), 'utf-8')).toBe('theirs\n');
+    expect(workflow.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/Foo.md', USER);
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(workflow.releaseLock).not.toHaveBeenCalled();
+  });
+
+  it('rewriteFile hands over null when nothing is at the path', async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
+    const workflow = makeWorkflow();
+    let seen: Buffer | null | undefined;
+    await layer(workflow).rewriteFile('knowledge-base/New.md', (current) => {
+      seen = current;
+      return 'made\n';
+    });
+    expect(seen).toBeNull();
+    expect(await fs.readFile(path.join(root, 'knowledge-base/New.md'), 'utf-8')).toBe('made\n');
+  });
+
+  it('rewriteFile judges the bytes it is about to write with the pre-disk validator, under the lock', async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/Foo.md'), 'ok\n');
+    const workflow = makeWorkflow();
+    const refusal = new Error('refused by the validator');
+    const judged: string[] = [];
+    const guarded = new LockingFilesystem(
+      { basePath: root, contained: true },
+      {
+        workflow,
+        workspaceId: 'ws-feat',
+        branch: 'feat',
+        user: USER,
+        kbDirName: KB,
+        validateWrite: async (_p, content) => {
+          judged.push(String(content));
+          throw refusal;
+        },
+      },
+    );
+    await expect(guarded.rewriteFile('knowledge-base/Foo.md', () => 'bad\n')).rejects.toBe(refusal);
+    expect(judged).toEqual(['bad\n']);
+    expect(await fs.readFile(path.join(root, 'knowledge-base/Foo.md'), 'utf-8')).toBe('ok\n');
+    expect(workflow.releaseLockUntouched).toHaveBeenCalled();
+  });
+
+  it('rewriteFile refuses a path outside the repository before any lock', async () => {
+    const workflow = makeWorkflow();
+    await expect(layer(workflow).rewriteFile('elsewhere/Foo.md', () => 'x')).rejects.toThrow();
+    expect(workflow.acquireLock).not.toHaveBeenCalled();
+  });
+
   it('writeFiles runs its check once EVERY lock is held, and lands only what the check keeps', async () => {
     const workflow = makeWorkflow();
     const acquired: string[] = [];
