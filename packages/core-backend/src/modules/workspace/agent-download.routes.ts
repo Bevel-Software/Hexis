@@ -28,6 +28,51 @@ export interface AgentDownloadRouteDeps {
   identify?: (req: express.Request) => Promise<string | null>;
 }
 
+/** The verifiers {@link createDownloadFetcherIdentifier} asks, as the composition root has them. */
+export interface DownloadFetcherVerifiers {
+  /** A connection key or internal token (the tool routes' verifier). Never throws for a bad token. */
+  verifyToolToken(token: string): Promise<{ ok: true; auth: { userId: string } } | { ok: false }>;
+  /** An app session JWT's signature and expiry; throws when it does not verify. */
+  verifySession(token: string): { userId: string };
+}
+
+/**
+ * Who a download fetch says it is, by EVERY credential this server issues:
+ * a connection key or internal token, or an app session — as a bearer, or
+ * as the `bevel_token` cookie a browser sends on its own. Null when it
+ * carries none that verifies.
+ *
+ * Every kind, because the question is "is this fetch somebody OTHER than
+ * the user the link was issued to?", and a credential kind left unasked is a
+ * fetch that answers "nobody" while carrying another user's identity. A
+ * session is asked by its signature alone, not whether its account is still
+ * on: a switched-off account still says who it is, and that is all the
+ * route needs to refuse it.
+ */
+export function createDownloadFetcherIdentifier(
+  verifiers: DownloadFetcherVerifiers,
+  readCookie: (req: express.Request) => string | null,
+): (req: express.Request) => Promise<string | null> {
+  return async (req) => {
+    const header = req.headers.authorization;
+    const bearer =
+      typeof header === 'string' && header.toLowerCase().startsWith('bearer ')
+        ? header.slice(header.indexOf(' ') + 1).trim()
+        : '';
+    for (const token of [bearer, readCookie(req) ?? '']) {
+      if (token === '') continue;
+      const tool = await verifiers.verifyToolToken(token).catch(() => ({ ok: false as const }));
+      if (tool.ok) return tool.auth.userId;
+      try {
+        return verifiers.verifySession(token).userId;
+      } catch {
+        // Not a session either: try the next credential, if any.
+      }
+    }
+    return null;
+  };
+}
+
 /**
  * `GET /api/agent/downloads/:token` — the outgoing twin of the agent upload
  * route, authenticated by a single-use link token and nothing else.

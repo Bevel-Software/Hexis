@@ -56,13 +56,14 @@ function parseDomainList(raw: string): string[] {
 import { SpillStore } from '../modules/workspace/spill-store.js';
 import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
 import { AgentDownloadStore } from '../modules/workspace/agent-download.store.js';
+import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-download.routes.js';
 import type { Request } from 'express';
 import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
 import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
-import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
+import { createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
 import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { ChangeReadGate } from '../modules/access/change-read-gate.js';
@@ -1308,12 +1309,13 @@ export async function createCoreServices(
   const toolHandlerFactory = createToolHandlerFactory(resolveToolContext, writeAccess);
   const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService);
   const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService);
-  const agentDownloadFetcher = async (req: Request): Promise<string | null> => {
-    const header = req.headers.authorization;
-    if (!header || !header.toLowerCase().startsWith('bearer ')) return null;
-    const result = await verifyToolToken(header.slice(header.indexOf(' ') + 1).trim());
-    return result.ok ? result.auth.userId : null;
-  };
+  // Every credential kind this server issues — connection keys, internal
+  // tokens and app sessions (bearer or cookie) — so a fetch carrying another
+  // user's identity of ANY kind is refused the link.
+  const agentDownloadFetcher: (req: Request) => Promise<string | null> = createDownloadFetcherIdentifier(
+    { verifyToolToken, verifySession: (token) => authService.verifyToken(token) },
+    readAuthCookie,
+  );
   // Read-only manual endpoints accept the above PLUS a browser JWT, so a
   // logged-in user can browse the catalog with their session. Execution routes
   // keep `toolAuthMiddleware` (no JWT), so a session can read but not invoke.

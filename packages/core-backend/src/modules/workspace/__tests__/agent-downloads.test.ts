@@ -25,7 +25,9 @@ import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkspaceService } from '../workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { AgentDownloadStore, DOWNLOAD_TOKEN_REFUSAL } from '../agent-download.store.js';
-import { createAgentDownloadRoutes } from '../agent-download.routes.js';
+import { createAgentDownloadRoutes, createDownloadFetcherIdentifier } from '../agent-download.routes.js';
+import { readAuthCookie } from '../../auth/auth.middleware.js';
+import jwt from 'jsonwebtoken';
 import { buildDownload, DOWNLOAD_PERMISSION_REQUIRED, NOT_FOUND } from '../agent-download.builder.js';
 import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/write-access.js';
 import { sharedFileRules } from '../../agent-instructions/shared-file-rules.js';
@@ -45,6 +47,9 @@ const KB = 'knowledge-base';
 const BRANCH = 'draft';
 const PUBLIC_BASE = 'https://kb.example.com';
 const ANA = { id: 'user-ana', email: 'ana@x.io', name: 'Ana' };
+const JWT_SECRET = 'test-secret';
+/** An app session, signed as `/auth/login` signs one. */
+const sessionOf = (userId: string): string => jwt.sign({ userId, email: `${userId}@x.io` }, JWT_SECRET, { expiresIn: '1h' });
 
 /** Not a real PNG, but bytes no text reader would take for text. */
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0x10, 0x80, 0x00, 0x01]);
@@ -176,11 +181,16 @@ async function start(options: StartOptions = {}): Promise<Started> {
     undefined,
     store,
   );
-  // A fetch that says who it is: `Bearer <user id>` stands for a verified credential.
-  const identify = async (req: express.Request): Promise<string | null> => {
-    const h = req.headers.authorization;
-    return h?.startsWith('Bearer ') ? h.slice(7) : null;
-  };
+  // The identifier the composition root wires, over REAL signed sessions and
+  // a stand-in key store (`key_<user id>` is a connection key of that user).
+  const identify = createDownloadFetcherIdentifier(
+    {
+      verifyToolToken: async (token) =>
+        token.startsWith('key_') ? { ok: true, auth: { userId: token.slice(4) } } : { ok: false },
+      verifySession: (token) => jwt.verify(token, JWT_SECRET) as { userId: string },
+    },
+    readAuthCookie,
+  );
   router.use(createAgentDownloadRoutes({ downloads: store, identify }));
   app.use('/api', router);
   const server = await new Promise<HttpServer>((r) => {
@@ -344,15 +354,50 @@ describe('a download link answers once', () => {
     expect((await fetchLink(h.base, first!.downloadUrl)).status).toBe(200);
     const again = await fetchLink(h.base, first!.downloadUrl);
     const unknown = await fetch(`${h.base}/api/agent/downloads/bevel-down_not-a-token`);
-    const foreign = await fetchLink(h.base, second!.downloadUrl, { headers: { authorization: 'Bearer user-mallory' } });
+    const foreign = await fetchLink(h.base, second!.downloadUrl, { headers: { authorization: 'Bearer key_user-mallory' } });
     for (const res of [again, unknown, foreign]) {
       expect(res.status).toBe(404);
       expect(await res.json()).toEqual({ error: DOWNLOAD_TOKEN_REFUSAL });
     }
     expect(DOWNLOAD_TOKEN_REFUSAL).toContain('request_file_download');
     // The issuer's own credential is no obstacle — and a refused foreign fetch did not spend the link.
-    const own = await fetchLink(h.base, second!.downloadUrl, { headers: { authorization: `Bearer ${ANA.id}` } });
+    const own = await fetchLink(h.base, second!.downloadUrl, { headers: { authorization: `Bearer key_${ANA.id}` } });
     expect(own.status).toBe(200);
+  });
+
+  it('refuses another user\'s signed-in session in every spelling, without spending the link', async () => {
+    const h = await start();
+    const { body } = await request(h.base, [`${KB}/Shared/Open.md`]);
+    const url = local(h.base, body.files[0]!.downloadUrl);
+    const token = decodeURIComponent(url.slice(url.lastIndexOf('/') + 1));
+    const mallory = sessionOf('user-mallory');
+
+    const attempts = [
+      // A session JWT as a bearer, on the path form and on the header form.
+      await fetch(url, { headers: { authorization: `Bearer ${mallory}` } }),
+      await fetch(`${h.base}/api/agent/downloads`, {
+        headers: { authorization: `Bearer ${mallory}`, 'x-download-token': token },
+      }),
+      // The cookie a signed-in browser sends on its own.
+      await fetch(url, { headers: { cookie: `bevel_token=${encodeURIComponent(mallory)}` } }),
+    ];
+    for (const res of attempts) {
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: DOWNLOAD_TOKEN_REFUSAL });
+    }
+    // None of those spent it: the owner's own session still gets the bytes.
+    const own = await fetch(url, { headers: { authorization: `Bearer ${sessionOf(ANA.id)}` } });
+    expect(own.status).toBe(200);
+    expect(await own.text()).toBe('# open\n');
+  });
+
+  it('serves a fetch whose credential identifies nobody, since the link is the credential', async () => {
+    const h = await start();
+    const { body } = await request(h.base, [`${KB}/Shared/Open.md`, `${KB}/Shared/access.md`]);
+
+    const forged = jwt.sign({ userId: 'user-mallory' }, 'not-our-secret');
+    expect((await fetchLink(h.base, body.files[0]!.downloadUrl, { headers: { authorization: `Bearer ${forged}` } })).status).toBe(200);
+    expect((await fetchLink(h.base, body.files[1]!.downloadUrl, { headers: { authorization: 'Bearer junk' } })).status).toBe(200);
   });
 
   it('takes the token in an x-download-token header on the address without its last segment', async () => {
