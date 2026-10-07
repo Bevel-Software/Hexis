@@ -331,6 +331,20 @@ export class WorkflowValidationError extends WorkflowDomainError {
 }
 
 /**
+ * The commit an applied change request records is in the clone but is NOT
+ * that request's own merge commit — no second parent, or a message that does
+ * not name the request. A validation failure like the one above, told apart
+ * because it never mends: a reader may remember it, where a commit the clone
+ * merely does not hold yet must be asked for again after the next fetch.
+ */
+export class AppliedChangeMismatchError extends WorkflowValidationError {
+  constructor(message: string, payload?: Record<string, unknown>) {
+    super(message, payload);
+    this.name = 'AppliedChangeMismatchError';
+  }
+}
+
+/**
  * The next step a missing path always offers, in one sentence.
  *
  * Lives HERE, the layer with no module imports, because both surfaces that

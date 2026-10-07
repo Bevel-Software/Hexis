@@ -161,7 +161,7 @@ describe('the list of applied requests reads each merge commit once', () => {
     return { svc: new PullRequestService(db, workspace, access, git), ofAppliedChange, ensureRemotesFetched };
   }
 
-  it('asks git once per request, however often the list is read, and never fetches', async () => {
+  it('asks git once per request, however often the list is read, and refreshes the clone once per list — never per row', async () => {
     const { svc, ofAppliedChange, ensureRemotesFetched } = appliedHarness([applied(1), applied(2), applied(3)]);
 
     const first = await svc.listPrsByState(['merged']);
@@ -170,7 +170,10 @@ describe('the list of applied requests reads each merge commit once', () => {
     expect(first.map((s) => s.touchedNodePaths)).toEqual([['Shared/1.md'], ['Shared/2.md'], ['Shared/3.md']]);
     expect(second).toEqual(first);
     expect(ofAppliedChange).toHaveBeenCalledTimes(3);
-    expect(ensureRemotesFetched).not.toHaveBeenCalled();
+    // One refresh per LIST (TTL-cached underneath), not one per row: a merge
+    // commit cannot change, but a clone that has not fetched since the merge
+    // does not hold it, and would read every applied request as author-only.
+    expect(ensureRemotesFetched).toHaveBeenCalledTimes(2);
   });
 
   it('asks again for a merge commit the clone did not hold the first time', async () => {

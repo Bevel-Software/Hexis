@@ -33,6 +33,7 @@ import {
 } from '../../kb-fs/branch-name.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import {
+  AppliedChangeMismatchError,
   BranchAuthorshipError,
   WorkflowDomainError,
   WorkflowValidationError,
@@ -2845,22 +2846,33 @@ export class GitService implements IGitService {
         throw err;
       }
     };
+    // Two refusals, told apart for the caller's sake. A commit this clone does
+    // NOT HOLD is a passing state — the next fetch may bring it — and is
+    // reported as plain validation failure, to be asked again. A commit the
+    // clone holds that is NOT THIS REQUEST'S merge commit (no second parent,
+    // or a message that does not name the request) never becomes it, and is
+    // reported as a mismatch the caller may remember.
+    if (!(await revParse(`${mergeSha}^{commit}`))) {
+      throw new WorkflowValidationError(
+        `commit ${mergeSha} is not in this clone, so change request #${number} cannot be read from it yet`,
+      );
+    }
     // The SECOND parent first, because its absence is the whole P1: a merge
     // `--no-ff` always has one, and a commit that does not is not a merge this
-    // request made. Asking for it also answers "is this commit here at all".
+    // request made.
     const headSha = await revParse(`${mergeSha}^2^{commit}`);
     if (!headSha) {
-      throw new WorkflowValidationError(
-        `commit ${mergeSha} is not a merge commit in this clone, so it cannot be change request #${number}'s`,
+      throw new AppliedChangeMismatchError(
+        `commit ${mergeSha} is not a merge commit, so it cannot be change request #${number}'s`,
       );
     }
     const baseSha = await revParse(`${mergeSha}^1^{commit}`);
     if (!baseSha) {
-      throw new WorkflowValidationError(`no first parent for commit ${mergeSha}`);
+      throw new AppliedChangeMismatchError(`no first parent for commit ${mergeSha}`);
     }
     const { stdout: message } = await this.git(cwd, ['log', '-1', '--format=%B', mergeSha]);
     if (!mergeCommitMessageNames(message, number, applied.title)) {
-      throw new WorkflowValidationError(
+      throw new AppliedChangeMismatchError(
         `commit ${mergeSha} is not the merge commit of change request #${number}`,
       );
     }

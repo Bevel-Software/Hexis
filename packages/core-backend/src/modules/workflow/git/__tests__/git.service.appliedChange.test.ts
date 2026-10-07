@@ -169,8 +169,15 @@ describe('GitService reading an applied change from its merge commit', () => {
       () => git.changedFilesOfAppliedChange(workspaceId, ref(tip)),
       () => git.changedPathsAndPairsOfAppliedChange(workspaceId, ref(tip)),
     ]) {
-      await expect(call()).rejects.toThrow(/is not a merge commit in this clone/);
+      await expect(call()).rejects.toThrow(/is not a merge commit/);
     }
+  });
+
+  it('tells a commit the clone does not hold apart from one that is not a merge: the first may arrive, the second never will', async () => {
+    await seedMerged();
+    const unknown = 'f'.repeat(40);
+    await expect(git.appliedChangeShas(workspaceId, ref(unknown))).rejects.toThrow(/is not in this clone/);
+    await expect(git.appliedChangeShas(workspaceId, ref(unknown))).rejects.not.toThrow(/is not a merge commit/);
   });
 
   // The residual of the same P1, and the reason the NUMBER travels with the sha.
@@ -245,7 +252,7 @@ describe('GitService reading an applied change from its merge commit', () => {
     const rootCommit = await gitOut(repo, ['rev-list', '--max-parents=0', 'HEAD']);
     await expect(
       git.changedFilesOfAppliedChange(workspaceId, ref(rootCommit)),
-    ).rejects.toThrow(/is not a merge commit in this clone/);
+    ).rejects.toThrow(/is not a merge commit/);
   });
 
   it('filters roles.yaml and the folder placeholder, as the branch-pair diff does', async () => {

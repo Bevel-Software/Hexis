@@ -20,7 +20,7 @@ import { changeRequests } from '../../database/schema.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
-import { WorkflowValidationError } from '../../../shared/domain-errors.js';
+import { AppliedChangeMismatchError, WorkflowValidationError } from '../../../shared/domain-errors.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import { changeRequestLink, changeRequestLinkBase } from './change-request-link.js';
 
@@ -52,9 +52,8 @@ const LIST_PR_CACHE_TTL_MS = 30_000;
  * is evicted.
  */
 const MAX_REMEMBERED_APPLIED_CHANGES = 20_000;
-/** How many refused applied rows to remember, and for how long — see `touchedPathsFor`. */
-const MAX_REFUSED_APPLIED_CHANGES = 5_000;
-const REFUSED_APPLIED_CHANGE_TTL_MS = 60_000;
+/** How many mismatched applied rows to remember — see `touchedPathsFor`. */
+const MAX_MISMATCHED_APPLIED_CHANGES = 5_000;
 /** How many rows a listing reads from git at once. */
 const SUMMARY_CONCURRENCY = 8;
 
@@ -211,8 +210,8 @@ export class PullRequestService implements IPullRequestService {
    * nothing invalidates this, and nothing needs to. See {@link touchedPathsFor}.
    */
   private readonly appliedChanges = new Map<string, { paths: string[]; pairs: ChangedPathPair[] }>();
-  /** Applied rows whose commit this clone refused, by the same key, with the moment the refusal is asked again. */
-  private readonly refusedAppliedChanges = new Map<string, number>();
+  /** Applied rows whose recorded commit is not their own, by the same key — never asked again. */
+  private readonly mismatchedAppliedChanges = new Set<string>();
   /**
    * Per-CR detail cache, keyed by `${workspaceId ?? 'global'}:${viewer}:${number}`.
    * The payload includes per-file approvals resolved against the caller's
@@ -365,17 +364,15 @@ export class PullRequestService implements IPullRequestService {
       const key = `${workspaceId}\u0000${source.applied.mergeSha}\u0000${source.applied.number}`;
       const known = this.appliedChanges.get(key);
       if (known) return known;
-      // A row whose commit this clone refused — not held, or not this
-      // request's own (a `merged_sha` written before merges recorded their
-      // own commit) — is remembered as such for a while, bounded in count and
-      // in time: without this, every list re-ran its git calls for every such
-      // row, serialized under the workspace mutex, on every poll, and a
-      // deployment with hundreds of pre-fix rows paid seconds of git per poll
-      // indefinitely. Time-bounded because the first case mends itself at the
-      // next fetch, and a memo that outlived the fetch would hide the mend.
-      const refusedUntil = this.refusedAppliedChanges.get(key);
-      if (refusedUntil !== undefined && refusedUntil > Date.now()) return empty;
-      this.refusedAppliedChanges.delete(key);
+      // A row whose commit the clone holds but which is NOT this request's
+      // own (a `merged_sha` written before merges recorded their own commit)
+      // never becomes it, and is remembered as such, bounded in count:
+      // without this, every list re-ran its git calls for every such row,
+      // serialized under the workspace mutex, on every poll, and a deployment
+      // with hundreds of pre-fix rows paid seconds of git per poll
+      // indefinitely. A commit the clone does not HOLD is not remembered —
+      // the next fetch may bring it, and the next list asks again.
+      if (this.mismatchedAppliedChanges.has(key)) return empty;
       return this.gitService
         .changedPathsAndPairsOfAppliedChange(workspaceId, source.applied)
         .then((answer) => {
@@ -389,9 +386,9 @@ export class PullRequestService implements IPullRequestService {
           return answer;
         })
         .catch((err: unknown) => {
-          if (err instanceof WorkflowValidationError) {
-            if (this.refusedAppliedChanges.size >= MAX_REFUSED_APPLIED_CHANGES) this.refusedAppliedChanges.clear();
-            this.refusedAppliedChanges.set(key, Date.now() + REFUSED_APPLIED_CHANGE_TTL_MS);
+          if (err instanceof AppliedChangeMismatchError) {
+            if (this.mismatchedAppliedChanges.size >= MAX_MISMATCHED_APPLIED_CHANGES) this.mismatchedAppliedChanges.clear();
+            this.mismatchedAppliedChanges.add(key);
           }
           return degrade('changedPathsAndPairsOfAppliedChange')(err);
         });

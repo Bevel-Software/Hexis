@@ -6,7 +6,7 @@ import type { Database } from '../../../database/connection.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
 import { hashEmail as hash } from '../../../../shared/email-identity.js';
-import { WorkflowValidationError } from '../../../../shared/domain-errors.js';
+import { AppliedChangeMismatchError, WorkflowValidationError } from '../../../../shared/domain-errors.js';
 
 function pr(overrides: Partial<PullRequestSummary>): PullRequestSummary {
   return {
@@ -376,27 +376,26 @@ describe('PullRequestService.listPrsByState', () => {
       expect(ensureRemotesFetched).toHaveBeenCalledTimes(1);
     });
 
-    it('remembers a merge commit the clone refused, and does not ask git for it again on the next list', async () => {
+    it('remembers a recorded commit that is not the request\'s own, and never asks git for it again', async () => {
       // Rows whose `merged_sha` is not this request's own commit — written
       // before merges recorded their own — fail the verification for good;
       // re-running their git calls on every poll, serialized under the
       // workspace mutex, is what a deployment with hundreds of them paid.
       const { svc, atCommit } = svcOver([row({ number: 9, state: 'merged' })], ['A.md']);
-      atCommit.mockRejectedValue(new WorkflowValidationError('commit is not the merge commit of change request #9'));
+      atCommit.mockRejectedValue(new AppliedChangeMismatchError('commit is not the merge commit of change request #9'));
       const first = await svc.listPrsByState(['closed', 'merged']);
       expect(first[0]?.touchedNodePaths).toEqual([]);
       await svc.listPrsByState(['closed', 'merged']);
+      await svc.listPrsByState(['closed', 'merged']);
       expect(atCommit).toHaveBeenCalledTimes(1);
-      // The memo is bounded in time: once it lapses the row is asked again,
-      // so a commit the next fetch brought in is read.
-      vi.useFakeTimers();
-      try {
-        vi.setSystemTime(Date.now() + 61_000);
-        await svc.listPrsByState(['closed', 'merged']);
-        expect(atCommit).toHaveBeenCalledTimes(2);
-      } finally {
-        vi.useRealTimers();
-      }
+    });
+
+    it('asks again for a commit the clone did not hold — that one the next fetch may bring', async () => {
+      const { svc, atCommit } = svcOver([row({ number: 9, state: 'merged' })], ['A.md']);
+      atCommit.mockRejectedValueOnce(new WorkflowValidationError('commit is not in this clone'));
+      expect((await svc.listPrsByState(['closed', 'merged']))[0]?.touchedNodePaths).toEqual([]);
+      expect((await svc.listPrsByState(['closed', 'merged']))[0]?.touchedNodePaths).toEqual(['A.md']);
+      expect(atCommit).toHaveBeenCalledTimes(2);
     });
 
     it('asks git NOTHING about a declined row — there is no diff to compute', async () => {
