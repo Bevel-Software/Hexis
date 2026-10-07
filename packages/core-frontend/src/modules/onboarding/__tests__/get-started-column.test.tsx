@@ -370,8 +370,14 @@ describe('GetStartedColumn: getting out of the way', () => {
     expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
   });
 
-  it('is not shown at or below 1100px', () => {
-    setViewportWidth(1100);
+  it('is shown in an ordinary laptop window', () => {
+    setViewportWidth(1000);
+    mount();
+    expect(screen.getByRole('complementary', { name: 'Get set up' })).toBeInTheDocument();
+  });
+
+  it('is not shown at or below 900px, where the sidebar turns into a drawer', () => {
+    setViewportWidth(900);
     mount();
     expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
   });

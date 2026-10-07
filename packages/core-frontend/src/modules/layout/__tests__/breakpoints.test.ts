@@ -28,7 +28,7 @@ describe('narrow-layout source parity', () => {
     expect(NARROW_PX).toBe(900);
     expect(NARROW_QUERY).toBe(`(max-width: ${NARROW_PX}px)`);
     expect(TOOLBAR_STACK_QUERY).toBe('(max-width: 767px)');
-    expect(SETUP_COLUMN_HIDDEN_QUERY).toBe('(max-width: 1100px)');
+    expect(SETUP_COLUMN_HIDDEN_QUERY).toBe('(max-width: 900px)');
   });
 
   it('keeps the JS breakpoint aligned with the existing 900px Tailwind variants', () => {

@@ -6,7 +6,9 @@ export const NARROW_QUERY = `(max-width: ${NARROW_PX}px)`;
 export const TOOLBAR_STACK_QUERY = '(max-width: 767px)';
 
 /**
- * The "Get set up" column (288px) stops fitting beside an app surface at or
- * below this width: the sidebar plus a readable page already take the rest.
+ * The "Get set up" column (288px) is put away at the same width the sidebar
+ * turns into a drawer. It used to go at 1100px, which hid it in an ordinary
+ * laptop browser window, the screen it is most for; from 901px up the
+ * sidebar, the page and the column still fit side by side.
  */
-export const SETUP_COLUMN_HIDDEN_QUERY = '(max-width: 1100px)';
+export const SETUP_COLUMN_HIDDEN_QUERY = NARROW_QUERY;
