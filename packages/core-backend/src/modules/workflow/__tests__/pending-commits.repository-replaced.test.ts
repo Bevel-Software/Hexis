@@ -118,9 +118,10 @@ describe('PendingCommitsService.markNeedsAttentionInWorkspace', () => {
  */
 describe('PendingCommitsService.queuedOnBranch', () => {
   function selectDb(rows: Array<{ status: string; lastError: string | null }>) {
-    const where = vi.fn(async () => rows);
+    const orderBy = vi.fn(async () => rows);
+    const where = vi.fn(() => ({ orderBy }));
     const db = { select: vi.fn(() => ({ from: () => ({ where }) })) } as unknown as Database;
-    return { db, where };
+    return { db, where, orderBy };
   }
 
   it('counts pending and running rows, and reports no attention when none is stuck', async () => {
@@ -139,8 +140,8 @@ describe('PendingCommitsService.queuedOnBranch', () => {
     expect(sql.params).toEqual(['alice/draft']);
   });
 
-  it('reports the first needs_attention row\'s message alongside the count', async () => {
-    const { db } = selectDb([
+  it('reports the oldest needs_attention row\'s message alongside the count', async () => {
+    const { db, orderBy } = selectDb([
       { status: 'pending', lastError: null },
       { status: 'needs_attention', lastError: 'push rejected' },
       { status: 'needs_attention', lastError: 'later' },
@@ -149,6 +150,19 @@ describe('PendingCommitsService.queuedOnBranch', () => {
       queued: 1,
       stuck: 2,
       needsAttention: 'push rejected',
+    });
+    // "Oldest" is the query's order, so every call reports the same message.
+    const dialect = new PgDialect();
+    const order = (orderBy.mock.calls[0] as unknown as SQL[]).map((o) => dialect.sqlToQuery(o).sql);
+    expect(order).toEqual(['"pending_commits"."queued_at" asc', '"pending_commits"."id" asc']);
+  });
+
+  it('falls back to a message when a stuck row has an empty error, so it is never read as retryable', async () => {
+    const { db } = selectDb([{ status: 'needs_attention', lastError: '' }]);
+    await expect(new PendingCommitsService(db).queuedOnBranch('alice/draft')).resolves.toEqual({
+      queued: 0,
+      stuck: 1,
+      needsAttention: 'A queued commit on this branch failed and needs a person.',
     });
   });
 

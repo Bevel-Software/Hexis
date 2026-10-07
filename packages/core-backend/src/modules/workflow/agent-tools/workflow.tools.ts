@@ -590,7 +590,7 @@ export function registerWorkflowTools(
             },
             conflictedPaths: { type: 'array', items: { type: 'string' }, description: 'Present when `kind` is `conflicts-need-resolution`.' },
             branch: { type: 'string', description: 'Present when `kind` is `pending-commits` — the branch whose writes are not committed yet.' },
-            pending: { type: 'integer', description: 'Present when `kind` is `pending-commits` — how many of its commits are still queued.' },
+            pending: { type: 'integer', description: 'Present when `kind` is `pending-commits` — how many commits on that branch are still queued, plus those that failed when `needsAttention` is present.' },
             needsAttention: {
               type: 'string',
               description:
