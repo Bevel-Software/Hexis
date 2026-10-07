@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AdminMenuItem, AppDef } from '../../../../core/registry';
 import {
+  COMMAND_SHORTCUTS,
   coreCommandActions,
   mergeCommandActions,
   suggestedActions,
@@ -98,6 +99,18 @@ describe('coreCommandActions', () => {
     void action.run(c);
     expect(c.navigate).toHaveBeenCalledWith('/chosen');
     expect(c.navigate).not.toHaveBeenCalledWith('/declared');
+  });
+});
+
+describe('shortcut hints', () => {
+  it('come from the table the shortcuts are bound by, and only for bound commands', () => {
+    const all = coreCommandActions({ apps: APPS, settings: { defaultItems: [], adminItems: [] } });
+    const hint = (id: string) => all.find((a) => a.id === id)?.shortcut;
+    expect(hint('new-page')).toEqual(['C']);
+    expect(hint('go-to:knowledge')).toEqual(['G', 'K']);
+    expect(hint('go-to:skills-tools')).toEqual(['G', 'S']);
+    expect(hint('invite')).toBeUndefined();
+    expect(Object.keys(COMMAND_SHORTCUTS).sort()).toEqual(['go-to:knowledge', 'go-to:skills-tools', 'new-page']);
   });
 });
 

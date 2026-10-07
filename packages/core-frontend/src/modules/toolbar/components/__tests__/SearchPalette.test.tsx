@@ -325,7 +325,12 @@ describe('SearchPalette: commands', () => {
     const groups = within(screen.getByRole('listbox')).getAllByRole('group');
     expect(groups[0]).toHaveAccessibleName('Actions');
     expect(groups[1]).toHaveAccessibleName('Pages');
-    expect(groupRows('Actions')).toEqual(['New page', 'Invite people', 'Connect your agent', 'Go to Skills & Tools']);
+    expect(groupRows('Actions')).toEqual([
+      'New pageC (shortcut C)',
+      'Invite people',
+      'Connect your agent',
+      'Go to Skills & ToolsGS (shortcut G then S)',
+    ]);
     // Enter runs the first row, which is now a command.
     expect(input()).toHaveAttribute('aria-activedescendant', options()[0].id);
   });
@@ -334,7 +339,11 @@ describe('SearchPalette: commands', () => {
     const user = userEvent.setup();
     renderPalette({ onboardingPending: false });
     await user.click(trigger());
-    expect(groupRows('Actions')).toEqual(['New page', 'Invite people', 'Go to Skills & Tools']);
+    expect(groupRows('Actions')).toEqual([
+      'New pageC (shortcut C)',
+      'Invite people',
+      'Go to Skills & ToolsGS (shortcut G then S)',
+    ]);
     // ...but it is still there to be typed for.
     await user.type(input(), 'connect');
     expect(groupRows('Actions')).toEqual(['Connect your agent']);
@@ -346,7 +355,10 @@ describe('SearchPalette: commands', () => {
     await user.click(trigger());
 
     await user.type(input(), 'go to');
-    expect(groupRows('Actions')).toEqual(['Go to Knowledge', 'Go to Skills & Tools']);
+    expect(groupRows('Actions')).toEqual([
+      'Go to KnowledgeGK (shortcut G then K)',
+      'Go to Skills & ToolsGS (shortcut G then S)',
+    ]);
 
     await user.clear(input());
     await user.type(input(), 'team');
@@ -363,7 +375,7 @@ describe('SearchPalette: commands', () => {
     const user = userEvent.setup();
     renderPalette({ admin: false });
     await user.click(trigger());
-    expect(groupRows('Actions')).toEqual(['New page', 'Go to Skills & Tools']);
+    expect(groupRows('Actions')).toEqual(['New pageC (shortcut C)', 'Go to Skills & ToolsGS (shortcut G then S)']);
     await user.type(input(), 'invite');
     expect(group('Actions')).toBeNull();
     await user.clear(input());
@@ -386,7 +398,7 @@ describe('SearchPalette: commands', () => {
     const user = userEvent.setup();
     renderPalette();
     await user.click(trigger());
-    await user.click(screen.getByRole('option', { name: 'New page' }));
+    await user.click(screen.getByRole('option', { name: /^New page/ }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Couldn’t create the page: refused');
     expect(input()).toHaveFocus();
     await user.keyboard('{Escape}');
@@ -489,12 +501,116 @@ describe('SearchPalette: commands', () => {
     renderPalette({ commandActions });
     await user.click(trigger());
     await user.type(input(), 'new');
-    expect(groupRows('Actions')).toEqual(['New page', 'New ontologyGraphO, shortcut O']);
+    expect(groupRows('Actions')).toEqual(['New pageC (shortcut C)', 'New ontologyGraphO (shortcut O)']);
     expect(screen.queryByText('Impostor page')).toBeNull();
 
     const row = screen.getByRole('option', { name: /new ontology/i });
     expect(within(row).getByText('O', { selector: 'kbd' }).parentElement).toHaveAttribute('aria-hidden');
     await user.click(row);
     expect(run).toHaveBeenCalledWith(expect.objectContaining({ isAdmin: true, activeAppId: 'knowledge' }));
+  });
+});
+
+/**
+ * C, G then K, G then S: the commonest commands without the palette — and
+ * never at the expense of somebody typing.
+ */
+describe('SearchPalette: single-key shortcuts', () => {
+  const press = (key: string, init: KeyboardEventInit = {}, target: Element = document.body) =>
+    fireEvent.keyDown(target, { key, ...init });
+
+  it('C creates a new page', () => {
+    renderPalette();
+    press('c');
+    expect(createPage).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('combobox')).toBeNull();
+  });
+
+  it('G then K goes to Knowledge, G then S to Skills & Tools', () => {
+    renderPalette();
+    press('g');
+    press('s');
+    expect(screen.getByTestId('location')).toHaveTextContent('/skills-and-tools');
+    press('g');
+    press('k');
+    expect(screen.getByTestId('location').textContent).toBe('/workspace');
+  });
+
+  it('shows the keys on the commands they run', async () => {
+    const user = userEvent.setup();
+    renderPalette();
+    await user.click(trigger());
+    const newPage = screen.getByRole('option', { name: 'New page (shortcut C)' });
+    expect(within(newPage).getByText('C', { selector: 'kbd' }).parentElement).toHaveAttribute('aria-hidden');
+    expect(screen.getByRole('option', { name: 'Go to Skills & Tools (shortcut G then S)' })).toBeInTheDocument();
+    // Commands with no binding advertise none.
+    expect(screen.getByRole('option', { name: 'Invite people' })).toBeInTheDocument();
+  });
+
+  it('leaves keys alone in a field or an editor', () => {
+    renderPalette();
+    const field = document.createElement('input');
+    const editor = document.createElement('div');
+    editor.setAttribute('contenteditable', 'true');
+    const line = document.createElement('p');
+    editor.appendChild(line);
+    document.body.append(field, editor);
+    try {
+      press('c', {}, field);
+      press('c', {}, line);
+      press('g', {}, line);
+      press('k', {}, line);
+      expect(createPage).not.toHaveBeenCalled();
+      expect(screen.getByTestId('location')).toHaveTextContent('/workspace/main');
+    } finally {
+      field.remove();
+      editor.remove();
+    }
+  });
+
+  it('leaves keys alone with a modifier held', () => {
+    renderPalette();
+    press('c', { ctrlKey: true });
+    press('c', { metaKey: true });
+    press('C', { shiftKey: true });
+    press('c', { altKey: true });
+    expect(createPage).not.toHaveBeenCalled();
+  });
+
+  it('leaves keys alone while a modal dialog is up', () => {
+    renderPalette();
+    const modal = document.createElement('div');
+    modal.setAttribute('aria-modal', 'true');
+    document.body.appendChild(modal);
+    try {
+      press('c');
+      expect(createPage).not.toHaveBeenCalled();
+    } finally {
+      modal.remove();
+    }
+  });
+
+  it('leaves keys to the query while the palette is open', async () => {
+    const user = userEvent.setup();
+    renderPalette();
+    await user.click(trigger());
+    await user.type(input(), 'c');
+    expect(createPage).not.toHaveBeenCalled();
+    expect(input()).toHaveValue('c');
+  });
+
+  it('forgets a G that waited more than a second for its K', () => {
+    vi.useFakeTimers();
+    try {
+      renderPalette();
+      press('g');
+      act(() => {
+        vi.advanceTimersByTime(1001);
+      });
+      press('k');
+      expect(screen.getByTestId('location')).toHaveTextContent('/workspace/main');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

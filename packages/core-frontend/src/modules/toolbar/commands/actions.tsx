@@ -58,9 +58,10 @@ export interface CommandAction {
   group?: string;
   /**
    * The keys that run it outside the menu, for the row's hint — DISPLAY
-   * only: `['C']`, or `['G', 'K']` for a sequence. The keys themselves are
-   * bound by `useCommandShortcuts`; a hint for a binding that does not exist
-   * would teach a key that does nothing.
+   * only: `['C']`, or `['G', 'K']` for a sequence. Core's are filled in from
+   * {@link COMMAND_SHORTCUTS}, the table `useCommandShortcuts` binds; a
+   * distribution that sets one binds the keys itself, since a hint for a
+   * binding that does not exist would teach a key that does nothing.
    */
   shortcut?: string[];
   /** The row's icon; a generic arrow when absent. */
@@ -130,6 +131,25 @@ export function goToAppActionId(appId: string): string {
 }
 
 /**
+ * The single-key shortcuts, keyed by the command they run: `C` for New page,
+ * `G` then `K` for Knowledge, `G` then `S` for Skills & Tools. ONE table,
+ * read both by `useCommandShortcuts` (which binds the keys) and by the list
+ * below (which shows them as hints), so a row never advertises a key that
+ * does nothing. Lower-case is what is matched; the hints upper-case it.
+ */
+export const COMMAND_SHORTCUTS: Readonly<Record<string, readonly string[]>> = {
+  'new-page': ['c'],
+  [goToAppActionId('knowledge')]: ['g', 'k'],
+  [goToAppActionId('skills-tools')]: ['g', 's'],
+};
+
+/** A core command with its hint from {@link COMMAND_SHORTCUTS}, if it has one. */
+function withShortcutHint(action: CommandAction): CommandAction {
+  const keys = COMMAND_SHORTCUTS[action.id];
+  return keys ? { ...action, shortcut: keys.map((k) => k.toUpperCase()) } : action;
+}
+
+/**
  * One "Go to …" per app in the switcher, in the switcher's order. Offered
  * even for the app on screen: from deep inside it, going to its start is
  * still somewhere.
@@ -192,7 +212,9 @@ export function coreCommandActions({
   apps: readonly AppDef[];
   settings: MenuSections;
 }): CommandAction[] {
-  return [NEW_PAGE, EDIT_PAGE, INVITE, CONNECT_AGENT, ...appActions(apps), ...settingsActions(settings)];
+  return [NEW_PAGE, EDIT_PAGE, INVITE, CONNECT_AGENT, ...appActions(apps), ...settingsActions(settings)].map(
+    withShortcutHint,
+  );
 }
 
 /**

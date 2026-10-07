@@ -30,6 +30,7 @@ import {
 } from '../search/sources';
 import { actionNames, suggestedActions, type CommandAction, type CommandContext } from '../commands/actions';
 import { useCommandActions } from '../commands/useCommandActions';
+import { useCommandShortcuts } from '../commands/useCommandShortcuts';
 
 /** Rows per group. Past this the query is too short to be useful, not the list too long. */
 const GROUP_LIMIT = 8;
@@ -197,6 +198,11 @@ export function SearchPalette({ compact }: { compact: boolean }) {
     },
     [openRef],
   );
+
+  // The commands are read here, not in the panel, because the single-key
+  // shortcuts (C, G K, G S) run them while the palette is shut.
+  const { actions, ctx } = useCommandActions();
+  useCommandShortcuts({ actions, ctx, enabled: !open, run: runAction });
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (!isShortcut(e) || e.defaultPrevented) return;
@@ -262,6 +268,8 @@ export function SearchPalette({ compact }: { compact: boolean }) {
             inputRef={inputRef}
             catalogState={catalogState}
             notice={notice}
+            actions={actions}
+            ctx={ctx}
             onClose={close}
             onRunAction={runAction}
           />
@@ -279,12 +287,17 @@ function SearchPanel({
   inputRef,
   catalogState,
   notice,
+  actions,
+  ctx,
   onClose,
   onRunAction,
 }: {
   inputRef: RefObject<HTMLInputElement | null>;
   catalogState: CatalogState;
   notice: string | null;
+  /** The commands on offer, and the context they run with (`useCommandActions`). */
+  actions: readonly CommandAction[];
+  ctx: CommandContext;
   onClose: (focus?: 'previous' | 'trigger') => void;
   onRunAction: (action: CommandAction, ctx: CommandContext) => void;
 }) {
@@ -292,7 +305,6 @@ function SearchPanel({
   const { openWorkspacePath } = useFileNav();
   const { kbDirName } = useWorkspace();
   const { tree, suggestionOnlyPaths } = useMergedWorkspaceTree();
-  const { actions, ctx } = useCommandActions();
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const listboxId = useId();
@@ -390,6 +402,7 @@ function SearchPanel({
           const index = offset + i;
           const selected = index === active;
           const shortcut = r.action?.shortcut;
+          const location = r.action ? r.action.group : r.result.location;
           return (
             <div
               key={r.key}
@@ -411,14 +424,16 @@ function SearchPanel({
                 {r.action ? (r.action.icon ?? <ChevronRight size={15} />) : ICONS[r.result.kind]}
               </span>
               <span className="min-w-0 truncate">{r.action ? r.action.label : r.result.name}</span>
-              <span className="ml-auto max-w-[45%] flex-none truncate pl-2 text-meta text-ink-faint">
-                {r.action ? r.action.group : r.result.location}
-              </span>
+              {location && (
+                <span className="ml-auto max-w-[45%] flex-none truncate pl-2 text-meta text-ink-faint">
+                  {location}
+                </span>
+              )}
               {shortcut && shortcut.length > 0 && (
                 <>
                   {/* Drawn as keys for the eye, said as words for the ear:
                       `aria-keyshortcuts` cannot express a sequence like G K. */}
-                  <span aria-hidden className="flex flex-none items-center gap-1">
+                  <span aria-hidden className={cn('flex flex-none items-center gap-1 pl-2', !location && 'ml-auto')}>
                     {shortcut.map((key, k) => (
                       <kbd
                         key={k}
@@ -428,7 +443,7 @@ function SearchPanel({
                       </kbd>
                     ))}
                   </span>
-                  <span className="sr-only">, shortcut {spokenShortcut(shortcut)}</span>
+                  <span className="sr-only"> (shortcut {spokenShortcut(shortcut)})</span>
                 </>
               )}
             </div>
