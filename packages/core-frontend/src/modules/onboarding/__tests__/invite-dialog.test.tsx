@@ -18,10 +18,11 @@ import { splitEmails } from '../invite-emails';
  * the result view hands the admin what to forward.
  */
 
-const { listAccountsMock, createAccountMock, addMemberMock, copyMock } = vi.hoisted(() => ({
+const { listAccountsMock, createAccountMock, addMemberMock, fetchRolesMock, copyMock } = vi.hoisted(() => ({
   listAccountsMock: vi.fn<() => Promise<AccountSummary[]>>(),
   createAccountMock: vi.fn<(email: string, name: string) => Promise<void>>(),
   addMemberMock: vi.fn<(canonical: string, email: string) => Promise<unknown>>(),
+  fetchRolesMock: vi.fn<() => Promise<{ canonical: string; members: string[]; fixedMembers?: string[] }[]>>(),
   copyMock: vi.fn<(text: string) => Promise<boolean>>(),
 }));
 
@@ -34,6 +35,7 @@ vi.mock('../../auth/services/account.api', async (importOriginal) => ({
 vi.mock('../../admin/services/roles.api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../admin/services/roles.api')>()),
   addMember: addMemberMock,
+  fetchRoles: fetchRolesMock,
 }));
 vi.mock('../../library/utils/clipboard', () => ({ copyToClipboard: copyMock }));
 
@@ -88,6 +90,7 @@ beforeEach(() => {
   listAccountsMock.mockReset().mockResolvedValue([account('juan@bevel.software')]);
   createAccountMock.mockReset().mockResolvedValue(undefined);
   addMemberMock.mockReset().mockResolvedValue([]);
+  fetchRolesMock.mockReset().mockResolvedValue([{ canonical: 'admin', members: ['juan@bevel.software'] }]);
   copyMock.mockReset().mockResolvedValue(true);
 });
 
@@ -166,7 +169,7 @@ describe('InviteDialog: sending', () => {
     expect(within(ana).getByText('Hasn’t signed in yet')).toBeInTheDocument();
   });
 
-  it('makes newly created accounts admins when invited as Admin', async () => {
+  it('makes everyone invited as Admin an admin, new accounts and existing ones alike', async () => {
     listAccountsMock.mockResolvedValue([account('juan@bevel.software'), account('bo@bevel.software')]);
     const { input } = mountDialog();
     await userEvent.type(input, 'ana@bevel.software{Enter}bo@bevel.software{Enter}');
@@ -175,8 +178,26 @@ describe('InviteDialog: sending', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Invite 2 people' }));
 
     await screen.findByRole('dialog', { name: '2 people are invited' });
-    expect(addMemberMock).toHaveBeenCalledTimes(1);
-    expect(addMemberMock).toHaveBeenCalledWith('admin', 'ana@bevel.software');
+    expect(createAccountMock.mock.calls.map((c) => c[0])).toEqual(['ana@bevel.software']);
+    expect(addMemberMock.mock.calls).toEqual([
+      ['admin', 'ana@bevel.software'],
+      ['admin', 'bo@bevel.software'],
+    ]);
+    const bo = within(screen.getByRole('list', { name: 'People' })).getByText('bo@bevel.software').closest('li')!;
+    expect(within(bo).getByText('Can sign in already, now an admin')).toBeInTheDocument();
+  });
+
+  it('leaves an existing admin as they are when invited as Admin', async () => {
+    listAccountsMock.mockResolvedValue([account('juan@bevel.software'), account('bo@bevel.software')]);
+    fetchRolesMock.mockResolvedValue([{ canonical: 'admin', members: ['juan@bevel.software', 'bo@bevel.software'] }]);
+    const { input } = mountDialog();
+    await userEvent.type(input, 'bo@bevel.software{Enter}');
+    await userEvent.selectOptions(screen.getByLabelText('Invite as'), 'admin');
+    await userEvent.click(screen.getByRole('button', { name: 'Invite 1 person' }));
+
+    await screen.findByRole('dialog', { name: '1 person is invited' });
+    expect(addMemberMock).not.toHaveBeenCalled();
+    expect(screen.getByText('Can sign in already, already an admin')).toBeInTheDocument();
   });
 
   it('says "no seat left" on the row the deployment refused with a 403', async () => {

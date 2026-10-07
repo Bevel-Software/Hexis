@@ -4,7 +4,7 @@ import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { useAppRegistry } from '../../../core/registry';
 import { useAuth } from '../../auth/state/auth.context';
 import { createAccount, listAccounts } from '../../auth/services/account.api';
-import { addMember } from '../../admin/services/roles.api';
+import { addMember, fetchRoles } from '../../admin/services/roles.api';
 import { copyToClipboard } from '../../library/utils/clipboard';
 import { initials } from '../../../lib/email';
 import { EmailChipsInput } from './EmailChipsInput';
@@ -84,7 +84,7 @@ export function InviteDialog({ open, onClose, onInvited }: InviteDialogProps) {
     if (valid.length === 0 || sending) return;
     setSending(true);
     try {
-      const result = await sendInvites(valid, role, { listAccounts, createAccount, addMember });
+      const result = await sendInvites(valid, role, { listAccounts, createAccount, addMember, fetchRoles });
       setEmails([]);
       setDraft('');
       setOutcomes(result);
@@ -268,6 +268,9 @@ function outcomeDetail(outcome: InviteOutcome): string {
       if (outcome.roleError) return `Member: couldn’t make them an admin (${outcome.roleError})`;
       return outcome.role === 'admin' ? 'Admin' : 'Member';
     case 'existing':
+      if (outcome.roleError) return `Can sign in already: couldn’t make them an admin (${outcome.roleError})`;
+      if (outcome.promoted) return 'Can sign in already, now an admin';
+      if (outcome.alreadyAdmin) return 'Can sign in already, already an admin';
       return 'Can sign in already';
     case 'no-seat':
     case 'error':

@@ -27,7 +27,11 @@ const ADMIN_ROLE = 'admin';
 /** What became of one address. */
 export type InviteOutcome =
   | { email: string; status: 'created'; role: InviteRole; roleError?: string }
-  | { email: string; status: 'existing' }
+  /**
+   * Already had an account. Invited as Admin, they are made one too:
+   * `promoted` when this call did it, `alreadyAdmin` when they were one.
+   */
+  | { email: string; status: 'existing'; promoted?: boolean; alreadyAdmin?: boolean; roleError?: string }
   | { email: string; status: 'no-seat'; message: string }
   | { email: string; status: 'error'; message: string };
 
@@ -52,9 +56,13 @@ export function isInvited(outcome: InviteOutcome): boolean {
  * read just means every address is treated as new.
  *
  * "Admin" is a role membership, not an account property, so it is a second
- * write after the create, and only for an account this call made — the
- * dialog never promotes somebody who was already here. A refused promotion
- * leaves the account standing as a member and says so on the row.
+ * write after the create. Somebody who already had an account is made an
+ * Admin too when invited as one: the admin asked for that person to be an
+ * Admin, and that they could already sign in does not change the request.
+ * The roster is read first so an existing Admin (including one the server
+ * configuration fixes) is reported as such rather than written again. A
+ * refused promotion leaves the account standing as it was and says so on
+ * the row.
  */
 export async function sendInvites(
   emails: string[],
@@ -63,6 +71,7 @@ export async function sendInvites(
     listAccounts(): Promise<{ email: string }[]>;
     createAccount(email: string, name: string): Promise<void>;
     addMember(canonical: string, email: string): Promise<unknown>;
+    fetchRoles(): Promise<{ canonical: string; members: string[]; fixedMembers?: string[] }[]>;
   },
 ): Promise<InviteOutcome[]> {
   let existing: Set<string> | null = null;
@@ -71,10 +80,32 @@ export async function sendInvites(
   } catch {
     existing = null;
   }
+  /** Who is an Admin already; asked only when someone is to be made one. Unreadable means unknown. */
+  let admins: Set<string> | null = null;
+  if (role === 'admin') {
+    try {
+      const entry = (await api.fetchRoles()).find((r) => r.canonical === ADMIN_ROLE);
+      admins = new Set([...(entry?.members ?? []), ...(entry?.fixedMembers ?? [])].map((e) => e.toLowerCase()));
+    } catch {
+      admins = null;
+    }
+  }
   const outcomes: InviteOutcome[] = [];
   for (const email of emails) {
     if (existing?.has(email.toLowerCase())) {
-      outcomes.push({ email, status: 'existing' });
+      if (role !== 'admin') {
+        outcomes.push({ email, status: 'existing' });
+      } else if (admins?.has(email.toLowerCase())) {
+        outcomes.push({ email, status: 'existing', alreadyAdmin: true });
+      } else {
+        try {
+          await api.addMember(ADMIN_ROLE, email);
+          outcomes.push({ email, status: 'existing', promoted: true });
+        } catch (err) {
+          const roleError = err instanceof Error ? err.message : 'Could not make them an admin';
+          outcomes.push({ email, status: 'existing', roleError });
+        }
+      }
       continue;
     }
     try {
