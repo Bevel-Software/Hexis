@@ -109,3 +109,55 @@ describe('PendingCommitsService.markNeedsAttentionInWorkspace', () => {
     await expect(new PendingCommitsService(db).markNeedsAttentionInWorkspace('main', 'whatever')).resolves.toBe(0);
   });
 });
+
+/**
+ * What `mergeBranch` waits on: the commits still between a branch's saved
+ * files and its remote. `pending` and `running` both count — a row the worker
+ * holds is not pushed yet — and a `needs_attention` row is reported with its
+ * message, because nothing will land it without a person.
+ */
+describe('PendingCommitsService.queuedOnBranch', () => {
+  function selectDb(rows: Array<{ status: string; lastError: string | null }>) {
+    const where = vi.fn(async () => rows);
+    const db = { select: vi.fn(() => ({ from: () => ({ where }) })) } as unknown as Database;
+    return { db, where };
+  }
+
+  it('counts pending and running rows, and reports no attention when none is stuck', async () => {
+    const { db, where } = selectDb([
+      { status: 'pending', lastError: null },
+      { status: 'running', lastError: null },
+    ]);
+    await expect(new PendingCommitsService(db).queuedOnBranch('alice/draft')).resolves.toEqual({
+      queued: 2,
+      stuck: 0,
+      needsAttention: null,
+    });
+    // Keyed on the branch column.
+    const sql = new PgDialect().sqlToQuery((where.mock.calls[0] as unknown as [SQL])[0]);
+    expect(sql.sql).toMatch(/"branch" = \$1/);
+    expect(sql.params).toEqual(['alice/draft']);
+  });
+
+  it('reports the first needs_attention row\'s message alongside the count', async () => {
+    const { db } = selectDb([
+      { status: 'pending', lastError: null },
+      { status: 'needs_attention', lastError: 'push rejected' },
+      { status: 'needs_attention', lastError: 'later' },
+    ]);
+    await expect(new PendingCommitsService(db).queuedOnBranch('alice/draft')).resolves.toEqual({
+      queued: 1,
+      stuck: 2,
+      needsAttention: 'push rejected',
+    });
+  });
+
+  it('answers nothing queued for a quiet branch', async () => {
+    const { db } = selectDb([]);
+    await expect(new PendingCommitsService(db).queuedOnBranch('quiet')).resolves.toEqual({
+      queued: 0,
+      stuck: 0,
+      needsAttention: null,
+    });
+  });
+});

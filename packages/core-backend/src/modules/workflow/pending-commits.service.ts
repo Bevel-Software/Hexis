@@ -496,6 +496,32 @@ export class PendingCommitsService {
   }
 
   /**
+   * What still stands between `branch`'s saved files and its remote: how many
+   * commits are queued (`pending` or `running` — a row the worker holds is not
+   * pushed yet either), how many were escalated to `needs_attention`, and the
+   * message of the first of those, or null when none was.
+   *
+   * Keyed on the branch the row was written for, not a workspace id: the
+   * question is asked by `mergeBranch`, which merges what the REMOTE holds of
+   * that branch, whichever clone the bytes are waiting in.
+   */
+  async queuedOnBranch(
+    branch: string,
+  ): Promise<{ queued: number; stuck: number; needsAttention: string | null }> {
+    const rows = await this.db
+      .select({ status: pendingCommits.status, lastError: pendingCommits.lastError })
+      .from(pendingCommits)
+      .where(eq(pendingCommits.branch, branch));
+    const stuck = rows.filter((r) => r.status === 'needs_attention');
+    return {
+      queued: rows.filter((r) => r.status === 'pending' || r.status === 'running').length,
+      stuck: stuck.length,
+      needsAttention:
+        stuck.length === 0 ? null : (stuck[0]?.lastError ?? 'A queued commit on this branch failed and needs a person.'),
+    };
+  }
+
+  /**
    * Is a LIVE row — `pending` or `running`, the statuses the worker will
    * still drive — queued for `(workspaceId, branch, path)`? A
    * `needs_attention` row deliberately does NOT count: its ladder has
