@@ -141,7 +141,7 @@ import { FileViewer } from '../FileViewer';
 import { resetStarterPacksForTests } from '../../../onboarding/state/starter-packs';
 // The lock API is mocked above; import the mocked fns so individual tests can
 // override the acquire outcome (e.g. a 403 on enter-edit).
-import { acquireLock as acquireLockMock, LockApiError } from '../../../workflow/services/lock.api';
+import { acquireLock as acquireLockMock, getLock as getLockMock, LockApiError } from '../../../workflow/services/lock.api';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../state/workspace.context';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
@@ -695,8 +695,8 @@ describe('FileViewer', () => {
   // fix that 403 was swallowed (console.warn only) and the click just flickered
   // "Loading…" then reverted to "Edit" with no explanation. Now the refusal is
   // surfaced in the save-error banner so the user understands the file is
-  // read-only to them. (Distinct from lock contention, which the "Locked by X"
-  // banner already covers.)
+  // read-only to them. (Distinct from someone else editing, which the "X is
+  // editing this page" banner already covers.)
   it('surfaces an access-denied 403 on enter-edit instead of silently reverting', async () => {
     // Force the access lookup to fail → useFileAccess default-allows →
     // canWrite=true → the Edit button renders on a protected branch.
@@ -725,6 +725,26 @@ describe('FileViewer', () => {
     expect(screen.getByText(/Eligible: Admin/i)).toBeInTheDocument();
     // And we did NOT flip into edit mode — no editable textbox appeared.
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  // Someone else has the page open for editing: the reader is told who, in
+  // plain words, and Edit says the same on hover.
+  it('says who is editing a page someone else has open', async () => {
+    vi.mocked(getLockMock).mockResolvedValueOnce({
+      branch: 'alice/draft',
+      path: 'knowledge-base/Knowledge/Foo.md',
+      holderUserId: 'u2',
+      holderName: 'Dana Lee',
+      acquiredAt: new Date().toISOString(),
+      lastHeartbeatAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    render(<ViewerHarness initialContent="Base content" />);
+
+    const banner = await screen.findByText(/is editing this page\. You can edit it when they finish\./);
+    expect(banner).toHaveTextContent('Dana Lee is editing this page. You can edit it when they finish.');
+    expect(screen.queryByText(/Locked/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit' })).toHaveAttribute('title', 'Dana Lee is editing this page');
   });
 
   // WP1 regression. The document column moved: the viewer pane used to be

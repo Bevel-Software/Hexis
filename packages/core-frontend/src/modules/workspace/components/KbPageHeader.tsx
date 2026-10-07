@@ -420,9 +420,9 @@ export function KbPageHeader({
               disabled={!!lockedBy || entering}
               title={
                 lockedBy
-                  ? `Locked by ${lockedBy}`
+                  ? `${lockedBy} is editing this page`
                   : entering
-                    ? 'Acquiring lock and fetching latest content…'
+                    ? 'Getting the latest version…'
                     : 'Click to edit this file'
               }
               onClick={onEdit}

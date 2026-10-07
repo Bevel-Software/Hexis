@@ -1,5 +1,5 @@
 import { useMemo, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { Check, XCircle, Lock, AlertTriangle, ArrowLeft, FileText, History } from 'lucide-react';
+import { Check, XCircle, Pencil, AlertTriangle, ArrowLeft, FileText, History } from 'lucide-react';
 import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { publishEditablePage, withdrawEditablePage } from '../state/editable-page';
@@ -492,8 +492,9 @@ export function FileViewer() {
       .then(async ({ acquired, contended, error }) => {
         if (!acquired) {
           // Two failure shapes:
-          //   - Contention (`contended`): held by someone else → the "Locked
-          //     by X" banner (below) already explains it; don't double-report.
+          //   - Contention (`contended`): held by someone else → the "X is
+          //     editing this page" banner (below) already explains it; don't
+          //     double-report.
           //   - Access-denied 403 / network (`error`, not contended): surface
           //     it. `useFileAccess` default-allows on a transient lookup
           //     failure, so the editor lets the user click Edit even when the
@@ -838,7 +839,7 @@ export function FileViewer() {
         // Read the message off the resolved outcome, not `fileLock.lockError`
         // — that's React state and is stale in this closure right after the
         // await. Covers both the access-denied 403 and lock-contention cases.
-        throw new Error(error ?? 'File is locked by another user.');
+        throw new Error(error ?? 'Someone else is editing this page.');
       }
       try {
         await fileLock.saveAndRelease();
@@ -1232,9 +1233,9 @@ export function FileViewer() {
       onClick={handleEnterEditMode}
       title={
         lockedBy
-          ? `Locked by ${lockedBy}`
+          ? `${lockedBy} is editing this page`
           : isEnteringEdit
-            ? 'Acquiring lock and fetching latest content…'
+            ? 'Getting the latest version…'
             : 'Click to edit this file'
       }
     >
@@ -1480,12 +1481,12 @@ export function FileViewer() {
             <Banner
               role="status"
               tone="wait"
-              icon={<Lock size={14} />}
+              icon={<Pencil size={14} />}
               aria-live="polite"
               aria-atomic="true"
               className="mb-4 flex-none"
             >
-              Locked by <span className="font-medium">{fileLock.externalLock.holderName}</span>. The editor is read-only until they finish.
+              <span className="font-medium">{fileLock.externalLock.holderName}</span> is editing this page. You can edit it when they finish.
             </Banner>
           )}
 

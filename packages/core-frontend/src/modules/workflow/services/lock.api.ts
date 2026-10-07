@@ -26,6 +26,16 @@ export class LockApiError extends Error {
   }
 }
 
+/**
+ * What a person reads when the server says they no longer hold the file —
+ * it went idle, or expired, before a save or a heartbeat landed. The
+ * server's own sentence ("Cannot release lock on …: not held by you")
+ * names the mechanism; the person only needs to know their editing
+ * stopped and what to do about it.
+ */
+export const EDITING_ENDED_MESSAGE =
+  'Your editing session ended before this save. Check the page and edit it again if anything is missing.';
+
 async function unwrap<T>(res: Response): Promise<T> {
   if (res.ok) return (await res.json()) as T;
   let body: unknown;
@@ -34,6 +44,9 @@ async function unwrap<T>(res: Response): Promise<T> {
     body = await res.json();
     if (body && typeof body === 'object' && 'error' in body) {
       message = String((body as { error: unknown }).error);
+    }
+    if (body && typeof body === 'object' && (body as { kind?: unknown }).kind === 'lock-not-held') {
+      message = EDITING_ENDED_MESSAGE;
     }
   } catch {
     // non-JSON body — fall through with default message
@@ -45,8 +58,8 @@ async function unwrap<T>(res: Response): Promise<T> {
  * Try to acquire the lock for `(branch, path)`. Resolves with the
  * `AcquireLockResult` payload — `acquired: true` when the caller now
  * holds the lock, `acquired: false` when someone else does (the
- * holder's lock state is included so the UI can render "Locked by X"
- * without a follow-up call).
+ * holder's lock state is included so the UI can render "X is editing
+ * this page" without a follow-up call).
  */
 export async function acquireLock(
   workspaceId: string,

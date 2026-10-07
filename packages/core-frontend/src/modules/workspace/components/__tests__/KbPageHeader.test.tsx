@@ -95,11 +95,11 @@ describe('KbPageHeader', () => {
     expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
   });
 
-  it('disables Edit while someone else holds the lock and names the holder', () => {
+  it('disables Edit while someone else is editing and names them', () => {
     renderHeader({ lockedBy: 'Ali Raza' });
     const edit = screen.getByRole('button', { name: 'Edit' });
     expect(edit).toBeDisabled();
-    expect(edit).toHaveAttribute('title', 'Locked by Ali Raza');
+    expect(edit).toHaveAttribute('title', 'Ali Raza is editing this page');
   });
 
   it('swaps Edit for Done in edit mode', () => {
