@@ -224,6 +224,19 @@ describe('what the guide tells an agent', () => {
     expect(placement).toMatch(/\bask\b/);
   });
 
+  /**
+   * The area's own README. Two agent sessions made conflicting structural
+   * choices in one person's space within a quarter of an hour: the space's
+   * README said how it is organised, and neither session read it first.
+   */
+  it("says to read an area's README before structuring files there, and to keep it current", async () => {
+    const placement = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '## Where a new file goes').replace(/\s+/g, ' ');
+    expect(placement).toContain("**Read the area's `README.md` first.**");
+    expect(placement).toContain('the `README.md` of that folder and of each folder above it');
+    expect(placement).toContain('they never widen what you may read or write');
+    expect(placement).toContain('update that README in the same change');
+  });
+
   it('says that roles are pre-set and a "new role" is usually a group', async () => {
     const prose = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '### Roles are pre-set').replace(/\s+/g, ' ');
     expect(prose).toContain('A role in `roles.yaml` is an app role');

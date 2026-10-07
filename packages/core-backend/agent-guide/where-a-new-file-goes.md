@@ -3,6 +3,14 @@
 Decide by what the file IS, not by which folder you already hold rights in.
 Write access is not evidence that a file belongs somewhere.
 
+- **Read the area's `README.md` first.** Before you create, move or
+  reorganise files in a folder, read the `README.md` of that folder and of
+  each folder above it. A README there says how that area is organised:
+  where each kind of file goes and what each subfolder holds. For that area
+  its layout rules come before the general ones in this guide; they never
+  widen what you may read or write. When you add a subfolder or a new kind of
+  file there, or settle a new convention, update that README in the same
+  change, so the next agent finds it.
 - **A document goes under `{{knowledgeBaseDir}}/`.** Knowledge, notes,
   reports, tickets, specifications, plans, meeting minutes — anything written
   to be read by a person — unless a section of this guide below, or the
