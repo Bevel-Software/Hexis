@@ -218,3 +218,52 @@ describe('DELETE /workspace/:id/file — one file identity', () => {
     }
   });
 });
+
+/**
+ * The root's `access.md` and `roles.yaml` govern the whole repository, so the
+ * app's delete route refuses them — with the sentence `delete_file` and the
+ * explorer use — before a lock is taken. A nested `access.md` is a file like
+ * any other here: the lock gate decides whether the caller may write it.
+ */
+describe('DELETE /workspace/:id/file — the repository\'s own files', () => {
+  let h: Harness | null = null;
+  afterEach(async () => {
+    if (h) {
+      await closeServer(h.server);
+      await fs.rm(h.workspaceDir, { recursive: true, force: true });
+    }
+    h = null;
+  });
+
+  const del = (base: string, p: string) =>
+    fetch(`${base}/api/workspace/${WORKSPACE_ID}/file?path=${encodeURIComponent(p)}`, { method: 'DELETE' });
+
+  it.each(['access.md', 'roles.yaml'])('refuses the root %s with one sentence and leaves it', async (name) => {
+    h = await makeHarness();
+    await fs.mkdir(h.repoDir, { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, name), 'x', 'utf-8');
+
+    const res = await del(h.baseUrl, name);
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: `${name} is the repository's own file and cannot be deleted.` });
+    expect(h.deleteFileMock).not.toHaveBeenCalled();
+    expect(await exists(path.join(h.repoDir, name))).toBe(true);
+  });
+
+  it('deletes a nested access.md like any file, and a nested roles.yaml too', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.repoDir, 'Team'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'Team/access.md'), '---\nread: Admin\n---\n', 'utf-8');
+    await fs.writeFile(path.join(h.repoDir, 'Team/roles.yaml'), 'content', 'utf-8');
+    // Not emptied by these deletes, so no placeholder needs keeping.
+    await fs.writeFile(path.join(h.repoDir, 'Team/notes.md'), 'n', 'utf-8');
+
+    for (const p of ['Team/access.md', 'Team/roles.yaml']) {
+      const res = await del(h.baseUrl, p);
+      expect(res.status).toBe(200);
+      expect(h.deleteFileMock).toHaveBeenCalledWith(WORKSPACE_ID, `${KB}/${p}`);
+      expect(await exists(path.join(h.repoDir, p))).toBe(false);
+    }
+  });
+});

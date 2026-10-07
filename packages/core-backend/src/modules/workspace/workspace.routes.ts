@@ -14,6 +14,8 @@ import {
   folderPlaceholderPath,
   isPlatformFile,
   isPlatformRestoreShape,
+  isRepositoryOwnFile,
+  repositoryOwnFileDeleteRefusal,
   platformFileCreationRefusal,
   platformFileRefusal,
   reservedRootDirNames,
@@ -1194,6 +1196,14 @@ export function createWorkspaceRoutes(
           eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
         }
         res.json({ status: 'deleted', count: filesInDir.length });
+        return;
+      }
+      // The root's `access.md` and `roles.yaml` govern the whole repository:
+      // nobody deletes them, here or through the agent tools. A nested
+      // `access.md` is deleted like any file its caller may write.
+      const rel = toKbRelative(filePath, kbDirName);
+      if (rel !== null && isRepositoryOwnFile(rel, kb.layout)) {
+        res.status(409).json({ error: repositoryOwnFileDeleteRefusal(rel) });
         return;
       }
       await withLock(id, user, filePath, () => workspaceService.deleteFile(id, filePath));
