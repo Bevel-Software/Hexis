@@ -61,13 +61,22 @@ or `window.bevel.navigate(href)`:
 - **A bare fragment scrolls the page.** `#totals` scrolls the element with
   `id="totals"` into view inside the frame; the page stays loaded and the app
   does not move. A fragment that names no element does nothing, except `#` and
-  `#top`, which scroll to the top of the page. Use this for a table of contents
-  or a "back to top" link.
+  `#top`, which scroll to the top of the page. An element whose id is `top`
+  wins over the top of the page. Use this for a table of contents or a "back
+  to top" link. The page's own address does not change, so `hashchange` never
+  fires: a page that routes by hash handles its own clicks.
 - **A relative path** resolves against the folder of the page's own file and
   opens that file in the app: from `{{knowledgeBaseDir}}/Reports/Q3.html`,
   `../Knowledge/Alice.md#goal` opens `{{knowledgeBaseDir}}/Knowledge/Alice.md`
   at its `goal` heading.
 - **`/workspace/<branch>/<path>`** opens that file on that branch.
 - **An external address** (`http:`, `https:`, `mailto:`) opens in a new tab.
+  A call from a script may also open `tel:`, `sms:`, `geo:` and a
+  protocol-relative `//host/path` address in a new tab, though a link
+  written in the markup cannot keep one.
 - **Anything else** (`javascript:`, `data:`, `file:`, an empty string) does
   nothing.
+
+A click that a handler of the page has already cancelled with
+`event.preventDefault()` is left to that handler: the bridge neither scrolls
+nor opens anything for it.

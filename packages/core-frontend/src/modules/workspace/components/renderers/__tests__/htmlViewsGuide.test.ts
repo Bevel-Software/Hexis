@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { isOpenableExternalHref, isPageLinkExternalHref } from '../../../../../shared/markdown/hrefs';
 import { sanitizeAgentHtml } from '../htmlSandbox';
 import { runBridge } from './bridgeHarness';
 
@@ -90,13 +91,43 @@ describe('the html-views guide section agrees with the renderer', () => {
       const bridge = runBridge({ ids: ['totals'] });
       const go = (href: string) =>
         route === 'click' ? bridge.click(href) : (bridge.bevel[route] as (h: string) => void)(href);
-      go('#totals');
-      go('#nowhere');
-      go('#');
-      go('#top');
+      const clicks = [go('#totals'), go('#nowhere'), go('#'), go('#top')];
+      // A click's default is cancelled every time: left to the browser, the
+      // frame would navigate away after the scroll.
+      if (route === 'click') expect(clicks, route).toEqual(Array(4).fill({ prevented: true }));
       expect(bridge.scrolled, route).toEqual(['totals']);
       expect(bridge.scrolledToTop(), route).toBe(2);
       expect(bridge.posted, route).toEqual([]);
+    }
+    expect(flat).toContain('An element whose id is `top` wins over the top of the page');
+    const withTop = runBridge({ ids: ['top'] });
+    withTop.click('#top');
+    expect(withTop.scrolled).toEqual(['top']);
+    expect(withTop.scrolledToTop()).toBe(0);
+  });
+
+  it('says a click the page already cancelled is left to the page, and the bridge leaves it', () => {
+    expect(flat).toContain(
+      'A click that a handler of the page has already cancelled with `event.preventDefault()` is left to that handler: the bridge neither scrolls nor opens anything for it.',
+    );
+    const bridge = runBridge({ ids: ['totals'] });
+    bridge.click('#totals', { alreadyPrevented: true });
+    bridge.click('../Knowledge/Alice.md', { alreadyPrevented: true });
+    expect(bridge.scrolled).toEqual([]);
+    expect(bridge.posted).toEqual([]);
+  });
+
+  it('names the addresses only a script may open, and the app opens exactly those beyond the markup', () => {
+    expect(flat).toContain(
+      'A call from a script may also open `tel:`, `sms:`, `geo:` and a protocol-relative `//host/path` address in a new tab, though a link written in the markup cannot keep one.',
+    );
+    for (const href of ['tel:+15550100', 'sms:+15550100', 'geo:0,0', '//example.com/docs']) {
+      expect(isOpenableExternalHref(href), href).toBe(true);
+      expect(isPageLinkExternalHref(href), href).toBe(false);
+      expect(hrefAfterSanitizing(href), href).toBeNull();
+    }
+    for (const href of ['javascript:alert(1)', 'data:text/html,hi', 'file:///etc/hosts']) {
+      expect(isOpenableExternalHref(href), href).toBe(false);
     }
   });
 

@@ -434,7 +434,10 @@ describe('buildSandboxedHtml', () => {
     bridge.click('\n      Board.html\n    ');
     bridge.click('  #goal  ');
     bridge.click('  https://example.com/docs  ');
-    bridge.click('  ');
+    // An empty href goes nowhere, and its default is still cancelled: left to
+    // the browser it would reload the frame against the app's URL.
+    expect(bridge.click('  ')).toEqual({ prevented: true });
+    expect(bridge.click('')).toEqual({ prevented: true });
 
     expect(bridge.posted).toEqual([
       { type: 'bevel.navigate', href: 'Board.html' },
@@ -497,6 +500,24 @@ describe('buildSandboxedHtml', () => {
       // A malformed escape is looked up as written, and nothing breaks.
       bridge.click('#100%');
       expect(bridge.scrolled).toEqual(['Q3 totals', 'legacy']);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    // The HTML standard's order: the fragment as written names the target
+    // first, its decoding only when that finds nothing.
+    it('prefers the id as written over its percent-decoding, as a browser does', () => {
+      const bridge = runBridge({ ids: ['Q3%20totals', 'Q3 totals'] });
+      bridge.click('#Q3%20totals');
+      expect(bridge.scrolled).toEqual(['Q3%20totals']);
+    });
+
+    it('leaves a click the page already cancelled to the page: no scroll, nothing posted', () => {
+      const bridge = runBridge({ ids: ['panel'] });
+      bridge.click('#panel', { alreadyPrevented: true });
+      bridge.click('#', { alreadyPrevented: true });
+      bridge.click('../Knowledge/Alice.md', { alreadyPrevented: true });
+      expect(bridge.scrolled).toEqual([]);
+      expect(bridge.scrolledToTop()).toBe(0);
       expect(bridge.posted).toEqual([]);
     });
 

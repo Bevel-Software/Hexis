@@ -10,8 +10,12 @@ import { buildSandboxedHtml } from '../htmlSandbox';
  * `html-views` section to it.
  */
 export interface BridgeRun {
-  /** Click an `<a>` whose written href is `href`; answers whether the default was cancelled. */
-  click: (href: string) => { prevented: boolean };
+  /**
+   * Click an `<a>` whose written href is `href`; answers whether the default
+   * was cancelled. `alreadyPrevented` is a click a handler of the page's own
+   * cancelled before it bubbled up to the bridge.
+   */
+  click: (href: string, opts?: { alreadyPrevented?: boolean }) => { prevented: boolean };
   /** `window.bevel` as the page's own scripts see it. */
   bevel: Record<string, unknown>;
   /** Messages posted to the parent. */
@@ -28,7 +32,7 @@ export function runBridge(page: { ids?: string[]; names?: string[] } = {}): Brid
   const out = buildSandboxedHtml({ title: 't', libModuleSources: [], bodyHtml: '' });
   const scriptBody = out.match(/<script type="module">([\s\S]*?)<\/script>/)![1];
 
-  type ClickEvent = { target: { closest: () => unknown }; preventDefault: () => void };
+  type ClickEvent = { target: { closest: () => unknown }; defaultPrevented: boolean; preventDefault: () => void };
   const handlers: ((e: ClickEvent) => void)[] = [];
   const posted: unknown[] = [];
   const scrolled: string[] = [];
@@ -54,10 +58,14 @@ export function runBridge(page: { ids?: string[]; names?: string[] } = {}): Brid
   if (handlers.length !== 1) throw new Error(`the bridge registered ${handlers.length} click listeners`);
 
   return {
-    click: (href: string) => {
-      let prevented = false;
+    click: (href: string, opts = {}) => {
+      let prevented = opts.alreadyPrevented ?? false;
       const anchor = { getAttribute: () => href };
-      handlers[0]({ target: { closest: () => anchor }, preventDefault: () => (prevented = true) });
+      handlers[0]({
+        target: { closest: () => anchor },
+        defaultPrevented: prevented,
+        preventDefault: () => (prevented = true),
+      });
       return { prevented };
     },
     bevel: ctx.bevel as Record<string, unknown>,

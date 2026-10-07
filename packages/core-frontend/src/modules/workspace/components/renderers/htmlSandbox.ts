@@ -307,7 +307,8 @@ function escapeForScriptBody(source: string): string {
  * frame resolves `#totals` against the APP's URL, so the default action
  * navigates the frame away and unloads the page. A fragment naming no element
  * does nothing, except `#` and `#top`, which scroll to the top as a browser
- * would. The `html-views` section of the agent guide states this rule, and
+ * would. A click whose default a handler of the page already cancelled is
+ * left to that handler. The `html-views` section of the agent guide states this rule, and
  * `htmlViewsGuide.test.ts` holds the two together.
  */
 const NAV_BRIDGE = `
@@ -332,7 +333,9 @@ const NAV_BRIDGE = `
     var named = document.getElementsByName ? document.getElementsByName(id) : null;
     return named && named.length ? named[0] : null;
   }
-  // A bare fragment is an in-page jump, scrolled here inside the frame.
+  // A bare fragment is an in-page jump, scrolled here inside the frame. The
+  // target is found as the HTML standard finds it: the fragment as written
+  // first, its percent-decoding only when that names nothing.
   function jumpTo(fragment) {
     if (typeof document === 'undefined') return;
     var id = fragment.slice(1);
@@ -369,9 +372,14 @@ const NAV_BRIDGE = `
       var el = e.target;
       var a = el && el.closest ? el.closest('a[href]') : null;
       if (!a) return;
+      // A handler of the page's own that already cancelled this click owns
+      // it (a toggle, a hash router); the bridge stays out of its way.
+      if (e.defaultPrevented) return;
+      // Cancelled even when there is nowhere to go: left to the browser, an
+      // empty href reloads the frame against the app's URL, as '#…' would.
+      e.preventDefault();
       var href = normalize(a.getAttribute('href') || '');
       if (!href) return;
-      e.preventDefault();
       navigate(href);
     });
   }
