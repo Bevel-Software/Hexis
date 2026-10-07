@@ -36,6 +36,13 @@ const PAGES: string[] = [
   'Text with `code [not](../B/Code.md)` and\n\n```\n[fenced](../B/Fenced.md)\n```\n\n~~~md\n![fenced](x.png)\n~~~\n\nafter [after](../B/After.md)',
   '---\nnodeType: "[Task](../../NodeTypes/Task.md)"\nid: one\n---\n\n# One\n[body](../B/Body.md)',
   '[folder](../B/) [mangled](junk/knowledge-base/Projects/C.md)',
+  // Indented code blocks: four columns in, where a paragraph cannot continue.
+  '[before](../B/Before.md)\n\n    [indented](../B/Indented.md)\n    ![x](y.png)\n\n    still code [c](../B/C2.md)\n\n[after](../B/After2.md)',
+  '# Heading\n    [code after heading](../B/H.md)\n\npara\n    [lazy continuation](../B/Lazy.md)',
+  '\t[tab code](../B/Tab.md)\n\ntext [t](../B/T.md)',
+  '- item\n\n    [list paragraph](../B/ListPara.md)\n\n        [list code](../B/ListCode.md)\n\nback [out](../B/Out.md)\n\n    [code again](../B/Code2.md)',
+  '1. one\n2. two\n\n   [ordered para](../B/Ord.md)\n\n       [ordered code](../B/OrdCode.md)',
+  '> quote\n\n    [code after quote](../B/Q.md)\n\n  [two spaces](../B/Two2.md)',
 ];
 
 /** The destinations react-markdown renders for a page, in document order, as the attribute values. */

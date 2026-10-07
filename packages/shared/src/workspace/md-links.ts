@@ -12,8 +12,9 @@
  * DESTINATIONS — inline links, images, reference definitions, and the inline
  * links in a node's frontmatter (the `nodeType` link) — as character spans, so
  * a rewrite splices the new destination into the old one's place and every
- * other byte of the file stays as it was. Fenced code blocks and inline code
- * are skipped: a path written there is an example, not a link.
+ * other byte of the file stays as it was. Code — fenced blocks, indented
+ * blocks and inline code — is skipped: a path written there is an example,
+ * not a link.
  */
 
 import { extractFrontmatter } from './frontmatter.js';
@@ -72,8 +73,30 @@ export function scanMarkdownLinks(text: string): MdLinkSpan[] {
 /** An opening code fence: its character and length. */
 const FENCE_OPEN_RE = /^[ \t]*(?:>[ \t]?)*[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})(.*)$/;
 
+/** A list item's marker, with the spaces after it. */
+const LIST_ITEM_RE = /^( *)([-*+]|\d{1,9}[.)])( +|$)/;
+
+/** The column a line's text starts at, tabs stopping every 4 columns. */
+function indentOf(line: string): number {
+  let col = 0;
+  for (const c of line) {
+    if (c === ' ') col += 1;
+    else if (c === '\t') col += 4 - (col % 4);
+    else break;
+  }
+  return col;
+}
+
 function scanBody(text: string, from: number, out: MdLinkSpan[]): void {
   let fence: { char: string; len: number } | null = null;
+  // An indented code block: four columns past where the enclosing list item's
+  // text starts (column 0 outside a list), opened where a paragraph cannot be
+  // continued — after a blank line, a heading, a fence, or at the top.
+  let indentedCode = false;
+  /** The column the current list item's text starts at, or null outside a list. */
+  let listIndent: number | null = null;
+  let mayOpenCode = true;
+  let prevBlank = true;
   // The run of prose lines since the last blank line or fence: inline
   // constructs (a link split over two lines) live within one such run.
   let chunkStart = -1;
@@ -87,29 +110,53 @@ function scanBody(text: string, from: number, out: MdLinkSpan[]): void {
     const nl = text.indexOf('\n', lineStart);
     const lineEnd = nl === -1 ? text.length : nl;
     const line = text.slice(lineStart, lineEnd).replace(/\r$/, '');
+    const blank = line.trim() === '';
+    const indent = indentOf(line);
     if (fence) {
       const close = line.replace(/^[ \t]*(?:>[ \t]?)*[ \t]*/, '');
       const run = close.match(/^(`+|~+)[ \t]*$/);
-      if (run && run[1][0] === fence.char && run[1].length >= fence.len) fence = null;
+      if (run && run[1][0] === fence.char && run[1].length >= fence.len) {
+        fence = null;
+        mayOpenCode = true;
+      }
+    } else if (blank) {
+      flush();
+      mayOpenCode = true;
+    } else if (indentedCode && indent >= (listIndent ?? 0) + 4) {
+      // Still inside the indented code block.
     } else {
+      indentedCode = false;
+      // A line back at the margin after a blank line has left the list.
+      if (listIndent !== null && prevBlank && indent < listIndent) listIndent = null;
+      const item: RegExpExecArray | null = indent < (listIndent ?? 0) + 4 ? LIST_ITEM_RE.exec(line) : null;
       const open = line.match(FENCE_OPEN_RE);
-      // A backtick fence's info string may hold no backtick (that is inline code).
-      if (open && !(open[1][0] === '`' && open[2].includes('`'))) {
+      if (!item && mayOpenCode && indent >= (listIndent ?? 0) + 4) {
+        flush();
+        indentedCode = true;
+      } else if (open && !(open[1][0] === '`' && open[2].includes('`'))) {
+        // A backtick fence's info string may hold no backtick (that is inline code).
         flush();
         fence = { char: open[1][0], len: open[1].length };
-      } else if (line.trim() === '') {
-        flush();
       } else {
+        if (item) {
+          const gap: number = item[3].length;
+          listIndent = item[1].length + item[2].length + (gap === 0 || gap > 4 ? 1 : gap);
+        }
         const def = matchDefinition(line, lineStart);
         if (def) {
           flush();
           out.push(def);
+          mayOpenCode = false;
         } else {
           if (chunkStart < 0) chunkStart = lineStart;
           chunkEnd = lineEnd;
+          // A heading ends its block; a paragraph line can be continued.
+          mayOpenCode = /^ {0,3}#{1,6}(?:[ \t]|$)/.test(line);
+          if (mayOpenCode) flush();
         }
       }
     }
+    prevBlank = blank;
     if (nl === -1) break;
     lineStart = nl + 1;
   }

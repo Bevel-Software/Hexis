@@ -128,6 +128,34 @@ describe('md-links — what a move never changes', () => {
     expect(text).toBe(input.replace('Real [p](../Old/Plan.md).', 'Real [p](../New/Deep/Plan.md).'));
   });
 
+  it('indented code blocks are untouched, at the margin and inside a list item', () => {
+    const input = [
+      'Real [p](../Old/Plan.md).',
+      '',
+      '    [p](../Old/Plan.md)',
+      '',
+      '    still code [p](../Old/Plan.md)',
+      '',
+      '- item',
+      '',
+      '    list paragraph [p](../Old/Plan.md)',
+      '',
+      '        [p](../Old/Plan.md)',
+      '',
+      'para',
+      '    lazy [p](../Old/Plan.md)',
+      '',
+    ].join('\n');
+    const { text, edits } = rewrite(input, OUTSIDE, PLAN, NEW_PLAN);
+    expect(edits).toHaveLength(3);
+    const changed = text.split('\n').filter((l, i) => l !== input.split('\n')[i]);
+    expect(changed).toEqual([
+      'Real [p](../New/Deep/Plan.md).',
+      '    list paragraph [p](../New/Deep/Plan.md)',
+      '    lazy [p](../New/Deep/Plan.md)',
+    ]);
+  });
+
   it('id-links, external URLs, same-page anchors and escaped brackets are left alone', () => {
     const input = '[a](project-hexis) [b](plan#risks) [c](https://x.y/Old/Plan.md) [d](#risks) \\[e](../Old/Plan.md)\n';
     expect(rewrite(input, OUTSIDE, PLAN, NEW_PLAN).text).toBe(input);
