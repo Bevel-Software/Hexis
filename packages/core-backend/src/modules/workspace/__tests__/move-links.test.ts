@@ -138,14 +138,16 @@ describe('planMoveLinks', () => {
     expect(plan.report.notRewritten).toEqual([{ path: `${KB}/B.md`, reason: 'refused: not in this session', links: ['Old/One.md'] }]);
   });
 
-  it('a page the read hook refuses is named without its links', async () => {
+  it('a page the read hook refuses is treated as unreadable: never named, one sentence instead', async () => {
     const files = {
       [`${KB}/Old/One.md`]: 'x\n',
       [`${KB}/Hidden.md`]: '[one](Old/One.md) [secret](Secret/Target.md)\n',
     };
     const plan = await planMoveLinks(inputOf(files, { hookRefusal: async () => ({ reason: 'refused: read denied', read: true }) }));
     expect(plan.edits).toEqual([]);
-    expect(plan.report.notRewritten).toEqual([{ path: `${KB}/Hidden.md`, reason: 'refused: read denied', links: [] }]);
+    expect(plan.report.notRewritten).toEqual([]);
+    expect(plan.report.unsearched).toBe(UNSEARCHED_SENTENCE);
+    expect(JSON.stringify(plan.report)).not.toMatch(/Hidden|Secret|read denied/);
   });
 
   it('a link spelling the moved name with percent-encoding or escapes is still found', async () => {

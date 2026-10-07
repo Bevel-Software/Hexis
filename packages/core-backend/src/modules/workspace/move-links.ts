@@ -13,7 +13,9 @@
  *     name and no count;
  *   - a file the caller can read but may not change (a protected branch's
  *     write rules, or the write hook's refusal) is named with its links, and
- *     left; one the read hook refuses is named without them;
+ *     left;
+ *   - a file the read hook refuses counts as one the caller cannot read: not
+ *     named, only covered by the same sentence;
  *   - an HTML page is named with its links, and left.
  */
 
@@ -77,7 +79,7 @@ export interface MoveLinksInput {
   /**
    * Ask the deployment's read and write hooks about a file the move edits:
    * why it may not be, or null. Only edited files are asked. `read` says the
-   * read hook refused, so the file's contents — its links — stay unsaid.
+   * read hook refused: the file is then treated as unreadable and never named.
    */
   hookRefusal: (lockAt: string, path: string) => Promise<{ reason: string; read: boolean } | null>;
 }
@@ -171,7 +173,8 @@ export async function planMoveLinks(input: MoveLinksInput): Promise<MoveLinksPla
   for (const e of kept) {
     const refusal = await input.hookRefusal(e.lockAt, e.path);
     if (refusal === null) allowed.push(e);
-    else notRewritten.push({ path: e.path, reason: refusal.reason, links: refusal.read ? [] : e.links.map((l) => l.from) });
+    else if (refusal.read) unsearched = true;
+    else notRewritten.push({ path: e.path, reason: refusal.reason, links: e.links.map((l) => l.from) });
   }
   kept = allowed;
   return { edits: kept, report: reportOf(kept, notRewritten, unsearched) };

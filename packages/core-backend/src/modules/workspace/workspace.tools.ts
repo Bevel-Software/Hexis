@@ -3019,7 +3019,7 @@ export function registerWorkspaceTools(
           readText: (p) => nodeFs.readFile(join(root, p), 'utf8'),
           // Asked only once a page is known to be edited — the hooks hear of
           // no page merely searched — so a read refusal arrives after the
-          // read; the plan then names the page without its links.
+          // read; the plan then treats the page as unreadable and never names it.
           hookRefusal: async (lockAt, path) => {
             const why = (err: unknown) => `refused: ${err instanceof Error ? err.message : String(err)}`;
             try {

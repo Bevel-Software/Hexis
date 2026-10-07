@@ -66,7 +66,11 @@ export function scanMarkdownLinks(text: string): MdLinkSpan[] {
       const nl = text.indexOf('\n', lineStart);
       const lineEnd = nl === -1 || nl > fmEnd ? fmEnd : nl;
       const value = FRONTMATTER_LINK_VALUE_RE.exec(text.slice(lineStart, lineEnd).replace(/\r$/, ''));
-      if (value) scanInline(text, lineStart + value[1].length, lineEnd, true, out);
+      // Only the link itself: a trailing YAML comment is not part of the value.
+      if (value) {
+        const linkStart = lineStart + value[1].length;
+        scanInline(text, linkStart, linkStart + value[3].length, true, out);
+      }
       lineStart = lineEnd + 1;
     }
   }
@@ -76,10 +80,12 @@ export function scanMarkdownLinks(text: string): MdLinkSpan[] {
 
 /**
  * A frontmatter line whose whole value is one markdown link, quoted or not
- * (the panel's `FRONTMATTER_LINK_RE`, on the value YAML hands it). Group 1 is
- * everything before the link.
+ * (the panel's `FRONTMATTER_LINK_RE`, on the value YAML hands it — which is
+ * why a trailing ` # comment`, stripped by YAML, may follow). Group 1 is
+ * everything before the link; group 3 is the link.
  */
-const FRONTMATTER_LINK_VALUE_RE = /^([ \t]*[^\s:#][^:]*:[ \t]+(["']?))\[[^\]]+\]\(.*\)\2[ \t]*$/;
+const FRONTMATTER_LINK_VALUE_RE =
+  /^([ \t]*[^\s:#][^:]*:[ \t]+(["']?))(\[[^\]]+\]\(<?[^)>]+>?\))\2(?:[ \t]+#.*)?[ \t]*$/;
 
 /**
  * An opening code fence: its character and length. Group 1 is what precedes

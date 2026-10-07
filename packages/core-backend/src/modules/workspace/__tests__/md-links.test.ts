@@ -283,6 +283,10 @@ describe('md-links — container and frontmatter edges', () => {
       "parent: '[P](../Old/Plan.md)'",
       'owner: [P](../Old/Plan.md)',
       'description: "See [P](../Old/Plan.md) for context"',
+      'commented: "[P](../Old/Plan.md)"  # YAML drops this [c](../Old/Plan.md)',
+      'bare: [P](../Old/Plan.md) # so does this',
+      'inside: "[P](../Old/Plan.md) # not a comment"',
+      'two: [a](../Old/Plan.md) [b](../Old/Plan.md)',
       '---',
       '',
     ].join('\n');
@@ -293,6 +297,10 @@ describe('md-links — container and frontmatter edges', () => {
       "parent: '[P](../New/Deep/Plan.md)'",
       'owner: [P](../New/Deep/Plan.md)',
       'description: "See [P](../Old/Plan.md) for context"',
+      'commented: "[P](../New/Deep/Plan.md)"  # YAML drops this [c](../Old/Plan.md)',
+      'bare: [P](../New/Deep/Plan.md) # so does this',
+      'inside: "[P](../Old/Plan.md) # not a comment"',
+      'two: [a](../Old/Plan.md) [b](../Old/Plan.md)',
       '---',
       '',
     ]);
