@@ -15,6 +15,7 @@ import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
+import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
 import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
@@ -27,7 +28,7 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessControlService } from '../../access/access-control.service.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { WorkspaceService } from '../workspace.service.js';
-import { isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
+import { DEFAULT_KB_LAYOUT, isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
@@ -328,6 +329,7 @@ const post = (url: string, body: unknown = {}) =>
 
 beforeEach(() => {
   /* fresh per test via start() */
+  guideText = 'THE PLATFORM GUIDE\n';
 });
 afterEach(async () => {
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
@@ -1120,6 +1122,15 @@ describe("the agent guide at the guide's name", () => {
     expect((await read(base, 'AGENTS.md')).content).toBe('THE PLATFORM GUIDE\n');
     // Sliced like any content.
     expect((await read(base, GUIDE, { offset: 4, limit: 8 })).content).toBe('PLATFORM');
+  });
+
+  it('answers with the platform\'s composed guide, HTML views section and all', async () => {
+    guideText = await composeAgentGuide(DEFAULT_KB_LAYOUT);
+    const base = await start();
+    const { content } = await read(base, 'AGENTS.md');
+    expect(content).toBe(guideText);
+    expect(content).toContain('## HTML views');
+    expect(content).toContain('**A bare fragment scrolls the page.**');
   });
 
   it("puts the knowledge base's own AGENTS.md first, then the separator, then the guide", async () => {
