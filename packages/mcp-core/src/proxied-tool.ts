@@ -203,10 +203,11 @@ export function sanitizeInputSchema(schema: unknown): unknown {
   const inlining = new Set<string>();
   // Nodes produced while inlining a `$ref`, against MAX_INLINED_NODES.
   let inlined = 0;
-  // `isPropertyMap` marks the value of `properties`/`patternProperties`: its
-  // keys are the tool's OWN field names, not schema keywords, so a field
-  // literally named `format`, `$ref` or `definitions` must survive untouched
-  // (its VALUE is still a schema and is walked as one).
+  // `isPropertyMap` marks the value of `properties`/`patternProperties`, and
+  // of `dependentSchemas`/`dependencies`: its keys are the tool's OWN field
+  // names, not schema keywords, so a field literally named `format`, `$ref`,
+  // `definitions` or `default` must survive untouched (its VALUE is still a
+  // schema and is walked as one).
   const walk = (node: unknown, depth: number, isPropertyMap = false): unknown => {
     // Stack guard, not a schema rule: `$ref` recursion is caught below, so
     // nothing a server legitimately sends reaches this. Stopping must never
@@ -215,13 +216,29 @@ export function sanitizeInputSchema(schema: unknown): unknown {
     if (depth > MAX_SANITIZE_DEPTH) return stripPastDepth(node);
     if (Array.isArray(node)) return node.map((item) => walk(item, depth + 1));
     if (!node || typeof node !== 'object') return node;
-    if (inlining.size > 0) inlined += 1;
+    if (inlining.size > 0) {
+      inlined += 1;
+      // The expansion budget is spent per node copied, and checked per node:
+      // a `$ref` past it degrades to `{}` below, and the rest of a target
+      // already being copied degrades the same way as the depth cap does —
+      // shape kept, objects emptied — so one oversized target costs the
+      // budget and not its own size.
+      if (inlined > MAX_INLINED_NODES) return stripPastDepth(node);
+    }
     const obj = node as Record<string, unknown>;
-    if (!isPropertyMap && typeof obj.$ref === 'string') {
-      const pointer = obj.$ref;
+    // `$dynamicRef` is a reference like `$ref` (2020-12's late-bound form):
+    // resolved the same way when it is a local pointer, degraded the same way
+    // when it is not — never left standing, because the `$defs` block it
+    // reaches into is dropped below and a dangling reference is what clients
+    // reject.
+    const reference =
+      typeof obj.$ref === 'string' ? obj.$ref : typeof obj.$dynamicRef === 'string' ? obj.$dynamicRef : undefined;
+    if (!isPropertyMap && reference !== undefined) {
+      const pointer = reference;
       // JSON Schema allows siblings next to $ref; keep them, target wins ties.
       const siblings: Record<string, unknown> = { ...obj };
       delete siblings.$ref;
+      delete siblings.$dynamicRef;
       // Sanitized ONCE, here, because every path below can return them: the
       // siblings are schema keywords in their own right, and an unsupported
       // `format` or a nested `$ref` left in them is precisely what this
@@ -266,7 +283,11 @@ export function sanitizeInputSchema(schema: unknown): unknown {
       if (key === 'format' && (typeof value !== 'string' || !SUPPORTED_SCHEMA_FORMATS.has(value))) {
         continue;
       }
-      out[key] = walk(value, depth + 1, key === 'properties' || key === 'patternProperties');
+      out[key] = walk(
+        value,
+        depth + 1,
+        key === 'properties' || key === 'patternProperties' || key === 'dependentSchemas' || key === 'dependencies',
+      );
     }
     return out;
   };

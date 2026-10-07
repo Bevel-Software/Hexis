@@ -207,4 +207,41 @@ describe('ToolSchemaGuard', () => {
     screen(guard, 'u2', load({ notion: [tool('bad', INVALID)] }));
     expect(check).toHaveBeenCalledTimes(1);
   });
+
+  describe('with more callers than it remembers', () => {
+    const MANY = 2000; // MAX_REMEMBERED_CALLERS
+
+    it('evicts the caller longest unseen, and keeps every other caller\'s finding on the owner\'s page', () => {
+      const guard = new ToolSchemaGuard();
+      // The first caller's finding, then a crowd of callers with nothing to
+      // report, then one more than fits.
+      screen(guard, 'first', load({ notion: [tool('bad', INVALID)] }));
+      for (let i = 1; i < MANY; i += 1) screen(guard, `u${i}`, load({ notion: [tool('a', VALID)] }));
+      expect(guard.hiddenFor('notion')).toHaveLength(1);
+      // `first` was seen again since — so it is not the longest unseen, and
+      // its finding stays when the crowd overflows.
+      screen(guard, 'first', load({ notion: [tool('bad', INVALID)] }));
+      screen(guard, 'overflow', load({ notion: [tool('a', VALID)] }));
+      expect(guard.hiddenFor('notion')).toHaveLength(1);
+      // Overflow once more: now `u1` goes, then `u2` — never the whole table.
+      screen(guard, 'overflow-2', load({ notion: [tool('a', VALID)] }));
+      expect(guard.hiddenFor('notion')).toHaveLength(1);
+    });
+
+    it('does not let a load that began before an eviction overwrite what came after it', () => {
+      const guard = new ToolSchemaGuard();
+      for (let i = 0; i < MANY; i += 1) screen(guard, `u${i}`, load({ notion: [tool('a', VALID)] }));
+      // `u0` is the longest unseen. A load of theirs begins — and before it
+      // lands, the table overflows and `u0` is evicted, its watermark with it.
+      const stale = guard.beginLoad();
+      screen(guard, 'newcomer', load({ notion: [tool('a', VALID)] }));
+      // A newer load of `u0` then lands with the corrected picture.
+      screen(guard, 'u0', load({ notion: [tool('a', VALID)] }));
+      // The stale load lands last, with a finding the server has since fixed:
+      // its own answer stands, the shared picture does not move.
+      const own = guard.screen('u0', stale, load({ notion: [tool('bad', INVALID)] }));
+      expect([...own.keys()]).toEqual(['notion.srv.bad']);
+      expect(guard.hiddenFor('notion')).toEqual([]);
+    });
+  });
 });

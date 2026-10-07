@@ -75,6 +75,8 @@ export class ToolSchemaGuard implements HiddenToolSource {
   private readonly hidden = new Map<string, Map<string, ScreenedHiddenTool[]>>();
   /** The newest load whose picture has been applied, per caller — see {@link beginLoad}. */
   private readonly applied = new Map<string, number>();
+  /** The newest load of any caller evicted from `applied`: a load older than it is stale for everyone. */
+  private evictedFloor = 0;
   /** Hands out {@link beginLoad} tickets; monotonic for the life of the process. */
   private loads = 0;
 
@@ -141,18 +143,24 @@ export class ToolSchemaGuard implements HiddenToolSource {
       }
       if (ofManual.length > 0) picture.set(manual, ofManual);
     }
-    // Stale: a load that read the server earlier than one already applied. Its
-    // own answer stands, the shared picture does not move.
-    if (loadId < (this.applied.get(userId) ?? 0)) return found;
+    // Stale: a load that read the server earlier than one already applied —
+    // this caller's own newest, or the newest of a caller evicted below,
+    // whose order survives them as the floor. Its own answer stands, the
+    // shared picture does not move.
+    if (loadId < Math.max(this.applied.get(userId) ?? 0, this.evictedFloor)) return found;
     // Not about size — each entry is a handful of strings — but about a
-    // deployment with many callers never growing these without bound. Cleared
-    // whole rather than evicted one by one: the next load of each surface puts
-    // its own findings back, and a ticket is monotonic, so a cleared order is
-    // still an order.
-    if (this.applied.size >= MAX_REMEMBERED_CALLERS && !this.applied.has(userId)) {
-      this.hidden.clear();
-      this.applied.clear();
+    // deployment with many callers never growing these without bound. Evicted
+    // one caller at a time, the longest unseen first, so every other caller's
+    // findings stay on the owner's page; the next load of the evicted surface
+    // puts its own back. (Re-inserted on every load, so a Map's insertion
+    // order is the order of last sight.)
+    while (this.applied.size >= MAX_REMEMBERED_CALLERS && !this.applied.has(userId)) {
+      const oldest = this.applied.keys().next().value as string;
+      this.evictedFloor = Math.max(this.evictedFloor, this.applied.get(oldest) ?? 0);
+      this.applied.delete(oldest);
+      this.hidden.delete(oldest);
     }
+    this.applied.delete(userId);
     this.applied.set(userId, loadId);
     if (picture.size > 0) this.hidden.set(userId, picture);
     else this.hidden.delete(userId);

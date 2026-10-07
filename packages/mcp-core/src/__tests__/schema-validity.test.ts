@@ -61,17 +61,37 @@ describe('inputSchemaDefect', () => {
     ).toEqual({ path: '/properties/code/pattern', reason: 'must be a valid regular expression' });
   });
 
-  it('reports a bad regex wherever a schema stands — inside `anyOf`, `items`, `$defs`', () => {
+  it('reports a bad regex wherever a schema stands — inside `anyOf`, `items`, and a `$defs` entry a `$ref` reaches', () => {
     expect(
       inputSchemaDefect({
         type: 'object',
         properties: { rows: { type: 'array', items: { anyOf: [{ type: 'string', pattern: 'a{2,1}' }] } } },
       }),
     ).toEqual({ path: '/properties/rows/items/anyOf/0/pattern', reason: 'must be a valid regular expression' });
-    expect(inputSchemaDefect({ type: 'object', $defs: { x: { pattern: '(' } }, properties: {} })).toEqual({
-      path: '/$defs/x/pattern',
-      reason: 'must be a valid regular expression',
-    });
+    // Reported at the entry's OWN path — where the server's owner edits it —
+    // whichever reference reached it.
+    for (const keyword of ['$ref', '$dynamicRef']) {
+      expect(
+        inputSchemaDefect({ type: 'object', $defs: { x: { pattern: '(' } }, properties: { v: { [keyword]: '#/$defs/x' } } }),
+      ).toEqual({ path: '/$defs/x/pattern', reason: 'must be a valid regular expression' });
+    }
+  });
+
+  it('does not report a `$defs` entry nothing references: no client compiles it and the listing never carries it', () => {
+    // ajv is lazy on `$defs`, and the proxy drops the block, inlining only
+    // what a `$ref` reaches — so a bad regex there hides no tool anywhere, and
+    // flagging it would hide one for a place the offered schema does not have.
+    expect(inputSchemaDefect({ type: 'object', $defs: { x: { pattern: '(' } }, properties: {} })).toBeNull();
+    expect(inputSchemaDefect({ type: 'object', definitions: { x: { pattern: '(' } }, properties: {} })).toBeNull();
+    // A reference that does not resolve reaches nothing, and two references
+    // to one entry are one entry.
+    expect(
+      inputSchemaDefect({
+        type: 'object',
+        $defs: { x: { pattern: '(' }, ok: { type: 'string' } },
+        properties: { a: { $ref: '#/$defs/missing' }, b: { $ref: '#/$defs/ok' }, c: { $ref: '#/$defs/ok' } },
+      }),
+    ).toBeNull();
   });
 
   it('reports a `patternProperties` KEY that is not a compilable regular expression', () => {
