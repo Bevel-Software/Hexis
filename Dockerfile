@@ -113,6 +113,7 @@ COPY --from=builder /app/packages/core-backend/dist packages/core-backend/dist
 COPY --from=builder /app/packages/core-backend/migrations packages/core-backend/migrations
 COPY --from=builder /app/packages/core-backend/kb-template packages/core-backend/kb-template
 COPY --from=builder /app/packages/core-backend/agent-guide packages/core-backend/agent-guide
+COPY --from=builder /app/packages/core-backend/starter-packs packages/core-backend/starter-packs
 
 # The server shell (tsx runs TypeScript directly) + the built SPA it serves.
 COPY --from=builder /app/apps/server/src apps/server/src

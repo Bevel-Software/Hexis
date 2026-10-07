@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defaultKbTemplateDir } from './assets.js';
+import { defaultKbTemplateDir, defaultStarterPacksDir } from './assets.js';
 import { assertKeyDecodesTo32Bytes } from './shared/token-crypto.js';
 import { DEFAULT_GIT_TIMEOUT_MS } from './modules/workflow/git/node-git-runner.js';
 import { DEFAULT_DB_SCHEMA, assertSchemaName } from './modules/database/connection.js';
@@ -103,6 +103,7 @@ export interface TenantConfig {
   readonly gitUsername: string;
   readonly gitToken: string;
   readonly kbTemplateDir: string;
+  readonly starterPacksDir: string;
   readonly updateCheckEnabled: boolean;
   readonly loginPasswordEnabled: boolean;
   readonly allowedEmailDomains: string[];
@@ -276,6 +277,14 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
    * existing one. Override with `KB_TEMPLATE_DIR`.
    */
   readonly kbTemplateDir: string;
+  /**
+   * Filesystem path to the starter packs a new knowledge base's admin may
+   * pick from (the `starter-packs/` folder shipped inside this package — see
+   * `defaultStarterPacksDir()`): one folder per team, each a `pack.yaml` with
+   * the pages and the plugin it adds. A distribution offers its own with
+   * `STARTER_PACKS_DIR`; a folder holding no valid pack offers none.
+   */
+  readonly starterPacksDir: string;
   /**
    * In-app update check. When true (default), `GET /api/update-check` lazily
    * asks api.github.com for the newest Hexis release — only when an admin's
@@ -477,6 +486,7 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
     // Default: the `kb-template/` folder shipped inside this package (works
     // both from src/ and compiled dist/ — see assets.ts).
     this.kbTemplateDir = process.env.KB_TEMPLATE_DIR || defaultKbTemplateDir();
+    this.starterPacksDir = process.env.STARTER_PACKS_DIR || defaultStarterPacksDir();
     this.updateCheckEnabled =
       (process.env.UPDATE_CHECK ?? 'true').trim().toLowerCase() !== 'false';
     this.allowedEmailDomains = (process.env.ALLOWED_EMAIL_DOMAINS || '')

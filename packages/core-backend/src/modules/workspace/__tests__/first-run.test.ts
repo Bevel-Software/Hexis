@@ -62,6 +62,24 @@ describe('knowledgeFolderIsNew', () => {
   it('is not new when the folder is not there: a shape the template never made is not greeted', async () => {
     expect(await knowledgeFolderIsNew(join(dir, 'missing'))).toBe(false);
   });
+
+  it('passes over a starter pack page that still holds what the pack wrote, line endings aside', async () => {
+    await mkdir(join(dir, 'Team'), { recursive: true });
+    await writeFile(join(dir, 'About us.md'), '# About us\r\n\r\nAsk your agent: _Draft this_\r\n');
+    await writeFile(join(dir, 'Team', 'Glossary.md'), '# Glossary\n');
+    const starter = new Map([
+      ['About us.md', '# About us\n\nAsk your agent: _Draft this_\n'],
+      ['Team/Glossary.md', '# Glossary\n'],
+    ]);
+    expect(await knowledgeFolderIsNew(dir, starter)).toBe(true);
+    // The same pages count without the pack to recognise them by.
+    expect(await knowledgeFolderIsNew(dir)).toBe(false);
+  });
+
+  it('is not new once someone fills a starter page in', async () => {
+    await writeFile(join(dir, 'About us.md'), '# About us\n\nWe make bicycles.\n');
+    expect(await knowledgeFolderIsNew(dir, new Map([['About us.md', '# About us\n']]))).toBe(false);
+  });
 });
 
 describe('the firstRun note', () => {
@@ -82,6 +100,15 @@ describe('the firstRun note', () => {
     const note = firstRunNote('knowledge-base/KnowledgeBase');
     expect(note).toContain('`knowledge-base/KnowledgeBase/`');
     expect(note).toMatch(/offer to draft/);
+    expect(note).toMatch(/answer that first/);
+    expect(note).toContain(`\`${FIRST_RUN_SECTION_ID}\``);
+  });
+
+  it("after a starter pack, names the team's pages and says they are placeholders", () => {
+    const note = firstRunNote('knowledge-base/KnowledgeBase', { name: 'Sales', suggestedPages: ['About us', 'Customers'] });
+    expect(note).toContain('the Sales starter pages');
+    expect(note).toMatch(/placeholders/);
+    expect(note).toContain('offer to draft its first pages (About us, Customers)');
     expect(note).toMatch(/answer that first/);
     expect(note).toContain(`\`${FIRST_RUN_SECTION_ID}\``);
   });

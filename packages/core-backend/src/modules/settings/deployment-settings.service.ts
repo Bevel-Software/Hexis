@@ -372,6 +372,22 @@ export const CORE_SETTINGS: SettingDef[] = [
     validate: (v) =>
       parseRetentionWindow(v) === null ? 'Enter a whole number of days, or 0 to keep events forever.' : null,
   },
+
+  {
+    /**
+     * Which starter pack the first admin chose for a new knowledge base — a
+     * pack's id, or `none` for "I'll start from scratch" — written once, by
+     * the deployment, when the choice landed (see
+     * `modules/onboarding/starter-pack.service.ts`). Its presence is what
+     * retires the "What does your team do?" card for good; its value is what
+     * the first-page prompt and the agent's first-run note follow. Internal:
+     * a fact about what happened, not something the setup screen offers.
+     */
+    key: 'starterPack',
+    section: 'knowledge-base',
+    internal: true,
+    validate: (v) => (/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(v) ? null : 'A starter pack id is lowercase letters, digits and hyphens.'),
+  },
 ];
 
 /**
@@ -950,6 +966,25 @@ export class DeploymentSettingsService {
       .update(tuple)
       .digest('hex');
     return `${OIDC_VERIFICATION_PREFIX}${fingerprint}`;
+  }
+
+  /**
+   * One plain (never sealed) setting as the DATABASE has it now, taken into
+   * this replica's cache on the way: for the rare setting a running
+   * deployment writes, so a replica that did not serve the write still
+   * answers with it. The environment still wins, as in {@link resolve}.
+   */
+  async reload(key: string): Promise<string> {
+    const def = this.defs.get(key);
+    if (!def || def.secret) return this.resolve(key);
+    const rows = await this.db
+      .select({ value: deploymentSettings.value, encrypted: deploymentSettings.encrypted })
+      .from(deploymentSettings)
+      .where(eq(deploymentSettings.key, key));
+    const row = rows.find((r) => !r.encrypted);
+    if (row) this.stored.set(key, row.value);
+    else this.stored.delete(key);
+    return this.resolve(key);
   }
 
   /** Remove one stored row (used by tests and by `prune`). */
