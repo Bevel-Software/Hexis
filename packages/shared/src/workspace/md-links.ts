@@ -81,8 +81,11 @@ export function scanMarkdownLinks(text: string): MdLinkSpan[] {
 /**
  * A frontmatter line whose whole value is one markdown link, quoted or not
  * (the panel's `FRONTMATTER_LINK_RE`, on the value YAML hands it — which is
- * why a trailing ` # comment`, stripped by YAML, may follow). Group 1 is
- * everything before the link; group 3 is the link.
+ * why a trailing ` # comment`, stripped by YAML, may follow). An unquoted
+ * one is matched too: YAML reads it as a flow sequence, so the panel shows no
+ * link, but the graph tooling reads `nodeType` lines with a line regex, not
+ * YAML, and still follows it. Group 1 is everything before the link; group 3
+ * is the link.
  */
 const FRONTMATTER_LINK_VALUE_RE =
   /^([ \t]*[^\s:#][^:]*:[ \t]+(["']?))(\[[^\]]+\]\(<?[^)>]+>?\))\2(?:[ \t]+#.*)?[ \t]*$/;
