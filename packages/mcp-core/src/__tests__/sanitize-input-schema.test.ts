@@ -149,6 +149,27 @@ describe('sanitizeInputSchema', () => {
       type: 'object',
       properties: { item: { description: 'kept', allOf: [{ type: 'string' }, { minLength: 1 }] } },
     });
+    // A boolean target keeps its meaning: `false` rejects everything.
+    expect(
+      sanitizeInputSchema({
+        type: 'object',
+        properties: { item: { $ref: '#/$defs/a', $dynamicRef: '#/$defs/never' } },
+        $defs: { a: { type: 'string' }, never: false },
+      }),
+    ).toEqual({ type: 'object', properties: { item: { allOf: [{ type: 'string' }, false] } } });
+  });
+
+  it('counts a target wider than the budget without walking it whole', () => {
+    // A `$defs` entry with far more members than the budget: counting stops
+    // at the cap, and the reference answers `{}`.
+    const wide: Record<string, unknown> = {};
+    for (let i = 0; i < 200_000; i += 1) wide[`f${i}`] = 1;
+    const out = sanitizeInputSchema({
+      type: 'object',
+      properties: { item: { $ref: '#/$defs/wide' } },
+      $defs: { wide: { type: 'object', properties: wide } },
+    });
+    expect(out).toEqual({ type: 'object', properties: { item: {} } });
   });
 
   it('charges a reference the whole size of its target, array entries and scalars included, so repeated references cannot multiply it', () => {

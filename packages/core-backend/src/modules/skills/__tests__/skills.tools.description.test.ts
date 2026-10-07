@@ -40,6 +40,28 @@ describe('the skill tools name the available skills within the description cap',
     expect(none.list.description).toContain('No skills are currently available.');
   });
 
+  it('lists every skill when the complete line fits, even where a shorter list plus its count would not', async () => {
+    // The budget is what the tool's fixed text leaves under the cap once the
+    // guide-first sentence is counted — read off a served description rather
+    // than guessed, so the names below are sized to fill it EXACTLY.
+    const probe = await served([skill('x')]);
+    const fixed = probe.list.description!.slice(GUIDE_FIRST_SENTENCE.length + 1, probe.list.description!.indexOf('Currently available skills: '));
+    const budget = TOOL_DESCRIPTION_CAP - GUIDE_FIRST_SENTENCE.length - 1 - fixed.length;
+    const head = 'Currently available skills: '.length;
+    // Twenty-one names, the last one sized so the complete line is the budget to the character.
+    const count = 21;
+    const base = Math.floor((budget - head - 1 - (count - 1) * 2 - count * 2) / count); // chars inside the backticks
+    const names = Array.from({ length: count }, (_, i) => `n${i}`.padEnd(base, 'x'));
+    const slack = budget - (head + names.reduce((n, name) => n + name.length + 2, 0) + (count - 1) * 2 + 1);
+    names[count - 1] = names[count - 1] + 'y'.repeat(slack);
+    const { list } = await served(names.map(skill));
+    const line = list.description!.slice(list.description!.indexOf('Currently available skills: '));
+    expect(line.length).toBe(budget);
+    expect(line.endsWith('.')).toBe(true);
+    expect(line).not.toContain(' more');
+    for (const name of names) expect(line).toContain(`\`${name}\``);
+  });
+
   it('cuts the list to what fits under the cap with the guide-first sentence counted, and counts the rest', async () => {
     const many = Array.from({ length: 300 }, (_, i) => skill(`a-skill-with-a-long-name-number-${i}`));
     const { list, get } = await served(many);

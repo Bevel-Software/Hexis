@@ -114,11 +114,15 @@ async function availableSkillsLine(skillService: ISkillService, userEmail: strin
   const names = skills.map((s) => `\`${s.name}\``);
   const rest = (shown: number): string =>
     shown < names.length ? `, and ${names.length - shown} more that list_skills names.` : '.';
-  // One pass, accumulating: the cut is where the next name — with the
-  // separator before it and the tail that would follow it — no longer fits.
-  // (Rebuilding the joined prefix per candidate made this quadratic in the
-  // catalog's size, on every catalog listing.)
   const head = 'Currently available skills: ';
+  // The complete line first: it ends in a full stop, not in a count, so it
+  // can fit where a shorter list plus its "and N more" tail would not.
+  const complete = `${head}${names.join(', ')}.`;
+  if (complete.length <= budget) return complete;
+  // Otherwise one pass, accumulating: the cut is where the next name — with
+  // the separator before it and the tail that would follow it — no longer
+  // fits. (Rebuilding the joined prefix per candidate made this quadratic in
+  // the catalog's size, on every catalog listing.)
   let shown = 0;
   let length = head.length;
   for (const name of names) {

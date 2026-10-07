@@ -210,17 +210,28 @@ export function sanitizeInputSchema(schema: unknown): unknown {
   const costOf = (pointer: string): number => {
     const known = costs.get(pointer);
     if (known !== undefined) return known;
+    // Counted with a bounded frontier: children are pushed one at a time and
+    // only while the count is under the cap, so a target wider than the
+    // budget costs the cap in work and in memory, never its own width.
     let count = 0;
     const stack: unknown[] = [resolvePointer(pointer)];
-    while (stack.length > 0 && count <= MAX_INLINED_NODES) {
+    const over = () => count + stack.length > MAX_INLINED_NODES;
+    while (stack.length > 0 && !over()) {
       const item = stack.pop();
       count += 1;
-      if (item && typeof item === 'object') {
-        for (const child of Array.isArray(item) ? item : Object.values(item as Record<string, unknown>)) stack.push(child);
+      if (!item || typeof item !== 'object') continue;
+      if (Array.isArray(item)) {
+        for (let i = 0; i < item.length && !over(); i += 1) stack.push(item[i]);
+      } else {
+        for (const key in item as Record<string, unknown>) {
+          if (over()) break;
+          if (Object.prototype.hasOwnProperty.call(item, key)) stack.push((item as Record<string, unknown>)[key]);
+        }
       }
     }
-    costs.set(pointer, count);
-    return count;
+    const cost = over() ? MAX_INLINED_NODES + 1 : count;
+    costs.set(pointer, cost);
+    return cost;
   };
   // `isPropertyMap` marks the value of `properties`/`patternProperties`, and
   // of `dependentSchemas`/`dependencies`: its keys are the tool's OWN field
@@ -291,7 +302,12 @@ export function sanitizeInputSchema(schema: unknown): unknown {
           ? { ...(kept ?? {}), ...(resolved as Record<string, unknown>) }
           : (kept ?? resolved ?? {});
       }
-      const targets = references.map((pointer) => asObject(resolveOne(pointer)));
+      // A boolean target is a schema too (`false` rejects everything) and is
+      // kept as it is; anything that is not an object schema is `{}`.
+      const targets = references.map((pointer) => {
+        const resolved = resolveOne(pointer);
+        return typeof resolved === 'boolean' ? resolved : asObject(resolved);
+      });
       const allOf = Array.isArray(kept?.allOf) ? (kept!.allOf as unknown[]) : [];
       return { ...(kept ?? {}), allOf: [...allOf, ...targets] };
     }
