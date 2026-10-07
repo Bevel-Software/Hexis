@@ -372,6 +372,13 @@ interface Props {
    * drawn as they always were, with no tabs.
    */
   repository?: RepositoryStatus;
+  /**
+   * The tab to open on a deployment that has chosen no way yet, when that way
+   * is offered. The first-run storage screen sends an admin here by "Use an
+   * address and token", and landing them on another tab would answer a
+   * question they did not ask.
+   */
+  openOn?: GitMode;
 }
 
 /**
@@ -403,6 +410,7 @@ export function SetupScreen({
   kbInit,
   oidcVerification,
   repository,
+  openOn,
 }: Props) {
   /** Whether a setting is a secret: what is never written to the browser's storage. */
   const isSecret = (key: string) => settings.find((s) => s.key === key)?.secret !== false;
@@ -580,7 +588,9 @@ export function SetupScreen({
       !repository?.pinned &&
       repository?.modes.includes('github-app') &&
       new URLSearchParams(window.location.search ?? '').has('github');
-    return backFromGitHub ? 'github-app' : (chosen ?? repository?.modes[0] ?? 'token');
+    if (backFromGitHub) return 'github-app';
+    const asked = openOn && repository?.modes.includes(openOn) ? openOn : undefined;
+    return chosen ?? asked ?? repository?.modes[0] ?? 'token';
   });
   /** The tab a setting is answered on, for the ones that belong to one way of having a repository. */
   const tabOf = (key: string): GitMode | null =>

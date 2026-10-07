@@ -450,6 +450,21 @@ export interface AppRegistry {
    */
   signInOption?: SignInOptionDef;
   /**
+   * What the first-run storage screen calls the repository the deployment
+   * keeps for itself: the card a new admin is steered towards.
+   *
+   * WHO keeps it is a property of the distribution, not of the screen. On a
+   * core deployment it is this server ("This server keeps it"); a hosted
+   * distribution keeps it on the admin's behalf and says so by name. Absent
+   * means core's words.
+   *
+   * The description travels WITH the title for the same reason the
+   * `welcomeExit` label travels with its path: a caller renaming the keeper
+   * without the sentence under it is how the card would come to contradict
+   * itself.
+   */
+  managedStorage?: { title: string; description: string };
+  /**
    * How many unread items the gear menu's badge should show, if anything is
    * counting. CORE COUNTS NOTHING: the feedback inbox behind that badge is an
    * enterprise module, and core polled its endpoint every thirty seconds
