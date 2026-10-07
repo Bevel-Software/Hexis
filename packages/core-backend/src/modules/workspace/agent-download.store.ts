@@ -136,8 +136,10 @@ export class AgentDownloadStore {
   private readonly artifacts = new Map<string, ArtifactRecord>();
   /** Request id → the request its links belong to. */
   private readonly requests = new Map<string, RequestRecord>();
-  /** Per user, the build in flight — see {@link withBuildTurn}. */
+  /** Per user, the request in flight — see {@link withRequestSlot}. */
   private readonly building = new Map<string, Promise<unknown>>();
+  /** Per user, slots held by calls still waiting, building or writing — counted as open. */
+  private readonly reserved = new Map<string, number>();
   private readonly root: string;
   private readonly publicBaseUrl: string;
   private readonly tokenPrefix: string;
@@ -161,10 +163,8 @@ export class AgentDownloadStore {
   }
 
   /**
-   * Refuse `user` a new request when they already hold the most one user may.
-   * Asked BEFORE anything is read or built, so a caller at the cap is told so
-   * without the server spending a zip's worth of work on an answer it would
-   * then throw away; {@link issue} asks again, because builds take time.
+   * Refuse `user` a new request when they already hold the most one user may
+   * — issued requests and slots still being filled alike.
    */
   assertCanIssue(user: { id: string }): void {
     const open = this.openRequestsOf(user.id);
@@ -178,32 +178,55 @@ export class AgentDownloadStore {
   }
 
   /**
-   * Run `build` for `userId` after any build of theirs already running.
+   * Take one of `user`'s request slots, then run `work` after any request of
+   * theirs already running; `work` is handed the `issue` that fills the slot.
    *
-   * A build reads every included file into memory and may zip up to the whole
-   * download limit; ten requests in parallel from one caller would be ten
-   * such builds at once. One at a time per user bounds what one caller can
-   * make the process hold; different users do not wait on each other.
+   * The slot is taken AT ONCE, before the turn is waited for, and counts as an
+   * open request until `work` ends: a caller at the cap is refused before the
+   * server spends a zip's worth of work on it, and ten calls in parallel cannot
+   * all pass the count and then all build. A call that ends without issuing
+   * (nothing included, a refusal, a failure) gives its slot back.
+   *
+   * The build AND the write of its bytes run in the turn: a build reads every
+   * included file into memory and may zip up to the download limit, so one
+   * request at a time per user bounds what one caller can make the process
+   * hold or the disk stage. Different users do not wait on each other.
    */
-  async withBuildTurn<T>(userId: string, build: () => Promise<T>): Promise<T> {
-    const before = this.building.get(userId) ?? Promise.resolve();
-    const mine = before.catch(() => undefined).then(build);
-    this.building.set(userId, mine);
+  async withRequestSlot<T>(
+    user: { id: string },
+    work: (issue: (items: DownloadArtifact[]) => Promise<IssuedDownload>) => Promise<T>,
+  ): Promise<T> {
+    this.assertCanIssue(user);
+    this.reserved.set(user.id, (this.reserved.get(user.id) ?? 0) + 1);
     try {
-      return await mine;
+      const before = this.building.get(user.id) ?? Promise.resolve();
+      const mine = before.catch(() => undefined).then(() => work((items) => this.write(user, items)));
+      this.building.set(user.id, mine);
+      try {
+        return await mine;
+      } finally {
+        if (this.building.get(user.id) === mine) this.building.delete(user.id);
+      }
     } finally {
-      if (this.building.get(userId) === mine) this.building.delete(userId);
+      const left = (this.reserved.get(user.id) ?? 1) - 1;
+      if (left > 0) this.reserved.set(user.id, left);
+      else this.reserved.delete(user.id);
     }
   }
 
   /**
    * Store every artifact of one request and answer a link per artifact, all
-   * sharing the request's expiry. Nothing is issued unless every artifact is
-   * on disk: a request whose bytes could not all be written leaves nothing.
+   * sharing the request's expiry, in a slot of its own (see
+   * {@link withRequestSlot}). Nothing is issued unless every artifact is on
+   * disk: a request whose bytes could not all be written leaves nothing.
    */
   async issue(user: { id: string }, items: DownloadArtifact[]): Promise<IssuedDownload> {
+    return this.withRequestSlot(user, (issue) => issue(items));
+  }
+
+  /** {@link issue} within a slot already held: the slot is the capacity check. */
+  private async write(user: { id: string }, items: DownloadArtifact[]): Promise<IssuedDownload> {
     if (items.length === 0) throw new Error('A download request must carry at least one artifact.');
-    this.assertCanIssue(user);
     const requestId = `download-${Date.now()}-${randomBytes(8).toString('hex')}`;
     const dir = path.join(this.root, requestId);
     const minted: { key: string; token: string; record: ArtifactRecord }[] = [];
@@ -226,14 +249,6 @@ export class AgentDownloadStore {
           },
         });
       }
-    } catch (err) {
-      await this.removeDir(requestId);
-      throw err;
-    }
-    // Counted again, now that the bytes are down: another request of this
-    // user's may have been issued while these were written.
-    try {
-      this.assertCanIssue(user);
     } catch (err) {
       await this.removeDir(requestId);
       throw err;
@@ -262,12 +277,13 @@ export class AgentDownloadStore {
    * moment it is claimed, before a byte goes out: a second fetch arriving
    * while the first is still sending is refused, not served twice.
    *
-   * `fetcherId` is the user the fetch identified itself as, when it carried a
-   * credential at all. The link works for anyone holding it — an agent's
-   * `curl` carries no session — but a fetch that says it is SOMEONE ELSE is
-   * refused: that user holds a link issued to another.
+   * `fetcherIds` are the users the fetch identified itself as, by every
+   * credential it carried — usually none. The link works for anyone holding
+   * it — an agent's `curl` carries no session — but a fetch that says it is
+   * SOMEONE ELSE, by any of its credentials, is refused: that user holds a
+   * link issued to another.
    */
-  claim(token: string, fetcherId?: string | null): ClaimedDownload {
+  claim(token: string, fetcherIds: readonly string[] = []): ClaimedDownload {
     const key = hash(token);
     const record = this.artifacts.get(key);
     if (!record || record.claimedAt !== undefined) throw refusal();
@@ -277,7 +293,7 @@ export class AgentDownloadStore {
       void this.forget(key);
       throw refusal();
     }
-    if (fetcherId && fetcherId !== request.userId) throw refusal();
+    if (fetcherIds.some((id) => id !== request.userId)) throw refusal();
     record.claimedAt = Date.now();
     return {
       absolutePath: path.join(this.root, record.requestId, record.file),
@@ -299,10 +315,13 @@ export class AgentDownloadStore {
     await this.forget(key);
   }
 
-  /** How many requests `userId` holds open: unexpired with a link unfetched, or with a fetch still sending. */
+  /**
+   * How many requests `userId` holds open: unexpired with a link unfetched, or
+   * with a fetch still sending — and the slots of calls still under way.
+   */
   openRequestsOf(userId: string): number {
     const now = Date.now();
-    let open = 0;
+    let open = this.reserved.get(userId) ?? 0;
     for (const request of this.requests.values()) {
       if (request.userId !== userId) continue;
       if (request.expiresAt > now || this.sending(request, now)) open += 1;

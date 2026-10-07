@@ -13,7 +13,8 @@ import {
   entryExistsMessage,
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
-import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
+import { isAbsence, type IgnoreRules, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
+import { BevelIgnoreStack } from '../kb-fs/bevel-ignore.js';
 import {
   DestinationTakenError,
   inspectDestination,
@@ -99,6 +100,11 @@ const UNZIP_MAX_TOTAL_BYTES = 500 * 1024 * 1024; // 500 MB across the whole arch
 // streaming) so the cap also bounds peak heap usage for one download.
 // Reuses the unzip total as a single "fits in a workspace" budget.
 export const ZIP_DOWNLOAD_MAX_BYTES = UNZIP_MAX_TOTAL_BYTES;
+
+// How many files one agent download request may carry: what one zip may hold
+// for `apply_file_upload` to unzip it back, and a bound on the lists a
+// request builds before anything is judged.
+export const DOWNLOAD_MAX_FILES = UNZIP_MAX_ENTRIES;
 
 /**
  * Which of a folder's files a zip may pack: handed every file the walk found
@@ -1491,6 +1497,11 @@ export class WorkspaceService implements IWorkspaceService {
    * back repository-relative, with their size on disk; nothing is read, and
    * nothing is judged — the caller judges every path on its own.
    *
+   * The `.bevelignore` rules are those in force at the folder, its ancestors'
+   * included, as the explorer's walk from the root has them: a folder an
+   * ancestor's rule hides holds no files. The walk stops once it has found
+   * more than `maxFiles` files; the caller refuses such a request.
+   *
    * A path that reaches its target through a link, or names the git folder,
    * is refused as the reads refuse it; a path with nothing at it is
    * `missing`, which the caller answers exactly as a path it may not read.
@@ -1498,6 +1509,7 @@ export class WorkspaceService implements IWorkspaceService {
   async downloadCandidatesAt(
     workspaceId: string,
     wsPath: string,
+    maxFiles: number,
   ): Promise<{ kind: 'missing' } | { kind: 'file' | 'folder'; files: { path: string; bytes: number }[] }> {
     const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
     assertNoGitInternalsSegment(relativePath);
@@ -1516,7 +1528,9 @@ export class WorkspaceService implements IWorkspaceService {
     if (stat.isFile()) return { kind: 'file', files: [{ path: inRepo, bytes: stat.size }] };
     if (!stat.isDirectory()) return { kind: 'missing' };
     const files: { path: string; bytes: number }[] = [];
-    await this.disk.walk(absolutePath, explorerWalk(), [
+    const rules = await ignoreRulesAbove(path.join(workspaceDir, this.kbDirName), inRepo);
+    if (!rules) return { kind: 'folder', files };
+    await this.disk.walk(absolutePath, { ...explorerWalk(), ignore: rules, until: () => files.length > maxFiles }, [
       {
         async onFile(dir, name) {
           const size = (await fs.lstat(path.join(absolutePath, dir, name))).size;
@@ -2592,6 +2606,24 @@ export class WorkspaceService implements IWorkspaceService {
     };
     return finish(top);
   }
+}
+
+/**
+ * The `.bevelignore` rules in force ABOVE the folder `inRepo` (repository-
+ * relative, `''` for the root) — the root's file and every ancestor's, not
+ * the folder's own, which a walk from the folder layers itself — or null when
+ * one of those rules hides the folder or an ancestor, as the explorer's walk
+ * from the root would never enter it.
+ */
+async function ignoreRulesAbove(repoRoot: string, inRepo: string): Promise<IgnoreRules | null> {
+  let rules: IgnoreRules = BevelIgnoreStack.empty();
+  let dir = repoRoot;
+  for (const segment of inRepo.split('/').filter(Boolean)) {
+    rules = await rules.extendedWith(dir);
+    dir = path.join(dir, segment);
+    if (rules.isIgnored(dir, true)) return null;
+  }
+  return rules;
 }
 
 /**

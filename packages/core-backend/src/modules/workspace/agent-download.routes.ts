@@ -19,13 +19,13 @@ export const AGENT_DOWNLOAD_HEADER_ROUTE = '/agent/downloads';
 export interface AgentDownloadRouteDeps {
   downloads: AgentDownloadStore;
   /**
-   * The user a fetch identifies itself as, when it carries a credential this
-   * server recognises — or null when it carries none (or one that does not
-   * verify). The link is the whole credential, so most fetches carry nothing;
-   * this only lets the route refuse a fetch that says it is SOMEONE ELSE than
-   * the user the link was issued to. Optional: absent, identity is not asked.
+   * Every user a fetch identifies itself as, by the credentials this server
+   * recognises — none when it carries none (or none that verifies). The link
+   * is the whole credential, so most fetches carry nothing; this only lets the
+   * route refuse a fetch that says it is SOMEONE ELSE than the user the link
+   * was issued to. Optional: absent, identity is not asked.
    */
-  identify?: (req: express.Request) => Promise<string | null>;
+  identify?: (req: express.Request) => Promise<string[]>;
 }
 
 /** The verifiers {@link createDownloadFetcherIdentifier} asks, as the composition root has them. */
@@ -39,8 +39,10 @@ export interface DownloadFetcherVerifiers {
 /**
  * Who a download fetch says it is, by EVERY credential this server issues:
  * a connection key or internal token, or an app session — as a bearer, or
- * as the `bevel_token` cookie a browser sends on its own. Null when it
- * carries none that verifies.
+ * as the `bevel_token` cookie a browser sends on its own. Every credential
+ * is asked, not the first that verifies: a bearer and a cookie may name two
+ * different users, and either one being someone else must refuse the link.
+ * Empty when it carries none that verifies.
  *
  * Every kind, because the question is "is this fetch somebody OTHER than
  * the user the link was issued to?", and a credential kind left unasked is a
@@ -52,24 +54,28 @@ export interface DownloadFetcherVerifiers {
 export function createDownloadFetcherIdentifier(
   verifiers: DownloadFetcherVerifiers,
   readCookie: (req: express.Request) => string | null,
-): (req: express.Request) => Promise<string | null> {
+): (req: express.Request) => Promise<string[]> {
   return async (req) => {
     const header = req.headers.authorization;
     const bearer =
       typeof header === 'string' && header.toLowerCase().startsWith('bearer ')
         ? header.slice(header.indexOf(' ') + 1).trim()
         : '';
+    const users = new Set<string>();
     for (const token of [bearer, readCookie(req) ?? '']) {
       if (token === '') continue;
       const tool = await verifiers.verifyToolToken(token).catch(() => ({ ok: false as const }));
-      if (tool.ok) return tool.auth.userId;
+      if (tool.ok) {
+        users.add(tool.auth.userId);
+        continue;
+      }
       try {
-        return verifiers.verifySession(token).userId;
+        users.add(verifiers.verifySession(token).userId);
       } catch {
-        // Not a session either: try the next credential, if any.
+        // Not a session either: this credential names nobody.
       }
     }
-    return null;
+    return [...users];
   };
 }
 
@@ -94,8 +100,8 @@ export function createAgentDownloadRoutes(deps: AgentDownloadRouteDeps): express
     const token = tokenOf(req);
     let claimed;
     try {
-      const fetcher = identify ? await identify(req).catch(() => null) : null;
-      claimed = downloads.claim(token, fetcher);
+      const fetchers = identify ? await identify(req).catch(() => []) : [];
+      claimed = downloads.claim(token, fetchers);
     } catch (err) {
       if (err instanceof DownloadTokenError) {
         res.setHeader('Cache-Control', 'no-store');
@@ -115,11 +121,9 @@ export function createAgentDownloadRoutes(deps: AgentDownloadRouteDeps): express
       void downloads.finish(token);
     };
     res.on('close', done);
-    // RFC 5987 UTF-8 filename; CR/LF stripped to block header injection.
-    const name = claimed.filename.replace(/[\r\n]/g, '') || 'download';
     res.setHeader('Content-Type', claimed.contentType);
     res.setHeader('Content-Length', String(claimed.bytes));
-    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+    res.setHeader('Content-Disposition', attachmentDisposition(claimed.filename));
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     const stream = createReadStream(claimed.absolutePath);
@@ -145,6 +149,24 @@ export function createAgentDownloadRoutes(deps: AgentDownloadRouteDeps): express
   router.get(AGENT_DOWNLOAD_ROUTE, handle);
   router.get(AGENT_DOWNLOAD_HEADER_ROUTE, handle);
   return router;
+}
+
+/**
+ * `attachment` with the name twice (RFC 6266): an ASCII `filename` for a
+ * client that reads only that — anything outside printable ASCII, and the
+ * quote and backslash, become `_` — and the exact name as RFC 5987
+ * `filename*`, where `encodeURIComponent`'s leftovers `'()*` are encoded
+ * too, as the grammar requires. Without the plain form such a client would
+ * save the file under the URL's last segment: the token.
+ */
+export function attachmentDisposition(filename: string): string {
+  const name = filename.replace(/[\r\n]/g, '') || 'download';
+  const ascii = name.replace(/[^\x20-\x7e]|["\\]/g, '_');
+  const encoded = encodeURIComponent(name).replace(
+    /['()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }
 
 /**

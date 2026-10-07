@@ -17,8 +17,10 @@ export type DownloadCandidates =
 export interface DownloadBuildDeps {
   /** The repository's folder in the workspace (`knowledge-base`). */
   kbDirName: string;
-  /** The uncompressed total one request may carry. */
+  /** The uncompressed total one request may carry — its files once, and separately its folders' zips. */
   maxBytes: number;
+  /** How many distinct files one request may carry. */
+  maxFiles: number;
   /** What is at a workspace path: nothing, a file, or a folder's explorer-visible files (repository-relative). */
   candidatesAt(wsPath: string): Promise<DownloadCandidates>;
   /** The caller's `read` verdicts, repository-relative paths. */
@@ -72,6 +74,31 @@ export function downloadTooLarge(total: number, maxBytes: number): ToolError {
   );
 }
 
+/** The refusal a request naming more files than one request may carry gets: no link. */
+export function downloadTooManyFiles(maxFiles: number): ToolError {
+  return new ToolError(
+    `Those paths hold more than ${maxFiles} files, the most one download request may carry, so no link was ` +
+      'issued. Ask for fewer or smaller folders at a time.',
+    413,
+    { kind: 'download-too-many-files', maxFiles },
+  );
+}
+
+/**
+ * The refusal a request gets when its folders' zips together would carry more
+ * than the limit — a file inside two requested folders (`a/` and `a/b/`) is
+ * packed into both, so the zips can outgrow the files they hold.
+ */
+function zipsTooLarge(total: number, maxBytes: number): ToolError {
+  return new ToolError(
+    `The requested folders' zips would total ${total} bytes uncompressed (a file inside two requested folders ` +
+      `is packed into each), over this deployment's ${maxBytes} byte download limit, so no link was issued. Ask ` +
+      'for fewer or non-overlapping folders at a time.',
+    413,
+    { kind: 'download-too-large', totalBytes: total, maxBytes },
+  );
+}
+
 /**
  * Judge every file of a download request on its own, and capture the ones
  * that pass.
@@ -89,7 +116,12 @@ export function downloadTooLarge(total: number, maxBytes: number): ToolError {
  * with the hook's own words. One refused path never stops the others.
  *
  * The size limit is checked on the sizes on disk BEFORE any file is read, and
- * again on what was read; past it the whole request is refused.
+ * again on what was read; past it the whole request is refused. It holds twice
+ * over: once on the distinct files (each file's own link), and once on the
+ * folders' zips together, where a file is counted in every zip that packs it —
+ * so what one request stores is bounded by twice the limit, however its
+ * folders overlap. A request holding more than `maxFiles` files is refused
+ * before anything is judged.
  */
 export async function buildDownload(requested: string[], deps: DownloadBuildDeps): Promise<BuiltDownload> {
   const { kbDirName } = deps;
@@ -123,6 +155,7 @@ export async function buildDownload(requested: string[], deps: DownloadBuildDeps
       continue;
     }
     for (const f of found.files) if (!sizes.has(f.path)) sizes.set(f.path, f.bytes);
+    if (sizes.size > deps.maxFiles) throw downloadTooManyFiles(deps.maxFiles);
     if (found.kind === 'folder') {
       if (found.files.length === 0) refuse(wsPath, EMPTY_FOLDER);
       else folders.push({ path: wsPath, files: found.files.map((f) => f.path) });
@@ -156,6 +189,12 @@ export async function buildDownload(requested: string[], deps: DownloadBuildDeps
   // The limit, on the sizes on disk, before a byte is read.
   const declared = passed.reduce((sum, rel) => sum + (sizes.get(rel) ?? 0), 0);
   if (declared > deps.maxBytes) throw downloadTooLarge(declared, deps.maxBytes);
+  const passedSet = new Set(passed);
+  const zipsDeclared = folders.reduce(
+    (sum, folder) => sum + folder.files.reduce((n, rel) => n + (passedSet.has(rel) ? (sizes.get(rel) ?? 0) : 0), 0),
+    0,
+  );
+  if (zipsDeclared > deps.maxBytes) throw zipsTooLarge(zipsDeclared, deps.maxBytes);
 
   const files: IncludedFile[] = [];
   const artifacts: DownloadArtifact[] = [];
@@ -185,18 +224,22 @@ export async function buildDownload(requested: string[], deps: DownloadBuildDeps
   // One zip per requested folder that kept at least one file, its entries at
   // their full repository paths, so an upload of it at the repository root
   // lands every file where it came from.
+  // Again on what was read, before a zip is built.
+  const kept = folders.map((folder) => folder.files.filter((rel) => captured.has(rel)));
+  const zipsTotal = kept.flat().reduce((sum, rel) => sum + captured.get(rel)!.byteLength, 0);
+  if (zipsTotal > deps.maxBytes) throw zipsTooLarge(zipsTotal, deps.maxBytes);
   const zipped: IncludedFolder[] = [];
-  for (const folder of folders) {
-    const kept = folder.files.filter((rel) => captured.has(rel));
-    if (kept.length === 0) continue;
+  for (const [i, folder] of folders.entries()) {
+    const files = kept[i]!;
+    if (files.length === 0) continue;
     const zip = new AdmZip();
     let bytes = 0;
-    for (const rel of kept) {
+    for (const rel of files) {
       const data = captured.get(rel)!;
       zip.addFile(rel, data);
       bytes += data.byteLength;
     }
-    zipped.push({ path: folder.path, bytes, files: kept.map(toWs) });
+    zipped.push({ path: folder.path, bytes, files: files.map(toWs) });
     const rel = folder.path === kbDirName ? '' : folder.path.slice(kbDirName.length + 1).replace(/\/+$/, '');
     artifacts.push({
       data: zip.toBuffer(),

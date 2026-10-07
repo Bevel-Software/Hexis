@@ -76,7 +76,7 @@ import { DestinationTakenError, inspectDestination } from '../../shared/rename-n
 import { AgentUploadStore, type ClaimedUpload } from './agent-upload.store.js';
 import type { AgentDownloadStore } from './agent-download.store.js';
 import { buildDownload } from './agent-download.builder.js';
-import { ZIP_DOWNLOAD_MAX_BYTES } from './workspace.service.js';
+import { DOWNLOAD_MAX_FILES, ZIP_DOWNLOAD_MAX_BYTES } from './workspace.service.js';
 import {
   isSymlinkZipEntry,
   isZipNoiseEntry,
@@ -3609,7 +3609,10 @@ export function registerWorkspaceTools(
       outputs: {
         type: 'object',
         properties: {
-          expiresAt: str('ISO-8601 instant after which every link of this answer is gone; null when no link was issued.'),
+          expiresAt: {
+            type: ['string', 'null'],
+            description: 'ISO-8601 instant after which every link of this answer is gone; null when no link was issued.',
+          },
           expiresInSeconds: int('Seconds until `expiresAt`; 0 when no link was issued.'),
           files: {
             type: 'array',
@@ -3670,7 +3673,7 @@ export function registerWorkspaceTools(
     if (!Array.isArray(raw) || raw.length === 0 || raw.some((p) => typeof p !== 'string' || p.trim() === '')) {
       throw new ToolError('Name at least one path to download in `paths`: an array of file and folder paths.', 400);
     }
-    // At the cap, say so before any work is spent on an answer that would be refused.
+    // At the cap, say so before a branch is resolved; the slot below counts again.
     store.assertCanIssue(ctx.user);
     // Resolves (clones, if need be) the branch's workspace, as a read does —
     // so an unknown branch is the call's refusal, not every path's.
@@ -3680,42 +3683,47 @@ export function registerWorkspaceTools(
     const requested: string[] = [];
     for (const p of raw as string[]) {
       try {
-        requested.push(normalizeWorkspacePath(p.trim(), kbDirName));
+        // As written: a name may begin or end with a space, and trimming it
+        // would ask for another file.
+        requested.push(normalizeWorkspacePath(p, kbDirName));
       } catch (err) {
         if (!hasHttpStatus(err)) throw err;
         refusedSpelling.push({ path: p, reason: err.message });
       }
     }
-    const built = await store.withBuildTurn(ctx.user.id, () =>
-      buildDownload(requested, {
+    // A slot is taken before anything is built (a caller at the cap is told
+    // so at once) and given back when nothing is issued.
+    return store.withRequestSlot(ctx.user, async (issue) => {
+      const built = await buildDownload(requested, {
         kbDirName,
         maxBytes: ZIP_DOWNLOAD_MAX_BYTES,
-        candidatesAt: (p) => ctx.workspaceService.downloadCandidatesAt(workspaceId, p),
+        maxFiles: DOWNLOAD_MAX_FILES,
+        candidatesAt: (p) => ctx.workspaceService.downloadCandidatesAt(workspaceId, p, DOWNLOAD_MAX_FILES),
         canReadBatch: (paths) => accessControl.canReadBatch(workspaceId, ctx.user.email, paths),
         canDownloadBatch: (paths) => accessControl.canDownloadBatch(workspaceId, ctx.user.email, paths),
         notifyRead: (p) => notifyAgentRead(agentAccessGate, ctx, branch, p),
         readFile: (p) => ctx.workspaceService.readFileBinary(workspaceId, p),
         contentTypeOf: downloadContentType,
-      }),
-    );
-    const refused = [...refusedSpelling, ...built.refused];
-    if (built.artifacts.length === 0) {
-      return { expiresAt: null, expiresInSeconds: 0, files: [], folders: [], refused };
-    }
-    const issued = await store.issue(ctx.user, built.artifacts);
-    const urls = issued.downloadUrls;
-    return {
-      expiresAt: issued.expiresAt,
-      expiresInSeconds: issued.expiresInSeconds,
-      files: built.files.map((f, i) => ({ ...f, downloadUrl: urls[i]! })),
-      folders: built.folders.map((f, i) => ({
-        path: f.path,
-        bytes: f.bytes,
-        downloadUrl: urls[built.files.length + i]!,
-        files: f.files,
-      })),
-      refused,
-    };
+      });
+      const refused = [...refusedSpelling, ...built.refused];
+      if (built.artifacts.length === 0) {
+        return { expiresAt: null, expiresInSeconds: 0, files: [], folders: [], refused };
+      }
+      const issued = await issue(built.artifacts);
+      const urls = issued.downloadUrls;
+      return {
+        expiresAt: issued.expiresAt,
+        expiresInSeconds: issued.expiresInSeconds,
+        files: built.files.map((f, i) => ({ ...f, downloadUrl: urls[i]! })),
+        folders: built.folders.map((f, i) => ({
+          path: f.path,
+          bytes: f.bytes,
+          downloadUrl: urls[built.files.length + i]!,
+          files: f.files,
+        })),
+        refused,
+      };
+    });
   }
 
   // ── shell (internal-only) ───────────────────────────────────────────────

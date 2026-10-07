@@ -25,7 +25,7 @@ import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkspaceService } from '../workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { AgentDownloadStore, DOWNLOAD_TOKEN_REFUSAL } from '../agent-download.store.js';
-import { createAgentDownloadRoutes, createDownloadFetcherIdentifier } from '../agent-download.routes.js';
+import { attachmentDisposition, createAgentDownloadRoutes, createDownloadFetcherIdentifier } from '../agent-download.routes.js';
 import { readAuthCookie } from '../../auth/auth.middleware.js';
 import jwt from 'jsonwebtoken';
 import { buildDownload, DOWNLOAD_PERMISSION_REQUIRED, NOT_FOUND } from '../agent-download.builder.js';
@@ -94,10 +94,17 @@ interface StartOptions {
 
 let servers: HttpServer[] = [];
 let dirs: string[] = [];
+let stores: AgentDownloadStore[] = [];
 
 afterEach(async () => {
   for (const s of servers) await new Promise<void>((r) => s.close(() => r()));
   servers = [];
+  // Before their roots go: a store left sweeping would keep sweeping a deleted root.
+  for (const store of stores) {
+    store.stopSweeping();
+    await store.drainSweep();
+  }
+  stores = [];
   for (const d of dirs) await rm(d, { recursive: true, force: true });
   dirs = [];
   vi.useRealTimers();
@@ -132,6 +139,7 @@ async function start(options: StartOptions = {}): Promise<Started> {
     ...(options.ttlMs !== undefined ? { ttlMs: options.ttlMs } : {}),
     ...(options.maxOpenPerUser !== undefined ? { maxOpenPerUser: options.maxOpenPerUser } : {}),
   });
+  stores.push(store);
   const hooks = new WorkflowHooks();
   const readsHooked: string[] = [];
   hooks.onAgentRead(async (op) => {
@@ -239,7 +247,7 @@ describe('request_file_download: every file judged on its own', () => {
     const res = await fetchLink(h.base, body.files[0]!.downloadUrl);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('image/png');
-    expect(res.headers.get('content-disposition')).toBe("attachment; filename*=UTF-8''logo.png");
+    expect(res.headers.get('content-disposition')).toBe('attachment; filename="logo.png"; filename*=UTF-8\'\'logo.png');
     expect(res.headers.get('cache-control')).toBe('no-store');
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
     const got = Buffer.from(await res.arrayBuffer());
@@ -271,7 +279,7 @@ describe('request_file_download: every file judged on its own', () => {
     const res = await fetchLink(h.base, folder.downloadUrl);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/zip');
-    expect(res.headers.get('content-disposition')).toBe("attachment; filename*=UTF-8''Shared.zip");
+    expect(res.headers.get('content-disposition')).toBe('attachment; filename="Shared.zip"; filename*=UTF-8\'\'Shared.zip');
     expect(res.headers.get('cache-control')).toBe('no-store');
     const zip = new AdmZip(Buffer.from(await res.arrayBuffer()));
     const entries = zip.getEntries().map((e) => e.entryName).sort();
@@ -335,6 +343,32 @@ describe('request_file_download: every file judged on its own', () => {
     expect(body.folders[0]!.files).toEqual(paths);
   });
 
+  it('honours the .bevelignore rules of the folders above a requested folder', async () => {
+    const h = await start({
+      files: {
+        ...FILES,
+        '.bevelignore': 'Pictures/Deep/Secret.md\nPictures/Gone/\n',
+        'Pictures/Deep/Open.md': '# open\n',
+        'Pictures/Deep/Secret.md': '# ignored from the root\n',
+        'Pictures/Gone/Inside.md': '# in an ignored folder\n',
+      },
+    });
+    const { body } = await request(h.base, [`${KB}/Pictures/Deep`, `${KB}/Pictures/Gone`]);
+
+    expect(body.files.map((f) => f.path)).toEqual([`${KB}/Pictures/Deep/Open.md`]);
+    expect(body.folders.map((f) => f.files)).toEqual([[`${KB}/Pictures/Deep/Open.md`]]);
+    expect(body.refused).toEqual([{ path: `${KB}/Pictures/Gone`, reason: 'the folder holds no files' }]);
+  });
+
+  it('takes a path as written, without trimming the spaces around it', async () => {
+    const h = await start();
+    const { body } = await request(h.base, [`${KB}/Shared/Open.md `]);
+
+    expect(body.files).toEqual([]);
+    expect(body.refused).toHaveLength(1);
+    expect(body.refused[0]!.path).not.toBe(`${KB}/Shared/Open.md`);
+  });
+
   it('serves the bytes captured at request time, not a later save', async () => {
     const h = await start();
     const { body } = await request(h.base, [`${KB}/Shared/Open.md`]);
@@ -389,6 +423,35 @@ describe('a download link answers once', () => {
     const own = await fetch(url, { headers: { authorization: `Bearer ${sessionOf(ANA.id)}` } });
     expect(own.status).toBe(200);
     expect(await own.text()).toBe('# open\n');
+  });
+
+  it('refuses a fetch whose bearer is the owner but whose cookie is someone else, without spending the link', async () => {
+    const h = await start();
+    const { body } = await request(h.base, [`${KB}/Shared/Open.md`]);
+    const url = local(h.base, body.files[0]!.downloadUrl);
+
+    const mixed = await fetch(url, {
+      headers: {
+        authorization: `Bearer key_${ANA.id}`,
+        cookie: `bevel_token=${encodeURIComponent(sessionOf('user-mallory'))}`,
+      },
+    });
+    expect(mixed.status).toBe(404);
+    expect(await mixed.json()).toEqual({ error: DOWNLOAD_TOKEN_REFUSAL });
+    const own = await fetch(url, {
+      headers: { authorization: `Bearer key_${ANA.id}`, cookie: `bevel_token=${encodeURIComponent(sessionOf(ANA.id))}` },
+    });
+    expect(own.status).toBe(200);
+  });
+
+  it('names the attachment in both forms, encoding what RFC 5987 requires', () => {
+    expect(attachmentDisposition("it's (a)*.md")).toBe(
+      'attachment; filename="it\'s (a)*.md"; filename*=UTF-8\'\'it%27s%20%28a%29%2A.md',
+    );
+    expect(attachmentDisposition('Plän "x"\r\n.md')).toBe(
+      'attachment; filename="Pl_n _x_.md"; filename*=UTF-8\'\'Pl%C3%A4n%20%22x%22.md',
+    );
+    expect(attachmentDisposition('')).toBe('attachment; filename="download"; filename*=UTF-8\'\'download');
   });
 
   it('serves a fetch whose credential identifies nobody, since the link is the credential', async () => {
@@ -472,6 +535,7 @@ describe('limits', () => {
       buildDownload([`${KB}/a.md`, `${KB}/b.md`], {
         kbDirName: KB,
         maxBytes: 10,
+        maxFiles: 100,
         candidatesAt: async (p) => ({ kind: 'file', files: [{ path: p.slice(KB.length + 1), bytes: 6 }] }),
         canReadBatch: async (ps) => new Map(ps.map((p) => [p, true])),
         canDownloadBatch: async (ps) => new Map(ps.map((p) => [p, true])),
@@ -481,6 +545,60 @@ describe('limits', () => {
       }),
     ).rejects.toMatchObject({ status: 413, details: { totalBytes: 12, maxBytes: 10 } });
     expect(readFile).not.toHaveBeenCalled();
+  });
+
+  /** Build deps over an in-memory tree: `tree` maps each requested path to the files under it. */
+  const fakeDeps = (tree: Record<string, { path: string; bytes: number }[]>, maxBytes: number, maxFiles: number) => ({
+    kbDirName: KB,
+    maxBytes,
+    maxFiles,
+    candidatesAt: async (p: string) => ({ kind: 'folder' as const, files: tree[p] ?? [] }),
+    canReadBatch: async (ps: string[]) => new Map(ps.map((p) => [p, true])),
+    canDownloadBatch: async (ps: string[]) => new Map(ps.map((p) => [p, true])),
+    notifyRead: async () => undefined,
+    readFile: vi.fn(async () => Buffer.from('xxxx')),
+    contentTypeOf: () => 'text/markdown',
+  });
+
+  it('counts a file in every requested folder that zips it, so overlapping folders cannot multiply the limit', async () => {
+    const x = { path: 'a/x.md', bytes: 4 };
+    const y = { path: 'a/b/y.md', bytes: 4 };
+    const deps = fakeDeps({ [`${KB}/a`]: [x, y], [`${KB}/a/b`]: [y] }, 10, 100);
+    // The files total 8, under the limit; the two zips together carry 12.
+    await expect(buildDownload([`${KB}/a`, `${KB}/a/b`], deps)).rejects.toMatchObject({
+      status: 413,
+      details: { totalBytes: 12, maxBytes: 10 },
+    });
+    expect(deps.readFile).not.toHaveBeenCalled();
+    // Either folder alone fits.
+    const one = await buildDownload([`${KB}/a`], fakeDeps({ [`${KB}/a`]: [x, y] }, 10, 100));
+    expect(one.folders).toHaveLength(1);
+  });
+
+  it('refuses a request holding more files than one request may carry, before judging any', async () => {
+    const deps = fakeDeps({ [`${KB}/a`]: [{ path: 'a/1.md', bytes: 0 }, { path: 'a/2.md', bytes: 0 }] }, 10, 1);
+    const canRead = vi.spyOn(deps, 'canReadBatch');
+    await expect(buildDownload([`${KB}/a`], deps)).rejects.toMatchObject({
+      status: 413,
+      details: { kind: 'download-too-many-files', maxFiles: 1 },
+    });
+    expect(canRead).not.toHaveBeenCalled();
+  });
+
+  it('counts calls still building against the cap, so parallel calls cannot all pass it', async () => {
+    const h = await start({ maxOpenPerUser: 2 });
+    const answers = await Promise.all([1, 2, 3, 4].map(() => request(h.base, [`${KB}/Shared/Open.md`])));
+
+    expect(answers.map((a) => a.status).sort()).toEqual([200, 200, 429, 429]);
+    expect(await readdir(h.downloadsRoot)).toHaveLength(2);
+    expect(h.store.openRequestsOf(ANA.id)).toBe(2);
+  });
+
+  it('gives the slot back when a call issues nothing', async () => {
+    const h = await start({ maxOpenPerUser: 1 });
+    expect((await request(h.base, [`${KB}/Gone.md`])).body.files).toEqual([]);
+    expect(h.store.openRequestsOf(ANA.id)).toBe(0);
+    expect((await request(h.base, [`${KB}/Shared/Open.md`])).status).toBe(200);
   });
 
   it('holds a user to 10 open download requests, however many links each carries', async () => {
@@ -508,8 +626,10 @@ describe('limits', () => {
 describe('credentials, deployments and the read hook', () => {
   it('refuses a read-only credential before anything is built', async () => {
     const h = await start({ scope: 'read' });
-    const { status } = await request(h.base, [`${KB}/Shared/Open.md`]);
+    const { status, body } = await request(h.base, [`${KB}/Shared/Open.md`]);
     expect(status).toBe(403);
+    // About the credential, not the deployment: the tool itself is a read.
+    expect(body.error).toContain('read-only credential');
     expect(await readdir(h.downloadsRoot)).toEqual([]);
     expect(h.readsHooked).toEqual([]);
   });
@@ -570,6 +690,11 @@ describe('what agents are told', () => {
     );
     const def = (await registry.listExternal()).find((t) => t.name === 'request_file_download');
     expect(def).toBeDefined();
+    // The answer with no link carries `expiresAt: null`; the schema says so.
+    expect((def!.outputs as { properties: Record<string, { type: unknown }> }).properties.expiresAt!.type).toEqual([
+      'string',
+      'null',
+    ]);
     for (const phrase of ['`request_file_upload`', '`apply_file_upload`', 'x-download-token', 'not found', 'download permission required', '500 MB', 'ONCE']) {
       expect(def!.description, phrase).toContain(phrase);
     }

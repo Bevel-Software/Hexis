@@ -236,11 +236,11 @@ export interface CoreServices {
   /** The bytes `request_file_download` captured, held until their one-time link is fetched or expires. */
   agentDownloadStore: AgentDownloadStore;
   /**
-   * The user a download fetch identifies itself as by its bearer credential,
-   * or null when it carries none that verifies — so the download route can
-   * refuse a link presented by someone it was not issued to.
+   * Every user a download fetch identifies itself as, by its bearer and its
+   * session cookie — none when it carries none that verifies — so the
+   * download route can refuse a link presented by someone it was not issued to.
    */
-  agentDownloadFetcher: (req: Request) => Promise<string | null>;
+  agentDownloadFetcher: (req: Request) => Promise<string[]>;
   docExtractService: DocExtractService;
   accessControl: AccessControlService;
   creatorAccess: CreatorAccessService;
@@ -701,7 +701,12 @@ export async function createCoreServices(
   // upload root — outside every workspace, for the same reason — until their
   // one-time link is fetched or expires.
   const agentDownloadsRoot = path.resolve(config.agentUploadsRoot, '..', 'agent-downloads');
-  await assertUploadsRootOutsideWorkspaces(agentDownloadsRoot, config.workspacesRoot);
+  await assertUploadsRootOutsideWorkspaces(agentDownloadsRoot, config.workspacesRoot, {
+    name: 'The agent download root (`agent-downloads`, beside AGENT_UPLOADS_ROOT)',
+    why:
+      'captured download bytes wait there for their one-time links, so a root inside a workspace would let the ' +
+      'file tools read them. Point AGENT_UPLOADS_ROOT at a directory whose parent is outside WORKSPACES_ROOT.',
+  });
   const agentDownloadStore = new AgentDownloadStore({
     root: agentDownloadsRoot,
     publicBaseUrl: config.publicBackendUrl,
@@ -1312,7 +1317,7 @@ export async function createCoreServices(
   // Every credential kind this server issues — connection keys, internal
   // tokens and app sessions (bearer or cookie) — so a fetch carrying another
   // user's identity of ANY kind is refused the link.
-  const agentDownloadFetcher: (req: Request) => Promise<string | null> = createDownloadFetcherIdentifier(
+  const agentDownloadFetcher: (req: Request) => Promise<string[]> = createDownloadFetcherIdentifier(
     { verifyToolToken, verifySession: (token) => authService.verifyToken(token) },
     readAuthCookie,
   );

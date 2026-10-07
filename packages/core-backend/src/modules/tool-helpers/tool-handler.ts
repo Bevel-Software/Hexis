@@ -45,8 +45,14 @@ export function createToolHandlerFactory(resolve: ResolveToolContext, writeAcces
         res.status(401).json({ error: 'Unauthenticated' });
         return;
       }
-      if ((opts.write || opts.writeScope) && auth.scope === 'read') {
+      if (opts.write && auth.scope === 'read') {
         res.status(403).json({ error: 'This tool requires write access.' });
+        return;
+      }
+      // About the CREDENTIAL, not the deployment: the tool is a read, and a
+      // read-only deployment serves it — the key used here is what may not.
+      if (opts.writeScope && auth.scope === 'read') {
+        res.status(403).json({ error: 'This tool cannot be used with a read-only credential; use a full-scope key.' });
         return;
       }
       // Before anything is awaited: a client that goes away during the
