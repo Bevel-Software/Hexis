@@ -29,10 +29,12 @@ describe('agent names', () => {
       '[hexis-mcp 0.26.0] signing in as "Claude Code · local server on LAPTOP-1" — named by the client\'s handshake ("claude-code" "2.1.273")',
     );
     expect(identityLine({ name: 'claude', guessed: true }, 'LAPTOP-1', '0.26.0')).toBe(
-      '[hexis-mcp 0.26.0] signing in as "Claude · local server on LAPTOP-1" — guessed from the parent process ("claude"); the client named itself to nobody',
+      '[hexis-mcp 0.26.0] signing in as "Claude · local server on LAPTOP-1" — guessed from the parent process ("claude") — the client named itself to nobody; a server started by hand from that program\'s terminal is named the same',
     );
+    // Null covers a table that could not be read AND a table with no known
+    // agent in it; the line claims neither on its own.
     expect(identityLine(null, 'LAPTOP-1', '0.26.0')).toBe(
-      '[hexis-mcp 0.26.0] signing in as "Unknown agent · local server on LAPTOP-1" — the client named itself to nobody and no parent process could be read',
+      '[hexis-mcp 0.26.0] signing in as "Unknown agent · local server on LAPTOP-1" — the client named itself to nobody and no known agent was found among its parent processes',
     );
   });
 
