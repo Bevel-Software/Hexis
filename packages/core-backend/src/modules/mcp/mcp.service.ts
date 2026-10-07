@@ -499,7 +499,7 @@ export class McpService {
         // part of the UTCP manual the tool was discovered from (UTCP has no
         // place for it), so it is joined on here — the one point where a
         // discovered tool becomes a listing entry.
-        const ui = apps?.tools[t.mcpName];
+        const ui = apps && Object.hasOwn(apps.tools, t.mcpName) ? apps.tools[t.mcpName] : undefined;
         const entry = toListedTool(ui ? { ...t, ui } : t); // logs its own reason on a name/schema drop
         if (!entry) {
           dropped.push(t.mcpName);
@@ -665,7 +665,10 @@ export class McpService {
         if (audit) await audit.denied(proxied.utcpName, args);
         return needsAuth;
       }
-      const run = () => this.dispatch(client, proxied, request, extra);
+      // A tool with an MCP App view answers structured content too — the
+      // view reads its fields from there.
+      const structured = apps !== null && Object.hasOwn(apps.tools, proxied.mcpName);
+      const run = () => this.dispatch(client, proxied, request, extra, structured);
       return audit ? audit.call(proxied.utcpName, args, run, isErrorResult) : run();
     });
 
@@ -1409,17 +1412,23 @@ export class McpService {
     // payload without a `progressToken` is accepted — same approach the prior
     // handler used; the strict ServerNotification type requires the token.
     extra: { sendNotification: (n: any) => Promise<void> },
+    structured = false,
   ): Promise<CallToolResult> {
     const progressToken = request.params._meta?.progressToken;
-    return dispatchToolCall(client, tool, request.params.arguments ?? {}, (progress, message) =>
-      extra.sendNotification({
-        method: 'notifications/progress',
-        params: {
-          ...(progressToken !== undefined ? { progressToken } : {}),
-          progress,
-          message,
-        },
-      }),
+    return dispatchToolCall(
+      client,
+      tool,
+      request.params.arguments ?? {},
+      (progress, message) =>
+        extra.sendNotification({
+          method: 'notifications/progress',
+          params: {
+            ...(progressToken !== undefined ? { progressToken } : {}),
+            progress,
+            message,
+          },
+        }),
+      { structured },
     );
   }
 

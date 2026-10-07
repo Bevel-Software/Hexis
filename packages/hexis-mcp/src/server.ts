@@ -259,7 +259,9 @@ export function listedTools(
   const dropped: string[] = [];
   const examplePool: ProxiedTool[] = [];
   for (const tool of tools) {
-    const view = views[tool.mcpName];
+    // Own keys only: a tool named `constructor` or `toString` is not one an
+    // app view was published for.
+    const view = Object.hasOwn(views, tool.mcpName) ? views[tool.mcpName] : undefined;
     const entry = toListedTool(view ? { ...tool, ui: view } : tool); // logs its own reason on a name/schema drop
     if (!entry) {
       dropped.push(tool.mcpName);
@@ -771,6 +773,10 @@ export async function createHexisMcpServer(
       tools = withoutRemoteMetaTools(
         (await live.getTools()).map((tool: UtcpTool) => flattenManualTool(tool, REMOTE_MANUAL_NAME)),
       );
+      // The views go with the tools: a tool that gained or re-pointed its
+      // `ui://` view since startup must be listed — and its view served — as
+      // the deployment serves it now, not as it did when this process began.
+      apps = await fetchMcpApps(config);
       console.error(
         `[hexis-mcp] the workspace's catalog changed — ${tools.length} tool(s) now served ` +
           `(${localByName.size} local-only manual(s) registered here, the rest served by the workspace).`,
@@ -1148,15 +1154,22 @@ export async function createHexisMcpServer(
         const tool = tools.find((t) => t.mcpName === name);
         if (!tool) return toolError(`Unknown tool "${name}".`);
         const progressToken = request.params._meta?.progressToken;
-        return await dispatchToolCall(live, tool, request.params.arguments ?? {}, (progress, message) =>
-          extra.sendNotification({
-            method: 'notifications/progress',
-            params: {
-              ...(progressToken !== undefined ? { progressToken } : {}),
-              progress,
-              message,
-            },
-          } as never),
+        return await dispatchToolCall(
+          live,
+          tool,
+          request.params.arguments ?? {},
+          (progress, message) =>
+            extra.sendNotification({
+              method: 'notifications/progress',
+              params: {
+                ...(progressToken !== undefined ? { progressToken } : {}),
+                progress,
+                message,
+              },
+            } as never),
+          // A tool with a view answers structured content as well: the view
+          // reads its fields from there, not from the text the model reads.
+          { structured: Object.hasOwn(apps.tools, name) },
         );
       } finally {
         inflightCalls -= 1;

@@ -96,6 +96,17 @@ function looksLikeNodeId(repoRelative: string): boolean {
  * always targets the deployment's default branch. A missing `#slug` means
  * "the whole file".
  */
+/**
+ * A separator spelled `%2F` or `%5C` is refused BEFORE decoding: decoded, it
+ * becomes a real `/` that the safe-path check can no longer tell from one
+ * the caller wrote, and `Data%2FThing.md` would name `Data/Thing.md`.
+ */
+function refuseEncodedSeparators(rawPath: string): void {
+  if (/%2f|%5c/i.test(rawPath)) {
+    throw new EmbedRefParseError(`Not a safe knowledge-base path: ${rawPath}`);
+  }
+}
+
 export function parseEmbedRef(raw: string, kbDirName: string): EmbedRef | EmbedIdRef {
   if (typeof raw !== 'string' || raw.trim() === '') {
     throw new EmbedRefParseError('Empty reference');
@@ -128,6 +139,7 @@ export function parseEmbedRef(raw: string, kbDirName: string): EmbedRef | EmbedI
       throw new EmbedRefParseError(`Not a valid URL: ${ref}`);
     }
     fragment = safeDecode(url.hash.replace(/^#/, ''));
+    refuseEncodedSeparators(url.pathname);
     const segments = url.pathname.split('/').filter(Boolean).map((s) => safeDecode(s));
     if ((segments[0] === 'workspace' || segments[0] === 'embed') && segments.length >= 3) {
       pathPart = segments.slice(2).join('/');
@@ -138,6 +150,7 @@ export function parseEmbedRef(raw: string, kbDirName: string): EmbedRef | EmbedI
     const hashIndex = ref.indexOf('#');
     fragment = hashIndex >= 0 ? safeDecode(ref.slice(hashIndex + 1)) : '';
     const rawPath = hashIndex >= 0 ? ref.slice(0, hashIndex) : ref;
+    refuseEncodedSeparators(rawPath);
     pathPart = rawPath.split('/').map((s) => safeDecode(s)).join('/');
   }
 

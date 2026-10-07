@@ -32,6 +32,8 @@ export class McpAppService {
     private readonly config: {
       /** The deployment's public frontend address — the ONE origin the view may frame. */
       readonly publicFrontendUrl: string;
+      /** Where the view's file lives. The packaged `mcp-app/` folder unless a test says otherwise. */
+      readonly viewDir?: string;
     },
   ) {}
 
@@ -47,16 +49,17 @@ export class McpAppService {
   }
 
   private async build(): Promise<McpAppManifest> {
+    const file = path.join(this.config.viewDir ?? mcpAppDir(), OPEN_PAGE_VIEW_FILE);
     let text: string;
     try {
-      text = await readFile(path.join(mcpAppDir(), OPEN_PAGE_VIEW_FILE), 'utf8');
+      text = await readFile(file, 'utf8');
     } catch (err) {
       // No view, no app. Advertising a `resourceUri` whose resource cannot be
       // read would have a host preload a failure and show an empty frame
       // where the tool's text used to be; with no manifest `open_page` is an
       // ordinary tool answering ordinary text, which is the graceful shape.
       log.error(
-        `could not read the MCP App view at ${path.join(mcpAppDir(), OPEN_PAGE_VIEW_FILE)}; ` +
+        `could not read the MCP App view at ${file}; ` +
           `open_page will carry no view: ${err instanceof Error ? err.message : String(err)}`,
       );
       return { tools: {}, resources: [] };

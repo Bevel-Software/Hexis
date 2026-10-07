@@ -80,6 +80,19 @@ describe("a surface's link policy", () => {
     expect(onOpenFile).not.toHaveBeenCalled();
   });
 
+  /**
+   * Judged as the browser judges it: a destination padded with whitespace is
+   * still a same-page anchor once normalised, so it scrolls here rather than
+   * being relayed out as another page.
+   */
+  it('leaves a whitespace-padded same-page anchor alone too', async () => {
+    const { onOpenFile } = view('## Goal\n\n<a href=" #goal">jump</a>', surface);
+    const link = screen.getByRole('link', { name: 'jump' });
+    expect(link.getAttribute('href')).toBe(' #goal');
+    await userEvent.click(link);
+    expect(onOpenFile).not.toHaveBeenCalled();
+  });
+
   it('still renders a bare node id inert when there is no resolver for it', () => {
     view('[a node](some-node-id)', surface);
     expect(screen.queryByRole('link', { name: 'a node' })).toBeNull();

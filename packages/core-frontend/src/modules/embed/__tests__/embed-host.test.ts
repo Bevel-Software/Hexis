@@ -70,6 +70,21 @@ describe('resolveToAppUrl', () => {
   it('still makes an absolute address out of an app path with no page loaded yet', () => {
     expect(resolveToAppUrl('/change-requests/7', '', null)).toBe(`${ORIGIN}/change-requests/7`);
   });
+
+  /**
+   * The embed's OWN links — the account-link page, a change request, the
+   * app's page — arrive already absolute. Refusing them left the reader with
+   * a dead "Link your account".
+   */
+  it('passes an absolute address the embed built itself', () => {
+    expect(resolveToAppUrl(`${ORIGIN}/embed/link?token=t`, '', null)).toBe(`${ORIGIN}/embed/link?token=t`);
+    expect(resolveToAppUrl('https://elsewhere.example/x', '', null)).toBe('https://elsewhere.example/x');
+  });
+
+  it('still refuses a script address, or a protocol-relative one, among the embed own links', () => {
+    expect(resolveToAppUrl('javascript:alert(1)', '', null)).toBeNull();
+    expect(resolveToAppUrl('relative/path', '', null)).toBeNull();
+  });
 });
 
 describe('what the embed says when it has nothing to show', () => {

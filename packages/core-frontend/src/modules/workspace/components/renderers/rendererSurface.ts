@@ -41,6 +41,11 @@ export interface RendererSurface {
    * its host.
    */
   openLink(href: string, basePath: string): void;
+  /**
+   * Open a workspace PATH — one that came from a file tree, not a link — taken
+   * verbatim: no anchor split, no repair, `#` is part of the name.
+   */
+  openWorkspacePath(workspacePath: string): void;
   /** Follow a node-id link (`<id>` or `<id#heading>`), the copy-link form. */
   openNodeId(idOrLink: string): void;
   /** The absolute, shareable address of `workspacePath` — what a copy-link yields. */

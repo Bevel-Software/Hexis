@@ -1,11 +1,11 @@
 /**
  * CORE platform tables — the git-backed workspace/workflow, auth, access,
  * change requests, locks, the pending-commits queue, connection keys, MCP
- * OAuth, and the Secrets Vault. A core-only deployment migrates and runs on
- * exactly these tables.
+ * OAuth, the Secrets Vault, and the embed's Atlassian account links. A
+ * core-only deployment migrates and runs on exactly these tables.
  *
  * Enterprise-only tables (chat, routines, watchlist, connectors, LLM config,
- * SharePoint/Atlassian links, feedback, upload, kb-revalidation) live in
+ * SharePoint links, feedback, upload, kb-revalidation) live in
  * `enterprise-schema.ts`, which imports the FK targets (`users`,
  * `externalApiKeys`) from here. `schema.ts` re-exports both, so existing
  * imports keep working unchanged.

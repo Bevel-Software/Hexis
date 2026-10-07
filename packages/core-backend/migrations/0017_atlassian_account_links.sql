@@ -15,12 +15,18 @@ CREATE TABLE IF NOT EXISTS "atlassian_account_links" (
 );
 --> statement-breakpoint
 -- Same constraint NAME the enterprise history used, so the guard recognises
--- the one an upgraded database already carries and adds nothing.
+-- the one an upgraded database already carries and adds nothing. Recognised
+-- only as the FOREIGN KEY it must be (contype 'f') with the cascade erasure
+-- relies on (confdeltype 'c'): anything else under that name is not adopted,
+-- and the ADD below then fails on the name — loudly, at migration time —
+-- rather than leaving links that outlive their user.
 DO $$ BEGIN
 	IF NOT EXISTS (
 		SELECT 1 FROM pg_constraint
 		WHERE conname = 'atlassian_account_links_user_id_users_id_fk'
 		  AND conrelid = 'atlassian_account_links'::regclass
+		  AND contype = 'f'
+		  AND confdeltype = 'c'
 	) THEN
 		ALTER TABLE "atlassian_account_links"
 			ADD CONSTRAINT "atlassian_account_links_user_id_users_id_fk"

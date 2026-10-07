@@ -68,7 +68,13 @@ async function connect(opts: { serveApps?: boolean } = {}) {
   }
   const toolRoutes = express.Router();
   toolRoutes.use(createManualRoutes(registry, fakeAuth, async () => 'a@x.io'));
-  toolRoutes.post('/agent/tools/:name', (_req, res) => res.json({ ok: true }));
+  toolRoutes.post('/agent/tools/:name', (req, res) =>
+    res.json(
+      req.params.name === OPEN_PAGE_TOOL
+        ? { path: 'Data/Thing.md', content: '# Thing', embedUrl: `${PUBLIC}/embed?token=t`, appUrl: PUBLIC, branch: 'main' }
+        : { ok: true },
+    ),
+  );
 
   httpServer = app.listen(0);
   await new Promise<void>((r) => httpServer!.once('listening', () => r()));
@@ -158,6 +164,20 @@ describe('the hosted MCP endpoint serves the open_page view', () => {
     // Every tool is still listed, and still carries no view.
     expect(tools.find((t) => t.name === OPEN_PAGE_TOOL)).toBeDefined();
     expect(tools.find((t) => t.name === OPEN_PAGE_TOOL)!._meta).toBeUndefined();
+  }, 30_000);
+
+  /**
+   * The view frames `structuredContent.embedUrl` — it has nowhere else to
+   * read it — so a tool with a view must answer structured content as well
+   * as the text the model reads. A tool without one answers text alone.
+   */
+  it('answers open_page with structured content the view can read, and read_file without', async () => {
+    const host = await connect();
+    const opened = await host.callTool({ name: OPEN_PAGE_TOOL, arguments: { path: 'Data/Thing.md' } });
+    expect(opened.structuredContent).toMatchObject({ embedUrl: `${PUBLIC}/embed?token=t`, branch: 'main' });
+    expect((opened.content as Array<{ type: string; text: string }>)[0].text).toContain('embedUrl');
+    const read = await host.callTool({ name: 'read_file', arguments: { path: 'Data/Thing.md' } });
+    expect(read.structuredContent).toBeUndefined();
   }, 30_000);
 
   it('declares the resources capability when it does', async () => {

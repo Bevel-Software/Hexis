@@ -108,9 +108,12 @@ export type EmbedNodeIdResolver = (nodeId: string) => Promise<string | null>;
  * The file is the source of truth: editing acquires the platform's file lock,
  * saving writes to the default branch and releases it (which commits), and a
  * viewer who may not write proposes instead, exactly as the app's file page
- * does. Everything here authenticates by the TOKEN and nothing else — no
- * session is consulted, and a request that carries one without a token is
- * refused.
+ * does. The framed data methods — load, raw bytes, lock, heartbeat, cancel,
+ * save, propose — authenticate by the TOKEN and nothing else: no session is
+ * consulted, and a request that carries one without a token is refused. The
+ * account-management methods (`linkAccount`, `listLinkedAccounts`,
+ * `unlinkAccount`) are the exception, called from session-authenticated
+ * routes on a page no host may frame.
  */
 export interface IEmbedService {
   /**

@@ -44,6 +44,7 @@ import rehypeSanitize from 'rehype-sanitize';
 import rehypeSlug from 'rehype-slug';
 import { CopyAnchorButton } from './CopyAnchorButton';
 import { KbImage, type KbImageResolver } from './KbImage';
+import { normalizeHref } from '../../../../shared/markdown/hrefs';
 
 export type { KbImageResolver, KbImageSource } from './KbImage';
 
@@ -249,8 +250,10 @@ export function useKbMarkdownComponents({
         // A surface that owns every outgoing link takes the rest: an
         // `http(s)` address, and a workspace path the `.md` rule above did
         // not match (an image, a PDF, a document). Same-page `#anchor` links
-        // are excluded — they scroll inside this view and leave nothing.
-        if (onOpenFile && linkPolicy === 'surface' && href && !href.startsWith('#')) {
+        // are excluded — they scroll inside this view and leave nothing —
+        // judged on the NORMALISED spelling, as a browser judges it, so a
+        // whitespace-padded ` #goal` still scrolls rather than leaving.
+        if (onOpenFile && linkPolicy === 'surface' && href && !normalizeHref(href).startsWith('#')) {
           return (
             <a
               {...props}

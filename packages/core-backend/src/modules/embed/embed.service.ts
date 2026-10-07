@@ -22,8 +22,13 @@ import type {
   EmbedTokenResult,
   IEmbedService,
 } from './embed.interface.js';
-import { EmbedAccessError, EmbedNodeNotFoundError, EmbedTokenError } from './embed.errors.js';
-import { parseEmbedRef, EmbedRefParseError } from './embed-link.js';
+import {
+  EmbedAccessError,
+  EmbedLockedError,
+  EmbedNodeNotFoundError,
+  EmbedTokenError,
+} from './embed.errors.js';
+import { parseEmbedRef, EmbedRefParseError, isSafeRepoRelativeEmbedPath } from './embed-link.js';
 import type { AccountLinkService } from './account-link.service.js';
 
 const log = logger('embed');
@@ -154,12 +159,20 @@ export class EmbedService implements IEmbedService {
     const ref = parseEmbedRef(reference, this.config.kbDirName);
     let repoRelative: string;
     if ('nodeId' in ref) {
-      // A bare id is the app's copy-link form. Resolving it needs a node
-      // graph, which core does not have; a deployment that does registers a
-      // resolver (see `EmbedNodeIdResolver`).
-      const resolved = this.resolveNodeId ? await this.resolveNodeId(ref.nodeId) : null;
-      if (!resolved) throw new EmbedRefParseError(`No file at the reference '${ref.nodeId}'`);
-      repoRelative = resolved;
+      // One dot-less segment is an id by the copy-link's shape — and ALSO a
+      // legal root-level file name (`readme`, `LICENSE`). A file that is
+      // actually there wins: it is what the caller named, and `open_page`
+      // has just read it by that very path.
+      if (isSafeRepoRelativeEmbedPath(ref.nodeId) && (await this.fileExists(ref.nodeId))) {
+        repoRelative = ref.nodeId;
+      } else {
+        // A bare id is the app's copy-link form. Resolving it needs a node
+        // graph, which core does not have; a deployment that does registers a
+        // resolver (see `EmbedNodeIdResolver`).
+        const resolved = this.resolveNodeId ? await this.resolveNodeId(ref.nodeId) : null;
+        if (!resolved) throw new EmbedRefParseError(`No file at the reference '${ref.nodeId}'`);
+        repoRelative = resolved;
+      }
     } else {
       repoRelative = ref.repoRelative;
     }
@@ -265,8 +278,12 @@ export class EmbedService implements IEmbedService {
 
   async heartbeat(token: string): Promise<void> {
     const claims = this.verifyToken(token);
-    const { user } = await this.resolveIdentity(claims);
+    const { user, canWrite } = await this.resolveIdentity(claims);
     if (!user) return; // nothing held — nothing to keep alive
+    // Write access is asked again on every renewal: the token outlives the
+    // permission it was minted under, and a writer who lost it must not keep
+    // a lock alive that shuts out the people who still have it.
+    if (!canWrite) throw new EmbedAccessError();
     await this.workflowService.heartbeatLock(
       this.defaultWorkspaceId(),
       this.kb.defaultBranch,
@@ -290,6 +307,14 @@ export class EmbedService implements IEmbedService {
   async save(token: string, content: string): Promise<void> {
     const { user, wsPath } = await this.requireEditor(token);
     const workspaceId = this.defaultWorkspaceId();
+    // Bytes reach the disk ONLY under a lock this viewer holds. Acquiring is
+    // re-entrant for the holder, so a viewer who still has it just renews it;
+    // one whose lock lapsed (a frame hidden past the TTL) and was taken by
+    // somebody else is refused here — writing first and finding out at the
+    // release would leave their text on disk under the other editor's lock,
+    // for that editor's next commit to publish.
+    const held = await this.workflowService.acquireLock(workspaceId, this.kb.defaultBranch, wsPath, user);
+    if (!held.acquired) throw new EmbedLockedError(held.lock.holderName);
     try {
       await this.workspaceService.writeFile(workspaceId, wsPath, content);
       // Release commits + pushes the on-disk bytes through the background
@@ -461,6 +486,17 @@ export class EmbedService implements IEmbedService {
   }
 
   /** Read a file's bytes from the default branch's workspace. */
+  /** Whether `repoRelative` is a file on the default branch. */
+  private async fileExists(repoRelative: string): Promise<boolean> {
+    try {
+      await this.readFileBytes(repoRelative);
+      return true;
+    } catch (err) {
+      if (err instanceof EmbedNodeNotFoundError) return false;
+      throw err;
+    }
+  }
+
   private async readFileBytes(repoRelative: string): Promise<Buffer> {
     const workspaceId = this.defaultWorkspaceId();
     await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch);

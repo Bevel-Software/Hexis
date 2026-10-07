@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
@@ -148,16 +151,18 @@ describe('the manifest route the local MCP server reads', () => {
  */
 describe('a view that cannot be read', () => {
   it('leaves the deployment with no apps at all', async () => {
-    class Broken extends McpAppService {
-      // The real read goes through `mcpAppDir()`; standing in for an
-      // unreadable file is the honest way to reach the branch without
-      // deleting a packaged asset under a parallel test run.
-      manifest() {
-        return Promise.resolve({ tools: {}, resources: [] });
-      }
+    // The REAL build, pointed at a folder with no view in it — the read
+    // fails exactly as it does in an image that shipped without `mcp-app/`,
+    // and nothing packaged is touched under a parallel test run.
+    const empty = mkdtempSync(path.join(tmpdir(), 'no-mcp-app-'));
+    try {
+      const service = new McpAppService({ publicFrontendUrl: PUBLIC, viewDir: empty });
+      const manifest = await service.manifest();
+      expect(manifest.tools).toEqual({});
+      expect(manifest.resources).toEqual([]);
+      expect(await service.resource(OPEN_PAGE_VIEW_URI)).toBeNull();
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
     }
-    const manifest = await new Broken({ publicFrontendUrl: PUBLIC }).manifest();
-    expect(manifest.tools).toEqual({});
-    expect(manifest.resources).toEqual([]);
   });
 });

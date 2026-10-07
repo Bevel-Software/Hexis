@@ -65,8 +65,17 @@ async function failure(res: Response): Promise<EmbedApiError> {
   return new EmbedApiError(res.status, message);
 }
 
+/**
+ * The token-only routes are called WITHOUT the browser's cookies. The server
+ * refuses a session on them anyway; omitting it here keeps a same-origin
+ * session from riding along at all, so the boundary does not rest on the
+ * server alone. (The account-link call below is the one that needs it.)
+ */
+const TOKEN_ONLY: RequestInit = { credentials: 'omit' };
+
 async function post(path: string, body: Record<string, unknown>): Promise<Response> {
   const res = await fetch(path, {
+    ...TOKEN_ONLY,
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -76,7 +85,7 @@ async function post(path: string, body: Record<string, unknown>): Promise<Respon
 }
 
 export async function loadEmbed(token: string): Promise<EmbedFileView> {
-  const res = await fetch(`/api/embed/load?token=${encodeURIComponent(token)}`);
+  const res = await fetch(`/api/embed/load?token=${encodeURIComponent(token)}`, TOKEN_ONLY);
   if (!res.ok) throw await failure(res);
   return (await res.json()) as EmbedFileView;
 }

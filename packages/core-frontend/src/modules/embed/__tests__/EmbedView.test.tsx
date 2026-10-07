@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { AppRegistryContext, type AppRegistry } from '../../../core/registry';
@@ -159,6 +159,48 @@ describe('a writer', () => {
     expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
   });
 
+  /**
+   * Hidden is not closed. The lock is let go while the frame is hidden — and
+   * taken AGAIN when it comes back, before Save can mean anything. Somebody
+   * who took it meanwhile keeps it, and Save is refused.
+   */
+  it('takes the lock again after a tab switch, and refuses Save if someone else took it', async () => {
+    api.loadEmbed.mockResolvedValue(view());
+    api.lockEmbed.mockResolvedValueOnce({ acquired: true });
+    api.cancelEmbed.mockResolvedValue(undefined);
+    mount();
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    await screen.findByRole('button', { name: 'Save' });
+
+    const setVisibility = (state: 'hidden' | 'visible') => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: state });
+      document.dispatchEvent(new Event('visibilitychange'));
+    };
+    setVisibility('hidden');
+    await waitFor(() => expect(api.cancelEmbed).toHaveBeenCalledWith('tok'));
+    api.lockEmbed.mockResolvedValueOnce({ acquired: false, holderName: 'Bob' });
+    setVisibility('visible');
+
+    await waitFor(() => expect(api.lockEmbed).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/Bob started editing this page/)).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(api.saveEmbed).not.toHaveBeenCalled();
+  });
+
+  it('keeps Save when the lock is taken back cleanly', async () => {
+    api.loadEmbed.mockResolvedValue(view());
+    api.lockEmbed.mockResolvedValue({ acquired: true });
+    api.cancelEmbed.mockResolvedValue(undefined);
+    mount();
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await waitFor(() => expect(api.lockEmbed).toHaveBeenCalledTimes(2));
+    expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('releases the lock on Discard', async () => {
     api.loadEmbed.mockResolvedValue(view());
     api.lockEmbed.mockResolvedValue({ acquired: true });
@@ -287,5 +329,17 @@ describe('the renderer', () => {
     const internal = screen.getByRole('link', { name: 'other' });
     expect(external.getAttribute('target')).toBeNull();
     expect(internal.getAttribute('target')).toBeNull();
+
+    // And a click on either is HANDED OVER: the frame's own navigation is
+    // prevented, and the host path is what opens it (standalone, as here,
+    // that path is a new tab).
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    expect(fireEvent.click(external)).toBe(false);
+    expect(fireEvent.click(internal)).toBe(false);
+    expect(open.mock.calls.map((c) => c[0])).toEqual([
+      'https://example.test/docs',
+      `${window.location.origin}/workspace/main/${KB}/Data/Other.md`,
+    ]);
+    expect(open.mock.calls.every((c) => c[1] === '_blank')).toBe(true);
   });
 });

@@ -4,7 +4,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFileReaderRegistry } from '../../workspace/file-readers/file-reader.registry.js';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { EmbedService, type EmbedConfig } from '../embed.service.js';
-import { EmbedAccessError, EmbedNodeNotFoundError, EmbedTokenError } from '../embed.errors.js';
+import {
+  EmbedAccessError,
+  EmbedLockedError,
+  EmbedNodeNotFoundError,
+  EmbedTokenError,
+} from '../embed.errors.js';
 import { EmbedRefParseError } from '../embed-link.js';
 import { resolveBeside } from '../embed.service.js';
 
@@ -152,6 +157,27 @@ describe('EmbedService: minting', () => {
     await expect(service.mintForUser({ userId: USER.id, reference: 'hx-a-node' })).rejects.toThrow(
       EmbedRefParseError,
     );
+  });
+
+  /**
+   * `readme` is the copy-link's id shape AND a legal root-level file. The
+   * file that is really there wins — `open_page` has just read it by that
+   * very path, and core has no id resolver to fall back on.
+   */
+  it('reads an extensionless root file as the path it is, not as a node id', async () => {
+    const { service } = build({ files: { [`${KB}/readme`]: 'hello' } });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: 'readme' });
+    expect(claimsOf(token)).toMatchObject({ repoRelative: 'readme' });
+  });
+
+  it('refuses a separator spelled %2F rather than decoding it into a real one', async () => {
+    const { service } = build({ files: { [WS]: PAGE } });
+    await expect(service.mintForUser({ userId: USER.id, reference: 'Data%2FThing.md' })).rejects.toThrow(
+      EmbedRefParseError,
+    );
+    await expect(
+      service.mintForUser({ userId: USER.id, reference: `https://hexis.example/workspace/main/${KB}/Data%2FThing.md` }),
+    ).rejects.toThrow(EmbedRefParseError);
   });
 
   it('resolves a node-id reference through a deployment resolver when one is', async () => {
@@ -362,6 +388,29 @@ describe('EmbedService: saving as a writer', () => {
     const { service } = build({ acquired: false, holderName: 'Bob' });
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     expect(await service.acquireLock(token)).toEqual({ acquired: false, holderName: 'Bob' });
+  });
+
+  /**
+   * A frame hidden past the lock's TTL can come back to find the file taken.
+   * Its Save must not land: written first and refused at the release, the
+   * text would sit on disk under the OTHER editor's lock, for their next
+   * commit to publish.
+   */
+  it('writes nothing when the viewer no longer holds the lock', async () => {
+    const { service, workspaceService, workflowService } = build({ acquired: false, holderName: 'Bob' });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    await expect(service.save(token, 'x')).rejects.toThrow(EmbedLockedError);
+    await expect(service.save(token, 'x')).rejects.toThrow('Bob');
+    expect(workspaceService.writeFile).not.toHaveBeenCalled();
+    expect(workflowService.releaseLock).not.toHaveBeenCalled();
+  });
+
+  it('refuses to keep a lock alive for a viewer who lost write access', async () => {
+    const { service, accessControl, workflowService } = build();
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    accessControl.canWrite.mockResolvedValue(false);
+    await expect(service.heartbeat(token)).rejects.toThrow(EmbedAccessError);
+    expect(workflowService.heartbeatLock).not.toHaveBeenCalled();
   });
 
   it('releases the lock WITHOUT committing when the write fails, and rethrows', async () => {

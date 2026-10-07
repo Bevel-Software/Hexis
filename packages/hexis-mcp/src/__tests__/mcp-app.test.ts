@@ -62,6 +62,16 @@ describe('listedTools forwards the deployment view metadata', () => {
     expect(readFile).not.toHaveProperty('_meta');
   });
 
+  /** An inherited property of the views object is not a view somebody published. */
+  it('gives no view to a tool named after an Object.prototype member', () => {
+    const listed = listedTools([tool('constructor'), tool('toString')], {
+      open_page: { resourceUri: VIEW_URI },
+    });
+    for (const name of ['constructor', 'toString']) {
+      expect(listed.find((t) => t.name === name)).not.toHaveProperty('_meta');
+    }
+  });
+
   /** A deployment that serves no app leaves every tool exactly as it was. */
   it('carries no metadata when the deployment serves no app', () => {
     const listed = listedTools([tool('open_page')]);
@@ -110,6 +120,22 @@ describe('fetchMcpApps', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     stubFetch('<!doctype html><title>login</title>');
     expect(await fetchMcpApps(config)).toEqual({ tools: {}, resources: [] });
+  });
+
+  /**
+   * A JSON answer of the WRONG shape — a proxy's `{}`, another protocol's
+   * envelope — still answers no apps, but says so: the parser alone would
+   * read it as a deployment that serves none, without a word.
+   */
+  it.each([
+    ['an empty object', {}],
+    ['an envelope', { data: { tools: {}, resources: [] } }],
+    ['resources that are not a list', { tools: {}, resources: {} }],
+  ])('names a manifest of the wrong shape (%s) rather than reading it as no apps', async (_label, body) => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    stubFetch(body);
+    expect(await fetchMcpApps(config)).toEqual({ tools: {}, resources: [] });
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('not an MCP App manifest'));
   });
 
   it('says WHY on stderr, so an app-less server is diagnosable rather than silent', async () => {

@@ -138,7 +138,10 @@
           if (hostOrigin === null && event.origin) hostOrigin = event.origin;
 
           if (message.method === 'ui/notifications/tool-result') {
-            show((message.params && message.params.result) || {});
+            // The params ARE the CallToolResult. A `result` wrapper is
+            // accepted too, for a host that wrapped it.
+            var params = message.params || {};
+            show(params.structuredContent || !params.result ? params : params.result);
             return;
           }
           if (message.method === 'ui/notifications/container-size-changed') {
@@ -150,6 +153,7 @@
           // here depends on them, but a host that sends the first tool result
           // only after the handshake completes needs us to have sent it.
           if (message.id === INITIALIZE_ID) {
+            send({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} });
             if (!shown) say('Opening the page…');
           }
         });
@@ -159,7 +163,14 @@
           jsonrpc: '2.0',
           id: INITIALIZE_ID,
           method: 'ui/initialize',
-          params: { protocolVersion: '2026-01-26' },
+          params: {
+            protocolVersion: '2026-01-26',
+            appInfo: { name: 'hexis-knowledge-page', version: '1.0.0' },
+            // Asks the host for nothing: no tool calls, no messages, no
+            // model context. Links go out through ui/open-link, which every
+            // host offers.
+            appCapabilities: {},
+          },
         });
       })();
     </script>

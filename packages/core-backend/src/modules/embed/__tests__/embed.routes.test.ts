@@ -3,7 +3,12 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createEmbedLinkRoutes, createEmbedRoutes, TOKEN_REQUIRED } from '../embed.routes.js';
-import { EmbedAccessError, EmbedNodeNotFoundError, EmbedTokenError } from '../embed.errors.js';
+import {
+  EmbedAccessError,
+  EmbedLockedError,
+  EmbedNodeNotFoundError,
+  EmbedTokenError,
+} from '../embed.errors.js';
 
 const TOKEN = 'a-valid-token';
 
@@ -42,9 +47,22 @@ function stubService(overrides: Record<string, unknown> = {}) {
  * same order `create-core-server` uses, because the order is what makes the
  * framing headers land before `index.html` is served.
  */
-async function serve(service: ReturnType<typeof stubService>, opts: { session?: boolean } = {}) {
+async function serve(
+  service: ReturnType<typeof stubService>,
+  opts: { session?: boolean; restrictFraming?: boolean } = {},
+) {
   const app = express();
   app.use(express.json());
+  // A deployment (or a later change to this app) that stamps a framing
+  // restriction on EVERY response, ahead of the embed routes — the case the
+  // embed page's own header removal exists for.
+  if (opts.restrictFraming) {
+    app.use((_req, res, next) => {
+      res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+      res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
+      next();
+    });
+  }
   app.use(createEmbedRoutes(service as never));
   const authMiddleware: express.RequestHandler = (req, res, next) => {
     if (!opts.session) {
@@ -123,8 +141,12 @@ describe('framing', () => {
    * secures it. `X-Frame-Options` is REMOVED rather than merely unset, so a
    * header added globally later cannot silently break every host's embed.
    */
-  it('sends no framing restriction on the embed page', async () => {
-    const client = await serve(stubService());
+  it('sends no framing restriction on the embed page, even under a global one', async () => {
+    const client = await serve(stubService(), { restrictFraming: true });
+    // The restriction is really there on every other page…
+    const other = await client.get('/workspace/main');
+    expect(other.headers.get('x-frame-options')).toBe('SAMEORIGIN');
+    // …and the embed page clears it.
     const res = await client.get('/embed?token=' + TOKEN);
     expect(res.status).toBe(200);
     expect(res.headers.get('x-frame-options')).toBeNull();
@@ -138,7 +160,7 @@ describe('framing', () => {
    * could frame it could link a foreign account to a victim.
    */
   it('refuses every framing ancestor on the account-link page', async () => {
-    const client = await serve(stubService());
+    const client = await serve(stubService(), { restrictFraming: true });
     const res = await client.get('/embed/link?token=' + TOKEN);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-security-policy')).toBe("frame-ancestors 'none'");
@@ -212,6 +234,27 @@ describe('the data routes', () => {
     expect(await proposed.json()).toMatchObject({ number: 7 });
   });
 
+  it('says who holds the lock when a save is refused for it', async () => {
+    const service = stubService({
+      save: vi.fn(async () => {
+        throw new EmbedLockedError('Bob');
+      }),
+    });
+    const client = await serve(service);
+    const res = await client.post('/api/embed/save', { token: TOKEN, content: 'x' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toContain('Bob');
+  });
+
+  /** Protected text and a token-bearing link: nothing may keep the answer. */
+  it('forbids caching the loaded page, as it does the raw bytes', async () => {
+    const client = await serve(stubService());
+    const load = await client.get(`/api/embed/load?token=${TOKEN}`);
+    expect(load.headers.get('cache-control')).toBe('no-store, private');
+    const refused = await client.get('/api/embed/load?token=wrong');
+    expect(refused.headers.get('cache-control')).toBe('no-store, private');
+  });
+
   it('refuses a save with no content', async () => {
     const client = await serve(stubService());
     expect((await client.post('/api/embed/save', { token: TOKEN })).status).toBe(400);
@@ -221,6 +264,7 @@ describe('the data routes', () => {
     [new EmbedTokenError(), 401],
     [new EmbedAccessError(), 403],
     [new EmbedNodeNotFoundError('gone'), 404],
+    [new EmbedLockedError('Bob'), 409],
   ])('maps %s to its status', async (error, status) => {
     const service = stubService({
       loadFile: vi.fn(async () => {

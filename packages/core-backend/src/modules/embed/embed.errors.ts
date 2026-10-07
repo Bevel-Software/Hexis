@@ -27,7 +27,11 @@ export class EmbedAccessError extends Error {
   }
 }
 
-/** Another editor currently holds the file lock; the save can't proceed. */
+/**
+ * Another editor holds the file lock, so a save can't proceed (→ 409). Raised
+ * when the viewer's own lock lapsed — a frame left hidden past the TTL — and
+ * somebody else took the file in the meantime.
+ */
 export class EmbedLockedError extends Error {
   constructor(
     /** Display name / email of the current lock holder, for the UI. */

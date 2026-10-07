@@ -20,12 +20,17 @@ import {
   type EmbedFileView,
 } from '../services/embed.api';
 import { EMBED_EXPIRED, openThroughHost } from '../embed-host';
+import { kbFileUrl } from '../../workspace/routing/kb-routes';
 
 /** How often a held lock is kept alive while somebody is editing. */
 const HEARTBEAT_MS = 30_000;
 
 function tokenFromUrl(): string {
   return new URLSearchParams(window.location.search).get('token') ?? '';
+}
+
+function lockLostMessage(holder: string): string {
+  return `${holder} started editing this page while it was in the background — your draft can't be saved over theirs.`;
 }
 
 /** An app path as an absolute URL, so a host can open it cross-site. */
@@ -66,6 +71,8 @@ export function EmbedView() {
   const [sent, setSent] = useState<{ url?: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [awaitingLink, setAwaitingLink] = useState(false);
+  /** Who took the lock while this frame was hidden — null while we hold it. */
+  const [lockLost, setLockLost] = useState<string | null>(null);
 
   const reload = useCallback(() => {
     if (!token) {
@@ -79,6 +86,7 @@ export function EmbedView() {
         setExpired(false);
         setLoadError(null);
         setMode('read');
+        setLockLost(null);
         setSent(null);
         if (next.linked) setAwaitingLink(false);
       })
@@ -111,6 +119,12 @@ export function EmbedView() {
   // Best-effort lock release when the frame is hidden or closed mid-edit. The
   // server's lock TTL plus the heartbeat above is the real backstop — a
   // cross-origin iframe cannot promise an unload signal fires.
+  //
+  // Hidden is not closed: a reader who switches tabs comes back to the same
+  // open editor. So on the way back the lock is TAKEN AGAIN before Save can
+  // mean anything — and if somebody else took it meanwhile, the reader is
+  // told so and Save is refused (the server refuses it too: it saves only
+  // under a lock this reader holds).
   const holdsLockRef = useRef(holdsLock);
   useEffect(() => {
     holdsLockRef.current = holdsLock;
@@ -120,7 +134,16 @@ export function EmbedView() {
       if (holdsLockRef.current) cancelEmbed(token).catch(() => undefined);
     };
     const onVisibility = () => {
-      if (document.visibilityState === 'hidden') release();
+      if (document.visibilityState === 'hidden') {
+        release();
+        return;
+      }
+      if (!holdsLockRef.current) return;
+      lockEmbed(token)
+        .then((result) => {
+          setLockLost(result.acquired ? null : (result.holderName ?? 'Someone else'));
+        })
+        .catch(() => setLockLost('Someone else'));
     };
     window.addEventListener('pagehide', release);
     document.addEventListener('visibilitychange', onVisibility);
@@ -142,6 +165,9 @@ export function EmbedView() {
     return {
       kbDirName: view.kbDirName,
       openLink: open,
+      // A path from a tree, verbatim — never through the link grammar, which
+      // would read a `#` in a file name as an anchor.
+      openWorkspacePath: (path) => openThroughHost(absolute(kbFileUrl(view.branch, path)), '', null),
       // A node id is handed to the host as the app's own copy-link address;
       // the app resolves it with the reader's session, which is the only
       // place that resolution can be done.
@@ -151,6 +177,7 @@ export function EmbedView() {
         embedRawUrl(token, path === view.workspacePath ? undefined : path, options),
       rawFetch: (path, options) =>
         fetch(embedRawUrl(token, path === view.workspacePath ? undefined : path, options), {
+          credentials: 'omit',
           signal: options?.signal,
         }),
       // No download route under the token: `download:` is its own verb, which
@@ -181,6 +208,7 @@ export function EmbedView() {
         return;
       }
       setDraft(view.content);
+      setLockLost(null);
       setMode('write');
     } catch (err) {
       setNotice(err instanceof Error ? err.message : 'Could not start editing.');
@@ -201,6 +229,9 @@ export function EmbedView() {
   const onSave = useCallback(
     async (content: string) => {
       if (!view) return;
+      // Already on screen beside the editor; the refusal is for the
+      // renderer's own save shortcut, which does not see the disabled button.
+      if (view.canWrite && lockLost) throw new Error(lockLostMessage(lockLost));
       setBusy(true);
       setNotice(null);
       try {
@@ -219,7 +250,7 @@ export function EmbedView() {
         setBusy(false);
       }
     },
-    [view, token, reload],
+    [view, token, reload, lockLost],
   );
 
   const onCancel = useCallback(async () => {
@@ -229,6 +260,7 @@ export function EmbedView() {
     } finally {
       setBusy(false);
       setMode('read');
+      setLockLost(null);
       setNotice(null);
     }
   }, [view, token]);
@@ -299,7 +331,7 @@ export function EmbedView() {
                 variant="primary"
                 size="tiny"
                 onClick={() => void onSave(draft).catch(() => undefined)}
-                disabled={busy}
+                disabled={busy || (view.canWrite && lockLost !== null)}
               >
                 {busy ? 'Sending…' : view.canWrite ? 'Save' : 'Send proposal'}
               </Button>
@@ -321,6 +353,11 @@ export function EmbedView() {
           ))}
       </div>
 
+      {writing && view.canWrite && lockLost && (
+        <p role="alert" className="shrink-0 text-detail text-danger">
+          {lockLostMessage(lockLost)}
+        </p>
+      )}
       {notice && (
         <p role="alert" className="shrink-0 text-detail text-danger">
           {notice}

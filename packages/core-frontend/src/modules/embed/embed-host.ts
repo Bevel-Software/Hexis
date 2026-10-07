@@ -77,7 +77,15 @@ export function resolveToAppUrl(
   basePath: string,
   kb: { kbDirName: string; branch: string } | null,
 ): string | null {
-  if (!kb) return href.startsWith('/') ? `${window.location.origin}${href}` : null;
+  if (!kb) {
+    // An address the embed built itself — the account-link page, a change
+    // request, the app's own page — not one read out of a knowledge-base
+    // page. A root-relative path is this deployment's; anything absolute
+    // still has to pass the scheme allowlist below, for the same reason.
+    const url = normalizeHref(href);
+    if (url.startsWith('/') && !url.startsWith('//')) return `${window.location.origin}${url}`;
+    return isOpenableExternalHref(url) ? url : null;
+  }
   const target = resolveKbHref(href, { basePath, kbDirName: kb.kbDirName });
   if (target === null) return null;
   /**

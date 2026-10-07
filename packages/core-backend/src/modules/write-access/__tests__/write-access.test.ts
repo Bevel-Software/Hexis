@@ -47,6 +47,8 @@ describe('isAlwaysWritable', () => {
     ['POST', '/api/workspace/w1/access/batch'],
     ['POST', '/api/workspace/w1/workflow/locks/heartbeat'],
     ['POST', '/api/events/s1/focus'],
+    // The Atlassian connector's VIEW mint: it signs a token, changes nothing.
+    ['POST', '/api/embed/token'],
   ])('lets %s %s through', (method, path) => {
     expect(isAlwaysWritable(method, path)).toBe(true);
   });
@@ -59,6 +61,10 @@ describe('isAlwaysWritable', () => {
     ['POST', '/api/workspace/w1/workflow/locks'],
     ['POST', '/api/plugins'],
     ['POST', '/api/admin/groups'],
+    // The embed's own edits stay refused like every other write.
+    ['POST', '/api/embed/save'],
+    ['POST', '/api/embed/propose'],
+    ['POST', '/api/embed/token/extra'],
     // A look-alike of an allowed path is not that path.
     ['POST', '/api/admin/accountsx'],
     ['POST', '/api/workspace/w1/access/batch/extra'],

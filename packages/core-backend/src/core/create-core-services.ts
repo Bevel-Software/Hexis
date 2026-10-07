@@ -1209,7 +1209,10 @@ export async function createCoreServices(
   // a reader may see and change inside a chat is what they may see and change
   // in the app — never a second answer to the same question.
   const embedService = new EmbedService(
-    config,
+    // The RESOLVED checkout folder, not the env's: `config.kbDirName` is only
+    // the environment value, empty on a deployment that took the default or
+    // named it in setup, and every path the embed builds starts with it.
+    { ...config, kbDirName },
     kb,
     workspaceService,
     accessControl,

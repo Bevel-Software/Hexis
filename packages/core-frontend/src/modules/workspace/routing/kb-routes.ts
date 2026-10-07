@@ -461,7 +461,7 @@ export function useFileNav() {
     return {
       openFile: (pathOrUrl: string) => surface.openLink(pathOrUrl, ''),
       openLink: surface.openLink,
-      openWorkspacePath: (path: string) => surface.openLink(path, ''),
+      openWorkspacePath: surface.openWorkspacePath,
       closeFile: () => undefined,
     };
   }

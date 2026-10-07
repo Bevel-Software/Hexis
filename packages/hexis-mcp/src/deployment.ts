@@ -529,8 +529,10 @@ export async function callKbTool(
  *
  * DEGRADES TO NOTHING, loudly but harmlessly. A deployment that predates the
  * route 404s; one behind a proxy may answer HTML. Either way the right outcome
- * is NO apps: every tool is still listed and still callable, the `resources`
- * capability is simply not declared, and a host shows the tool's text answer —
+ * is NO apps: every tool is still listed and still callable, `resources/list`
+ * answers an empty list (this server declares the capability unconditionally,
+ * since a later catalog refresh may bring a view), and a host shows the
+ * tool's text answer —
  * which is exactly what a host without the extension does anyway. Advertising
  * a `resourceUri` this server could not serve would be worse than advertising
  * none: the host would preload a failure and show an empty frame where the
@@ -543,6 +545,22 @@ export async function fetchMcpApps(config: HexisMcpConfig): Promise<McpAppManife
       headers: { Authorization: `Bearer ${config.connectionKey}` },
       renew: renewer(config),
     });
+    // The top-level shape is checked HERE, before parsing: the parser answers
+    // an empty manifest for anything it does not recognise, which is right for
+    // a bad entry and wrong for a wrong document — a proxy's `{}` or another
+    // protocol's answer would otherwise turn every view off without a word.
+    const shape = body as { tools?: unknown; resources?: unknown } | null;
+    if (
+      !shape ||
+      typeof shape !== 'object' ||
+      Array.isArray(shape) ||
+      !shape.tools ||
+      typeof shape.tools !== 'object' ||
+      Array.isArray(shape.tools) ||
+      !Array.isArray(shape.resources)
+    ) {
+      throw new Error('the answer is not an MCP App manifest (expected { tools: {…}, resources: […] })');
+    }
     return parseMcpAppManifest(body);
   } catch (err) {
     // A rejected key is the one failure that is not about this route: it ends

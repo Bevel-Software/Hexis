@@ -31,8 +31,16 @@ describe('the account-link migration adopts a database that already has the tabl
     const text = await sql();
     // The NAME is what the guard recognises. A different one would add a
     // second, duplicate constraint to an upgraded database.
-    expect(text).toContain('atlassian_account_links_user_id_users_id_fk');
-    expect(text).toMatch(/IF NOT EXISTS\s*\(\s*SELECT 1 FROM pg_constraint/i);
+    const name = 'atlassian_account_links_user_id_users_id_fk';
+    // The guard looks for THIS name, as a foreign key with the cascade, and
+    // the constraint it adds when the guard finds nothing carries the same
+    // one — tied together, so a guard naming anything else fails here.
+    const guard = /IF NOT EXISTS\s*\(\s*SELECT 1 FROM pg_constraint\s+WHERE([\s\S]*?)\)\s*THEN/i.exec(text);
+    expect(guard).not.toBeNull();
+    expect(guard![1]).toContain(`conname = '${name}'`);
+    expect(guard![1]).toMatch(/contype = 'f'/);
+    expect(guard![1]).toMatch(/confdeltype = 'c'/);
+    expect(text).toContain(`ADD CONSTRAINT "${name}"`);
     // Links die with the user: an erasure request must never be blocked by a
     // leftover embed link.
     expect(text).toMatch(/ON DELETE cascade/i);
@@ -62,7 +70,14 @@ describe('the account-link migration adopts a database that already has the tabl
     // request depends on; `ALTER COLUMN` is a rewrite wherever it appears.
     const destructive = statements.filter((statement) => {
       const body = statement.trim();
-      return /^(DROP|DELETE|TRUNCATE|UPDATE)\b/i.test(body) || /ALTER\s+COLUMN/i.test(body);
+      // A statement opens a segment — or opens a block's body: inside a
+      // `DO $$ BEGIN … IF … THEN … END IF; END $$` the first statement shares
+      // its segment with the block's opening, so the verbs are looked for
+      // after BEGIN / THEN / ELSE / LOOP as well.
+      return (
+        /(^|\b(BEGIN|THEN|ELSE|LOOP)\s+)(DROP|DELETE|TRUNCATE|UPDATE)\b/i.test(body) ||
+        /ALTER\s+COLUMN/i.test(body)
+      );
     });
     expect(destructive).toEqual([]);
   });
@@ -73,7 +88,11 @@ describe('the account-link migration adopts a database that already has the tabl
     ) as { entries: Array<{ tag: string; idx: number }> };
     const mine = journal.entries.filter((e) => e.tag === MIGRATION.replace(/\.sql$/, ''));
     expect(mine).toHaveLength(1);
-    // After every migration that came before it, so the ledger stays ordered.
-    expect(Math.max(...journal.entries.map((e) => e.idx))).toBe(mine[0].idx);
+    // The runner applies entries in ARRAY order, so the array order is the
+    // ledger: every entry sits at the position its idx names, and this one
+    // after every migration numbered before it.
+    expect(journal.entries.map((e) => e.idx)).toEqual(journal.entries.map((_, i) => i));
+    expect(journal.entries.findIndex((e) => e.tag === mine[0].tag)).toBe(mine[0].idx);
+    expect(mine[0].tag.startsWith(String(mine[0].idx).padStart(4, '0'))).toBe(true);
   });
 });

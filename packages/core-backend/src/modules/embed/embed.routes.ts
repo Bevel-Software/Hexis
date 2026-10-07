@@ -1,6 +1,11 @@
 import express from 'express';
 import type { IEmbedService } from './embed.interface.js';
-import { EmbedAccessError, EmbedNodeNotFoundError, EmbedTokenError } from './embed.errors.js';
+import {
+  EmbedAccessError,
+  EmbedLockedError,
+  EmbedNodeNotFoundError,
+  EmbedTokenError,
+} from './embed.errors.js';
 import { EmbedRefParseError } from './embed-link.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
@@ -91,6 +96,9 @@ export function createEmbedRoutes(embedService: IEmbedService): express.Router {
   router.get('/api/embed/load', async (req, res) => {
     const token = queryToken(req, res);
     if (token === null) return;
+    // Protected text and a token-bearing link URL: as with `/raw`, nothing
+    // may keep the answer past the access it was computed under.
+    res.setHeader('Cache-Control', 'no-store, private');
     try {
       res.json(await embedService.loadFile(token));
     } catch (err) {
@@ -282,6 +290,7 @@ function statusFor(err: unknown): number {
   if (err instanceof EmbedTokenError) return 401;
   if (err instanceof EmbedAccessError) return 403;
   if (err instanceof EmbedNodeNotFoundError) return 404;
+  if (err instanceof EmbedLockedError) return 409;
   if (err instanceof EmbedRefParseError) return 400;
   // A domain error from the workflow layer (a protected-branch refusal, a
   // duplicate request) already carries the status it deserves.
@@ -295,6 +304,7 @@ function messageFor(err: unknown): string {
     err instanceof EmbedTokenError ||
     err instanceof EmbedAccessError ||
     err instanceof EmbedNodeNotFoundError ||
+    err instanceof EmbedLockedError ||
     err instanceof EmbedRefParseError
   ) {
     return err.message;
