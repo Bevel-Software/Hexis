@@ -27,13 +27,15 @@
  *  - `defaults-to-default-branch`, for a READ-ONLY tool: a call without a
  *    branch runs on the deployment's default branch, the input schema shows
  *    `branch` as optional and says so, and an object answer without a
- *    `branch` field gets one naming the branch used. A writing tool (`write:
- *    true`, or a `write` tag) that declares it makes `toolDef` throw at
- *    startup, naming the tool.
- *  - neither, with no `branch` in `inputs`: the tool takes no branch.
+ *    `branch` field gets one naming the branch used. A deployment with no
+ *    default branch configured answers such a call 503
+ *    `default-branch-unset`. A writing tool (`write: true`, or a `write`
+ *    tag) that declares it makes `toolDef` throw at startup, naming the tool.
+ *  - neither, with no `branch` in `inputs`: the tool takes no branch, and
+ *    a stray `branch` in a call is dropped before the tool runs.
  *
- * Either way a branch that is given and does not exist is answered 404
- * `branch-not-found`, naming it, before the tool runs.
+ * Under either branch declaration, a given branch that does not exist is
+ * answered 404 `branch-not-found`, naming it, before the tool runs.
  */
 export { createToolValidator, type ValidateToken, type ToolValidatorDeps } from './validate-token.js';
 export {

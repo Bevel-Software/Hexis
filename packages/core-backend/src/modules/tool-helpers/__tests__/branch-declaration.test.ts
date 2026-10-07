@@ -60,24 +60,27 @@ describe('a tool declares how it treats its branch', () => {
   let root = '';
   let kb: KbContext;
   let received: Received[] = [];
+  /** The deployment's default branch is unconfigured while this is set. */
+  let defaultBranchUnset = false;
 
   afterEach(async () => {
-    // Whatever the scenario, no call ever leaves a workspace named after a
-    // missing branch behind.
-    if (root) {
-      const dirs = await readdir(join(root, 'workspaces'));
-      expect(dirs).not.toContain('undefined');
-      expect(dirs).not.toContain(workspaceIdForBranch('undefined'));
-      expect(dirs).not.toContain('null');
-    }
+    // Read before the cleanup, asserted after it: a failed assertion must not
+    // leave the server listening or the temporary repository behind.
+    const dirs = root ? await readdir(join(root, 'workspaces')) : [];
     if (httpServer) {
       httpServer.closeAllConnections();
       await new Promise<void>((r) => httpServer!.close(() => r()));
     }
     httpServer = undefined;
     received = [];
+    defaultBranchUnset = false;
     if (root) await rm(root, { recursive: true, force: true });
     root = '';
+    // Whatever the scenario, no call ever leaves a workspace named after a
+    // missing branch behind.
+    expect(dirs).not.toContain('undefined');
+    expect(dirs).not.toContain(workspaceIdForBranch('undefined'));
+    expect(dirs).not.toContain('null');
   });
 
   /** A deployment's tool: built with `toolDef`, nothing about the branch in its handler. */
@@ -108,6 +111,9 @@ describe('a tool declares how it treats its branch', () => {
     await runGit(seed, ['checkout', '-b', 'my-draft']);
     await runGit(seed, ['commit', '--allow-empty', '-m', 'draft']);
     await runGit(seed, ['push', 'origin', DEFAULT_BRANCH, 'my-draft']);
+    // A branch whose name ENDS in `refs/heads/ghost`: `ls-remote`'s pattern
+    // matches it for `ghost`, which does not exist.
+    await runGit(seed, ['push', 'origin', 'HEAD:refs/heads/refs/heads/ghost']);
 
     kb = testKbContext({ kbDirName: KB_DIR });
     const workspaces = new WorkspaceService(workspacesRoot, upstream, kb, new NodeFs());
@@ -123,16 +129,20 @@ describe('a tool declares how it treats its branch', () => {
     });
     // Wired exactly as the composition root wires it.
     const toolHandler = createToolHandlerFactory(resolve, undefined, {
-      defaultBranch: () => kb.defaultBranch,
+      defaultBranch: () => (defaultBranchUnset ? '' : kb.defaultBranch),
       isMissing: (branch) => workspaces.isBranchMissing(branch),
     });
 
     const router = express.Router();
     const toolAuth = (req: express.Request, _res: express.Response, next: express.NextFunction): void => {
-      req.toolAuth = { source: 'external', userId: 'u', scope: 'read' } as ToolAuth;
+      req.toolAuth = { source: 'external', userId: 'u', scope: 'write' } as ToolAuth;
       next();
     };
-    const mount = (spec: ToolDefSpec, answer: (branch: unknown) => unknown = () => ({ ok: true })): void => {
+    const mount = (
+      spec: ToolDefSpec,
+      answer: (branch: unknown) => unknown = () => ({ ok: true }),
+      opts: { write?: boolean } = {},
+    ): void => {
       toolDef(spec);
       router.post(
         spec.path.slice('/api'.length),
@@ -150,7 +160,7 @@ describe('a tool declares how it treats its branch', () => {
             return answer((await fs.readFile(`${KB_DIR}/a.md`, { encoding: 'utf-8' })).toString().trim());
           }
           return answer(undefined);
-        }),
+        }, opts),
       );
     };
     // The three declarations, plus a `required` read off the inputs alone —
@@ -166,6 +176,14 @@ describe('a tool declares how it treats its branch', () => {
     mount(testTool('t_none'));
     mount(testTool('t_default_own_branch', { branch: 'defaults-to-default-branch' }), () => ({ branch: 'its-own' }));
     mount(testTool('t_default_array', { branch: 'defaults-to-default-branch' }), () => ['a', 'b']);
+    mount(testTool('t_default_date', { branch: 'defaults-to-default-branch' }), () => new Date(0));
+    mount(
+      testTool('t_default_undefined_branch', { branch: 'defaults-to-default-branch' }),
+      (content) => ({ content, branch: undefined }),
+    );
+    // Declared defaulting to a `toolDef` that was not told it writes, and
+    // mounted as writing: the handler holds it to `required`.
+    mount(testTool('t_default_mounted_write', { branch: 'defaults-to-default-branch' }), undefined, { write: true });
 
     const app = express();
     app.use(express.json());
@@ -264,6 +282,35 @@ describe('a tool declares how it treats its branch', () => {
         body: '{}',
       });
       expect(await arr.json()).toEqual(['a', 'b']);
+      // A `Date` is not a plain object: it stays the ISO string it serializes to.
+      const date = await fetch(`${base}/api/agent/tools/t_default_date`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+      expect(await date.json()).toBe(new Date(0).toISOString());
+    });
+
+    it('names the branch used when the answer carries an undefined `branch`', async () => {
+      const base = await start();
+
+      const res = await call(base, 't_default_undefined_branch', {});
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ content: 'hello', branch: DEFAULT_BRANCH });
+    });
+
+    it('answers a call without a branch on a deployment with no default branch as unconfigured, not as the caller\'s mistake', async () => {
+      const base = await start();
+      defaultBranchUnset = true;
+
+      const res = await call(base, 't_default', {});
+
+      expect(res.status).toBe(503);
+      expect(res.body).toMatchObject({ kind: 'default-branch-unset' });
+      expect(received).toEqual([]);
+      // Naming a branch still works.
+      expect((await call(base, 't_default', { branch: 'my-draft' })).status).toBe(200);
     });
 
     it('shows `branch` as optional in the input schema, saying what happens without it', () => {
@@ -299,6 +346,16 @@ describe('a tool declares how it treats its branch', () => {
         expect(res.body).toMatchObject({ kind: 'branch-not-found', branch: 'no-such-branch' });
         expect(received).toEqual([]);
         expect(await workspaceDirs()).toEqual([]);
+      });
+
+      it(`${tool}: answers 404 for a branch only a longer ref name ends in`, async () => {
+        const base = await start();
+
+        const res = await call(base, tool, { branch: 'ghost' });
+
+        expect(res.status).toBe(404);
+        expect(res.body).toMatchObject({ kind: 'branch-not-found', branch: 'ghost' });
+        expect(received).toEqual([]);
       });
 
       it(`${tool}: runs on the branch the call names`, async () => {
@@ -383,6 +440,17 @@ describe('a tool declares how it treats its branch', () => {
       expect(() =>
         toolDef(testTool('deployment_tagged_write', { branch: 'defaults-to-default-branch', tags: ['write'] })),
       ).toThrow(/deployment_tagged_write/);
+    });
+
+    it('mounted as writing, is held to required even when declared defaulting', async () => {
+      const base = await start();
+
+      const res = await call(base, 't_default_mounted_write', {});
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ kind: 'branch-required', error: BRANCH_REQUIRED_MESSAGE });
+      expect(received).toEqual([]);
+      expect((await call(base, 't_default_mounted_write', { branch: 'my-draft' })).status).toBe(200);
     });
 
     it('may declare required', () => {

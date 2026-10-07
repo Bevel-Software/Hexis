@@ -6,7 +6,7 @@ import { hasHttpStatus, ToolError, type ToolHandler } from './tool.contract.js';
 import {
   assertBranchProvided,
   BranchNotFoundError,
-  BranchRequiredError,
+  DefaultBranchUnsetError,
   WorkflowDomainError,
 } from '../../shared/domain-errors.js';
 import { branchHandlingFor, type BranchHandling } from './tool-def.js';
@@ -72,7 +72,7 @@ async function resolveBranch(
   // under both declarations rather than quietly read as the default.
   if (handling === 'defaults-to-default-branch' && given === undefined) {
     const fallback = branches?.defaultBranch() ?? '';
-    if (fallback.length === 0) throw new BranchRequiredError();
+    if (fallback.length === 0) throw new DefaultBranchUnsetError();
     return { branch: fallback, defaulted: true };
   }
   assertBranchProvided(given);
@@ -89,9 +89,15 @@ function namesSomething(v: unknown): v is string {
   }
 }
 
-/** A plain JSON object answer — the only kind a `branch` field can be added to. */
+/**
+ * A plain JSON object answer — the only kind a `branch` field can be added to.
+ * A `Date`, a class instance or an array serializes as something else, and
+ * spreading it into `{ branch }` would lose that answer.
+ */
 function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v) && !isAsyncIterable(v);
+  if (typeof v !== 'object' || v === null) return false;
+  const prototype: unknown = Object.getPrototypeOf(v);
+  return prototype === Object.prototype || prototype === null;
 }
 
 /**
@@ -163,11 +169,15 @@ export function createToolHandlerFactory(
         // string. Its declaration comes from the `toolDef` built for this
         // route; a route no `toolDef` described is read like an optional
         // `branch` the tool handles itself.
-        const handling =
+        //
+        // A writing route never defaults, whatever was recorded for it:
+        // `toolDef` refuses the declaration at startup for a tool it knows
+        // writes, and one only mounted as writing is held to `required` here,
+        // so its write cannot land on the default branch unasked.
+        const declared =
           opts.branch ?? branchHandlingFor(req.baseUrl + (req.route?.path ?? req.path)) ?? 'own';
-        if (handling === 'defaults-to-default-branch' && opts.write) {
-          throw new Error('A writing tool cannot declare branch: \'defaults-to-default-branch\'.');
-        }
+        const handling: BranchHandling =
+          declared === 'defaults-to-default-branch' && opts.write ? 'required' : declared;
         const resolved = await resolveBranch(handling, args, branches);
         // The tool can read no other branch than the resolved one: `args`
         // carries it under the same name, and a tool that takes no branch
@@ -182,7 +192,7 @@ export function createToolHandlerFactory(
         let out = await handler(toolArgs, ctx);
         // A defaulted call's answer says which branch it ran on, so a caller
         // that forgot its branch can see it was answered about another.
-        if (resolved?.defaulted && isPlainObject(out) && !('branch' in out)) {
+        if (resolved?.defaulted && isPlainObject(out) && out.branch === undefined) {
           out = { ...out, branch: resolved.branch };
         }
         if (isAsyncIterable(out)) {

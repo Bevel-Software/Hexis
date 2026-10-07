@@ -441,6 +441,8 @@ export class WorkspaceService implements IWorkspaceService {
    * else is asked of origin with `ls-remote`, and only origin's "no such ref"
    * makes it missing. A name that is malformed, or a remote that could not be
    * asked, is `false` too: the open then answers for it, exactly as before.
+   * A storage fault reading what this platform has heard of is NOT read as
+   * either answer: it propagates, the 500 the operator reads.
    */
   async isBranchMissing(branch: string): Promise<boolean> {
     try {
@@ -449,14 +451,10 @@ export class WorkspaceService implements IWorkspaceService {
       return false;
     }
     if (this.branchDirs.has(branch) || this.inFlightBootstraps.has(branch)) return false;
-    try {
-      if (await this.hasHeardOfBranch(branch)) return false;
-    } catch {
-      return false;
-    }
+    if (await this.hasHeardOfBranch(branch)) return false;
     const helper = credentialHelperValue(this.gitRunner.credentials);
     try {
-      await this.gitRunner.run(this.workspacesRoot, [
+      const { stdout } = await this.gitRunner.run(this.workspacesRoot, [
         ...(helper ? ['-c', `credential.helper=${helper}`] : []),
         'ls-remote',
         '--exit-code',
@@ -465,7 +463,10 @@ export class WorkspaceService implements IWorkspaceService {
         this.kbRepoUrl(),
         `refs/heads/${branch}`,
       ]);
-      return false;
+      // The argument is a PATTERN, matched at any slash boundary: it also
+      // lists `refs/heads/refs/heads/<branch>`. Only the exact ref counts.
+      const ref = `refs/heads/${branch}`;
+      return !stdout.split('\n').some((line) => line.split('\t')[1]?.trim() === ref);
     } catch (err) {
       // `--exit-code`: 2 is "the remote answered, and has no matching ref".
       // Every other failure is a remote we could not ask.
