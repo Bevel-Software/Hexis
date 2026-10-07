@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   BODY_AT_TOP_LEVEL_LINE,
   argumentsDoNotMatchMessage,
@@ -259,9 +259,18 @@ describe('compileCheck: the constraints a schema declares', () => {
     for (const pattern of ['^[a-z]+$', '^(?:ab)+$', '^(a+)?$', '^[(+)]*$', '^\\(a+\\)+$', '^a{1,3}b*$']) {
       expect(patternMayBacktrack(pattern), pattern).toBe(false);
     }
-    const started = Date.now();
-    expect(check(one({ type: 'string', pattern: '^(a+)+$' }), { v: `${'a'.repeat(40)}!` })).toEqual([]);
-    expect(Date.now() - started).toBeLessThan(100);
+    // Never run, rather than run fast: no RegExp built from it ever sees the
+    // value (a short one, so a regression fails here instead of hanging).
+    const exec = vi.spyOn(RegExp.prototype, 'exec');
+    const test = vi.spyOn(RegExp.prototype, 'test');
+    try {
+      expect(check(one({ type: 'string', pattern: '^(a+)+$' }), { v: `${'a'.repeat(12)}!` })).toEqual([]);
+      const ran = [...exec.mock.contexts, ...test.mock.contexts].filter((re) => (re as RegExp).source === '^(a+)+$');
+      expect(ran).toEqual([]);
+    } finally {
+      exec.mockRestore();
+      test.mockRestore();
+    }
   });
 
   it('does not assert `format`, which JSON Schema treats as an annotation', () => {
