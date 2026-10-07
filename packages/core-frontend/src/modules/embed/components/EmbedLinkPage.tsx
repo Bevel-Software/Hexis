@@ -86,8 +86,10 @@ export function EmbedLinkPage() {
         <Centered>
           <p className="mb-1 text-base font-semibold text-ink">Account linked</p>
           <p>
-            Your account is connected. Close this tab, go back to the page and click{' '}
-            <strong>Edit</strong> again.
+            {/* Not "click Edit": whether the page offers Edit or Propose
+                changes depends on this person's access, which this page
+                does not know. */}
+            Your account is connected. Close this tab and reload the page you came from.
           </p>
         </Centered>
       ) : status === 'error' ? (

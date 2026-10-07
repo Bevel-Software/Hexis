@@ -307,14 +307,16 @@ export class EmbedService implements IEmbedService {
   async save(token: string, content: string): Promise<void> {
     const { user, wsPath } = await this.requireEditor(token);
     const workspaceId = this.defaultWorkspaceId();
-    // Bytes reach the disk ONLY under a lock this viewer holds. Acquiring is
-    // re-entrant for the holder, so a viewer who still has it just renews it;
-    // one whose lock lapsed (a frame hidden past the TTL) and was taken by
-    // somebody else is refused here — writing first and finding out at the
-    // release would leave their text on disk under the other editor's lock,
-    // for that editor's next commit to publish.
-    const held = await this.workflowService.acquireLock(workspaceId, this.kb.defaultBranch, wsPath, user);
-    if (!held.acquired) throw new EmbedLockedError(held.lock.holderName);
+    // Bytes reach the disk ONLY under a lock this viewer holds. ASK who holds
+    // it rather than acquiring again: `acquire` is strict and refuses a live
+    // lock even to its own holder (so an agent sharing the user id cannot
+    // steal a human's edit), which turned every Save into a 409 against the
+    // writer's own Edit lock. This is the check the app's file routes make
+    // (`workspace.routes` `withLock`). A viewer whose lock lapsed — a frame
+    // hidden past the TTL — takes it again if it is free, and is refused if
+    // somebody else took it: writing first and finding out at the release
+    // would leave their text on disk under the other editor's lock.
+    await this.ensureHoldsLock(workspaceId, wsPath, user);
     try {
       await this.workspaceService.writeFile(workspaceId, wsPath, content);
       // Release commits + pushes the on-disk bytes through the background
@@ -434,6 +436,24 @@ export class EmbedService implements IEmbedService {
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
+
+  /**
+   * Make sure `user` holds an EDIT lock on `wsPath` on the default branch:
+   * keep it when they already do, take it when nobody does (an expired row
+   * reads as none), refuse with the holder's name when somebody else does.
+   */
+  private async ensureHoldsLock(workspaceId: string, wsPath: string, user: AuthUser): Promise<void> {
+    const branch = this.kb.defaultBranch;
+    const current = await this.workflowService.getLock(workspaceId, branch, wsPath);
+    if (current) {
+      // A coordination hold grants no write authority, so it is not "ours"
+      // for a save even when the id matches.
+      if (current.holderUserId === user.id && current.mode !== 'coordination') return;
+      throw new EmbedLockedError(current.holderName);
+    }
+    const taken = await this.workflowService.acquireLock(workspaceId, branch, wsPath, user);
+    if (!taken.acquired) throw new EmbedLockedError(taken.lock.holderName);
+  }
 
   private defaultWorkspaceId(): string {
     return workspaceIdForBranch(this.kb.defaultBranch);

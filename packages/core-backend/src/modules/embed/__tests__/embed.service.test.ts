@@ -71,6 +71,9 @@ function build(opts: Opts = {}) {
     isEmailDomainAllowed: vi.fn(() => opts.emailDomainAllowed ?? true),
   };
   const workflowService = {
+    // No live lock: a save takes it. The contention rules themselves are
+    // exercised against the real lock in embed.service.lock.test.ts.
+    getLock: vi.fn(async () => null),
     acquireLock: vi.fn(async () => ({
       acquired: opts.acquired ?? true,
       lock: { holderName: opts.holderName ?? 'Bob' },
