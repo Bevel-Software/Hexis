@@ -1801,10 +1801,14 @@ export function registerWorkspaceTools(
    * {@link ownGuideFile}).
    */
   const ownGuideReadable = async (fs: LocalFilesystem, branch: string, ctx: ToolContext, p: string): Promise<boolean> => {
-    if (!(await existsAt(fs, p))) return false;
+    // The permission verdict BEFORE the filesystem is asked anything, as on
+    // every other read: a caller the rules close the path to learns nothing
+    // from it — not that something is there, and not what the filesystem
+    // says about an entry it cannot stat.
     const gate = readGateFor(branch, ctx);
     const rel = toKbRelative(p, gate.kbDirName);
-    return rel === null || (await gate.accessControl.canRead(gate.workspaceId, gate.userEmail, rel));
+    if (rel !== null && !(await gate.accessControl.canRead(gate.workspaceId, gate.userEmail, rel))) return false;
+    return existsAt(fs, p);
   };
 
   /** Whether something is at `p` on `fs` — absence is false, any other failure is thrown. */
@@ -2176,10 +2180,6 @@ export function registerWorkspaceTools(
       // (an empty path is the handler's to explain), and here it would
       // otherwise name the workspace directory by another spelling.
       const searchRoot = typeof a.path === 'string' && a.path.length > 0 ? a.path : kbDirName;
-      // The search root itself goes to the read hook here; each file the walk
-      // actually opens goes to it per-file below, so a hook sees every path a
-      // grep reached rather than only the root it started from.
-      await notifyAgentRead(agentAccessGate, ctx, a.branch as string, searchRoot);
       const fs = await ctx.getFilesystem(a.branch as string);
       const gate = readGateFor(a.branch as string, ctx);
       const out: { path: string; line: number; text: string }[] = [];
@@ -2211,6 +2211,16 @@ export function registerWorkspaceTools(
       const rel = toKbRelative(searchRoot, kbDirName);
       const coversGuide =
         agentGuide !== undefined && (kind === 'directory' ? rel === null : isAgentGuidePath(rel ?? ''));
+      // The search root goes to the read hook — once, and only when it is
+      // repository content: a folder, or a file of the knowledge base's own.
+      // The guide's own path is not told here, because `guideAt` tells the
+      // hook of the organisation's file there exactly as `read_file` does
+      // (after the gate), and the platform's guide alone is nobody's file to
+      // note. Each file the walk opens goes to the hook per file below, so a
+      // hook sees every path a grep reached rather than only its root.
+      if (!(coversGuide && kind !== 'directory')) {
+        await notifyAgentRead(agentAccessGate, ctx, a.branch as string, searchRoot);
+      }
       if (coversGuide) {
         if (kind === 'directory') {
           await grepWalk(

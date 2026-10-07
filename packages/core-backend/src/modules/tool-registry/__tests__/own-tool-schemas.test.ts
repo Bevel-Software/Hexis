@@ -9,6 +9,7 @@ import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
 import { registerSkillsTools } from '../../skills/skills.tools.js';
 import { registerPluginsTools } from '../../plugins/plugins.tools.js';
 import { registerToolManualsTools } from '../../tool-manuals/tool-manuals.tools.js';
+import { registerAgentGuideTool } from '../../agent-guide/agent-guide.tools.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
@@ -101,6 +102,13 @@ const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) 
         kb: testKbContext(),
       }),
   },
+  {
+    // The one module registering a single tool: a provider on both surfaces,
+    // built from the sections the reader answers — none here, which still
+    // builds the def.
+    name: 'registerAgentGuideTool',
+    register: (registry) => registerAgentGuideTool(registry, express.Router(), pass, handler, async () => []),
+  },
 ];
 
 async function toolsOf(modules: ReadonlyArray<(typeof MODULES)[number]>) {
@@ -122,7 +130,9 @@ describe("Hexis's own tool schemas", () => {
    */
   it('covers every tool module the server registers', () => {
     const source = readFileSync(CORE_SERVER_SOURCE, 'utf8');
-    const registered = [...source.matchAll(/\b(register\w*Tools)\s*\(/g)].map((m) => m[1]);
+    // `register…Tools` and `register…Tool` alike: a module registering one
+    // tool is a module whose schema this harness must check too.
+    const registered = [...source.matchAll(/\b(register\w+Tools?)\s*\(/g)].map((m) => m[1]);
     expect([...new Set(registered)].sort()).toEqual(MODULES.map((m) => m.name).sort());
   });
 

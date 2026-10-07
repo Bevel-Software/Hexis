@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { inputSchemaDefect } from '@bevel-software/platform-mcp-core';
-import { ToolSchemaGuard, type ScreenedTool } from '../tool-schema-guard.js';
+import { MAX_REMEMBERED_CALLERS, ToolSchemaGuard, type ScreenedTool } from '../tool-schema-guard.js';
 
 const tool = (name: string, inputSchema: unknown): ScreenedTool => ({
   utcpName: `notion.srv.${name}`,
@@ -209,7 +209,7 @@ describe('ToolSchemaGuard', () => {
   });
 
   describe('with more callers than it remembers', () => {
-    const MANY = 2000; // MAX_REMEMBERED_CALLERS
+    const MANY = MAX_REMEMBERED_CALLERS;
 
     it('evicts the caller longest unseen, and keeps every other caller\'s finding on the owner\'s page', () => {
       const guard = new ToolSchemaGuard();

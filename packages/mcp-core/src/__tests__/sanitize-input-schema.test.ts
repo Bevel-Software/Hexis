@@ -201,4 +201,41 @@ describe('sanitizeInputSchema', () => {
     });
     expect(out).toEqual({ type: 'object', properties: { item: { description: 'kept' } } });
   });
+
+  it('answers `{}` for a single reference to anything that is not a schema, and keeps a boolean one', () => {
+    // A pointer can land on a string, a number or an array; none of those is
+    // a schema, and the raw value must not reach the listing.
+    expect(
+      sanitizeInputSchema({
+        type: 'object',
+        properties: {
+          s: { $ref: '#/$defs/name', description: 'kept' },
+          n: { $ref: '#/$defs/count' },
+          a: { $ref: '#/$defs/list' },
+          never: { $ref: '#/$defs/never' },
+          neverKept: { $ref: '#/$defs/never', description: 'kept' },
+        },
+        $defs: { name: 'a string', count: 7, list: [{ type: 'string' }], never: false },
+      }),
+    ).toEqual({
+      type: 'object',
+      properties: {
+        s: { description: 'kept' },
+        n: {},
+        a: {},
+        never: false,
+        neverKept: { description: 'kept', allOf: [false] },
+      },
+    });
+  });
+
+  it('resolves a pointer through own members only, so `#/constructor` names nothing', () => {
+    expect(
+      sanitizeInputSchema({
+        type: 'object',
+        properties: { a: { $ref: '#/constructor' }, b: { $dynamicRef: '#/$defs/__proto__' } },
+        $defs: {},
+      }),
+    ).toEqual({ type: 'object', properties: { a: {}, b: {} } });
+  });
 });

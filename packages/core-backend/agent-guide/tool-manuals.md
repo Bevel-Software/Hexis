@@ -50,7 +50,7 @@ It serves everything the hosted endpoint serves **plus** the local-only tools, b
 
 ### Referencing secrets — `${VAR}` and the `variables` block
 
-Anywhere a `.tool` needs a credential (an API key, a token) write a placeholder like `${API_KEY}`. At call time it is filled from the **Secrets Vault** under the key `<id>_<VAR>`, where `<id>` is the manual's resolved id (the same `id` → `name` → file-name resolution described above) — so a manual whose id is `weather` referencing `${API_KEY}` reads the secret `weather_API_KEY`. A secret is therefore bound to exactly one manual; another manual cannot read it.
+Anywhere a `.tool` needs a credential (an API key, a token) write a placeholder like `${API_KEY}`. At call time it is filled from the **Secrets Vault** under a key derived from the manual's resolved id (the same `id` → `name` → file-name resolution described above) and the variable's name: for a plain id the key is `<id>_<VAR>` — a manual whose id is `weather` referencing `${API_KEY}` reads the secret `weather_API_KEY` — while an id that contains `_` or punctuation is namespaced with every such character turned into `_` and then doubled (`serper_everyone` + `API_KEY` → `serper__everyone_API_KEY`). `list_tool_setup` and the Secrets page show the exact key each manual reads, so read it there rather than spelling it by hand. A secret is therefore bound to exactly one manual; another manual cannot read it.
 
 Declare who provisions each variable with an optional top-level `variables` array. Each entry is `{ name, scope, label? }`:
 

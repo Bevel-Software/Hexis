@@ -4226,6 +4226,28 @@ describe('agent read/write hooks', () => {
     expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`, `${KB_DIR}/AGENTS.md`]);
   });
 
+  it("grep at the guide's name tells the read hook the same way: never for the guide alone, once for the organisation's own file", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    record();
+    // The guide alone: nothing of the organisation's is read, so the hook
+    // hears nothing — a search of the guide's path is not a read of a file.
+    expect((await post(`${base}/api/agent/tools/grep`, { pattern: 'GUIDE', path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads).toEqual([]);
+    // The organisation's own file: once, as read_file tells it — not once
+    // for the search root and again for the file.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme GUIDE\n');
+    expect((await post(`${base}/api/agent/tools/grep`, { pattern: 'GUIDE', path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`]);
+    // A search of the whole knowledge base: the root once, then each file the
+    // walk opens once — the own AGENTS.md among them exactly once, from the
+    // composed search, never again from the walk.
+    reads = [];
+    expect((await post(`${base}/api/agent/tools/grep`, { pattern: 'GUIDE', sessionId: 's1' })).status).toBe(200);
+    expect(reads[0]?.wsPath).toBe(KB_DIR);
+    expect(reads.filter((op) => op.wsPath === `${KB_DIR}/AGENTS.md`)).toHaveLength(1);
+  });
+
   it('the read hook covers list_files, file_stat, grep, delete_file and delete_folder', async () => {
     const base = await start();
     record();

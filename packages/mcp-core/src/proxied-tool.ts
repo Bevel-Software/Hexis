@@ -193,6 +193,8 @@ export function sanitizeInputSchema(schema: unknown): unknown {
     for (const partRaw of pointer.slice(2).split('/')) {
       const part = partRaw.replace(/~1/g, '/').replace(/~0/g, '~');
       if (!node || typeof node !== 'object') return undefined;
+      // Own members only: `#/constructor` names nothing, not `Object`.
+      if (!Object.prototype.hasOwnProperty.call(node, part)) return undefined;
       node = (node as Record<string, unknown>)[part];
     }
     return node;
@@ -298,9 +300,15 @@ export function sanitizeInputSchema(schema: unknown): unknown {
         value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
       if (references.length === 1) {
         const resolved = resolveOne(references[0]!);
-        return resolved && typeof resolved === 'object' && !Array.isArray(resolved)
-          ? { ...(kept ?? {}), ...(resolved as Record<string, unknown>) }
-          : (kept ?? resolved ?? {});
+        // An object target merges over the siblings; a boolean target is a
+        // schema in its own right (`false` rejects everything) and stands
+        // alone, or under `allOf` beside siblings; anything else a pointer
+        // can land on — a string, a number, an array — is not a schema and
+        // becomes `{}`, never the raw value.
+        if (typeof resolved === 'boolean') {
+          return kept ? { ...kept, allOf: [...(Array.isArray(kept.allOf) ? kept.allOf : []), resolved] } : resolved;
+        }
+        return { ...(kept ?? {}), ...asObject(resolved) };
       }
       // A boolean target is a schema too (`false` rejects everything) and is
       // kept as it is; anything that is not an object schema is `{}`.

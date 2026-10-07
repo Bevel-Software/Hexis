@@ -51,8 +51,8 @@ describe('the skill tools name the available skills within the description cap',
     // Twenty-one names, the LAST one short — shorter than the ", and 1 more…"
     // tail a cut before it would carry — and the first one sized so the
     // complete line is the budget to the character. A cut-then-count loop
-    // stops at twenty names here (prefix plus tail is over budget) though the
-    // complete line fits.
+    // stops short of the complete list here (a prefix plus its count tail is
+    // over budget well before the last name) though the complete line fits.
     const count = 21;
     const base = Math.floor((budget - head - 1 - (count - 1) * 2 - count * 2) / count); // chars inside the backticks
     const names = Array.from({ length: count }, (_, i) => `n${i}`.padEnd(base, 'x'));

@@ -42,13 +42,14 @@ export interface PullRequestSummary {
   state: PullRequestState;
   createdAt: string;
   /**
-   * The latest moment the change-request ROW records: its close time when it
-   * has one, else its creation time. GitHub's `updated_at` on a pull request
-   * means "when it last changed"; Hexis stamps no such column on a change
-   * request (comments and approvals carry their own times), so this is as
-   * close as the row can honestly answer — never a time guessed from
-   * elsewhere. Absent only on a summary built by something other than a
-   * change-request row (test doubles).
+   * The latest moment the change-request ROW records: the latest of its
+   * creation time, its `updated_at` stamp (written when the row itself
+   * changes — a merge, a close, a recorded apply failure) and its close time.
+   * GitHub's `updated_at` on a pull request means "when anything about it
+   * last changed"; comments and approvals carry their own times here and do
+   * not move this one, so this is as close as the row can honestly answer —
+   * never a time guessed from elsewhere. Absent only on a summary built by
+   * something other than a change-request row (test doubles).
    */
   updatedAt?: string;
   /** Relative paths within `knowledge-base/`. Empty if not yet computed. */

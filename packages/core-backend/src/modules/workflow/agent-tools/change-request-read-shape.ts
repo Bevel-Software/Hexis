@@ -417,7 +417,9 @@ export function toCrDetail(
  * who writes that exact heading themselves loses their text from there — the
  * safe direction, and the only way this can err.)
  *
- * HTML comments go too: older bodies carry hidden identity markers.
+ * Hexis's OWN hidden markers go too — the `<!--hexis:…-->` / `<!--bevel:…-->`
+ * comments older bodies carry identity in — and no other comment: an HTML
+ * comment the author wrote is the author's prose, like the rest.
  *
  * Who must approve each file is NOT lost by this — it is what
  * `list_change_request_files` answers under `requiredApprovers`, per file and
@@ -434,7 +436,7 @@ export function authorsDescription(body: string): string {
   const generated = lines.lastIndexOf('## Affected owners');
   return (generated === -1 ? lines : lines.slice(0, generated))
     .join('\n')
-    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<!--\s*(?:hexis|bevel)[:/][\s\S]*?-->/g, '')
     .trim();
 }
 

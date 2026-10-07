@@ -1,4 +1,4 @@
-import { DEFAULT_KB_LAYOUT, renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { describe, expect, it } from 'vitest';
 import { mergeGroupsIntoRoles, parseRolesYaml } from '../../access-model/access-grammar.js';
 import { sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
@@ -49,14 +49,10 @@ describe('the guide is composed from the platform\'s sections', () => {
       if (s.id === 'introduction') expect(s.body.startsWith('# Knowledge base')).toBe(true);
       else expect(s.body.startsWith('## '), s.id).toBe(true);
     }
+    // The order of the composed guide is the order of the sections — pinned
+    // exactly above by the id list, and by the join test below, which equates
+    // the composed guide with the sections joined.
     const guide = await composeAgentGuide(DEFAULT_KB_LAYOUT);
-    let at = -1;
-    for (const s of sections) {
-      const heading = renderKbLayoutPlaceholders(s.body.split('\n')[0]!, DEFAULT_KB_LAYOUT);
-      const here = guide.indexOf(heading, at + 1);
-      expect(here, `${s.id} is out of order`).toBeGreaterThan(at);
-      at = here;
-    }
     expect(guide.endsWith('\n')).toBe(true);
     expect(guide.endsWith('\n\n')).toBe(false);
   });
