@@ -76,18 +76,35 @@ export function sanitizeError(err: unknown, opts: { maxLen?: number } = {}): str
  * belongs in the server log, which is where the banner already sends whoever
  * can act on it. Order matters: an auth failure also reads "unable to access",
  * and a permission refusal is told apart from a rejected credential.
+ *
+ * `operation` says which side of the sync failed: the same 403 or
+ * "Repository not found" means "may not write here" on a push but "may not
+ * read this repository" on a pull, and the two are fixed in different places.
  */
-export function describeSyncFailure(err: unknown): string {
+export function describeSyncFailure(err: unknown, operation: 'push' | 'pull' = 'push'): string {
   const raw = err instanceof Error ? err.message : String(err);
-  if (/authentication failed|could not read username|invalid username or password|returned error: 401/i.test(raw)) {
+  // `Permission denied (publickey…)` is ssh refusing the KEY — a rejected
+  // credential, not a missing permission.
+  if (
+    /authentication failed|could not read username|invalid username or password|returned error: 401|permission denied \(publickey/i.test(
+      raw,
+    )
+  ) {
     return "The repository host did not accept this server's credentials.";
   }
-  // Credentials the host accepted but that may not write here — a 403, a
-  // "Permission to … denied", a token scoped to other repositories (GitHub
-  // answers those "Repository not found"). Replacing the credential is the
-  // wrong fix; granting it push access is the right one.
-  if (/permission (to .* )?denied|returned error: 403|write access .* not granted|repository not found/i.test(raw)) {
-    return "The repository host did not give this server's credentials permission to push here.";
+  // Credentials the host accepted but that may not act here — a 403, the
+  // host's own "Permission to <repo> denied", a token scoped to other
+  // repositories (GitHub answers those "Repository not found"). Replacing the
+  // credential is the wrong fix; granting it access is the right one. Only
+  // the host's phrasing counts: a bare "Permission denied" is the server's
+  // own filesystem, handled below.
+  if (/permission to \S+ denied|returned error: 403|write access .* not granted|repository not found/i.test(raw)) {
+    return operation === 'pull'
+      ? "The repository host did not give this server's credentials access to this repository."
+      : "The repository host did not give this server's credentials permission to push here.";
+  }
+  if (/permission denied|insufficient permission/i.test(raw)) {
+    return "This server could not write to its own copy of the repository.";
   }
   if (/could not resolve host|failed to connect|couldn't connect|connection (refused|timed out|reset)|network is unreachable|operation timed out/i.test(raw)) {
     return 'The repository host could not be reached.';

@@ -281,6 +281,10 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
     expect(closed).toEqual([40]);
     expect([...changed.get(elsewhere.branch)!]).toEqual(['Data/ReportsArchive/old.md']);
 
+    // Each source checkout is brought up to date replaying merges as merges:
+    // a merge a refused open or update stranded there must not be flattened.
+    expect(git.pull).toHaveBeenCalledWith(aliceWs, { preserveMerges: true });
+    expect(git.pull).toHaveBeenCalledWith(bobWs, { preserveMerges: true });
     // Every checkout goes to git in ONE call, each file reverted to its merge base.
     expect(git.revertPathsAndPush).toHaveBeenCalledTimes(1);
     expect(plansOf(git)).toEqual([

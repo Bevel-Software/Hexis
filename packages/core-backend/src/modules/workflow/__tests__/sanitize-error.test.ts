@@ -97,6 +97,18 @@ describe('describeSyncFailure', () => {
       "The repository host did not give this server's credentials permission to push here.",
     ],
     [
+      'git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.',
+      "The repository host did not accept this server's credentials.",
+    ],
+    [
+      "error: cannot open .git/FETCH_HEAD: Permission denied",
+      "This server could not write to its own copy of the repository.",
+    ],
+    [
+      'error: insufficient permission for adding an object to repository database .git/objects',
+      "This server could not write to its own copy of the repository.",
+    ],
+    [
       "fatal: unable to access 'https://127.0.0.1:9/none.git/': Failed to connect to 127.0.0.1 port 9: Connection refused",
       'The repository host could not be reached.',
     ],
@@ -114,6 +126,25 @@ describe('describeSyncFailure', () => {
     const said = describeSyncFailure(new Error(raw));
     expect(said).toBe(expected);
     expect(said).not.toMatch(/fatal|remote:|github\.com|ghp_|127\.0\.0\.1/);
+  });
+
+  it('says "access to this repository", not "push", when the PULL was refused', () => {
+    for (const raw of [
+      "fatal: unable to access 'https://github.com/acme/kb.git/': The requested URL returned error: 403",
+      'remote: Repository not found.\nfatal: repository \'https://github.com/acme/kb.git/\' not found',
+      'remote: Permission to acme/kb.git denied to kb-bot.',
+    ]) {
+      expect(describeSyncFailure(new Error(raw), 'pull')).toBe(
+        "The repository host did not give this server's credentials access to this repository.",
+      );
+      expect(describeSyncFailure(new Error(raw), 'push')).toBe(
+        "The repository host did not give this server's credentials permission to push here.",
+      );
+    }
+    // A rejected credential is the same fix whichever side met it.
+    expect(describeSyncFailure(new Error('fatal: Authentication failed'), 'pull')).toBe(
+      "The repository host did not accept this server's credentials.",
+    );
   });
 
   it('accepts a non-Error throw', () => {

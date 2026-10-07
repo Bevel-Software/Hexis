@@ -695,7 +695,7 @@ export class WorkflowService implements IWorkflowService {
       }
       const message = sanitizeError(err);
       syncLog.warn(`pull failed for branch "${branch}": ${message}`);
-      this.noteGitSyncFailed(gitId, branch, err);
+      this.noteGitSyncFailed(gitId, branch, err, undefined, 'pull');
       return { branch, outcome: 'error', error: message };
     }
     // A clean pull is proof origin is reachable and this clone rebases onto
@@ -1183,7 +1183,8 @@ export class WorkflowService implements IWorkflowService {
         let recoveryError: unknown = null;
         if (looksLikeNonFastForward) {
           try {
-            await this.pullWorkspace(workspaceId);
+            // Same as `pushWithRecovery`: keep a stranded merge a merge.
+            await this.pullWorkspace(workspaceId, { preserveMerges: true });
             await this.git.push(workspaceId, user);
             recovered = true;
             this.noteGitSyncOk(workspaceId, branch);
@@ -1444,6 +1445,12 @@ export class WorkflowService implements IWorkflowService {
      * hold the sentence pass it; otherwise it is derived below.
      */
     explicitConflict?: { paths: string[]; message: string },
+    /**
+     * Which side of the sync failed. A 403 or "Repository not found" on a
+     * pull means the credentials cannot READ the repository, and telling the
+     * operator to grant push access would send them to the wrong setting.
+     */
+    operation: 'push' | 'pull' = 'push',
   ): void {
     // A rebase conflict is a conflict whichever path ran into it. The remote
     // sync names its files on purpose; the push-recovery paths (autosave, the
@@ -1470,7 +1477,7 @@ export class WorkflowService implements IWorkflowService {
       // host's own error text and URLs, and the banner is user-facing. A
       // fixed sentence says what kind of failure it was; the raw text is in
       // the server log, where the banner points whoever can act on it.
-      reason: conflict ? conflict.message : describeSyncFailure(err),
+      reason: conflict ? conflict.message : describeSyncFailure(err, operation),
       ...(conflict ? { conflictedPaths: conflict.paths } : {}),
     });
   }
@@ -1549,7 +1556,15 @@ export class WorkflowService implements IWorkflowService {
         // When recovery RAN, its error is the current state of the world (the
         // first rejection may be a stale non-fast-forward the pull already
         // cured); when it was skipped, the first error is all there is.
-        this.noteGitSyncFailed(workspaceId, branch, recoveryError ?? firstPushErr);
+        // A recovery that failed before its retry push failed in the PULL.
+        const failedInPull = recoveryError !== null && retryDetail === null;
+        this.noteGitSyncFailed(
+          workspaceId,
+          branch,
+          recoveryError ?? firstPushErr,
+          undefined,
+          failedInPull ? 'pull' : 'push',
+        );
         log.warn(
           `push failed for workspace=${workspaceId} user=${user.id}; throwing PushNeedsAgentResolutionError so the frontend can hand off to the agent:`,
           { detail: firstDetail },
@@ -2420,8 +2435,10 @@ export class WorkflowService implements IWorkflowService {
     // Best-effort freshen of the source checkout: the diff below reads origin
     // refs, but the restore commits from the working tree — a stale tree
     // would push non-fast-forward and fail loudly anyway; this just makes
-    // that rare.
-    await this.pullWorkspace(ws.id).catch(() => undefined);
+    // that rare. `preserveMerges`: the branch may carry a merge a refused open
+    // or update stranded locally, and a plain rebase would flatten it before
+    // the revert's push publishes the branch.
+    await this.pullWorkspace(ws.id, { preserveMerges: true }).catch(() => undefined);
 
     // The verb acts on the request as it is NOW — never a cached file list.
     const paths = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);
@@ -2650,7 +2667,9 @@ export class WorkflowService implements IWorkflowService {
       if (!summary || summary.state !== 'open') continue;
       const ws = await this.workspaceService.getOrCreateForBranch(summary.branch);
       try {
-        await this.pullWorkspace(ws.id);
+        // `preserveMerges`: a merge a refused open or update stranded on the
+        // request's branch must survive until the branch's next push.
+        await this.pullWorkspace(ws.id, { preserveMerges: true });
       } catch (err) {
         log.warn(
           `pull failed for #${summary.number} before removing folder ${printable(folder)}: ${printable(sanitizeError(err))}`,

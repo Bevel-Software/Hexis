@@ -829,6 +829,29 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
       expect(push).toHaveBeenCalledTimes(2);
     });
 
+    it('a recovery whose PULL the host refuses says the credentials cannot reach the repository, not "push"', async () => {
+      const emit = vi.fn();
+      const push = vi.fn().mockRejectedValue(new Error('! [rejected] ali/x -> ali/x (non-fast-forward)'));
+      const pull = vi
+        .fn()
+        // The freshen pull is best-effort; the recovery pull is the one that counts.
+        .mockResolvedValueOnce({ treeChanged: false })
+        .mockRejectedValue(
+          new Error("fatal: unable to access 'https://github.com/acme/kb.git/': The requested URL returned error: 403"),
+        );
+      const git = makeRevertGit({ push, pull });
+      const { svc } = makeHarness({ git, events: { emit } as unknown as WorkflowEventBus });
+
+      await expect(svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md')).rejects.toBeInstanceOf(
+        PushNeedsAgentResolutionError,
+      );
+      const failed = emit.mock.calls.map((c) => c[0] as Record<string, unknown>).find((e) => e.kind === 'git-sync-failed');
+      expect(failed?.reason).toBe(
+        "The repository host did not give this server's credentials access to this repository.",
+      );
+      expect(push).toHaveBeenCalledTimes(1);
+    });
+
     it('a non-fast-forward still takes the cooperative pull-rebase, then lands', async () => {
       const emit = vi.fn();
       const push = vi
@@ -842,9 +865,11 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
       await expect(svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md')).resolves.toMatchObject({ closed: false });
       expect(push).toHaveBeenCalledTimes(2);
       // Once to freshen the checkout, once as the cooperative recovery —
-      // which replays merges as merges on every push.
+      // both replay merges as merges, so a merge a refused open or update
+      // stranded on the branch is not flattened before this push publishes it.
       expect(pull).toHaveBeenCalledTimes(2);
-      expect(pull).toHaveBeenLastCalledWith('ali%2Fx', { preserveMerges: true });
+      expect(pull).toHaveBeenNthCalledWith(1, 'ali%2Fx', { preserveMerges: true });
+      expect(pull).toHaveBeenNthCalledWith(2, 'ali%2Fx', { preserveMerges: true });
       expect(kindsOf(emit)).not.toContain('git-sync-failed');
     });
   });
