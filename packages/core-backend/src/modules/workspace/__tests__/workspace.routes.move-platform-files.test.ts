@@ -264,6 +264,14 @@ describe('a platform file stays in its folder', () => {
 
     expect(h.moveEntry).not.toHaveBeenCalled();
     expect(h.acquireLock).not.toHaveBeenCalled();
+
+    // A root `AGENTS.md` is NOT a platform file any more — the guide is served
+    // from code — so a note renamed to it is an ordinary move that lands.
+    const guide = await move(h, `${KB}/Sales/deal.md`, `${KB}/AGENTS.md`);
+    expect(guide.status).toBe(200);
+    expect(guide.body).toEqual({ status: 'moved' });
+    expect(h.moveEntry).toHaveBeenCalledTimes(1);
+    expect(h.moveEntry).toHaveBeenCalledWith(WORKSPACE_ID, `${KB}/Sales/deal.md`, `${KB}/AGENTS.md`);
   });
 
   it('a destination that fills up after the access check is caught under the lock', async () => {

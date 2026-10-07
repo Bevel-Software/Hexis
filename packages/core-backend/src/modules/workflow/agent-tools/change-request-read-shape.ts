@@ -103,7 +103,17 @@ export interface CrSummary {
   changedFiles: number;
   /** How many it may not. Never named. */
   withheldFiles: number;
+  /**
+   * The most recent apply attempt that did not land, while the request is
+   * open — as the app shows it. Its `reason` can name files, so it is the
+   * author's words only for a caller who may read EVERY file of a request
+   * that has some; otherwise the reason is the withheld line the app shows.
+   */
+  lastApplyFailure?: { reason: string; conflicts: boolean; at: string };
 }
+
+/** What the app says in place of an apply-failure reason the caller may not read. */
+export const APPLY_FAILURE_REASON_WITHHELD = 'The reason names files you do not have access to read.';
 
 /** A change request read by number: the row, its description, and the gate. */
 export interface CrDetail extends CrSummary {
@@ -346,6 +356,21 @@ export function toCrSummary(
     updatedAt: cr.updatedAt ?? cr.createdAt,
     changedFiles: counts.readable,
     withheldFiles: counts.withheld,
+    // The same predicate the app's own list applies (`scopeApplyFailures`): a
+    // non-empty file set, every file readable. An empty set proves nothing,
+    // so it never grants the reason.
+    ...(cr.lastApplyFailure
+      ? {
+          lastApplyFailure: {
+            reason:
+              counts.readable > 0 && counts.withheld === 0
+                ? cr.lastApplyFailure.reason
+                : APPLY_FAILURE_REASON_WITHHELD,
+            conflicts: cr.lastApplyFailure.conflicts,
+            at: cr.lastApplyFailure.at,
+          },
+        }
+      : {}),
   };
 }
 
@@ -440,7 +465,9 @@ export function toCrViewer(
   const warnings = new Set(detail.mergeWarnings);
   const hard = detail.mergeBlockedReasons.filter((r) => !warnings.has(r));
   return {
-    mayApprove: shownApprovals.some((a) => a.viewerCanApprove),
+    // Nothing on a merged or declined request is there to approve, whatever
+    // write grant the caller holds on its files.
+    mayApprove: detail.state === 'open' && shownApprovals.some((a) => a.viewerCanApprove),
     mayMerge:
       detail.state === 'open' &&
       hard.length === 0 &&
@@ -496,7 +523,8 @@ export function pathsOf(file: Pick<ChangedFile, 'path' | 'previousPath'>): strin
 export function toCrFile(
   file: ChangedFile,
   approval: FileApproval | undefined,
-  opts: { patches: boolean },
+  /** `open`: whether the request still is — an approval can be given on an open request only. */
+  opts: { patches: boolean; open: boolean },
 ): CrFile {
   return {
     path: file.path,
@@ -533,7 +561,7 @@ export function toCrFile(
     approvedBy: (approval?.approvedBy ?? []).map(toCrFileApproval),
     approved: approval?.isApproved === true,
     inMergeGate: approval?.inMergeGate === true,
-    viewerMayApprove: approval?.viewerCanApprove === true,
+    viewerMayApprove: opts.open && approval?.viewerCanApprove === true,
   };
 }
 

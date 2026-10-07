@@ -126,8 +126,15 @@ const SCHEMA_VALUED_KEYWORDS = [
   'unevaluatedProperties',
 ] as const;
 
-/** Keywords whose value is a MAP of schemas: the keys are names, the values schemas. */
-const SCHEMA_MAP_KEYWORDS = ['$defs', 'definitions', 'dependentSchemas', 'patternProperties', 'properties'] as const;
+/**
+ * Keywords whose value is a MAP of schemas: the keys are names, the values
+ * schemas. `$defs`/`definitions` are NOT walked as such: an entry there is a
+ * schema only once a reference reaches it (ajv compiles nothing else, and the
+ * listing the proxy serves drops the block and inlines only what a `$ref`
+ * reaches), so the walk follows the references instead — see
+ * {@link regexDefect}.
+ */
+const SCHEMA_MAP_KEYWORDS = ['dependentSchemas', 'patternProperties', 'properties'] as const;
 
 /**
  * A bound on the walk below, for a schema whose shape is the sender's choice.
@@ -152,20 +159,37 @@ const MAX_REGEX_CHECK_NODES = 50_000;
  * only ever descends through keywords whose value IS a schema, so a tool's own
  * field named `pattern` (or a `pattern` string inside a `const` value) is data
  * and is left alone.
+ *
+ * A `$defs`/`definitions` entry is reached only through a local `$ref` (or
+ * `$dynamicRef`) that names it, and reported at ITS OWN path — the place in
+ * the schema the server sent, which is what its owner edits. An entry nothing
+ * references is never compiled by a client and never listed by the proxy, so
+ * a bad regex in it hides no tool anywhere and is not a defect here: this
+ * module's contract is "hidden on exactly what a client would refuse".
  */
 function regexDefect(schema: Record<string, unknown>): SchemaDefect | null {
   const queue: Array<{ node: Record<string, unknown>; path: string }> = [{ node: schema, path: '' }];
+  // Each node once, by path: two references to one entry are one schema.
+  const seen = new Set<string>(['']);
   // The cap bounds what is ENQUEUED, not only what is dequeued: a wide schema
   // reaches its limit by breadth rather than depth, and a queue entry costs a
   // path string that the node it describes does not. Past the cap the check
   // simply stops looking, which is the fail-open rule this whole file follows.
   const enqueue = (node: Record<string, unknown>, path: string) => {
-    if (queue.length < MAX_REGEX_CHECK_NODES) queue.push({ node, path });
+    if (seen.has(path) || queue.length >= MAX_REGEX_CHECK_NODES) return;
+    seen.add(path);
+    queue.push({ node, path });
   };
   for (let i = 0; i < queue.length; i += 1) {
     const { node, path } = queue[i];
     if (typeof node.pattern === 'string' && !compiles(node.pattern)) {
       return { path: `${path}/pattern`, reason: 'must be a valid regular expression' };
+    }
+    for (const keyword of ['$ref', '$dynamicRef'] as const) {
+      const reference = node[keyword];
+      if (typeof reference !== 'string' || !reference.startsWith('#/')) continue;
+      const target = resolveLocalPointer(schema, reference);
+      if (isSchemaObject(target)) enqueue(target, reference.slice(1));
     }
     for (const keyword of SCHEMA_MAP_KEYWORDS) {
       const map = node[keyword];
@@ -193,6 +217,19 @@ function regexDefect(schema: Record<string, unknown>): SchemaDefect | null {
 
 function isSchemaObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** The node a local JSON Pointer (`#/$defs/x`) names in `root`, or undefined. */
+function resolveLocalPointer(root: unknown, pointer: string): unknown {
+  let node: unknown = root;
+  for (const part of pointer.slice(2).split('/')) {
+    if (!isSchemaObject(node) && !Array.isArray(node)) return undefined;
+    const key = part.replace(/~1/g, '/').replace(/~0/g, '~');
+    // Own members only: `#/__proto__` must name nothing, not `Object.prototype`.
+    if (!Object.prototype.hasOwnProperty.call(node, key)) return undefined;
+    node = (node as Record<string, unknown>)[key];
+  }
+  return node;
 }
 
 function compiles(pattern: string): boolean {

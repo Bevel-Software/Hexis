@@ -64,10 +64,9 @@ const SECRET_FOR_THAT_PROVIDER =
   'Enter the application secret for that provider — the saved one is only sent to the provider it was saved for.';
 
 /**
- * The knowledge-base layout as setting keys: the three renameable roots (the
- * guide is served as `AGENTS.md` everywhere and has no key), and the consent
- * that rides with them — which the KB startup phase reads through a getter, so
- * the completing save puts it in effect along with the names.
+ * The knowledge-base layout as setting keys: the three renameable roots. The
+ * guide's file name is not one of them — the settings layer sets none, so the
+ * layout it produces carries the default, `AGENTS.md`.
  */
 const LAYOUT_KEYS: readonly string[] = [
   'knowledgeBaseDir',

@@ -1,4 +1,4 @@
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, isNull } from 'drizzle-orm';
 import { logger } from '../../../shared/logging.js';
 
 const log = logger('review-workflow');
@@ -774,7 +774,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
         // Named so a merge that finds nothing to merge can tell an empty request
         // apart from one a previous attempt already merged and failed to record
         // (see `ownMergeCommitOn`).
-        { appliedChangeNumber: prNumber },
+        { appliedChangeNumber: prNumber, appliedChangeTitle: cr.title },
       );
     } catch (err) {
       const redacted = redactTokens(err instanceof Error ? err.message : String(err), this.git.credentials?.token());
@@ -901,8 +901,21 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .limit(1);
     if (!cr || cr.state !== 'open' || !cr.targetBranch) return null;
 
+    // The cheap question first, of the database alone: did an attempt on this
+    // request push and then crash before recording? Such an attempt leaves its
+    // log row begun and never completed — `succeeded: false` with no error,
+    // the shape no finished attempt has. Without one there is nothing to
+    // recover, and a genuinely empty request is refused here as it always
+    // was, without a clone being created or a remote fetched on its behalf.
+    const [begun] = await this.db
+      .select({ id: prMergeLog.id })
+      .from(prMergeLog)
+      .where(and(eq(prMergeLog.prNumber, prNumber), eq(prMergeLog.succeeded, false), isNull(prMergeLog.error)))
+      .limit(1);
+    if (!begun) return null;
+
     const baseWorkspace = await this.workspaceService.getOrCreateForBranch(cr.targetBranch);
-    const own = await this.git.appliedMergeCommitOnTarget(baseWorkspace.id, cr.targetBranch, prNumber);
+    const own = await this.git.appliedMergeCommitOnTarget(baseWorkspace.id, cr.targetBranch, prNumber, cr.title);
     if (!own) return null;
 
     // The attempt is logged BEFORE the row is finalized, in the same order the

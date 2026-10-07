@@ -918,7 +918,15 @@ export class McpService {
     // registering a manual renames the template in place, so `m.name` read
     // afterwards is the rewritten identifier and `my-server` would be recorded
     // as `my_server` — a name no tool page ever looks up.
-    const manualCatalogNames = new Map(manuals.map((m) => [utcpManualName(m), String(m.name)]));
+    // Keyed by the rewritten name, which two manuals can share (the collision
+    // handled below): the KB manual's entry is the one that stays, since it is
+    // the one that is registered when a `.tool` collides with it.
+    const manualCatalogNames = new Map<string, string>();
+    for (const m of manuals) {
+      const rewritten = utcpManualName(m);
+      if (manualCatalogNames.get(rewritten) === EXTERNAL_KB_MANUAL_NAME) continue;
+      manualCatalogNames.set(rewritten, String(m.name));
+    }
     // The shared layer rewrites every manual name (`[^\w]` → `_`) and tools
     // route by the rewritten prefix, so two manuals whose names rewrite to one
     // identifier would silently share it. Sequential registration used to
