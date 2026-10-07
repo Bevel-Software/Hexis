@@ -26,6 +26,7 @@ import { chatGptPromptUrl, claudePromptUrl, firstPagePromptFor, firstPageRoute }
 import { useStarterPacks } from '../state/starter-packs';
 import { useInviteDialog } from '../state/invite-dialog.context';
 import { WELCOME_PATH } from '../paths';
+import { COMMAND_MENU_SHORTCUT_LABEL, openCommandMenu } from '../../toolbar/commands/command-menu';
 
 /** The starter page every new knowledge base is seeded with (`kb-template/`). */
 const GUIDE_FILE = 'How to get started.md';
@@ -162,8 +163,9 @@ function useHasTeammate(enabled: boolean, revision: number): { found: boolean; s
  * Every tick is DERIVED — the server's onboarding flag, the file tree, the
  * plugin catalog, the account list — so doing a step anywhere in the app
  * counts, and the column never claims something the workspace does not show.
- * Only "read the guide" has no server fact behind it; that one, and the two
- * ways of closing the column, are per-browser notes (see `useSetupChecklist`).
+ * Only "read the guide" and "open the command menu" have no server fact
+ * behind them; those two, and the two ways of closing the column, are
+ * per-browser notes (see `useSetupChecklist`).
  *
  * It gets out of the way on its own terms: on the welcome page (which is the
  * same instructions, full-size), below the width where a 288px column still
@@ -326,6 +328,19 @@ export function GetStartedColumn() {
           extra: <span className="text-meta text-ink-faint">Connect your agent and it can write pages for you.</span>,
         }),
     error: newPage.error,
+  });
+  /**
+   * The command menu is how anything else gets found or done, so the list
+   * teaches it — by having it opened, which is the whole lesson. The tick is
+   * raised by the palette itself on ANY open (the box, the shortcut, this
+   * button), so someone who already knew the shortcut is never asked to.
+   */
+  items.push({
+    id: 'command-menu',
+    title: `Find or do anything with ${COMMAND_MENU_SHORTCUT_LABEL}`,
+    done: checklist.openedCommandMenu,
+    hint: 'Type what you want: a page, a skill, or an action like Invite people.',
+    action: { label: 'Try it', onClick: openCommandMenu },
   });
   if (isAdmin) {
     items.push({

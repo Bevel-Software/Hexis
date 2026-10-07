@@ -31,6 +31,13 @@ import {
 import { actionNames, suggestedActions, type CommandAction, type CommandContext } from '../commands/actions';
 import { useCommandActions } from '../commands/useCommandActions';
 import { useCommandShortcuts } from '../commands/useCommandShortcuts';
+import {
+  COMMAND_MENU_SHORTCUT_ARIA,
+  COMMAND_MENU_SHORTCUT_LABEL,
+  isCommandMenuShortcut,
+  onCommandMenuRequest,
+} from '../commands/command-menu';
+import { useSetupChecklist } from '../../onboarding/state/onboarding';
 
 /** Rows per group. Past this the query is too short to be useful, not the list too long. */
 const GROUP_LIMIT = 8;
@@ -38,20 +45,6 @@ const GROUP_LIMIT = 8;
 /** The box's own words, and the input's (which ends on an ellipsis: it is waiting for you). */
 const TRIGGER_LABEL = 'Search or run a command';
 const PLACEHOLDER = 'Search or run a command…';
-
-/**
- * The shortcut belongs to ⌘ on Apple platforms and to Ctrl everywhere else —
- * and ONLY to that one. Ctrl+K on a Mac is the text fields' "delete to end of
- * line", which nobody pressing it there means as "search".
- */
-const APPLE = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.userAgent);
-const SHORTCUT_LABEL = APPLE ? '⌘K' : 'Ctrl K';
-const SHORTCUT_ARIA = APPLE ? 'Meta+K' : 'Control+K';
-
-function isShortcut(e: KeyboardEvent): boolean {
-  if (e.altKey || e.shiftKey || e.key.toLowerCase() !== 'k') return false;
-  return APPLE ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-}
 
 const byName = (r: SearchResult) => r.name;
 
@@ -147,6 +140,10 @@ export function SearchPalette({ compact }: { compact: boolean }) {
   // would carry the message (toasts only speak inside the Library).
   const [notice, setNotice] = useState<string | null>(null);
 
+  // Opening it by any route — the box, the shortcut, the Get set up list's
+  // "Try it" — ticks that list's "Find or do anything" step.
+  const { markCommandMenuOpened } = useSetupChecklist();
+
   const openPalette = useCallback(() => {
     if (open) {
       // Already open: the shortcut is a way back INTO it, not a toggle.
@@ -157,8 +154,9 @@ export function SearchPalette({ compact }: { compact: boolean }) {
     const active = document.activeElement;
     restoreFocusRef.current = active instanceof HTMLElement && active !== document.body ? active : null;
     setOpen(true);
+    markCommandMenuOpened();
     loadCatalog();
-  }, [open, loadCatalog]);
+  }, [open, loadCatalog, markCommandMenuOpened]);
 
   /**
    * Close, optionally handing focus back. `'previous'` is Escape — return to
@@ -203,9 +201,13 @@ export function SearchPalette({ compact }: { compact: boolean }) {
   // shortcuts (C, G K, G S) run them while the palette is shut.
   const { actions, ctx } = useCommandActions();
   useCommandShortcuts({ actions, ctx, enabled: !open, run: runAction });
+
+  // `openCommandMenu()` from outside the toolbar opens it as the shortcut does.
+  useEffect(() => onCommandMenuRequest(() => openRef.current()), [openRef]);
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (!isShortcut(e) || e.defaultPrevented) return;
+      if (!isCommandMenuShortcut(e) || e.defaultPrevented) return;
       // A modal dialog owns the keyboard while it is up; opening a palette
       // underneath its scrim would move focus somewhere nobody can see.
       if (document.querySelector('[aria-modal="true"]')) return;
@@ -240,7 +242,7 @@ export function SearchPalette({ compact }: { compact: boolean }) {
           aria-haspopup="dialog"
           aria-expanded={open}
           aria-controls={open ? panelId : undefined}
-          aria-keyshortcuts={SHORTCUT_ARIA}
+          aria-keyshortcuts={COMMAND_MENU_SHORTCUT_ARIA}
         >
           <Search aria-hidden size={14} className="flex-none" />
           <span className="min-w-0 flex-1 truncate">{TRIGGER_LABEL}</span>
@@ -248,7 +250,7 @@ export function SearchPalette({ compact }: { compact: boolean }) {
             aria-hidden
             className="flex-none rounded-xs border border-line-strong px-[5px] font-mono text-meta text-ink-faint"
           >
-            {SHORTCUT_LABEL}
+            {COMMAND_MENU_SHORTCUT_LABEL}
           </kbd>
         </button>
       )}

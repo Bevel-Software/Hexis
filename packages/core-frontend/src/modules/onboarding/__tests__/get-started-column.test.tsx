@@ -19,6 +19,8 @@ import type { AgentConnection } from '../services/agent-connection.api';
 import { FIRST_PAGE_PROMPT, chatGptPromptUrl, claudePromptUrl } from '../first-page-prompt';
 import type { StarterPacksAnswer } from '../services/starter-packs.api';
 import { resetStarterPacksForTests } from '../state/starter-packs';
+import { SearchPalette } from '../../toolbar/components/SearchPalette';
+import { COMMAND_MENU_SHORTCUT_LABEL } from '../../toolbar/commands/command-menu';
 
 /**
  * The "Get set up" column: every tick is derived from state the app already
@@ -48,6 +50,14 @@ vi.mock('../services/starter-packs.api', async (importOriginal) => ({
 vi.mock('../../auth/services/account.api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../auth/services/account.api')>()),
   listAccounts: listAccountsMock,
+}));
+vi.mock('../../library/services/library.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../library/services/library.api')>()),
+  listSkills: vi.fn(async () => []),
+}));
+vi.mock('../../secrets-vault/services/tool-secrets.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../secrets-vault/services/tool-secrets.api')>()),
+  listToolSecrets: vi.fn(async () => []),
 }));
 vi.mock('../../library/services/plugins.api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../library/services/plugins.api')>()),
@@ -152,6 +162,8 @@ type MountOptions = {
   openFilePath?: string | null;
   route?: string;
   createFile?: (relativePath: string, content?: string, options?: { ifAbsent?: boolean }) => Promise<void>;
+  /** Mount the toolbar's command menu beside the column, as the app does. */
+  withPalette?: boolean;
 };
 
 /** The column in every context it reads; `rerender` it to move the app's state under it. */
@@ -162,6 +174,7 @@ function columnUi({
   openFilePath = null as string | null,
   route = '/workspace',
   createFile = async () => {},
+  withPalette = false,
 }: MountOptions = {}) {
   const auth = authValue({
     user: { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera', onboardingDone },
@@ -174,6 +187,7 @@ function columnUi({
             value={makeWorkspaceFixture({ kbDirName: KB, fileTree: treeOf(files), openFilePath, createFile })}
           >
             <InviteDialogProvider>
+              {withPalette && <SearchPalette compact />}
               <GetStartedColumn />
               <LocationProbe />
             </InviteDialogProvider>
@@ -216,13 +230,14 @@ const doneWrites = () =>
   authFetchMock.mock.calls.filter((c) => (c as unknown[])[0] === '/api/auth/onboarding-done').length;
 
 describe('GetStartedColumn: what a member sees', () => {
-  it('lists the four member steps, hides the admin-only ones, and asks the server nothing', () => {
+  it('lists the five member steps, hides the admin-only ones, and asks the server nothing', () => {
     mount();
-    expect(screen.getByText('1 of 4')).toBeInTheDocument();
+    expect(screen.getByText('1 of 5')).toBeInTheDocument();
     expect(row('Create your workspace')).not.toBeNull();
     expect(row('Connect your agent')).not.toBeNull();
     expect(row('Read “How to get started”')).not.toBeNull();
     expect(row('Write your first page')).not.toBeNull();
+    expect(row(/^Find or do anything with/)).not.toBeNull();
     expect(row('Choose where your knowledge lives')).toBeNull();
     expect(row('Create a plugin for your team')).toBeNull();
     expect(row('Invite your team')).toBeNull();
@@ -234,7 +249,7 @@ describe('GetStartedColumn: what a member sees', () => {
     mount({ onboardingDone: true });
     expect(isDone('Connect your agent')).toBe(true);
     expect(isDone('Create your workspace')).toBe(true);
-    expect(screen.getByText('2 of 4')).toBeInTheDocument();
+    expect(screen.getByText('2 of 5')).toBeInTheDocument();
   });
 
   it('sends "Connect" to the welcome page', async () => {
@@ -262,7 +277,7 @@ describe('GetStartedColumn: what a member sees', () => {
   it('leaves the guide step out when the knowledge base has no such page', () => {
     mount({ files: [`${KB}/KnowledgeBase/.gitkeep`] });
     expect(row('Read “How to get started”')).toBeNull();
-    expect(screen.getByText('1 of 3')).toBeInTheDocument();
+    expect(screen.getByText('1 of 4')).toBeInTheDocument();
   });
 
   it('ticks "Write your first page" only for content other than the starter page', () => {
@@ -579,10 +594,10 @@ describe('GetStartedColumn: a connected agent', () => {
 });
 
 describe('GetStartedColumn: what an admin sees', () => {
-  it('lists all seven steps, storage already done', async () => {
+  it('lists all eight steps, storage already done', async () => {
     mount({ admin: true });
     await screen.findByRole('complementary', { name: 'Get set up' });
-    expect(screen.getByText('2 of 7')).toBeInTheDocument();
+    expect(screen.getByText('2 of 8')).toBeInTheDocument();
     expect(isDone('Choose where your knowledge lives')).toBe(true);
     expect(isDone('Create a plugin for your team')).toBe(false);
     expect(isDone('Invite your team')).toBe(false);
@@ -633,14 +648,19 @@ describe('GetStartedColumn: all done', () => {
   const WITH_PAGE = [...STARTER_TREE, `${KB}/KnowledgeBase/Notes.md`];
   const complete = () => screen.queryByRole('heading', { name: 'You’re set up' });
 
+  // The command menu has been opened, by whatever route.
+  beforeEach(() => {
+    window.localStorage.setItem('bevel.onboarding.commandMenuOpened.juan@bevel.software', '1');
+  });
+
   it('says "You’re set up" when the last step ticks, in place of the list', async () => {
     listPluginsMock.mockResolvedValue([plugin('Plugins/GTM')]);
     listAccountsMock.mockResolvedValue([account('juan@bevel.software'), account('ana@bevel.software')]);
     fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
     const everythingBut = { admin: true, onboardingDone: true, openFilePath: GUIDE };
-    // One step short, the settled column shows the six it has...
+    // One step short, the settled column shows the seven it has...
     const { rerender } = mount(everythingBut);
-    expect(await screen.findByText('6 of 7')).toBeInTheDocument();
+    expect(await screen.findByText('7 of 8')).toBeInTheDocument();
     expect(complete()).toBeNull();
     // ...and the page landing in the tree finishes it.
     rerender(columnUi({ ...everythingBut, files: WITH_PAGE }));
@@ -684,6 +704,44 @@ describe('GetStartedColumn: all done', () => {
     await act(async () => {});
     expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
     expect(fetchAgentConnectionMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The command menu is taught by being opened: "Try it" opens it, and the
+ * step ticks once it has been opened by any route — and stays ticked.
+ */
+describe('GetStartedColumn: the command menu', () => {
+  const STEP = `Find or do anything with ${COMMAND_MENU_SHORTCUT_LABEL}`;
+
+  it('is a step for everyone, named with this platform’s keys', async () => {
+    mount();
+    expect(row(STEP)).not.toBeNull();
+    expect(isDone(STEP)).toBe(false);
+    expect(
+      within(row(STEP)!).getByText('Type what you want: a page, a skill, or an action like Invite people.'),
+    ).toBeInTheDocument();
+  });
+
+  it('"Try it" opens the command menu, and that ticks the step', async () => {
+    const user = userEvent.setup();
+    mount({ withPalette: true });
+    await user.click(within(row(STEP)!).getByRole('button', { name: 'Try it' }));
+    expect(screen.getByRole('combobox', { name: 'Search or run a command' })).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(isDone(STEP)).toBe(true);
+  });
+
+  it('ticks when the menu is opened any other way, and remembers it per account', async () => {
+    const user = userEvent.setup();
+    const { unmount } = mount({ withPalette: true });
+    await user.keyboard('{Control>}k{/Control}');
+    expect(screen.getByRole('combobox', { name: 'Search or run a command' })).toBeInTheDocument();
+    expect(isDone(STEP)).toBe(true);
+    expect(window.localStorage.getItem('bevel.onboarding.commandMenuOpened.juan@bevel.software')).toBe('1');
+    unmount();
+    mount();
+    expect(isDone(STEP)).toBe(true);
   });
 });
 
