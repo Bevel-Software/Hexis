@@ -189,11 +189,15 @@ export type AgentGuideSectionsReader = () => Promise<RenderedGuideSection[]>;
  * {@link composeAgentGuide}); `get_agent_guide` also serves one at a time.
  *
  * A hook may append, replace and drop sections, with ONE exception: the
- * shared file rules ({@link WORKING_WITH_FILES_SECTION_ID}) must come back,
- * as core's or as the hook's own replacement. A client that drops the
- * handshake instructions has the guide as the only place to read the rules
- * — a guide without them would leave agents nothing to read. A hook that
- * drops it is a composition error, thrown rather than served.
+ * shared file rules ({@link WORKING_WITH_FILES_SECTION_ID}) must come back
+ * WITH TEXT IN THEM, as core's or as the hook's own replacement. A client
+ * that drops the handshake instructions has the guide as the only place to
+ * read the rules — a guide without them would leave agents nothing to read.
+ * A hook that drops the section, or hands it back empty, is a composition
+ * error, thrown rather than served. Judged on what would be SERVED — the
+ * rendered, trimmed body — so a replacement of whitespace is caught like a
+ * missing one, rather than passing the check and vanishing with the other
+ * empty sections below.
  */
 export async function agentGuideSections(
   layout: KbLayout,
@@ -203,23 +207,25 @@ export async function agentGuideSections(
   const resolved = resolveKbLayout(layout);
   const core = await coreAgentGuideSections(resolved);
   const sections = hook ? await hook(core, resolved) : core;
-  if (!sections.some((section) => section.id === WORKING_WITH_FILES_SECTION_ID)) {
+  const kbDirName = context.kbDirName?.trim() || DEFAULT_KB_DIR_NAME;
+  const rendered = sections.map((section) => {
+    const body = (
+      section.literal
+        ? section.body
+        : renderKbLayoutPlaceholders(section.body.replaceAll('{{kbDirName}}', () => kbDirName), resolved)
+    ).trim();
+    return { id: section.id, title: titleOf(body, section.id), body };
+  });
+  // Judged over EVERY section under the id — a hook may return the id twice
+  // — on what survives the empty-body filter below: one with text is enough.
+  const rules = rendered.filter((section) => section.id === WORKING_WITH_FILES_SECTION_ID);
+  if (!rules.some((section) => section.body.length > 0)) {
     throw new Error(
-      `The agent guide hook dropped the "${WORKING_WITH_FILES_SECTION_ID}" section, which every file tool points at. ` +
-        'Keep it, or replace it under the same id.',
+      `The agent guide hook ${rules.length === 0 ? 'dropped' : 'emptied'} the "${WORKING_WITH_FILES_SECTION_ID}" ` +
+        'section, which every file tool points at. Keep it, or replace it under the same id with the rules in it.',
     );
   }
-  const kbDirName = context.kbDirName?.trim() || DEFAULT_KB_DIR_NAME;
-  return sections
-    .map((section) => {
-      const body = (
-        section.literal
-          ? section.body
-          : renderKbLayoutPlaceholders(section.body.replaceAll('{{kbDirName}}', () => kbDirName), resolved)
-      ).trim();
-      return { id: section.id, title: titleOf(body, section.id), body };
-    })
-    .filter((section) => section.body.length > 0);
+  return rendered.filter((section) => section.body.length > 0);
 }
 
 /**

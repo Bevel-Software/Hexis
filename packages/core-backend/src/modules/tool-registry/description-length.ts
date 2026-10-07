@@ -75,7 +75,12 @@ export function firstSentenceEnd(tool: Pick<UtcpTool, 'name' | 'description'>): 
   const prefix = PREFIXED_TOOLS.has(tool.name) ? TOOL_PREFIX_CAP + 2 : 0;
   const description = tool.description ?? '';
   if (description === '') return prefix;
-  const opener = description.startsWith(`${GUIDE_FIRST_SENTENCE} `) ? GUIDE_FIRST_SENTENCE.length + 1 : 0;
+  // The opener and whatever whitespace follows it: `guideFirstDescription`
+  // joins with one space, and leaves a description that already opens with
+  // the sentence as it came — a newline after it is still the opener's.
+  const opener = description.startsWith(GUIDE_FIRST_SENTENCE)
+    ? GUIDE_FIRST_SENTENCE.length + (description.slice(GUIDE_FIRST_SENTENCE.length).match(/^\s*/)?.[0].length ?? 0)
+    : 0;
   const own = description.slice(opener);
   const firstSentence = own.match(/^[\s\S]*?[.!?](?=\s|$)/)?.[0] ?? own;
   return prefix + opener + firstSentence.length;

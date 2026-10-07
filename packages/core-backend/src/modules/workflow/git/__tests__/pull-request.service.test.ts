@@ -312,8 +312,9 @@ describe('PullRequestService.listPrsByState', () => {
     // The merge commit, not the branch pair: the source branch is retired, so
     // asking for it is what sent one fetch per row at the remote.
     // The ref carries the NUMBER as well as the sha: the git layer refuses a
-    // commit that is not this request's own merge commit.
-    expect(atCommit).toHaveBeenCalledWith('ws', { number: 9, mergeSha: MERGE_SHA });
+    // commit that is not this request's own merge commit. And the TITLE, so a
+    // commit written in the old message format is recognised too.
+    expect(atCommit).toHaveBeenCalledWith('ws', { number: 9, mergeSha: MERGE_SHA, title: 'A proposal' });
     expect(forPr).not.toHaveBeenCalled();
     expect(summary).toMatchObject({
       number: 9,
@@ -561,7 +562,7 @@ describe('PullRequestService.getPrDetail of an applied request', () => {
   it('reads its files from the merge commit, and never asks for its branches', async () => {
     const { svc, resolvePrShas, changedFilesOfAppliedChange } = svcFor();
     const detail = await svc.getPrDetail(4);
-    expect(changedFilesOfAppliedChange).toHaveBeenCalledWith('ws', { number: 4, mergeSha: MERGE_SHA }, {});
+    expect(changedFilesOfAppliedChange).toHaveBeenCalledWith('ws', { number: 4, mergeSha: MERGE_SHA, title: 'A proposal' }, {});
     // Not one branch resolution, so not one fetch: the branch no longer exists
     // and the commit cannot change.
     expect(resolvePrShas).not.toHaveBeenCalled();
@@ -594,7 +595,7 @@ describe('PullRequestService.getPrDetail of an applied request', () => {
     await svc.getPrDetail(4, { patches: false });
     expect(changedFilesOfAppliedChange).toHaveBeenCalledWith(
       'ws',
-      { number: 4, mergeSha: MERGE_SHA },
+      { number: 4, mergeSha: MERGE_SHA, title: 'A proposal' },
       { patchCap: 0 },
     );
   });

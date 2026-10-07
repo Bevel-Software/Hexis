@@ -56,3 +56,33 @@ export function mergeCommitSubject(title: string, number: number): string {
 export function mergeCommitSubjectNames(subject: string, number: number): boolean {
   return subject.trimEnd().endsWith(`(#${number})`);
 }
+
+/**
+ * Whether `message` — a merge commit's WHOLE message — is request `number`'s
+ * own, by the subject rule above or, given the request's stored `title`, by the
+ * form an earlier release wrote.
+ *
+ * That release did not flatten the title, so a title with a blank line in it
+ * put `(#N)` after the blank line, and git's `%s` subject ended before it: such
+ * rows failed {@link mergeCommitSubjectNames} and read as author-only for good.
+ * The commit is still exactly `<title> (#N)` followed by a blank line and the
+ * body, and the row still holds the title — so a message that opens with the
+ * title (its whitespace matched loosely), then ` (#N)`, then the END OF THAT
+ * LINE, is this request's. The line end is what keeps the match this
+ * request's: a title may contain another request's number (`Fix crash (#42)`),
+ * and a CURRENT-format commit of request 43 with that title reads
+ * `Fix crash (#42) (#43)` — the number of 42 there is followed by more text on
+ * the line, so it does not name 42's commit. Only `title` can vouch for the
+ * old format: the number sits wherever that format put it, which nothing else
+ * in a message may say.
+ */
+export function mergeCommitMessageNames(message: string, number: number, title?: string): boolean {
+  // The first paragraph, which is what git reports as `%s`.
+  const subject = message.split(/\r?\n[ \t]*\r?\n/, 1)[0] ?? '';
+  if (mergeCommitSubjectNames(subject.replace(/\s+/g, ' '), number)) return true;
+  if (title === undefined) return false;
+  const words = title.trim().split(/\s+/).map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (words.length === 0 || words[0] === '') return false;
+  const oldFormat = new RegExp(`^\\s*${words.join('\\s+')}\\s+\\(#${number}\\)[ \\t]*(?:\\r?\\n|$)`);
+  return oldFormat.test(message);
+}

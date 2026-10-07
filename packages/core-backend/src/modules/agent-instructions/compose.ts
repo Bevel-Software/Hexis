@@ -64,8 +64,10 @@ export const TOOL_PREFIX_LINE = "This organisation's knowledge base. Search it b
  * `header` field carries and what the card shows as fixed and not editable;
  * the admin's preamble follows it.
  *
- * A FUNCTION of the layout, because the shared rules name the guide by the
- * name a deployment saved for it, which is a deployment setting.
+ * A FUNCTION of the layout, because the shared rules name the platform files
+ * by the root names a deployment chose (`Skills/`, `Plugins/`), which are
+ * deployment settings. The guide's name is not one of them: it is `AGENTS.md`
+ * everywhere.
  */
 export function platformInstructions(layout: KbLayout): string {
   return `${PLATFORM_HEADER}\n\n${sharedFileRulesSection(layout)}`;
@@ -119,10 +121,11 @@ export interface ComposedAgentInstructions {
  * unterminated `<!--` strips everything after it, so the most likely editing
  * slip withholds text rather than leaking it.
  *
- * `layout` decides only the guide's name inside the shared rules, and defaults
- * to the standard one — a caller with no layout in hand (a test, a surface that
- * predates the setting) gets `AGENTS.md`, which is what an unset name means
- * everywhere else.
+ * `layout` decides the root names the shared rules spell (`Skills/`,
+ * `Plugins/`, the knowledge folder) and defaults to the standard ones — a
+ * caller with no layout in hand (a test, a surface that predates the setting)
+ * gets the defaults. The guide's name is not among them: it is `AGENTS.md` on
+ * every deployment.
  */
 export function composeAgentInstructions(
   preamble: string | null,

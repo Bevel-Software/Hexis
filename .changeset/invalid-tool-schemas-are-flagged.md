@@ -48,7 +48,7 @@ An agent that calls a hidden tool by name is told the tool is hidden because its
 
 Both are gated on the per-file write verdict — the same one that gates setting the tool's shared secrets. A caller who may only read the tool is told nothing: they cannot fix the schema, and the hidden tool is simply not among the ones they can call. The write check is only asked when there is something to show, so the healthy case costs no extra ACL round-trip.
 
-**Hexis's own schemas are checked by tests**, so Hexis never ships what it hides another server's tool for: every tool def the five `register*Tools` functions produce, on both surfaces, plus the three code-mode meta-tools. The test checks itself too — it reads the server's own registration calls and fails if a tool module has been added there but not here, and fails if a module contributes no tools at all. A harness that silently skipped a module's schemas would be worse than no test, because it would read as if it had checked them.
+**Hexis's own schemas are checked by tests**, so Hexis never ships what it hides another server's tool for: every tool def the six `register*Tools` functions produce, on both surfaces, plus the three code-mode meta-tools. The test checks itself too — it reads the server's own registration calls and fails if a tool module has been added there but not here, and fails if a module contributes no tools at all. A harness that silently skipped a module's schemas would be worse than no test, because it would read as if it had checked them.
 
 ## A limit worth knowing, upstream of all of this
 

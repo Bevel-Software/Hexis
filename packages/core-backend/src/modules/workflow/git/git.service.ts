@@ -16,7 +16,7 @@ import type {
   WorkingTreeStatus,
 } from '@bevel-software/platform-shared';
 import { isFolderPlaceholder } from '@bevel-software/platform-shared';
-import { mergeCommitSubjectNames } from './merge-commit.js';
+import { mergeCommitMessageNames } from './merge-commit.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -1494,6 +1494,8 @@ export class GitService implements IGitService {
        * forget the only commit its files can be read from.
        */
       appliedChangeNumber?: number;
+      /** The request's stored title, so a merge commit in the old message format is recognised too. */
+      appliedChangeTitle?: string;
     } = {},
   ): Promise<AppliedMergeResult> {
     assertValidBranchName(sourceBranch);
@@ -1608,7 +1610,7 @@ export class GitService implements IGitService {
           const own =
             opts.appliedChangeNumber === undefined
               ? null
-              : await this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, opts.appliedChangeNumber);
+              : await this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, opts.appliedChangeNumber, opts.appliedChangeTitle);
           return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: own };
         }
 
@@ -1667,6 +1669,7 @@ export class GitService implements IGitService {
     baseWorkspaceId: string,
     targetBranch: string,
     number: number,
+    title?: string,
   ): Promise<string | null> {
     assertValidBranchName(targetBranch);
     const cwd = await this.repoDir(baseWorkspaceId);
@@ -1691,7 +1694,7 @@ export class GitService implements IGitService {
       );
       return null;
     }
-    return this.mutex.run(baseWorkspaceId, () => this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, number));
+    return this.mutex.run(baseWorkspaceId, () => this.ownMergeCommitOn(cwd, `origin/${targetBranch}`, number, title));
   }
 
   /**
@@ -1709,25 +1712,38 @@ export class GitService implements IGitService {
    * The two conditions are the reader's own (`appliedChangeShas`): a merge
    * commit, whose subject names this number. Deciding it here with the same
    * predicate means the writer records only what the reader will accept. The
-   * walk is bounded by `--grep` (the number, as a fixed string) and capped,
-   * since the subject check still has to confirm a body-only match. Never on an
-   * ordinary merge: the two callers are the empty-merge case here and
+   * walk is bounded by `--grep` (the number, as a fixed string), which is the
+   * whole of the target's history for commits mentioning the number — and not
+   * by a count: a fixed count of newer merges once hid a stuck request's commit
+   * from the probe on a busy target, and a request that could no longer be
+   * finalized is worse than a log walk. The message check then confirms a
+   * body-only mention is not the request's own. Never on an ordinary merge:
+   * the two callers are the empty-merge case here and
    * {@link appliedMergeCommitOnTarget}, which the approval gate asks before it
    * refuses a retry that has nothing left to merge.
+   *
+   * `title` lets the old message format be recognised — see
+   * {@link mergeCommitMessageNames}.
    */
   private async ownMergeCommitOn(
     cwd: string,
     targetRef: string,
     number: number,
+    title?: string,
   ): Promise<string | null> {
+    // The whole message per commit. Records are NUL-separated (`-z`), the one
+    // byte a commit message cannot hold, and the sha is the record's first
+    // line: nothing a title may contain can split a record or a line early.
     const { stdout } = await this.git(cwd, [
-      'log', '--merges', '--fixed-strings', `--grep=(#${number})`,
-      '--format=%H%x00%s', '-n', '20', targetRef,
+      'log', '-z', '--merges', '--fixed-strings', `--grep=(#${number})`,
+      '--format=%H%n%B', targetRef,
     ]);
-    for (const line of stdout.split('\n')) {
-      const [sha, subject] = line.split('\0');
-      if (!sha || subject === undefined) continue;
-      if (mergeCommitSubjectNames(subject, number)) return sha.trim();
+    for (const record of stdout.split('\0')) {
+      const newline = record.indexOf('\n');
+      const sha = (newline === -1 ? record : record.slice(0, newline)).trim();
+      if (!/^[0-9a-f]{40,64}$/.test(sha)) continue;
+      const message = newline === -1 ? '' : record.slice(newline + 1);
+      if (mergeCommitMessageNames(message, number, title)) return sha;
     }
     return null;
   }
@@ -2842,8 +2858,8 @@ export class GitService implements IGitService {
     if (!baseSha) {
       throw new WorkflowValidationError(`no first parent for commit ${mergeSha}`);
     }
-    const { stdout: subject } = await this.git(cwd, ['log', '-1', '--format=%s', mergeSha]);
-    if (!mergeCommitSubjectNames(subject, number)) {
+    const { stdout: message } = await this.git(cwd, ['log', '-1', '--format=%B', mergeSha]);
+    if (!mergeCommitMessageNames(message, number, applied.title)) {
       throw new WorkflowValidationError(
         `commit ${mergeSha} is not the merge commit of change request #${number}`,
       );

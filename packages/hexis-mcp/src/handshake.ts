@@ -110,10 +110,13 @@ export function identityLine(agent: AgentIdentity | null, host: string, version:
   // rendered `printable`, so a newline or an escape in them cannot forge a
   // second log line or paint the terminal.
   const as = `signing in as ${printable(registrationName(agent, host))}`;
+  // No agent means no identity was available from either source: none named
+  // in a handshake (a nameless `initialize`, or no `initialize` at all), and
+  // none found among the parent processes (or no process table to read).
   const from = !agent
-    ? 'the client named itself to nobody and no parent process could be read'
+    ? 'no client identity was available — none named in a handshake, none found among the parent processes'
     : agent.guessed
-      ? `guessed from the parent process (${printable(agent.name)}); the client named itself to nobody`
+      ? `guessed from the parent process (${printable(agent.name)}) — the client named itself to nobody; a server started by hand from that program's terminal is named the same`
       : `named by the client's handshake (${printable(agent.name)}${agent.version ? ` ${printable(agent.version)}` : ''})`;
   return `[hexis-mcp ${version}] ${as} — ${from}`;
 }
