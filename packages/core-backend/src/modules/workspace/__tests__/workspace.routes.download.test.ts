@@ -347,6 +347,8 @@ describe('GET /workspace/:id/folder/zip — gated on Download role', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/zip');
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    // The archive holds one caller's verdicts, so a shared cache never keeps it.
+    expect(res.headers.get('cache-control')).toBe('private, no-store');
     const dispo = res.headers.get('content-disposition');
     expect(dispo).toBeTruthy();
     expect(dispo).toContain('attachment');

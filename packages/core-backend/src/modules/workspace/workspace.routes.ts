@@ -999,6 +999,12 @@ export function createWorkspaceRoutes(
     try {
       const buffer = await workspaceService.createFolderZip(id, folderPath, include);
       res.setHeader('X-Withheld-Files', String(withheld));
+      // One caller's archive: which files it holds, and the count beside it,
+      // are that caller's verdicts. `private` keeps a shared cache from
+      // handing it to the next caller; `no-store` because, unlike the single
+      // file, nothing here can be revalidated (no ETag), so a copy is never
+      // worth keeping.
+      res.setHeader('Cache-Control', 'private, no-store');
       // `|| 'folder'` covers the edge case where `folderPath` itself was
       // a single bare slash (`/`) that survived the trim — the service
       // would still reject it as path traversal, but the basename

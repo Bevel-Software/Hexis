@@ -141,6 +141,8 @@ describe('GET /folder/zip judges every file it packs (real resolver, real zip)',
 
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/zip');
+    // Ana's archive, with Ana's verdicts: never served to anyone else from a cache.
+    expect(res.headers.get('cache-control')).toBe('private, no-store');
     expect(await entriesOf(res)).toEqual(['Shared/Open.md', 'Shared/access.md']);
     // One file Ana can see but not save is counted; the two she cannot see
     // and the closed folder are not — the count says nothing the tree does not.
