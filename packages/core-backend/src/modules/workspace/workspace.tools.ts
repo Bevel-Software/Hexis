@@ -66,6 +66,7 @@ import {
   type AgentGuideReader,
 } from '../agent-guide/agent-guide.js';
 import { removeEmptyDirs } from './empty-dirs.js';
+import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew } from './first-run.js';
 import { rethrowAsWriteDenial } from './write-denial.js';
 import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
@@ -1640,12 +1641,17 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint the id of this conversation, which the KnowledgeBase tools take as `sessionId`. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id as `sessionId` on every later KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`.',
+      'Mint the id of this conversation, which the KnowledgeBase tools take as `sessionId`. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id as `sessionId` on every later KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`, plus `firstRun` while the knowledge base is still empty: a note to act on.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
       type: 'object',
-      properties: { sessionId: str('The minted session id — pass it as `sessionId` on subsequent KnowledgeBase tool calls and to `ask`.') },
+      properties: {
+        sessionId: str('The minted session id — pass it as `sessionId` on subsequent KnowledgeBase tool calls and to `ask`.'),
+        firstRun: str(
+          `Present only while the knowledge base holds nothing but its starter guide: what to offer the person (the guide's \`${FIRST_RUN_SECTION_ID}\` section says how).`,
+        ),
+      },
       required: ['sessionId'],
     },
     tags: ['workspace'],
@@ -1665,9 +1671,35 @@ export function registerWorkspaceTools(
     requireExternalSource,
     toolHandler(async (_args, ctx) => {
       const { sessionId } = await sessionSink.createSession(ctx.user.id, new Date());
-      return { sessionId };
+      const firstRun = await firstRunFor(ctx);
+      return firstRun ? { sessionId, firstRun } : { sessionId };
     }),
   );
+
+  /**
+   * The `firstRun` note (see `first-run.ts`) while the default branch's
+   * knowledge folder holds nothing but the starter guide, else null. Asked of
+   * a clone that is ALREADY there — never one this call would have to make, so
+   * the first call of a conversation does no clone — and never allowed to fail
+   * the call: minting the id is what `start_session` is for, and the note is a
+   * courtesy on top of it.
+   */
+  const firstRunFor = async (ctx: ToolContext): Promise<string | null> => {
+    try {
+      if (!kb.isBranchModelConfigured()) return null;
+      const workspaceId = kb.defaultWorkspaceId();
+      if (!(await ctx.workspaceService.hasBootstrappedWorkspace(workspaceId))) return null;
+      const knowledgeDir = kb.layout.knowledgeBaseDir;
+      const root = await ctx.workspaceService.getWorkspacePath(workspaceId);
+      if (!(await knowledgeFolderIsNew(join(root, kbDirName, knowledgeDir)))) return null;
+      return firstRunNote(`${kbDirName}/${knowledgeDir}`);
+    } catch (err) {
+      log.debug('start_session: could not tell whether the knowledge base is new', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  };
 
   // ── reads ──────────────────────────────────────────────────────────────
   mount({

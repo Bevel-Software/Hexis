@@ -93,6 +93,9 @@ export const CORE_SECTION_IDS: readonly string[] = Object.freeze([
   'tool-manuals',
   'conventions',
   'finding-things',
+  // Read by an agent `start_session` greeted with a `firstRun` note; the id is
+  // `FIRST_RUN_SECTION_ID` in workspace/first-run.ts, which the note names.
+  'new-knowledge-base',
 ]);
 
 /**

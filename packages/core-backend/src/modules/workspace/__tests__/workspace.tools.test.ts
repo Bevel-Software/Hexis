@@ -18,6 +18,7 @@ import { sharedFileRules, sharedFileRulesSection } from '../../agent-instruction
 import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
+import { FIRST_RUN_SECTION_ID, STARTER_GUIDE_FILE, firstRunNote } from '../first-run.js';
 import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workflow-hooks.js';
 import { SESSION_ID_DESCRIPTION, ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
@@ -2201,6 +2202,11 @@ describe('start_session', () => {
     // `UuidSessionSink`, because "did fifty first calls collide?" is a question
     // only the real minting can answer.
     sink?: ISessionSink,
+    // The default branch's workspace directory, for the tests about the
+    // `firstRun` note. Without one the workspace service is a bare stand-in
+    // the note's check cannot use, which is what every other test here wants:
+    // the call answers with the id alone.
+    defaultWorkspaceDir?: string,
   ): Promise<string> {
     created = [];
     const registry = new ToolRegistry();
@@ -2209,7 +2215,12 @@ describe('start_session', () => {
       scope: auth.scope,
       source: auth.source,
       abortSignal: signal,
-      workspaceService: {} as never,
+      workspaceService: (defaultWorkspaceDir
+        ? {
+            hasBootstrappedWorkspace: async () => true,
+            getWorkspacePath: async () => defaultWorkspaceDir,
+          }
+        : {}) as never,
       workflowService: {} as never,
       events: {} as never,
       getFilesystem: async () => ({}) as never,
@@ -2372,6 +2383,65 @@ describe('start_session', () => {
     expect(description).toMatch(/retry/i);
     expect(description).toMatch(/created nothing/i);
     expect(description).toMatch(/harmless/i);
+    // And that the answer may carry a note to act on, so an agent reading
+    // only the catalog knows the field is not noise.
+    expect(description).toContain('`firstRun`');
+  });
+
+  /**
+   * "The agent is the onboarding guide": on a knowledge base nobody has
+   * written in yet, the first call of a conversation says so, and the note
+   * stops on its own once a page exists.
+   */
+  describe('the firstRun note', () => {
+    let wsDir = '';
+    const knowledge = () => join(wsDir, KB_DIR, 'KnowledgeBase');
+
+    beforeEach(async () => {
+      wsDir = await mkdtemp(join(tmpdir(), 'bevel-first-run-'));
+      await mkdir(knowledge(), { recursive: true });
+      await writeFile(join(knowledge(), STARTER_GUIDE_FILE), '# How to get started\n');
+    });
+
+    afterEach(async () => {
+      await rm(wsDir, { recursive: true, force: true });
+    });
+
+    const startSession = async () => {
+      const base = await startSessionApp('external', undefined, wsDir);
+      return (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string; firstRun?: string };
+    };
+
+    it('is there while the knowledge folder holds only the starter guide', async () => {
+      // Folder placeholders and access rules are not pages either.
+      await mkdir(join(knowledge(), 'Empty'), { recursive: true });
+      await writeFile(join(knowledge(), 'Empty', '.gitkeep'), '');
+      await writeFile(join(knowledge(), 'access.md'), '# Access\n');
+
+      const res = await startSession();
+
+      expect(res.sessionId).toBe('thread-xyz');
+      expect(res.firstRun).toBe(firstRunNote(`${KB_DIR}/KnowledgeBase`));
+      expect(res.firstRun).toContain(`\`${FIRST_RUN_SECTION_ID}\``);
+    });
+
+    it('is gone once another page exists, at the top or in a folder', async () => {
+      await mkdir(join(knowledge(), 'Company'), { recursive: true });
+      await writeFile(join(knowledge(), 'Company', 'About.md'), '# About us\n');
+
+      const res = await startSession();
+
+      expect(res.sessionId).toBe('thread-xyz');
+      expect(res).not.toHaveProperty('firstRun');
+    });
+
+    it('never costs the session id: a workspace it cannot read answers with the id alone', async () => {
+      await rm(wsDir, { recursive: true, force: true });
+
+      const res = await startSession();
+
+      expect(res).toEqual({ sessionId: 'thread-xyz' });
+    });
   });
 });
 
