@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Knowledge base page</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: transparent;
+        font: 13px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
+          sans-serif;
+        color: #3f3f46;
+      }
+      #frame {
+        display: block;
+        width: 100%;
+        height: 100%;
+        border: 0;
+      }
+      #notice {
+        padding: 16px;
+        white-space: pre-wrap;
+      }
+      #notice a {
+        color: #2563eb;
+      }
+      .hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- One of the two is shown, never both: the framed page, or a sentence
+         saying why there is no framed page. -->
+    <iframe
+      id="frame"
+      class="hidden"
+      title="Knowledge base page"
+      referrerpolicy="no-referrer"
+      allow="clipboard-write"
+    ></iframe>
+    <p id="notice">Opening the page…</p>
+
+    <script>
+      // The MCP Apps view. It speaks the extension's protocol directly — no
+      // SDK, by decision: what an SDK would hide is the four message names
+      // below (see the Specification's Decision 10).
+      //
+      // Its whole job is to frame the deployment's own `/embed` page, which
+      // is where the app's renderers live. The view renders NOTHING itself:
+      // a second rendering path would have to be kept in step with the app's,
+      // and would be the one that is wrong.
+      (function () {
+        'use strict';
+
+        var frame = document.getElementById('frame');
+        var notice = document.getElementById('notice');
+        var hostOrigin = null;
+        var shown = false;
+
+        function send(message) {
+          // The host is this view's parent; it told us its origin on the
+          // handshake. Before that there is nowhere to send to but '*', and
+          // the only thing sent then is the handshake itself, which carries
+          // nothing.
+          try {
+            window.parent.postMessage(message, hostOrigin || '*');
+          } catch (err) {
+            /* the host went away; nothing to do */
+          }
+        }
+
+        function say(text) {
+          notice.textContent = text;
+          notice.classList.remove('hidden');
+          frame.classList.add('hidden');
+        }
+
+        /** Open a URL the way the host opens links: a new tab, through it. */
+        function openLink(url) {
+          send({
+            jsonrpc: '2.0',
+            id: 'open-' + Date.now(),
+            method: 'ui/open-link',
+            params: { url: url },
+          });
+        }
+
+        function show(result) {
+          var data = (result && result.structuredContent) || {};
+          if (typeof data.embedUrl === 'string' && data.embedUrl) {
+            frame.src = data.embedUrl;
+            frame.classList.remove('hidden');
+            notice.classList.add('hidden');
+            shown = true;
+            return;
+          }
+          // No embed address: the deployment's public address is plain http,
+          // so no host will frame it (see Decision 8). The tool's own answer
+          // already carries the page's text and its address in the app — say
+          // the same thing here, and make the address clickable.
+          var lines = [];
+          if (typeof data.note === 'string' && data.note) lines.push(data.note);
+          if (!lines.length) lines.push('This page cannot be shown here.');
+          say(lines.join('\n'));
+          if (typeof data.appUrl === 'string' && data.appUrl) {
+            var link = document.createElement('a');
+            link.href = data.appUrl;
+            link.textContent = 'Open it in the knowledge base';
+            link.addEventListener('click', function (event) {
+              event.preventDefault();
+              openLink(data.appUrl);
+            });
+            notice.appendChild(document.createElement('br'));
+            notice.appendChild(link);
+          }
+        }
+
+        window.addEventListener('message', function (event) {
+          var message = event.data;
+          if (!message || typeof message !== 'object') return;
+
+          // A link clicked INSIDE the framed page. The embed never navigates
+          // itself — it relays the destination here, and the host opens it in
+          // a new tab, which is the only way out of a sandboxed iframe that
+          // forbids popups. Accepted only from our own frame.
+          if (message.type === 'bevel-embed-open') {
+            if (event.source !== frame.contentWindow) return;
+            if (typeof message.url === 'string' && message.url) openLink(message.url);
+            return;
+          }
+
+          // Everything else is the host's half of the extension protocol.
+          if (event.source !== window.parent) return;
+          if (hostOrigin === null && event.origin) hostOrigin = event.origin;
+
+          if (message.method === 'ui/notifications/tool-result') {
+            show((message.params && message.params.result) || {});
+            return;
+          }
+          if (message.method === 'ui/notifications/container-size-changed') {
+            // The frame is 100% of the view, so the host's own sizing is the
+            // whole of the layout; nothing to recompute.
+            return;
+          }
+          // The handshake's reply carries the host's capabilities. Nothing
+          // here depends on them, but a host that sends the first tool result
+          // only after the handshake completes needs us to have sent it.
+          if (message.id === INITIALIZE_ID) {
+            if (!shown) say('Opening the page…');
+          }
+        });
+
+        var INITIALIZE_ID = 'initialize';
+        send({
+          jsonrpc: '2.0',
+          id: INITIALIZE_ID,
+          method: 'ui/initialize',
+          params: { protocolVersion: '2026-01-26' },
+        });
+      })();
+    </script>
+  </body>
+</html>

@@ -1,5 +1,6 @@
 import type { HexisMcpConfig } from './config.js';
 import { renewConnectionKeyNow } from './renewal.js';
+import { parseMcpAppManifest, type McpAppManifest } from '@bevel-software/platform-mcp-core';
 
 /**
  * The REST surface this server reads before it can serve anything. Everything
@@ -515,4 +516,44 @@ export async function callKbTool(
     body: JSON.stringify(args),
     renew: renewer(config),
   });
+}
+
+/**
+ * The deployment's MCP Apps: which of its tools carry a `ui://` view, and the
+ * views themselves.
+ *
+ * The local server bridges a host to a deployment over HTTP. It discovers the
+ * tools as UTCP manuals, and a UTCP manual has nowhere to carry a view — so
+ * the metadata has to arrive as data, keyed by tool name, and the view's HTML
+ * has to arrive with it (this server answers `resources/read` itself).
+ *
+ * DEGRADES TO NOTHING, loudly but harmlessly. A deployment that predates the
+ * route 404s; one behind a proxy may answer HTML. Either way the right outcome
+ * is NO apps: every tool is still listed and still callable, the `resources`
+ * capability is simply not declared, and a host shows the tool's text answer —
+ * which is exactly what a host without the extension does anyway. Advertising
+ * a `resourceUri` this server could not serve would be worse than advertising
+ * none: the host would preload a failure and show an empty frame where the
+ * text used to be.
+ */
+export async function fetchMcpApps(config: HexisMcpConfig): Promise<McpAppManifest> {
+  try {
+    const body = await getJson(`${config.baseUrl}/api/agent/mcp-app`, {
+      label: 'the MCP App manifest',
+      headers: { Authorization: `Bearer ${config.connectionKey}` },
+      renew: renewer(config),
+    });
+    return parseMcpAppManifest(body);
+  } catch (err) {
+    // A rejected key is the one failure that is not about this route: it ends
+    // the process everywhere else, and swallowing it here would turn a clear
+    // "mint a new key" into a silently app-less server.
+    if (err instanceof ConnectionKeyRejectedError) throw err;
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[hexis-mcp] could not read the deployment's MCP App manifest (${reason}); ` +
+        'tools that would render a view will answer with their text instead.',
+    );
+    return { tools: {}, resources: [] };
+  }
 }

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useGit } from '../../git/state/git.context';
-import { useWorkspace } from '../state/workspace.context';
+import { GitContext } from '../../git/state/git.context';
+import { WorkspaceContext } from '../state/workspace.context';
+import { useRendererSurface } from '../components/renderers/rendererSurface';
 import { authFetch } from '../../../lib/api';
 import {
   isExternalHref,
@@ -136,8 +137,12 @@ export function fetchNodeId(branch: string, workspacePath: string): Promise<stri
  * links id-based on their own, independent of the `FileRoute` path→id redirect.
  */
 export function useCanonicalFileUrl(workspacePath: string | null): string | null {
-  const git = useGit();
-  const branch = git.status?.branch ?? null;
+  // A surface outside the app knows the address of the file it is showing —
+  // it was told it by whatever opened it — and has no git status to resolve
+  // one from. Asked FIRST, and before `useGit`, which has no provider there.
+  const surface = useRendererSurface();
+  const git = useContext(GitContext);
+  const branch = surface ? null : (git?.status?.branch ?? null);
   // Tie the resolved id to the exact (branch, path) it was fetched for. Inputs
   // change a render before the effect re-resolves, so without this key the URL
   // would briefly pair the new path with the *previous* node's id.
@@ -156,6 +161,7 @@ export function useCanonicalFileUrl(workspacePath: string | null): string | null
     };
   }, [key, branch, workspacePath]);
 
+  if (surface) return workspacePath ? surface.canonicalUrlFor(workspacePath) : null;
   if (!branch || !workspacePath) return null;
   const nodeId = resolved && resolved.key === key ? resolved.id : null;
   const relative = nodeId ? kbNodeUrl(branch, nodeId) : kbFileUrl(branch, workspacePath);
@@ -317,10 +323,19 @@ export function branchFromPathname(pathname: string): string | null {
 }
 
 export function useFileNav() {
+  // Outside the app every opener is the surface's: the embed opens a page in
+  // a NEW TAB through its host and never navigates itself. Read before the
+  // two app contexts, which have no provider there — so they are read
+  // non-throwing and asserted only on the app path below.
+  const surface = useRendererSurface();
   const navigate = useNavigate();
   const location = useLocation();
-  const git = useGit();
-  const { kbDirName } = useWorkspace();
+  const git = useContext(GitContext);
+  const workspace = useContext(WorkspaceContext);
+  if (!surface && (!git || !workspace)) {
+    throw new Error('useFileNav must be used within GitContext/WorkspaceContext or a RendererSurface');
+  }
+  const kbDirName = surface?.kbDirName ?? workspace?.kbDirName ?? '';
   // The URL's branch first, the git status second. During a branch switch the
   // status still reports the branch being LEFT — it only catches up once the
   // destination workspace has bootstrapped and answered — so building a click
@@ -329,7 +344,7 @@ export function useFileNav() {
   // which branch is on screen (`FileRoute` bootstraps to match it), so a click
   // lands on the branch being switched TO. Off a workspace route there is no
   // branch in the URL and the status is the only answer there is.
-  const branch = branchFromPathname(location.pathname) ?? git.status?.branch ?? null;
+  const branch = branchFromPathname(location.pathname) ?? git?.status?.branch ?? null;
 
   const openFile = useCallback(
     (pathOrUrl: string) => {
@@ -437,6 +452,19 @@ export function useFileNav() {
     navigate(kbFileUrl(branch));
   }, [branch, navigate]);
 
+  // One return for the app, one for a surface. The surface's verbs are
+  // substituted WHOLESALE rather than branched inside each opener: "open it
+  // in a new tab, never navigate" is a different behaviour, not a parameter
+  // of this one, and a half-overridden navigator is how an embed ends up on
+  // a page no token was minted for.
+  if (surface) {
+    return {
+      openFile: (pathOrUrl: string) => surface.openLink(pathOrUrl, ''),
+      openLink: surface.openLink,
+      openWorkspacePath: (path: string) => surface.openLink(path, ''),
+      closeFile: () => undefined,
+    };
+  }
   return { openFile, openLink, openWorkspacePath, closeFile };
 }
 
@@ -449,9 +477,10 @@ export function useFileNav() {
  * the chat citation renderer so both resolve id-links identically.
  */
 export function useNodeIdNav() {
+  const surface = useRendererSurface();
   const { openFile } = useFileNav();
-  const git = useGit();
-  const branch = git.status?.branch ?? null;
+  const git = useContext(GitContext);
+  const branch = git?.status?.branch ?? null;
 
   const openNodeId = useCallback(
     async (idOrLink: string) => {
@@ -476,5 +505,9 @@ export function useNodeIdNav() {
     [branch, openFile],
   );
 
+  // The surface resolves an id its own way — the embed hands it to its host
+  // as an app address, which the app then resolves with the reader's own
+  // session. Resolving it HERE would need a session the embed does not have.
+  if (surface) return { openNodeId: surface.openNodeId };
   return { openNodeId };
 }

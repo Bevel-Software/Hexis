@@ -39,7 +39,7 @@ import { accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from
 import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
-import { displayPath, type FileKind, type FileReaderRegistry } from './file-readers/file-reader.js';
+import { displayPath, type FileKind, type FileReaderRegistry, type ReadResult } from './file-readers/file-reader.js';
 import { fileTypeOf, needsContent } from './file-readers/content-mode.js';
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
@@ -825,6 +825,33 @@ function sessionIdInputOf(def: { inputs?: unknown }): { description?: string } |
 }
 
 /**
+ * A read of ONE workspace file, exactly as `read_file` performs it: the read
+ * hook, the access gate, the not-found refusal and the per-extension reader,
+ * in that order. Rejects with the same `ToolError`s `read_file` rejects with.
+ *
+ * `offset`/`limit` and the `__tool_chain_spill__/…` ref are deliberately NOT
+ * here: they are `read_file`'s own arguments, not part of what reading a file
+ * means.
+ */
+export type ReadForTool = (
+  branch: string,
+  path: string,
+  ctx: ToolContext,
+) => Promise<ReadResult>;
+
+/**
+ * What the workspace tool registration hands back for another module to build
+ * on, rather than re-deriving.
+ *
+ * One member today, and it is the only kind of thing that belongs here: a
+ * behaviour the platform promises TWICE in the same words (`open_page`
+ * answers "the way `read_file` does") and must therefore implement once.
+ */
+export interface WorkspaceToolsPorts {
+  readForTool: ReadForTool;
+}
+
+/**
  * Workspace domain tools: the file primitives (replacing Mastra's auto-injected
  * Workspace tools) + unzip. Most just re-expose the SAME `LocalFilesystem`
  * methods Mastra's tools call (via `ctx.getFilesystem(a.branch as string)`), so behaviour is
@@ -875,7 +902,7 @@ export function registerWorkspaceTools(
    * tools read the disk and nothing else.
    */
   agentGuide?: AgentGuideReader,
-): void {
+): WorkspaceToolsPorts {
   const { kbDirName } = kb;
   /**
    * The one extension→reader registry every read-shaped decision routes
@@ -1670,6 +1697,41 @@ export function registerWorkspaceTools(
   );
 
   // ── reads ──────────────────────────────────────────────────────────────
+
+  /**
+   * What reading a workspace file ANSWERS, gate and all — `read_file`'s whole
+   * behaviour minus the spill ref and the `offset`/`limit` slice, which are
+   * that tool's own arguments.
+   *
+   * Factored out because a second tool has to answer the same way: `open_page`
+   * (see `modules/embed`) promises the file's text "the way `read_file` does",
+   * and the refusals `read_file` gives for a path the caller may not read or
+   * one that does not exist. Any of that re-derived there would be a second
+   * answer to a question with one correct answer — the access gate, the read
+   * hook, the extraction and the not-found message all have to match, and a
+   * copy drifts on the first change to any of them.
+   */
+  const readForTool: ReadForTool = async (branch, p, ctx) => {
+    // The guide's name at the repository root answers with the platform's
+    // guide, which is text the code owns and every agent may read: no gate
+    // and no read hook for it. A file the knowledge base keeps under that
+    // name is ITS OWN conventions page and is read as any file is — gated,
+    // noted — and comes first, with the guide after it. A copy of the
+    // guide an earlier release wrote to disk (still on a draft, say) is
+    // recognised by its header and not served a second time.
+    if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '')) {
+      return { kind: 'text', text: await guideAt(branch, ctx, p) };
+    }
+    await notifyAgentRead(agentAccessGate, ctx, branch, p);
+    await assertCanRead(readGateFor(branch, ctx), p);
+    const fs = await ctx.getFilesystem(branch);
+    // Reading (extraction, image and binary handling included) happens AFTER
+    // the access gate and the read hook above — a document read is still a
+    // KB read. ONE registry dispatch picks the reader by extension.
+    const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
+    return readers.readerFor(p).read(bytes, p);
+  };
+
   mount({
     name: 'read_file',
     gated: true,
@@ -1712,26 +1774,7 @@ export function registerWorkspaceTools(
           ? content.slice(start, limit !== undefined ? start + limit : undefined)
           : content;
       };
-      // The guide's name at the repository root answers with the platform's
-      // guide, which is text the code owns and every agent may read: no gate
-      // and no read hook for it. A file the knowledge base keeps under that
-      // name is ITS OWN conventions page and is read as any file is — gated,
-      // noted — and comes first, with the guide after it. A copy of the
-      // guide an earlier release wrote to disk (still on a draft, say) is
-      // recognised by its header and not served a second time.
-      if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '')) {
-        return { path: p, content: slice(await guideAt(a.branch as string, ctx, p)) };
-      }
-      await notifyAgentRead(agentAccessGate, ctx, a.branch as string, p);
-      await assertCanRead(readGateFor(a.branch as string, ctx), p);
-      const fs = await ctx.getFilesystem(a.branch as string);
-      // Reading (extraction, image and binary handling included) happens AFTER
-      // the access gate and the read hook above — a document read is still a
-      // KB read. ONE registry dispatch picks the reader by
-      // extension; everything below just maps its ReadResult onto the tool's
-      // result shape.
-      const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
-      const result = await readers.readerFor(p).read(bytes, p);
+      const result = await readForTool(a.branch as string, p, ctx);
       // Images return the picture itself as an MCP image content block, so a
       // multimodal model SEES it. The handler returns the `McpImageResult`
       // sentinel; the MCP result shaping (`toCallToolResult` in
@@ -3707,4 +3750,7 @@ export function registerWorkspaceTools(
       });
     },
   });
+
+  // The one read `open_page` borrows — see `readForTool` above.
+  return { readForTool };
 }
