@@ -1,15 +1,19 @@
-import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { Check, GitBranch, Server } from 'lucide-react';
-import { Badge, Banner, Button } from '../../../shared/components';
+import { Badge, Banner, Button, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { useAppRegistry } from '../../../core/registry';
 import { GitHubRepositoryPanel } from './GitHubRepositoryPanel';
 import { forgetDraft } from '../utils/kept-draft';
+import { tokenUsernameForHost } from '../utils/git-host';
+import { suggestedBranch } from '../utils/suggested-branch';
 import { KB_ROUTE_PREFIX } from '../../workspace/routing/kb-routes';
 import {
   saveSettings,
+  testConnection,
   KbInitFailed,
   SettingsProblems,
+  type ConnectionTest,
   type RepositoryStatus,
 } from '../services/setup.api';
 
@@ -21,13 +25,14 @@ const MANAGED_DEFAULT = {
 
 type Choice = 'managed' | 'github-app';
 
+/** Where on this screen the admin is: the question, or one of the ways that needs details. */
+type Step = 'choose' | 'github' | 'address';
+
 interface Props {
   /** The ways offered. The gate only sends a deployment here that has chosen none and is not pinned. */
   repository: RepositoryStatus;
   /** Re-read the status: the gate then shows whatever the deployment still needs. */
   onSaved(): void;
-  /** Leave for the full setup form, opened on the address and the token. */
-  onUseAddressAndToken(): void;
 }
 
 /**
@@ -40,25 +45,31 @@ interface Props {
  * and folder names, so the one-press path looked like the hardest one. This
  * screen asks the question on its own and leaves everything else for later.
  *
- * NOTHING IS TAKEN AWAY. An address and a token, single sign-on and the
- * rest are one link away, on the same form as before. Once a way is chosen
- * the gate goes back to that form for whatever is still missing, so a save
- * that leaves something to fix lands where it can be fixed.
+ * ONE SCREEN FOR THE WHOLE CHOICE. All three ways are answered here: the
+ * repository the deployment keeps, GitHub, and an address and a token for
+ * any other host. Each way that needs details opens as a step of this
+ * screen, with a way back to the cards, rather than handing over to the full
+ * form, which would ask the same question again among everything else.
+ * Single sign-on and the rest are on the full form at Settings → Deployment.
+ * Once a way is chosen the gate goes back to that form for whatever is still
+ * missing, so a save that leaves something to fix lands where it can be
+ * fixed.
  */
-export function FirstRunStorage({ repository, onSaved, onUseAddressAndToken }: Props) {
+export function FirstRunStorage({ repository, onSaved }: Props) {
   const { managedStorage } = useAppRegistry();
   const managed = managedStorage ?? MANAGED_DEFAULT;
   const offersGitHub = repository.modes.includes('github-app');
 
   const [choice, setChoice] = useState<Choice>('managed');
   /**
-   * The GitHub steps are open. Opened straight away on a return from GitHub,
-   * which the address says: the trip started here, and what came of it is
-   * said in the panel.
+   * The step on screen. The GitHub step opens straight away on a return from
+   * GitHub, which the address says: the trip started here, and what came of it
+   * is said in the panel.
    */
-  const [connecting, setConnecting] = useState(
-    () => offersGitHub && new URLSearchParams(window.location.search ?? '').has('github'),
+  const [step, setStep] = useState<Step>(() =>
+    offersGitHub && new URLSearchParams(window.location.search ?? '').has('github') ? 'github' : 'choose',
   );
+  const connecting = step === 'github';
   const [githubRepository, setGitHubRepository] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -130,10 +141,75 @@ export function FirstRunStorage({ repository, onSaved, onUseAddressAndToken }: P
   }
 
   function proceed() {
-    if (choice === 'github-app') {
-      setError(null);
-      setConnecting(true);
-    } else void save({ gitMode: 'managed' });
+    if (choice === 'github-app') open('github');
+    else void save({ gitMode: 'managed' });
+  }
+
+  /** Move between the question and a step, leaving what the last one said behind. */
+  function open(next: Step) {
+    setError(null);
+    setStep(next);
+  }
+
+  // ── An address and a token ──────────────────────────────────────────────
+  const [repoUrl, setRepoUrl] = useState('');
+  const [token, setToken] = useState('');
+  /** Only asked for when the host is not one whose token username is known. */
+  const [username, setUsername] = useState('');
+  /** The last test of exactly what is typed; any edit clears it. */
+  const [test, setTest] = useState<ConnectionTest | null>(null);
+  const [testing, setTesting] = useState(false);
+  const knownHost = tokenUsernameForHost(repoUrl);
+  const askUsername = repoUrl.trim() !== '' && !knownHost;
+
+  function edit(set: (value: string) => void, value: string) {
+    set(value);
+    setTest(null);
+    setError(null);
+  }
+
+  /** What the full form sends for the same answers, so the server reads them alike. */
+  function connection(): Record<string, string> {
+    const gitUsername = knownHost?.username ?? username.trim();
+    return {
+      kbRepoUrl: repoUrl.trim(),
+      gitToken: token,
+      ...(gitUsername ? { gitUsername } : {}),
+    };
+  }
+
+  /** Ask the host. A refusal is an answer and is shown; only a failure to ask throws. */
+  async function runTest(): Promise<ConnectionTest | null> {
+    setTesting(true);
+    setError(null);
+    try {
+      const result = await testConnection(connection());
+      setTest(result);
+      return result;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not test the connection.');
+      return null;
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  /**
+   * Save, proving the connection first when what is typed has not been
+   * tested, as the full form does: nothing behind this screen works until the
+   * repository answers. The branches come from the test, the same way the
+   * full form fills them in.
+   */
+  async function saveByAddress(event: FormEvent) {
+    event.preventDefault();
+    const result = test?.ok ? test : await runTest();
+    if (!result?.ok) return;
+    const branch = suggestedBranch(result);
+    await save({
+      gitMode: 'token',
+      ...connection(),
+      ...(branch ? { defaultBranch: branch, protectedBranches: branch } : {}),
+    });
   }
 
   const notices = (
@@ -199,16 +275,101 @@ export function FirstRunStorage({ repository, onSaved, onUseAddressAndToken }: P
                 <Button
                   type="button"
                   variant="quiet"
-                  onClick={() => {
-                    setConnecting(false);
-                    setError(null);
-                  }}
+                  onClick={() => open('choose')}
                   disabled={saving}
                 >
                   Back
                 </Button>
               </div>
             </>
+          ) : step === 'address' ? (
+            <form className="grid gap-7" onSubmit={(e) => void saveByAddress(e)} noValidate>
+              <Heading title="Connect your repository">
+                Any git host works: GitLab, Bitbucket, Azure DevOps or your own server. This deployment reads and
+                writes the one repository you name.
+              </Heading>
+              <div className="grid max-w-[520px] gap-5">
+                <Field
+                  label="Repository address"
+                  hint="Copy it from your repository's page. A brand-new empty repository is fine."
+                >
+                  {(id, describedBy) => (
+                    <TextField
+                      id={id}
+                      aria-describedby={describedBy}
+                      aria-invalid={test?.ok === false && test.field === 'kbRepoUrl' ? true : undefined}
+                      value={repoUrl}
+                      onChange={(e) => edit(setRepoUrl, e.target.value)}
+                      placeholder="https://gitlab.com/acme/knowledge-base.git"
+                      autoComplete="off"
+                      spellCheck={false}
+                      disabled={saving || needsRestart}
+                    />
+                  )}
+                </Field>
+                <Field
+                  label="Access token"
+                  hint="Create one in your git host with read and write access to this repository. Stored encrypted, and never shown again."
+                >
+                  {(id, describedBy) => (
+                    <TextField
+                      id={id}
+                      type="password"
+                      aria-describedby={describedBy}
+                      aria-invalid={test?.ok === false && test.field === 'gitToken' ? true : undefined}
+                      value={token}
+                      onChange={(e) => edit(setToken, e.target.value)}
+                      placeholder="Paste the token"
+                      autoComplete="off"
+                      disabled={saving || needsRestart}
+                    />
+                  )}
+                </Field>
+                {askUsername && (
+                  <Field
+                    label="Username for the token"
+                    hint="Some self-hosted servers ask for one beside the token. Leave it empty unless yours does."
+                  >
+                    {(id, describedBy) => (
+                      <TextField
+                        id={id}
+                        aria-describedby={describedBy}
+                        value={username}
+                        onChange={(e) => edit(setUsername, e.target.value)}
+                        autoComplete="off"
+                        spellCheck={false}
+                        disabled={saving || needsRestart}
+                      />
+                    )}
+                  </Field>
+                )}
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void runTest()}
+                    disabled={!repoUrl.trim() || !token || testing || saving || needsRestart}
+                  >
+                    {testing ? 'Checking…' : 'Test connection'}
+                  </Button>
+                  {test && <ConnectionAnswer result={test} />}
+                </div>
+              </div>
+              {notices}
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={!repoUrl.trim() || !token || testing || saving || needsRestart}
+                >
+                  {saving ? 'Saving…' : 'Save and continue'}
+                </Button>
+                <Button type="button" variant="quiet" onClick={() => open('choose')} disabled={saving || testing}>
+                  Back
+                </Button>
+              </div>
+            </form>
           ) : (
             <>
               <Heading title="Where should your knowledge base live?">
@@ -262,7 +423,7 @@ export function FirstRunStorage({ repository, onSaved, onUseAddressAndToken }: P
                   <span>Using GitLab, Bitbucket or Azure DevOps?</span>
                   <button
                     type="button"
-                    onClick={onUseAddressAndToken}
+                    onClick={() => open('address')}
                     disabled={saving}
                     className="leading-none text-accent underline underline-offset-2 hover:text-accent-hover"
                   >
@@ -348,5 +509,50 @@ function ChoiceCard({ ref, selected, onSelect, onKeyDown, disabled, icon, badge,
         ))}
       </span>
     </button>
+  );
+}
+
+/** A labelled field with its hint, the hint read out as the field's description. */
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint: string;
+  children: (id: string, describedBy: string) => ReactNode;
+}) {
+  const id = useId();
+  return (
+    <div className="grid gap-1.5">
+      <label htmlFor={id} className="text-detail font-medium text-ink">
+        {label}
+      </label>
+      {children(id, `${id}-hint`)}
+      <p id={`${id}-hint`} className="text-meta text-ink-faint">
+        {hint}
+      </p>
+    </div>
+  );
+}
+
+/** What the host said to the last test, in the words the full form uses. */
+function ConnectionAnswer({ result }: { result: ConnectionTest }) {
+  if (result.ok) {
+    return (
+      <span role="status" className="flex items-center gap-1.5 text-detail text-ok">
+        <Check className="size-3.5" aria-hidden />
+        {result.empty ? 'Connected. The repository is empty; it will be set up for you.' : 'Connected.'}
+      </span>
+    );
+  }
+  const said =
+    result.outcome === 'read-only'
+      ? 'This token can read the repository but cannot write to it. Give it write access and test again.'
+      : (result.error ?? 'The repository did not answer with these details.');
+  return (
+    <span role="alert" className="text-detail text-danger">
+      {said}
+    </span>
   );
 }

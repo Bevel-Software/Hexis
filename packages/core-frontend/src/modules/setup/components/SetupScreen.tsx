@@ -3,6 +3,7 @@ import { DEFAULT_KB_LAYOUT, type KbLayout } from '@bevel-software/platform-share
 import { Banner, Button, Surface, TextField } from '../../../shared/components';
 import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { tokenUsernameForHost } from '../utils/git-host';
+import { suggestedBranch } from '../utils/suggested-branch';
 import { isRootFolderSuggestion, rootFolderState, type RootFolderState } from '../utils/root-folders';
 import { copyToClipboard } from '../../../lib/clipboard';
 import { GitHubRepositoryPanel } from './GitHubRepositoryPanel';
@@ -372,13 +373,6 @@ interface Props {
    * drawn as they always were, with no tabs.
    */
   repository?: RepositoryStatus;
-  /**
-   * The tab to open on a deployment that has chosen no way yet, when that way
-   * is offered. The first-run storage screen sends an admin here by "Use an
-   * address and token", and landing them on another tab would answer a
-   * question they did not ask.
-   */
-  openOn?: GitMode;
 }
 
 /**
@@ -410,7 +404,6 @@ export function SetupScreen({
   kbInit,
   oidcVerification,
   repository,
-  openOn,
 }: Props) {
   /** Whether a setting is a secret: what is never written to the browser's storage. */
   const isSecret = (key: string) => settings.find((s) => s.key === key)?.secret !== false;
@@ -588,9 +581,7 @@ export function SetupScreen({
       !repository?.pinned &&
       repository?.modes.includes('github-app') &&
       new URLSearchParams(window.location.search ?? '').has('github');
-    if (backFromGitHub) return 'github-app';
-    const asked = openOn && repository?.modes.includes(openOn) ? openOn : undefined;
-    return chosen ?? asked ?? repository?.modes[0] ?? 'token';
+    return backFromGitHub ? 'github-app' : (chosen ?? repository?.modes[0] ?? 'token');
   });
   /** The tab a setting is answered on, for the ones that belong to one way of having a repository. */
   const tabOf = (key: string): GitMode | null =>
@@ -769,28 +760,6 @@ export function SetupScreen({
       connectionEpoch.current++;
       setTest(null);
     }
-  }
-
-  /**
-   * Which branch the repository just named, or the best conventional stand-in.
-   *
-   * Prefer what the remote calls its trunk. Not every host advertises it —
-   * older servers answer `ls-remote` without the symref line — so fall back to
-   * the conventional names before the first branch it did list. Leaving these
-   * blank is the one way a save can succeed and still not finish setup, which
-   * is worth a guess the reader can see and correct.
-   */
-  function suggestedBranch(result: ConnectionTest): string | null {
-    return (
-      result.defaultBranch ||
-      ['main', 'master', 'trunk'].find((name) => result.branches?.includes(name)) ||
-      result.branches?.[0] ||
-      // An EMPTY repository has no branch to report, but it will be seeded
-      // with whatever is configured here, so the conventional name is the
-      // right suggestion. Suggesting nothing was the one way "Connected"
-      // could still end, silently, in a save that did not finish setup.
-      (result.empty ? 'main' : null)
-    );
   }
 
   /**

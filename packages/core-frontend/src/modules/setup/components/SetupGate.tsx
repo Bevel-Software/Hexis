@@ -56,8 +56,11 @@ export function SetupGate({ children }: { children: ReactNode }) {
   // The status is read the shared way (`useSetupStatus`): only the latest
   // read lands, so a late answer cannot undo what a newer one said.
   const { status, failed, loaded, refresh } = useSetupStatus();
-  /** The admin asked for the full form ("Use an address and token") over the storage question. */
-  const [fullForm, setFullForm] = useState(backToTheFullForm);
+  /**
+   * Back from a trip to GitHub that started on the full form: that form put
+   * away what was typed, and is where it is given back. Read once, on arrival.
+   */
+  const [fullForm] = useState(backToTheFullForm);
 
   // Nothing is claimed until the answer is in. Rendering the app here and
   // replacing it a moment later would flash a broken workspace at exactly the
@@ -93,7 +96,6 @@ export function SetupGate({ children }: { children: ReactNode }) {
       <FirstRunStorage
         repository={status.repository}
         onSaved={refresh}
-        onUseAddressAndToken={() => setFullForm(true)}
       />
     );
   }
@@ -105,8 +107,6 @@ export function SetupGate({ children }: { children: ReactNode }) {
       kbInit={status.kbInit}
       oidcVerification={status.oidcVerification}
       repository={status.repository}
-      // Sent here from the storage question by "Use an address and token".
-      openOn={fullForm ? 'token' : undefined}
       onSaved={refresh}
     />
   );

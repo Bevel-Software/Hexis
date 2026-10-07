@@ -258,13 +258,75 @@ describe('SetupGate: the first-run storage question', () => {
     expect(await fullForm()).toBeInTheDocument();
   });
 
-  it('switches to the full form, on the address and token, from the link under the cards', async () => {
-    showGate();
-    await question();
-    await userEvent.click(screen.getByRole('button', { name: 'Use an address and token' }));
-    expect(await fullForm()).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Address and token' })).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByLabelText('Repository address')).toBeInTheDocument();
+  describe('an address and a token, on this screen', () => {
+    const openAddressStep = async () => {
+      showGate();
+      await question();
+      await userEvent.click(screen.getByRole('button', { name: 'Use an address and token' }));
+      await screen.findByRole('heading', { name: 'Connect your repository' });
+    };
+    const fill = async (url: string, token = 'glpat-secret') => {
+      await userEvent.type(screen.getByLabelText('Repository address'), url);
+      await userEvent.type(screen.getByLabelText('Access token'), token);
+    };
+
+    it('opens as a step of this screen, not the full form, and goes back to the cards', async () => {
+      await openAddressStep();
+      expect(screen.queryByRole('heading', { name: 'Set up this deployment' })).toBeNull();
+      expect(screen.queryByRole('tab', { name: 'Managed for you' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Save and continue' })).toBeDisabled();
+      await userEvent.click(screen.getByRole('button', { name: 'Back' }));
+      expect(await question()).toBeInTheDocument();
+    });
+
+    it('tests the connection and says what the host answered', async () => {
+      await openAddressStep();
+      await fill('https://gitlab.com/acme/kb.git');
+      api.testConnection.mockResolvedValue({ ok: true, outcome: 'connected', empty: true, branches: [] });
+      await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+      expect(await screen.findByText('Connected. The repository is empty; it will be set up for you.')).toBeInTheDocument();
+      // The host's token username is known, so it is sent and not asked.
+      expect(api.testConnection).toHaveBeenCalledWith(
+        expect.objectContaining({ kbRepoUrl: 'https://gitlab.com/acme/kb.git', gitToken: 'glpat-secret' }),
+      );
+      expect(screen.queryByLabelText('Username for the token')).toBeNull();
+    });
+
+    it('proves the connection before saving, then saves it with the branch the host named', async () => {
+      await openAddressStep();
+      await fill('https://gitlab.com/acme/kb.git');
+      api.testConnection.mockResolvedValue({ ok: true, outcome: 'connected', defaultBranch: 'trunk', branches: ['trunk'] });
+      api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+      await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+      await waitFor(() =>
+        expect(api.saveSettings).toHaveBeenCalledWith(
+          expect.objectContaining({
+            gitMode: 'token',
+            kbRepoUrl: 'https://gitlab.com/acme/kb.git',
+            gitToken: 'glpat-secret',
+            defaultBranch: 'trunk',
+            protectedBranches: 'trunk',
+          }),
+        ),
+      );
+      await waitFor(() => expect(assign).toHaveBeenCalledWith('/workspace'));
+    });
+
+    it('does not save what the host turned down, and says why', async () => {
+      await openAddressStep();
+      await fill('https://gitlab.com/acme/kb.git', 'wrong');
+      api.testConnection.mockResolvedValue({ ok: false, outcome: 'rejected', field: 'gitToken', error: 'The token was refused.' });
+      await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+      expect(await screen.findByText('The token was refused.')).toBeInTheDocument();
+      expect(screen.getByLabelText('Access token')).toHaveAttribute('aria-invalid', 'true');
+      expect(api.saveSettings).not.toHaveBeenCalled();
+    });
+
+    it('asks for the token username only on a host it does not know', async () => {
+      await openAddressStep();
+      await fill('https://git.acme.internal/kb.git');
+      expect(screen.getByLabelText('Username for the token')).toBeInTheDocument();
+    });
   });
 
   it.each<[string, RepositoryStatus | null]>([
