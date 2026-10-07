@@ -108,21 +108,50 @@ export class PushNeedsAgentResolutionError extends WorkflowDomainError {
     readonly path: string,
     readonly originalDetail: string,
     readonly recoveryDetail: string,
+    /**
+     * Why the push did not land. `diverged`: the remote moved and the
+     * cooperative rebase could not reconcile. `refused`: the host turned the
+     * push away for any other reason (an outage, credentials, a dropped
+     * connection) — nothing to reconcile, the next push of the branch carries
+     * the commits. The opening clause is the same either way.
+     */
+    readonly cause: 'diverged' | 'refused' = 'diverged',
   ) {
     super(
       `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
-        `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
-        `The agent will resolve this.`,
+        (cause === 'refused'
+          ? `the repository host refused the push. The next save on this branch shares it.`
+          : `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
+            `The agent will resolve this.`),
       409,
-      {
-        kind: 'push-needs-resolution',
-        branch,
-        path,
-        originalDetail,
-        recoveryDetail,
-      },
+      // The two details are raw git output — stderr can quote a credentialed
+      // URL, server paths, the host's own error page. They stay on the error
+      // for the server log and never enter the payload the browser receives.
+      { kind: 'push-needs-resolution', branch, path },
     );
     this.name = 'PushNeedsAgentResolutionError';
+  }
+}
+
+/**
+ * The repository host refused to delete a branch (an outage, a protection
+ * rule, a dropped connection). Deletion pushes FIRST and deletes locally only
+ * once the host agreed, so the branch is still there — locally and remotely —
+ * and the person can try again later. Unlike a refused write there is nothing
+ * to keep "saved locally": a deleted branch has no later push to carry it.
+ *
+ * `detail` is the raw git failure, for the server log only; it never enters
+ * the message or the payload.
+ */
+export class BranchDeleteRefusedError extends WorkflowDomainError {
+  readonly kind = 'branch-delete-refused' as const;
+  constructor(readonly branchName: string, readonly detail: string) {
+    super(
+      `The repository host refused to delete "${branchName}"; it is still there. Try again later.`,
+      409,
+      { kind: 'branch-delete-refused', branchName },
+    );
+    this.name = 'BranchDeleteRefusedError';
   }
 }
 

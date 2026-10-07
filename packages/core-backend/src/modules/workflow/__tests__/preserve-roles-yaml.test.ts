@@ -13,7 +13,11 @@ import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowService } from '../workflow.service.js';
 import type { Database } from '../../database/connection.js';
-import { RolesYamlPreservationError } from '../../../shared/domain-errors.js';
+import {
+  PushNeedsAgentResolutionError,
+  RolesYamlPreservationError,
+} from '../../../shared/domain-errors.js';
+import type { WorkflowEventBus } from '../event-bus.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
 /**
@@ -69,6 +73,7 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
     // Simulate a concurrent editor already holding the roles.yaml lock. When set,
     // acquire returns { acquired: false } and the restore must fail-closed.
     lockHeldBy?: string;
+    events?: WorkflowEventBus;
   }) {
     const ac = noopAccessControl();
     const reviewWorkflow = {
@@ -123,6 +128,7 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
       fileLocks, {} as unknown as PendingCommitsService,
       testKbContext({ kbDirName: KB_DIR }),
       openChangeGate(),
+      opts.events,
     );
     // Conflicts are now surfaced by the local merge inside `reviewWorkflow.mergePr`
     // (mocked to resolve here), so there's no provider "mergeable" pre-check to stub.
@@ -221,17 +227,52 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
     expect(git.push).toHaveBeenCalled();
   });
 
-  it('ABORTS the merge (RolesYamlPreservationError) if the restore push fails', async () => {
+  it('ABORTS the merge when the host refuses the restore push, keeping the restore locally (409, saved-locally, banner)', async () => {
     await fs.writeFile(path.join(headRepoDir, 'roles.yaml'), ATTACKER_ROLES);
-    const { svc, reviewWorkflow } = makeSvc({
+    const emit = vi.fn();
+    const { svc, git, reviewWorkflow, fileLocks } = makeSvc({
       headRoles: ATTACKER_ROLES,
       baseRoles: BASE_ROLES,
-      pushImpl: async () => { throw new Error('push rejected: non-fast-forward'); },
+      pushImpl: async () => {
+        throw new Error('git push failed: remote: Internal Server Error');
+      },
+      events: { emit } as unknown as WorkflowEventBus,
     });
 
-    await expect(merge(svc)).rejects.toBeInstanceOf(RolesYamlPreservationError);
-    // Fail-closed: the merge must NOT have run.
+    const err = await merge(svc).catch((e: unknown) => e);
+    // Answered like every refused push — not the 502 preservation error, and
+    // never a raw 500.
+    expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
+    expect((err as PushNeedsAgentResolutionError).status).toBe(409);
+    expect((err as Error).message).toContain(`Saved locally on "${HEAD}"`);
+    expect(JSON.stringify((err as PushNeedsAgentResolutionError).payload)).not.toContain('Internal Server Error');
+    // Fail-closed: the merge must NOT have run — origin still carries the
+    // divergent roles.yaml.
     expect(reviewWorkflow.mergePr).not.toHaveBeenCalled();
+    // The local result stays: base version on disk, committed, lock dropped.
+    expect(await fs.readFile(path.join(headRepoDir, 'roles.yaml'), 'utf-8')).toBe(BASE_ROLES);
+    expect(git.commitFile).toHaveBeenCalled();
+    expect(fileLocks.release).toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'git-sync-failed', workspaceId: HEAD, branch: HEAD }),
+    );
+  });
+
+  it('a non-fast-forward restore push takes the cooperative pull-rebase, then the merge proceeds', async () => {
+    await fs.writeFile(path.join(headRepoDir, 'roles.yaml'), ATTACKER_ROLES);
+    let pushes = 0;
+    const { svc, git, reviewWorkflow } = makeSvc({
+      headRoles: ATTACKER_ROLES,
+      baseRoles: BASE_ROLES,
+      pushImpl: async () => {
+        if (pushes++ === 0) throw new Error('push rejected: non-fast-forward');
+      },
+    });
+
+    await merge(svc);
+    expect(git.pull).toHaveBeenCalled();
+    expect(git.push).toHaveBeenCalledTimes(2);
+    expect(reviewWorkflow.mergePr).toHaveBeenCalledTimes(1);
   });
 
   it('ABORTS the merge if the CR (PR) cannot be resolved', async () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeError } from '../sanitize-error.js';
+import { describeSyncFailure, sanitizeError } from '../sanitize-error.js';
 
 describe('sanitizeError', () => {
   it('returns String(err) for non-Error throws', () => {
@@ -73,5 +73,42 @@ describe('sanitizeError', () => {
     const once = sanitizeError(new Error('Authorization: Bearer abc; token=def123'));
     const twice = sanitizeError(once);
     expect(twice).toBe(once);
+  });
+});
+
+describe('describeSyncFailure', () => {
+  // What a person reads about a failed push: the kind of failure, never a
+  // line of git's own output (the server log keeps that).
+  const cases: Array<[string, string]> = [
+    [
+      "fatal: Authentication failed for 'https://x-access-token:ghp_abc@github.com/acme/kb.git/'",
+      "The repository host did not accept this server's credentials.",
+    ],
+    [
+      "fatal: unable to access 'https://github.com/acme/kb.git/': The requested URL returned error: 403",
+      "The repository host did not accept this server's credentials.",
+    ],
+    [
+      "fatal: unable to access 'https://127.0.0.1:9/none.git/': Failed to connect to 127.0.0.1 port 9: Connection refused",
+      'The repository host could not be reached.',
+    ],
+    [
+      '! [rejected] main -> main (non-fast-forward)',
+      'The branch changed on the repository host and could not be reconciled automatically.',
+    ],
+    [
+      'remote: Internal Server Error\n ! [remote rejected] ali/x -> ali/x (Internal Server Error)',
+      'The repository host refused the request.',
+    ],
+  ];
+
+  it.each(cases)('describes %j without quoting it', (raw, expected) => {
+    const said = describeSyncFailure(new Error(raw));
+    expect(said).toBe(expected);
+    expect(said).not.toMatch(/fatal|remote:|github\.com|ghp_|127\.0\.0\.1/);
+  });
+
+  it('accepts a non-Error throw', () => {
+    expect(describeSyncFailure('something odd')).toBe('The repository host refused the request.');
   });
 });

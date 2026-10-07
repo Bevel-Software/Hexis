@@ -11,9 +11,11 @@ import type { PendingCommitsService } from '../pending-commits.service.js';
 import type { Database } from '../../database/connection.js';
 import { WorkflowService } from '../workflow.service.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
+import type { WorkflowEventBus } from '../event-bus.js';
 import {
   ChangeRequestConflictsError,
   PullRebaseConflictError,
+  PushNeedsAgentResolutionError,
   WorkflowDomainError,
 } from '../../../shared/domain-errors.js';
 
@@ -76,6 +78,8 @@ function harness(opts: {
   /** Does the clone hold commits origin has not seen? */
   unpushed?: boolean;
   unpushedError?: Error;
+  /** Each push answers the next of these in turn: an Error rejects, undefined lands. */
+  pushes?: Array<Error | undefined>;
 }) {
   // Two resolves per update: once after the pull (where the branch IS), once
   // after the merge (where it ended up). One mock that answers in order, so a
@@ -93,7 +97,10 @@ function harness(opts: {
       ? vi.fn().mockRejectedValue(opts.pullError)
       : vi.fn().mockResolvedValue({ treeChanged: false }),
     mergeFromOrigin: vi.fn().mockResolvedValue(opts.merge ?? { kind: 'clean', alreadyUpToDate: false }),
-    push: vi.fn().mockResolvedValue(undefined),
+    push: (opts.pushes ?? []).reduce(
+      (fn, outcome) => (outcome ? fn.mockRejectedValueOnce(outcome) : fn.mockResolvedValueOnce(undefined)),
+      vi.fn().mockResolvedValue(undefined),
+    ),
     hasUnpushedCommits: opts.unpushedError
       ? vi.fn().mockRejectedValue(opts.unpushedError)
       : vi.fn().mockResolvedValue(opts.unpushed ?? true),
@@ -114,6 +121,7 @@ function harness(opts: {
   const reviewWorkflow = {
     carryApprovalsForward: vi.fn().mockResolvedValue(opts.carried ?? 0),
   };
+  const emit = vi.fn();
   const svc = new WorkflowService(
     {} as unknown as Database,
     git as unknown as GitService,
@@ -125,8 +133,9 @@ function harness(opts: {
     pendingCommits as unknown as PendingCommitsService,
     testKbContext(),
     openChangeGate(),
+    { emit } as unknown as WorkflowEventBus,
   );
-  return { svc, git, prs, pendingCommits, reviewWorkflow, refreshed };
+  return { svc, git, prs, pendingCommits, reviewWorkflow, refreshed, emit };
 }
 
 describe('WorkflowService.updateFromTarget', () => {
@@ -384,5 +393,46 @@ describe('WorkflowService.updateFromTarget: the approvals the merge did not touc
     // Which files moved is unknown, so every file the request had is named:
     // slow beats a dialog that goes on presenting pre-merge text as current.
     expect(result.updatedPaths).toEqual(['Sales/Deal.md']);
+  });
+
+  describe('when the repository host refuses the push', () => {
+    const REFUSED = new Error('git push failed: remote: Internal Server Error');
+
+    it('keeps the merge applied locally and answers 409 with the saved-locally sentence and the banner', async () => {
+      const h = harness({ changedPaths: ['Sales/Deal.md'], pushes: [REFUSED, REFUSED] });
+      const err = await h.svc.updateFromTarget(WS, USER, 7).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
+      expect((err as PushNeedsAgentResolutionError).status).toBe(409);
+      expect((err as Error).message).toContain('Saved locally on "alice/deal"');
+      expect(JSON.stringify((err as PushNeedsAgentResolutionError).payload)).not.toContain('Internal Server Error');
+      // The merge ran and stays in the clone — the next push carries it.
+      expect(h.git.mergeFromOrigin).toHaveBeenCalledTimes(1);
+      expect(h.emit).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'git-sync-failed', workspaceId: 'alice/deal', branch: 'alice/deal' }),
+      );
+    });
+
+    it('the next update pushes what is still unpushed, and the banner clears', async () => {
+      const h = harness({
+        changedPaths: ['Sales/Deal.md'],
+        unpushed: true,
+        pushes: [REFUSED, undefined],
+      });
+      await expect(h.svc.updateFromTarget(WS, USER, 7)).rejects.toBeInstanceOf(PushNeedsAgentResolutionError);
+      await h.svc.updateFromTarget(WS, USER, 7);
+      const kinds = h.emit.mock.calls.map((c) => (c[0] as { kind: string }).kind).filter((k) => k.startsWith('git-sync-'));
+      expect(kinds).toEqual(['git-sync-failed', 'git-sync-recovered']);
+    });
+
+    it('a non-fast-forward recovers with a merge-preserving pull, so the merge stays a merge', async () => {
+      const h = harness({
+        changedPaths: ['Sales/Deal.md'],
+        pushes: [new Error('! [rejected] alice/deal -> alice/deal (non-fast-forward)'), undefined],
+      });
+      await h.svc.updateFromTarget(WS, USER, 7);
+      expect(h.git.push).toHaveBeenCalledTimes(2);
+      expect(h.git.pull).toHaveBeenLastCalledWith(WS, { preserveMerges: true });
+    });
   });
 });

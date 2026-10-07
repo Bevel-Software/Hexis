@@ -65,3 +65,27 @@ export function sanitizeError(err: unknown, opts: { maxLen?: number } = {}): str
   }
   return out;
 }
+
+/**
+ * What a person reads about a failed push or pull: one of a few fixed
+ * sentences, chosen from the git failure but never quoting it.
+ *
+ * `sanitizeError` masks secrets but still returns the host's own words —
+ * `remote: Internal Server Error`, a git `fatal:` line, a URL — and those must
+ * not reach the browser (the sync banner, a route's answer). The raw text
+ * belongs in the server log, which is where the banner already sends whoever
+ * can act on it. Order matters: an auth failure also reads "unable to access".
+ */
+export function describeSyncFailure(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  if (/authentication failed|could not read username|invalid username or password|permission (to .* )?denied|returned error: 40[13]|repository not found/i.test(raw)) {
+    return "The repository host did not accept this server's credentials.";
+  }
+  if (/could not resolve host|failed to connect|couldn't connect|connection (refused|timed out|reset)|network is unreachable|operation timed out/i.test(raw)) {
+    return 'The repository host could not be reached.';
+  }
+  if (/non-fast-forward|fetch first|updates were rejected/i.test(raw)) {
+    return 'The branch changed on the repository host and could not be reconciled automatically.';
+  }
+  return 'The repository host refused the request.';
+}

@@ -12,6 +12,7 @@ import type { IAccessControl } from '../../../access/access-control.interface.js
 import { GitService } from '../git.service.js';
 import {
   BranchAuthorshipError,
+  BranchDeleteRefusedError,
   ProtectedBranchError,
   WorkflowValidationError,
 } from '../../../../shared/domain-errors.js';
@@ -180,6 +181,44 @@ describe('GitService.deleteBranch — authorship + remote delete', () => {
     // Remote ref ALSO gone — this is the new behaviour, the original
     // implementation only deleted locally and left the orphan on origin.
     expect(await remoteHasRef(upstream, 'alice/my-draft')).toBe(false);
+  });
+
+  it('when the host refuses the remote deletion, deletes nothing and says so (409, no git output)', async () => {
+    const { upstream, repo } = await seedWorkspace(root, workspaceId);
+    // The host turns every push away, as GitHub did during its incident.
+    const hook = path.join(upstream, 'hooks', 'pre-receive');
+    await fs.writeFile(hook, '#!/bin/sh\necho "Internal Server Error" >&2\nexit 1\n');
+    await fs.chmod(hook, 0o755);
+    const svc = makeService();
+
+    const err = await svc.deleteBranch(workspaceId, 'alice/my-draft', ALICE).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BranchDeleteRefusedError);
+    const refusal = err as BranchDeleteRefusedError;
+    expect(refusal.status).toBe(409);
+    expect(refusal.message).toBe(
+      'The repository host refused to delete "alice/my-draft"; it is still there. Try again later.',
+    );
+    expect(JSON.stringify({ ...refusal.payload, error: refusal.message })).not.toMatch(
+      /Internal Server Error|remote rejected|pre-receive|upstream\.git/,
+    );
+    // Still there — remotely AND locally.
+    expect(await remoteHasRef(upstream, 'alice/my-draft')).toBe(true);
+    expect(
+      await gitOut(repo, ['for-each-ref', 'refs/heads/alice/my-draft', '--format', '%(refname)']),
+    ).toBe('refs/heads/alice/my-draft');
+  });
+
+  it('when the host cannot be reached, the local branch stays too', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    await runGit(repo, ['remote', 'set-url', 'origin', path.join(root, 'gone.git')]);
+    const svc = makeService();
+
+    await expect(svc.deleteBranch(workspaceId, 'alice/my-draft', ALICE)).rejects.toBeInstanceOf(
+      BranchDeleteRefusedError,
+    );
+    expect(
+      await gitOut(repo, ['for-each-ref', 'refs/heads/alice/my-draft', '--format', '%(refname)']),
+    ).toBe('refs/heads/alice/my-draft');
   });
 
   it("refuses when the user isn't the author — leaves the remote ref intact", async () => {

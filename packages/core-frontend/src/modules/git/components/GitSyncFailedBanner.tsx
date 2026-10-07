@@ -1,8 +1,8 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useContext, useState } from 'react';
 import { CloudOff, GitMerge } from 'lucide-react';
 import { useEventBusSubscription } from '../../workflow/hooks/useEventBusSubscription';
 import { canonicalizeWorkspaceId } from '../../workflow/state/event-bus.context';
-import { useWorkspace } from '../../workspace/state/workspace.context';
+import { useWorkspace, WorkspaceContext } from '../../workspace/state/workspace.context';
 import { useFileNav } from '../../workspace/routing/kb-routes';
 
 /**
@@ -40,6 +40,23 @@ function ConflictFiles({ paths }: { paths: string[] }) {
 }
 
 /**
+ * The same files as text. For a banner about a branch other than the one in
+ * the address bar: a link opens the path in the CURRENT workspace, which
+ * would be the wrong branch's copy.
+ */
+function ConflictFileNames({ paths }: { paths: string[] }) {
+  return (
+    <ul className="mt-1 ml-5 flex flex-wrap gap-x-3 gap-y-0.5">
+      {paths.map((p) => (
+        <li key={p}>
+          <span className="font-mono">{p}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
  * Shown when a commit landed locally but could not be pushed to the remote.
  *
  * The save itself is fine and is NOT rolled back — the commit is on the
@@ -61,10 +78,17 @@ function ConflictFiles({ paths }: { paths: string[] }) {
  * succeeds after failing. No dismiss control, same as `PullNeededBanner`: the
  * condition is real until the server says otherwise, and the next failing save
  * would re-raise it anyway.
+ *
+ * `workspaceId` names the branch's workspace when the surface is about a
+ * branch other than the focused one — the change-request view shows its
+ * SOURCE branch's banner, and watches that workspace so its events arrive.
+ * Without it the banner follows the workspace in the address bar.
  */
-export function GitSyncFailedBanner() {
-  const workspace = useWorkspace();
-  const workspaceId = workspace.workspaceId;
+export function GitSyncFailedBanner({ workspaceId: forWorkspaceId }: { workspaceId?: string } = {}) {
+  // Optional context: the change-request view can be mounted (and tested)
+  // outside a workspace, and names its workspace itself.
+  const focusedId = useContext(WorkspaceContext)?.workspaceId ?? null;
+  const workspaceId = forWorkspaceId ?? focusedId;
   // Local state (`workspace.id`) is URL-encoded (`user%2Ffeat`); event ids
   // arrive URL-decoded (`user/feat`, Express auto-decodes `req.params.id`).
   // Comparing them raw drops every event on a slashed feature branch — the
@@ -145,7 +169,12 @@ export function GitSyncFailedBanner() {
             save.
           </span>
         </div>
-        <ConflictFiles paths={failure.conflictedPaths} />
+        {forWorkspaceId &&
+        (!focusedId || canonicalizeWorkspaceId(focusedId) !== canonId) ? (
+          <ConflictFileNames paths={failure.conflictedPaths} />
+        ) : (
+          <ConflictFiles paths={failure.conflictedPaths} />
+        )}
       </div>
     );
   }

@@ -35,6 +35,7 @@ import type { KbContext } from '../../../shared/kb-context.js';
 import {
   AppliedChangeMismatchError,
   BranchAuthorshipError,
+  BranchDeleteRefusedError,
   WorkflowDomainError,
   WorkflowValidationError,
   ProtectedBranchError,
@@ -802,6 +803,24 @@ export class GitService implements IGitService {
         }
       }
 
+      // Remote delete FIRST. Skip in `onlyIfNoRemote` mode (the contract is
+      // local-only cleanup) and skip when there's no remote ref to delete.
+      // A refusal by the host fails the whole delete: the local branch is
+      // untouched, so nothing is half-deleted and the person can try again.
+      // Deleting locally first would leave a branch that vanished here but
+      // lives on the remote — and, unlike a refused write, a deleted branch
+      // has no later push to reconcile it.
+      if (!opts.onlyIfNoRemote
+        && await this.refExists(cwd, `refs/remotes/origin/${name}`)) {
+        try {
+          await this.git(cwd, ['push', 'origin', '--delete', name]);
+        } catch (err) {
+          const detail = sanitizeError(err);
+          log.warn(`the repository host refused to delete branch "${name}"; leaving it in place:`, { detail });
+          throw new BranchDeleteRefusedError(name, detail);
+        }
+      }
+
       // Local delete. `-D` force-deletes even if the branch isn't "fully
       // merged" from git's POV — squash-merged PRs leave a local branch whose
       // commits don't appear on origin/<base> verbatim, but the changes are
@@ -812,17 +831,6 @@ export class GitService implements IGitService {
       // them locally), and "discard from origin" must still work for those.
       if (await this.refExists(cwd, `refs/heads/${name}`)) {
         await this.git(cwd, ['branch', '-D', name]);
-      }
-
-      // Remote delete. Skip in `onlyIfNoRemote` mode (the contract is
-      // local-only cleanup) and skip when there's no remote ref to delete.
-      // A push failure here surfaces to the caller — the local ref is
-      // already gone, and we don't try to resurrect it because rolling back
-      // a "merged-into-the-deleted-branch" local commit would be even more
-      // confusing than the half-finished state.
-      if (!opts.onlyIfNoRemote
-        && await this.refExists(cwd, `refs/remotes/origin/${name}`)) {
-        await this.git(cwd, ['push', 'origin', '--delete', name]);
       }
     });
   }
