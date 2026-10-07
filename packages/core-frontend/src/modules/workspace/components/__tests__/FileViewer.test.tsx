@@ -187,7 +187,12 @@ function makeGit(
  */
 function LocationEcho() {
   const location = useLocation();
-  return <div data-testid="location">{location.pathname}</div>;
+  return (
+    <>
+      <div data-testid="location">{location.pathname}</div>
+      <div data-testid="location-state">{JSON.stringify(location.state ?? null)}</div>
+    </>
+  );
 }
 
 function ViewerHarness({
@@ -203,6 +208,8 @@ function ViewerHarness({
   authUser = null,
   captureTyped = false,
   gitAvailability = 'ready',
+  routeState,
+  routePath,
 }: {
   initialContent?: string;
   /** What git reports about itself; the history views need `'ready'`. */
@@ -231,6 +238,14 @@ function ViewerHarness({
    * tests keep the historical no-op.
    */
   captureTyped?: boolean;
+  /**
+   * Router state on the entry the viewer opens under. Given (or with
+   * `routePath`), the URL names the file the way `openWorkspacePath` builds
+   * it — `/workspace/<branch>/<path>` — instead of the bare branch.
+   */
+  routeState?: unknown;
+  /** The file the URL names, when it is not the open one. */
+  routePath?: string;
 }) {
   const [openFileContent, setOpenFileContent] = useState(initialContent);
   const [savedContent, setSavedContent] = useState(initialContent);
@@ -373,7 +388,19 @@ function ViewerHarness({
       </AuthContext.Provider>
   );
   return (
-    <MemoryRouter initialEntries={[`/workspace/${encodeURIComponent(urlBranch)}`]}>
+    <MemoryRouter
+      initialEntries={[
+        routeState !== undefined || routePath !== undefined
+          ? {
+              pathname: `/workspace/${encodeURIComponent(urlBranch)}/${(routePath ?? filePath ?? '')
+                .split('/')
+                .map(encodeURIComponent)
+                .join('/')}`,
+              state: routeState ?? null,
+            }
+          : `/workspace/${encodeURIComponent(urlBranch)}`,
+      ]}
+    >
       <Routes>
         <Route path="/workspace/:branch/*" element={tree} />
       </Routes>
@@ -1551,5 +1578,100 @@ describe('FileViewer: nothing open', () => {
       />,
     );
     expect(await screen.findByRole('button', { name: /Charter/ })).toBeInTheDocument();
+  });
+});
+
+/**
+ * Opening a page straight into the editor, asked for by the navigation
+ * (`openWorkspacePath(path, { edit: true })` → router state `startEditing`).
+ * It goes through the same lock-then-reload as the Edit button, happens once,
+ * and the request is taken off the history entry so a refresh or a Back
+ * opens the page for reading.
+ */
+describe('FileViewer: opening straight into the editor', () => {
+  const NEW_PAGE = 'knowledge-base/KnowledgeBase/Untitled.md';
+
+  afterEach(() => {
+    accessMock.result = {
+      canWrite: true,
+      canOwner: false,
+      eligible: { roles: ['Admin'], users: [] },
+      owners: EMPTY_ELIGIBLE,
+    };
+    vi.mocked(acquireLockMock).mockClear();
+  });
+
+  it('enters edit mode once, caret under the title, and clears the request', async () => {
+    const user = userEvent.setup();
+    vi.mocked(acquireLockMock).mockClear();
+    render(
+      <ViewerHarness
+        initialContent={'# Untitled\n\n'}
+        filePath={NEW_PAGE}
+        // Another key on the same entry survives the clean-up.
+        routeState={{ startEditing: true, rawFile: true }}
+      />,
+    );
+
+    const textarea = (await screen.findByRole('textbox')) as HTMLTextAreaElement;
+    expect(textarea.value).toBe('# Untitled\n\n');
+    expect(textarea).toHaveFocus();
+    expect(textarea.selectionStart).toBe(textarea.value.length);
+    expect(screen.getByTestId('location-state')).toHaveTextContent('{"rawFile":true}');
+    expect(screen.getByTestId('location')).toHaveTextContent('/workspace/alice%2Fdraft/knowledge-base/KnowledgeBase/Untitled.md');
+    expect(acquireLockMock).toHaveBeenCalledTimes(1);
+
+    // Done is Done: with the request gone, nothing puts the editor back.
+    await user.click(screen.getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(screen.queryByRole('textbox')).not.toBeInTheDocument());
+    await act(async () => {});
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(acquireLockMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens for reading when the navigation asked for nothing', async () => {
+    render(<ViewerHarness initialContent="# Notes" filePath={NEW_PAGE} routePath={NEW_PAGE} />);
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeEnabled();
+    await act(async () => {});
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(acquireLockMock).not.toHaveBeenCalled();
+  });
+
+  it('leaves another file alone: the request is for the file the URL names', async () => {
+    render(
+      <ViewerHarness
+        initialContent="# Foo"
+        filePath="knowledge-base/KnowledgeBase/Foo.md"
+        routePath={NEW_PAGE}
+        routeState={{ startEditing: true }}
+      />,
+    );
+    await screen.findByRole('button', { name: 'Edit' });
+    await act(async () => {});
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(acquireLockMock).not.toHaveBeenCalled();
+    // Still pending, for when that file opens.
+    expect(screen.getByTestId('location-state')).toHaveTextContent('{"startEditing":true}');
+  });
+
+  it('consumes the request without editing a file the reader cannot write', async () => {
+    accessMock.result = {
+      canWrite: false,
+      canOwner: false,
+      eligible: { roles: ['Admin'], users: [] },
+      owners: EMPTY_ELIGIBLE,
+    };
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        filePath={NEW_PAGE}
+        routeState={{ startEditing: true }}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId('location-state')).toHaveTextContent('null'));
+    expect(screen.getByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(acquireLockMock).not.toHaveBeenCalled();
   });
 });

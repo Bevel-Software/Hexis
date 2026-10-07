@@ -24,7 +24,7 @@ import type { PluginSummary } from '../../library/services/plugins.api';
 const { listAccountsMock, listPluginsMock, openWorkspacePathMock } = vi.hoisted(() => ({
   listAccountsMock: vi.fn<() => Promise<AccountSummary[]>>(),
   listPluginsMock: vi.fn<() => Promise<PluginSummary[]>>(),
-  openWorkspacePathMock: vi.fn<(path: string) => void>(),
+  openWorkspacePathMock: vi.fn<(path: string, options?: { edit?: boolean }) => void>(),
 }));
 
 vi.mock('../../../lib/api', () => ({ authFetch: vi.fn() }));
@@ -134,12 +134,14 @@ function mount({
   files = STARTER_TREE,
   openFilePath = null as string | null,
   route = '/workspace',
+  createFile = async () => {},
 }: {
   admin?: boolean;
   onboardingDone?: boolean;
   files?: string[];
   openFilePath?: string | null;
   route?: string;
+  createFile?: (relativePath: string, content?: string) => Promise<void>;
 } = {}) {
   const auth = authValue({
     user: { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera', onboardingDone },
@@ -149,7 +151,7 @@ function mount({
       <AuthContext.Provider value={auth}>
         <AdminContext.Provider value={adminValue(admin)}>
           <WorkspaceContext.Provider
-            value={makeWorkspaceFixture({ kbDirName: KB, fileTree: treeOf(files), openFilePath })}
+            value={makeWorkspaceFixture({ kbDirName: KB, fileTree: treeOf(files), openFilePath, createFile })}
           >
             <InviteDialogProvider>
               <GetStartedColumn />
@@ -235,12 +237,61 @@ describe('GetStartedColumn: what a member sees', () => {
     expect(isDone('Write your first page')).toBe(false);
     expect(
       within(row('Write your first page')!).getByText(
-        'Use New file on the Knowledge folder, or drop files into the tree.',
+        'Start one here, or drop files into the file tree.',
       ),
     ).toBeInTheDocument();
     unmount();
     mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/Product/Roadmap.md`] });
     expect(isDone('Write your first page')).toBe(true);
+  });
+
+  it('"New page" creates Untitled.md in the Knowledge folder and opens it for editing', async () => {
+    const createFile = vi.fn(async () => {});
+    mount({ createFile });
+    await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
+    expect(createFile).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled.md`, '# Untitled\n\n');
+    expect(openWorkspacePathMock).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled.md`, { edit: true });
+  });
+
+  it('"New page" takes the next free name when Untitled.md is taken', async () => {
+    const createFile = vi.fn(async () => {});
+    // Any page would already tick the step and hide the button, so what holds
+    // the name here is an (otherwise empty) folder called `Untitled.md` and
+    // `Untitled 2.md` — a name the tree has is taken, whatever it is.
+    mount({
+      createFile,
+      files: [
+        ...STARTER_TREE,
+        `${KB}/KnowledgeBase/Untitled.md/.gitkeep`,
+        `${KB}/KnowledgeBase/Untitled 2.md/.gitkeep`,
+      ],
+    });
+    await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
+    expect(createFile).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled 3.md`, '# Untitled\n\n');
+    expect(openWorkspacePathMock).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled 3.md`, { edit: true });
+  });
+
+  it('"New page" says "Creating…" while it works, and says why it failed on the step', async () => {
+    let refuse!: (err: Error) => void;
+    const createFile = vi.fn(
+      () =>
+        new Promise<void>((_, reject) => {
+          refuse = reject;
+        }),
+    );
+    mount({ createFile });
+    await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
+    expect(within(row('Write your first page')!).getByRole('button', { name: 'Creating…' })).toBeDisabled();
+
+    await act(async () => {
+      refuse(new Error('You don’t have permission to write to "KnowledgeBase/Untitled.md".'));
+    });
+    expect(within(row('Write your first page')!).getByRole('alert')).toHaveTextContent(
+      'Couldn’t create the page: You don’t have permission to write to "KnowledgeBase/Untitled.md".',
+    );
+    expect(within(row('Write your first page')!).getByRole('button', { name: 'New page' })).toBeEnabled();
+    expect(openWorkspacePathMock).not.toHaveBeenCalled();
+    expect(isDone('Write your first page')).toBe(false);
   });
 });
 

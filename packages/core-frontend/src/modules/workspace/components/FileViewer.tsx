@@ -9,7 +9,7 @@ import { Banner, Button, IconButton, Surface, useFocusHandoff } from '../../../s
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
-import { useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useCanonicalFileUrl, useFileNav } from '../routing/kb-routes';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
 import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
@@ -544,6 +544,62 @@ export function FileViewer() {
       });
   }, [editMode, isEnteringEdit, openFilePath, onProtectedBranch, isReviewingPending, fileLock, reloadTabFromDisk]);
 
+  /**
+   * Opening straight into edit mode, when the navigation asked for it
+   * (`openWorkspacePath(path, { edit: true })` — a page just created, there
+   * to be written). The request is router state (`startEditing`, the key the
+   * skill page already answers to), so no URL ever carries it.
+   *
+   * It is honoured the way a click on Edit would be, through
+   * `handleEnterEditMode` — the lock and the fresh read are not skipped — and
+   * only once the request can be judged: the file the URL names is the one
+   * open, with bytes, on a known branch, and the access lookup has answered
+   * (`canWrite` null is "not asked yet", and acting on it would be a guess).
+   * Then it is CONSUMED — replaced out of the history entry, other state
+   * kept — whether or not editing was allowed, so a refresh or a Back to this
+   * entry opens the page for reading like any other. The ref covers the beat
+   * before the replace lands (and StrictMode's second effect pass).
+   */
+  const location = useLocation();
+  const navigate = useNavigate();
+  const routePath = useParams<{ '*': string }>()['*'] ?? '';
+  const startEditingRequested =
+    (location.state as { startEditing?: boolean } | null)?.startEditing === true;
+  const consumedEditRequestRef = useRef<string | null>(null);
+  // The file whose editor should open with the caret at the end — see the
+  // effect beside `editorContainerRef`.
+  const caretToEndForRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!startEditingRequested || consumedEditRequestRef.current === location.key) return;
+    if (!openFilePath || openFilePath !== routePath || openFileContent === null || !Renderer) return;
+    if (currentBranch === null || access.canWrite === null) return;
+    consumedEditRequestRef.current = location.key;
+    const rest = { ...(location.state as Record<string, unknown>) };
+    delete rest.startEditing;
+    navigate(
+      { pathname: location.pathname, search: location.search, hash: location.hash },
+      { replace: true, state: Object.keys(rest).length > 0 ? rest : null },
+    );
+    if (!isViewOnlyFile(openFilePath)) {
+      caretToEndForRef.current = openFilePath;
+      // A one-shot reaction to the router's state, not derived state: this is
+      // the Edit click the navigation asked for, made once its file is ready.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      handleEnterEditMode();
+    }
+  }, [
+    startEditingRequested,
+    location,
+    navigate,
+    routePath,
+    openFilePath,
+    openFileContent,
+    Renderer,
+    currentBranch,
+    access.canWrite,
+    handleEnterEditMode,
+  ]);
+
   const handleExitEditMode = useCallback(() => {
     if (!editMode) return;
     // Flip to View mode SYNCHRONOUSLY. The actual save+commit+push that
@@ -803,6 +859,20 @@ export function FileViewer() {
     el.addEventListener('scroll', onScroll, { capture: true, passive: true });
     return () => el.removeEventListener('scroll', onScroll, { capture: true } as EventListenerOptions);
   }, [editMode, recordActivity]);
+
+  // A page opened for writing (the `startEditing` request above) gets the
+  // caret at its END — under the title it was created with — rather than
+  // where a freshly focused textarea puts it, in front of the `#`. Only for
+  // that request: Edit on an existing page by hand leaves the caret alone,
+  // since jumping to the end of a long document would scroll the reader away.
+  useEffect(() => {
+    if (!editMode || !openFilePath || caretToEndForRef.current !== openFilePath) return;
+    caretToEndForRef.current = null;
+    const textarea = editorContainerRef.current?.querySelector('textarea');
+    if (!textarea) return;
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  }, [editMode, openFilePath]);
 
   // No-op save when previewing pending content — don't let edits go through during review
   const handlePendingSave = useCallback(async () => {}, []);

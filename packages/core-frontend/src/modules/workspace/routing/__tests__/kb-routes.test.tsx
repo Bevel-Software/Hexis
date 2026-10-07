@@ -111,6 +111,16 @@ describe('useFileNav.openFile', () => {
     );
   });
 
+  it('asks the viewer for the editor through router state, never through the URL', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    result.current.openWorkspacePath('knowledge-base/KnowledgeBase/Untitled.md', { edit: true });
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/knowledge-base/KnowledgeBase/Untitled.md',
+      { state: { startEditing: true } },
+    );
+  });
+
   it('opens a tree path verbatim even when a folder inside it is named like the kbDirName', () => {
     navigateMock.mockClear();
     const { result } = renderNav('alice/draft');

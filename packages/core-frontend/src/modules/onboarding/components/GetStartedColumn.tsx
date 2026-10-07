@@ -25,12 +25,20 @@ import { WELCOME_PATH } from '../paths';
 /** The starter page every new knowledge base is seeded with (`kb-template/`). */
 const GUIDE_FILE = 'How to get started.md';
 
+/**
+ * What "New page" writes: a title, so the page is a page from its first save,
+ * and a blank line under it for the cursor to land on.
+ */
+const NEW_PAGE_CONTENT = '# Untitled\n\n';
+
 interface SetupItem {
   id: string;
   title: string;
   done: boolean;
   hint?: string;
-  action?: { label: string; onClick(): void; primary?: boolean };
+  action?: { label: string; onClick(): void; primary?: boolean; disabled?: boolean };
+  /** Why the step's action just failed, said on the step itself. */
+  error?: string | null;
 }
 
 /**
@@ -63,6 +71,17 @@ function findEntry(tree: FileTreeEntry | null, path: string): FileTreeEntry | nu
     }
   }
   return null;
+}
+
+/**
+ * `Untitled.md` in `folder`, or the first `Untitled N.md` the tree does not
+ * already hold — a second click makes a second page, never overwrites the
+ * first one.
+ */
+function untitledPagePath(tree: FileTreeEntry | null, folder: string): string {
+  let path = `${folder}/Untitled.md`;
+  for (let n = 2; findEntry(tree, path); n++) path = `${folder}/Untitled ${n}.md`;
+  return path;
 }
 
 /** A plugin for a team, not somebody's personal shelf. */
@@ -152,7 +171,7 @@ export function GetStartedColumn() {
   const onboarding = useOnboarding();
   const checklist = useSetupChecklist();
   const { isAdmin, isAdminLoading = false } = useAdmin();
-  const { kbDirName, openFilePath } = useWorkspace();
+  const { kbDirName, openFilePath, createFile } = useWorkspace();
   const { tree } = useMergedWorkspaceTree();
   const { openWorkspacePath } = useFileNav();
   const invite = useInviteDialog();
@@ -165,6 +184,31 @@ export function GetStartedColumn() {
   const knowledgeRoot = kbDirName ? `${kbDirName}/${KNOWLEDGE_BASE_DIR}` : null;
   const guidePath = knowledgeRoot ? `${knowledgeRoot}/${GUIDE_FILE}` : null;
   const guideExists = guidePath !== null && findEntry(tree, guidePath) !== null;
+
+  /**
+   * "New page": create a Markdown page in the Knowledge folder and open it
+   * already in the editor. The failure is kept here and shown on the step
+   * because nothing else would say it — toasts only speak inside the
+   * Library, and a refusal (a protected branch's write gate) is exactly what
+   * the person needs to read.
+   */
+  const [newPage, setNewPage] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
+  const createFirstPage = async () => {
+    if (!knowledgeRoot || newPage.busy) return;
+    const path = untitledPagePath(tree, knowledgeRoot);
+    setNewPage({ busy: true, error: null });
+    try {
+      await createFile(path, NEW_PAGE_CONTENT);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setNewPage({ busy: false, error: `Couldn’t create the page: ${msg}` });
+      return;
+    }
+    setNewPage({ busy: false, error: null });
+    // The step ticks itself from the refreshed tree (any page but the guide
+    // counts); `edit` opens the page with the cursor in it.
+    openWorkspacePath(path, { edit: true });
+  };
 
   // Opening the guide by any route counts — the tree, a link, this column.
   const { readGuide, markGuideRead } = checklist;
@@ -206,7 +250,15 @@ export function GetStartedColumn() {
     id: 'page',
     title: 'Write your first page',
     done: knowledgeRoot !== null && guidePath !== null && hasOwnContent(findEntry(tree, knowledgeRoot), guidePath),
-    hint: 'Use New file on the Knowledge folder, or drop files into the tree.',
+    hint: 'Start one here, or drop files into the file tree.',
+    action: knowledgeRoot
+      ? {
+          label: newPage.busy ? 'Creating…' : 'New page',
+          onClick: () => void createFirstPage(),
+          disabled: newPage.busy,
+        }
+      : undefined,
+    error: newPage.error,
   });
   if (isAdmin) {
     items.push({
@@ -294,9 +346,15 @@ export function GetStartedColumn() {
                       size="sm"
                       variant={item.action.primary ? 'primary' : 'outline'}
                       onClick={item.action.onClick}
+                      disabled={item.action.disabled}
                     >
                       {item.action.label}
                     </Button>
+                  )}
+                  {item.error && (
+                    <span role="alert" className="text-danger">
+                      {item.error}
+                    </span>
                   )}
                 </div>
               )}
