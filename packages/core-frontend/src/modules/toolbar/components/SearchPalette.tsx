@@ -42,6 +42,15 @@ import { useSetupChecklist } from '../../onboarding/state/onboarding';
 /** Rows per group. Past this the query is too short to be useful, not the list too long. */
 const GROUP_LIMIT = 8;
 
+/**
+ * Commands get a little more room: the settings alone are nine rows for an
+ * admin, and "settings" should list them all rather than drop one.
+ */
+const ACTION_LIMIT = 12;
+
+/** No row highlighted — what an empty query opens on (see `activeIndex`). */
+const NO_ROW = -1;
+
 /** The box's own words, and the input's (which ends on an ellipsis: it is waiting for you). */
 const TRIGGER_LABEL = 'Search or run a command';
 const PLACEHOLDER = 'Search or run a command…';
@@ -308,7 +317,13 @@ function SearchPanel({
   const { kbDirName } = useWorkspace();
   const { tree, suggestionOnlyPaths } = useMergedWorkspaceTree();
   const [query, setQuery] = useState('');
-  const [activeIndex, setActiveIndex] = useState(0);
+  /**
+   * The highlighted row. An EMPTY query highlights nothing until ↑/↓ or the
+   * pointer picks a row: its first row is a suggested command (New page), and
+   * Ctrl+K then Enter must never make a page nobody asked for. Once something
+   * is typed, the best match is highlighted and Enter takes it.
+   */
+  const [activeIndex, setActiveIndex] = useState(NO_ROW);
   const listboxId = useId();
   const optionId = (key: string) => `${listboxId}-${key}`;
 
@@ -329,7 +344,7 @@ function SearchPanel({
   // query, every offered command ranked by its label and keywords.
   const actionHits = useMemo(
     () =>
-      (query.trim() ? rankByNames(actions, query, actionNames, GROUP_LIMIT) : suggestedActions(actions, ctx)).map(
+      (query.trim() ? rankByNames(actions, query, actionNames, ACTION_LIMIT) : suggestedActions(actions, ctx)).map(
         actionRow,
       ),
     [actions, ctx, query],
@@ -339,7 +354,7 @@ function SearchPanel({
   const flat = useMemo(() => [...actionHits, ...pageHits, ...itemHits], [actionHits, pageHits, itemHits]);
   // Clamped rather than reset when the rows change under it: the catalog can
   // land while the reader is already arrowing through the pages.
-  const active = flat.length === 0 ? -1 : Math.min(activeIndex, flat.length - 1);
+  const active = flat.length === 0 || activeIndex === NO_ROW ? NO_ROW : Math.min(activeIndex, flat.length - 1);
   const activeKey = active >= 0 ? flat[active].key : null;
 
   useEffect(() => {
@@ -366,7 +381,10 @@ function SearchPanel({
         break;
       case 'ArrowUp':
         e.preventDefault();
-        if (flat.length > 0) setActiveIndex((active - 1 + flat.length) % flat.length);
+        // From no row at all, ↑ starts at the bottom, as ↓ starts at the top.
+        if (flat.length > 0) {
+          setActiveIndex(active === NO_ROW ? flat.length - 1 : (active - 1 + flat.length) % flat.length);
+        }
         break;
       case 'Enter':
         e.preventDefault();
@@ -483,7 +501,7 @@ function SearchPanel({
         value={query}
         onChange={(e) => {
           setQuery(e.target.value);
-          setActiveIndex(0);
+          setActiveIndex(e.target.value.trim() ? 0 : NO_ROW);
         }}
         onKeyDown={onKeyDown}
         autoComplete="off"

@@ -331,8 +331,44 @@ describe('SearchPalette: commands', () => {
       'Connect your agent',
       'Go to Skills & ToolsGS (shortcut G then S)',
     ]);
-    // Enter runs the first row, which is now a command.
+    // Nothing is highlighted until a row is picked (see the next test).
+    expect(input()).not.toHaveAttribute('aria-activedescendant');
+  });
+
+  it('runs nothing on Enter with an empty query, until a row is picked with the arrows', async () => {
+    const user = userEvent.setup();
+    renderPalette();
+    await user.click(trigger());
+    await user.keyboard('{Enter}');
+    expect(createPage).not.toHaveBeenCalled();
+    expect(input()).toHaveFocus();
+    expect(options().some((o) => o.getAttribute('aria-selected') === 'true')).toBe(false);
+
+    // ↑ from no row starts at the bottom; ↓ from no row at the top.
+    await user.keyboard('{ArrowUp}');
+    expect(options()[options().length - 1]).toHaveAttribute('aria-selected', 'true');
+    await user.keyboard('{Escape}');
+    await user.click(trigger());
+    await user.keyboard('{ArrowDown}');
     expect(input()).toHaveAttribute('aria-activedescendant', options()[0].id);
+    await user.keyboard('{Enter}');
+    expect(createPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('highlights a hovered row with an empty query, and takes the best match again once something is typed', async () => {
+    const user = userEvent.setup();
+    renderPalette();
+    await user.click(trigger());
+    await user.hover(screen.getByRole('option', { name: 'Invite people' }));
+    expect(screen.getByRole('option', { name: 'Invite people' })).toHaveAttribute('aria-selected', 'true');
+
+    await user.type(input(), 'invite');
+    expect(input()).toHaveAttribute('aria-activedescendant', options()[0].id);
+    // Clearing the query clears the highlight with it.
+    await user.clear(input());
+    expect(input()).not.toHaveAttribute('aria-activedescendant');
+    await user.keyboard('{Enter}');
+    expect(inviteOpen).not.toHaveBeenCalled();
   });
 
   it('suggests no agent connection once that onboarding is over', async () => {
@@ -455,6 +491,10 @@ describe('SearchPalette: commands', () => {
 
     renderPalette({ admin: true, adminMenuItems });
     await user.click(trigger());
+    // Six default rows, five admin rows: past the eight a page group gets.
+    await user.type(input(), 'settings');
+    expect(groupRows('Actions')).toHaveLength(11);
+    await user.clear(input());
     await user.type(input(), 'settings: stub');
     expect(groupRows('Actions')).toEqual(['Settings: Stub page', 'Settings: Stub admin page']);
     await user.clear(input());
