@@ -5,6 +5,7 @@ import type { Database } from '../../../database/connection.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { GitService } from '../git.service.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
+import { WorkflowValidationError } from '../../../../shared/domain-errors.js';
 
 /**
  * What a change-request LIST is allowed to cost.
@@ -47,8 +48,13 @@ function harness(rows = [row(1, 'suggestions/a/knowledge'), row(2, 'suggestions/
       }),
     }),
   } as unknown as Database;
-  const changedPathsForPr = vi.fn(async () => ['Shared/one.pdf']);
-  const git = { changedPathsForPr } as unknown as GitService;
+  // The summary builder asks for the flat paths AND the rename-aware pairs in
+  // one call, so this is the method the per-request cost now lands on.
+  const changedPathsForPr = vi.fn(async () => ({
+    paths: ['Shared/one.pdf'],
+    pairs: [{ path: 'Shared/one.pdf' }],
+  }));
+  const git = { changedPathsAndPairsForPr: changedPathsForPr } as unknown as GitService;
   const ensureRemotesFetched = vi.fn(async () => undefined);
   const workspace = {
     findAnyWorkspaceId: async () => 'ws-main',
@@ -117,5 +123,69 @@ describe('the change-request list refreshes the clone once, not once per request
     const list = await svc.listOpenPrs({ fresh: true });
     expect(list).toHaveLength(2);
     expect(changedPathsForPr).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * What a list of APPLIED requests is allowed to cost. Each is read from its
+ * merge commit, which asks git four times per row and never the network. A
+ * merge commit cannot change, so the second list must not ask git again.
+ */
+describe('the list of applied requests reads each merge commit once', () => {
+  const applied = (number: number) => ({
+    ...row(number, `suggestions/${number}/knowledge`),
+    state: 'merged',
+    mergedSha: `${number}`.padStart(40, 'a'),
+    closedAt: new Date('2026-09-19T00:00:00Z'),
+  });
+
+  function appliedHarness(rows: ReturnType<typeof applied>[]) {
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: () => ({ orderBy: async () => rows, limit: async () => rows }),
+        }),
+      }),
+    } as unknown as Database;
+    const ofAppliedChange = vi.fn(async (_w: string, ref: { number: number }) => ({
+      paths: [`Shared/${ref.number}.md`],
+      pairs: [{ path: `Shared/${ref.number}.md` }],
+    }));
+    const git = { changedPathsAndPairsOfAppliedChange: ofAppliedChange } as unknown as GitService;
+    const ensureRemotesFetched = vi.fn(async () => undefined);
+    const workspace = {
+      findAnyWorkspaceId: async () => 'ws-main',
+      ensureRemotesFetched,
+    } as unknown as WorkspaceService;
+    const access = {} as unknown as IAccessControl;
+    return { svc: new PullRequestService(db, workspace, access, git), ofAppliedChange, ensureRemotesFetched };
+  }
+
+  it('asks git once per request, however often the list is read, and refreshes the clone once per list — never per row', async () => {
+    const { svc, ofAppliedChange, ensureRemotesFetched } = appliedHarness([applied(1), applied(2), applied(3)]);
+
+    const first = await svc.listPrsByState(['merged']);
+    const second = await svc.listPrsByState(['merged']);
+
+    expect(first.map((s) => s.touchedNodePaths)).toEqual([['Shared/1.md'], ['Shared/2.md'], ['Shared/3.md']]);
+    expect(second).toEqual(first);
+    expect(ofAppliedChange).toHaveBeenCalledTimes(3);
+    // One refresh per LIST (TTL-cached underneath), not one per row: a merge
+    // commit cannot change, but a clone that has not fetched since the merge
+    // does not hold it, and would read every applied request as author-only.
+    expect(ensureRemotesFetched).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks again for a merge commit the clone did not hold the first time', async () => {
+    const { svc, ofAppliedChange } = appliedHarness([applied(1)]);
+    ofAppliedChange.mockRejectedValueOnce(new WorkflowValidationError('commit is not in this clone'));
+
+    const before = await svc.listPrsByState(['merged']);
+    const after = await svc.listPrsByState(['merged']);
+
+    // Fail-closed while the commit is missing, answered once it is there.
+    expect(before[0].touchedNodePaths).toEqual([]);
+    expect(after[0].touchedNodePaths).toEqual(['Shared/1.md']);
+    expect(ofAppliedChange).toHaveBeenCalledTimes(2);
   });
 });

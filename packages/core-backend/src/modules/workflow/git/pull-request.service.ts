@@ -1,8 +1,10 @@
-import { desc, eq } from 'drizzle-orm';
+import { desc, eq, inArray } from 'drizzle-orm';
 import { logger } from '../../../shared/logging.js';
 
 const log = logger('cr');
 import type {
+  AppliedChangeRef,
+  ChangedPathPair,
   FileApprovalState,
   IPullRequestService,
   PrReviewComment,
@@ -18,14 +20,126 @@ import { changeRequests } from '../../database/schema.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
-import { WorkflowValidationError } from '../../../shared/domain-errors.js';
+import { AppliedChangeMismatchError, WorkflowValidationError } from '../../../shared/domain-errors.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import { changeRequestLink, changeRequestLinkBase } from './change-request-link.js';
 
+/**
+ * The latest moment a change-request row records — its close time when it has
+ * one, else its creation time, with `updated_at` folded in for the day
+ * something writes it. Deliberately derived from the ROW alone: a time taken
+ * from the newest comment or approval would make the same request report
+ * different "last changed" moments to a list (which reads no comments) and a
+ * detail (which does).
+ */
+function latestRowMoment(row: {
+  createdAt: Date;
+  updatedAt: Date | null;
+  closedAt: Date | null;
+}): string {
+  const times = [row.createdAt, row.updatedAt, row.closedAt]
+    .filter((d): d is Date => d instanceof Date)
+    .map((d) => d.getTime());
+  return new Date(Math.max(...times)).toISOString();
+}
+
 const LIST_PR_CACHE_TTL_MS = 30_000;
+/**
+ * How many applied requests' file lists are remembered at once. Each is a
+ * short path list, so this is about a deployment that applies requests for
+ * years never growing the map without bound. Past it, what is remembered
+ * stays and new answers are not kept — see `touchedPathsFor` for why nothing
+ * is evicted.
+ */
+const MAX_REMEMBERED_APPLIED_CHANGES = 20_000;
+/** How many mismatched applied rows to remember — see `touchedPathsFor`. */
+const MAX_MISMATCHED_APPLIED_CHANGES = 5_000;
+/** How many rows a listing reads from git at once. */
+const SUMMARY_CONCURRENCY = 8;
+
+/** `fn` over `items`, at most `limit` in flight, results in order. */
+async function mapWithLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await fn(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  return results;
+}
 const DETAIL_CACHE_TTL_MS = 30_000;
 
 type ChangeRequestRow = typeof changeRequests.$inferSelect;
+
+/**
+ * Where a change request's files are read from.
+ *
+ *   - `branches` — the source/target pair, as a live proposal is read.
+ *   - `commit`   — the merge commit the row records, as an applied one is.
+ *   - `none`     — nothing: there is no durable record of what this request
+ *                 proposed, so it has no file list to show.
+ */
+export type ChangeSource =
+  | { kind: 'branches' }
+  | { kind: 'commit'; applied: AppliedChangeRef }
+  | { kind: 'none' };
+
+/**
+ * Which diff a change-request row is read from — asked ONCE, here, by both the
+ * list (`touchedPathsFor`) and the by-number detail (`getPrDetail`). The two
+ * surfaces answered this question separately before, and so answered it
+ * differently: the list gave a declined request no paths while the detail
+ * resolved its branch pair, which left `list_change_requests` and the four
+ * by-number tools contradicting each other about the same request for the same
+ * caller. One function, one answer.
+ *
+ * An OPEN request is its two branch tips, which is what a proposal IS.
+ *
+ * An APPLIED one is the merge commit its row records: the branch is retired, and
+ * the commit is local, immutable, and holds exactly what landed.
+ *
+ * A DECLINED one is read from NOTHING, and that is not a degradation:
+ *
+ *   - The row records no sha, so nothing durable says what the request
+ *     proposed. Declining retires the source branch as merging does
+ *     (`deleteChangeRequest` ends in `retireMergedSourceBranch`) — unless
+ *     another open request still needs that branch, which keeps it alive and
+ *     moving. Where the branch pair still resolves it would answer with what
+ *     that branch differs by NOW, work committed since for the request that
+ *     kept it included; reading the declined request would then present later
+ *     work as the proposal that was turned down.
+ *   - An empty file set proves no read access downstream, so a declined request
+ *     is readable by its author alone — the owner's criterion of 2026-10-02.
+ *   - And it asks git nothing, so neither a listing nor a by-number read of a
+ *     declined request costs a network round trip.
+ *
+ * A merged row that records no merge commit (or whose commit this clone has not
+ * fetched) lands on `none` too, and fails closed the same way until it can be
+ * read in full.
+ */
+export function changeSourceFor(row: {
+  number: number;
+  state: string;
+  /** The stored title, handed along so a merge commit in the old message format is still recognised. */
+  title?: string;
+  mergedSha?: string | null;
+}): ChangeSource {
+  if (row.state === 'open') return { kind: 'branches' };
+  // The NUMBER travels with the sha, because reading the commit's own change is
+  // only sound if the commit is this request's merge commit — and the number is
+  // what proves it (the subject ends with `(#<number>)`). A row whose
+  // `merged_sha` was written by a merge that made no commit points at the target
+  // tip, which is usually another request's merge commit; the git layer rejects
+  // that rather than answering with its files. See `merge-commit.ts`.
+  if (row.state === 'merged' && row.mergedSha) {
+    return { kind: 'commit', applied: { number: row.number, mergeSha: row.mergedSha, title: row.title } };
+  }
+  return { kind: 'none' };
+}
 
 /**
  * The slice of the review-workflow service this module needs to compose detail
@@ -91,6 +205,14 @@ export class PullRequestService implements IPullRequestService {
    */
   private routingPaths = new WeakMap<PullRequestSummary, string[]>();
   /**
+   * The files an APPLIED request landed, per clone and merge commit. A merge
+   * commit is immutable, so its answer is good for the life of the process;
+   * nothing invalidates this, and nothing needs to. See {@link touchedPathsFor}.
+   */
+  private readonly appliedChanges = new Map<string, { paths: string[]; pairs: ChangedPathPair[] }>();
+  /** Applied rows whose recorded commit is not their own, by the same key — never asked again. */
+  private readonly mismatchedAppliedChanges = new Set<string>();
+  /**
    * Per-CR detail cache, keyed by `${workspaceId ?? 'global'}:${viewer}:${number}`.
    * The payload includes per-file approvals resolved against the caller's
    * workspace KB, so it can't be shared across workspaces or viewers. The stored
@@ -145,7 +267,11 @@ export class PullRequestService implements IPullRequestService {
     return this.workspaceService.findAnyWorkspaceId();
   }
 
-  private rowToSummary(row: ChangeRequestRow, touchedNodePaths: string[]): PullRequestSummary {
+  private rowToSummary(
+    row: ChangeRequestRow,
+    touchedNodePaths: string[],
+    touchedNodeFiles: ChangedPathPair[],
+  ): PullRequestSummary {
     return {
       number: row.number,
       title: row.title,
@@ -160,7 +286,14 @@ export class PullRequestService implements IPullRequestService {
       base: row.targetBranch,
       state: row.state as PullRequestState,
       createdAt: row.createdAt.toISOString(),
+      // The latest moment the ROW records. Nothing stamps `updated_at` on a
+      // change request today, so in practice this is the close time of a
+      // closed request and the creation time of an open one — the honest
+      // answer from the row, with the column folded in for the day something
+      // does write it.
+      updatedAt: latestRowMoment(row),
       touchedNodePaths,
+      touchedNodeFiles,
       // Provider reviews are gone; the real approval state lives in the detail
       // view (per-file, DB-backed). The summary badge is derived there.
       review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
@@ -183,25 +316,86 @@ export class PullRequestService implements IPullRequestService {
   /**
    * Cheap touched-paths for a CR row (empty when no workspace exists yet),
    * placeholders included — see {@link summaryOf} for what a summary shows.
+   *
+   * WHICH DIFF is {@link changeSourceFor}'s answer — the same one `getPrDetail`
+   * takes, so a list and a by-number read never disagree about which files a
+   * request has. No state reaches the network per request: an open row is
+   * diffed from two branch tips a single whole-clone refresh has already brought
+   * up to date (`fetch: false`), an applied one from a local immutable commit,
+   * and a declined one from nothing at all.
+   *
+   * The merge commit also undid the flood finding 1 of Razvan's review named:
+   * `publishedPrCommits` answers null for a retired branch, which sent
+   * `changedPathsAndPairsForPr` to `fetch` two refs — one of them gone — once PER
+   * REQUEST and then logged a warning for each, so a list of a few hundred
+   * applied requests opened a few hundred concurrent fetches to answer nothing.
    */
   private async touchedPathsFor(
     row: ChangeRequestRow,
     workspaceId: string | null,
     opts: { fetch?: boolean } = {},
-  ): Promise<string[]> {
-    if (!workspaceId) return [];
+  ): Promise<{ paths: string[]; pairs: ChangedPathPair[] }> {
+    const empty = { paths: [] as string[], pairs: [] as ChangedPathPair[] };
+    if (!workspaceId) return empty;
+    // Best-effort, but logged: an empty result silently hides a CR from the
+    // owner-routing match in `listPrsForOwnerEmail`, so a swallowed failure
+    // shouldn't be invisible.
+    const degrade = (what: string) => (err: unknown) => {
+      const where = `#${row.number} (${row.sourceBranch} → ${row.targetBranch}) in ${workspaceId}`;
+      // A clone that simply does not hold the merge commit yet is not a failure
+      // to shout about — it is this row's turn to be fetched, and the next list
+      // read answers it. Warning per request on that would be the log flood the
+      // network flood came with.
+      if (err instanceof WorkflowValidationError) {
+        log.debug(`${what} could not resolve ${where}; answering no touched paths:`, { err });
+      } else {
+        log.warn(`${what} failed for ${where}:`, { err });
+      }
+      return empty;
+    };
+    const source = changeSourceFor(row);
+    if (source.kind === 'none') return empty;
+    if (source.kind === 'commit') {
+      // Remembered once read: a merge commit never changes, so neither does
+      // its diff, and a list of a few hundred applied requests would otherwise
+      // run four git processes per row on every call. Only an ANSWER is kept.
+      // A commit this clone does not hold yet rejects, and that is this row's
+      // turn to be fetched, so the next read asks again.
+      const key = `${workspaceId}\u0000${source.applied.mergeSha}\u0000${source.applied.number}`;
+      const known = this.appliedChanges.get(key);
+      if (known) return known;
+      // A row whose commit the clone holds but which is NOT this request's
+      // own (a `merged_sha` written before merges recorded their own commit)
+      // never becomes it, and is remembered as such, bounded in count:
+      // without this, every list re-ran its git calls for every such row,
+      // serialized under the workspace mutex, on every poll, and a deployment
+      // with hundreds of pre-fix rows paid seconds of git per poll
+      // indefinitely. A commit the clone does not HOLD is not remembered —
+      // the next fetch may bring it, and the next list asks again.
+      if (this.mismatchedAppliedChanges.has(key)) return empty;
+      return this.gitService
+        .changedPathsAndPairsOfAppliedChange(workspaceId, source.applied)
+        .then((answer) => {
+          // Full: what is remembered stays, and this answer is simply not
+          // kept. A list scans every applied row in one pass, so clearing or
+          // evicting here would throw out entries the SAME pass is about to
+          // ask for again, and a deployment past the cap would recompute
+          // every row on every list. Kept, the rows past the cap are the only
+          // ones that cost git anything.
+          if (this.appliedChanges.size < MAX_REMEMBERED_APPLIED_CHANGES) this.appliedChanges.set(key, answer);
+          return answer;
+        })
+        .catch((err: unknown) => {
+          if (err instanceof AppliedChangeMismatchError) {
+            if (this.mismatchedAppliedChanges.size >= MAX_MISMATCHED_APPLIED_CHANGES) this.mismatchedAppliedChanges.clear();
+            this.mismatchedAppliedChanges.add(key);
+          }
+          return degrade('changedPathsAndPairsOfAppliedChange')(err);
+        });
+    }
     return this.gitService
-      .changedPathsForPr(workspaceId, row.targetBranch, row.sourceBranch, opts)
-      .catch((err) => {
-        // Best-effort, but log it: an empty result silently hides a CR from the
-        // owner-routing match in `listPrsForOwnerEmail`, so a swallowed failure
-        // shouldn't be invisible.
-        log.warn(
-          `changedPathsForPr failed for #${row.number} (${row.sourceBranch} → ${row.targetBranch}) in ${workspaceId}:`,
-          { err },
-        );
-        return [] as string[];
-      });
+      .changedPathsAndPairsForPr(workspaceId, row.targetBranch, row.sourceBranch, opts)
+      .catch(degrade('changedPathsAndPairsForPr'));
   }
 
   /**
@@ -216,8 +410,14 @@ export class PullRequestService implements IPullRequestService {
     opts: { fetch?: boolean } = {},
   ): Promise<PullRequestSummary> {
     const touched = await this.touchedPathsFor(row, workspaceId, opts);
-    const summary = this.rowToSummary(row, touched.filter((p) => !isFolderPlaceholder(p)));
-    this.routingPaths.set(summary, touched);
+    const summary = this.rowToSummary(
+      row,
+      touched.paths.filter((p) => !isFolderPlaceholder(p)),
+      // Already placeholder-free and roles.yaml-free (see `changedPathPairs`),
+      // so the pairs need no filtering of their own here.
+      touched.pairs,
+    );
+    this.routingPaths.set(summary, touched.paths);
     return summary;
   }
 
@@ -272,6 +472,50 @@ export class PullRequestService implements IPullRequestService {
       this.cachedList.set(cacheKey, { at: now, value: summaries });
     }
     return summaries;
+  }
+
+  /**
+   * Every request in `states`, newest first. `['open']` is delegated so the
+   * list the app polls keeps its cache; any other set is read straight from
+   * the table, because a closed-request read is rare and a second cache keyed
+   * on a state set would mostly hold misses.
+   *
+   * Touched paths are best-effort exactly as on the open list, and no row costs
+   * a network call of its own: a MERGED row is diffed from the merge commit it
+   * records (local and immutable), and a DECLINED one is not diffed at all —
+   * see {@link touchedPathsFor}. A caller that gates on those paths must still
+   * treat an empty set as "cannot prove", never as "nothing to protect".
+   */
+  async listPrsByState(
+    states: PullRequestState[],
+    opts: { fresh?: boolean; workspaceId?: string } = {},
+  ): Promise<PullRequestSummary[]> {
+    const wanted = [...new Set(states)];
+    if (wanted.length === 0) return [];
+    if (wanted.length === 1 && wanted[0] === 'open') return this.listOpenPrs(opts);
+    const workspaceId = await this.resolveWorkspaceId(opts.workspaceId);
+    const rows = await this.db
+      .select()
+      .from(changeRequests)
+      .where(inArray(changeRequests.state, wanted))
+      .orderBy(desc(changeRequests.createdAt));
+    // ONE fetch for the whole list, for the reason spelled out on listOpenPrs —
+    // never one per row — and only when a row in scope reads from git at all.
+    // An open request is diffed from two branch refs, which are as current as
+    // the last fetch; a MERGED one from its merge commit, which cannot change
+    // but which a clone that has not fetched since the merge does not hold —
+    // without this fetch such a clone would read every applied request as
+    // author-only for good. A declined one reads from nothing, so a listing
+    // of declined requests alone reaches the network not once.
+    if (workspaceId && rows.some((row) => row.state === 'open' || row.state === 'merged')) {
+      await this.workspaceService
+        .ensureRemotesFetched(workspaceId, { force: opts.fresh === true })
+        .catch(() => undefined);
+    }
+    // Bounded fan-out: an applied row's read takes the workspace mutex for
+    // its git calls, so a hundred rows launched at once would only queue on
+    // it while holding a hundred pending promises.
+    return mapWithLimit(rows, SUMMARY_CONCURRENCY, (row) => this.summaryOf(row, workspaceId, { fetch: false }));
   }
 
   async listPrsAuthoredBy(
@@ -448,42 +692,114 @@ export class PullRequestService implements IPullRequestService {
     };
     /** Did the target change, since the fork point, a file this request changes? */
     let targetChangedShared = false;
-    if (workspaceId) {
-      const shas = await this.gitService.resolvePrShas(
-        workspaceId,
-        row.targetBranch,
-        row.sourceBranch,
+    // The SAME routing the list takes, from the same function, so the two
+    // surfaces cannot disagree about which files a request has — see
+    // {@link changeSourceFor} for why each state reads from what it does.
+    const source = workspaceId ? changeSourceFor(row) : ({ kind: 'none' } as ChangeSource);
+    try {
+      if (workspaceId && source.kind === 'commit') {
+        // An APPLIED request is read from its merge commit, not from its
+        // branches: the source branch is retired, so there is nothing to resolve
+        // and nothing to fetch. The commit's first parent is the target as it
+        // stood before the merge and its second is the source tip that landed,
+        // so the file list is exactly what was applied, and the `headSha` the
+        // approvals are judged stale against is the head they were given on.
+        //
+        // Before the 2026-10-02 decision this fell into the catch below and
+        // answered no files — which, since an empty file set proves no read
+        // access, made every applied request readable by its author alone.
+        // Reading back what happened is what the ticket exists for.
+        //
+        // One refresh first: the commit cannot change, but a clone that has
+        // not fetched since the merge does not hold it yet, and reading it as
+        // missing would make the request author-only on that clone for good.
+        await this.workspaceService
+          .ensureRemotesFetched(workspaceId, { force: opts.fresh === true })
+          .catch(() => undefined);
+        const ends = await this.gitService.appliedChangeShas(workspaceId, source.applied);
+        baseSha = ends.baseSha;
+        headSha = ends.headSha;
+        files = await this.gitService.changedFilesOfAppliedChange(workspaceId, source.applied, {
+          ...(opts.patches === false ? { patchCap: 0 } : {}),
+        });
+        // `forkPoint` and `targetChangedShared` stay at their defaults. "Is this
+        // behind its target, and does the divergence reach its files" is a
+        // question about a proposal that could still be updated; an applied one
+        // has no answer to give and reports none (`behind` and `needsUpdate` are
+        // gated on `state === 'open'` downstream anyway).
+      } else if (workspaceId && source.kind === 'branches') {
+        const shas = await this.gitService.resolvePrShas(
+          workspaceId,
+          row.targetBranch,
+          row.sourceBranch,
+        );
+        baseSha = shas.baseSha;
+        headSha = shas.headSha;
+        // The file list is pinned to the SHAs just resolved (`at`), so it and
+        // the `headSha` approvals pin against describe the same commits even if
+        // another fetch lands on this workspace in between, and the second
+        // fetch of the same two refs is gone. `patches: false` is for the
+        // internal detail an approve / withdraw / revert fetches to pin its
+        // work: those never read `files[].patch`, and generating it cost one git
+        // subprocess per changed file per click. The detail served to clients
+        // keeps its patches, so the published payload is unchanged.
+        files = await this.gitService.changedFilesForPr(
+          workspaceId,
+          row.targetBranch,
+          row.sourceBranch,
+          { at: { baseSha, headSha }, ...(opts.patches === false ? { patchCap: 0 } : {}) },
+        );
+        // Pinned to the same two commits as the file list, so "needs updating"
+        // and the diff it qualifies can never describe different heads.
+        forkPoint = await this.gitService.forkPointForPr(workspaceId, { baseSha, headSha });
+        // Only a target that moved in a file THIS request also changes makes the
+        // proposal's diff describe text that has moved. One extra
+        // `diff --name-only` (and only when the branches have diverged at all)
+        // buys the difference between opening instantly and paying for a merge,
+        // a push and a second detail read.
+        targetChangedShared = await this.targetTouchesRequestFiles(
+          workspaceId,
+          forkPoint,
+          baseSha,
+          files,
+        );
+      }
+      // `source.kind === 'none'` — a DECLINED request, a merged row recording no
+      // merge commit, or no workspace at all — asks git NOTHING and is answered
+      // from the ROW ALONE: no shas, no files. The row's STATE decides that, not
+      // whether git happens to fail, which is the fix for the contradiction
+      // Local Testing found: declining does not retire the source branch (only
+      // merging deletes it), so the branch pair below resolved a declined
+      // request perfectly well and published its files to anyone who could read
+      // one of them — while the list, which gives a declined row no paths at
+      // all, hid the same request from the same caller.
+    } catch (err) {
+      // What reaches this is a MERGED request whose merge commit this clone
+      // cannot resolve — not fetched yet, or a sha the row records that the
+      // object store does not hold. A DECLINED request never gets here at all
+      // any more: it asks git nothing (see above), so it cannot fail.
+      //
+      // Everything the ROW records — title, body, state, author, times — is
+      // still true, and this is the degradation the no-workspace case above
+      // already takes: no shas and no files, rather than no answer at all. Since
+      // an empty file set proves no read access, such a row fails CLOSED to its
+      // author, and the next read, once the commit is in the clone, answers in
+      // full.
+      //
+      // An OPEN request still fails loudly. There, an unresolvable branch means
+      // a branch not yet published or a clone not yet caught up, and presenting
+      // a live proposal as one that changes nothing would tell a reviewer the
+      // opposite of the truth.
+      if (!(err instanceof WorkflowValidationError) || row.state === 'open') throw err;
+      log.warn(
+        `change request #${prNumber} is ${row.state} and can no longer be diffed; answering from its row alone:`,
+        { err },
       );
-      baseSha = shas.baseSha;
-      headSha = shas.headSha;
-      // The file list is pinned to the SHAs just resolved (`at`), so it and
-      // the `headSha` approvals pin against describe the same commits even if
-      // another fetch lands on this workspace in between, and the second
-      // fetch of the same two refs is gone. `patches: false` is for the
-      // internal detail an approve / withdraw / revert fetches to pin its
-      // work: those never read `files[].patch`, and generating it cost one git
-      // subprocess per changed file per click. The detail served to clients
-      // keeps its patches, so the published payload is unchanged.
-      files = await this.gitService.changedFilesForPr(
-        workspaceId,
-        row.targetBranch,
-        row.sourceBranch,
-        { at: { baseSha, headSha }, ...(opts.patches === false ? { patchCap: 0 } : {}) },
-      );
-      // Pinned to the same two commits as the file list, so "needs updating"
-      // and the diff it qualifies can never describe different heads.
-      forkPoint = await this.gitService.forkPointForPr(workspaceId, { baseSha, headSha });
-      // Only a target that moved in a file THIS request also changes makes the
-      // proposal's diff describe text that has moved. One extra
-      // `diff --name-only` (and only when the branches have diverged at all)
-      // buys the difference between opening instantly and paying for a merge,
-      // a push and a second detail read.
-      targetChangedShared = await this.targetTouchesRequestFiles(
-        workspaceId,
-        forkPoint,
-        baseSha,
-        files,
-      );
+      baseSha = '';
+      headSha = '';
+      files = [];
+      forkPoint = { mergeBaseSha: null, behind: false };
+      targetChangedShared = false;
     }
 
     // Validated cache hit: TTL fresh AND head SHA unchanged since we cached.
@@ -499,7 +815,17 @@ export class PullRequestService implements IPullRequestService {
       return cached.value;
     }
 
-    const summary = this.rowToSummary(row, files.map((f) => f.path));
+    // The detail has the real file list, so its pairs come straight off it —
+    // the same shape the list builds from its own diff, so a reader gating on
+    // `touchedNodeFiles` gets the same verdict from a summary and a detail.
+    const summary = this.rowToSummary(
+      row,
+      files.map((f) => f.path),
+      files.map((f) => ({
+        path: f.path,
+        ...(f.previousPath ? { previousPath: f.previousPath } : {}),
+      })),
+    );
 
     // Comments + approvals come from our own DB via the review-workflow service.
     // The enricher is optional — if it isn't wired yet (startup ordering,

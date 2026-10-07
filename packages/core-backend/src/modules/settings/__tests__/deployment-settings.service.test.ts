@@ -191,8 +191,6 @@ describe('DeploymentSettingsService — KB layout', () => {
       pluginsDir: 'Plugins',
       agentsFile: 'AGENTS.md',
     });
-    // The pointer is on until someone says otherwise.
-    expect(settings.resolveAgentsFileLink()).toBe(true);
   });
 
   /**
@@ -225,9 +223,9 @@ describe('DeploymentSettingsService — KB layout', () => {
   it('ignores the environment for the four layout names', async () => {
     const { db } = makeDb();
     const settings = new DeploymentSettingsService(db, ENC_KEY);
-    await settings.save({ skillsDir: 'skills', pluginsDir: 'plugins', agentsFile: 'HEXIS.md' }, null);
+    await settings.save({ skillsDir: 'skills', pluginsDir: 'plugins' }, null);
     process.env.KB_SKILLS_DIR = 'capabilities';
-    expect(settings.resolveKbLayout()).toMatchObject({ skillsDir: 'skills', agentsFile: 'HEXIS.md' });
+    expect(settings.resolveKbLayout()).toMatchObject({ skillsDir: 'skills' });
     expect(settings.sourceOf('skillsDir')).toBe('stored');
     // Not locked: the field stays editable in the app, and a save of it is
     // accepted rather than refused as 'set by the environment'.
@@ -284,68 +282,41 @@ describe('DeploymentSettingsService — KB layout', () => {
   });
 
   /**
-   * The guide's file name is saved beside the folders and judged with them:
-   * the four must differ, and a name that is not one markdown file is refused
-   * with the rule it broke.
+   * The guide's name was a setting while the guide was written to disk. It is
+   * gone: the setup screen no longer offers it, a save naming it is refused
+   * as unknown, and the guide is read as `AGENTS.md` on every deployment
+   * whatever a deployment saved before.
    */
-  it('refuses a guide name that is not one markdown file of its own', async () => {
-    const { db } = makeDb();
+  it('knows no guide name any more: a save naming one is refused, and the layout always says AGENTS.md', async () => {
+    const { db, rows } = makeDb();
+    // The row a deployment saved while the setting existed is still in its
+    // database. It is loaded like any other row, and changes nothing.
+    rows.push({ key: 'agentsFile', value: 'HEXIS.md', encrypted: false });
     const settings = new DeploymentSettingsService(db, ENC_KEY);
-    for (const bad of ['guides/HEXIS.md', 'HEXIS.txt', 'CLAUDE.md', 'access.md', 'roles.yaml']) {
-      await expect(settings.save({ agentsFile: bad }, null)).rejects.toBeInstanceOf(
-        SettingsValidationError,
-      );
-    }
-    await expect(settings.save({ agentsFile: 'HEXIS.md' }, null)).resolves.toBeTruthy();
-  });
-
-  it('refuses a guide named after a root folder, from either side of the pair', async () => {
-    const { db } = makeDb();
-    const settings = new DeploymentSettingsService(db, ENC_KEY);
-    // The plugins folder already in effect, named by the guide alone.
-    await settings.save({ pluginsDir: 'Guide.md' }, null);
-    await expect(settings.save({ agentsFile: 'guide.md' }, null)).rejects.toBeInstanceOf(
-      SettingsValidationError,
-    );
-    // And the other way round, in one batch.
-    await expect(
-      settings.save({ agentsFile: 'HEXIS.md', skillsDir: 'hexis.md' }, null),
-    ).rejects.toBeInstanceOf(SettingsValidationError);
-  });
-
-  it('marks the guide name and its pointer setting as restart-to-apply', async () => {
-    const { db } = makeDb();
-    const settings = new DeploymentSettingsService(db, ENC_KEY);
-    expect((await settings.save({ agentsFile: 'HEXIS.md' }, null)).restartKeys).toContain('agentsFile');
-    expect((await settings.save({ agentsFileLink: 'false' }, null)).restartKeys).toContain(
-      'agentsFileLink',
-    );
-    expect(settings.resolveAgentsFileLink()).toBe(false);
+    await settings.load();
+    expect(settings.resolveKbLayout().agentsFile).toBe('AGENTS.md');
+    await expect(settings.save({ agentsFile: 'HEXIS.md' }, null)).rejects.toMatchObject({
+      problems: { agentsFile: 'Unknown setting.' },
+    });
+    await expect(settings.save({ agentsFile: 'HEXIS.md' }, null, 'deployment')).rejects.toMatchObject({
+      problems: { agentsFile: 'Unknown setting.' },
+    });
+    expect(settings.resolveKbLayout().agentsFile).toBe('AGENTS.md');
+    expect(settings.describe().map((s) => s.key)).not.toContain('agentsFile');
   });
 
   /**
    * A restart is owed for a CHANGE, and saving what a deployment is already
-   * running on is not one. Both of these settings mean something while unset —
-   * the guide is `AGENTS.md`, the pointer is on — so the first save of that
-   * same answer changes nothing the process would pick up at a restart.
+   * running on is not one. A root name means something while unset — the
+   * default — so the first save of that same answer changes nothing the
+   * process would pick up at a restart.
    */
   it('owes no restart for saving the value an unset setting already meant', async () => {
     const { db } = makeDb();
     const settings = new DeploymentSettingsService(db, ENC_KEY);
-    // The checkbox arrives ticked, and ticked is what an unset one already is.
-    expect((await settings.save({ agentsFileLink: 'true' }, null)).restartKeys).not.toContain(
-      'agentsFileLink',
-    );
-    expect((await settings.save({ agentsFile: 'AGENTS.md' }, null)).restartKeys).not.toContain(
-      'agentsFile',
-    );
     expect((await settings.save({ skillsDir: 'Skills' }, null)).restartKeys).not.toContain('skillsDir');
-    // And the setting still reads as it did.
-    expect(settings.resolveAgentsFileLink()).toBe(true);
-    // Turning it off from there IS a change, and still reports one.
-    expect((await settings.save({ agentsFileLink: 'false' }, null)).restartKeys).toContain(
-      'agentsFileLink',
-    );
+    // Renaming it from there IS a change, and still reports one.
+    expect((await settings.save({ skillsDir: 'Abilities' }, null)).restartKeys).toContain('skillsDir');
   });
 
   /**

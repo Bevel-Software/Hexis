@@ -14,24 +14,24 @@
  *
  *  - the MCP `instructions` of the initialize handshake (see `compose.ts`),
  *    which Claude Code, Claude Desktop and Cursor put in the system prompt;
- *  - the platform-managed agent guide at the repository root (`AGENTS.md` by
- *    default), rendered from `{{sharedFileRules}}` in the template — claude.ai
- *    on the web, the Agent SDK and Cline drop `instructions`, and a guide the
- *    agent is told to read before its first action is always available.
+ *  - the platform's agent guide, which `get_agent_guide` returns and a
+ *    `read_file` of the guide's name serves (see `modules/agent-guide`) —
+ *    claude.ai on the web, the Agent SDK and Cline drop `instructions`, and a
+ *    guide the agent is told to read before its first action is always
+ *    available.
  *
  * Both places get the SAME string, from {@link sharedFileRulesSection} — not
  * two hand-mirrored copies. A rule written twice is a rule that drifts, and a
  * drifted rule is worse than a repeated one, because the agent cannot tell
- * which copy is current. Each description ends instead with
- * {@link sharedRulesPointer}, one sentence naming the section and the file.
+ * which copy is current. Each description opens instead with the one
+ * sentence sending the agent to the guide (`tool-registry/guide-first.ts`).
  *
- * Pure text, a function of the layout only: the guide's file name is a
- * deployment setting, so nothing here may snapshot `AGENTS.md`.
+ * Pure text, a function of the layout only: the guide's name is a deployment
+ * setting (an alias a deployment chose before the guide left the disk), so
+ * nothing here may snapshot `AGENTS.md`.
  */
 
 import {
-  DEFAULT_KB_LAYOUT,
-  agentsFileOf,
   LEGACY_AGENTS_FILE,
   platformFilesByDepth,
   type KbLayout,
@@ -43,9 +43,9 @@ export const SHARED_RULES_SECTION = 'Working with files';
 
 /**
  * The guide's name on a knowledge base seeded before it was renamed to
- * {@link LEGACY_AGENTS_FILE}. Named in the conventions rule because the seeder
- * never deletes a file it did not expect, so such a knowledge base still
- * carries one.
+ * {@link LEGACY_AGENTS_FILE}, back when the guide was a file. The platform's
+ * own copy is taken out at startup now (see template-files.step.ts); one that
+ * stays is a file the organisation edited, so it is theirs and still named.
  */
 const PRE_RENAME_AGENTS_FILE = 'CLAUDE.md';
 
@@ -84,12 +84,11 @@ export interface SharedFileRule {
  * ones that said "this tool" or "this call" name the tools instead.
  */
 export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
-  const agentsFile = agentsFileOf(layout);
   return [
     {
       id: 'agent-guide',
       heading: "This knowledge base's own conventions",
-      body: conventionsRule(agentsFile),
+      body: conventionsRule(),
     },
     {
       id: 'content-kinds',
@@ -204,15 +203,14 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
 
 /**
  * The platform files as the rules list them — from the one function that knows
- * which they are, so the list cannot drift from what actually refuses a move,
- * and the guide appears under this deployment's name for it.
+ * which they are, so the list cannot drift from what actually refuses a move.
  *
  * WITH THE DEPTH each name counts at, because the name alone is half the rule:
  * `access.md` governs the folder it sits in and `.bevelignore` layers, so both
- * are platform files wherever they are; `roles.yaml` and the guide are read
- * from the repository root only, so a nested copy of either is ordinary
- * content that moves and deletes like any page. An agent told only the names
- * refuses a rename it may make, and trusts a nested `access.md` it may not.
+ * are platform files wherever they are; `roles.yaml` is read from the
+ * repository root only, so a nested copy is ordinary content that moves and
+ * deletes like any page. An agent told only the names refuses a rename it may
+ * make, and trusts a nested `access.md` it may not.
  */
 function platformFileList(layout: KbLayout): string {
   const { anyDepth, rootOnly } = platformFilesByDepth(layout);
@@ -221,30 +219,21 @@ function platformFileList(layout: KbLayout): string {
 }
 
 /**
- * The conventions reminder — which file holds the author's own rules for this
- * knowledge base, and to read it first.
+ * The conventions reminder — where the platform's guide is, that the
+ * organisation's own conventions file comes with it, and to read both first.
  *
- * `CLAUDE.md` is named as a fallback because knowledge bases seeded before the
- * rename still carry one. WHEN THE GUIDE HAS BEEN RENAMED the sentence names
- * two files, ours first: the second is the organisation's OWN `AGENTS.md`,
- * which on such a deployment is ordinary content the platform never touches —
- * and which no harness reads for a remote agent, because a remote agent has no
- * checkout. Under the default name the wording collapses to the one file it
- * has always named.
+ * The guide is read by name at the repository root, where coding agents look
+ * for an `AGENTS.md` by convention, and `get_agent_guide` returns it alone.
+ * One name on every deployment, so the rule takes no layout. `CLAUDE.md` is
+ * named as a fallback because a knowledge base seeded before the rename may
+ * still carry one its people edited.
  */
-function conventionsRule(agentsFile: string): string {
-  if (agentsFile === LEGACY_AGENTS_FILE) {
-    return (
-      `Before your first read or change in a workspace, read \`${LEGACY_AGENTS_FILE}\` at the KB root — or ` +
-      `\`${PRE_RENAME_AGENTS_FILE}\` on a knowledge base seeded before it was renamed — if either exists: it holds ` +
-      "the author's conventions for this knowledge base, and you should follow them."
-    );
-  }
+function conventionsRule(): string {
   return (
-    `Before your first read or change in a workspace, read \`${agentsFile}\` at the KB root, then ` +
-    `\`${LEGACY_AGENTS_FILE}\` if it also exists (the organisation's own conventions) — or ` +
-    `\`${PRE_RENAME_AGENTS_FILE}\` on a knowledge base seeded before it was renamed: together they hold the ` +
-    'conventions for this knowledge base, and you should follow them.'
+    "Before your first read or change in a workspace, call `get_agent_guide` and read the platform's guide " +
+    `(whole, or one section). read_file on \`${LEGACY_AGENTS_FILE}\` at the KB root answers with the same ` +
+    "guide, after the organisation's own conventions file of that name when it has one: follow both. A " +
+    `\`${PRE_RENAME_AGENTS_FILE}\` at the KB root is the organisation's own too; read it if it exists.`
   );
 }
 
@@ -260,55 +249,4 @@ export function sharedFileRulesSection(layout: KbLayout): string {
   return `## ${SHARED_RULES_SECTION}\n\n${body}`;
 }
 
-/**
- * The longest guide file name the pointer sentence spells out. Beyond this it
- * names the guide by its ROLE instead (see {@link sharedRulesPointer}).
- *
- * There has to be a bound somewhere, because the pointer rides on every file
- * tool and a file name is not a fixed cost: `validateFilename` allows a name
- * of up to 255 bytes, so an unbounded pointer could reach 318 characters and
- * push `file_stat` to 1,428 — over the description cap, recreating on a
- * renamed deployment exactly the truncation this module exists to prevent, and
- * invisibly, because every measurement is taken under the default layout.
- *
- * 40 is well past any name a deployment plausibly picks
- * (`ENGINEERING-AGENT-CONVENTIONS.md` is 32) and the fallback below is only
- * reachable past it.
- */
-export const POINTER_GUIDE_NAME_BUDGET = 40;
 
-/**
- * The one sentence a tool description ends with, in place of the paragraphs it
- * used to carry. Short on purpose: it costs every description the same ~100
- * characters at worst, and its whole job is to name the section and the file
- * to read.
- *
- * BOUNDED BY CONSTRUCTION, which is what lets the description cap mean
- * something on a deployment that renamed its guide: a name within
- * {@link POINTER_GUIDE_NAME_BUDGET} is spelled out, and a longer one gets the
- * generic wording. Naming the file is the better sentence and wins whenever it
- * fits; a name past the budget is pathological, and there the choice is between
- * a sentence that says where to look and a catalog entry the client cuts. The
- * guide's own name is still in the section's first rule either way.
- *
- * An absent layout means the default one, as it does in
- * `composeAgentInstructions`: a caller reading the layout from configuration
- * gets `undefined` when none is set, and the pointer must still name a file.
- */
-export function sharedRulesPointer(layout: KbLayout = DEFAULT_KB_LAYOUT): string {
-  const agentsFile = agentsFileOf(layout);
-  const where =
-    agentsFile.length <= POINTER_GUIDE_NAME_BUDGET ? agentsFile : 'the agent guide at the KB root';
-  return ` Shared rules for all file tools: see "${SHARED_RULES_SECTION}" in ${where}.`;
-}
-
-/**
- * The most the pointer can ever cost a description, over every layout. What the
- * description cap is measured against, the way the tool prefix is measured at
- * ITS cap rather than at whatever the current admin wrote: a description that
- * only fits beside the short default guide name does not really fit.
- */
-export const SHARED_RULES_POINTER_MAX = Math.max(
-  sharedRulesPointer({ ...DEFAULT_KB_LAYOUT, agentsFile: `${'x'.repeat(POINTER_GUIDE_NAME_BUDGET - 3)}.md` }).length,
-  sharedRulesPointer({ ...DEFAULT_KB_LAYOUT, agentsFile: `${'x'.repeat(POINTER_GUIDE_NAME_BUDGET + 10)}.md` }).length,
-);

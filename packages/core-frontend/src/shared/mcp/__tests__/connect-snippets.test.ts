@@ -468,7 +468,7 @@ describe('snippets: one builder per client, keyed or not', () => {
       const parsed = JSON.parse(hexisMcpJsonSnippet(BASE, KEY));
       expect(parsed.mcpServers['skills-tools-knowledge']).toEqual({
         command: 'npx',
-        args: ['-y', '@bevel-software/hexis-mcp'],
+        args: ['-y', '@bevel-software/hexis-mcp@latest'],
         env: {
           HEXIS_URL: BASE,
           HEXIS_CONNECTION_KEY: KEY,
@@ -492,7 +492,7 @@ describe('snippets: one builder per client, keyed or not', () => {
 
     it('builds the Claude Code command as a stdio add with both env values', () => {
       expect(hexisMcpClaudeCommand(BASE, KEY)).toBe(
-        `claude mcp add skills-tools-knowledge --env HEXIS_URL="${BASE}" --env HEXIS_CONNECTION_KEY="${KEY}" -- npx -y @bevel-software/hexis-mcp`,
+        `claude mcp add skills-tools-knowledge --env HEXIS_URL="${BASE}" --env HEXIS_CONNECTION_KEY="${KEY}" -- npx -y @bevel-software/hexis-mcp@latest`,
       );
     });
 

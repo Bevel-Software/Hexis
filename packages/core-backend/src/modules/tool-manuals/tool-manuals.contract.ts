@@ -1,4 +1,5 @@
 import type { CallTemplate } from '@utcp/sdk';
+import type { HiddenTool, HiddenToolSource } from '../../shared/hidden-tools.js';
 
 /**
  * Tool manuals — user-authored `*.tool` files under `Plugins/` in the DEFAULT
@@ -329,10 +330,11 @@ export interface ToolCapability {
 
 /**
  * A single tool manual for the BROWSER tool page (`GET /api/tools/:slug`): the
- * summary plus the two human-facing fields the catalog listing has no use for.
- * Both are normalized to `null` rather than left optional — the page renders a
- * definite "nothing here" state, so an absent field and an empty one are the
- * same thing to it.
+ * summary plus the three human-facing fields the catalog listing has no use
+ * for — the description, the capabilities and the tools hidden for an invalid
+ * schema. Each is normalized to a definite empty (`null`, `[]`) rather than
+ * left optional — the page renders a definite "nothing here" state, so an
+ * absent field and an empty one are the same thing to it.
  */
 export interface ToolManualDetail extends Omit<ToolManualSummary, 'description'> {
   description: string | null;
@@ -342,6 +344,16 @@ export interface ToolManualDetail extends Omit<ToolManualSummary, 'description'>
    * round-trip this endpoint deliberately does not make), so they report `[]`.
    */
   capabilities: ToolCapability[];
+  /**
+   * Tools of this manual that Hexis keeps off every agent surface because
+   * their input schema is not valid JSON Schema as the server sent it, each
+   * with the place and the reason.
+   *
+   * Only for a caller who may WRITE this manual's file: the marker is for the
+   * people who manage the server, who are the only ones who can get the schema
+   * fixed. `[]` for everyone else, and for a server with nothing wrong.
+   */
+  hiddenTools: HiddenTool[];
 }
 
 export interface IToolManualService {
@@ -373,6 +385,14 @@ export interface IToolManualService {
    * confirm that a tool the caller can't see exists).
    */
   getDetail(userEmail: string, slug: string): Promise<ToolManualDetail | null>;
+
+  /**
+   * Wire where a hidden tool's schema finding comes from (the MCP proxy, which
+   * is constructed after this service — setter injection for the same reason
+   * `setMcpAuthDiscovery` is one). Without it `getDetail` reports no hidden
+   * tool, which is the honest answer for a deployment with no MCP surface.
+   */
+  setHiddenTools(source: HiddenToolSource): void;
 
   /**
    * One line per manual the caller can read, each carrying the manual's

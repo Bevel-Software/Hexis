@@ -58,9 +58,15 @@ import {
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
 import { AccessDeniedError } from '../access-model/access-errors.js';
+import {
+  AGENT_GUIDE_FILE,
+  isAgentGuidePath,
+  isManagedGuide,
+  withPlatformGuideAppended,
+  type AgentGuideReader,
+} from '../agent-guide/agent-guide.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import { rethrowAsWriteDenial } from './write-denial.js';
-import { sharedRulesPointer } from '../agent-instructions/shared-file-rules.js';
 import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
 import { logger } from '../../shared/logging.js';
@@ -730,6 +736,8 @@ async function grepWalk(
   gate: ReadGate,
   notifyRead: (path: string) => Promise<void>,
   docs: DocGrepState,
+  /** A file the walk leaves to its caller: never opened, never counted against `max`. */
+  skip: (path: string) => boolean = () => false,
 ): Promise<void> {
   if (out.length >= max || depth > 12) return;
   let entries;
@@ -747,7 +755,9 @@ async function grepWalk(
     if (e.type !== 'directory' && isFolderPlaceholder(e.name)) continue;
     const p = dir ? `${dir}/${e.name}` : e.name;
     if (e.type === 'directory') {
-      await grepWalk(fs, p, re, out, max, depth + 1, gate, notifyRead, docs);
+      await grepWalk(fs, p, re, out, max, depth + 1, gate, notifyRead, docs, skip);
+    } else if (skip(p)) {
+      continue;
     } else {
       // Opening a file is a read of it, even when the walk started at a root
       // the read hook was already told about — so every file the walk opens
@@ -857,6 +867,14 @@ export function registerWorkspaceTools(
    * two tools are not mounted at all rather than mounted and broken.
    */
   uploads?: AgentUploadStore,
+  /**
+   * The platform's agent guide (see `modules/agent-guide`), which `read_file`
+   * and `file_stat` answer at the guide's name in the repository root — after
+   * the knowledge base's own file of that name, when it has one. Optional for
+   * the harnesses that are about the file primitives; without it the two
+   * tools read the disk and nothing else.
+   */
+  agentGuide?: AgentGuideReader,
 ): void {
   const { kbDirName } = kb;
   /**
@@ -1490,8 +1508,7 @@ export function registerWorkspaceTools(
     const requiresBranch = ((spec.inputs as { required?: string[] }).required ?? []).includes('branch');
     const describe = (): string =>
       (typeof spec.description === 'function' ? spec.description() : spec.description) +
-      (spec.gated ? agentAccessGate.notes.gatedToolNote() : '') +
-      sharedRulesPointer(kb.layout);
+      (spec.gated ? agentAccessGate.notes.gatedToolNote() : '');
     const def = toolDef({
       name: spec.name,
       description: describe(),
@@ -1623,7 +1640,7 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint the id of this conversation, which the KnowledgeBase tools take as `sessionId`. Call this ONCE, at the start of your work and only once per run — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id explicitly as `sessionId` on every subsequent KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it — there is no half-made session to clean up. If a retry lands after a success you simply hold two independent ids, which is harmless: keep passing the one id you have already used for the rest of the run and ignore the other. Returns `{ sessionId }`.',
+      'Mint the id of this conversation, which the KnowledgeBase tools take as `sessionId`. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id as `sessionId` on every later KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
@@ -1689,6 +1706,22 @@ export function registerWorkspaceTools(
       if (spillStore.isSpillRef(p)) {
         return { path: p, content: await spillStore.read(p, offset, limit) };
       }
+      const slice = (content: string): string => {
+        const start = offset && offset > 0 ? offset : 0;
+        return offset !== undefined || limit !== undefined
+          ? content.slice(start, limit !== undefined ? start + limit : undefined)
+          : content;
+      };
+      // The guide's name at the repository root answers with the platform's
+      // guide, which is text the code owns and every agent may read: no gate
+      // and no read hook for it. A file the knowledge base keeps under that
+      // name is ITS OWN conventions page and is read as any file is — gated,
+      // noted — and comes first, with the guide after it. A copy of the
+      // guide an earlier release wrote to disk (still on a draft, say) is
+      // recognised by its header and not served a second time.
+      if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '')) {
+        return { path: p, content: slice(await guideAt(a.branch as string, ctx, p)) };
+      }
       await notifyAgentRead(agentAccessGate, ctx, a.branch as string, p);
       await assertCanRead(readGateFor(a.branch as string, ctx), p);
       const fs = await ctx.getFilesystem(a.branch as string);
@@ -1717,13 +1750,104 @@ export function registerWorkspaceTools(
       // document, unreadable binary, oversized image) IS the file's honest
       // textual answer, sliced like any other content.
       const content = result.kind === 'text' ? result.text : result.message;
-      const start = offset && offset > 0 ? offset : 0;
-      const sliced = offset !== undefined || limit !== undefined
-        ? content.slice(start, limit !== undefined ? start + limit : undefined)
-        : content;
-      return { path: p, content: sliced };
+      return { path: p, content: slice(content) };
     },
   });
+
+  /**
+   * The knowledge base's OWN file at the guide's path, read as any file is —
+   * through the read hook and the access gate — or null when there is none,
+   * when the caller MAY NOT READ IT, or when what is there is a copy of the
+   * platform's guide an earlier release wrote (recognised by its header),
+   * which the guide served beside it would only repeat. A file that is not
+   * text (a binary squatting the name) is read for what it is: its honest
+   * textual answer.
+   *
+   * A file the caller may not read answers EXACTLY as no file does: the guide
+   * alone, with nothing said. A refusal here would tell a caller the root
+   * denies that a conventions file exists, which is the one thing the
+   * platform never tells about a file someone may not read — a restricted
+   * node is indistinguishable from an absent one on every other read.
+   */
+  /** What a read of the guide's path answers: the guide, after the knowledge base's own readable file when it has one. */
+  const guideAt = async (branch: string, ctx: ToolContext, p: string): Promise<string> => {
+    const guide = await agentGuide!();
+    const own = await ownGuideFile(branch, ctx, p);
+    return own === null ? guide : withPlatformGuideAppended(own, guide);
+  };
+
+  const ownGuideFile = async (branch: string, ctx: ToolContext, p: string): Promise<string | null> => {
+    const fs = await ctx.getFilesystem(branch);
+    // Existence first, then the gate, then the hook and the bytes — nothing of
+    // theirs is read, or noted as read, before they are allowed to read it.
+    if (!(await ownGuideReadable(fs, branch, ctx, p))) return null;
+    await notifyAgentRead(agentAccessGate, ctx, branch, p);
+    // Gone between the probe and the read — a concurrent delete — is the
+    // absent case: the guide alone, as a read a moment later would answer.
+    const bytes = await fs.readFile(p).then(asBytes, (err: unknown) => {
+      if (isAbsence(err)) return null;
+      throw err;
+    });
+    if (bytes === null) return null;
+    const result = await readers.readerFor(p).read(bytes, p);
+    const text = result.kind === 'text' ? result.text : result.kind === 'image' ? result.note : result.message;
+    return isManagedGuide(text) ? null : text;
+  };
+
+  /**
+   * Whether there is a file of the knowledge base's own at the guide's path
+   * that THIS caller may read. False for nothing there and for a file the
+   * access rules close to them, on purpose and without distinction (see
+   * {@link ownGuideFile}).
+   */
+  const ownGuideReadable = async (fs: LocalFilesystem, branch: string, ctx: ToolContext, p: string): Promise<boolean> => {
+    // The permission verdict BEFORE the filesystem is asked anything, as on
+    // every other read: a caller the rules close the path to learns nothing
+    // from it — not that something is there, and not what the filesystem
+    // says about an entry it cannot stat.
+    const gate = readGateFor(branch, ctx);
+    const rel = toKbRelative(p, gate.kbDirName);
+    if (rel !== null && !(await gate.accessControl.canRead(gate.workspaceId, gate.userEmail, rel))) return false;
+    return existsAt(fs, p);
+  };
+
+  /** Whether something is at `p` on `fs` — absence is false, any other failure is thrown. */
+  const existsAt = async (fs: LocalFilesystem, p: string): Promise<boolean> =>
+    fs.stat(p).then(
+      () => true,
+      (err: unknown) => {
+        if (isAbsence(err)) return false;
+        throw err;
+      },
+    );
+
+  /**
+   * Whether what is at `p` is an entry of the knowledge base's own for the
+   * ordinary stat to describe: anything there except a plain file that is a
+   * copy of the guide an earlier release wrote (recognised by its header).
+   * A folder at the guide's name is theirs and is never read — reading a
+   * folder is an error, not an absence. Nothing there, at the stat or at the
+   * read a moment later (a concurrent delete), is the absent case, which the
+   * caller answers with the guide.
+   */
+  const isOwnEntryStill = async (fs: LocalFilesystem, p: string): Promise<boolean> => {
+    const type = await fs.stat(p).then(
+      (st) => st.type,
+      (err: unknown) => {
+        if (isAbsence(err)) return undefined;
+        throw err;
+      },
+    );
+    if (type === undefined) return false;
+    if (type !== 'file') return true;
+    const bytes = await fs.readFile(p).then(asBytes, (err: unknown) => {
+      if (isAbsence(err)) return null;
+      throw err;
+    });
+    if (bytes === null) return false;
+    const result = await readers.readerFor(p).read(bytes, p);
+    return !(result.kind === 'text' && isManagedGuide(result.text));
+  };
 
   mount({
     name: 'list_files',
@@ -1849,6 +1973,11 @@ export function registerWorkspaceTools(
         },
         textEditable: { type: 'boolean', description: 'Files only: whether write_file/write_files/edit_file accept this file as it is now.' },
         mimeNote: str('Present when `mimeSource` is `fallback`: says the MIME type is a fallback, not a detected type.'),
+        platformGuide: {
+          type: 'boolean',
+          description:
+            "True at the agent guide's name in the repository root when the knowledge base has no file of its own there: what read_file answers is the platform's guide, which is not on disk and cannot be written, moved or deleted.",
+        },
       },
       required: ['managed', 'movable', 'deletable', 'access'],
       additionalProperties: true,
@@ -1857,7 +1986,48 @@ export function registerWorkspaceTools(
     handler: async (a, ctx: ToolContext) => {
       const p = a.path as string;
       const branch = a.branch as string;
-      await notifyAgentRead(agentAccessGate, ctx, branch, p);
+      // The guide's name with no file of the knowledge base's own under it —
+      // or one the caller may not read, or a copy of the guide an earlier
+      // release wrote, none of which `read_file` serves: what a read answers
+      // there is the platform's guide, so stat says a text file is there to
+      // read — ungated, like the read — and that nothing can be moved,
+      // deleted or written at it through these tools. The three cases get
+      // ONE answer on purpose: a different one for the file the caller may
+      // not read would tell them it exists. A file of the knowledge base's
+      // own that the caller may read is a file like any other, and the
+      // ordinary answer below describes it.
+      let noted = false;
+      if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '')) {
+        const fs = await ctx.getFilesystem(branch);
+        const readable = await ownGuideReadable(fs, branch, ctx, p);
+        // Telling the organisation's own file from a stale copy READS it, so
+        // the read hook hears of it as it hears of a read_file there — after
+        // the gate, never before, and once (the ordinary stat below is told).
+        if (readable) {
+          await notifyAgentRead(agentAccessGate, ctx, branch, p);
+          noted = true;
+        }
+        const own = readable && (await isOwnEntryStill(fs, p));
+        if (!own) {
+          const guide = await agentGuide();
+          return {
+            name: p.slice(p.lastIndexOf('/') + 1),
+            type: 'file',
+            size: Buffer.byteLength(guide, 'utf8'),
+            managed: true,
+            movable: false,
+            deletable: false,
+            access: { read: true, write: false, download: false, owner: false },
+            contentMode: 'text',
+            kind: 'text',
+            mime: 'text/markdown',
+            mimeSource: 'extension',
+            textEditable: false,
+            platformGuide: true,
+          };
+        }
+      }
+      if (!noted) await notifyAgentRead(agentAccessGate, ctx, branch, p);
       await assertCanRead(readGateFor(branch, ctx), p);
       // Nothing there is a 404, and the placeholder — never content — gets
       // exactly that answer: the one every file tool gives (see not-found.ts).
@@ -2010,10 +2180,6 @@ export function registerWorkspaceTools(
       // (an empty path is the handler's to explain), and here it would
       // otherwise name the workspace directory by another spelling.
       const searchRoot = typeof a.path === 'string' && a.path.length > 0 ? a.path : kbDirName;
-      // The search root itself goes to the read hook here; each file the walk
-      // actually opens goes to it per-file below, so a hook sees every path a
-      // grep reached rather than only the root it started from.
-      await notifyAgentRead(agentAccessGate, ctx, a.branch as string, searchRoot);
       const fs = await ctx.getFilesystem(a.branch as string);
       const gate = readGateFor(a.branch as string, ctx);
       const out: { path: string; line: number; text: string }[] = [];
@@ -2031,7 +2197,51 @@ export function registerWorkspaceTools(
             : await searchRootKind(fs, searchRoot);
       /** Why a single-file search found nothing, when "no matches" would be a lie. */
       let fileNote: string | undefined;
-      if (kind === 'directory') {
+      // The guide is searched where it is read: a search of the repository
+      // root covers it, and a search of its own path is a search of what
+      // `read_file` answers there. The composed text is what is searched —
+      // the knowledge base's own readable file first, then the platform's
+      // guide — under the guide's path and with the line numbers a read of
+      // it gives. The walk leaves that one file to this: a match the walk
+      // made there would be the same line again, and one it COUNTED against
+      // `max_results` would be a file later in the tree never searched while
+      // the answer says nothing was cut. A file the caller may not read is
+      // absent from it, as it is from the read.
+      const guidePath = `${kbDirName}/${AGENT_GUIDE_FILE}`;
+      const rel = toKbRelative(searchRoot, kbDirName);
+      const coversGuide =
+        agentGuide !== undefined && (kind === 'directory' ? rel === null : isAgentGuidePath(rel ?? ''));
+      // The search root goes to the read hook — once, and only when it is
+      // repository content: a folder, or a file of the knowledge base's own.
+      // The guide's own path is not told here, because `guideAt` tells the
+      // hook of the organisation's file there exactly as `read_file` does
+      // (after the gate), and the platform's guide alone is nobody's file to
+      // note. Each file the walk opens goes to the hook per file below, so a
+      // hook sees every path a grep reached rather than only its root.
+      if (!(coversGuide && kind !== 'directory')) {
+        await notifyAgentRead(agentAccessGate, ctx, a.branch as string, searchRoot);
+      }
+      if (coversGuide) {
+        if (kind === 'directory') {
+          await grepWalk(
+            fs,
+            searchRoot,
+            re,
+            out,
+            max,
+            0,
+            gate,
+            (p) => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p),
+            docs,
+            (p) => p === guidePath,
+          );
+        }
+        const lines = (await guideAt(a.branch as string, ctx, guidePath)).split('\n');
+        for (let i = 0; i < lines.length && out.length < max; i++) {
+          re.lastIndex = 0;
+          if (re.test(lines[i]!)) out.push({ path: guidePath, line: i + 1, text: lines[i]!.slice(0, 300) });
+        }
+      } else if (kind === 'directory') {
         await grepWalk(
           fs,
           searchRoot,

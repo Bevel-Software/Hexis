@@ -26,7 +26,9 @@ import {
   registerToolManualsTools,
 } from '../modules/tool-manuals/index.js';
 import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
+import { registerChangeRequestReadTools } from '../modules/workflow/agent-tools/change-request-read.tools.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
+import { registerAgentGuideTool } from '../modules/agent-guide/index.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
 import {
   registerSkillsTools,
@@ -456,7 +458,13 @@ export async function createCoreServer(
   // `get_skill`. Warnings only; it never refuses a save.
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
   registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore);
+  // The five read tools over change requests. Separate from the workflow tools
+  // because they are the only ones that gate their whole payload on the
+  // caller's read access, so they take the access service and nothing else.
+  registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide);
+  // The guide on its own, beside the file tools that serve it by name.
+  registerAgentGuideTool(core.toolRegistry, toolsRouter, ta, th, core.agentGuideSections);
   // The agent upload route, on the same router as the tool endpoints so it
   // mounts ahead of the JWT `/api` mounts below — but WITHOUT `toolAuth`: its
   // whole credential is the single-use token in its path, which is the point
@@ -467,13 +475,16 @@ export async function createCoreServer(
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
-  registerPluginsTools(core.toolRegistry);
+  registerPluginsTools(core.toolRegistry, core.kb);
   registerToolManualsTools(core.toolRegistry, toolsRouter, ta, th, core.toolManualService, {
     accessControl: core.accessControl,
     // The vault satisfies the module's local VariableStatusPort — `list_tool_setup`
     // reports configuration booleans only; secret values never ride through tools.
     variableStatus: core.secretsVaultService,
     kb: core.kb,
+    // What the proxy's schema check found when each server's tools were last
+    // loaded — reported to a caller who may write the tool, nobody else.
+    hiddenTools: core.mcpService.hiddenTools,
   });
   // Overlay tool registrations (defs + module-hosted endpoints).
   ext.tools?.({

@@ -14,7 +14,8 @@ import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
-import { sharedFileRules, sharedFileRulesSection, sharedRulesPointer } from '../../agent-instructions/shared-file-rules.js';
+import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
+import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
 import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workflow-hooks.js';
@@ -98,6 +99,8 @@ let unzipEntries: string[] = [];
 let folderTurns: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
 let writePolicy: RoutineWritePolicyService;
+/** What the platform's guide reads as, for the tests about the guide's name. */
+let guideText = 'THE PLATFORM GUIDE\n';
 /**
  * The focused branch the resolved `ToolContext` carries — mirrors the branch an
  * internal token bakes for the in-process agent. A test sets it to prove a
@@ -297,7 +300,7 @@ async function start(
     recoveryBotEmail: RECOVERY_BOT,
     hooks,
     notes,
-  }, writePolicy, {} as never /* sessionSink — start_session not exercised here */);
+  }, writePolicy, {} as never /* sessionSink — start_session not exercised here */, undefined, undefined, undefined, async () => guideText);
   app.use('/api', router);
   httpServer = await new Promise<HttpServer>((r) => {
     const s = app.listen(0, () => r(s));
@@ -1096,6 +1099,193 @@ describe('write modes and per-path outcomes', () => {
   });
 });
 
+/**
+ * The agent guide at the repository root. It is not a file: `read_file` of
+ * its name answers with the platform's guide, after the knowledge base's own
+ * file of that name when it has one, and `file_stat` says what is there.
+ */
+describe("the agent guide at the guide's name", () => {
+  const GUIDE = `${KB_DIR}/AGENTS.md`;
+  const read = (base: string, p = GUIDE, extra: Record<string, unknown> = {}) =>
+    post(`${base}/api/agent/tools/read_file`, { path: p, ...extra }).then((r) => r.json() as Promise<{ path: string; content: string }>);
+  const statOf = (base: string, p = GUIDE) =>
+    post(`${base}/api/agent/tools/file_stat`, { path: p }).then((r) => r.json() as Promise<Record<string, unknown>>);
+
+  it('answers with the guide when the knowledge base has no file of that name', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n' });
+    // By the root-anchored and the prefix-less spellings too, like any path.
+    expect((await read(base, `/${GUIDE}`)).content).toBe('THE PLATFORM GUIDE\n');
+    expect((await read(base, 'AGENTS.md')).content).toBe('THE PLATFORM GUIDE\n');
+    // Sliced like any content.
+    expect((await read(base, GUIDE, { offset: 4, limit: 8 })).content).toBe('PLATFORM');
+  });
+
+  it("puts the knowledge base's own AGENTS.md first, then the separator, then the guide", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nWrite tickets in the present tense.\n');
+    const { content } = await read(base);
+    expect(content.startsWith('# Acme\n\nWrite tickets in the present tense.\n\n---\n')).toBe(true);
+    expect(content.endsWith('\n\nTHE PLATFORM GUIDE\n')).toBe(true);
+    expect(content).toContain("The text above is this knowledge base's own conventions file.");
+  });
+
+  it('never serves a copy of the guide an earlier release left on disk a second time', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Knowledge base\n\n> **This file is managed by the platform.** Stale.\n');
+    expect((await read(base)).content).toBe('THE PLATFORM GUIDE\n');
+  });
+
+  it("never tells a caller who may not read the knowledge base's own file that it exists", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const denied = await start('read', denyReads(new Set(['AGENTS.md'])));
+    // Nothing of theirs there: the guide is everyone's.
+    const absent = await read(denied);
+    const absentStat = await statOf(denied);
+    expect(absent.content).toBe('THE PLATFORM GUIDE\n');
+    // A file they may not read answers EXACTLY as no file does — a refusal
+    // would be the one thing the platform never says about a restricted
+    // file, which is that it is there.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nThe secret conventions.\n');
+    const closed = await post(`${denied}/api/agent/tools/read_file`, { path: GUIDE });
+    expect(closed.status).toBe(200);
+    expect(await closed.json()).toEqual(absent);
+    expect(await statOf(denied)).toEqual(absentStat);
+  });
+
+  it("serves the knowledge base's own file to a caller who may read it", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const allowed = await start('read');
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nThe conventions.\n');
+    expect((await read(allowed)).content).toContain('The conventions.');
+  });
+
+  it("answers the guide alone when the knowledge base's own file vanishes between the probe and the read", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    // The file is there when it is probed and gone when it is read: a
+    // concurrent delete, which is the absent case and never a failure.
+    const probed = fs.stat.bind(fs);
+    let vanish = false;
+    (fs as unknown as Record<string, unknown>).stat = async (p: string) => {
+      const st = await probed(p);
+      if (vanish && p.endsWith('AGENTS.md')) {
+        vanish = false;
+        await fs.deleteFile(p);
+      }
+      return st;
+    };
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    vanish = true;
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n' });
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    vanish = true;
+    expect(await statOf(base)).toMatchObject({ platformGuide: true });
+  });
+
+  it('leaves a folder at the guide\'s name to the ordinary stat, and never reads it as a copy', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    await fs.mkdir(`${KB_DIR}/AGENTS.md`);
+    const folder = await statOf(base);
+    expect(folder).toMatchObject({ type: 'directory' });
+    expect(folder.platformGuide).toBeUndefined();
+  });
+
+  it('is a nested AGENTS.md no concern of: that is a file like any other', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/Handbook/AGENTS.md`, '# Handbook\n');
+    expect((await read(base, `${KB_DIR}/Handbook/AGENTS.md`)).content).toBe('# Handbook\n');
+    expect((await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/Handbook/HEXIS.md` })).status).toBe(404);
+  });
+
+  it('grep finds the guide where read_file serves it: from the root and at its own path, own file first, denied file absent', async () => {
+    guideText = '# Guide\n\nName every needle you plant.\n';
+    const grep = (base: string, pattern: string, path?: string) =>
+      post(`${base}/api/agent/tools/grep`, path === undefined ? { pattern } : { pattern, path }).then(
+        (r) => r.json() as Promise<{ matches: { path: string; line: number; text: string }[] }>,
+      );
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/Handbook/a.md`, 'a needle on disk\n');
+    // A search of the whole knowledge base reaches the guide, under the path
+    // a read of it answers to, with the line number that read gives.
+    const fromRoot = await grep(base, 'needle');
+    expect(fromRoot.matches).toContainEqual({ path: GUIDE, line: 3, text: 'Name every needle you plant.' });
+    expect(fromRoot.matches).toContainEqual({ path: `${KB_DIR}/Handbook/a.md`, line: 1, text: 'a needle on disk' });
+    // A search of the guide's own path is a search of what read_file answers.
+    expect((await grep(base, 'needle', GUIDE)).matches).toEqual([{ path: GUIDE, line: 3, text: 'Name every needle you plant.' }]);
+    expect((await grep(base, 'needle', 'AGENTS.md')).matches).toEqual([{ path: GUIDE, line: 3, text: 'Name every needle you plant.' }]);
+    // A search under a folder does not reach a file that is not under it.
+    expect((await grep(base, 'needle', `${KB_DIR}/Handbook`)).matches.map((m) => m.path)).toEqual([`${KB_DIR}/Handbook/a.md`]);
+
+    // With the knowledge base's own AGENTS.md, the search covers the composed
+    // text — the own file first, then the guide — and once: the walk's own
+    // matches in that file are the same lines, so they are not repeated.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nOur needle rule.\n');
+    const { content } = await read(base);
+    const guideLine = content.split('\n').indexOf('Name every needle you plant.') + 1;
+    const composed = (await grep(base, 'needle')).matches.filter((m) => m.path === GUIDE);
+    expect(composed).toEqual([
+      { path: GUIDE, line: 3, text: 'Our needle rule.' },
+      { path: GUIDE, line: guideLine, text: 'Name every needle you plant.' },
+    ]);
+    expect((await grep(base, 'needle', GUIDE)).matches).toEqual(composed);
+
+    // The own file does not use up `max_results` twice: the walk leaves it to
+    // the composed search, so a file later in the tree is still reached when
+    // the own file alone has more matches than the cap. Without that, the
+    // walk filled the cap from AGENTS.md, those matches were dropped as
+    // duplicates, and Handbook/ was never searched.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, `# Acme\n\n${'needle\n'.repeat(5)}`);
+    const capped = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', max_results: 3 })).json()) as {
+      matches: { path: string }[];
+    };
+    expect(capped.matches.map((m) => m.path)).toContain(`${KB_DIR}/Handbook/a.md`);
+    expect(capped.matches).toHaveLength(3);
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nOur needle rule.\n');
+
+    // A caller who may not read the own file searches the guide alone, from
+    // the root and at the path — as read_file answers them, with no sign that
+    // anything of the organisation's is there.
+    const denied = await start('read', denyReads(new Set(['AGENTS.md'])));
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nOur needle rule.\n');
+    for (const found of [await grep(denied, 'needle'), await grep(denied, 'needle', GUIDE)]) {
+      expect(found.matches.filter((m) => m.path === GUIDE)).toEqual([{ path: GUIDE, line: 3, text: 'Name every needle you plant.' }]);
+      expect(JSON.stringify(found)).not.toContain('Acme');
+    }
+  });
+
+  it('file_stat says a text file is there to read, and that nothing can be written, moved or deleted at it', async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    expect(await statOf(base)).toMatchObject({
+      name: 'AGENTS.md',
+      type: 'file',
+      size: Buffer.byteLength('THE PLATFORM GUIDE\n'),
+      platformGuide: true,
+      managed: true,
+      movable: false,
+      deletable: false,
+      contentMode: 'text',
+      textEditable: false,
+      access: { read: true, write: false },
+    });
+    // With a file of the knowledge base's own there, stat describes THAT file.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    const own = await statOf(base);
+    expect(own).toMatchObject({ name: 'AGENTS.md', type: 'file', managed: false, movable: true, textEditable: true });
+    expect(own.platformGuide).toBeUndefined();
+    // A copy an earlier release wrote is what read_file does not serve, so
+    // stat says the same thing it says for no file at all.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Knowledge base\n\n> **This file is managed by the platform.** Stale.\n');
+    expect(await statOf(base)).toMatchObject({ platformGuide: true, managed: true, movable: false });
+  });
+});
+
 describe('read-permission gating', () => {
   // Seed two KB nodes; the access stub denies read on the "secret" one.
   async function startGated(): Promise<string> {
@@ -1714,19 +1904,18 @@ describe('office documents and PDFs', () => {
     expect(await readContent(base, `${KB_DIR}/deck.pptx`)).toContain('Original');
   });
 
-  it('every mounted tool ends with the one sentence pointing at the shared rules, and repeats none of them', async () => {
+  it('every mounted tool opens with the one sentence sending the agent to the guide, and repeats none of the rules', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
-    const pointer = sharedRulesPointer(testKbContext().layout);
     // The shell is in the list too: it carried the agent-guide reminder before,
     // and that reminder is one of the rules that moved.
     const mounted = ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'delete_folder', 'mkdir', 'move_file', 'copy_file', 'unzip', 'execute_command'];
     for (const name of mounted) {
       const def = tools.find((t) => t.name === name);
       expect(def, name).toBeDefined();
-      expect(def!.description!.endsWith(pointer), name).toBe(true);
-      // Once, at the end — not once per paragraph that used to be appended.
-      expect(def!.description!.split(pointer), name).toHaveLength(2);
+      expect(def!.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `), name).toBe(true);
+      // Once, at the front — not once per paragraph that used to be appended.
+      expect(def!.description!.split(GUIDE_FIRST_SENTENCE), name).toHaveLength(2);
       // EVERY shared rule, in full, is in the two shared places now (see
       // agent-instructions/__tests__/shared-file-rules.test.ts) and in no
       // description. Checked on the whole body rather than on a phrase: the
@@ -1740,10 +1929,11 @@ describe('office documents and PDFs', () => {
       expect(def!.description, name).not.toContain('Content rule (the same on every file tool)');
       expect(def!.description, name).not.toContain('Before your first read or change in a workspace');
     }
-    // start_session carried none of the shared paragraphs and gains no pointer:
-    // it touches no file. External-only, so it is looked up on that surface.
+    // start_session touches no file, yet it opens with the same sentence: the
+    // guide is read before ANYTHING in the platform, a session included.
+    // External-only, so it is looked up on that surface.
     const external = await toolRegistry.listExternal();
-    expect(external.find((t) => t.name === 'start_session')!.description).not.toContain(pointer);
+    expect(external.find((t) => t.name === 'start_session')!.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `)).toBe(true);
   });
 
   describe('binary capability contract: a text file, a document, an image and a zip', () => {
@@ -2998,19 +3188,17 @@ describe('preflight for moves and deletes', () => {
       expect(await exists(args.src)).toBe(true);
     });
 
-    it('every one of the four platform files gets the same sentence, and the agent never gets the admin restore', async () => {
+    it('every one of the three platform files gets the same sentence, and the agent never gets the admin restore', async () => {
       // The agent move tool has no exception: the recovery move is a person's,
       // made as an admin, and an agent is neither.
       const base = await seeded();
       await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
-      await fs.writeFile(KB('AGENTS.md'), 'agents\n');
       await fs.writeFile(KB('.bevelignore'), '*.tmp\n');
       await fs.writeFile(KB('Misplaced/access.md'), '---\nread: everyone\n---\n');
       const cases: [string, string][] = [
         [KB('access.md'), KB('Sales/access.md')],
         [KB('roles.yaml'), KB('Sales/roles.yaml')],
         [KB('.bevelignore'), KB('Sales/.bevelignore')],
-        [KB('AGENTS.md'), KB('Sales/AGENTS.md')],
         // Including the shape of the admin's recovery move: a misplaced
         // access.md into a folder that has none. A person holding the Admin
         // role is allowed exactly this move from the UI; the agent is not.
@@ -3120,15 +3308,19 @@ describe('preflight for moves and deletes', () => {
   describe('what counts as the platform\'s own, and what a move or delete may reach', () => {
     const caseSensitiveDisk = process.platform === 'linux';
 
-    it('roles.yaml and AGENTS.md are platform files only at the root; access.md and .bevelignore at any depth', async () => {
+    it('roles.yaml is a platform file only at the root; access.md and .bevelignore at any depth; AGENTS.md nowhere', async () => {
       const base = await seeded();
       await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
       await fs.writeFile(KB('Sales/roles.yaml'), 'content');
+      await fs.writeFile(KB('AGENTS.md'), 'content');
       await fs.writeFile(KB('Sales/AGENTS.md'), 'content');
       await fs.writeFile(KB('Sales/.bevelignore'), '*.tmp\n');
       const managed = async (p: string) => (await call(base, 'file_stat', { path: KB(p) })).body.managed;
       expect(await managed('roles.yaml')).toBe(true);
       expect(await managed('Sales/roles.yaml')).toBe(false);
+      // The organisation's own conventions file: the guide is served from
+      // code, so nothing under this name is the platform's.
+      expect(await managed('AGENTS.md')).toBe(false);
       expect(await managed('Sales/AGENTS.md')).toBe(false);
       expect(await managed('Sales/.bevelignore')).toBe(true);
       expect((await call(base, 'move_file', { src: KB('Sales/roles.yaml'), dest: KB('Sales/old-roles.yaml') })).body).toMatchObject({ moved: true });
@@ -3497,7 +3689,7 @@ describe('preflight for moves and deletes', () => {
       // is stated once in the shared rules rather than on each of them.
       expect(sharedFileRulesSection(testKbContext().layout)).toContain('`write-denied`');
       for (const name of ['move_file', 'delete_file', 'delete_folder']) {
-        expect((await def(name)).description, name).toContain(sharedRulesPointer(testKbContext().layout));
+        expect((await def(name)).description.startsWith(GUIDE_FIRST_SENTENCE), name).toBe(true);
       }
     });
   });
@@ -4015,6 +4207,47 @@ describe('agent read/write hooks', () => {
     expect(writes).toEqual([]);
   });
 
+  it("file_stat at the guide's name tells the read hook once when it reads the organisation's own file, and never for the guide alone", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    record();
+    // Nothing of the organisation's there: the guide is everyone's and no
+    // file is read, so the hook hears nothing.
+    expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads).toEqual([]);
+    // The organisation's own file: telling it from a stale copy reads it,
+    // and the hook hears of that read exactly once — as it does of a read_file.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`]);
+    // A stale copy of the guide is read to be recognised, so it is heard of too.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Knowledge base\n\n> **This file is managed by the platform.** Stale.\n');
+    expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`, `${KB_DIR}/AGENTS.md`]);
+  });
+
+  it("grep at the guide's name tells the read hook the same way: never for the guide alone, once for the organisation's own file", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    record();
+    // The guide alone: nothing of the organisation's is read, so the hook
+    // hears nothing — a search of the guide's path is not a read of a file.
+    expect((await post(`${base}/api/agent/tools/grep`, { pattern: 'GUIDE', path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads).toEqual([]);
+    // The organisation's own file: once, as read_file tells it — not once
+    // for the search root and again for the file.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme GUIDE\n');
+    expect((await post(`${base}/api/agent/tools/grep`, { pattern: 'GUIDE', path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`]);
+    // A search of the whole knowledge base: the root once, then each file the
+    // walk opens once — the own AGENTS.md among them exactly once, from the
+    // composed search, never again from the walk.
+    reads = [];
+    expect((await post(`${base}/api/agent/tools/grep`, { pattern: 'GUIDE', sessionId: 's1' })).status).toBe(200);
+    expect(reads[0]?.wsPath).toBe(KB_DIR);
+    expect(reads.filter((op) => op.wsPath === `${KB_DIR}/AGENTS.md`)).toHaveLength(1);
+  });
+
   it('the read hook covers list_files, file_stat, grep, delete_file and delete_folder', async () => {
     const base = await start();
     record();
@@ -4275,22 +4508,22 @@ describe('tool descriptions and the deployment note', () => {
     expect(all.get('read_file')!.description).not.toContain('Stay within one');
   });
 
-  it("a registered note lands after every gated tool's own text, ahead of the shared-rules pointer, and on the sessionId input", async () => {
+  it("a registered note lands after every gated tool's own text, behind the guide-first opening, and on the sessionId input", async () => {
     await start();
     notes.registerGatedToolNote(' One folder per conversation.');
     notes.registerSessionIdNote(' It also pins that folder.');
     const all = await defs();
-    // The POINTER is last, always: that is the one sentence an agent needs to
-    // find the shared rules, and a description cut short must not lose it. The
-    // deployment's note sits directly before it, after the tool's own text.
-    const pointer = sharedRulesPointer(testKbContext().layout);
+    // The guide-first sentence is FIRST, always: that is the one instruction
+    // an agent needs, and a description cut short from the end must not lose
+    // it. The deployment's note is last, after the tool's own text.
     for (const name of ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'delete_folder', 'mkdir', 'move_file', 'copy_file', 'unzip']) {
-      expect(all.get(name)!.description.endsWith(` One folder per conversation.${pointer}`), name).toBe(true);
+      expect(all.get(name)!.description.startsWith(`${GUIDE_FIRST_SENTENCE} `), name).toBe(true);
+      expect(all.get(name)!.description.endsWith(' One folder per conversation.'), name).toBe(true);
       expect(sessionIdDescriptionOf(all.get(name)!), name).toBe(`${SESSION_ID_DESCRIPTION} It also pins that folder.`);
     }
     // `execute_command` is internal-only, so it is checked on that surface.
     const internal = new Map((await toolRegistry.listInternal()).map((t) => [t.name, t]));
-    expect(internal.get('execute_command')!.description.endsWith(` One folder per conversation.${pointer}`)).toBe(true);
+    expect(internal.get('execute_command')!.description.endsWith(' One folder per conversation.')).toBe(true);
   });
 
   it('a tool that is not gated carries no note', async () => {

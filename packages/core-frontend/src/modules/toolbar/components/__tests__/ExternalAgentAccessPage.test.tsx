@@ -215,11 +215,11 @@ describe('the interactive tab: Claude and ChatGPT first, each family on its own 
     mount(PUBLIC_URL);
     const values = snippets();
     expect(values).toContain(
-      `claude mcp add skills-tools-knowledge --env HEXIS_URL="${window.location.origin}" -- npx -y @bevel-software/hexis-mcp`,
+      `claude mcp add skills-tools-knowledge --env HEXIS_URL="${window.location.origin}" -- npx -y @bevel-software/hexis-mcp@latest`,
     );
     const json = values.find((v) => v.includes('mcpServers') && v.includes('"command"'));
     const parsed = JSON.parse(json!).mcpServers['skills-tools-knowledge'];
-    expect(parsed.args).toEqual(['-y', '@bevel-software/hexis-mcp']);
+    expect(parsed.args).toEqual(['-y', '@bevel-software/hexis-mcp@latest']);
     expect(parsed.env.HEXIS_URL).toBe(window.location.origin);
     // Keyless = interactive: the browser-sign-in mode carries no key env.
     expect(parsed.env.HEXIS_CONNECTION_KEY).toBeUndefined();
@@ -332,12 +332,12 @@ describe('the key-bearing snippets quote the deployment too', () => {
 
     // 7. the Claude Code stdio one-liner
     expect(values).toContain(
-      `claude mcp add skills-tools-knowledge --env HEXIS_URL="${window.location.origin}" --env HEXIS_CONNECTION_KEY="${KEY}" -- npx -y @bevel-software/hexis-mcp`,
+      `claude mcp add skills-tools-knowledge --env HEXIS_URL="${window.location.origin}" --env HEXIS_CONNECTION_KEY="${KEY}" -- npx -y @bevel-software/hexis-mcp@latest`,
     );
     // 8. the JSON config that spawns the package
     const json = values.find((v) => v.includes('mcpServers') && v.includes('"command"'));
     const parsed = JSON.parse(json!).mcpServers['skills-tools-knowledge'];
-    expect(parsed.args).toEqual(['-y', '@bevel-software/hexis-mcp']);
+    expect(parsed.args).toEqual(['-y', '@bevel-software/hexis-mcp@latest']);
     expect(parsed.env.HEXIS_URL).toBe(window.location.origin);
     expect(parsed.env.HEXIS_CONNECTION_KEY).toBe(KEY);
     expect(json).not.toContain(PUBLIC_URL);

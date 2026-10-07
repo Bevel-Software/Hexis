@@ -23,13 +23,13 @@ import { UuidSessionSink } from '../../workspace/session-sink.js';
 import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
 import { CLIENT_SHORT_CUT, TOOL_DESCRIPTION_CAP, clientVisibleLength, firstSentenceEnd } from '../description-length.js';
 import {
-  POINTER_GUIDE_NAME_BUDGET,
-  SHARED_RULES_POINTER_MAX,
   TOOL_PREFIX_CAP,
   sharedFileRules,
-  sharedRulesPointer,
 } from '../../agent-instructions/index.js';
 import { isPlatformFile, platformFilesByDepth } from '@bevel-software/platform-shared';
+import { GET_AGENT_GUIDE_TOOL, GUIDE_FIRST_SENTENCE, guideFirstDescription } from '../guide-first.js';
+import { registerAgentGuideTool } from '../../agent-guide/agent-guide.tools.js';
+import { agentGuideSections } from '../../agent-guide/agent-guide.js';
 
 /**
  * The cap exists because clients cut a long tool description, and they cut it
@@ -62,16 +62,18 @@ const emptySkills = { listSkills: async () => [] } as unknown as Parameters<type
 /**
  * The meta-tools as the hosted endpoint builds them (`mcp.service.ts`):
  * examples written against the namespace it registers the knowledge-base tools
- * under and against the catalog it serves, and the chain ending in the pointer.
- * So the chain description measured here carries the worked call a client is
- * really sent, which is its longest form.
+ * under and against the catalog it serves, and the chain without the rules it
+ * states only in the shared places. So the chain description measured here
+ * carries the worked call a client is really sent, which is its longest form.
  */
-function servedMetaTools(external: readonly UtcpTool[], pointer = sharedRulesPointer(testKbContext().layout)) {
+function servedMetaTools(external: readonly UtcpTool[]) {
   return codeModeMetaTools(
     EXTERNAL_KB_MANUAL_NAME,
     external.map((t) => ({ utcpName: `${EXTERNAL_KB_MANUAL_NAME}.${t.name}`, inputSchema: t.inputs })),
-    { sharedRulesPointer: pointer },
-  );
+    { sharedRulesPointer: '' },
+    // As the hosted endpoint serves them: opening with the guide-first
+    // sentence, through the one helper the endpoint itself uses.
+  ).map((t) => ({ ...t, description: guideFirstDescription(t.description) }));
 }
 
 /** Every tool Hexis itself registers, on both surfaces, deduplicated by name. */
@@ -103,18 +105,21 @@ async function hexisTools(): Promise<UtcpTool[]> {
     unused(),
   );
   registerWorkflowTools(registry, router, toolAuth, toolHandler, kb);
-  registerPluginsTools(registry);
+  registerPluginsTools(registry, kb);
   registerSkillsTools(registry, router, toolAuth, toolHandler, emptySkills);
   registerToolManualsTools(registry, router, toolAuth, toolHandler, emptyManuals, {
     accessControl: unused(),
     variableStatus: unused(),
     kb,
   });
+  // The guide's own tool, with the platform's sections: the one description
+  // that lists the sections is measured with the list it really carries.
+  registerAgentGuideTool(registry, router, toolAuth, toolHandler, () => agentGuideSections(kb.layout));
 
   const byName = new Map<string, UtcpTool>();
-  // The meta-tools as a client is served them: the chain carries its pointer
-  // (`mcp.service.ts` appends it at the mount), so the catalog measured here is
-  // the catalog that goes out rather than the unpointed constant.
+  // The meta-tools as a client is served them (`mcp.service.ts` opens each
+  // with the guide-first sentence at the mount), so the catalog measured here
+  // is the catalog that goes out rather than the bare constant.
   const external = (await registry.listExternal()) as UtcpTool[];
   const metaTools = servedMetaTools(external);
   for (const tool of [...(await registry.listInternal()), ...external, ...metaTools]) {
@@ -141,9 +146,11 @@ describe('no Hexis tool description is long enough to be cut', () => {
     // The cap does not answer the ~500-character cut; the ORDER of the text
     // does, and this is where that claim is checked rather than asserted in a
     // comment. A client that stops at 500 must still have the sentence saying
-    // what the tool does — what it loses is the pointer tail, and the file the
-    // pointer names is stated in the handshake instructions and in the guide
-    // anyway. Lowering the cap to 500 would not buy this; only order does.
+    // what the tool does — what it loses is the tail. The shared rules are
+    // stated in the guide (which the opener sends every client to, including
+    // the description-only ones this cut is about) and, for the clients that
+    // honour it, in the handshake instructions as well. Lowering
+    // the cap to 500 would not buy this; only order does.
     const late = (await hexisTools())
       .map((t) => ({ tool: t.name, endsAt: firstSentenceEnd(t) }))
       .filter((m) => m.endsAt > CLIENT_SHORT_CUT)
@@ -156,30 +163,26 @@ describe('no Hexis tool description is long enough to be cut', () => {
     ).toEqual([]);
   });
 
-  it('holds the cap on a deployment that renamed its guide, not only under the default', async () => {
-    // The pointer ends every file tool's description and its length moves with
-    // a deployment setting, so a cap checked only against the nine characters
-    // of `AGENTS.md` guarantees nothing about the catalog a renamed deployment
-    // serves. Two things make it hold: the pointer is bounded by construction
-    // (past `POINTER_GUIDE_NAME_BUDGET` the guide is named by its role), and
-    // `clientVisibleLength` charges the worst case rather than this layout's.
+  it('opens every tool but the guide\'s own with the guide-first sentence, and fits with it', async () => {
+    // The sentence is in the description the registry lists, so the catalog
+    // measured here is the catalog a client gets, sentence included.
     const tools = await hexisTools();
-    const atWorst = tools
-      .map((t) => ({ tool: t.name, chars: clientVisibleLength(t) }))
-      .filter((m) => m.chars > TOOL_DESCRIPTION_CAP);
-    expect(atWorst, atWorst.map((m) => `${m.tool}: ${m.chars}`).join('\n')).toEqual([]);
-
-    // And measured literally, under the longest guide name a deployment can
-    // actually configure: every description still fits.
-    const longest = `${'x'.repeat(252)}.md`;
-    const pointerHere = sharedRulesPointer(testKbContext().layout);
-    const pointerThere = sharedRulesPointer({ ...testKbContext().layout, agentsFile: longest });
-    expect(pointerThere.length).toBeLessThanOrEqual(SHARED_RULES_POINTER_MAX);
-    for (const tool of tools) {
-      if (!tool.description?.endsWith(pointerHere)) continue;
-      const asRenamed = tool.description.slice(0, -pointerHere.length) + pointerThere;
-      const chars = clientVisibleLength({ name: tool.name, description: asRenamed });
-      expect(chars, `${tool.name} on a renamed deployment`).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
+    // ONE predicate for both halves, so no description falls between them: a
+    // tool whose own description is empty is served the sentence alone, and
+    // one with text after it has whitespace between — not `here.Read`.
+    const opensWithGuide = (t: UtcpTool): boolean => {
+      const description = t.description ?? '';
+      if (description === GUIDE_FIRST_SENTENCE) return true;
+      return description.startsWith(GUIDE_FIRST_SENTENCE) && /^\s/.test(description.slice(GUIDE_FIRST_SENTENCE.length));
+    };
+    const opened = tools.filter(opensWithGuide);
+    expect(opened.length).toBeGreaterThan(0);
+    // The guide's own tool is the one exception: it is what the sentence
+    // points at, and it is in the catalog measured here so the cap holds on
+    // it too (see the first test).
+    expect(tools.filter((t) => !opensWithGuide(t)).map((t) => t.name)).toEqual([GET_AGENT_GUIDE_TOOL]);
+    for (const tool of opened) {
+      expect(clientVisibleLength(tool), tool.name).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
     }
   });
 
@@ -190,12 +193,10 @@ describe('no Hexis tool description is long enough to be cut', () => {
     // the catalog the agent reads was over it by 300.
     const read = (await hexisTools()).find((t) => t.name === 'read_file');
     expect(read).toBeDefined();
-    // Its own text, with the pointer charged at its worst case rather than at
-    // this layout's, plus the prefix at ITS cap and the blank line between.
-    const pointer = sharedRulesPointer();
-    const ownAtWorstPointer = read!.description!.length - pointer.length + SHARED_RULES_POINTER_MAX;
-    expect(clientVisibleLength(read!)).toBe(ownAtWorstPointer + TOOL_PREFIX_CAP + 2);
-    expect(ownAtWorstPointer + TOOL_PREFIX_CAP + 2).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
+    // Its own text (the guide-first sentence included), plus the prefix at
+    // ITS cap and the blank line between, must fit — measured as the client
+    // sees it.
+    expect(clientVisibleLength(read!)).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
   });
 
   it('fails, naming the tool, when a paragraph takes a description over the cap', () => {
@@ -228,7 +229,7 @@ describe('no Hexis tool description is long enough to be cut', () => {
   });
 });
 
-describe('every file tool ends with the pointer and carries no shared paragraph', () => {
+describe('every file tool opens with the guide-first sentence and carries no shared paragraph', () => {
   /** The tools that used to carry the shared paragraphs — every `mount`ed one. */
   const FILE_TOOLS = [
     'read_file',
@@ -248,13 +249,12 @@ describe('every file tool ends with the pointer and carries no shared paragraph'
     'apply_file_upload',
   ];
 
-  it('ends each description with the one sentence naming the shared rules', async () => {
+  it('opens each description with the sentence sending the agent to the guide, and ends it as a sentence', async () => {
     const tools = await hexisTools();
-    const pointer = sharedRulesPointer(testKbContext().layout);
     for (const name of FILE_TOOLS) {
       const def = tools.find((t) => t.name === name);
       expect(def, name).toBeDefined();
-      expect(def!.description!.endsWith(pointer), `${name} must end with: ${pointer}`).toBe(true);
+      expect(def!.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `), `${name} must open with: ${GUIDE_FIRST_SENTENCE}`).toBe(true);
       // Ends with a full sentence, so nothing reads as cut off mid-thought.
       expect(def!.description!.trimEnd().endsWith('.'), name).toBe(true);
     }
@@ -283,25 +283,27 @@ describe('every file tool ends with the pointer and carries no shared paragraph'
 });
 
 describe('the shared rules describe the tools they name', () => {
-  it('ends the chain description with the pointer too, under the cap', async () => {
+  it('opens the chain description with the guide-first sentence too, under the cap', async () => {
     // What a chain does with a failure, a large result or an image is true of
     // every call, so it is stated in the shared rules — and the clients that
     // drop the handshake `instructions` see only descriptions, so the chain
-    // gets the same pointer every file tool ends with. Composed at the mount,
-    // because `mcp-core` may not spell a guide name that is a deployment
-    // setting.
-    const pointer = sharedRulesPointer(testKbContext().layout);
+    // opens with the same sentence every tool of the platform's own opens
+    // with, and ends with no second pointer: the one at the front is the way
+    // to the rules. Composed at the mount, because `mcp-core` builds the
+    // constant without knowing where this deployment states them.
     const served = (await hexisTools()).find((t) => t.name === CALL_TOOL_CHAIN_NAME)!;
-    expect(served.description!.endsWith(pointer)).toBe(true);
+    expect(served.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `)).toBe(true);
+    expect(served.description!.split(GUIDE_FIRST_SENTENCE)).toHaveLength(2);
+    expect(served.description!.trimEnd().endsWith('.')).toBe(true);
     expect(clientVisibleLength(served)).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
-    // The other two describe the registry, not what a call does: no pointer.
+    // The other two open the same way: the guide comes before the registry too.
     for (const tool of servedMetaTools([]).filter((t) => t.name !== CALL_TOOL_CHAIN_NAME)) {
-      expect(tool.description).not.toContain(pointer);
+      expect(tool.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `), tool.name).toBe(true);
     }
   });
 
   it('states what a chain does in the shared rules, and not a second time on the chain', async () => {
-    // The pointer is only honest if the rules it points at are THERE. These
+    // The opener is only honest if the rules it points at are THERE. These
     // two were paragraphs of the chain's description; they moved, whole, and a
     // description that kept them as well would be the long one a client cuts.
     const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'tool-chain')!;
@@ -317,7 +319,7 @@ describe('the shared rules describe the tools they name', () => {
 
   it('keeps the rules on the chain itself where no shared rules are served', () => {
     // The standalone bridge proxies a deployment whose guide it cannot name, so
-    // it passes no pointer — and an agent there must still be told what a chain
+    // it passes no pointer at all — and an agent there must still be told what a chain
     // that timed out, or answered too much, or read an image, does.
     const [chain] = codeModeMetaTools('hexis', []).filter((t) => t.name === CALL_TOOL_CHAIN_NAME);
     expect(chain.description).toContain(CHAIN_FAILURES_RULE);

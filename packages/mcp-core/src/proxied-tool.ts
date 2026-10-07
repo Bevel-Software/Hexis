@@ -77,6 +77,69 @@ export function toListedTool(tool: ProxiedTool): McpTool | null {
   };
 }
 
+/**
+ * How deep {@link sanitizeInputSchema} descends before it stops walking and
+ * passes the remainder through untouched. Generous on purpose: a real schema
+ * costs two levels per nesting (the `properties` keyword, then the field name),
+ * and the whole reason for this constant is the call stack, not the schema.
+ */
+const MAX_SANITIZE_DEPTH = 200;
+
+/**
+ * How many nodes one schema's `$ref` inlining may produce before a `$ref`
+ * stops being expanded.
+ *
+ * The recursion guard tracks only the pointers on the ACTIVE path, which is
+ * what `$ref` recursion means — but it does not make expansion cheap. A
+ * schema whose references form a DAG rather than a tree (two `allOf` branches
+ * pointing at one `$defs` entry, that entry doing the same) expands its target
+ * once per branch, and that doubles per level: a few hundred bytes on the wire
+ * can ask `tools/list` for a reply no amount of memory will hold. Past this
+ * budget a `$ref` degrades to the same permissive `{}` a recursive one does,
+ * which stands at a schema position and leaves the result valid JSON Schema.
+ */
+const MAX_INLINED_NODES = 20_000;
+
+/**
+ * The stand-in for a subtree past {@link MAX_SANITIZE_DEPTH}: every plain
+ * object becomes `{}`, while arrays and scalars keep their shape. Iterative,
+ * because the whole reason for being here is that the recursion has to stop.
+ *
+ * `{}` is legal exactly where a SCHEMA stands, and an object this deep inside a
+ * schema is at a schema position. The positions the old cap destroyed were an
+ * `anyOf` LIST, a `required` entry and a `type` STRING — none of them an
+ * object, all of them handed back as they came. And because no object survives,
+ * nothing past the cap can carry a `$ref` left dangling by the `$defs` block
+ * this walk drops, or a `format` the Anthropic validator refuses.
+ */
+function stripPastDepth(node: unknown): unknown {
+  if (!node || typeof node !== 'object') return node;
+  if (!Array.isArray(node)) return {};
+  const out: unknown[] = [];
+  const queue: Array<{ from: readonly unknown[]; to: unknown[] }> = [{ from: node, to: out }];
+  for (let i = 0; i < queue.length; i += 1) {
+    const { from, to } = queue[i];
+    for (const item of from) {
+      if (!item || typeof item !== 'object') to.push(item);
+      else if (!Array.isArray(item)) to.push({});
+      else {
+        const nested: unknown[] = [];
+        to.push(nested);
+        queue.push({ from: item, to: nested });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Keywords whose value is INSTANCE DATA rather than a schema. A schema says
+ * what a value may be; these carry values themselves, so nothing in them is a
+ * construct for the sanitizer to touch — and nothing in them is a place where
+ * `{}` would mean "any value" either.
+ */
+const DATA_VALUED_KEYWORDS = new Set(['const', 'default', 'enum', 'examples']);
+
 /** JSON-Schema string `format` values the Anthropic tool validator accepts. */
 const SUPPORTED_SCHEMA_FORMATS = new Set([
   'date-time',
@@ -99,9 +162,28 @@ const SUPPORTED_SCHEMA_FORMATS = new Set([
  *  - drop non-standard `format` values (OpenAPI's `int32`/`byte`/… — only the
  *    JSON-Schema-standard formats above are accepted; `format` is advisory, so
  *    dropping it doesn't change tool behavior).
- * Depth-bounded so a recursive schema degrades to a permissive `{}` node instead
- * of hanging or emitting the unsupported recursion; non-local/external refs
- * degrade the same way. Exported for direct testing.
+ * Everything else is passed through UNCHANGED, and both recursion guards are
+ * built so that hitting one cannot change a schema either:
+ *
+ *  - a `$ref` that resolves back onto a schema we are already inlining is
+ *    recursive, and inlining has no finite answer for it. It degrades to a
+ *    permissive `{}` — which is legal, because a `$ref` only ever stands where
+ *    a SCHEMA is expected and `{}` there means "any value". Non-local and
+ *    unresolvable refs degrade the same way, and so does one past
+ *    {@link MAX_INLINED_NODES}.
+ *  - the depth cap keeps the rest of the subtree's shape, replacing only the
+ *    objects in it with `{}` — see {@link stripPastDepth}. It cannot reach
+ *    inside instance data, because the walk never descends into a
+ *    {@link DATA_VALUED_KEYWORDS} value in the first place.
+ *
+ * That second rule is the fix for three tools AI clients silently dropped. The
+ * cap used to return `{}` at WHATEVER position it stopped at, and most
+ * positions in a schema are not schema positions: a tool nested deeper than
+ * the cap reached clients with `anyOf: {}`, `required: [{}]` or `type: {}` in
+ * it. None of those is valid JSON Schema, so the client refused the tool — and
+ * said so about a server that had sent a perfectly good schema.
+ *
+ * Exported for direct testing.
  */
 export function sanitizeInputSchema(schema: unknown): unknown {
   const root = schema;
@@ -111,30 +193,131 @@ export function sanitizeInputSchema(schema: unknown): unknown {
     for (const partRaw of pointer.slice(2).split('/')) {
       const part = partRaw.replace(/~1/g, '/').replace(/~0/g, '~');
       if (!node || typeof node !== 'object') return undefined;
+      // Own members only: `#/constructor` names nothing, not `Object`.
+      if (!Object.prototype.hasOwnProperty.call(node, part)) return undefined;
       node = (node as Record<string, unknown>)[part];
     }
     return node;
   };
-  // `isPropertyMap` marks the value of `properties`/`patternProperties`: its
-  // keys are the tool's OWN field names, not schema keywords, so a field
-  // literally named `format`, `$ref` or `definitions` must survive untouched
-  // (its VALUE is still a schema and is walked as one).
+  // The pointers currently being inlined, on THIS path. A `$ref` that points
+  // at a schema we are already inside is recursive: JSON Schema says that with
+  // the reference, and an inlined copy has no finite form.
+  const inlining = new Set<string>();
+  // Nodes charged to the expansion budget so far, against MAX_INLINED_NODES.
+  let inlined = 0;
+  // The size of each referenced target — objects, arrays, their entries and
+  // scalars, one count per pointer — stopped early past the budget, since
+  // past it the exact number no longer matters.
+  const costs = new Map<string, number>();
+  const costOf = (pointer: string): number => {
+    const known = costs.get(pointer);
+    if (known !== undefined) return known;
+    // Counted with a bounded frontier: children are pushed one at a time and
+    // only while the count is under the cap, so a target wider than the
+    // budget costs the cap in work and in memory, never its own width.
+    let count = 0;
+    const stack: unknown[] = [resolvePointer(pointer)];
+    const over = () => count + stack.length > MAX_INLINED_NODES;
+    while (stack.length > 0 && !over()) {
+      const item = stack.pop();
+      count += 1;
+      if (!item || typeof item !== 'object') continue;
+      if (Array.isArray(item)) {
+        for (let i = 0; i < item.length && !over(); i += 1) stack.push(item[i]);
+      } else {
+        for (const key in item as Record<string, unknown>) {
+          if (over()) break;
+          if (Object.prototype.hasOwnProperty.call(item, key)) stack.push((item as Record<string, unknown>)[key]);
+        }
+      }
+    }
+    const cost = over() ? MAX_INLINED_NODES + 1 : count;
+    costs.set(pointer, cost);
+    return cost;
+  };
+  // `isPropertyMap` marks the value of `properties`/`patternProperties`, and
+  // of `dependentSchemas`/`dependencies`: its keys are the tool's OWN field
+  // names, not schema keywords, so a field literally named `format`, `$ref`,
+  // `definitions` or `default` must survive untouched (its VALUE is still a
+  // schema and is walked as one).
   const walk = (node: unknown, depth: number, isPropertyMap = false): unknown => {
-    if (depth > 20) return {}; // recursion/cycle guard — permissive fallback
-    if (Array.isArray(node)) return node.map((item) => walk(item, depth + 1));
+    // Stack guard, not a schema rule: `$ref` recursion is caught below, so
+    // nothing a server legitimately sends reaches this. Stopping must never
+    // make a schema INVALID — which is exactly what the old cap did, by
+    // returning `{}` at whatever position it had reached.
+    if (depth > MAX_SANITIZE_DEPTH) return stripPastDepth(node);
     if (!node || typeof node !== 'object') return node;
+    if (Array.isArray(node)) return node.map((item) => walk(item, depth + 1));
     const obj = node as Record<string, unknown>;
-    if (!isPropertyMap && typeof obj.$ref === 'string') {
-      const target = resolvePointer(obj.$ref);
+    // `$dynamicRef` is a reference like `$ref` (2020-12's late-bound form):
+    // resolved the same way when it is a local pointer, degraded the same way
+    // when it is not — never left standing, because the `$defs` block it
+    // reaches into is dropped below and a dangling reference is what clients
+    // reject. Both at once is legal and both apply, so both are inlined, as
+    // the `allOf` they amount to.
+    const references = (['$ref', '$dynamicRef'] as const)
+      .map((keyword) => obj[keyword])
+      .filter((value): value is string => typeof value === 'string');
+    if (!isPropertyMap && references.length > 0) {
       // JSON Schema allows siblings next to $ref; keep them, target wins ties.
       const siblings: Record<string, unknown> = { ...obj };
       delete siblings.$ref;
-      const resolved = walk(target ?? {}, depth + 1);
-      return resolved && typeof resolved === 'object' && !Array.isArray(resolved)
-        ? { ...siblings, ...(resolved as Record<string, unknown>) }
-        : Object.keys(siblings).length
-          ? siblings
-          : resolved ?? {};
+      delete siblings.$dynamicRef;
+      // Sanitized ONCE, here, because every path below can return them: the
+      // siblings are schema keywords in their own right, and an unsupported
+      // `format` or a nested `$ref` left in them is precisely what this
+      // function exists to keep out of a listing. (`siblings` no longer holds
+      // a `$ref`, so this cannot re-enter this branch at this node; deeper
+      // ones terminate on `inlining` or on the depth cap.)
+      const kept = Object.keys(siblings).length ? (walk(siblings, depth + 1) as Record<string, unknown>) : null;
+      // Recursive, or past the expansion budget: `{}` ("any value") is the only
+      // finite answer, and a `$ref` stands at a schema position, so `{}` there
+      // is valid JSON Schema. The reference itself has to go — the `$defs`
+      // block it points into is dropped below, and a dangling `$ref` is what
+      // clients reject.
+      //
+      // The budget is charged AT THE REFERENCE, by the whole size of what it
+      // would copy — every object, array, array entry and scalar in the
+      // target, counted once per pointer — before a byte of it is copied. A
+      // target that does not fit the remaining budget is `{}` whole, never a
+      // partial copy: the only thing a copy can cost is what the reference
+      // multiplies, and that is the target's full size whatever shapes it is
+      // made of (a `required` list of ten thousand names as much as ten
+      // thousand properties).
+      const resolveOne = (pointer: string): unknown => {
+        if (inlining.has(pointer)) return {};
+        const cost = costOf(pointer);
+        if (inlined + cost > MAX_INLINED_NODES) return {};
+        inlined += cost;
+        inlining.add(pointer);
+        try {
+          return walk(resolvePointer(pointer) ?? {}, depth + 1);
+        } finally {
+          inlining.delete(pointer);
+        }
+      };
+      const asObject = (value: unknown): Record<string, unknown> =>
+        value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+      if (references.length === 1) {
+        const resolved = resolveOne(references[0]!);
+        // An object target merges over the siblings; a boolean target is a
+        // schema in its own right (`false` rejects everything) and stands
+        // alone, or under `allOf` beside siblings; anything else a pointer
+        // can land on — a string, a number, an array — is not a schema and
+        // becomes `{}`, never the raw value.
+        if (typeof resolved === 'boolean') {
+          return kept ? { ...kept, allOf: [...(Array.isArray(kept.allOf) ? kept.allOf : []), resolved] } : resolved;
+        }
+        return { ...(kept ?? {}), ...asObject(resolved) };
+      }
+      // A boolean target is a schema too (`false` rejects everything) and is
+      // kept as it is; anything that is not an object schema is `{}`.
+      const targets = references.map((pointer) => {
+        const resolved = resolveOne(pointer);
+        return typeof resolved === 'boolean' ? resolved : asObject(resolved);
+      });
+      const allOf = Array.isArray(kept?.allOf) ? (kept!.allOf as unknown[]) : [];
+      return { ...(kept ?? {}), allOf: [...allOf, ...targets] };
     }
     const out: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
@@ -143,12 +326,25 @@ export function sanitizeInputSchema(schema: unknown): unknown {
         continue;
       }
       if (key === '$defs' || key === 'definitions') continue; // inlined above
+      // Instance DATA, not a schema: handed back exactly as it came. A `default`
+      // or an `enum` entry that happens to carry a key named `format` or `$ref`
+      // is a value the tool expects, not a construct to rewrite — and since the
+      // walk never descends into one, the depth cap cannot reach inside it
+      // either.
+      if (DATA_VALUED_KEYWORDS.has(key)) {
+        out[key] = value;
+        continue;
+      }
       // Drop a non-standard `format` (OpenAPI `int32`/`byte`/…) — the validator
       // only allows the JSON-Schema-standard set; the annotation is non-load-bearing.
       if (key === 'format' && (typeof value !== 'string' || !SUPPORTED_SCHEMA_FORMATS.has(value))) {
         continue;
       }
-      out[key] = walk(value, depth + 1, key === 'properties' || key === 'patternProperties');
+      out[key] = walk(
+        value,
+        depth + 1,
+        key === 'properties' || key === 'patternProperties' || key === 'dependentSchemas' || key === 'dependencies',
+      );
     }
     return out;
   };

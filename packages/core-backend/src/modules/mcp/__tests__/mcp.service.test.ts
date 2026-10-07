@@ -12,7 +12,9 @@ import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
-import { TOOL_PREFIX_LINE, platformInstructions, sharedRulesPointer } from '../../agent-instructions/index.js';
+import { TOOL_PREFIX_LINE, platformInstructions } from '../../agent-instructions/index.js';
+import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
+import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import type { AgentEventInput, IAgentEventRecorder } from '../../audit/audit.contract.js';
 
 /** The platform-owned part of the handshake text: the header plus the shared file rules. */
@@ -266,23 +268,23 @@ describe('McpService (UTCP→MCP proxy)', () => {
     expect(askSchema.properties.body?.properties?.prompt).toBeDefined();
   });
 
-  it('ends the served call_tool_chain description with the shared-rules pointer', async () => {
-    // What a chained read does to an IMAGE is one of the rules the file tools
-    // share, so it is stated once — in the handshake instructions and in the
-    // managed guide — and the chain, like every file tool, ends with the one
-    // sentence saying where. The clients that drop `instructions` have only
-    // descriptions to go on, so that sentence is their way to the rule.
+  it('opens every served meta-tool with the guide-first sentence, and states the chain rules nowhere on the chain', async () => {
+    // What a chained read does to an IMAGE, a failure or a large result is one
+    // of the rules the file tools share, so it is stated once — in the
+    // handshake instructions and in the guide — and each meta-tool, like every
+    // tool of the platform's own, opens with the one sentence saying where.
+    // The clients that drop `instructions` have only descriptions to go on, so
+    // that sentence is their way to the rules.
     const client = await setup();
     const { tools } = await client.listTools();
-    const chain = tools.find((t) => t.name === 'call_tool_chain')!;
-    const pointer = sharedRulesPointer(DEFAULT_KB_LAYOUT);
-    expect(chain.description!.endsWith(pointer)).toBe(true);
-    // Once, and not on the two meta-tools that describe the registry rather
-    // than a file.
-    expect(chain.description!.split(pointer)).toHaveLength(2);
-    for (const name of ['list_tools', 'tools_info']) {
-      expect(tools.find((t) => t.name === name)!.description, name).not.toContain(pointer);
+    for (const name of ['call_tool_chain', 'list_tools', 'tools_info']) {
+      const served = tools.find((t) => t.name === name)!;
+      expect(served.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `), name).toBe(true);
+      expect(served.description!.split(GUIDE_FIRST_SENTENCE), name).toHaveLength(2);
     }
+    const chain = tools.find((t) => t.name === 'call_tool_chain')!;
+    expect(chain.description).not.toContain('image_omitted');
+    expect(chain.description).not.toContain('Shared rules for all file tools');
   });
 
   it('a $defs/$ref tool schema survives tools/list and a real MCP client accepts it', async () => {
@@ -612,27 +614,33 @@ describe('McpService — agent instructions', () => {
       expect.stringContaining('mcp-description.md'),
       expect.objectContaining({ message: 'disk' }),
     );
-    // And the four tools carry the fixed line alone.
+    // And the four tools carry the fixed line alone, ahead of the guide-first
+    // opening every listed tool has.
     const { tools } = await client.listTools();
     for (const name of KB_TOOLS) {
-      expect(tools.find((t) => t.name === name)?.description).toBe(`${TOOL_PREFIX_LINE}\n\noriginal ${name} description`);
+      expect(tools.find((t) => t.name === name)?.description).toBe(
+        `${TOOL_PREFIX_LINE}\n\n${GUIDE_FIRST_SENTENCE} original ${name} description`,
+      );
     }
   });
 
-  it('prefixes exactly the four knowledge-base tools; every other description is byte-for-byte unchanged', async () => {
+  it('prefixes exactly the four knowledge-base tools; every other description is as the catalog lists it', async () => {
     const client = await setup({ readAgentPreamble: async () => 'Acme builds solar farms.', extraTools: KB_TOOLS });
     const { tools } = await client.listTools();
     const byName = Object.fromEntries(tools.map((t) => [t.name, t.description]));
     const prefix = `${TOOL_PREFIX_LINE} Acme builds solar farms.`;
     for (const name of KB_TOOLS) {
-      expect(byName[name], name).toBe(`${prefix}\n\noriginal ${name} description`);
+      expect(byName[name], name).toBe(`${prefix}\n\n${GUIDE_FIRST_SENTENCE} original ${name} description`);
     }
-    // Regression: the rest, meta-tools included, is untouched.
-    expect(byName.ask).toBe('echo the prompt');
-    expect(byName.boom).toBe('always errors');
-    expect(byName.refy).toBe('has $defs/$ref in its schema');
+    // Regression: the rest carries only what the catalog gives every tool —
+    // the guide-first opening — and never the purpose prefix; the meta-tools
+    // open with that sentence too.
+    expect(byName.ask).toBe(`${GUIDE_FIRST_SENTENCE} echo the prompt`);
+    expect(byName.boom).toBe(`${GUIDE_FIRST_SENTENCE} always errors`);
+    expect(byName.refy).toBe(`${GUIDE_FIRST_SENTENCE} has $defs/$ref in its schema`);
     for (const meta of ['call_tool_chain', 'list_tools', 'tools_info']) {
       expect(byName[meta], meta).not.toContain(TOOL_PREFIX_LINE);
+      expect(byName[meta]!.startsWith(`${GUIDE_FIRST_SENTENCE} `), meta).toBe(true);
     }
   });
 

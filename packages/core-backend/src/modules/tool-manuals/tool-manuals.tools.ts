@@ -7,6 +7,7 @@ import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IToolManualService } from './tool-manuals.contract.js';
+import type { HiddenToolSource } from '../../shared/hidden-tools.js';
 
 /**
  * What `list_tool_setup` needs from the secrets vault (structurally satisfied
@@ -43,6 +44,12 @@ export function registerToolManualsTools(
     variableStatus: VariableStatusPort;
     /** Which branch tools are served from, and its clone. */
     kb: Pick<KbContext, 'defaultBranch' | 'defaultWorkspaceId'>;
+    /**
+     * Where a hidden tool's schema finding comes from (the MCP proxy).
+     * Optional: a deployment with no MCP surface has nothing to report, and
+     * `hiddenTools` is then empty everywhere.
+     */
+    hiddenTools?: HiddenToolSource;
   },
 ): void {
   registry.registerExternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
@@ -66,23 +73,30 @@ export function registerToolManualsTools(
   const listSetupDef = toolDef({
     name: 'list_tool_setup',
     // What each FIELD means is documented on the field, in `outputs` below:
-    // `setup.kind`, `variables` and `invalid` each carried a paragraph here,
-    // which made this description two thousand characters and so the first
-    // thing a client cut. The description says what the tool answers and the
-    // three things an agent cannot read off a field.
+    // `setup.kind`, `variables`, `invalid` and `hiddenTools` each carried a
+    // paragraph here, which made this description two thousand characters and
+    // so the first thing a client cut. The description says what the tool
+    // answers and the four things an agent cannot read off a field.
+    //
+    // It sits a few characters under `TOOL_DESCRIPTION_CAP` WITH the guide-first
+    // sentence the registry puts in front of it (`tool-registry/guide-first.ts`),
+    // which is why every sentence here is the short form: the `hiddenTools`
+    // clause and that opener both came out of the same budget, and what a
+    // hidden tool's entry CONTAINS is on the field below rather than here.
     description:
       'Configuration status of every `.tool` the current user can access: what each tool needs set up and what is ' +
-      'already configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER — a `.tool` it cannot ' +
-      'READ is absent entirely, and every flag is the caller\'s own state. ' +
-      'Secret VALUES are never returned and can never be set through a tool: an admin enters them in the tool editor, ' +
-      'and users sign in on /connect rather than typing a value. ' +
-      'What gates setting a tool\'s shared secrets is `canWrite` on the `.tool` FILE — per-file access from its ' +
-      'frontmatter `write:`/`owner:` verbs and the access.md chain, NOT a platform role: the people who manage the ' +
-      'file configure the tool. ' +
+      'already configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER: a `.tool` it cannot ' +
+      'READ is absent, and every flag is the caller\'s own. ' +
+      'Secret VALUES are never returned and can never be set through a tool: an admin enters them in the tool ' +
+      'editor; users sign in on /connect. ' +
+      'Setting a tool\'s shared secrets is gated by `canWrite` on the `.tool` FILE (its frontmatter ' +
+      '`write:`/`owner:` verbs and the access.md chain), NOT by a platform role: who manages the file configures ' +
+      'the tool. ' +
+      '`hiddenTools` names the tools Hexis hides from agents for an invalid schema. ' +
       'The listing is the RELEASED catalog, built from the default branch only: a server or `.tool` you declared on a ' +
-      'draft is not listed, not callable and not signed-in-able until that draft is merged. Pass `branch` (the draft ' +
-      'you wrote the declaration on) and `onBranchOnly` names every tool declared there that the default branch does ' +
-      'not serve yet — open a change request, then ask the user to review and merge it in the app to activate it.',
+      'draft is not listed, callable or signed-in-able until it is merged. Pass `branch` (the draft you wrote the ' +
+      'declaration on) and `onBranchOnly` names every tool declared there that the default branch does not serve ' +
+      'yet — open a change request and ask the user to merge it in the app to activate it.',
     path: '/api/agent/tools/list_tool_setup',
     inputs: {
       type: 'object',
@@ -132,6 +146,22 @@ export function registerToolManualsTools(
                 type: 'boolean',
                 description: 'You may write this `.tool` FILE, which is what gates setting its shared secrets.',
               },
+              hiddenTools: {
+                type: 'array',
+                description:
+                  'Tools of this server kept off every agent surface for an invalid input schema. Empty ' +
+                  'unless the caller may write this tool.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string', description: 'The name the tool would have been offered under.' },
+                    path: { type: 'string', description: 'JSON Pointer to the place in the schema that is not valid.' },
+                    reason: { type: 'string', description: 'Why that place is not valid, in the validator\'s words.' },
+                    marker: { type: 'string', description: 'The one sentence the tool page shows for this tool.' },
+                  },
+                  required: ['name', 'path', 'reason', 'marker'],
+                },
+              },
               variables: {
                 type: 'array',
                 description:
@@ -156,7 +186,7 @@ export function registerToolManualsTools(
                 },
               },
             },
-            required: ['slug', 'name', 'path', 'type', 'canWrite', 'variables'],
+            required: ['slug', 'name', 'path', 'type', 'canWrite', 'hiddenTools', 'variables'],
           },
         },
         invalid: {
@@ -219,27 +249,35 @@ export function registerToolManualsTools(
       const status = await deps.variableStatus.statusFor(ctx.user.id, allKeys);
       const statusByKey = new Map(status.map((s) => [s.key, s]));
       const tools = await Promise.all(
-        manuals.map(async (m) => ({
-          slug: m.slug,
-          name: m.name,
-          path: m.path,
-          type: m.type,
-          setup: m.setup ?? null,
-          canWrite: await deps.accessControl.canWrite(defaultWs(), ctx.user.email, m.path),
-          variables: (m.variables ?? []).map((v) => {
-            const st = statusByKey.get(varKey(m.name, v.name));
-            const isOAuth = v.oauth != null;
-            return {
-              name: v.name,
-              scope: v.scope,
-              label: v.label ?? null,
-              oauth: isOAuth,
-              adminConfigured: st?.adminConfigured ?? false,
-              userConfigured: st?.userConfigured ?? false,
-              authorized: isOAuth ? (st?.userAuthorized ?? false) : null,
-            };
-          }),
-        })),
+        manuals.map(async (m) => {
+          const canWrite = await deps.accessControl.canWrite(defaultWs(), ctx.user.email, m.path);
+          return {
+            slug: m.slug,
+            name: m.name,
+            path: m.path,
+            type: m.type,
+            setup: m.setup ?? null,
+            canWrite,
+            // The marker goes only to the people who manage the server — the
+            // same verdict that gates setting its shared secrets. A caller who
+            // may only READ the tool is told nothing about it: they cannot fix
+            // the schema, and the tool is simply not among the ones they can call.
+            hiddenTools: canWrite ? (deps.hiddenTools?.hiddenFor(m.name) ?? []) : [],
+            variables: (m.variables ?? []).map((v) => {
+              const st = statusByKey.get(varKey(m.name, v.name));
+              const isOAuth = v.oauth != null;
+              return {
+                name: v.name,
+                scope: v.scope,
+                label: v.label ?? null,
+                oauth: isOAuth,
+                adminConfigured: st?.adminConfigured ?? false,
+                userConfigured: st?.userConfigured ?? false,
+                authorized: isOAuth ? (st?.userAuthorized ?? false) : null,
+              };
+            }),
+          };
+        }),
       );
       const onBranchOnly = pending.map((p) => ({ ...p, branch: branch! }));
       if (onBranchOnly.length === 0) return { tools, invalid, onBranchOnly };
