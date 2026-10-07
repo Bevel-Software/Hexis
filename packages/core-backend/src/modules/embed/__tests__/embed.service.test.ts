@@ -353,6 +353,23 @@ describe('EmbedService: bytes', () => {
     expect(accessControl.canRead).toHaveBeenCalledWith(expect.anything(), USER.email, 'Data/assets/shot.png');
   });
 
+  /** The form the embed view sends: a renderer names files by workspace path. */
+  it('serves a picture named from the repository root', async () => {
+    const { service } = build({
+      files: { [WS]: PAGE, [`${KB}/Data/assets/shot.png`]: Buffer.from([9]) },
+    });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    const { bytes, path } = await service.readBytes(token, '/Data/assets/shot.png');
+    expect(path).toBe('Data/assets/shot.png');
+    expect([...bytes]).toEqual([9]);
+  });
+
+  it('refuses the outside-the-knowledge-base form the view sends', async () => {
+    const { service } = build();
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    await expect(service.readBytes(token, '/..')).rejects.toThrow(EmbedAccessError);
+  });
+
   it('refuses a path that climbs out of the repository', async () => {
     const { service } = build();
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });

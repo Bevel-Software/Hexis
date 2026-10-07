@@ -375,4 +375,18 @@ describe('the renderer', () => {
     ]);
     expect(open.mock.calls.every((c) => c[1] === '_blank')).toBe(true);
   });
+
+  /**
+   * A picture in a markdown page is fetched under the token from the
+   * repository root — the renderer hands the surface a WORKSPACE path, and
+   * sent as written the server resolved it beside the page a second time
+   * (`Data/knowledge-base/Data/shot.png`), so every image 404'd.
+   */
+  it('asks for a picture beside the page by its repository path', async () => {
+    api.loadEmbed.mockResolvedValue(view({ content: '# Thing\n\n![shot](shot.png)\n' }));
+    mount();
+    const img = await screen.findByRole('img', { name: 'shot' });
+    expect(img.getAttribute('src')).toBe('/api/embed/raw?token=tok&path=/Data/shot.png');
+    expect(api.embedRawUrl).toHaveBeenCalledWith('tok', '/Data/shot.png', expect.anything());
+  });
 });

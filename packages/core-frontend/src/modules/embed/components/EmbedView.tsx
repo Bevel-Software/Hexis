@@ -62,6 +62,26 @@ function absolute(pathOrUrl: string): string {
  * them. Neither of them is ever shown a "no access" notice where a control
  * should be: there is always something they can do.
  */
+/**
+ * A workspace path, as every renderer hands the surface one, in the form the
+ * embed's raw route reads: omitted for the embedded file itself, and
+ * `/<repo-relative>` for any other file — the leading slash is what makes the
+ * server take it from the repository root rather than beside the page. Sending
+ * the workspace path as written made the server look for
+ * `<page folder>/<kbDir>/<page folder>/shot.png`, and every picture 404'd.
+ *
+ * A path outside the knowledge-base folder has no file in the repository; it
+ * goes as `/..`, which the server refuses as outside the knowledge base.
+ */
+function embedRawPath(
+  path: string,
+  view: Pick<EmbedFileView, 'workspacePath' | 'kbDirName'>,
+): string | undefined {
+  if (path === view.workspacePath) return undefined;
+  const prefix = `${view.kbDirName}/`;
+  return path.startsWith(prefix) ? `/${path.slice(prefix.length)}` : '/..';
+}
+
 export function EmbedView() {
   const token = tokenFromUrl();
   const registry = useAppRegistry();
@@ -189,10 +209,9 @@ export function EmbedView() {
       // place that resolution can be done.
       openNodeId: (idOrLink) => open(`/workspace/${encodeURIComponent(view.branch)}/${idOrLink}`, ''),
       canonicalUrlFor: () => absolute(view.appUrl),
-      rawUrl: (path, options) =>
-        embedRawUrl(token, path === view.workspacePath ? undefined : path, options),
+      rawUrl: (path, options) => embedRawUrl(token, embedRawPath(path, view), options),
       rawFetch: (path, options) =>
-        fetch(embedRawUrl(token, path === view.workspacePath ? undefined : path, options), {
+        fetch(embedRawUrl(token, embedRawPath(path, view), options), {
           credentials: 'omit',
           signal: options?.signal,
         }),

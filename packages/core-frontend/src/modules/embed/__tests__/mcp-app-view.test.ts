@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const PAGE = readFileSync(path.resolve(__dirname, '../../../../../core-backend/mcp-app/page.html'), 'utf8');
 const SCRIPT = /<script>([\s\S]*)<\/script>/.exec(PAGE)![1];
 const BODY = /<body>([\s\S]*?)<script>/.exec(PAGE)![1];
+const STYLE = /<style>([\s\S]*?)<\/style>/.exec(PAGE)![1];
 
 let host: { postMessage: ReturnType<typeof vi.fn> };
 const realParent = Object.getOwnPropertyDescriptor(window, 'parent');
@@ -22,6 +23,7 @@ beforeEach(() => {
   // The test is about WHAT the view frames, not about loading it.
   const happyDOM = (window as { happyDOM?: { settings: { disableIframePageLoading: boolean } } }).happyDOM;
   if (happyDOM) happyDOM.settings.disableIframePageLoading = true;
+  document.head.innerHTML = `<style>${STYLE}</style>`;
   document.body.innerHTML = BODY;
   host = { postMessage: vi.fn() };
   Object.defineProperty(window, 'parent', { configurable: true, value: host });
@@ -94,5 +96,27 @@ describe('the MCP App view', () => {
     });
     expect(document.getElementById('notice')!.textContent).toBe('File not found: Notes/missing.md');
     expect(document.getElementById('frame')!.classList.contains('hidden')).toBe(true);
+  });
+
+  it('takes a hidden frame out of the layout, so the notice is what shows', () => {
+    // The page's own stylesheet is applied: an id rule giving the frame its
+    // display must not outrank the class that hides it.
+    fromHost({
+      jsonrpc: '2.0',
+      method: 'ui/notifications/tool-result',
+      params: { structuredContent: { note: 'The embedded view needs an https deployment.' } },
+    });
+    expect(getComputedStyle(document.getElementById('frame')!).display).toBe('none');
+    expect(getComputedStyle(document.getElementById('notice')!).display).not.toBe('none');
+  });
+
+  it('shows the frame once an embed address arrives', () => {
+    fromHost({
+      jsonrpc: '2.0',
+      method: 'ui/notifications/tool-result',
+      params: { structuredContent: { embedUrl: 'https://hexis.example/embed?token=t' } },
+    });
+    expect(getComputedStyle(document.getElementById('frame')!).display).toBe('block');
+    expect(getComputedStyle(document.getElementById('notice')!).display).toBe('none');
   });
 });

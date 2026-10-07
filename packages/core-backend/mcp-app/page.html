@@ -27,8 +27,11 @@
       #notice a {
         color: #2563eb;
       }
+      /* !important: #frame's display rule is an id selector and outranks a
+         class, so without it a "hidden" frame keeps its full height and
+         pushes the notice below the fold. */
       .hidden {
-        display: none;
+        display: none !important;
       }
     </style>
   </head>

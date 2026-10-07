@@ -572,8 +572,9 @@ function nodeNameFor(repoRelative: string): string {
 /**
  * A path written relative to `from`'s folder, resolved to a repo-relative
  * path — or null when it escapes the repository or is otherwise unsafe.
- * Absolute-looking paths (`/x`, `<kbDir>/x`) are taken as repo-relative,
- * which is how the app's own markdown links are written.
+ * A path with a leading slash (`/x`) is taken from the repository root:
+ * that is the form the embed view sends, translating the workspace path a
+ * renderer hands it.
  */
 export function resolveBeside(from: string, path: string): string | null {
   // eslint-disable-next-line no-control-regex

@@ -95,8 +95,9 @@ export async function loadEmbed(token: string): Promise<EmbedFileView> {
  * byte-reading renderers put in an `<img src>` or fetch themselves.
  *
  * `path` is omitted for the embedded file itself and given for one beside it
- * (a picture a markdown page shows); the server resolves it relative to the
- * embedded file and re-checks the viewer's read access on it.
+ * (a picture a markdown page shows): `/<repo-relative>` from the repository
+ * root, or a path relative to the embedded file. The server re-checks the
+ * viewer's read access on whatever it resolves to.
  */
 export function embedRawUrl(
   token: string,
