@@ -1,0 +1,14 @@
+---
+'@bevel-software/platform-shared': minor
+'@bevel-software/platform-core-backend': minor
+---
+
+`move_file` rewrites the links into, out of and between the files it moves.
+
+Moving or renaming a file or folder used to leave every relative link pointing at the old place: those inside the moved files, the `nodeType` link in each node's frontmatter among them, and those in other pages pointing at the moved files. Agents recomputed them by hand.
+
+A move now rewrites them by default, and lands the move and every edit in one commit that git reads as renames. Every markdown link form is covered — relative, root-anchored `/knowledge-base/…` and `/workspace/<branch>/…`, angle-bracket and percent-encoded destinations, images and reference definitions — and each link keeps its form, anchor and title. Code, id-links and every other byte of a page, frontmatter included, are left as they were. HTML pages are named, not rewritten. Transcripts and probe logs are not searched.
+
+The dry run and the move answer the same `links` report: `filesEdited`, `linksRewritten`, the first 100 `edits`, the pages left `notRewritten` with the reason (a page the caller may not change on a protected branch, an HTML page, a hook's refusal), and, when the caller cannot read some pages, one sentence saying links there may still point at the old path — those pages are never opened, named or counted. A move that would edit more than 200 files is refused; a lock another writer holds past the retries fails the whole move with nothing changed. `rewriteLinks: false` moves exactly as before.
+
+For integrators: platform-shared exports the link grammar (`scanMarkdownLinks`, `resolveMdLink`, `rewriteMdLinks`, `retargetMdDestination`, `htmlLinksAffectedByMove`, `MD_ID_LINK_RE`), and `LockingFilesystem` gains `moveWithEdits`.
