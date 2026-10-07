@@ -98,7 +98,7 @@ describe('AppSwitcher as a segmented toggle (few apps, wide toolbar)', () => {
 
   it('shows the brand as text and both core apps side by side, with no menu', () => {
     renderSwitcher({ path: '/workspace' });
-    expect(screen.getByText('Bevel').closest('button')).toBeNull();
+    expect(screen.getByText(/^Hexis by/).closest('button')).toBeNull();
     const links = within(nav()).getAllByRole('link');
     expect(links.map((l) => l.textContent)).toEqual(['Knowledge', 'Skills & Tools']);
     expect(screen.queryByRole('button', { name: 'Switch app' })).not.toBeInTheDocument();
@@ -187,7 +187,7 @@ describe('AppSwitcher as a menu (more than three apps)', () => {
 
   it('renders the brand as the trigger and no menu until clicked', () => {
     renderMenu();
-    expect(screen.getByText('Bevel')).toBeInTheDocument();
+    expect(screen.getByText('Hexis by Bevel')).toBeInTheDocument();
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 

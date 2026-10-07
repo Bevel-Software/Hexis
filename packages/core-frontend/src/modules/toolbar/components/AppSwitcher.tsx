@@ -5,6 +5,7 @@ import { activeAppId, useActiveAppId, useAppRegistry, type AppDef } from '../../
 import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
 import { TOOLBAR_STACK_QUERY } from '../../layout/breakpoints';
 import { cn } from '../../../lib/utils';
+import { PRODUCT_NAME, ProductName } from '../../../shared/components';
 
 const MENU_ID = 'app-switcher-menu';
 
@@ -69,7 +70,7 @@ interface SwitcherProps {
 function AppToggle({ apps, activeId }: SwitcherProps) {
   return (
     <div className="flex min-w-0 items-center gap-2">
-      <span className="shrink-0 px-1.5 text-sm font-semibold tracking-wide text-ink">Bevel</span>
+      <ProductName className="shrink-0 px-1.5 text-sm font-semibold tracking-wide text-ink" />
       <nav aria-label="Apps" className="flex shrink-0 gap-0.5 rounded-md bg-hover p-0.5">
         {apps.map((app) => {
           const current = app.id === activeId;
@@ -157,7 +158,7 @@ function AppMenu({ apps, activeId }: SwitcherProps) {
         aria-expanded={open}
         aria-controls={open ? MENU_ID : undefined}
       >
-        <span className="shrink-0 text-sm font-semibold tracking-wide">Bevel</span>
+        <span className="shrink-0 text-sm font-semibold tracking-wide">{PRODUCT_NAME}</span>
         {activeApp && (
           <>
             <span aria-hidden="true" className="shrink-0 text-sm text-ink-faint">

@@ -1,6 +1,6 @@
 import { useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { Check, GitBranch, Server } from 'lucide-react';
-import { Badge, Banner, Button, TextField } from '../../../shared/components';
+import { Badge, Banner, Button, ProductName, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { useAppRegistry } from '../../../core/registry';
 import { GitHubRepositoryPanel } from './GitHubRepositoryPanel';
@@ -233,17 +233,7 @@ export function FirstRunStorage({ repository, onSaved }: Props) {
     <div className="h-full overflow-y-auto bg-canvas">
       <main className="mx-auto px-4 pt-8 pb-16 md:pt-16 md:pb-24 max-w-[692px]">
         <div className="grid gap-7">
-          <span className="text-ui font-semibold tracking-wide text-ink">
-            Hexis by{' '}
-            <a
-              href="https://bevel.software"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-accent hover:underline"
-            >
-              Bevel
-            </a>
-          </span>
+          <ProductName className="text-ui font-semibold tracking-wide text-ink" />
           {connecting ? (
             <>
               <Heading title="Connect your GitHub">

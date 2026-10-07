@@ -196,7 +196,7 @@ const BRANCH_MODEL_KEYS = ['defaultBranch', 'protectedBranches'];
 
 /** What each way of having a repository is called on its tab. */
 const GIT_MODE_LABEL: Record<GitMode, string> = {
-  managed: 'Managed for you',
+  managed: 'Hexis takes care of it',
   'github-app': 'GitHub',
   token: 'Address and token',
 };

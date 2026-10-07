@@ -273,7 +273,7 @@ describe('SetupGate: the first-run storage question', () => {
     it('opens as a step of this screen, not the full form, and goes back to the cards', async () => {
       await openAddressStep();
       expect(screen.queryByRole('heading', { name: 'Set up this deployment' })).toBeNull();
-      expect(screen.queryByRole('tab', { name: 'Managed for you' })).toBeNull();
+      expect(screen.queryByRole('tab', { name: 'Hexis takes care of it' })).toBeNull();
       expect(screen.getByRole('button', { name: 'Save and continue' })).toBeDisabled();
       await userEvent.click(screen.getByRole('button', { name: 'Back' }));
       expect(await question()).toBeInTheDocument();

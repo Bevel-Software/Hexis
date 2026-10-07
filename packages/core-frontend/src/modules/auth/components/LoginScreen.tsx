@@ -1,5 +1,6 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useAuth } from '../state/auth.context';
+import { ProductName } from '../../../shared/components';
 import {
   startSsoLogin,
   fetchLoginProviders,
@@ -76,7 +77,9 @@ export function LoginScreen() {
         className="bg-white p-8 rounded-xl border border-line w-full max-w-sm space-y-5"
       >
         <div className="text-center space-y-1">
-          <h1 className="text-2xl font-semibold text-ink">Bevel</h1>
+          <h1 className="text-2xl font-semibold text-ink">
+            <ProductName />
+          </h1>
           <p className="text-sm text-ink-muted">Sign in to continue</p>
         </div>
 
