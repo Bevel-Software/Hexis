@@ -555,7 +555,7 @@ export function registerWorkflowTools(
       'when `target` is a protected branch unless you could commit every changed file directly to it. ' +
       'SYNC: merging the target into your draft (`source` = the change request\'s target, `target` = your draft) ' +
       'is always allowed, even with that draft\'s request open — use it to bring a draft up to date. ' +
-      'Writes are committed asynchronously; the merge first waits up to 30s for `source`\'s pending commits. ' +
+      'Writes are committed asynchronously; the merge first waits up to 20s for `source`\'s pending commits. ' +
       'Returns `merged` with the merge commit; `nothing-to-merge` with `target`\'s tip when it already holds ' +
       'all of `source`; `pending-commits` (nothing merged) when writes are still committing — retry shortly — ' +
       'or one failed (`needsAttention`: tell the user); or `conflicts-need-resolution` with the conflicting ' +
@@ -578,7 +578,7 @@ export function registerWorkflowTools(
           type: 'object',
           description:
             'A completed merge, a merge with nothing to do, writes on `source` not committed yet ' +
-            '(writes are committed asynchronously and the merge waits up to 30 seconds for them), ' +
+            '(writes are committed asynchronously and the merge waits up to 20 seconds for them), ' +
             'or a signal that conflicts must be resolved first.',
           properties: {
             kind: { type: 'string', enum: ['merged', 'nothing-to-merge', 'pending-commits', 'conflicts-need-resolution'] },

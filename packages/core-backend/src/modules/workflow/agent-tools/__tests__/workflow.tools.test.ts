@@ -309,7 +309,7 @@ describe('registerWorkflowTools', () => {
           expect(mergeBranch.description, kind).toContain(`\`${kind}\``);
         }
         expect(mergeBranch.description).toMatch(/committed asynchronously/);
-        expect(mergeBranch.description).toMatch(/waits up to 30s/);
+        expect(mergeBranch.description).toMatch(/waits up to 20s/);
         const outcome = (mergeBranch.outputs as { properties: { outcome: { description: string; properties: Record<string, { enum?: string[] }> } } })
           .properties.outcome;
         expect(outcome.properties.kind.enum).toEqual(['merged', 'nothing-to-merge', 'pending-commits', 'conflicts-need-resolution']);

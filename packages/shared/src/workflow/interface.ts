@@ -694,7 +694,7 @@ export interface IWorkflowService {
    * Conflicts write nothing and come back as `conflicts-need-resolution`.
    *
    * Writes are committed asynchronously, so before merging this waits — up to
-   * 30 seconds, holding no lock — for `sourceBranch` to have no queued commit.
+   * 20 seconds, holding no lock — for `sourceBranch` to have no queued commit.
    * Still queued after that, or a queued commit escalated to a person, comes
    * back as `pending-commits` with nothing merged. A target that already held
    * everything on the source comes back as `nothing-to-merge` with its tip;

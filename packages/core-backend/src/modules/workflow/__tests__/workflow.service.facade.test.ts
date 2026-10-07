@@ -13,6 +13,7 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService, type PendingCommit } from '../pending-commits.service.js';
 import { PendingCommitsWorker } from '../pending-commits.worker.js';
+import { HttpCommunicationProtocol } from '@utcp/http';
 import { WorkflowService } from '../workflow.service.js';
 import { PullRebaseConflictError, WorkflowDomainError } from '../../../shared/domain-errors.js';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
@@ -1258,7 +1259,7 @@ describe('WorkflowService.mergeBranch — waits for the source branch\'s pending
     return { service: service as unknown as PendingCommitsService & typeof service, table };
   }
 
-  function harness(pending: PendingCommitsService, wait = { timeoutMs: 30_000, pollMs: 20 }) {
+  function harness(pending: PendingCommitsService, wait = { timeoutMs: 20_000, pollMs: 20 }) {
     const git = makeGit();
     (git as unknown as Record<string, unknown>).remoteBranchExists = vi.fn().mockResolvedValue(true);
     const merge = vi.fn(async (): Promise<unknown> => ({ kind: 'merged', sha: 'merge-sha', mergeCommit: 'merge-sha' }));
@@ -1340,12 +1341,21 @@ describe('WorkflowService.mergeBranch — waits for the source branch\'s pending
     expect(git.pull).not.toHaveBeenCalled();
   });
 
-  it('waits at most 30 seconds unless a test shortens it', () => {
+  it('bounds the wait well inside the timeout an agent\'s call is forwarded under', () => {
     const svc = new WorkflowService(
       makeDb(), makeGit(), makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(),
       makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate(),
     );
-    expect(svc.mergeWaitForPendingCommits.timeoutMs).toBe(30_000);
+    // Over `/api/mcp` the call reaches the tool through `@utcp/http`, whose
+    // request timeout cannot be set per template. A wait that ran to that
+    // ceiling answered "timeout of 30000ms exceeded" instead of
+    // `pending-commits` (Local Testing, attempt 1). The wait and the merge after
+    // it must both fit, so the bound leaves ten seconds for the merge.
+    const forwarding = (new HttpCommunicationProtocol() as unknown as { _axiosInstance: { defaults: { timeout: number } } })
+      ._axiosInstance.defaults.timeout;
+    expect(forwarding).toBe(30_000);
+    expect(svc.mergeWaitForPendingCommits.timeoutMs).toBe(20_000);
+    expect(forwarding - svc.mergeWaitForPendingCommits.timeoutMs).toBeGreaterThanOrEqual(10_000);
   });
 
   it('answers pending-commits at once, with the worker\'s message, when a queued commit needs attention', async () => {
@@ -1353,8 +1363,8 @@ describe('WorkflowService.mergeBranch — waits for the source branch\'s pending
       row({ status: 'needs_attention', lastError: 'push rejected: protected ref' }),
       row(),
     ]);
-    // The default 30-second bound: an answer well inside it shows no wait.
-    const { svc, merge } = harness(service, { timeoutMs: 30_000, pollMs: 20 });
+    // The default 20-second bound: an answer well inside it shows no wait.
+    const { svc, merge } = harness(service, { timeoutMs: 20_000, pollMs: 20 });
     const started = Date.now();
     const outcome = await svc.mergeBranch(makeUser(), SOURCE, TARGET);
     expect(Date.now() - started).toBeLessThan(1_000);
@@ -1393,7 +1403,7 @@ describe('WorkflowService.mergeBranch — waits for the source branch\'s pending
   it('refuses a merge an open change request proposes before any waiting', async () => {
     // A queued commit that would hold the merge for the full bound.
     const { service } = memoryQueue([row({ branch: 'alice/feat' })]);
-    const { svc, merge } = harness(service, { timeoutMs: 30_000, pollMs: 20 });
+    const { svc, merge } = harness(service, { timeoutMs: 20_000, pollMs: 20 });
     const started = Date.now();
     const err = await svc.mergeBranch(makeUser(), 'alice/feat', DEFAULT_BRANCH).catch((e: unknown) => e);
     expect(Date.now() - started).toBeLessThan(1_000);

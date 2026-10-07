@@ -3424,9 +3424,16 @@ export class WorkflowService implements IWorkflowService {
   /**
    * How long `mergeBranch` waits for the source's queued commits, and how
    * often it asks. The worker polls every half second and a commit takes a few
-   * seconds; thirty seconds is an outage, not latency. Mutable for tests only.
+   * seconds; twenty seconds of waiting is an outage, not latency.
+   *
+   * Twenty, not thirty, because of who is waiting on THIS call: an agent over
+   * `/api/mcp` reaches the tool through `@utcp/http`, whose request timeout is
+   * a fixed 30 seconds (its call-template schema drops any `timeout` field).
+   * The wait plus the merge after it (fetch, merge, push) must fit inside
+   * that, or the agent hears "timeout of 30000ms exceeded" instead of the
+   * `pending-commits` answer this wait exists to give. Mutable for tests only.
    */
-  mergeWaitForPendingCommits = { timeoutMs: 30_000, pollMs: 250 };
+  mergeWaitForPendingCommits = { timeoutMs: 20_000, pollMs: 250 };
 
   /**
    * Wait until no commit is queued on `branch`, or the bound runs out. A
