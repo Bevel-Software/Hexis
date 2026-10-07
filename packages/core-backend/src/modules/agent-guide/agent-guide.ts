@@ -216,10 +216,12 @@ export async function agentGuideSections(
     ).trim();
     return { id: section.id, title: titleOf(body, section.id), body };
   });
-  const rules = rendered.find((section) => section.id === WORKING_WITH_FILES_SECTION_ID);
-  if (rules === undefined || rules.body.length === 0) {
+  // Judged over EVERY section under the id — a hook may return the id twice
+  // — on what survives the empty-body filter below: one with text is enough.
+  const rules = rendered.filter((section) => section.id === WORKING_WITH_FILES_SECTION_ID);
+  if (!rules.some((section) => section.body.length > 0)) {
     throw new Error(
-      `The agent guide hook ${rules === undefined ? 'dropped' : 'emptied'} the "${WORKING_WITH_FILES_SECTION_ID}" ` +
+      `The agent guide hook ${rules.length === 0 ? 'dropped' : 'emptied'} the "${WORKING_WITH_FILES_SECTION_ID}" ` +
         'section, which every file tool points at. Keep it, or replace it under the same id with the rules in it.',
     );
   }

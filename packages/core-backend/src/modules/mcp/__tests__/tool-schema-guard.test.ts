@@ -228,20 +228,39 @@ describe('ToolSchemaGuard', () => {
       expect(guard.hiddenFor('notion')).toHaveLength(1);
     });
 
-    it('does not let a load that began before an eviction overwrite what came after it', () => {
+    it("keeps the order per caller: an evicted caller's next load is their newest, whichever began first", () => {
       const guard = new ToolSchemaGuard();
       for (let i = 0; i < MANY; i += 1) screen(guard, `u${i}`, load({ notion: [tool('a', VALID)] }));
-      // `u0` is the longest unseen. A load of theirs begins — and before it
-      // lands, the table overflows and `u0` is evicted, its watermark with it.
-      const stale = guard.beginLoad();
+      // `u0` is the longest unseen. Two loads of theirs begin, old then new —
+      // and before either lands, the table overflows and `u0` is evicted,
+      // watermark and all.
+      const older = guard.beginLoad();
+      const newer = guard.beginLoad();
       screen(guard, 'newcomer', load({ notion: [tool('a', VALID)] }));
-      // A newer load of `u0` then lands with the corrected picture.
-      screen(guard, 'u0', load({ notion: [tool('a', VALID)] }));
-      // The stale load lands last, with a finding the server has since fixed:
-      // its own answer stands, the shared picture does not move.
-      const own = guard.screen('u0', stale, load({ notion: [tool('bad', INVALID)] }));
+      // Nothing of `u0` is held, so whichever lands first is the newest
+      // picture this process has of them: the old load, with its finding.
+      guard.screen('u0', older, load({ notion: [tool('bad', INVALID)] }));
+      expect(guard.hiddenFor('notion')).toHaveLength(1);
+      // The newer load then lands with the corrected schema and wins —
+      // and the watermark it restores rejects anything older after it.
+      guard.screen('u0', newer, load({ notion: [tool('a', VALID)] }));
+      expect(guard.hiddenFor('notion')).toEqual([]);
+      const own = guard.screen('u0', older, load({ notion: [tool('bad', INVALID)] }));
       expect([...own.keys()]).toEqual(['notion.srv.bad']);
       expect(guard.hiddenFor('notion')).toEqual([]);
+    });
+
+    it("does not rank one caller's load against another caller's eviction", () => {
+      const guard = new ToolSchemaGuard();
+      // `x` begins a load; the table then fills and overflows, evicting
+      // callers whose tickets are newer than `x`'s.
+      const x = guard.beginLoad();
+      for (let i = 0; i < MANY; i += 1) screen(guard, `u${i}`, load({ notion: [tool('a', VALID)] }));
+      screen(guard, 'overflow', load({ notion: [tool('a', VALID)] }));
+      // `x`'s load is `x`'s newest, evictions elsewhere notwithstanding: its
+      // finding reaches the owner's page.
+      guard.screen('x', x, load({ notion: [tool('bad', INVALID)] }));
+      expect(guard.hiddenFor('notion')).toHaveLength(1);
     });
   });
 });

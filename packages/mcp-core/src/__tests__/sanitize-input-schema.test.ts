@@ -138,21 +138,46 @@ describe('sanitizeInputSchema', () => {
     });
   });
 
-  it('spends the inlining budget per node copied, so one oversized `$ref` target degrades instead of being copied whole', () => {
-    // One `$defs` entry wider than the budget, referenced once: past the
-    // budget the rest of the copy is emptied (shape kept, as the depth cap
-    // does), and the result is still valid JSON Schema.
-    const wide: Record<string, unknown> = {};
-    for (let i = 0; i < 25_000; i += 1) wide[`f${i}`] = { type: 'string', description: `field ${i}` };
+  it('inlines `$ref` and `$dynamicRef` both when a schema carries both, as the `allOf` they amount to', () => {
+    expect(
+      sanitizeInputSchema({
+        type: 'object',
+        properties: { item: { $ref: '#/$defs/a', $dynamicRef: '#/$defs/b', description: 'kept' } },
+        $defs: { a: { type: 'string' }, b: { minLength: 1 } },
+      }),
+    ).toEqual({
+      type: 'object',
+      properties: { item: { description: 'kept', allOf: [{ type: 'string' }, { minLength: 1 }] } },
+    });
+  });
+
+  it('charges a reference the whole size of its target, array entries and scalars included, so repeated references cannot multiply it', () => {
+    // A target that is mostly a `required` list of strings — the shape a
+    // per-object count never saw — referenced three times: the budget is
+    // spent by the first copies, and the reference that no longer fits is
+    // `{}` rather than another twelve thousand names.
+    const wide = { type: 'object', required: Array.from({ length: 12_000 }, (_, i) => `f${i}`) };
     const out = sanitizeInputSchema({
       type: 'object',
-      properties: { item: { $ref: '#/$defs/wide' } },
+      properties: { a: { $ref: '#/$defs/wide' }, b: { $ref: '#/$defs/wide' }, c: { $ref: '#/$defs/wide' } },
+      $defs: { wide },
+    }) as { properties: Record<string, { required?: string[] }> };
+    const copies = Object.values(out.properties).filter((p) => (p.required?.length ?? 0) === 12_000).length;
+    expect(copies).toBeGreaterThan(0);
+    expect(copies).toBeLessThan(3);
+    // What did not fit is `{}` whole: a valid schema, never a dangling reference or a cut list.
+    expect(Object.values(out.properties).every((p) => p.required === undefined || p.required.length === 12_000)).toBe(true);
+    expect(JSON.stringify(out)).not.toContain('$ref');
+  });
+
+  it('answers `{}` for a single target larger than the whole budget, keeping the siblings', () => {
+    const wide: Record<string, unknown> = {};
+    for (let i = 0; i < 25_000; i += 1) wide[`f${i}`] = { type: 'string' };
+    const out = sanitizeInputSchema({
+      type: 'object',
+      properties: { item: { $ref: '#/$defs/wide', description: 'kept' } },
       $defs: { wide: { type: 'object', properties: wide } },
-    }) as { properties: { item: { type?: string; properties?: Record<string, unknown> } } };
-    const copied = out.properties.item.properties ?? {};
-    const whole = Object.values(copied).filter((v) => v && typeof v === 'object' && 'type' in (v as object)).length;
-    expect(whole).toBeGreaterThan(0);
-    expect(whole).toBeLessThan(25_000);
-    expect(Object.values(copied).every((v) => v && typeof v === 'object' && !Array.isArray(v))).toBe(true);
+    });
+    expect(out).toEqual({ type: 'object', properties: { item: { description: 'kept' } } });
   });
 });

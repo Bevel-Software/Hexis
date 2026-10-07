@@ -1731,16 +1731,19 @@ export class GitService implements IGitService {
     number: number,
     title?: string,
   ): Promise<string | null> {
-    // The whole message per commit, records separated by RS (0x1e) and the
-    // sha from the message by US (0x1f): a message may hold any newline.
+    // The whole message per commit. Records are NUL-separated (`-z`), the one
+    // byte a commit message cannot hold, and the sha is the record's first
+    // line: nothing a title may contain can split a record or a line early.
     const { stdout } = await this.git(cwd, [
-      'log', '--merges', '--fixed-strings', `--grep=(#${number})`,
-      '--format=%H%x1f%B%x1e', targetRef,
+      'log', '-z', '--merges', '--fixed-strings', `--grep=(#${number})`,
+      '--format=%H%n%B', targetRef,
     ]);
-    for (const record of stdout.split('\x1e')) {
-      const [sha, message] = record.split('\x1f');
-      if (!sha?.trim() || message === undefined) continue;
-      if (mergeCommitMessageNames(message, number, title)) return sha.trim();
+    for (const record of stdout.split('\0')) {
+      const newline = record.indexOf('\n');
+      const sha = (newline === -1 ? record : record.slice(0, newline)).trim();
+      if (!/^[0-9a-f]{40,64}$/.test(sha)) continue;
+      const message = newline === -1 ? '' : record.slice(newline + 1);
+      if (mergeCommitMessageNames(message, number, title)) return sha;
     }
     return null;
   }

@@ -155,6 +155,13 @@ describe('the guide is composed from the platform\'s sections', () => {
         ),
       ).rejects.toThrow(/emptied the "working-with-files" section/);
     }
+    // The id twice, one empty and one with the rules: judged over every
+    // section under the id, so the one with text satisfies it.
+    const twice = await composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => [
+      { id: WORKING_WITH_FILES_SECTION_ID, body: '' },
+      ...sections,
+    ]);
+    expect(twice).toContain(sharedFileRulesSection(DEFAULT_KB_LAYOUT));
     // Replacing it under the same id is the hook's right.
     const replaced = await composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) =>
       sections.map((s) => (s.id === WORKING_WITH_FILES_SECTION_ID ? { id: s.id, body: '## Working with files\n\nOurs.\n' } : s)),

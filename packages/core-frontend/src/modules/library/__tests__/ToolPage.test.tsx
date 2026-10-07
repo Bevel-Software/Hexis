@@ -362,9 +362,9 @@ describe('ToolPage: tools hidden for an invalid schema', () => {
   });
 
   // Both cases wait for the DETAIL to be on screen, not for the heading: the
-  // heading's name comes from the secrets listing (`page.tool.name`), which
-  // settles before the detail response does, so asserting absence against it
-  // would pass on a page whose detail had not loaded yet.
+  // heading's name comes from the secrets listing (`page.tool.name`), loaded
+  // in parallel with the detail, so it can settle first and asserting absence
+  // against it could pass on a page whose detail had not loaded yet.
   it('shows nothing when the server is healthy', async () => {
     toolsMock.getToolDetail.mockResolvedValue({ ...DETAIL, type: 'mcp', hiddenTools: [] });
     renderPage();

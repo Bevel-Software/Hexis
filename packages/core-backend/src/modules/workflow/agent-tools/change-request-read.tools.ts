@@ -472,7 +472,7 @@ export function registerChangeRequestReadTools(
           type: 'object',
           description: 'What YOU, specifically, may do with this request.',
           properties: {
-            mayApprove: { type: 'boolean', description: 'Whether you may approve at least one of the files you are shown.' },
+            mayApprove: { type: 'boolean', description: 'Whether you may approve at least one of the files you are shown. False on any request that is not open: approvals are given while it is.' },
             mayMerge: { type: 'boolean', description: 'Whether an Apply by you would be accepted right now.' },
             isAuthor: { type: 'boolean', description: 'Whether you opened it (your agent counts as you).' },
           },
@@ -575,7 +575,7 @@ export function registerChangeRequestReadTools(
               },
               approved: { type: 'boolean', description: 'A current approval by an eligible approver stands.' },
               inMergeGate: { type: 'boolean', description: 'Whether the gate waits on this file at all.' },
-              viewerMayApprove: { type: 'boolean', description: 'Whether YOU may approve it.' },
+              viewerMayApprove: { type: 'boolean', description: 'Whether YOU may approve it. False on any request that is not open: approvals are given while it is.' },
             },
             required: ['path', 'change', 'additions', 'deletions', 'isBinary', 'requiredApprovers', 'approvedBy', 'approved', 'inMergeGate', 'viewerMayApprove'],
           },

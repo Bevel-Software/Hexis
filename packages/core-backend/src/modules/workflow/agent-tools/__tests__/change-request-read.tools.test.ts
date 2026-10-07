@@ -476,11 +476,21 @@ describe('list_change_requests', () => {
       lastApplyFailure: { reason: APPLY_FAILURE_REASON_WITHHELD, conflicts: true, at: failure.at },
     });
     expect(JSON.stringify(withheld.json)).not.toContain('Payroll');
+    // The detail withholds on the same verdict, through its own path.
+    details.set(
+      12,
+      detail({
+        files: [file('Knowledge/A.md'), file('Payroll/Rates.md')],
+        touchedNodePaths: ['Knowledge/A.md', 'Payroll/Rates.md'],
+        lastApplyFailure: failure,
+      }),
+    );
+    const detailWithheld = (await call(base, 'get_change_request', { number: 12 })).json;
+    expect(detailWithheld).toMatchObject({ lastApplyFailure: { reason: APPLY_FAILURE_REASON_WITHHELD } });
+    expect(JSON.stringify(detailWithheld)).not.toContain('Payroll');
     readable = ['Knowledge/A.md', 'Payroll/Rates.md'];
     const shown = await call(base, 'list_change_requests', {});
     expect(shown.json.changeRequests[0]).toMatchObject({ lastApplyFailure: failure });
-    // The detail carries it the same way.
-    details.set(12, detail({ touchedNodePaths: ['Knowledge/A.md', 'Payroll/Rates.md'], lastApplyFailure: failure }));
     expect((await call(base, 'get_change_request', { number: 12 })).json).toMatchObject({ lastApplyFailure: failure });
   });
 

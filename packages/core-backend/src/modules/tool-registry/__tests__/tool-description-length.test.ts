@@ -166,8 +166,13 @@ describe('no Hexis tool description is long enough to be cut', () => {
     // measured here is the catalog a client gets, sentence included.
     const tools = await hexisTools();
     // ONE predicate for both halves, so no description falls between them: a
-    // tool whose own description is empty is served the sentence alone.
-    const opensWithGuide = (t: UtcpTool) => t.description?.startsWith(GUIDE_FIRST_SENTENCE) === true;
+    // tool whose own description is empty is served the sentence alone, and
+    // one with text after it has whitespace between — not `here.Read`.
+    const opensWithGuide = (t: UtcpTool): boolean => {
+      const description = t.description ?? '';
+      if (description === GUIDE_FIRST_SENTENCE) return true;
+      return description.startsWith(GUIDE_FIRST_SENTENCE) && /^\s/.test(description.slice(GUIDE_FIRST_SENTENCE.length));
+    };
     const opened = tools.filter(opensWithGuide);
     expect(opened.length).toBeGreaterThan(0);
     // The guide's own tool is the one exception: it is what the sentence

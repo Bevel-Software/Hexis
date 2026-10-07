@@ -118,8 +118,8 @@ describe('summary mapping', () => {
   it("carries the last apply failure, its reason only for a caller who may read every file of a request that has some", () => {
     const failure = { reason: 'Conflicts in Payroll/Rates.md', conflicts: true, at: '2026-09-29T09:00:00.000Z' };
     const cr = summary({ lastApplyFailure: failure });
-    // Every file readable: the author's words.
-    expect(toCrSummary(cr, { readable: 2, withheld: 0 }).lastApplyFailure).toEqual(failure);
+    // Every file readable — one is enough: the author's words.
+    expect(toCrSummary(cr, { readable: 1, withheld: 0 }).lastApplyFailure).toEqual(failure);
     // One file withheld: the reason could name it, so it is the app's
     // withheld line — the time and the kind are still the caller's to see.
     expect(toCrSummary(cr, { readable: 1, withheld: 1 }).lastApplyFailure).toEqual({

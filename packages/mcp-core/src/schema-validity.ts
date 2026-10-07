@@ -224,7 +224,10 @@ function resolveLocalPointer(root: unknown, pointer: string): unknown {
   let node: unknown = root;
   for (const part of pointer.slice(2).split('/')) {
     if (!isSchemaObject(node) && !Array.isArray(node)) return undefined;
-    node = (node as Record<string, unknown>)[part.replace(/~1/g, '/').replace(/~0/g, '~')];
+    const key = part.replace(/~1/g, '/').replace(/~0/g, '~');
+    // Own members only: `#/__proto__` must name nothing, not `Object.prototype`.
+    if (!Object.prototype.hasOwnProperty.call(node, key)) return undefined;
+    node = (node as Record<string, unknown>)[key];
   }
   return node;
 }

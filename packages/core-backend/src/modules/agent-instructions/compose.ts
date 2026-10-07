@@ -121,10 +121,11 @@ export interface ComposedAgentInstructions {
  * unterminated `<!--` strips everything after it, so the most likely editing
  * slip withholds text rather than leaking it.
  *
- * `layout` decides only the guide's name inside the shared rules, and defaults
- * to the standard one — a caller with no layout in hand (a test, a surface that
- * predates the setting) gets `AGENTS.md`, which is what an unset name means
- * everywhere else.
+ * `layout` decides the root names the shared rules spell (`Skills/`,
+ * `Plugins/`, the knowledge folder) and defaults to the standard ones — a
+ * caller with no layout in hand (a test, a surface that predates the setting)
+ * gets the defaults. The guide's name is not among them: it is `AGENTS.md` on
+ * every deployment.
  */
 export function composeAgentInstructions(
   preamble: string | null,

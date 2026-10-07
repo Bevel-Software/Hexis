@@ -86,9 +86,10 @@ Access to any path — reading it as much as writing it — is governed by
 - **Per-file rules exist for Markdown notes and `.tool` definitions.** A note
   (`.md`, lowercase) may name verbs in its own frontmatter, and those rules
   apply to that one note; a `.tool` definition keeps the access verbs in its
-  own YAML the same way. Every other file (a PDF, a presentation, a spreadsheet, an image, any
-  binary, a `.markdown` or `.MD` file, or binary content saved as `.md`)
-  takes its folder's rules: sharing it on its own is refused with
+  own YAML the same way; a distribution may register further file kinds
+  that carry their own rules. Any other file (a PDF, a presentation, a
+  spreadsheet, an image, any binary, a `.markdown` or `.MD` file, or binary
+  content saved as `.md`) takes its folder's rules: sharing it on its own is refused with
   `folder-governs-access`, naming the folder. To change who
   can open such a file, change its folder's `access.md`, or move the file to a
   folder whose rules fit.

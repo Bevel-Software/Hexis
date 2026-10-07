@@ -53,8 +53,10 @@ describe('the skill tools name the available skills within the description cap',
       expect(counted, tool.name).not.toBeNull();
       const shown = (tool.description!.match(/`a-skill-with-a-long-name-number-\d+`/g) ?? []).length;
       expect(shown + Number(counted![1]), tool.name).toBe(300);
-      // No name is cut in half: every one listed is a real one.
-      for (const name of tool.description!.match(/`a-skill-with-a-long-name-number-[^`]*`/g) ?? []) {
+      // No name is cut in half: every one listed is a real one, closing
+      // backtick included — a dangling name (no closing backtick) is caught
+      // because the scan does not require one.
+      for (const name of tool.description!.match(/`a-skill-with-a-long-name-number-[^`,.]*`?/g) ?? []) {
         expect(name, tool.name).toMatch(/^`a-skill-with-a-long-name-number-\d+`$/);
       }
     }

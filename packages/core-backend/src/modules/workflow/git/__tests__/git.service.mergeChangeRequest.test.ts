@@ -303,6 +303,29 @@ describe('GitService.mergeChangeRequest', () => {
     expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 5, 'Add feature')).toBeNull();
   });
 
+  it('does not take a current-format commit of another request for one whose title merely contains its number', async () => {
+    // Request 43, titled `Fix crash (#42)`, merges as `Fix crash (#42) (#43)`.
+    // Asked for request 42 with the stored title `Fix crash`, the old-format
+    // rule must refuse it: 42's number is not at the end of the line there.
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+      await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+    });
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), testKbContext());
+    const merged = await git.mergeChangeRequest(
+      baseWsId, 'alice/add', BASE,
+      { subject: mergeCommitSubject('Fix crash (#42)', 43), body: 'x' }, USER,
+      { appliedChangeNumber: 43 },
+    );
+    expect(merged.kind).toBe('merged');
+    if (merged.kind !== 'merged') return;
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 43)).toBe(merged.mergeCommit);
+    expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 42, 'Fix crash')).toBeNull();
+    await expect(git.appliedChangeShas(baseWsId, { number: 42, mergeSha: merged.sha, title: 'Fix crash' })).rejects.toThrow(
+      /not the merge commit/,
+    );
+  });
+
   // One variable at a time, because the two halves of the P1 are not the same
   // claim. With the remote REACHABLE, a missing tracking ref is not a hazard at
   // all: the refresh names its destination explicitly, so it recreates the ref

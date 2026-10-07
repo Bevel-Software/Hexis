@@ -86,11 +86,13 @@ export type ChangeSource =
  * A DECLINED one is read from NOTHING, and that is not a degradation:
  *
  *   - The row records no sha, so nothing durable says what the request
- *     proposed. Declining does not retire the source branch (only merging
- *     deletes it), so the branch pair would answer — but it would answer with
- *     what that branch differs by NOW. The author keeps committing to it, and
- *     may open a fresh request from it; reading the declined request would then
- *     present someone else's later work as the proposal that was turned down.
+ *     proposed. Declining retires the source branch as merging does
+ *     (`deleteChangeRequest` ends in `retireMergedSourceBranch`) — unless
+ *     another open request still needs that branch, which keeps it alive and
+ *     moving. Where the branch pair still resolves it would answer with what
+ *     that branch differs by NOW, work committed since for the request that
+ *     kept it included; reading the declined request would then present later
+ *     work as the proposal that was turned down.
  *   - An empty file set proves no read access downstream, so a declined request
  *     is readable by its author alone — the owner's criterion of 2026-10-02.
  *   - And it asks git nothing, so neither a listing nor a by-number read of a

@@ -151,7 +151,7 @@ class KbSeedTree {
     // forked then still carries it there — so a template whose root `.md` is
     // the organisation's own text is seeded as the content it is. The same
     // judgement the first start makes when it retires copies.
-    if (relDir === '' && name.endsWith('.md')) {
+    if (relDir === '' && /\.md$/i.test(name)) {
       // Judged the way the copy below judges: a binary under the name is
       // spotted from its first bytes and never read whole.
       const source = await this.templates.pathOf(name);

@@ -65,7 +65,8 @@ const SECRET_FOR_THAT_PROVIDER =
 
 /**
  * The knowledge-base layout as setting keys: the three renameable roots. The
- * guide is served as `AGENTS.md` everywhere and has no key.
+ * guide's file name is not one of them — the settings layer sets none, so the
+ * layout it produces carries the default, `AGENTS.md`.
  */
 const LAYOUT_KEYS: readonly string[] = [
   'knowledgeBaseDir',

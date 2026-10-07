@@ -75,8 +75,6 @@ export class ToolSchemaGuard implements HiddenToolSource {
   private readonly hidden = new Map<string, Map<string, ScreenedHiddenTool[]>>();
   /** The newest load whose picture has been applied, per caller — see {@link beginLoad}. */
   private readonly applied = new Map<string, number>();
-  /** The newest load of any caller evicted from `applied`: a load older than it is stale for everyone. */
-  private evictedFloor = 0;
   /** Hands out {@link beginLoad} tickets; monotonic for the life of the process. */
   private loads = 0;
 
@@ -143,11 +141,17 @@ export class ToolSchemaGuard implements HiddenToolSource {
       }
       if (ofManual.length > 0) picture.set(manual, ofManual);
     }
-    // Stale: a load that read the server earlier than one already applied —
-    // this caller's own newest, or the newest of a caller evicted below,
-    // whose order survives them as the floor. Its own answer stands, the
-    // shared picture does not move.
-    if (loadId < Math.max(this.applied.get(userId) ?? 0, this.evictedFloor)) return found;
+    // Stale: a load that read the server earlier than one already applied for
+    // THIS caller. Its own answer stands, the shared picture does not move.
+    //
+    // Per caller, and nothing wider. An evicted caller's watermark goes with
+    // their picture, and that loses nothing: once nothing of theirs is held,
+    // whichever of their loads lands next is the newest picture this process
+    // has of them, and it restores the watermark that rejects any older one
+    // landing after it. A floor shared across callers would instead reject
+    // some OTHER caller's newest load for having begun before an unrelated
+    // eviction, and the owner's page would miss that caller's finding.
+    if (loadId < (this.applied.get(userId) ?? 0)) return found;
     // Not about size — each entry is a handful of strings — but about a
     // deployment with many callers never growing these without bound. Evicted
     // one caller at a time, the longest unseen first, so every other caller's
@@ -156,7 +160,6 @@ export class ToolSchemaGuard implements HiddenToolSource {
     // order is the order of last sight.)
     while (this.applied.size >= MAX_REMEMBERED_CALLERS && !this.applied.has(userId)) {
       const oldest = this.applied.keys().next().value as string;
-      this.evictedFloor = Math.max(this.evictedFloor, this.applied.get(oldest) ?? 0);
       this.applied.delete(oldest);
       this.hidden.delete(oldest);
     }

@@ -92,6 +92,14 @@ describe('inputSchemaDefect', () => {
         properties: { a: { $ref: '#/$defs/missing' }, b: { $ref: '#/$defs/ok' }, c: { $ref: '#/$defs/ok' } },
       }),
     ).toBeNull();
+    // A pointer into the prototype chain names nothing: `#/__proto__` is not
+    // `Object.prototype`, and `#/$defs/constructor` is not `Object`.
+    expect(
+      inputSchemaDefect({
+        type: 'object',
+        properties: { a: { $ref: '#/__proto__' }, b: { $ref: '#/$defs/constructor' }, c: { $ref: '#/properties/a/__proto__/x' } },
+      }),
+    ).toBeNull();
   });
 
   it('reports a `patternProperties` KEY that is not a compilable regular expression', () => {

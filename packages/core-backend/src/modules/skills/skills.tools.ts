@@ -112,14 +112,27 @@ async function availableSkillsLine(skillService: ISkillService, userEmail: strin
   const skills = await skillService.listSkills(userEmail);
   if (skills.length === 0) return 'No skills are currently available.';
   const names = skills.map((s) => `\`${s.name}\``);
-  const line = (shown: number): string =>
-    shown === 0
-      ? `${names.length} skills are currently available; list_skills names them.`
-      : `Currently available skills: ${names.slice(0, shown).join(', ')}` +
-        (shown < names.length ? `, and ${names.length - shown} more that list_skills names.` : '.');
-  let shown = names.length;
-  while (shown > 0 && line(shown).length > budget) shown -= 1;
-  return line(shown);
+  const rest = (shown: number): string =>
+    shown < names.length ? `, and ${names.length - shown} more that list_skills names.` : '.';
+  // One pass, accumulating: the cut is where the next name — with the
+  // separator before it and the tail that would follow it — no longer fits.
+  // (Rebuilding the joined prefix per candidate made this quadratic in the
+  // catalog's size, on every catalog listing.)
+  const head = 'Currently available skills: ';
+  let shown = 0;
+  let length = head.length;
+  for (const name of names) {
+    const added = (shown > 0 ? 2 : 0) + name.length;
+    if (length + added + rest(shown + 1).length > budget) break;
+    length += added;
+    shown += 1;
+  }
+  if (shown === 0) {
+    return names.length === 1
+      ? '1 skill is currently available; list_skills names it.'
+      : `${names.length} skills are currently available; list_skills names them.`;
+  }
+  return `${head}${names.slice(0, shown).join(', ')}${rest(shown)}`;
 }
 
 /** What the fixed part of a description leaves the skills line, with the guide-first sentence counted. */
