@@ -70,6 +70,9 @@ async function makeHarness(): Promise<Harness> {
       asked.push(p);
       return true;
     },
+    // Each file of a zipped folder is judged too; this suite is about where
+    // the FOLDER is placed, so the files all pass.
+    canDownloadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
   } as unknown as IAccessControl;
 
   const locked: string[] = [];

@@ -979,8 +979,26 @@ export function createWorkspaceRoutes(
       return;
     }
     if (!(await requireDownloadPermission(req, res, id, folderPath))) return;
+    const user = await requireUser(req, res);
+    if (!user) return;
+    // `download` on the folder lets the caller ASK for the zip. What goes in
+    // it is judged file by file, through the two gates the per-file route
+    // runs in the same order: a file the caller may not read is left out, and
+    // so is one they may read but not download. Nothing in the answer names a
+    // left-out file; the count below covers only files the caller could
+    // already see in the tree, so it discloses nothing the tree does not.
+    let withheld = 0;
+    const include = async (paths: string[]): Promise<ReadonlySet<string>> => {
+      const readable = await accessControl.canReadBatch(id, user.email, paths);
+      const visible = paths.filter((p) => readable.get(p) === true);
+      const downloadable = await accessControl.canDownloadBatch(id, user.email, visible);
+      const kept = new Set(visible.filter((p) => downloadable.get(p) === true));
+      withheld = visible.length - kept.size;
+      return kept;
+    };
     try {
-      const buffer = await workspaceService.createFolderZip(id, folderPath);
+      const buffer = await workspaceService.createFolderZip(id, folderPath, include);
+      res.setHeader('X-Withheld-Files', String(withheld));
       // `|| 'folder'` covers the edge case where `folderPath` itself was
       // a single bare slash (`/`) that survived the trim — the service
       // would still reject it as path traversal, but the basename
@@ -999,7 +1017,10 @@ export function createWorkspaceRoutes(
         res.status(413).json({ error: error.message });
         return;
       }
-      if (error instanceof PathTraversalError) {
+      // A traversal refusal, or the access tree failing to load while the
+      // entries were judged (`AccessConfigError`): each carries its own status
+      // and payload, the same ones the single-file gate answers with.
+      if (error instanceof PathTraversalError || error instanceof WorkflowDomainError) {
         sendError(res, error);
         return;
       }

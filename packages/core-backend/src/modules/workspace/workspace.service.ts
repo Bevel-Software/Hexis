@@ -101,6 +101,14 @@ const UNZIP_MAX_TOTAL_BYTES = 500 * 1024 * 1024; // 500 MB across the whole arch
 const ZIP_DOWNLOAD_MAX_BYTES = UNZIP_MAX_TOTAL_BYTES;
 
 /**
+ * Which of a folder's files a zip may pack: handed every file the walk found
+ * (repository-relative, POSIX separators), answers the set to include. The
+ * route builds one from the caller's `read` and `download` verdicts — see
+ * `createFolderZip` for why it is required.
+ */
+export type ZipEntryFilter = (repoRelativePaths: string[]) => Promise<ReadonlySet<string>>;
+
+/**
  * Thrown by `createFolderZip` when the cumulative uncompressed bytes exceed
  * `ZIP_DOWNLOAD_MAX_BYTES`. Carries a 413-ready message; the route layer
  * checks `instanceof` and maps it accordingly.
@@ -1406,7 +1414,23 @@ export class WorkspaceService implements IWorkspaceService {
    * size crosses `ZIP_DOWNLOAD_MAX_BYTES`. Buffered in memory (adm-zip has
    * no streaming API); the cap therefore doubles as a peak-heap bound.
    */
-  async createFolderZip(workspaceId: string, wsPath: string): Promise<Buffer> {
+  /**
+   * Zip a folder. `include` is asked, ONCE, which of the folder's files may
+   * go in: it is handed every file the walk found, as repository-relative
+   * paths, and answers the set to pack. Required, not optional, and with no
+   * default that packs everything: the route used to gate `download` on the
+   * folder alone and pack every file under it, so a caller with `download`
+   * on a folder got files whose own rules (frontmatter, a nested access.md)
+   * denied them `read` or `download` — files the per-file route refused and
+   * the file tree never showed. A caller that wants everything says so by
+   * returning everything; it cannot get it by saying nothing.
+   *
+   * Two passes rather than a judgement per file inside the walk: the access
+   * model answers a list in one load, and a folder of a thousand files is
+   * the case a per-file call would make slow. The size cap counts only the
+   * files packed; a withheld file costs nothing and reveals nothing.
+   */
+  async createFolderZip(workspaceId: string, wsPath: string, include: ZipEntryFilter): Promise<Buffer> {
     const { workspaceDir, relativePath, absolutePath: absoluteRoot } = await this.resolveInsideRepo(workspaceId, wsPath);
     assertNoGitInternalsSegment(relativePath);
     await assertNotGitInternals(workspaceDir, relativePath, absoluteRoot);
@@ -1415,35 +1439,45 @@ export class WorkspaceService implements IWorkspaceService {
       throw new Error('Not a directory');
     }
 
-    const zipRoot = path.basename(absoluteRoot) || 'folder';
-    const zip = new AdmZip();
-    let totalBytes = 0;
-
+    // `relativePath` is workspace-relative, `<kbDirName>/<folder>`; the
+    // access rules are keyed inside the repository, so the prefix comes off
+    // here (and the repository root itself is the empty prefix).
+    const folderInRepo = relativePath === this.kbDirName ? '' : relativePath.slice(this.kbDirName.length + 1);
+    const found: { dir: string; name: string; repoRelative: string }[] = [];
     await this.disk.walk(absoluteRoot, explorerWalk(), [
       {
         async onFile(dir, name) {
-          const childAbs = path.join(absoluteRoot, dir, name);
-          // Check the size cap BEFORE reading the file into memory. Reading
-          // first would let a single hostile 2 GB file allocate the whole
-          // buffer before the throw — defeating the cap as a peak-heap
-          // bound. `stat.size` is an upper bound that we re-verify after
-          // the read in case the file grew between stat and readFile.
-          const stat = await fs.stat(childAbs);
-          if (totalBytes + stat.size > ZIP_DOWNLOAD_MAX_BYTES) {
-            throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
-          }
-          const data = await fs.readFile(childAbs);
-          if (totalBytes + data.byteLength > ZIP_DOWNLOAD_MAX_BYTES) {
-            throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
-          }
-          totalBytes += data.byteLength;
-          // Path inside the archive: <folderName>/<relPathUnderFolder>, POSIX
-          // separators regardless of host OS so the zip extracts cleanly
-          // on Windows/Mac/Linux alike.
-          zip.addFile(`${zipRoot}/${dir ? `${dir}/${name}` : name}`, data);
+          found.push({ dir, name, repoRelative: [folderInRepo, dir, name].filter(Boolean).join('/') });
         },
       },
     ]);
+    const allowed = await include(found.map((f) => f.repoRelative));
+
+    const zipRoot = path.basename(absoluteRoot) || 'folder';
+    const zip = new AdmZip();
+    let totalBytes = 0;
+    for (const { dir, name, repoRelative } of found) {
+      if (!allowed.has(repoRelative)) continue;
+      const childAbs = path.join(absoluteRoot, dir, name);
+      // Check the size cap BEFORE reading the file into memory. Reading
+      // first would let a single hostile 2 GB file allocate the whole
+      // buffer before the throw — defeating the cap as a peak-heap
+      // bound. `stat.size` is an upper bound that we re-verify after
+      // the read in case the file grew between stat and readFile.
+      const stat = await fs.stat(childAbs);
+      if (totalBytes + stat.size > ZIP_DOWNLOAD_MAX_BYTES) {
+        throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
+      }
+      const data = await fs.readFile(childAbs);
+      if (totalBytes + data.byteLength > ZIP_DOWNLOAD_MAX_BYTES) {
+        throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
+      }
+      totalBytes += data.byteLength;
+      // Path inside the archive: <folderName>/<relPathUnderFolder>, POSIX
+      // separators regardless of host OS so the zip extracts cleanly
+      // on Windows/Mac/Linux alike.
+      zip.addFile(`${zipRoot}/${dir ? `${dir}/${name}` : name}`, data);
+    }
     return zip.toBuffer();
   }
 
