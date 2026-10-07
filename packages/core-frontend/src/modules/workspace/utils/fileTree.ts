@@ -101,15 +101,8 @@ const isAccessRulesFile = (entry: FileTreeEntry): boolean => entry.name.toLowerC
  * the top of the knowledge tree, breadth-first, so the opening suggestion is a
  * section heading rather than the fifth file inside the first folder.
  *
- * Scoped to exactly what the explorer browses under "Knowledge", and scoped
- * to the CHECKOUT: `KnowledgeBase/` plus any content folder beside it inside
- * `<kbDirName>/`. `Plugins/` is the Skills & Tools app's storage and is not a
- * browsing destination here, and the loose files at the checkout root
- * (`access.md`, `roles.yaml`) are how the deployment is configured, not
- * something to read. A clone that predates the split has no named roots at
- * all, so its whole checkout is the knowledge — including the loose files at
- * its root, which in that layout are pages rather than configuration. A
- * workspace with no checkout in it has nothing to offer.
+ * Scoped to exactly what the explorer browses under "Knowledge" — see
+ * `knowledgeFiles` for what that scope is and why.
  *
  * Fewer than `limit` — including none at all — is a legitimate answer for a
  * knowledge base that is still empty; the caller says so rather than padding.
@@ -117,6 +110,42 @@ const isAccessRulesFile = (entry: FileTreeEntry): boolean => entry.name.toLowerC
 export function suggestedPages(
   tree: FileTreeEntry | null,
   kbDirName: string | null,
+  limit: number,
+): FileTreeEntry[] {
+  return walkKnowledge(tree, kbDirName, (entry) => READABLE_PAGE.test(entry.name), limit);
+}
+
+/**
+ * Every file the explorer browses under "Knowledge", breadth-first — what the
+ * toolbar's search palette finds pages by name in. Not only documents: a
+ * spreadsheet or a PDF has a row in the explorer, and a search that could not
+ * find what the tree beside it shows would read as a broken search. The same
+ * exclusions as `suggestedPages` apply, because they are about what the
+ * explorer is FOR rather than about file types.
+ *
+ * Scoped to the CHECKOUT: `KnowledgeBase/` plus any content folder beside it
+ * inside `<kbDirName>/`. `Plugins/` is the Skills & Tools app's storage and is
+ * not a browsing destination here, and the loose files at the checkout root
+ * (`access.md`, `roles.yaml`) are how the deployment is configured, not
+ * something to read. A clone that predates the split has no named roots at
+ * all, so its whole checkout is the knowledge — including the loose files at
+ * its root, which in that layout are pages rather than configuration. A
+ * workspace with no checkout in it has nothing to offer.
+ */
+export function knowledgeFiles(tree: FileTreeEntry | null, kbDirName: string | null): FileTreeEntry[] {
+  return walkKnowledge(tree, kbDirName, () => true, Infinity);
+}
+
+/**
+ * The walk both of the above share: breadth-first from the knowledge roots,
+ * stopping once `limit` files have been accepted. Dot-prefixed entries,
+ * `access.md` files and folders named after a reserved root are skipped at
+ * every depth before `accept` is asked.
+ */
+function walkKnowledge(
+  tree: FileTreeEntry | null,
+  kbDirName: string | null,
+  accept: (file: FileTreeEntry) => boolean,
   limit: number,
 ): FileTreeEntry[] {
   const kbRoot = checkoutRoot(tree, kbDirName);
@@ -142,7 +171,7 @@ export function suggestedPages(
       // Dot-prefixed entries are the repository's own bookkeeping.
       if (entry.name.startsWith('.')) continue;
       if (entry.type === 'file') {
-        if (READABLE_PAGE.test(entry.name) && !isAccessRulesFile(entry)) pages.push(entry);
+        if (!isAccessRulesFile(entry) && accept(entry)) pages.push(entry);
       } else if (level === roots || !KB_ROOT_DIRS.has(entry.name)) {
         // Below the roots, the reserved SET decides — not two names: a folder
         // named after any reserved root, at any depth, is the same kind of

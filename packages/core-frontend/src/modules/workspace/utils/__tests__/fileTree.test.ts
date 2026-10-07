@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
   checkoutRoot,
+  knowledgeFiles,
   mergePendingIntoTree,
   omitPathFromTree,
   pathExistsInTree,
@@ -222,6 +223,31 @@ describe('suggestedPages', () => {
       `${KB}/KnowledgeBase/GTM/Pricing.md`,
     ]);
     expect(suggestedPages(dir('', [dir('KnowledgeBase', [file('KnowledgeBase/Planted.md')])]), KB, 10)).toEqual([]);
+  });
+});
+
+describe('knowledgeFiles', () => {
+  it('lists every file the Knowledge explorer browses, not only documents — but never access rules or Plugins/', () => {
+    expect(knowledgeFiles(TREE, KB).map((e) => e.relativePath)).toEqual([
+      'knowledge-base/KnowledgeBase/Onboarding.md',
+      'knowledge-base/KnowledgeBase/GTM/Pricing.md',
+      'knowledge-base/KnowledgeBase/GTM/deals.csv',
+    ]);
+  });
+
+  it('skips dot-prefixed bookkeeping and is empty without a checkout', () => {
+    const tree = dir('', [
+      dir(KB, [
+        dir(`${KB}/KnowledgeBase`, [
+          file(`${KB}/KnowledgeBase/.bevelignore`),
+          dir(`${KB}/KnowledgeBase/.git`, [file(`${KB}/KnowledgeBase/.git/HEAD`)]),
+          file(`${KB}/KnowledgeBase/Team.md`),
+        ]),
+      ]),
+    ]);
+    expect(knowledgeFiles(tree, KB).map((e) => e.name)).toEqual(['Team.md']);
+    expect(knowledgeFiles(null, KB)).toEqual([]);
+    expect(knowledgeFiles(TREE, null)).toEqual([]);
   });
 });
 

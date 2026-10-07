@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom';
 import { PanelRight } from 'lucide-react';
 import { ProfileMenu } from './ProfileMenu';
 import { AppSwitcher } from './AppSwitcher';
+import { SearchPalette } from './SearchPalette';
 import { useLayout } from '../../layout/state/layout.context';
 import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
 import { useActiveAppId, useAppRegistry } from '../../../core/registry';
@@ -81,6 +82,10 @@ export function Toolbar() {
         {!isCompact && itemCluster.length > 0 && (
           <div className="flex items-center gap-2 ml-4">{itemCluster}</div>
         )}
+
+        {/* Search by name across Knowledge and Skills & Tools. Below `md` the
+            box gives way to the essentials and Ctrl/⌘K alone opens it. */}
+        <SearchPalette compact={isCompact} />
 
         <div className="flex-1" />
 
