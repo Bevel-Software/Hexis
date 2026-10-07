@@ -101,9 +101,21 @@ export function parseEmbedRef(raw: string, kbDirName: string): EmbedRef | EmbedI
     throw new EmbedRefParseError('Empty reference');
   }
 
+  // A person pastes the marker, so the two decorations arrive in either order
+  // — `content: <url>` and `<content: url>` are both things a ticket holds.
+  // Peeled in a loop rather than in one fixed order, so neither spelling
+  // leaves a `content:` prefix inside the path (where it reads as a scheme and
+  // the whole reference is refused).
   let ref = raw.trim();
-  ref = ref.replace(/^content:\s*/i, '').trim();
-  ref = ref.replace(/^<+/, '').replace(/>+$/, '').trim();
+  for (let i = 0; i < 4; i += 1) {
+    const peeled = ref
+      .replace(/^content:\s*/i, '')
+      .replace(/^<+/, '')
+      .replace(/>+$/, '')
+      .trim();
+    if (peeled === ref) break;
+    ref = peeled;
+  }
 
   let pathPart: string;
   let fragment: string;

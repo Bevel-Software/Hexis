@@ -72,9 +72,18 @@ describe('parseEmbedRef', () => {
     ['a traversal inside', 'Data/../../etc/passwd'],
     ['a percent-encoded separator', 'Data%2f..%2fsecret.md'],
     ['a percent-encoded dot', 'Data/%2e%2e/secret.md'],
-    ['a bare id with illegal characters', 'Not An Id'],
   ])('refuses %s', (_label, raw) => {
     expect(() => parseEmbedRef(raw, KB)).toThrow(EmbedRefParseError);
+  });
+
+  /**
+   * A single segment that is not a legal id is a FILE NAME, not a bad id — a
+   * space is perfectly legal in one, and the knowledge base is full of them.
+   * Only the shape of the trailing segment decides which form a reference is
+   * (see `looksLikeNodeId`), and nothing about that is a refusal.
+   */
+  it('reads a single segment that is not a legal id as a file name', () => {
+    expect(parseEmbedRef('Not An Id', KB)).toEqual({ repoRelative: 'Not An Id' });
   });
 
   it('refuses a malformed percent-escape rather than throwing a URIError', () => {

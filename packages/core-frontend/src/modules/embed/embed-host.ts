@@ -1,5 +1,5 @@
-import { resolveKbHref } from '../workspace/routing/kb-routes';
-import { kbFileUrl } from '../workspace/routing/kb-routes';
+import { kbFileUrl, resolveKbHref } from '../workspace/routing/kb-routes';
+import { isOpenableExternalHref, normalizeHref } from '../../shared/markdown/hrefs';
 
 /**
  * What an expired, missing or rejected embed token shows. One sentence, no
@@ -77,15 +77,24 @@ export function resolveToAppUrl(
   basePath: string,
   kb: { kbDirName: string; branch: string } | null,
 ): string | null {
-  if (/^https?:\/\//i.test(href)) return href;
   if (!kb) return href.startsWith('/') ? `${window.location.origin}${href}` : null;
   const target = resolveKbHref(href, { basePath, kbDirName: kb.kbDirName });
   if (target === null) return null;
-  // An external destination the grammar recognised (a `mailto:`, an absolute
-  // address written without a scheme we handle) goes to the host as written:
-  // the host opens it in a new tab the same way, and it is not ours to
-  // rewrite.
-  if (target.kind === 'external') return href;
+  /**
+   * An external destination goes to the host — but only one from the SCHEME
+   * ALLOWLIST, and in its normalised spelling.
+   *
+   * This is load-bearing rather than belt-and-braces. The embed asks its host
+   * to open whatever it hands over, and a host obliges: `javascript:alert(1)`
+   * is a destination the link grammar happily calls "external", and relaying
+   * it would be asking the host to run it. The app's own link handler
+   * (`openExternalHref`) applies exactly this allowlist for exactly this
+   * reason; the embed's has to apply it too, because the embed's links come
+   * from a knowledge-base page an agent may have written.
+   */
+  if (target.kind === 'external') {
+    return isOpenableExternalHref(href) ? normalizeHref(href) : null;
+  }
   if (target.kind !== 'workspace') return null;
   // A link that named its own branch keeps it; everything else opens on the
   // branch the embed rendered, which is the default branch.
