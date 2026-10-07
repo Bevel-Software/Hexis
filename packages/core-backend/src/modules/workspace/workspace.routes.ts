@@ -571,8 +571,11 @@ export function createWorkspaceRoutes(
     res: express.Response,
     workspaceId: string,
     relativePath: string,
+    // A caller that has already resolved the user hands it over, so one
+    // request is not looked up twice.
+    resolvedUser?: { email: string },
   ): Promise<boolean> {
-    const user = await requireUser(req, res);
+    const user = resolvedUser ?? (await requireUser(req, res));
     if (!user) return false;
     let allowed: boolean;
     try {
@@ -978,9 +981,9 @@ export function createWorkspaceRoutes(
       res.status(400).json({ error: 'download=1 is required for folder zip downloads' });
       return;
     }
-    if (!(await requireDownloadPermission(req, res, id, folderPath))) return;
     const user = await requireUser(req, res);
     if (!user) return;
+    if (!(await requireDownloadPermission(req, res, id, folderPath, user))) return;
     // `download` on the folder lets the caller ASK for the zip. What goes in
     // it is judged file by file, through the two gates the per-file route
     // runs in the same order: a file the caller may not read is left out, and

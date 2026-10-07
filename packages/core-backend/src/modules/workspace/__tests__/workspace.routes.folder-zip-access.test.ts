@@ -169,7 +169,9 @@ describe('GET /folder/zip judges every file it packs (real resolver, real zip)',
     expect(res.status).toBe(403);
   });
 
-  it('answers an empty archive, not an error, when every file inside is withheld', async () => {
+  // `access.md` itself stays in: it is what grants the folder download, so a
+  // caller who may ask for the zip may always read the file that lets them.
+  it('answers an archive holding only the grant file, not an error, when every content file is withheld', async () => {
     h = await makeHarness({
       'Shared/access.md': '---\n---\ndownload:\n  - Ana <ana@x.io>\n',
       'Shared/Only.md': '---\ndownload:\n  - deny Ana <ana@x.io>\n---\n# no save\n',
