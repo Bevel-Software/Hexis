@@ -18,6 +18,7 @@ import {
   statesFor,
   toCrViewer,
   toCrSummary,
+  APPLY_FAILURE_REASON_WITHHELD,
   visibleComments,
   toCrComment,
   toCrFile,
@@ -113,6 +114,25 @@ describe('summary mapping', () => {
     delete cr.updatedAt;
     expect(toCrSummary(cr, { readable: 1, withheld: 0 }).updatedAt).toBe(cr.createdAt);
   });
+
+  it("carries the last apply failure, its reason only for a caller who may read every file of a request that has some", () => {
+    const failure = { reason: 'Conflicts in Payroll/Rates.md', conflicts: true, at: '2026-09-29T09:00:00.000Z' };
+    const cr = summary({ lastApplyFailure: failure });
+    // Every file readable: the author's words.
+    expect(toCrSummary(cr, { readable: 2, withheld: 0 }).lastApplyFailure).toEqual(failure);
+    // One file withheld: the reason could name it, so it is the app's
+    // withheld line — the time and the kind are still the caller's to see.
+    expect(toCrSummary(cr, { readable: 1, withheld: 1 }).lastApplyFailure).toEqual({
+      reason: APPLY_FAILURE_REASON_WITHHELD,
+      conflicts: true,
+      at: failure.at,
+    });
+    // No file at all proves nothing, so it grants nothing.
+    expect(toCrSummary(cr, { readable: 0, withheld: 0 }).lastApplyFailure?.reason).toBe(APPLY_FAILURE_REASON_WITHHELD);
+    // Nothing to report: the key is absent, not null.
+    expect(toCrSummary(summary({ lastApplyFailure: null }), { readable: 1, withheld: 0 })).not.toHaveProperty('lastApplyFailure');
+    expect(toCrSummary(summary(), { readable: 1, withheld: 0 })).not.toHaveProperty('lastApplyFailure');
+  });
 });
 
 describe('the author filter', () => {
@@ -201,7 +221,7 @@ describe('files', () => {
       isApproved: true,
       viewerCanApprove: true,
     });
-    expect(toCrFile(file, approved, { patches: false })).toEqual({
+    expect(toCrFile(file, approved, { patches: false, open: true })).toEqual({
       path: 'Knowledge/A.md',
       previousPath: 'Knowledge/Old.md',
       // git's `renamed` through `open_change_request`'s own `changeKindOf`.
@@ -226,10 +246,20 @@ describe('files', () => {
     });
   });
 
+  it('never says the viewer may approve a file of a request that is no longer open', () => {
+    // A write grant on the file outlives the request: `viewerCanApprove` is
+    // still true on a merged or declined request's approval entry, and
+    // answering it would offer an approval nothing accepts.
+    const file = { path: 'A.md', status: 'modified' as const, additions: 1, deletions: 0, isBinary: false, sha: 's', rawUrl: '' };
+    const grant = approval({ viewerCanApprove: true });
+    expect(toCrFile(file, grant, { patches: false, open: true }).viewerMayApprove).toBe(true);
+    expect(toCrFile(file, grant, { patches: false, open: false }).viewerMayApprove).toBe(false);
+  });
+
   it('returns a patch only when one was asked for', () => {
     const file = { path: 'A.md', status: 'modified' as const, additions: 1, deletions: 0, isBinary: false, sha: 's', rawUrl: '', patch: '@@' };
-    expect(toCrFile(file, undefined, { patches: false }).patch).toBeUndefined();
-    expect(toCrFile(file, undefined, { patches: true }).patch).toBe('@@');
+    expect(toCrFile(file, undefined, { patches: false, open: true }).patch).toBeUndefined();
+    expect(toCrFile(file, undefined, { patches: true, open: true }).patch).toBe('@@');
   });
 
   // `approversUnknown` is PRESENT or absent, never `false` — the same shape
@@ -238,17 +268,17 @@ describe('files', () => {
   // look for.
   it('says the approver set is unknown when nothing could answer for the file', () => {
     const file = { path: 'A.md', status: 'modified' as const, additions: 1, deletions: 0, isBinary: false, sha: 's', rawUrl: '' };
-    expect(toCrFile(file, undefined, { patches: false })).toMatchObject({
+    expect(toCrFile(file, undefined, { patches: false, open: true })).toMatchObject({
       requiredApprovers: { roles: [], users: [] },
       approversUnknown: true,
       approved: false,
       inMergeGate: false,
       viewerMayApprove: false,
     });
-    expect(toCrFile(file, approval({ eligibilityResolved: false }), { patches: false })
+    expect(toCrFile(file, approval({ eligibilityResolved: false }), { patches: false, open: true })
       .approversUnknown).toBe(true);
     // Resolved: the key is absent, not false.
-    expect(toCrFile(file, approval(), { patches: false })).not.toHaveProperty('approversUnknown');
+    expect(toCrFile(file, approval(), { patches: false, open: true })).not.toHaveProperty('approversUnknown');
   });
 
   it('reads each of git\'s statuses as one of the four words', () => {
@@ -256,7 +286,7 @@ describe('files', () => {
       toCrFile(
         { path: 'A.md', status, additions: 0, deletions: 0, isBinary: false, sha: 's', rawUrl: '' },
         undefined,
-        { patches: false },
+        { patches: false, open: true },
       ).change;
     expect(kind('added')).toBe('added');
     expect(kind('removed')).toBe('deleted');
@@ -443,6 +473,13 @@ describe('the viewer block — what this caller may do', () => {
         approval({ path: 'B.md', viewerCanApprove: true }),
       ]).mayApprove,
     ).toBe(true);
+  });
+
+  it('mayApprove is false on a merged or declined request, whatever grant the caller holds', () => {
+    const grant = [approval({ viewerCanApprove: true })];
+    for (const state of ['merged', 'closed'] as const) {
+      expect(toCrViewer(detail({ state }), false, grant).mayApprove, state).toBe(false);
+    }
   });
 
   it('mayApprove follows exactly the approval set it is given', () => {

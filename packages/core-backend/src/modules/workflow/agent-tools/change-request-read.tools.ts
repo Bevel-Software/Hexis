@@ -144,7 +144,10 @@ export function registerChangeRequestReadTools(
   /** A change-request number as the tools accept it. */
   const numberArg = (args: Record<string, unknown>): number => {
     const n = args.number;
-    if (typeof n !== 'number' || !Number.isInteger(n) || n <= 0) {
+    // A SAFE integer: JSON carries numbers a double cannot hold exactly, and
+    // one of those would reach the database rounded, or as an error the
+    // caller could not have predicted — not as the 400 a wrong number earns.
+    if (typeof n !== 'number' || !Number.isSafeInteger(n) || n <= 0) {
       throw new ToolError('`number` is required and must be a positive integer.', 400);
     }
     return n;
@@ -308,6 +311,19 @@ export function registerChangeRequestReadTools(
       updatedAt: { type: 'string', description: 'ISO timestamp — the close time of a closed request, else the creation time.' },
       changedFiles: { type: 'integer', description: 'How many of its files YOU may read.' },
       withheldFiles: { type: 'integer', description: 'How many of its files you may not read. Never named.' },
+      lastApplyFailure: {
+        type: 'object',
+        description:
+          'Present while an open request carries the refusal its last Apply met: `reason` in the gate\'s or git\'s ' +
+          'words when you may read every file of the request, else a line saying the reason is withheld; ' +
+          '`conflicts` when git refused on conflicts with the target; `at` an ISO timestamp.',
+        properties: {
+          reason: { type: 'string' },
+          conflicts: { type: 'boolean' },
+          at: { type: 'string' },
+        },
+        required: ['reason', 'conflicts', 'at'],
+      },
     },
     required: ['url', 'number', 'title', 'state', 'author', 'sourceBranch', 'targetBranch', 'createdAt', 'updatedAt', 'changedFiles', 'withheldFiles'],
   };
@@ -364,7 +380,13 @@ export function registerChangeRequestReadTools(
       const author = typeof args.author === 'string' ? args.author : undefined;
       const { perPage, page } = pagingOf(args);
 
-      const all = await ctx.workflowService.listChangeRequestsByState(statesFor(state));
+      // The one clone every answer here is read in, resolved ONCE and handed
+      // to the listing too: the summaries' file lists are built in it, and
+      // the by-number tools read the same request in the same clone, so the
+      // list cannot hide a request the detail would serve — or the reverse —
+      // for want of a workspace the other path fell back to.
+      const workspaceId = await repoGlobalWorkspaceId(ctx);
+      const all = await ctx.workflowService.listChangeRequestsByState(statesFor(state), { workspaceId });
       const matching = all.filter(
         (cr) =>
           (head === undefined || cr.branch === head) &&
@@ -383,7 +405,6 @@ export function registerChangeRequestReadTools(
       // all four by-number tools answered 404 for, and counted its withheld
       // file as zero. One notion of a readable file, shared with the detail
       // through the same `fileIsReadable`, is what stops the two disagreeing.
-      const workspaceId = await repoGlobalWorkspaceId(ctx);
       const byBase = new Map<string, string[]>();
       for (const cr of matching) {
         const bucket = byBase.get(cr.base) ?? [];
@@ -573,7 +594,7 @@ export function registerChangeRequestReadTools(
       const approvals = approvalsByPath(scoped.detail);
       const { items, ...paging } = pageOf(scoped.readableFiles, perPage, page);
       return {
-        files: items.map((f) => toCrFile(f, approvals.get(f.path), { patches })),
+        files: items.map((f) => toCrFile(f, approvals.get(f.path), { patches, open: scoped.detail.state === 'open' })),
         withheldFiles: scoped.withheldFileCount,
         ...paging,
       };

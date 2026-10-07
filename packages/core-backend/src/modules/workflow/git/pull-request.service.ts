@@ -103,6 +103,8 @@ export type ChangeSource =
 export function changeSourceFor(row: {
   number: number;
   state: string;
+  /** The stored title, handed along so a merge commit in the old message format is still recognised. */
+  title?: string;
   mergedSha?: string | null;
 }): ChangeSource {
   if (row.state === 'open') return { kind: 'branches' };
@@ -113,7 +115,7 @@ export function changeSourceFor(row: {
   // tip, which is usually another request's merge commit; the git layer rejects
   // that rather than answering with its files. See `merge-commit.ts`.
   if (row.state === 'merged' && row.mergedSha) {
-    return { kind: 'commit', applied: { number: row.number, mergeSha: row.mergedSha } };
+    return { kind: 'commit', applied: { number: row.number, mergeSha: row.mergedSha, title: row.title } };
   }
   return { kind: 'none' };
 }

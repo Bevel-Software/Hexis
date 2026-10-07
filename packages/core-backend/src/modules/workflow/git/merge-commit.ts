@@ -56,3 +56,28 @@ export function mergeCommitSubject(title: string, number: number): string {
 export function mergeCommitSubjectNames(subject: string, number: number): boolean {
   return subject.trimEnd().endsWith(`(#${number})`);
 }
+
+/**
+ * Whether `message` — a merge commit's WHOLE message — is request `number`'s
+ * own, by the subject rule above or, given the request's stored `title`, by the
+ * form an earlier release wrote.
+ *
+ * That release did not flatten the title, so a title with a blank line in it
+ * put `(#N)` after the blank line, and git's `%s` subject ended before it: such
+ * rows failed {@link mergeCommitSubjectNames} and read as author-only for good.
+ * The commit is still exactly `<title> (#N)` followed by the body, and the row
+ * still holds the title — so, whitespace folded, a message that begins with the
+ * title and then the number is this request's. Only `title` can say that: the
+ * folded form takes the number from wherever the old format put it, and
+ * nothing else in a message may vouch for that.
+ */
+export function mergeCommitMessageNames(message: string, number: number, title?: string): boolean {
+  // The first paragraph, which is what git reports as `%s`.
+  const subject = message.split(/\r?\n[ \t]*\r?\n/, 1)[0] ?? '';
+  if (mergeCommitSubjectNames(subject.replace(/\s+/g, ' '), number)) return true;
+  if (title === undefined) return false;
+  const fold = (text: string) => text.replace(/\s+/g, ' ').trim();
+  const expected = `${fold(title)} (#${number})`;
+  const folded = fold(message);
+  return folded === expected || folded.startsWith(`${expected} `);
+}

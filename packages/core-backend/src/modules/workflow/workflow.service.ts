@@ -1732,7 +1732,7 @@ export class WorkflowService implements IWorkflowService {
 
   listChangeRequestsByState(
     states: ChangeRequestState[],
-    opts?: { fresh?: boolean },
+    opts?: { fresh?: boolean; workspaceId?: string },
   ): Promise<ChangeRequest[]> {
     return this.prs.listPrsByState(states, opts);
   }
