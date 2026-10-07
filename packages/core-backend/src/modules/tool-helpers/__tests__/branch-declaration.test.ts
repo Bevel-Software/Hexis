@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import express from 'express';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { WorkspaceService } from '../../workspace/workspace.service.js';
@@ -472,6 +472,27 @@ describe('a tool declares how it treats its branch', () => {
       expect(res.body).toEqual({ kind: 'branch-required', error: BRANCH_REQUIRED_MESSAGE });
       expect(received).toEqual([]);
       expect((await call(base, 't_default_mounted_write', { branch: 'my-draft' })).status).toBe(200);
+    });
+
+    it('mounted as writing and declared defaulting, warns once with a fix toolDef accepts', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const base = await start();
+
+        await call(base, 't_default_mounted_write', {});
+        await call(base, 't_default_mounted_write', {});
+
+        const warnings = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('t_default_mounted_write'));
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain("`write: true` and `branch: 'required'`");
+        // The advice, followed, registers; `write` alone with the defaulting
+        // declaration would throw.
+        expect(() =>
+          toolDef(testTool('t_default_mounted_write_fixed', { write: true, branch: 'required' })),
+        ).not.toThrow();
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('may declare required', () => {

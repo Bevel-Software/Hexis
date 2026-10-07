@@ -194,7 +194,9 @@ export function createToolHandlerFactory(
         // so its write cannot land on the default branch unasked. Its
         // published schema still calls `branch` optional — the tool's
         // declaration is wrong, not the call — so the mismatch is logged,
-        // once per route, for the tool's author to fix by declaring `write`.
+        // once per route, for the tool's author to fix by declaring both
+        // `write: true` and `branch: 'required'` (`write` alone with the
+        // defaulting declaration makes `toolDef` throw at startup).
         const declared =
           opts.branch ?? branchHandlingFor(req.baseUrl + (req.route?.path ?? req.path)) ?? 'own';
         const heldToRequired = declared === 'defaults-to-default-branch' && opts.write === true;
@@ -203,7 +205,8 @@ export function createToolHandlerFactory(
           warnedHeldToRequired = true;
           log.warn(
             `Tool route ${req.baseUrl + (req.route?.path ?? req.path)} is mounted as writing but declared ` +
-              `branch: 'defaults-to-default-branch'; it is held to 'required'. Declare \`write: true\` to its toolDef.`,
+              `branch: 'defaults-to-default-branch'; it is held to 'required'. ` +
+              `Declare both \`write: true\` and \`branch: 'required'\` to its toolDef.`,
           );
         }
         const resolved = await resolveBranch(handling, args, branches);
