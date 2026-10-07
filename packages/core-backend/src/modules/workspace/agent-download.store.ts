@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { logger } from '../../shared/logging.js';
@@ -64,7 +65,7 @@ export interface DownloadArtifact {
   filename: string;
 }
 
-/** What {@link AgentDownloadStore.issue} answers: one link per artifact, in order, and the terms. */
+/** What the `issue` {@link AgentDownloadStore.withRequestSlot} hands its work answers: one link per artifact, in order, and the terms. */
 export interface IssuedDownload {
   /** One absolute URL per artifact, in the order the artifacts were given. */
   downloadUrls: string[];
@@ -140,6 +141,8 @@ export class AgentDownloadStore {
   private readonly building = new Map<string, Promise<unknown>>();
   /** Per user, slots held by calls still waiting, building or writing — counted as open. */
   private readonly reserved = new Map<string, number>();
+  /** The users whose turn the current async context is running in — see {@link withRequestSlot}. */
+  private readonly inTurn = new AsyncLocalStorage<ReadonlySet<string>>();
   private readonly root: string;
   private readonly publicBaseUrl: string;
   private readonly tokenPrefix: string;
@@ -191,16 +194,33 @@ export class AgentDownloadStore {
    * included file into memory and may zip up to the download limit, so one
    * request at a time per user bounds what one caller can make the process
    * hold or the disk stage. Different users do not wait on each other.
+   *
+   * The ONE way a request is issued: there is no public `issue` to call on
+   * the side. `work`'s `issue` fills the slot once — a second call would be
+   * a second request on one slot, past the cap — and a `withRequestSlot` for
+   * the same user from inside `work` throws rather than wait for the turn it
+   * is itself holding, which would never come.
    */
   async withRequestSlot<T>(
     user: { id: string },
     work: (issue: (items: DownloadArtifact[]) => Promise<IssuedDownload>) => Promise<T>,
   ): Promise<T> {
+    const held = this.inTurn.getStore();
+    if (held?.has(user.id)) {
+      throw new Error('A download request slot was asked for inside one already held for the same user.');
+    }
     this.assertCanIssue(user);
     this.reserved.set(user.id, (this.reserved.get(user.id) ?? 0) + 1);
     try {
+      let issued = false;
+      const issue = (items: DownloadArtifact[]): Promise<IssuedDownload> => {
+        if (issued) return Promise.reject(new Error('A download request slot issues once.'));
+        issued = true;
+        return this.write(user, items);
+      };
+      const turn = new Set(held ?? []).add(user.id);
       const before = this.building.get(user.id) ?? Promise.resolve();
-      const mine = before.catch(() => undefined).then(() => work((items) => this.write(user, items)));
+      const mine = before.catch(() => undefined).then(() => this.inTurn.run(turn, () => work(issue)));
       this.building.set(user.id, mine);
       try {
         return await mine;
@@ -216,15 +236,10 @@ export class AgentDownloadStore {
 
   /**
    * Store every artifact of one request and answer a link per artifact, all
-   * sharing the request's expiry, in a slot of its own (see
-   * {@link withRequestSlot}). Nothing is issued unless every artifact is on
-   * disk: a request whose bytes could not all be written leaves nothing.
+   * sharing the request's expiry, within a slot already held: the slot is the
+   * capacity check. Nothing is issued unless every artifact is on disk: a
+   * request whose bytes could not all be written leaves nothing.
    */
-  async issue(user: { id: string }, items: DownloadArtifact[]): Promise<IssuedDownload> {
-    return this.withRequestSlot(user, (issue) => issue(items));
-  }
-
-  /** {@link issue} within a slot already held: the slot is the capacity check. */
   private async write(user: { id: string }, items: DownloadArtifact[]): Promise<IssuedDownload> {
     if (items.length === 0) throw new Error('A download request must carry at least one artifact.');
     const requestId = `download-${Date.now()}-${randomBytes(8).toString('hex')}`;
@@ -359,7 +374,7 @@ export class AgentDownloadStore {
     }
   }
 
-  /** Sweep now, and keep sweeping. Started by the first {@link issue}; idempotent; `unref`'d. */
+  /** Sweep now, and keep sweeping. Started by the first request issued; idempotent; `unref`'d. */
   startSweeping(intervalMs: number = SWEEP_INTERVAL_MS): void {
     if (this.sweepTimer) return;
     this.stopped = false;

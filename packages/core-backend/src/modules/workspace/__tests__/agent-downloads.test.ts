@@ -594,6 +594,31 @@ describe('limits', () => {
     expect(h.store.openRequestsOf(ANA.id)).toBe(2);
   });
 
+  it('refuses a nested slot for the same user instead of waiting on its own turn, and issues once per slot', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-dl-slot-'));
+    dirs.push(root);
+    const store = new AgentDownloadStore({ root, publicBaseUrl: PUBLIC_BASE });
+    stores.push(store);
+    const artifact = { data: Buffer.from('x'), contentType: 'text/plain', filename: 'x.txt' };
+
+    // Would deadlock if the inner call queued behind the outer turn.
+    await expect(
+      store.withRequestSlot(ANA, () => store.withRequestSlot(ANA, async () => 'never')),
+    ).rejects.toThrow('already held for the same user');
+    // Another user's slot inside is fine: different users never wait on each other.
+    await expect(
+      store.withRequestSlot(ANA, () => store.withRequestSlot({ id: 'user-bo' }, async () => 'ok')),
+    ).resolves.toBe('ok');
+
+    await expect(
+      store.withRequestSlot(ANA, async (issue) => {
+        await issue([artifact]);
+        return issue([artifact]);
+      }),
+    ).rejects.toThrow('issues once');
+    expect(store.openRequestsOf(ANA.id)).toBe(1);
+  });
+
   it('gives the slot back when a call issues nothing', async () => {
     const h = await start({ maxOpenPerUser: 1 });
     expect((await request(h.base, [`${KB}/Gone.md`])).body.files).toEqual([]);
