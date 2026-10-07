@@ -1442,7 +1442,10 @@ export class WorkspaceService implements IWorkspaceService {
     // `relativePath` is workspace-relative, `<kbDirName>/<folder>`; the
     // access rules are keyed inside the repository, so the prefix comes off
     // here (and the repository root itself is the empty prefix).
-    const folderInRepo = relativePath === this.kbDirName ? '' : relativePath.slice(this.kbDirName.length + 1);
+    // A trailing slash the caller wrote (`docs/`) survives normalisation and
+    // would key every file as `docs//x.md`, which no verdict matches: the
+    // filter would then withhold the whole folder in silence.
+    const folderInRepo = (relativePath === this.kbDirName ? '' : relativePath.slice(this.kbDirName.length + 1)).replace(/\/+$/, '');
     const found: { dir: string; name: string; repoRelative: string }[] = [];
     await this.disk.walk(absoluteRoot, explorerWalk(), [
       {

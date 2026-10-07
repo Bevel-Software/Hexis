@@ -722,6 +722,24 @@ describe('WorkspaceService.createFolderZip', () => {
     expect(names).toEqual(['judged/inner/deep.md', 'judged/open.md']);
   });
 
+  it('keys the files the same way whether the folder is written with a trailing slash or not', async () => {
+    const dir = path.join(repoDir, 'slashed');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'a.md'), 'a');
+    const asked: string[][] = [];
+    const include = async (paths: string[]) => {
+      asked.push(paths);
+      return new Set(paths);
+    };
+
+    await svc.createFolderZip(workspaceId, 'slashed/', include);
+    await svc.createFolderZip(workspaceId, `${'knowledge-base'}/slashed//`, include);
+
+    // A `slashed//a.md` key would match no verdict, and the filter would
+    // withhold the whole folder without a word.
+    expect(asked).toEqual([['slashed/a.md'], ['slashed/a.md']]);
+  });
+
   it('zips a folder prefixing entries with the folder name', async () => {
     const dir = path.join(repoDir, 'docs');
     await fs.mkdir(dir, { recursive: true });
