@@ -11,6 +11,7 @@ import { SidebarToggle } from '../../layout/components/SidebarToggle';
 import { toggleSidebar, useSidebar } from '../../layout/state/sidebar';
 import { TOOLBAR_STACK_QUERY } from '../../layout/breakpoints';
 import { isSettingsNavPath } from '../../settings/settings-nav-items';
+import { InviteButton } from '../../onboarding/components/InviteButton';
 
 /**
  * The app's top bar: the nav toggle, the app switcher, and whatever the
@@ -102,6 +103,8 @@ export function Toolbar() {
             <PanelRight size={16} />
           </button>
         )}
+
+        <InviteButton />
 
         {/* One button for who you are and everything that follows you around.
             It used to be three things in a row here — a name that was not a

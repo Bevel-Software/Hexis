@@ -41,6 +41,8 @@ const welcomedKey = (email: string) => `${WELCOMED_PREFIX}${email.toLowerCase()}
 
 const doneLocally = new Set<string>();
 const welcomedLocally = new Set<string>();
+/** Full storage keys set this session — see {@link setFlag}. */
+const flagsLocally = new Set<string>();
 const listeners = new Set<() => void>();
 
 /** Tell every mounted `useOnboarding` that the overrides above moved. */
@@ -66,6 +68,42 @@ function hasBeenWelcomed(email: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The "Get set up" column's two per-account notes: the starter guide has been
+ * opened, and the column was dismissed. Both are the same kind of thing as
+ * `welcomed` — per-browser conveniences, not server truth — so they live in
+ * the same store and wake the same listeners, but through one tiny flag pair
+ * rather than a third hand-written copy of the read/write/try-catch dance.
+ */
+const READ_GUIDE_PREFIX = 'bevel.onboarding.readGuide.';
+const SETUP_DISMISSED_PREFIX = 'bevel.onboarding.setupDismissed.';
+
+/** Storage is best-effort here too: a lost flag costs one extra row on screen. */
+function hasFlag(key: string): boolean {
+  if (flagsLocally.has(key)) return true;
+  try {
+    return window.localStorage.getItem(key) === '1';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Raise a one-way flag. Remembered in memory as well as storage so a browser
+ * that refuses the write still honours it for the rest of the session.
+ * Idempotent, like {@link markWelcomed}.
+ */
+function setFlag(key: string): void {
+  if (hasFlag(key)) return;
+  flagsLocally.add(key);
+  try {
+    window.localStorage.setItem(key, '1');
+  } catch {
+    /* held in memory for this session */
+  }
+  emit();
 }
 
 /**
@@ -136,13 +174,20 @@ export function markOnboardingDone(userId: string, email: string): void {
 export function resetOnboardingForTests(): void {
   try {
     for (const key of Object.keys(window.localStorage)) {
-      if (key.startsWith(WELCOMED_PREFIX)) window.localStorage.removeItem(key);
+      if (
+        key.startsWith(WELCOMED_PREFIX) ||
+        key.startsWith(READ_GUIDE_PREFIX) ||
+        key.startsWith(SETUP_DISMISSED_PREFIX)
+      ) {
+        window.localStorage.removeItem(key);
+      }
     }
   } catch {
     /* ignore */
   }
   doneLocally.clear();
   welcomedLocally.clear();
+  flagsLocally.clear();
   emit();
 }
 
@@ -154,6 +199,10 @@ export interface OnboardingController {
   markWelcomed(): void;
   markDone(): void;
 }
+
+/** The subscription's version counter: every override and note changes it. */
+const snapshot = () => `${doneLocally.size}:${welcomedLocally.size}:${flagsLocally.size}`;
+const serverSnapshot = () => '0:0:0';
 
 const SIGNED_OUT: OnboardingController = {
   showPill: false,
@@ -174,11 +223,7 @@ export function useOnboarding(): OnboardingController {
   const user = auth?.user ?? null;
   // The subscription's version counter: overrides and welcomed notes change
   // under it. The snapshot is a cheap string so identity comparison is exact.
-  useSyncExternalStore(
-    subscribe,
-    () => `${doneLocally.size}:${welcomedLocally.size}`,
-    () => '0:0',
-  );
+  useSyncExternalStore(subscribe, snapshot, serverSnapshot);
   if (!user) return SIGNED_OUT;
   const email = user.email;
   const done = user.onboardingDone !== false || doneLocally.has(email);
@@ -187,5 +232,42 @@ export function useOnboarding(): OnboardingController {
     shouldWelcome: !done && !hasBeenWelcomed(email),
     markWelcomed: () => markWelcomed(email),
     markDone: () => markOnboardingDone(user.id, email),
+  };
+}
+
+export interface SetupChecklistState {
+  /** The starter guide ("How to get started") has been opened on this browser. */
+  readGuide: boolean;
+  /** The person closed the "Get set up" column; it stays closed. */
+  dismissed: boolean;
+  markGuideRead(): void;
+  dismiss(): void;
+}
+
+const NO_CHECKLIST: SetupChecklistState = {
+  readGuide: false,
+  dismissed: false,
+  markGuideRead: () => {},
+  dismiss: () => {},
+};
+
+/**
+ * The client-side half of the "Get set up" column: the two ticks the server
+ * has no field for. Keyed by lower-cased email, like `welcomed`, and tolerant
+ * of a missing auth provider for the same reason {@link useOnboarding} is.
+ */
+export function useSetupChecklist(): SetupChecklistState {
+  const auth = useContext(AuthContext);
+  const user = auth?.user ?? null;
+  useSyncExternalStore(subscribe, snapshot, serverSnapshot);
+  if (!user) return NO_CHECKLIST;
+  const email = user.email.toLowerCase();
+  const readKey = `${READ_GUIDE_PREFIX}${email}`;
+  const dismissedKey = `${SETUP_DISMISSED_PREFIX}${email}`;
+  return {
+    readGuide: hasFlag(readKey),
+    dismissed: hasFlag(dismissedKey),
+    markGuideRead: () => setFlag(readKey),
+    dismiss: () => setFlag(dismissedKey),
   };
 }

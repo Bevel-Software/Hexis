@@ -508,6 +508,18 @@ export interface AppRegistry {
    * the other is the likeliest way to produce it.
    */
   welcomeExit?: { path: string; label: string };
+  /**
+   * A panel inside the invite dialog, between the role choice and the footer.
+   *
+   * Core invites by creating accounts and knows nothing about what a place in
+   * the deployment costs. A hosted deployment does: it renders its seat meter
+   * here (how many of the plan's seats these invites would fill — `inviting`
+   * is the number of valid addresses entered so far), and its "anyone at
+   * your domain can join" switch. Rendered inside a boundary, so a panel that
+   * throws costs its own place, never the invite form. Absent means core
+   * renders nothing there.
+   */
+  inviteExtras?: ComponentType<{ inviting: number }>;
 }
 
 export const EMPTY_REGISTRY: AppRegistry = {

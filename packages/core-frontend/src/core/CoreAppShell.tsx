@@ -52,6 +52,8 @@ import { ToolsExplorerPage } from '../modules/tools/ToolsExplorerPage';
 import { LibraryRoutes } from '../modules/library/routes/LibraryRoutes';
 import { RootLanding } from '../modules/onboarding/components/RootLanding';
 import { ConnectAgentPill } from '../modules/onboarding/components/ConnectAgentPill';
+import { GetStartedColumn } from '../modules/onboarding/components/GetStartedColumn';
+import { InviteDialogProvider } from '../modules/onboarding/state/invite-dialog';
 import { PullRequestsForMe } from '../modules/git/components/PullRequestsForMe';
 import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
 import { useMediaQuery } from '../modules/layout/hooks/useMediaQuery';
@@ -258,8 +260,19 @@ function CoreSurfaces() {
   // strip, the viewer's banner AND the Library's Skills tree all ask the same
   // question, and a tree rendered outside the provider would read the empty
   // default and never show a proposed file.
+  //
+  // The "Get set up" column sits beside whichever surface is on screen, here
+  // for the same reason: one checklist across both apps, mounted once, so it
+  // does not re-fetch or re-flash on a switch between them. The row wraps
+  // both branches identically, so the surface below keeps its position and
+  // stays mounted across the switch (see above).
   return (
-    <OpenChangeRequestsProvider>{library ? <LibraryRoutes /> : <KnowledgeSurface />}</OpenChangeRequestsProvider>
+    <OpenChangeRequestsProvider>
+      <div className="flex h-full min-h-0">
+        <div className="min-w-0 flex-1">{library ? <LibraryRoutes /> : <KnowledgeSurface />}</div>
+        <GetStartedColumn />
+      </div>
+    </OpenChangeRequestsProvider>
   );
 }
 
@@ -349,6 +362,11 @@ export function AppChrome() {
       <AppClaimContext.Provider value={setClaimedApp}>
       <LayoutContext.Provider value={paneController ?? NO_PANES_LAYOUT}>
         <PaneControllerContext.Provider value={setPaneController}>
+          {/* The invite dialog's host: the toolbar's Invite button and the
+              "Get set up" column open the same one. Inside the registry's
+              providers (this is their child), so the dialog's slot can read
+              what a distribution provides there. */}
+          <InviteDialogProvider>
           {/* Flex-col wrapper so the (conditional) banner strip takes its own
               height and the toolbar + active surface flex into the rest. */}
           <div className="flex flex-col h-full">
@@ -362,6 +380,7 @@ export function AppChrome() {
               <ShellRoutes apps={apps} />
             </div>
           </div>
+          </InviteDialogProvider>
         </PaneControllerContext.Provider>
       </LayoutContext.Provider>
       </AppClaimContext.Provider>
