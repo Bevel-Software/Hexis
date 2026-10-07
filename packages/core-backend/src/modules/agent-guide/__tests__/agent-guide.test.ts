@@ -268,10 +268,13 @@ describe('what the guide tells an agent', () => {
       const plugins = 'pluginsDir' in layout ? layout.pluginsDir : DEFAULT_KB_LAYOUT.pluginsDir;
       // The four places that introduce it: the `my_plugin` bullet, the sentence
       // on moving a skill, the placement rule, and the `everyone` note.
-      expect(guide).toContain("`my_plugin` — your user's personal plugin, holding their own skills and\n  tools");
-      expect(guide).toContain('A skill\nmoves from a personal plugin into a shared plugin by moving its folder.');
-      expect(guide).toContain("A person's private skill goes in their personal plugin");
-      expect(guide).toContain(`A person's personal plugin\n  (\`${plugins}/personal-<id>/\`) denies \`everyone\` outright`);
+      const prose = guide.replace(/\s+/g, ' ');
+      expect(prose).toContain("`my_plugin` — your user's personal plugin, holding their own skills and tools");
+      expect(prose).toContain('A skill moves from a personal plugin into a shared plugin by moving its folder.');
+      expect(prose).toContain("A person's private skill goes in their personal plugin");
+      expect(prose).toContain(
+        `A person's personal plugin (\`${plugins}/personal-<id>/\`) grants its owner access and denies \`everyone\` outright`,
+      );
     }
   });
 

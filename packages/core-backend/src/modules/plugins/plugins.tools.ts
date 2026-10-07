@@ -76,6 +76,9 @@ const PROVISIONED_OUTPUT = {
  * the registry puts in front of every listed tool. What survives that cut is
  * decided by ORDER, so the rule sits inside it and the `skillsDir` detail —
  * which the guide states in full anyway — is what a short client loses.
+ * The root is named ONCE, after the rule rather than inside it: a folder name
+ * may run to 255 bytes, and repeated within the rule it could push the rule
+ * itself past the cut and the whole text past `TOOL_DESCRIPTION_CAP`.
  * `plugins.tools.test.ts` pins that placement rather than trusting this note.
  *
  * It REFUSES nothing. The write gate accepts every file in a personal plugin
@@ -85,9 +88,10 @@ export function myPluginDescription(layout: KbLayout): string {
   const knowledge = `\`${resolveKbLayout(layout).knowledgeBaseDir}/\``;
   return (
     "The caller's personal plugin: their own skills and tools, created on first use. " +
-    `Notes, knowledge and other documents do NOT go here; they go under ${knowledge}. ` +
-    `For something the user wants kept private, ask where under ${knowledge} it should go and say a ` +
+    'Notes, knowledge and other documents do NOT go here; they go under the knowledge root. ' +
+    'For something the user wants kept private, ask where under the knowledge root it should go and say a ' +
     'folder there can be restricted so only they can read it; never write it here, even if asked. ' +
+    `The knowledge root here is ${knowledge}. ` +
     'Returns its folder and where skills go inside it (`skillsDir`); write a skill there as ' +
     '`<skillsDir>/<skill-name>/SKILL.md` with the file tools, opening with the Agent Skills frontmatter ' +
     '(`name`, `description`, and `metadata.version` such as `"1.0.0"`). Readable only by its owner — not even admins — and ' +

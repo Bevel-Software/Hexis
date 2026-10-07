@@ -6,9 +6,9 @@ import { InternalTokenService } from '../../tool-auth/internal-token.service.js'
 import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
 import { keyOrSessionAuth } from '../../tool-auth/key-or-session.middleware.js';
 import { createAuthMiddleware } from '../../auth/auth.middleware.js';
-import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
+import { DEFAULT_KB_LAYOUT, validateKbLayout } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { CLIENT_SHORT_CUT } from '../../tool-registry/description-length.js';
+import { CLIENT_SHORT_CUT, TOOL_DESCRIPTION_CAP, clientVisibleLength } from '../../tool-registry/description-length.js';
 import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import { registerPluginsTools, CREATE_PLUGIN, myPluginDef, myPluginDescription } from '../plugins.tools.js';
 import { createPluginCreationRoutes } from '../plugins.routes.js';
@@ -32,6 +32,16 @@ async function listedMyPlugin(layout = DEFAULT_KB_LAYOUT): Promise<{ description
   expect(listed, 'my_plugin is not in the external catalog').toBeDefined();
   return listed as { description: string };
 }
+
+/** The rule, in the words a client must be handed before any cut. */
+const RULE = [
+  'personal plugin',
+  'their own skills and tools',
+  'they go under the knowledge root',
+  'ask where under the knowledge root',
+  'restricted so only they can read it',
+  'never write it here, even if asked',
+];
 
 describe('the tool definitions', () => {
   it('describe the creation endpoints, and reach every surface', async () => {
@@ -60,10 +70,11 @@ describe('what my_plugin tells an agent about the personal plugin', () => {
   it('states the rule, naming this deployment\'s knowledge root', async () => {
     const { description } = await listedMyPlugin();
     expect(description).toContain("The caller's personal plugin: their own skills and tools");
-    expect(description).toContain('Notes, knowledge and other documents do NOT go here; they go under `KnowledgeBase/`');
+    expect(description).toContain('Notes, knowledge and other documents do NOT go here; they go under the knowledge root.');
+    expect(description).toContain('The knowledge root here is `KnowledgeBase/`.');
     // A private request gets a QUESTION and the restrictable folder, never the
     // personal plugin — not even when the user asks for it outright.
-    expect(description).toContain('ask where under `KnowledgeBase/` it should go');
+    expect(description).toContain('ask where under the knowledge root it should go');
     expect(description).toContain('restricted so only they can read it');
     expect(description).toContain('never write it here, even if asked');
     // The name the app shows, and none of the three phrases that sent agents here.
@@ -75,8 +86,7 @@ describe('what my_plugin tells an agent about the personal plugin', () => {
   it('names a RENAMED knowledge root, and never the default one', async () => {
     const renamed = { knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' };
     const { description } = await listedMyPlugin(renamed);
-    expect(description).toContain('they go under `Docs/`');
-    expect(description).toContain('ask where under `Docs/` it should go');
+    expect(description).toContain('The knowledge root here is `Docs/`.');
     expect(description).not.toContain('KnowledgeBase');
   });
 
@@ -94,7 +104,7 @@ describe('what my_plugin tells an agent about the personal plugin', () => {
     kb.applyLayout({ knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' });
     for (const tools of [await registry.listExternal(), await registry.listInternal()]) {
       const description = tools.find((t) => t.name === 'my_plugin')!.description!;
-      expect(description).toContain('they go under `Docs/`');
+      expect(description).toContain('The knowledge root here is `Docs/`.');
       expect(description).not.toContain('KnowledgeBase');
     }
   });
@@ -112,17 +122,29 @@ describe('what my_plugin tells an agent about the personal plugin', () => {
       expect(description.startsWith(`${GUIDE_FIRST_SENTENCE} `), 'the opener is counted too').toBe(true);
       const cut = description.slice(0, CLIENT_SHORT_CUT);
       const root = layout.knowledgeBaseDir;
-      for (const phrase of [
-        'personal plugin',
-        'their own skills and tools',
-        `they go under \`${root}/\``,
-        `ask where under \`${root}/\``,
-        'restricted so only they can read it',
-        'never write it here, even if asked',
-      ]) {
+      for (const phrase of [...RULE, `The knowledge root here is \`${root}/\`.`]) {
         expect(cut, `"${phrase}" falls past the ${CLIENT_SHORT_CUT}-character cut`).toContain(phrase);
       }
     }
+  });
+
+  /**
+   * A folder name may run to 255 bytes. The root is named once, after the rule,
+   * so even the longest name a deployment can choose leaves the whole rule
+   * inside the cut and the whole text inside the cap.
+   */
+  it('keeps the rule inside the cut, and the text inside the cap, for the longest root name', async () => {
+    const longest = { knowledgeBaseDir: 'K'.repeat(255), skillsDir: 'Skills', pluginsDir: 'Plugins' };
+    expect(validateKbLayout(longest), 'the name is one a deployment may choose').toBeNull();
+    const listed = await listedMyPlugin(longest);
+    const cut = listed.description.slice(0, CLIENT_SHORT_CUT);
+    for (const phrase of RULE) {
+      expect(cut, `"${phrase}" falls past the ${CLIENT_SHORT_CUT}-character cut`).toContain(phrase);
+    }
+    expect(listed.description).toContain(`The knowledge root here is \`${longest.knowledgeBaseDir}/\`.`);
+    expect(clientVisibleLength({ name: 'my_plugin', description: listed.description })).toBeLessThanOrEqual(
+      TOOL_DESCRIPTION_CAP,
+    );
   });
 
   /** Only the description changed: the call an agent makes is the call it made. */
