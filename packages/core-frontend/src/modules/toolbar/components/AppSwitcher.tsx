@@ -1,30 +1,35 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { activeAppId, useActiveAppId, useAppRegistry, type AppDef } from '../../../core/registry';
+import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
+import { TOOLBAR_STACK_QUERY } from '../../layout/breakpoints';
+import { cn } from '../../../lib/utils';
 
 const MENU_ID = 'app-switcher-menu';
 
 /**
- * The clickable brand in the toolbar's top-left: shows the product name, the
- * app you are currently in, and opens the app switcher — the list of
- * top-level surfaces (core apps + registry-contributed ones) you can move
- * between.
+ * The most apps the toolbar lays out side by side. Core ships two; a third
+ * (an enterprise extension) still fits beside the brand. Past that the row
+ * would crowd out the toolbar items, so the list folds back into the menu.
+ */
+const MAX_SEGMENTS = 3;
+
+/**
+ * The toolbar's top-left: the product name and the way between the top-level
+ * surfaces (core apps + registry-contributed ones).
  *
  * Switching between Knowledge and Skills & Tools changes everything below the
- * toolbar, so the trigger names the destination it landed on ("Bevel /
- * Knowledge"); a brand on its own left the switch invisible.
- *
- * Open/close mechanics mirror AdminMenu: click toggles, an outside mousedown
- * or Escape closes, and closing hands focus back to the trigger.
+ * toolbar, so the switch must say where you are without being opened. With
+ * few apps on a wide toolbar that is a segmented control — every destination
+ * on show, the current one lifted. With more apps, or on a compact toolbar
+ * where the row would not fit, it is a menu behind a trigger that names the
+ * current app ("Bevel / Knowledge").
  */
 export function AppSwitcher() {
-  const navigate = useNavigate();
   const location = useLocation();
   const registry = useAppRegistry();
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  const buttonRef = useRef<HTMLButtonElement>(null);
+  const isCompact = useMediaQuery(TOOLBAR_STACK_QUERY);
 
   // The shell merges the core apps into the registry (see CoreAppShell), so
   // this list is complete — core Knowledge / Skills & Tools plus extensions.
@@ -36,12 +41,79 @@ export function AppSwitcher() {
   // the path-prefix rule (a skill page at its canonical /workspace URL claims
   // Skills & Tools — see AppClaimContext). The local computation is the
   // fallback for standalone renders, where the context is undefined and the
-  // prefix rule is all there is.
+  // prefix rule is all there is. Undefined on the standalone settings pages,
+  // where no app is active.
   const shellActiveId = useActiveAppId();
   const activeId = shellActiveId ?? activeAppId(apps, location.pathname);
-  // Named next to the brand so the toolbar answers "which app am I in?"
-  // without opening the menu. Undefined on the standalone settings pages,
-  // where no app is active and the trigger is the brand alone.
+
+  if (!isCompact && apps.length > 0 && apps.length <= MAX_SEGMENTS) {
+    return <AppToggle apps={apps} activeId={activeId} />;
+  }
+  return <AppMenu apps={apps} activeId={activeId} />;
+}
+
+interface SwitcherProps {
+  apps: AppDef[];
+  activeId: string | undefined;
+}
+
+/**
+ * The brand as plain text, then one segment per app, styled like the
+ * Library sidebar's view switch: on the hover tint, the current app lifted
+ * onto the surface.
+ *
+ * A `nav` of links with `aria-current="page"`, not a tablist: each segment
+ * goes somewhere else in the app rather than revealing a panel here, so it
+ * is navigation, and links also open in a new tab like any other.
+ */
+function AppToggle({ apps, activeId }: SwitcherProps) {
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <span className="shrink-0 px-1.5 text-sm font-semibold tracking-wide text-ink">Bevel</span>
+      <nav aria-label="Apps" className="flex shrink-0 gap-0.5 rounded-md bg-hover p-0.5">
+        {apps.map((app) => {
+          const current = app.id === activeId;
+          return (
+            <Link
+              key={app.id}
+              to={app.path}
+              aria-current={current ? 'page' : undefined}
+              title={app.description}
+              // Same as choosing the current app in the menu: nothing. A
+              // click must not throw a deep link back to the app's root.
+              onClick={(e) => {
+                if (current) e.preventDefault();
+              }}
+              className={cn(
+                'whitespace-nowrap rounded-sm px-2.5 py-1 text-detail font-semibold transition-[background-color,color,box-shadow]',
+                'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-muted',
+                current ? 'bg-surface text-ink shadow-card' : 'text-ink-muted hover:text-ink',
+              )}
+            >
+              {app.label}
+            </Link>
+          );
+        })}
+      </nav>
+    </div>
+  );
+}
+
+/**
+ * The clickable brand: names the app you are currently in and opens the list
+ * of apps. A brand on its own left the switch invisible, hence the label.
+ *
+ * Open/close mechanics mirror AdminMenu: click toggles, an outside mousedown
+ * or Escape closes, and closing hands focus back to the trigger.
+ */
+function AppMenu({ apps, activeId }: SwitcherProps) {
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
+  // Undefined on the standalone settings pages, where the trigger is the
+  // brand alone.
   const activeApp = apps.find((a) => a.id === activeId);
 
   const close = () => {
@@ -78,7 +150,7 @@ export function AppSwitcher() {
         ref={buttonRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex min-w-0 items-center gap-1 px-1.5 py-1 rounded hover:bg-hover text-ink"
+        className="flex min-w-0 items-center gap-1 px-1.5 py-1 rounded-sm hover:bg-hover text-ink"
         title={activeApp ? `Switch app. Currently ${activeApp.label}` : 'Switch app'}
         aria-label="Switch app"
         aria-haspopup="menu"
