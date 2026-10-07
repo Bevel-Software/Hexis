@@ -84,6 +84,17 @@ function looksLikeNodeId(repoRelative: string): boolean {
 }
 
 /**
+ * A separator spelled `%2F` or `%5C` is refused BEFORE decoding: decoded, it
+ * becomes a real `/` that the safe-path check can no longer tell from one
+ * the caller wrote, and `Data%2FThing.md` would name `Data/Thing.md`.
+ */
+function refuseEncodedSeparators(rawPath: string): void {
+  if (/%2f|%5c/i.test(rawPath)) {
+    throw new EmbedRefParseError(`Not a safe knowledge-base path: ${rawPath}`);
+  }
+}
+
+/**
  * Parse a reference into a file path or a node id. Accepts:
  *   - A full app URL: `https://<host>/workspace/<branch>/<kbDir>/<path>#<slug>`
  *     (also `/embed/<branch>/…`), optionally angle-bracketed and/or
@@ -96,17 +107,6 @@ function looksLikeNodeId(repoRelative: string): boolean {
  * always targets the deployment's default branch. A missing `#slug` means
  * "the whole file".
  */
-/**
- * A separator spelled `%2F` or `%5C` is refused BEFORE decoding: decoded, it
- * becomes a real `/` that the safe-path check can no longer tell from one
- * the caller wrote, and `Data%2FThing.md` would name `Data/Thing.md`.
- */
-function refuseEncodedSeparators(rawPath: string): void {
-  if (/%2f|%5c/i.test(rawPath)) {
-    throw new EmbedRefParseError(`Not a safe knowledge-base path: ${rawPath}`);
-  }
-}
-
 export function parseEmbedRef(raw: string, kbDirName: string): EmbedRef | EmbedIdRef {
   if (typeof raw !== 'string' || raw.trim() === '') {
     throw new EmbedRefParseError('Empty reference');

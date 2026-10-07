@@ -14,7 +14,8 @@ vi.mock('../../auth/hooks/useAuthState', () => ({ useAuthState: () => mocks.auth
 vi.mock('../../auth/components/LoginScreen', () => ({ LoginScreen: () => <p>Sign in</p> }));
 vi.mock('../../../lib/api', () => ({ getToken: () => 'session-bearer' }));
 
-import { EmbedLinkPage, outsideAccountOf } from '../components/EmbedLinkPage';
+import { EmbedLinkPage } from '../components/EmbedLinkPage';
+import { outsideAccountOf } from '../services/embed-token';
 
 /** A token shaped like the server's: only the payload is read, for display. */
 function tokenFor(claims: Record<string, unknown>): string {

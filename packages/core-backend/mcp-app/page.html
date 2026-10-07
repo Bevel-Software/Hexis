@@ -89,6 +89,19 @@
           });
         }
 
+        /** The text blocks of a CallToolResult, one line each. */
+        function textOf(result) {
+          var out = [];
+          var content = Array.isArray(result.content) ? result.content : [];
+          for (var i = 0; i < content.length; i++) {
+            var block = content[i];
+            if (block && block.type === 'text' && typeof block.text === 'string' && block.text) {
+              out.push(block.text);
+            }
+          }
+          return out;
+        }
+
         function show(result) {
           var data = (result && result.structuredContent) || {};
           if (typeof data.embedUrl === 'string' && data.embedUrl) {
@@ -104,6 +117,10 @@
           // the same thing here, and make the address clickable.
           var lines = [];
           if (typeof data.note === 'string' && data.note) lines.push(data.note);
+          // A refused call (no such page, no access) carries its reason only
+          // as text — errors never get structuredContent. Show that reason
+          // rather than a generic sentence.
+          if (!lines.length && result && result.isError) lines = textOf(result);
           if (!lines.length) lines.push('This page cannot be shown here.');
           say(lines.join('\n'));
           if (typeof data.appUrl === 'string' && data.appUrl) {
@@ -153,6 +170,8 @@
           // here depends on them, but a host that sends the first tool result
           // only after the handshake completes needs us to have sent it.
           if (message.id === INITIALIZE_ID) {
+            // A rejected handshake is not advertised as ready.
+            if (message.error || !message.result) return;
             send({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} });
             if (!shown) say('Opening the page…');
           }

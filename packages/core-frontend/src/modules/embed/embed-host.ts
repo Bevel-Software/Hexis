@@ -84,7 +84,9 @@ export function resolveToAppUrl(
     // still has to pass the scheme allowlist below, for the same reason.
     const url = normalizeHref(href);
     if (url.startsWith('/') && !url.startsWith('//')) return `${window.location.origin}${url}`;
-    return isOpenableExternalHref(url) ? url : null;
+    // A protocol-relative `//host/path` names another origin without saying
+    // so; the embed never builds one, so it is refused rather than relayed.
+    return !url.startsWith('//') && isOpenableExternalHref(url) ? url : null;
   }
   const target = resolveKbHref(href, { basePath, kbDirName: kb.kbDirName });
   if (target === null) return null;

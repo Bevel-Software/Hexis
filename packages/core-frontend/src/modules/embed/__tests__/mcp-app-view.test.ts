@@ -55,6 +55,13 @@ describe('the MCP App view', () => {
     expect(sent).toContain('ui/notifications/initialized');
   });
 
+  it('does not confirm a handshake the host rejected', () => {
+    const { id } = host.postMessage.mock.calls[0][0] as { id: string };
+    fromHost({ jsonrpc: '2.0', id, error: { code: -32600, message: 'unsupported' } });
+    const sent = host.postMessage.mock.calls.map((c) => (c[0] as { method?: string }).method);
+    expect(sent).not.toContain('ui/notifications/initialized');
+  });
+
   it('frames the embed from a tool result delivered as the CallToolResult itself', () => {
     fromHost({
       jsonrpc: '2.0',
@@ -76,6 +83,16 @@ describe('the MCP App view', () => {
       params: { structuredContent: { note: 'The embedded view needs an https deployment.' } },
     });
     expect(document.getElementById('notice')!.textContent).toContain('needs an https deployment');
+    expect(document.getElementById('frame')!.classList.contains('hidden')).toBe(true);
+  });
+
+  it('shows the reason a refused call gave, from its text block', () => {
+    fromHost({
+      jsonrpc: '2.0',
+      method: 'ui/notifications/tool-result',
+      params: { isError: true, content: [{ type: 'text', text: 'File not found: Notes/missing.md' }] },
+    });
+    expect(document.getElementById('notice')!.textContent).toBe('File not found: Notes/missing.md');
     expect(document.getElementById('frame')!.classList.contains('hidden')).toBe(true);
   });
 });

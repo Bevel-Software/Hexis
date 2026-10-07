@@ -776,7 +776,8 @@ export async function createHexisMcpServer(
       // The views go with the tools: a tool that gained or re-pointed its
       // `ui://` view since startup must be listed — and its view served — as
       // the deployment serves it now, not as it did when this process began.
-      apps = await fetchMcpApps(config);
+      // A failed read keeps the views already served (see `fetchMcpApps`).
+      apps = await fetchMcpApps(config, apps);
       console.error(
         `[hexis-mcp] the workspace's catalog changed — ${tools.length} tool(s) now served ` +
           `(${localByName.size} local-only manual(s) registered here, the rest served by the workspace).`,

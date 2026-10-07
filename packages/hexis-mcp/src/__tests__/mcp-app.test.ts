@@ -155,6 +155,24 @@ describe('fetchMcpApps', () => {
     await expect(fetchMcpApps(config)).rejects.toThrow(ConnectionKeyRejectedError);
   });
 
+  /**
+   * On a catalog refresh the manifest already served is passed in: a failed
+   * read keeps it (the refresh is marked applied either way, so nothing would
+   * read again), while a manifest that reads as empty still replaces it.
+   */
+  it('keeps the manifest already served when a refresh read fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const served = { tools: { open_page: { resourceUri: VIEW_URI } }, resources: [VIEW] };
+    stubFetch({ error: 'nope' }, 502);
+    expect(await fetchMcpApps(config, served)).toBe(served);
+  });
+
+  it('lets a refresh that reads an empty manifest replace the one served', async () => {
+    const served = { tools: { open_page: { resourceUri: VIEW_URI } }, resources: [VIEW] };
+    stubFetch({ tools: {}, resources: [] });
+    expect(await fetchMcpApps(config, served)).toEqual({ tools: {}, resources: [] });
+  });
+
   it('drops a view whose media type is not the MCP App one', async () => {
     stubFetch({
       tools: { open_page: { resourceUri: VIEW_URI } },

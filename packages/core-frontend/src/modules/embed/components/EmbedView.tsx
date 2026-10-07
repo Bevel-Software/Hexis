@@ -25,6 +25,10 @@ import { kbFileUrl } from '../../workspace/routing/kb-routes';
 /** How often a held lock is kept alive while somebody is editing. */
 const HEARTBEAT_MS = 30_000;
 
+/** Said when a heartbeat finds the viewer's write access withdrawn mid-edit. */
+const WRITE_WITHDRAWN =
+  'You can no longer edit this page directly. Your changes are still here — send them as a proposal instead.';
+
 function tokenFromUrl(): string {
   return new URLSearchParams(window.location.search).get('token') ?? '';
 }
@@ -107,11 +111,23 @@ export function EmbedView() {
   // Keep the held lock alive while somebody is editing. Not while proposing:
   // a proposal takes no lock, because nothing it does touches the default
   // branch.
+  //
+  // A heartbeat refused with 403 means the write access itself was withdrawn
+  // mid-edit. The page is read again — it now offers a proposal, not a save —
+  // and the open editor keeps the draft, so the edits are not lost and the
+  // reader is told why the control changed. Any other failure is left to the
+  // lock's TTL and to Save, which refuses with its own reason.
   const holdsLock = mode === 'write' && (view?.canWrite ?? false);
   useEffect(() => {
     if (!holdsLock) return;
     const id = window.setInterval(() => {
-      heartbeatEmbed(token).catch(() => undefined);
+      heartbeatEmbed(token).catch((err: unknown) => {
+        if (!(err instanceof EmbedApiError && err.status === 403)) return;
+        setNotice(WRITE_WITHDRAWN);
+        loadEmbed(token)
+          .then((next) => setView(next))
+          .catch(() => undefined);
+      });
     }, HEARTBEAT_MS);
     return () => window.clearInterval(id);
   }, [holdsLock, token]);

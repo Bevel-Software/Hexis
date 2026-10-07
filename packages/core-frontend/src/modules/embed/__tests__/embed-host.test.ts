@@ -81,8 +81,9 @@ describe('resolveToAppUrl', () => {
     expect(resolveToAppUrl('https://elsewhere.example/x', '', null)).toBe('https://elsewhere.example/x');
   });
 
-  it('still refuses a script address, or a protocol-relative one, among the embed own links', () => {
+  it('still refuses a script address, a protocol-relative one, or an unresolved relative path, among the embed own links', () => {
     expect(resolveToAppUrl('javascript:alert(1)', '', null)).toBeNull();
+    expect(resolveToAppUrl('//evil.example/x', '', null)).toBeNull();
     expect(resolveToAppUrl('relative/path', '', null)).toBeNull();
   });
 });

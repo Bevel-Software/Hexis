@@ -537,8 +537,18 @@ export async function callKbTool(
  * a `resourceUri` this server could not serve would be worse than advertising
  * none: the host would preload a failure and show an empty frame where the
  * text used to be.
+ *
+ * `previous` is what a FAILED read answers — the manifest already being
+ * served, on a catalog refresh. A refresh that hit a deployment mid-redeploy
+ * must not turn every view off until the next catalog change: the refresh is
+ * marked applied either way, so nothing would read the manifest again. A
+ * manifest that READS as empty still replaces it — that is a deployment
+ * that stopped serving the view.
  */
-export async function fetchMcpApps(config: HexisMcpConfig): Promise<McpAppManifest> {
+export async function fetchMcpApps(
+  config: HexisMcpConfig,
+  previous: McpAppManifest = { tools: {}, resources: [] },
+): Promise<McpAppManifest> {
   try {
     const body = await getJson(`${config.baseUrl}/api/agent/mcp-app`, {
       label: 'the MCP App manifest',
@@ -570,8 +580,10 @@ export async function fetchMcpApps(config: HexisMcpConfig): Promise<McpAppManife
     const reason = err instanceof Error ? err.message : String(err);
     console.error(
       `[hexis-mcp] could not read the deployment's MCP App manifest (${reason}); ` +
-        'tools that would render a view will answer with their text instead.',
+        (previous.resources.length
+          ? 'keeping the views read before.'
+          : 'tools that would render a view will answer with their text instead.'),
     );
-    return { tools: {}, resources: [] };
+    return previous;
   }
 }

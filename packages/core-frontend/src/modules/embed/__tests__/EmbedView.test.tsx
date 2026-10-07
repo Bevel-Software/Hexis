@@ -201,6 +201,39 @@ describe('a writer', () => {
     expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  /**
+   * Write access withdrawn mid-edit: the heartbeat answers 403. The editor
+   * stays open with the draft, Save becomes Send proposal, and the reader is
+   * told why — never an editor that quietly stopped saving.
+   */
+  it('turns Save into Send proposal, keeping the draft, when a heartbeat finds write access withdrawn', async () => {
+    const ticks: Array<() => void> = [];
+    const realSetInterval = window.setInterval.bind(window);
+    vi.spyOn(window, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
+      if (ms === 30_000) {
+        ticks.push(fn);
+        return 0;
+      }
+      return realSetInterval(fn, ms);
+    }) as typeof window.setInterval);
+    api.loadEmbed.mockResolvedValueOnce(view());
+    api.lockEmbed.mockResolvedValue({ acquired: true });
+    api.heartbeatEmbed.mockRejectedValue(new FakeEmbedApiError(403, 'Forbidden'));
+    api.proposeEmbed.mockResolvedValue({ url: 'https://hexis.example/change-requests/3' });
+    mount();
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    await screen.findByRole('button', { name: 'Save' });
+
+    api.loadEmbed.mockResolvedValueOnce(view({ canWrite: false }));
+    ticks.at(-1)!();
+
+    expect(await screen.findByText(/You can no longer edit this page directly/)).toBeTruthy();
+    const send = await screen.findByRole('button', { name: 'Send proposal' });
+    await userEvent.click(send);
+    await waitFor(() => expect(api.proposeEmbed).toHaveBeenCalledWith('tok', PAGE));
+    expect(api.saveEmbed).not.toHaveBeenCalled();
+  });
+
   it('releases the lock on Discard', async () => {
     api.loadEmbed.mockResolvedValue(view());
     api.lockEmbed.mockResolvedValue({ acquired: true });
