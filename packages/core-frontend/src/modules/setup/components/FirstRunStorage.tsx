@@ -15,7 +15,7 @@ import {
 
 /** Core's words for the repository the deployment keeps; a distribution names itself (`managedStorage`). */
 const MANAGED_DEFAULT = {
-  title: 'This server keeps it',
+  title: 'Hexis takes care of it',
   description: 'Ready right away. There is nothing to connect and nothing to enter.',
 };
 
@@ -157,10 +157,20 @@ export function FirstRunStorage({ repository, onSaved, onUseAddressAndToken }: P
     <div className="h-full overflow-y-auto bg-canvas">
       <main className="mx-auto px-4 pt-8 pb-16 md:pt-16 md:pb-24 max-w-[692px]">
         <div className="grid gap-7">
-          <span className="text-ui font-semibold tracking-wide text-ink">Bevel</span>
+          <span className="text-ui font-semibold tracking-wide text-ink">
+            Hexis by{' '}
+            <a
+              href="https://bevel.software"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent hover:underline"
+            >
+              Bevel
+            </a>
+          </span>
           {connecting ? (
             <>
-              <Heading label="Set up this deployment · GitHub" title="Connect your GitHub">
+              <Heading title="Connect your GitHub">
                 This deployment reads and writes the one repository you pick.
               </Heading>
               <GitHubRepositoryPanel
@@ -201,7 +211,7 @@ export function FirstRunStorage({ repository, onSaved, onUseAddressAndToken }: P
             </>
           ) : (
             <>
-              <Heading label="Set up this deployment" title="Where should your knowledge base live?">
+              <Heading title="Where should your knowledge base live?">
                 Your knowledge, skills and tools are kept together in one git repository. Choose who looks after it.
               </Heading>
               <div role="radiogroup" aria-label="Where the knowledge base lives" className="grid gap-3 lg:grid-cols-2">
@@ -224,7 +234,7 @@ export function FirstRunStorage({ repository, onSaved, onUseAddressAndToken }: P
                           points: [
                             'Every change is a commit, reviewed as a change request',
                             'Stored with this deployment’s backups',
-                            'Move to a repository of your own later',
+                            'Movable to a repository of your own later',
                           ],
                         }
                       : {
@@ -245,20 +255,23 @@ export function FirstRunStorage({ repository, onSaved, onUseAddressAndToken }: P
                 <Button type="button" variant="primary" onClick={proceed} disabled={saving || needsRestart}>
                   {saving ? 'Saving…' : 'Continue'}
                 </Button>
-                <span className="text-detail text-ink-faint">
-                  Using GitLab, Bitbucket or Azure DevOps?{' '}
+                {/* Its own flex row with a line height of one, so the text's
+                    centre, not a taller line box around it, lines up with the
+                    middle of the Continue button. */}
+                <span className="flex flex-wrap items-center gap-x-1 text-detail leading-none text-ink-faint">
+                  <span>Using GitLab, Bitbucket or Azure DevOps?</span>
                   <button
                     type="button"
                     onClick={onUseAddressAndToken}
                     disabled={saving}
-                    className="text-accent underline underline-offset-2 hover:text-accent-hover"
+                    className="leading-none text-accent underline underline-offset-2 hover:text-accent-hover"
                   >
                     Use an address and token
                   </button>
                 </span>
               </div>
               <p className="text-meta text-ink-faint">
-                Single sign-on and the audit log can wait. Both are in Settings → Deployment.
+                To add single sign-on and the audit log, go to Settings → Deployment later.
               </p>
             </>
           )}
@@ -268,10 +281,9 @@ export function FirstRunStorage({ repository, onSaved, onUseAddressAndToken }: P
   );
 }
 
-function Heading({ label, title, children }: { label: string; title: string; children: ReactNode }) {
+function Heading({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div className="grid gap-2">
-      <span className="text-label uppercase text-ink-faint">{label}</span>
       <h1 className="text-display font-semibold text-ink">{title}</h1>
       <p className="max-w-[58ch] text-lede text-ink-muted">{children}</p>
     </div>
@@ -294,7 +306,7 @@ interface ChoiceCardProps {
 /** One way of keeping the repository, as a radio: its own heading, what it means, and what it asks. */
 function ChoiceCard({ ref, selected, onSelect, onKeyDown, disabled, icon, badge, title, description, points }: ChoiceCardProps) {
   // Named by its title and described by the rest, so a screen reader says
-  // "This server keeps it, radio, checked" rather than the whole card.
+  // "Hexis takes care of it, radio, checked" rather than the whole card.
   const id = useId();
   return (
     <button

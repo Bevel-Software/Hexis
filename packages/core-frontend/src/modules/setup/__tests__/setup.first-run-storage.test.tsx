@@ -101,7 +101,7 @@ function showGate(repository: RepositoryStatus | null = FRESH, registry = EMPTY_
 
 const question = () => screen.findByRole('heading', { name: 'Where should your knowledge base live?' });
 const fullForm = () => screen.findByRole('heading', { name: 'Set up this deployment' });
-const managedCard = () => screen.getByRole('radio', { name: 'This server keeps it' });
+const managedCard = () => screen.getByRole('radio', { name: 'Hexis takes care of it' });
 const gitHubCard = () => screen.queryByRole('radio', { name: 'My own GitHub' });
 const proceed = () => userEvent.click(screen.getByRole('button', { name: 'Continue' }));
 
@@ -287,6 +287,6 @@ describe('SetupGate: the first-run storage question', () => {
     await question();
     const card = screen.getByRole('radio', { name: 'Hexis keeps it' });
     expect(card).toHaveAccessibleDescription(/Hosted for you, ready now\./);
-    expect(screen.queryByText('This server keeps it')).toBeNull();
+    expect(screen.queryByText('Hexis takes care of it')).toBeNull();
   });
 });
