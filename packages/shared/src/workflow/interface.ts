@@ -445,7 +445,8 @@ export interface IWorkflowService {
    */
   listChangeRequestsByState(
     states: ChangeRequestState[],
-    opts?: { fresh?: boolean },
+    /** `workspaceId`: the clone to read file lists in; any clone will do, and a caller that resolved one passes it so the list and the by-number reads agree. */
+    opts?: { fresh?: boolean; workspaceId?: string },
   ): Promise<ChangeRequest[]>;
   /** Change requests authored by the given user (matched on stored author identity). */
   listChangeRequestsAuthoredBy(

@@ -137,6 +137,12 @@ export interface AppliedChangeRef {
   number: number;
   /** The `merged_sha` the row records. */
   mergeSha: string;
+  /**
+   * The request's stored title, which lets a merge commit written by an
+   * earlier release — the title not yet flattened, so a blank line in it put
+   * the number after git's subject — be recognised as the request's own.
+   */
+  title?: string;
 }
 
 /**

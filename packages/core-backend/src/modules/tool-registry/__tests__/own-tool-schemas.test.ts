@@ -79,6 +79,12 @@ const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) 
         { recoveryBotEmail: 'recovery@bevel.software', hooks: nothing, notes: new ToolDescriptionNotes() },
         nothing,
         nothing,
+        undefined,
+        undefined,
+        // The upload store: the two upload tools are mounted only when one is
+        // supplied, and the server supplies one — so this harness does too,
+        // or their schemas would be the two it silently never checked.
+        nothing,
       ),
   },
   {

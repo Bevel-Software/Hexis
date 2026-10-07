@@ -1992,9 +1992,18 @@ export function registerWorkspaceTools(
       // not read would tell them it exists. A file of the knowledge base's
       // own that the caller may read is a file like any other, and the
       // ordinary answer below describes it.
+      let noted = false;
       if (agentGuide && isAgentGuidePath(toKbRelative(p, kbDirName) ?? '')) {
         const fs = await ctx.getFilesystem(branch);
-        const own = (await ownGuideReadable(fs, branch, ctx, p)) && (await isOwnEntryStill(fs, p));
+        const readable = await ownGuideReadable(fs, branch, ctx, p);
+        // Telling the organisation's own file from a stale copy READS it, so
+        // the read hook hears of it as it hears of a read_file there — after
+        // the gate, never before, and once (the ordinary stat below is told).
+        if (readable) {
+          await notifyAgentRead(agentAccessGate, ctx, branch, p);
+          noted = true;
+        }
+        const own = readable && (await isOwnEntryStill(fs, p));
         if (!own) {
           const guide = await agentGuide();
           return {
@@ -2014,7 +2023,7 @@ export function registerWorkspaceTools(
           };
         }
       }
-      await notifyAgentRead(agentAccessGate, ctx, branch, p);
+      if (!noted) await notifyAgentRead(agentAccessGate, ctx, branch, p);
       await assertCanRead(readGateFor(branch, ctx), p);
       // Nothing there is a 404, and the placeholder — never content — gets
       // exactly that answer: the one every file tool gives (see not-found.ts).

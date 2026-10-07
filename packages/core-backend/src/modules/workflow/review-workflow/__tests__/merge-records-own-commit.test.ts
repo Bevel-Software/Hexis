@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
 
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import { ReviewWorkflowService } from '../review-workflow.service.js';
-import { changeRequests } from '../../../database/schema.js';
+import { changeRequests, prMergeLog } from '../../../database/schema.js';
 import type { Database } from '../../../database/connection.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { GitService } from '../../git/git.service.js';
@@ -80,7 +82,11 @@ type Captured = { kind: 'insert' | 'update'; table: unknown; values: Record<stri
  */
 function makeDb(
   captured: Captured[],
-  { rows = [CR_ROW], casWon = true }: { rows?: Record<string, unknown>[]; casWon?: boolean } = {},
+  {
+    rows = [CR_ROW],
+    casWon = true,
+    begunLog = true,
+  }: { rows?: Record<string, unknown>[]; casWon?: boolean; begunLog?: boolean } = {},
 ): Database {
   let crReads = 0;
   const thenable = (data: unknown) => {
@@ -88,10 +94,20 @@ function makeDb(
     p.limit = () => Promise.resolve(data);
     return p;
   };
+  /**
+   * What the CAS compares against: the row's state at the moment of the
+   * update. `casWon` says the row is still open then; a lost CAS means it is
+   * what the LAST row says (the terminal state the lost CAS is explained by).
+   */
+  const stateAtCas = casWon ? 'open' : String(rows[rows.length - 1]?.state ?? 'merged');
   return {
     select: () => ({
       from: (table: unknown) => ({
         where: () => {
+          // The merge log begun by the attempt that pushed and crashed —
+          // `succeeded: false`, no error — is what makes a retry look for its
+          // commit at all.
+          if (table === prMergeLog) return thenable(begunLog ? [{ id: 'merge-log-0' }] : []);
           if (table !== changeRequests) return thenable([]);
           const row = rows[Math.min(crReads, rows.length - 1)];
           crReads += 1;
@@ -109,14 +125,21 @@ function makeDb(
       set: (values: Record<string, unknown>) => {
         captured.push({ kind: 'update', table, values });
         return {
-          where: () => {
+          where: (predicate: SQL) => {
             const t = thenable(undefined) as unknown as Promise<unknown> & {
               returning: () => Promise<unknown>;
             };
-            // Empty for the change request row means the CAS was lost: something
-            // else moved it out of `open` first.
-            t.returning = () =>
-              Promise.resolve(table === changeRequests && !casWon ? [] : [{ id: CR_ROW.id }]);
+            // The CAS is answered FROM THE WHERE CLAUSE, not from a flag: the
+            // update of the change request row lands only if the row is in
+            // the state the predicate asks for. A predicate that no longer
+            // guards on `state = 'open'` would therefore land on a terminal
+            // row here — which is the race this test file exists to pin, so
+            // dropping the guard fails the lost-CAS tests below instead of
+            // passing them by a stub that answered from `casWon` alone.
+            const { sql, params } = new PgDialect().sqlToQuery(predicate);
+            const guardsOpen = /"state"/.test(sql) && params.includes('open');
+            const lands = table !== changeRequests || !guardsOpen || stateAtCas === 'open';
+            t.returning = () => Promise.resolve(lands ? [{ id: CR_ROW.id }] : []);
             return t;
           },
         };
@@ -223,11 +246,15 @@ function makeStuckService(
     // What the row says when the lost CAS is explained — a cancel closes a
     // request just as a merge does, and the audit line must not guess.
     stateAfterCas = 'merged',
+    // Whether an earlier attempt left a begun, never-completed merge-log row —
+    // the only evidence that there may be a pushed commit to recover.
+    begunLog = true,
   }: {
     gateState?: string;
     rowState?: string;
     casWon?: boolean;
     stateAfterCas?: string;
+    begunLog?: boolean;
   } = {},
 ) {
   const rows = [{ ...CR_ROW, state: rowState }, { ...CR_ROW, state: stateAfterCas }];
@@ -242,7 +269,7 @@ function makeStuckService(
     getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-base' })),
   } as unknown as WorkspaceService;
   const svc = new ReviewWorkflowService(
-    makeDb(captured, { rows, casWon }),
+    makeDb(captured, { rows, casWon, begunLog }),
     {} as unknown as IAccessControl,
     workspace,
     { mergeChangeRequest, appliedMergeCommitOnTarget } as unknown as GitService,
@@ -252,10 +279,27 @@ function makeStuckService(
   const merge = () =>
     svc.mergePr(CR_ROW.number, USER, HEAD_SHA, [], gateState as 'open', CR_ROW.title, BASE, 'ws-1');
   const crUpdate = () => captured.find((c) => c.kind === 'update' && c.table === changeRequests)?.values;
-  return { merge, crUpdate, captured, mergeChangeRequest, appliedMergeCommitOnTarget };
+  return { merge, crUpdate, captured, mergeChangeRequest, appliedMergeCommitOnTarget, workspace };
 }
 
 describe('mergePr — a request whose merge commit was pushed but never recorded', () => {
+  it('asks git only when the database shows an attempt that began and never completed', async () => {
+    // A genuinely empty request — nothing on the target, no attempt behind it
+    // — is refused as it always was, and the refusal touches no clone and no
+    // remote: the probe that fetches the target runs only behind the one
+    // piece of evidence a crashed attempt leaves, its begun merge-log row.
+    const { merge, appliedMergeCommitOnTarget, workspace } = makeStuckService('a-commit', { begunLog: false });
+    await expect(merge()).rejects.toThrow(/no file changes to approve/i);
+    expect(appliedMergeCommitOnTarget).not.toHaveBeenCalled();
+    expect((workspace as unknown as { getOrCreateForBranch: ReturnType<typeof vi.fn> }).getOrCreateForBranch).not.toHaveBeenCalled();
+  });
+
+  it('hands the stored title to the probe, so a merge commit in the old message format is recognised', async () => {
+    const { merge, appliedMergeCommitOnTarget } = makeStuckService('a-commit');
+    await merge();
+    expect(appliedMergeCommitOnTarget).toHaveBeenCalledWith('ws-base', BASE, CR_ROW.number, CR_ROW.title);
+  });
+
   it('records that commit instead of refusing, and merges nothing', async () => {
     const { merge, crUpdate, mergeChangeRequest, appliedMergeCommitOnTarget } =
       makeStuckService('the-commit-the-first-attempt-pushed');
@@ -268,7 +312,7 @@ describe('mergePr — a request whose merge commit was pushed but never recorded
     });
     expect(result.sha).toBe('the-commit-the-first-attempt-pushed');
     // Asked of the TARGET branch's own workspace, for this request's number.
-    expect(appliedMergeCommitOnTarget).toHaveBeenCalledWith('ws-base', BASE, CR_ROW.number);
+    expect(appliedMergeCommitOnTarget).toHaveBeenCalledWith('ws-base', BASE, CR_ROW.number, CR_ROW.title);
     // Nothing was merged, committed or pushed: the merge already happened.
     expect(mergeChangeRequest).not.toHaveBeenCalled();
   });

@@ -141,18 +141,29 @@ export class ToolSchemaGuard implements HiddenToolSource {
       }
       if (ofManual.length > 0) picture.set(manual, ofManual);
     }
-    // Stale: a load that read the server earlier than one already applied. Its
-    // own answer stands, the shared picture does not move.
+    // Stale: a load that read the server earlier than one already applied for
+    // THIS caller. Its own answer stands, the shared picture does not move.
+    //
+    // Per caller, and nothing wider. An evicted caller's watermark goes with
+    // their picture, and that loses nothing: once nothing of theirs is held,
+    // whichever of their loads lands next is the newest picture this process
+    // has of them, and it restores the watermark that rejects any older one
+    // landing after it. A floor shared across callers would instead reject
+    // some OTHER caller's newest load for having begun before an unrelated
+    // eviction, and the owner's page would miss that caller's finding.
     if (loadId < (this.applied.get(userId) ?? 0)) return found;
     // Not about size — each entry is a handful of strings — but about a
-    // deployment with many callers never growing these without bound. Cleared
-    // whole rather than evicted one by one: the next load of each surface puts
-    // its own findings back, and a ticket is monotonic, so a cleared order is
-    // still an order.
-    if (this.applied.size >= MAX_REMEMBERED_CALLERS && !this.applied.has(userId)) {
-      this.hidden.clear();
-      this.applied.clear();
+    // deployment with many callers never growing these without bound. Evicted
+    // one caller at a time, the longest unseen first, so every other caller's
+    // findings stay on the owner's page; the next load of the evicted surface
+    // puts its own back. (Re-inserted on every load, so a Map's insertion
+    // order is the order of last sight.)
+    while (this.applied.size >= MAX_REMEMBERED_CALLERS && !this.applied.has(userId)) {
+      const oldest = this.applied.keys().next().value as string;
+      this.applied.delete(oldest);
+      this.hidden.delete(oldest);
     }
+    this.applied.delete(userId);
     this.applied.set(userId, loadId);
     if (picture.size > 0) this.hidden.set(userId, picture);
     else this.hidden.delete(userId);

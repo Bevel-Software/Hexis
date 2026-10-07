@@ -220,12 +220,28 @@ describe('list_tool_setup — access controls resolved for the caller', () => {
     expect(bob.tools[0].hiddenTools).toEqual([]);
   });
 
-  it('reports no hidden tool when no MCP surface has loaded a server yet', async () => {
+  it('reports no hidden tool on a deployment with no MCP surface at all — no source wired', async () => {
     const base = await start(); // no source wired, as a deployment without the proxy
     const alice = (await (await callSetup(base, 'bevel_alice')).json()) as {
       tools: { slug: string; hiddenTools: HiddenTool[] }[];
     };
     for (const tool of alice.tools) expect(tool.hiddenTools).toEqual([]);
+  });
+
+  it('reports no hidden tool to a manager whose server is healthy, or has not loaded yet — source wired, nothing found', async () => {
+    // The distinct case from the one above: the proxy IS there and has nothing
+    // against `weather`, which Alice manages. `[]` is the finding, not the
+    // absence of a finder.
+    const hiddenFor = vi.fn((): HiddenTool[] => []);
+    const base = await start({ hiddenFor });
+    const alice = (await (await callSetup(base, 'bevel_alice')).json()) as {
+      tools: { slug: string; canWrite: boolean; hiddenTools: HiddenTool[] }[];
+    };
+    const weather = alice.tools.find((t) => t.slug === 'weather')!;
+    expect(weather.canWrite).toBe(true);
+    expect(weather.hiddenTools).toEqual([]);
+    // Asked, for the manual she manages — the answer came from the source.
+    expect(hiddenFor).toHaveBeenCalledWith('weather');
   });
 
   it('rejects an unauthenticated call outright', async () => {
