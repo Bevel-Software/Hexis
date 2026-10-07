@@ -91,7 +91,7 @@ const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) 
     name: 'registerSkillsTools',
     register: (registry) => registerSkillsTools(registry, express.Router(), pass, handler, nothing),
   },
-  { name: 'registerPluginsTools', register: (registry) => registerPluginsTools(registry) },
+  { name: 'registerPluginsTools', register: (registry) => registerPluginsTools(registry, testKbContext()) },
   {
     name: 'registerToolManualsTools',
     register: (registry) =>

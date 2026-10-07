@@ -105,7 +105,7 @@ async function hexisTools(): Promise<UtcpTool[]> {
     unused(),
   );
   registerWorkflowTools(registry, router, toolAuth, toolHandler, kb);
-  registerPluginsTools(registry);
+  registerPluginsTools(registry, kb);
   registerSkillsTools(registry, router, toolAuth, toolHandler, emptySkills);
   registerToolManualsTools(registry, router, toolAuth, toolHandler, emptyManuals, {
     accessControl: unused(),

@@ -122,16 +122,18 @@ into an unused name there — so do not try to create a plugin by writing a
 skill into `{{pluginsDir}}/<new-name>/…`; it will be denied. Use the two tools
 instead:
 
-- `my_plugin` — your user's own private space, created on first use:
-  `{{pluginsDir}}/personal-<id>/`. Readable only by its owner — not even
-  admins — and never listed as a plugin. Their personal skills go under its `skills/`,
-  each in its own folder with a `SKILL.md`; write there with the file tools.
+- `my_plugin` — your user's personal plugin, holding their own skills and
+  tools, created on first use: `{{pluginsDir}}/personal-<id>/`. Readable only
+  by its owner — not even admins — and never listed as a plugin. Their personal
+  skills go under its `skills/`, each in its own folder with a `SKILL.md`;
+  write there with the file tools. A note or any other document goes under
+  `{{knowledgeBaseDir}}/` instead — see **Where a new file goes**.
 - `create_plugin` — a shared plugin, named, optionally inside a grouping
   folder under `{{pluginsDir}}/` (`parent`). The caller runs it; others join
   through the app or are granted in its `access.md`.
 
 The app's **New plugin** button and `POST /api/plugins` do the same. A skill
-moves from a personal space into a plugin by moving its folder.
+moves from a personal plugin into a shared plugin by moving its folder.
 
 Everything under `{{knowledgeBaseDir}}/` is yours to arrange. Subfolders, naming,
 whether a topic is one file or twenty — all of it is a judgement call about
