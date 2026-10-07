@@ -10,7 +10,7 @@ import {
   type RefObject,
 } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FileText, Puzzle, Search, Sparkles, Wrench } from 'lucide-react';
+import { ChevronRight, FileText, Puzzle, Search, Sparkles, Wrench } from 'lucide-react';
 import { MenuPanel, useDismissableMenu, useLatestRef } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { useWorkspace } from '../../workspace/state/workspace.context';
@@ -20,7 +20,7 @@ import { knowledgeFiles } from '../../workspace/utils/fileTree';
 import { listSkills } from '../../library/services/library.api';
 import { listPlugins } from '../../library/services/plugins.api';
 import { listToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
-import { rankByName } from '../search/rank';
+import { rankByName, rankByNames } from '../search/rank';
 import {
   libraryResults,
   pageResults,
@@ -28,11 +28,15 @@ import {
   type SearchResult,
   type SearchResultKind,
 } from '../search/sources';
+import { actionNames, suggestedActions, type CommandAction, type CommandContext } from '../commands/actions';
+import { useCommandActions } from '../commands/useCommandActions';
 
 /** Rows per group. Past this the query is too short to be useful, not the list too long. */
 const GROUP_LIMIT = 8;
 
-const PLACEHOLDER = 'Search pages, skills and tools';
+/** The box's own words, and the input's (which ends on an ellipsis: it is waiting for you). */
+const TRIGGER_LABEL = 'Search or run a command';
+const PLACEHOLDER = 'Search or run a command…';
 
 /**
  * The shortcut belongs to ⌘ on Apple platforms and to Ctrl everywhere else —
@@ -57,6 +61,17 @@ const ICONS: Record<SearchResultKind, ReactNode> = {
   plugin: <Puzzle size={15} />,
 };
 
+/** One row of the listbox: a command to run, or a page or item to open. */
+type PaletteRow =
+  | { key: string; action: CommandAction; result?: never }
+  | { key: string; result: SearchResult; action?: never };
+
+const actionRow = (action: CommandAction): PaletteRow => ({ key: `action:${action.id}`, action });
+const resultRow = (result: SearchResult): PaletteRow => ({ key: result.key, result });
+
+/** A shortcut as a screen reader should hear it: "C", "G then K". */
+const spokenShortcut = (keys: readonly string[]) => keys.join(' then ');
+
 interface CatalogState {
   /** A load is in flight. The previous catalog, if any, stays on screen meanwhile. */
   loading: boolean;
@@ -68,7 +83,9 @@ interface CatalogState {
 /**
  * The toolbar's search box and the palette it opens — the prototype's
  * `.search-box` and `searchPop()`: one place to find a page, a skill, a tool
- * or a plugin BY NAME, from anywhere in the app. Ctrl+K (⌘K on a Mac) opens it
+ * or a plugin BY NAME, from anywhere in the app — and to run a command ("New
+ * page", "Invite people", "Settings: Secrets"; see `commands/actions`), which
+ * are listed first. Ctrl+K (⌘K on a Mac) opens it
  * from anywhere too, which is how it is reached on a narrow window, where the
  * box itself does not fit in the toolbar.
  *
@@ -124,6 +141,11 @@ export function SearchPalette({ compact }: { compact: boolean }) {
     );
   }, []);
 
+  // Why the last command failed, shown when the palette reopens to say so.
+  // Commands run with the palette already shut, and nothing else in core
+  // would carry the message (toasts only speak inside the Library).
+  const [notice, setNotice] = useState<string | null>(null);
+
   const openPalette = useCallback(() => {
     if (open) {
       // Already open: the shortcut is a way back INTO it, not a toggle.
@@ -147,6 +169,7 @@ export function SearchPalette({ compact }: { compact: boolean }) {
    */
   const close = useCallback((focus?: 'previous' | 'trigger') => {
     setOpen(false);
+    setNotice(null);
     if (!focus) return;
     const previous = restoreFocusRef.current?.isConnected ? restoreFocusRef.current : null;
     const target = focus === 'previous' ? (previous ?? triggerRef.current) : (triggerRef.current ?? previous);
@@ -154,6 +177,26 @@ export function SearchPalette({ compact }: { compact: boolean }) {
   }, []);
 
   const openRef = useLatestRef(openPalette);
+
+  /**
+   * Run a command once the palette has closed. A failure — thrown or
+   * rejected — opens the palette again with the reason under the rows, so a
+   * command that could not do its job never fails in silence.
+   */
+  const runAction = useCallback(
+    (action: CommandAction, ctx: CommandContext) => {
+      const fail = (err: unknown) => {
+        setNotice(err instanceof Error ? err.message : String(err));
+        openRef.current();
+      };
+      try {
+        void Promise.resolve(action.run(ctx)).catch(fail);
+      } catch (err) {
+        fail(err);
+      }
+    },
+    [openRef],
+  );
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (!isShortcut(e) || e.defaultPrevented) return;
@@ -194,7 +237,7 @@ export function SearchPalette({ compact }: { compact: boolean }) {
           aria-keyshortcuts={SHORTCUT_ARIA}
         >
           <Search aria-hidden size={14} className="flex-none" />
-          <span className="min-w-0 flex-1 truncate">{PLACEHOLDER}</span>
+          <span className="min-w-0 flex-1 truncate">{TRIGGER_LABEL}</span>
           <kbd
             aria-hidden
             className="flex-none rounded-xs border border-line-strong px-[5px] font-mono text-meta text-ink-faint"
@@ -209,7 +252,7 @@ export function SearchPalette({ compact }: { compact: boolean }) {
           ref={panelRef}
           id={panelId}
           role="dialog"
-          aria-label="Search"
+          aria-label="Command menu"
           className={cn(
             'z-40',
             compact ? 'fixed inset-x-3 top-[52px]' : 'absolute top-[calc(100%+6px)] left-0 w-full min-w-[320px]',
@@ -218,7 +261,9 @@ export function SearchPalette({ compact }: { compact: boolean }) {
           <SearchPanel
             inputRef={inputRef}
             catalogState={catalogState}
+            notice={notice}
             onClose={close}
+            onRunAction={runAction}
           />
         </div>
       )}
@@ -233,16 +278,21 @@ export function SearchPalette({ compact }: { compact: boolean }) {
 function SearchPanel({
   inputRef,
   catalogState,
+  notice,
   onClose,
+  onRunAction,
 }: {
   inputRef: RefObject<HTMLInputElement | null>;
   catalogState: CatalogState;
+  notice: string | null;
   onClose: (focus?: 'previous' | 'trigger') => void;
+  onRunAction: (action: CommandAction, ctx: CommandContext) => void;
 }) {
   const navigate = useNavigate();
   const { openWorkspacePath } = useFileNav();
   const { kbDirName } = useWorkspace();
   const { tree, suggestionOnlyPaths } = useMergedWorkspaceTree();
+  const { actions, ctx } = useCommandActions();
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const listboxId = useId();
@@ -261,9 +311,18 @@ function SearchPanel({
     [catalogState.catalog, kbDirName],
   );
 
-  const pageHits = useMemo(() => rankByName(pages, query, byName, GROUP_LIMIT), [pages, query]);
-  const itemHits = useMemo(() => rankByName(items, query, byName, GROUP_LIMIT), [items, query]);
-  const flat = useMemo(() => [...pageHits, ...itemHits], [pageHits, itemHits]);
+  // Commands first: with nothing typed, a short set of the commonest; with a
+  // query, every offered command ranked by its label and keywords.
+  const actionHits = useMemo(
+    () =>
+      (query.trim() ? rankByNames(actions, query, actionNames, GROUP_LIMIT) : suggestedActions(actions, ctx)).map(
+        actionRow,
+      ),
+    [actions, ctx, query],
+  );
+  const pageHits = useMemo(() => rankByName(pages, query, byName, GROUP_LIMIT).map(resultRow), [pages, query]);
+  const itemHits = useMemo(() => rankByName(items, query, byName, GROUP_LIMIT).map(resultRow), [items, query]);
+  const flat = useMemo(() => [...actionHits, ...pageHits, ...itemHits], [actionHits, pageHits, itemHits]);
   // Clamped rather than reset when the rows change under it: the catalog can
   // land while the reader is already arrowing through the pages.
   const active = flat.length === 0 ? -1 : Math.min(activeIndex, flat.length - 1);
@@ -274,10 +333,15 @@ function SearchPanel({
     document.getElementById(`${listboxId}-${activeKey}`)?.scrollIntoView?.({ block: 'nearest' });
   }, [activeKey, listboxId]);
 
-  const choose = (result: SearchResult) => {
+  const choose = (row: PaletteRow) => {
     onClose('trigger');
-    if (result.target.kind === 'workspace') openWorkspacePath(result.target.path);
-    else navigate(result.target.url);
+    if (row.action) {
+      onRunAction(row.action, ctx);
+      return;
+    }
+    const { target } = row.result;
+    if (target.kind === 'workspace') openWorkspacePath(target.path);
+    else navigate(target.url);
   };
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
@@ -314,7 +378,7 @@ function SearchPanel({
   const trimmed = query.trim();
   const loadingItems = catalogState.loading && !catalogState.catalog;
 
-  const renderGroup = (label: string, rows: SearchResult[], offset: number) => {
+  const renderGroup = (label: string, rows: PaletteRow[], offset: number) => {
     if (rows.length === 0) return null;
     const labelId = `${listboxId}-${label.replace(/\W+/g, '-')}`;
     return (
@@ -325,6 +389,7 @@ function SearchPanel({
         {rows.map((r, i) => {
           const index = offset + i;
           const selected = index === active;
+          const shortcut = r.action?.shortcut;
           return (
             <div
               key={r.key}
@@ -343,12 +408,29 @@ function SearchPanel({
               )}
             >
               <span aria-hidden className="flex-none text-ink-faint">
-                {ICONS[r.kind]}
+                {r.action ? (r.action.icon ?? <ChevronRight size={15} />) : ICONS[r.result.kind]}
               </span>
-              <span className="min-w-0 truncate">{r.name}</span>
+              <span className="min-w-0 truncate">{r.action ? r.action.label : r.result.name}</span>
               <span className="ml-auto max-w-[45%] flex-none truncate pl-2 text-meta text-ink-faint">
-                {r.location}
+                {r.action ? r.action.group : r.result.location}
               </span>
+              {shortcut && shortcut.length > 0 && (
+                <>
+                  {/* Drawn as keys for the eye, said as words for the ear:
+                      `aria-keyshortcuts` cannot express a sequence like G K. */}
+                  <span aria-hidden className="flex flex-none items-center gap-1">
+                    {shortcut.map((key, k) => (
+                      <kbd
+                        key={k}
+                        className="rounded-xs border border-line-strong px-[5px] font-mono text-meta text-ink-faint"
+                      >
+                        {key}
+                      </kbd>
+                    ))}
+                  </span>
+                  <span className="sr-only">, shortcut {spokenShortcut(shortcut)}</span>
+                </>
+              )}
             </div>
           );
         })}
@@ -363,7 +445,7 @@ function SearchPanel({
     ? 'Loading skills and tools…'
     : flat.length === 0
       ? trimmed
-        ? `No pages or items match “${trimmed}”`
+        ? `Nothing matches “${trimmed}”`
         : 'Nothing to search yet.'
       : catalogState.failed && !catalogState.catalog
         ? 'Couldn’t load skills and tools.'
@@ -375,7 +457,7 @@ function SearchPanel({
         ref={inputRef}
         type="text"
         role="combobox"
-        aria-label={PLACEHOLDER}
+        aria-label={TRIGGER_LABEL}
         aria-expanded
         aria-controls={listboxId}
         aria-autocomplete="list"
@@ -391,10 +473,16 @@ function SearchPanel({
         spellCheck={false}
         className="mb-1 w-full flex-none border-b border-line bg-transparent px-2 pt-1.5 pb-2.5 text-body text-ink placeholder:text-ink-faint focus:outline-none"
       />
-      <div id={listboxId} role="listbox" aria-label="Search results" className="min-h-0 overflow-y-auto">
-        {renderGroup('Pages', pageHits, 0)}
-        {renderGroup('Skills & tools', itemHits, pageHits.length)}
+      <div id={listboxId} role="listbox" aria-label="Commands and results" className="min-h-0 overflow-y-auto">
+        {renderGroup('Actions', actionHits, 0)}
+        {renderGroup('Pages', pageHits, actionHits.length)}
+        {renderGroup('Skills & tools', itemHits, actionHits.length + pageHits.length)}
       </div>
+      {notice && (
+        <div role="alert" className="flex-none px-2 pt-2 text-ui text-danger">
+          {notice}
+        </div>
+      )}
       <div role="status" className={cn('flex-none px-2 text-ui text-ink-muted', status && 'py-2')}>
         {status}
       </div>

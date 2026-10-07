@@ -429,12 +429,19 @@ export function useFileNav() {
    * It travels as router state (`startEditing`, the key the skill page
    * already answers to), not in the URL, so a shared or bookmarked link never
    * drops anyone into the editor; `FileViewer` honours it once and clears it.
+   *
+   * `replace` swaps the current history entry instead of adding one — for
+   * asking to edit the page already on screen, where a second entry for the
+   * same URL would make Back look like it did nothing.
    */
   const openWorkspacePath = useCallback(
-    (path: string, options?: { edit?: boolean }) => {
+    (path: string, options?: { edit?: boolean; replace?: boolean }) => {
       if (!branch) return;
-      if (options?.edit) navigate(kbFileUrl(branch, path), { state: { startEditing: true } });
-      else navigate(kbFileUrl(branch, path));
+      const url = kbFileUrl(branch, path);
+      const replace = options?.replace === true;
+      if (options?.edit) navigate(url, replace ? { state: { startEditing: true }, replace } : { state: { startEditing: true } });
+      else if (replace) navigate(url, { replace });
+      else navigate(url);
     },
     [branch, navigate],
   );

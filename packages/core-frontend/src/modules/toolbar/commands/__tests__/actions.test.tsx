@@ -1,0 +1,151 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { AdminMenuItem, AppDef } from '../../../../core/registry';
+import {
+  coreCommandActions,
+  mergeCommandActions,
+  suggestedActions,
+  visibleActions,
+  type CommandAction,
+  type CommandContext,
+} from '../actions';
+
+/**
+ * The command list on its own, without a menu: what core offers, what each
+ * context hides, and how a distribution's commands join it.
+ */
+
+const APPS: AppDef[] = [
+  // Out of order on purpose: the commands follow the switcher's `order`.
+  { id: 'skills-tools', label: 'Skills & Tools', path: '/skills-and-tools', order: 20, element: <></> },
+  { id: 'knowledge', label: 'Knowledge', path: '/workspace', order: 10, element: <></> },
+];
+
+const row = (over: Partial<AdminMenuItem> & { id: string }): AdminMenuItem => ({ label: over.id, ...over });
+
+function ctx(over: Partial<CommandContext> = {}): CommandContext {
+  return {
+    navigate: vi.fn(),
+    isAdmin: false,
+    activeAppId: 'knowledge',
+    openFilePath: null,
+    editablePage: null,
+    openWorkspacePath: vi.fn(),
+    invite: { open: vi.fn(), invitedRevision: 0 },
+    createPage: vi.fn(async () => 'kb/KnowledgeBase/Untitled.md'),
+    onboardingPending: false,
+    ...over,
+  };
+}
+
+const labels = (actions: CommandAction[]) => actions.map((a) => a.label);
+
+describe('coreCommandActions', () => {
+  const settings = {
+    defaultItems: [
+      row({ id: 'secrets', label: 'Secrets', path: '/secrets' }),
+      row({ id: 'dialog-row', label: 'Feedback', dialog: () => <></> }),
+      row({ id: 'node-label', label: <b>Fancy</b>, path: '/fancy' }),
+    ],
+    adminItems: [row({ id: 'roles', label: 'App roles', path: '/roles-and-members' })],
+  };
+  const all = coreCommandActions({ apps: APPS, settings });
+
+  it('offers a member the page verbs, the apps and their own settings', () => {
+    expect(labels(visibleActions(all, ctx()))).toEqual([
+      'New page',
+      'Connect your agent',
+      'Go to Knowledge',
+      'Go to Skills & Tools',
+      'Settings: Secrets',
+    ]);
+  });
+
+  it('adds Invite people and the admin settings for an admin', () => {
+    expect(labels(visibleActions(all, ctx({ isAdmin: true })))).toEqual([
+      'New page',
+      'Invite people',
+      'Connect your agent',
+      'Go to Knowledge',
+      'Go to Skills & Tools',
+      'Settings: Secrets',
+      'Settings: App roles',
+    ]);
+  });
+
+  it('leaves out New page before the workspace knows its folder, and Invite with no dialog to open', () => {
+    const shown = labels(visibleActions(all, ctx({ isAdmin: true, createPage: null, invite: null })));
+    expect(shown).not.toContain('New page');
+    expect(shown).not.toContain('Invite people');
+  });
+
+  it('offers Edit this page only for the open page the viewer says can be edited', () => {
+    const page = 'kb/KnowledgeBase/Notes.md';
+    expect(labels(visibleActions(all, ctx({ openFilePath: page })))).not.toContain('Edit this page');
+    expect(labels(visibleActions(all, ctx({ openFilePath: page, editablePage: page })))).toContain('Edit this page');
+    // A stale verdict for another page offers nothing.
+    expect(labels(visibleActions(all, ctx({ openFilePath: page, editablePage: 'kb/Other.md' })))).not.toContain(
+      'Edit this page',
+    );
+  });
+
+  it('runs a settings row’s own onSelect ahead of its path, as the profile menu does', () => {
+    const onSelect = vi.fn(({ navigate }: { navigate(to: string): void }) => navigate('/chosen'));
+    const [action] = coreCommandActions({
+      apps: [],
+      settings: { defaultItems: [row({ id: 'x', label: 'X', path: '/declared', onSelect })], adminItems: [] },
+    }).filter((a) => a.id === 'settings:x');
+    const c = ctx();
+    void action.run(c);
+    expect(c.navigate).toHaveBeenCalledWith('/chosen');
+    expect(c.navigate).not.toHaveBeenCalledWith('/declared');
+  });
+});
+
+describe('suggestedActions', () => {
+  const all = coreCommandActions({ apps: APPS, settings: { defaultItems: [], adminItems: [] } });
+  const suggest = (c: CommandContext) => labels(suggestedActions(visibleActions(all, c), c));
+
+  it('suggests the commonest verbs and the way to the other app', () => {
+    expect(suggest(ctx({ isAdmin: true, onboardingPending: true }))).toEqual([
+      'New page',
+      'Invite people',
+      'Connect your agent',
+      'Go to Skills & Tools',
+    ]);
+    expect(suggest(ctx({ activeAppId: 'skills-tools' }))).toEqual(['New page', 'Go to Knowledge']);
+  });
+});
+
+describe('mergeCommandActions / visibleActions', () => {
+  const core = coreCommandActions({ apps: [], settings: { defaultItems: [], adminItems: [] } });
+
+  it('puts the registry’s commands after core’s and drops a reused id', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const extra: CommandAction[] = [
+      { id: 'new-ontology', label: 'New ontology', visible: () => true, run: vi.fn() },
+      { id: 'new-page', label: 'Impostor', visible: () => true, run: vi.fn() },
+    ];
+    const merged = mergeCommandActions(core, extra);
+    expect(merged.map((a) => a.id).slice(-1)).toEqual(['new-ontology']);
+    expect(labels(merged)).not.toContain('Impostor');
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+
+  it('drops a command whose visible() throws, and keeps the rest', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const broken: CommandAction = {
+      id: 'broken',
+      label: 'Broken',
+      visible: () => {
+        throw new Error('boom');
+      },
+      run: vi.fn(),
+    };
+    expect(labels(visibleActions(mergeCommandActions(core, [broken]), ctx()))).toEqual([
+      'New page',
+      'Connect your agent',
+    ]);
+    error.mockRestore();
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { matchTier, normalizeForMatch, rankByName } from '../rank';
+import { matchTier, normalizeForMatch, rankByName, rankByNames } from '../rank';
 
 const names = (items: string[], query: string, limit = 10) => rankByName(items, query, (n) => n, limit);
 
@@ -61,5 +61,25 @@ describe('rankByName', () => {
 
   it('returns nothing when nothing matches', () => {
     expect(names(['Pricing'], 'zzz')).toEqual([]);
+  });
+});
+
+describe('rankByNames', () => {
+  const commands = [
+    { label: 'Invite people', keywords: ['team', 'members'] },
+    { label: 'Team settings', keywords: [] },
+    { label: 'New page', keywords: ['write'] },
+  ];
+  const ranked = (query: string) =>
+    rankByNames(commands, query, (c) => [c.label, ...c.keywords], 10).map((c) => c.label);
+
+  it('ranks an item at the best tier any of its names reaches', () => {
+    // "Invite people" reaches tier 0 through its keyword, as "Team settings" does through its label.
+    expect(ranked('team')).toEqual(['Invite people', 'Team settings']);
+    expect(ranked('wri')).toEqual(['New page']);
+  });
+
+  it('breaks ties on the first name, the one on screen', () => {
+    expect(ranked('e')).toEqual(['New page', 'Invite people', 'Team settings']);
   });
 });

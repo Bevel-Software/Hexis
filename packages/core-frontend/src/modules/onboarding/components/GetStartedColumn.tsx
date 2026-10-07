@@ -17,9 +17,9 @@ import { LIBRARY_ROOT, isLibraryLocation } from '../../library/routes/library-pa
 import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
 import { SETUP_COLUMN_HIDDEN_QUERY } from '../../layout/breakpoints';
 import { useWorkspace } from '../../workspace/state/workspace.context';
-import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
 import { useFileNav } from '../../workspace/routing/kb-routes';
+import { useCreatePage } from '../../workspace/hooks/useCreatePage';
 import { useOnboarding, useSetupChecklist } from '../state/onboarding';
 import { useAgentConnection } from '../state/agent-connection';
 import { chatGptPromptUrl, claudePromptUrl, firstPagePromptFor, firstPageRoute } from '../first-page-prompt';
@@ -29,12 +29,6 @@ import { WELCOME_PATH } from '../paths';
 
 /** The starter page every new knowledge base is seeded with (`kb-template/`). */
 const GUIDE_FILE = 'How to get started.md';
-
-/**
- * What "New page" writes: a title, so the page is a page from its first save,
- * and a blank line under it for the cursor to land on.
- */
-const NEW_PAGE_CONTENT = '# Untitled\n\n';
 
 interface SetupAction {
   label: string;
@@ -92,37 +86,6 @@ function findEntry(tree: FileTreeEntry | null, path: string): FileTreeEntry | nu
     }
   }
   return null;
-}
-
-/** `Untitled.md` for the first page, `Untitled N.md` after it. */
-function untitledPath(folder: string, n: number): string {
-  return n === 1 ? `${folder}/Untitled.md` : `${folder}/Untitled ${n}.md`;
-}
-
-/**
- * The first number, from `from` on, whose untitled name the tree does not
- * already hold — a second click makes a second page rather than reusing the
- * first one's name.
- */
-function freeUntitledNumber(tree: FileTreeEntry | null, folder: string, from = 1): number {
-  let n = from;
-  while (findEntry(tree, untitledPath(folder, n))) n++;
-  return n;
-}
-
-/**
- * How many names New page tries before it gives up. The tree it picks from
- * can be a moment behind (a teammate or an agent creating pages too), so a
- * refusal moves on to the next name; a handful covers any real race.
- */
-const NEW_PAGE_ATTEMPTS = 5;
-
-/**
- * The exclusive create's "that name is taken": 409, for a file that exists
- * now — or one somebody holds the lock on, which is a page being made there.
- */
-function isNameTaken(err: unknown): boolean {
-  return err instanceof WorkspaceApiError && err.status === 409;
 }
 
 /** A plugin for a team, not somebody's personal shelf. */
@@ -217,9 +180,10 @@ export function GetStartedColumn() {
   const onboarding = useOnboarding();
   const checklist = useSetupChecklist();
   const { isAdmin, isAdminLoading = false } = useAdmin();
-  const { kbDirName, openFilePath, createFile } = useWorkspace();
+  const { kbDirName, openFilePath } = useWorkspace();
   const { tree } = useMergedWorkspaceTree();
   const { openWorkspacePath } = useFileNav();
+  const { createPage } = useCreatePage();
   const invite = useInviteDialog();
 
   /**
@@ -268,7 +232,7 @@ export function GetStartedColumn() {
 
   /**
    * "New page": create a Markdown page in the Knowledge folder and open it
-   * already in the editor. The failure is kept here and shown on the step
+   * already in the editor (`useCreatePage`, shared with the command menu). The failure is kept here and shown on the step
    * because nothing else would say it — toasts only speak inside the
    * Library, and a refusal (a protected branch's write gate) is exactly what
    * the person needs to read.
@@ -277,30 +241,14 @@ export function GetStartedColumn() {
   const createFirstPage = async () => {
     if (!knowledgeRoot || newPage.busy) return;
     setNewPage({ busy: true, error: null });
-    // An exclusive create: the name comes from the tree on screen, which may
-    // not yet show a page someone else just made — and a plain write would
-    // replace that page with an empty one.
-    let n = freeUntitledNumber(tree, knowledgeRoot);
-    let path = untitledPath(knowledgeRoot, n);
-    for (let attempt = 1; ; attempt++) {
-      try {
-        await createFile(path, NEW_PAGE_CONTENT, { ifAbsent: true });
-        break;
-      } catch (err) {
-        if (isNameTaken(err) && attempt < NEW_PAGE_ATTEMPTS) {
-          n = freeUntitledNumber(tree, knowledgeRoot, n + 1);
-          path = untitledPath(knowledgeRoot, n);
-          continue;
-        }
-        const msg = err instanceof Error ? err.message : String(err);
-        setNewPage({ busy: false, error: `Couldn’t create the page: ${msg}` });
-        return;
-      }
+    try {
+      // The step ticks itself from the refreshed tree (any page but the guide
+      // counts); the page opens in the editor with the cursor in it.
+      await createPage();
+      setNewPage({ busy: false, error: null });
+    } catch (err) {
+      setNewPage({ busy: false, error: err instanceof Error ? err.message : String(err) });
     }
-    setNewPage({ busy: false, error: null });
-    // The step ticks itself from the refreshed tree (any page but the guide
-    // counts); `edit` opens the page with the cursor in it.
-    openWorkspacePath(path, { edit: true });
   };
 
   // Opening the guide by any route counts — the tree, a link, this column.

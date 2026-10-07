@@ -2,6 +2,7 @@ import { useMemo, useCallback, useContext, useEffect, useRef, useState } from 'r
 import { Check, XCircle, Lock, AlertTriangle, ArrowLeft, FileText, History } from 'lucide-react';
 import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
+import { publishEditablePage, withdrawEditablePage } from '../state/editable-page';
 import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
@@ -601,6 +602,27 @@ export function FileViewer() {
     access.canWrite,
     handleEnterEditMode,
   ]);
+
+  // Tell the command menu whether "Edit this page" would do anything — the
+  // same conditions the Edit button is drawn and enabled by (see
+  // `editable-page.ts`). `canWrite` null is the button's optimistic Edit too.
+  const lockHolder = fileLock.externalLock?.holderName ?? null;
+  const editableNow =
+    openFilePath !== null &&
+    openFileContent !== null &&
+    !!Renderer &&
+    !isViewOnlyFile(openFilePath) &&
+    !editMode &&
+    !isEnteringEdit &&
+    !proposeMode &&
+    !isReviewingPending &&
+    access.canWrite !== false &&
+    lockHolder === null;
+  useEffect(() => {
+    if (!editableNow || !openFilePath) return;
+    publishEditablePage(openFilePath);
+    return () => withdrawEditablePage(openFilePath);
+  }, [editableNow, openFilePath]);
 
   const handleExitEditMode = useCallback(() => {
     if (!editMode) return;
