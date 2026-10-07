@@ -49,14 +49,16 @@ function subscribe(listener: () => void): () => void {
 }
 
 /**
- * The "Get set up" column's two per-account notes: the starter guide has been
- * opened, and the column was dismissed. Both are per-browser conveniences,
- * not server truth, so they live beside the session override and wake the
- * same listeners, through one tiny flag pair rather than a hand-written copy
- * of the read/write/try-catch dance per note.
+ * The "Get set up" column's per-account notes: the starter guide has been
+ * opened, the column was dismissed, and its "You're set up" was seen and
+ * closed. All per-browser conveniences, not server truth, so they live beside
+ * the session override and wake the same listeners, through one tiny flag
+ * pair rather than a hand-written copy of the read/write/try-catch dance per
+ * note.
  */
 const READ_GUIDE_PREFIX = 'bevel.onboarding.readGuide.';
 const SETUP_DISMISSED_PREFIX = 'bevel.onboarding.setupDismissed.';
+const SETUP_COMPLETE_PREFIX = 'bevel.onboarding.setupCompleteClosed.';
 
 /** Storage is best-effort: private-mode Safari throws, and a lost flag costs
  *  one extra row on screen, not a failure. */
@@ -138,7 +140,8 @@ export function resetOnboardingForTests(): void {
     for (const key of Object.keys(window.localStorage)) {
       if (
         key.startsWith(READ_GUIDE_PREFIX) ||
-        key.startsWith(SETUP_DISMISSED_PREFIX)
+        key.startsWith(SETUP_DISMISSED_PREFIX) ||
+        key.startsWith(SETUP_COMPLETE_PREFIX)
       ) {
         window.localStorage.removeItem(key);
       }
@@ -195,20 +198,28 @@ export interface SetupChecklistState {
   readGuide: boolean;
   /** The person closed the "Get set up" column; it stays closed. */
   dismissed: boolean;
+  /**
+   * The person closed the column's "You're set up" — the list was finished
+   * and celebrated, and the column is gone for good.
+   */
+  completionClosed: boolean;
   markGuideRead(): void;
   dismiss(): void;
+  closeCompletion(): void;
 }
 
 const NO_CHECKLIST: SetupChecklistState = {
   readGuide: false,
   dismissed: false,
+  completionClosed: false,
   markGuideRead: () => {},
   dismiss: () => {},
+  closeCompletion: () => {},
 };
 
 /**
- * The client-side half of the "Get set up" column: the two ticks the server
- * has no field for. Keyed by lower-cased email, so `Juan@…` and `juan@…` are
+ * The client-side half of the "Get set up" column: the tick the server has no
+ * field for, and the column's two ways of going away. Keyed by lower-cased email, so `Juan@…` and `juan@…` are
  * one person, and tolerant of a missing auth provider for the same reason
  * {@link useOnboarding} is.
  */
@@ -220,10 +231,13 @@ export function useSetupChecklist(): SetupChecklistState {
   const email = user.email.toLowerCase();
   const readKey = `${READ_GUIDE_PREFIX}${email}`;
   const dismissedKey = `${SETUP_DISMISSED_PREFIX}${email}`;
+  const completeKey = `${SETUP_COMPLETE_PREFIX}${email}`;
   return {
     readGuide: hasFlag(readKey),
     dismissed: hasFlag(dismissedKey),
+    completionClosed: hasFlag(completeKey),
     markGuideRead: () => setFlag(readKey),
     dismiss: () => setFlag(dismissedKey),
+    closeCompletion: () => setFlag(completeKey),
   };
 }

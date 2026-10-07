@@ -136,21 +136,24 @@ function setViewportWidth(width: number): void {
   (window as typeof window & { happyDOM: { setInnerWidth(v: number): void } }).happyDOM.setInnerWidth(width);
 }
 
-function mount({
-  admin = false,
-  onboardingDone = false,
-  files = STARTER_TREE,
-  openFilePath = null as string | null,
-  route = '/workspace',
-  createFile = async () => {},
-}: {
+type MountOptions = {
   admin?: boolean;
   onboardingDone?: boolean;
   files?: string[];
   openFilePath?: string | null;
   route?: string;
   createFile?: (relativePath: string, content?: string, options?: { ifAbsent?: boolean }) => Promise<void>;
-} = {}) {
+};
+
+/** The column in every context it reads; `rerender` it to move the app's state under it. */
+function columnUi({
+  admin = false,
+  onboardingDone = false,
+  files = STARTER_TREE,
+  openFilePath = null as string | null,
+  route = '/workspace',
+  createFile = async () => {},
+}: MountOptions = {}) {
   const auth = authValue({
     user: { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera', onboardingDone },
   });
@@ -170,6 +173,11 @@ function mount({
       </AuthContext.Provider>
     </MemoryRouter>
   );
+  return ui;
+}
+
+function mount(options: MountOptions = {}) {
+  const ui = columnUi(options);
   return { ...render(ui), ui };
 }
 
@@ -546,18 +554,68 @@ describe('GetStartedColumn: what an admin sees', () => {
     expect(screen.getByRole('dialog', { name: 'Invite your team' })).toBeInTheDocument();
   });
 
-  it('goes away once every step is done', async () => {
+});
+
+/**
+ * Finishing the list is a moment, not a disappearance: the column says
+ * "You're set up" — when the last tick lands, or on arrival for a list that
+ * was finished and never celebrated — and goes for good once that is closed.
+ */
+describe('GetStartedColumn: all done', () => {
+  const WITH_PAGE = [...STARTER_TREE, `${KB}/KnowledgeBase/Notes.md`];
+  const complete = () => screen.queryByRole('heading', { name: 'You’re set up' });
+
+  it('says "You’re set up" when the last step ticks, in place of the list', async () => {
     listPluginsMock.mockResolvedValue([plugin('Plugins/GTM')]);
     listAccountsMock.mockResolvedValue([account('juan@bevel.software'), account('ana@bevel.software')]);
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
     const everythingBut = { admin: true, onboardingDone: true, openFilePath: GUIDE };
     // One step short, the settled column shows the six it has...
-    const { unmount } = mount(everythingBut);
+    const { rerender } = mount(everythingBut);
     expect(await screen.findByText('6 of 7')).toBeInTheDocument();
+    expect(complete()).toBeNull();
+    // ...and the page landing in the tree finishes it.
+    rerender(columnUi({ ...everythingBut, files: WITH_PAGE }));
+    expect(await screen.findByRole('heading', { name: 'You’re set up' })).toBeInTheDocument();
+    const column = screen.getByRole('complementary', { name: 'Get set up' });
+    expect(within(column).getByRole('status')).toHaveTextContent(
+      'Your agent can read and write your knowledge base, and your team can join you.',
+    );
+    expect(within(column).queryByRole('list')).not.toBeInTheDocument();
+    expect(within(column).queryByRole('progressbar')).not.toBeInTheDocument();
+  });
+
+  it('celebrates a list finished elsewhere on arrival, and does not mention a team to a member', async () => {
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+    mount({ onboardingDone: true, openFilePath: GUIDE, files: WITH_PAGE });
+    expect(await screen.findByRole('heading', { name: 'You’re set up' })).toBeInTheDocument();
+    expect(screen.getByText('Your agent can read and write your knowledge base.')).toBeInTheDocument();
+    expect(screen.queryByText(/your team/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * "Connect your agent" also ticks when the onboarding was concluded with no
+   * agent ever calling in (the pill's ×), so the line does not claim one.
+   */
+  it('claims no agent when none has connected', async () => {
+    mount({ onboardingDone: true, openFilePath: GUIDE, files: WITH_PAGE });
+    expect(await screen.findByRole('heading', { name: 'You’re set up' })).toBeInTheDocument();
+    expect(screen.getByText('Your knowledge base is ready.')).toBeInTheDocument();
+    expect(screen.queryByText(/Your agent can/)).not.toBeInTheDocument();
+  });
+
+  it('Close retires the column for good, and remembers it per account', async () => {
+    const { unmount } = mount({ onboardingDone: true, openFilePath: GUIDE, files: WITH_PAGE });
+    await userEvent.click(await screen.findByRole('button', { name: 'Close' }));
+    expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
+    expect(window.localStorage.getItem('bevel.onboarding.setupCompleteClosed.juan@bevel.software')).toBe('1');
     unmount();
-    // ...and with the last one done, the same answers leave nothing to show.
-    mount({ ...everythingBut, files: [...STARTER_TREE, `${KB}/KnowledgeBase/Notes.md`] });
+    // Not shown again — not even if a step comes undone later.
+    fetchAgentConnectionMock.mockClear();
+    mount({ onboardingDone: true, openFilePath: GUIDE });
     await act(async () => {});
     expect(screen.queryByRole('complementary', { name: 'Get set up' })).not.toBeInTheDocument();
+    expect(fetchAgentConnectionMock).not.toHaveBeenCalled();
   });
 });
 

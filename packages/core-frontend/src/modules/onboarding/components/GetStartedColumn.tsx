@@ -150,7 +150,9 @@ function useTeamPluginExists(enabled: boolean, refreshKey: string): { found: boo
       cancelled = true;
     };
   }, [enabled, found, refreshKey]);
-  return { found, settled };
+  // A yes is an answer. Finding it re-runs the effect, whose cleanup cancels
+  // the `finally` that would have settled, so `found` settles by itself.
+  return { found, settled: settled || found };
 }
 
 /**
@@ -178,7 +180,8 @@ function useHasTeammate(enabled: boolean, revision: number): { found: boolean; s
       cancelled = true;
     };
   }, [enabled, found, revision]);
-  return { found, settled };
+  // Settled by a yes, as above.
+  return { found, settled: settled || found };
 }
 
 /**
@@ -188,12 +191,14 @@ function useHasTeammate(enabled: boolean, revision: number): { found: boolean; s
  * Every tick is DERIVED — the server's onboarding flag, the file tree, the
  * plugin catalog, the account list — so doing a step anywhere in the app
  * counts, and the column never claims something the workspace does not show.
- * Only "read the guide" has no server fact behind it; that one, and the
- * dismissal, are per-browser notes (see `useSetupChecklist`).
+ * Only "read the guide" has no server fact behind it; that one, and the two
+ * ways of closing the column, are per-browser notes (see `useSetupChecklist`).
  *
  * It gets out of the way on its own terms: on the welcome page (which is the
  * same instructions, full-size), below the width where a 288px column still
- * leaves a readable page, once every step is done, and for good once closed.
+ * leaves a readable page, and for good once closed. Finishing every step does
+ * not make it vanish mid-sentence: it says "You're set up" first, and goes
+ * once that is closed.
  * The admin-only steps (storage, plugin, invite) are hidden from members,
  * whose checklist is about using the workspace, not setting it up.
  */
@@ -216,7 +221,8 @@ export function GetStartedColumn() {
    * the onboarding asked for, so it concludes it too: the pill goes. Once
    * per mount, for the reason the welcome page gives.
    */
-  const agent = useAgentConnection({ enabled: !checklist.dismissed });
+  const gone = checklist.dismissed || checklist.completionClosed;
+  const agent = useAgentConnection({ enabled: !gone });
   const concluded = useRef(false);
   const { showPill, markDone } = onboarding;
   useEffect(() => {
@@ -226,7 +232,7 @@ export function GetStartedColumn() {
   }, [agent.connected, showPill, markDone]);
 
   const onWelcome = pathname === WELCOME_PATH;
-  const askServer = isAdmin && !checklist.dismissed;
+  const askServer = isAdmin && !gone;
   const plugin = useTeamPluginExists(askServer, isLibraryLocation(pathname) ? pathname : '');
   const teammate = useHasTeammate(askServer, invite?.invitedRevision ?? 0);
 
@@ -360,8 +366,17 @@ export function GetStartedColumn() {
   // not known — and showing a half-ticked list for a moment to an admin who
   // has done everything would be a column that flashes on every load.
   const settled = !isAdminLoading && (!isAdmin || (plugin.settled && teammate.settled));
-  if (onWelcome || tooNarrow || checklist.dismissed || !settled || doneCount === items.length) {
+  const allDone = doneCount === items.length;
+  // The completion line says whether the agent can reach the knowledge base,
+  // so it waits for that answer rather than rewriting itself under the reader.
+  if (onWelcome || tooNarrow || gone || !settled || (allDone && !agent.settled)) {
     return null;
+  }
+
+  if (allDone) {
+    return (
+      <SetupComplete agentConnected={agent.connected} team={isAdmin} onClose={checklist.closeCompletion} />
+    );
   }
 
   return (
@@ -441,6 +456,50 @@ export function GetStartedColumn() {
           </li>
         ))}
       </ul>
+    </aside>
+  );
+}
+
+/**
+ * The column's last state: every step is done. Shown when the last tick lands
+ * — or on arrival, for a list finished elsewhere and never celebrated — and
+ * kept until Close, which retires the column for good on this browser.
+ *
+ * The line says only what is true: "Connect your agent" also ticks when the
+ * onboarding was concluded without an agent ever calling in, and members
+ * have no team step. A status region, so the change is announced without
+ * moving anyone's focus; the entrance is the welcome page's own, motion-safe.
+ */
+function SetupComplete({
+  agentConnected,
+  team,
+  onClose,
+}: {
+  agentConnected: boolean;
+  team: boolean;
+  onClose(): void;
+}) {
+  const ready = agentConnected
+    ? 'Your agent can read and write your knowledge base'
+    : 'Your knowledge base is ready';
+  return (
+    <aside
+      aria-label="Get set up"
+      className="w-72 flex-none overflow-y-auto border-l border-line bg-canvas px-4.5 py-4"
+    >
+      <div role="status" className="grid justify-items-start gap-2 motion-safe:animate-onboarding-greeting">
+        <span aria-hidden className="flex size-8 items-center justify-center rounded-full bg-ok text-white">
+          <Check size={16} strokeWidth={3} />
+        </span>
+        <h2 className="text-strong font-semibold text-ink">You’re set up</h2>
+        <p className="text-detail text-ink-muted">
+          {ready}
+          {team ? ', and your team can join you.' : '.'}
+        </p>
+        <Button size="sm" variant="outline" onClick={onClose}>
+          Close
+        </Button>
+      </div>
     </aside>
   );
 }
