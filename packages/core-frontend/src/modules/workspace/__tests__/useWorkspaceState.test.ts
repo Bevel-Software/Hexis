@@ -3,7 +3,9 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 
 // Mock the workspace API before importing the hook — the hook's top-level import
 // binds to the mocked module.
-vi.mock('../services/workspace.api', () => ({
+vi.mock('../services/workspace.api', async (importOriginal) => ({
+  // The real error class, so a test can reject with the shape callers read.
+  WorkspaceApiError: (await importOriginal<typeof import('../services/workspace.api')>()).WorkspaceApiError,
   getOrCreateWorkspace: vi.fn().mockResolvedValue({
     workspace: { id: 'ws-1' },
     fileTree: { name: '.', relativePath: '.', type: 'directory', children: [] },
@@ -87,5 +89,47 @@ describe('useWorkspaceState fsRevision', () => {
       await expect(result.current.deleteEntry('a.md')).rejects.toThrow('boom');
     });
     expect(result.current.fsRevision).toBeGreaterThan(start);
+  });
+});
+
+/**
+ * `createFile` writes unconditionally unless asked for an exclusive create —
+ * the explorer's New file keeps its old call, and a caller that picked a name
+ * from a possibly stale tree can have the backend refuse an existing file.
+ */
+describe('useWorkspaceState createFile', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function mountReady() {
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('ws-1'));
+    return result;
+  }
+
+  it('writes unconditionally by default', async () => {
+    const result = await mountReady();
+    await act(async () => { await result.current.createFile('a.md', '# A'); });
+    expect(api.writeFile).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.writeFile).mock.calls[0]![3]?.ifAbsent).toBeUndefined();
+  });
+
+  it('passes ifAbsent through to the write', async () => {
+    const result = await mountReady();
+    await act(async () => { await result.current.createFile('a.md', '# A', { ifAbsent: true }); });
+    expect(api.writeFile).toHaveBeenCalledWith('ws-1', 'a.md', '# A', { ifAbsent: true });
+  });
+
+  it('rejects with the refusal, and leaves the tree and revision alone', async () => {
+    const result = await mountReady();
+    const start = result.current.fsRevision;
+    const listCalls = vi.mocked(api.listFiles).mock.calls.length;
+    vi.mocked(api.writeFile).mockRejectedValueOnce(new api.WorkspaceApiError(409, '"a.md" already exists.'));
+    await act(async () => {
+      await expect(result.current.createFile('a.md', '', { ifAbsent: true })).rejects.toMatchObject({ status: 409 });
+    });
+    expect(result.current.fsRevision).toBe(start);
+    expect(vi.mocked(api.listFiles).mock.calls.length).toBe(listCalls);
   });
 });

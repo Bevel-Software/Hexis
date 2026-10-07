@@ -694,9 +694,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
 
   // ── Working-tree mutations ────────────────────────────────────────────────
 
-  const createFile = useCallback(async (relativePath: string, content?: string) => {
+  const createFile = useCallback(async (relativePath: string, content?: string, options?: { ifAbsent?: boolean }) => {
     if (!workspaceId) return;
-    await writeFile(workspaceId, relativePath, content ?? '');
+    await writeFile(workspaceId, relativePath, content ?? '', options);
     await refreshFileTree();
     bumpFs();
   }, [workspaceId, refreshFileTree, bumpFs]);

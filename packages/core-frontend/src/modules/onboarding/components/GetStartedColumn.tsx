@@ -17,6 +17,7 @@ import { LIBRARY_ROOT, isLibraryLocation } from '../../library/routes/library-pa
 import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
 import { SETUP_COLUMN_HIDDEN_QUERY } from '../../layout/breakpoints';
 import { useWorkspace } from '../../workspace/state/workspace.context';
+import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
 import { useFileNav } from '../../workspace/routing/kb-routes';
 import { useOnboarding, useSetupChecklist } from '../state/onboarding';
@@ -85,15 +86,35 @@ function findEntry(tree: FileTreeEntry | null, path: string): FileTreeEntry | nu
   return null;
 }
 
+/** `Untitled.md` for the first page, `Untitled N.md` after it. */
+function untitledPath(folder: string, n: number): string {
+  return n === 1 ? `${folder}/Untitled.md` : `${folder}/Untitled ${n}.md`;
+}
+
 /**
- * `Untitled.md` in `folder`, or the first `Untitled N.md` the tree does not
- * already hold — a second click makes a second page, never overwrites the
- * first one.
+ * The first number, from `from` on, whose untitled name the tree does not
+ * already hold — a second click makes a second page rather than reusing the
+ * first one's name.
  */
-function untitledPagePath(tree: FileTreeEntry | null, folder: string): string {
-  let path = `${folder}/Untitled.md`;
-  for (let n = 2; findEntry(tree, path); n++) path = `${folder}/Untitled ${n}.md`;
-  return path;
+function freeUntitledNumber(tree: FileTreeEntry | null, folder: string, from = 1): number {
+  let n = from;
+  while (findEntry(tree, untitledPath(folder, n))) n++;
+  return n;
+}
+
+/**
+ * How many names New page tries before it gives up. The tree it picks from
+ * can be a moment behind (a teammate or an agent creating pages too), so a
+ * refusal moves on to the next name; a handful covers any real race.
+ */
+const NEW_PAGE_ATTEMPTS = 5;
+
+/**
+ * The exclusive create's "that name is taken": 409, for a file that exists
+ * now — or one somebody holds the lock on, which is a page being made there.
+ */
+function isNameTaken(err: unknown): boolean {
+  return err instanceof WorkspaceApiError && err.status === 409;
 }
 
 /** A plugin for a team, not somebody's personal shelf. */
@@ -223,14 +244,26 @@ export function GetStartedColumn() {
   const [newPage, setNewPage] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
   const createFirstPage = async () => {
     if (!knowledgeRoot || newPage.busy) return;
-    const path = untitledPagePath(tree, knowledgeRoot);
     setNewPage({ busy: true, error: null });
-    try {
-      await createFile(path, NEW_PAGE_CONTENT);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setNewPage({ busy: false, error: `Couldn’t create the page: ${msg}` });
-      return;
+    // An exclusive create: the name comes from the tree on screen, which may
+    // not yet show a page someone else just made — and a plain write would
+    // replace that page with an empty one.
+    let n = freeUntitledNumber(tree, knowledgeRoot);
+    let path = untitledPath(knowledgeRoot, n);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await createFile(path, NEW_PAGE_CONTENT, { ifAbsent: true });
+        break;
+      } catch (err) {
+        if (isNameTaken(err) && attempt < NEW_PAGE_ATTEMPTS) {
+          n = freeUntitledNumber(tree, knowledgeRoot, n + 1);
+          path = untitledPath(knowledgeRoot, n);
+          continue;
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        setNewPage({ busy: false, error: `Couldn’t create the page: ${msg}` });
+        return;
+      }
     }
     setNewPage({ busy: false, error: null });
     // The step ticks itself from the refreshed tree (any page but the guide

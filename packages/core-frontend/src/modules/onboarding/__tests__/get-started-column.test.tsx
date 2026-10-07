@@ -12,6 +12,7 @@ import { GetStartedColumn } from '../components/GetStartedColumn';
 import { InviteDialogProvider } from '../state/invite-dialog';
 import { resetOnboardingForTests } from '../state/onboarding';
 import { WELCOME_PATH } from '../paths';
+import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 import type { AccountSummary } from '../../auth/services/account.api';
 import type { PluginSummary } from '../../library/services/plugins.api';
 import type { AgentConnection } from '../services/agent-connection.api';
@@ -148,7 +149,7 @@ function mount({
   files?: string[];
   openFilePath?: string | null;
   route?: string;
-  createFile?: (relativePath: string, content?: string) => Promise<void>;
+  createFile?: (relativePath: string, content?: string, options?: { ifAbsent?: boolean }) => Promise<void>;
 } = {}) {
   const auth = authValue({
     user: { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera', onboardingDone },
@@ -262,7 +263,7 @@ describe('GetStartedColumn: what a member sees', () => {
     const createFile = vi.fn(async () => {});
     mount({ createFile });
     await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
-    expect(createFile).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled.md`, '# Untitled\n\n');
+    expect(createFile).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled.md`, '# Untitled\n\n', { ifAbsent: true });
     expect(openWorkspacePathMock).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled.md`, { edit: true });
   });
 
@@ -280,8 +281,57 @@ describe('GetStartedColumn: what a member sees', () => {
       ],
     });
     await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
-    expect(createFile).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled 3.md`, '# Untitled\n\n');
+    expect(createFile).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled 3.md`, '# Untitled\n\n', { ifAbsent: true });
     expect(openWorkspacePathMock).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled 3.md`, { edit: true });
+  });
+
+  /**
+   * The tree can be a moment behind: a page made elsewhere since it loaded
+   * holds the name the column picked. The create is exclusive, so the
+   * backend refuses (409) instead of replacing that page, and the column
+   * moves on to the next name.
+   */
+  it('"New page" never overwrites: a name taken since the tree loaded moves on to the next', async () => {
+    const taken = new Set([`${KB}/KnowledgeBase/Untitled.md`, `${KB}/KnowledgeBase/Untitled 2.md`]);
+    const createFile = vi.fn(async (path: string) => {
+      if (taken.has(path)) throw new WorkspaceApiError(409, `"${path}" already exists.`);
+    });
+    mount({ createFile });
+    await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
+    await waitFor(() =>
+      expect(openWorkspacePathMock).toHaveBeenCalledWith(`${KB}/KnowledgeBase/Untitled 3.md`, { edit: true }),
+    );
+    expect(createFile.mock.calls.map((c) => c[0])).toEqual([
+      `${KB}/KnowledgeBase/Untitled.md`,
+      `${KB}/KnowledgeBase/Untitled 2.md`,
+      `${KB}/KnowledgeBase/Untitled 3.md`,
+    ]);
+    expect(within(row('Write your first page')!).queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('"New page" gives up after a few taken names, and says so on the step', async () => {
+    const createFile = vi.fn(async (path: string) => {
+      throw new WorkspaceApiError(409, `"${path}" already exists.`);
+    });
+    mount({ createFile });
+    await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
+    expect(await within(row('Write your first page')!).findByRole('alert')).toHaveTextContent(
+      `Couldn’t create the page: "${KB}/KnowledgeBase/Untitled 5.md" already exists.`,
+    );
+    expect(createFile).toHaveBeenCalledTimes(5);
+    expect(openWorkspacePathMock).not.toHaveBeenCalled();
+  });
+
+  it('"New page" does not retry a refusal that is not about the name', async () => {
+    const createFile = vi.fn(async () => {
+      throw new WorkspaceApiError(403, 'You don’t have permission to write to "KnowledgeBase/Untitled.md".');
+    });
+    mount({ createFile });
+    await userEvent.click(within(row('Write your first page')!).getByRole('button', { name: 'New page' }));
+    expect(await within(row('Write your first page')!).findByRole('alert')).toHaveTextContent(
+      'You don’t have permission',
+    );
+    expect(createFile).toHaveBeenCalledTimes(1);
   });
 
   it('"New page" says "Creating…" while it works, and says why it failed on the step', async () => {
