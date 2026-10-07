@@ -3017,13 +3017,21 @@ export function registerWorkspaceTools(
           ),
           writeBlocked: (paths) => writeBlocked(branch, ctx, paths),
           readText: (p) => nodeFs.readFile(join(root, p), 'utf8'),
+          // Asked only once a page is known to be edited — the hooks hear of
+          // no page merely searched — so a read refusal arrives after the
+          // read; the plan then names the page without its links.
           hookRefusal: async (lockAt, path) => {
+            const why = (err: unknown) => `refused: ${err instanceof Error ? err.message : String(err)}`;
             try {
               await notifyAgentRead(agentAccessGate, ctx, branch, lockAt);
+            } catch (err) {
+              return { reason: why(err), read: true };
+            }
+            try {
               await assertAgentWriteAllowed(agentAccessGate, ctx, branch, path);
               return null;
             } catch (err) {
-              return `refused: ${err instanceof Error ? err.message : String(err)}`;
+              return { reason: why(err), read: false };
             }
           },
         })

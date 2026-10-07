@@ -12,7 +12,8 @@
  *     one sentence saying such files may still point at the old path, with no
  *     name and no count;
  *   - a file the caller can read but may not change (a protected branch's
- *     write rules, or a hook's refusal) is named with its links, and left;
+ *     write rules, or the write hook's refusal) is named with its links, and
+ *     left; one the read hook refuses is named without them;
  *   - an HTML page is named with its links, and left.
  */
 
@@ -75,9 +76,10 @@ export interface MoveLinksInput {
   readText: (path: string) => Promise<string>;
   /**
    * Ask the deployment's read and write hooks about a file the move edits:
-   * the reason it may not be, or null. Only edited files are asked.
+   * why it may not be, or null. Only edited files are asked. `read` says the
+   * read hook refused, so the file's contents — its links — stay unsaid.
    */
-  hookRefusal: (lockAt: string, path: string) => Promise<string | null>;
+  hookRefusal: (lockAt: string, path: string) => Promise<{ reason: string; read: boolean } | null>;
 }
 
 /** Whether `path` lies in a `transcripts/` or `probes/` folder. */
@@ -88,9 +90,22 @@ export function isUnsearchedRecord(path: string): boolean {
 const isMarkdown = (p: string) => /\.md$/i.test(p);
 const isHtml = (p: string) => /\.html?$/i.test(p);
 
-/** The search's cheap first cut: a file linking at `name` names it, raw or encoded. */
+/**
+ * The search's cheap first cut: a file linking at `name` names it — raw, or
+ * spelled with markdown escapes or percent-encoding, which are undone here
+ * the way the resolver undoes them (any case, any subset of characters).
+ */
 function mayMention(text: string, name: string): boolean {
-  return text.includes(name) || text.includes(encodeURIComponent(name));
+  if (text.includes(name)) return true;
+  const unescaped = text.replace(/\\([!-/:-@[-`{-~])/g, '$1');
+  const decoded = unescaped.replace(/(?:%[0-9a-f]{2})+/gi, (run) => {
+    try {
+      return decodeURIComponent(run);
+    } catch {
+      return run;
+    }
+  });
+  return decoded.includes(name);
 }
 
 export async function planMoveLinks(input: MoveLinksInput): Promise<MoveLinksPlan> {
@@ -101,14 +116,23 @@ export async function planMoveLinks(input: MoveLinksInput): Promise<MoveLinksPla
 
   const candidates = input.allFiles.filter((p) => (isMarkdown(p) || isHtml(p)) && !isUnsearchedRecord(p)).sort();
   const readable = await input.canRead(candidates);
-  const unsearched = candidates.some((p) => readable.get(p) !== true);
+  let unsearched = candidates.some((p) => readable.get(p) !== true);
 
   const edits: PlannedEdit[] = [];
   const notRewritten: MoveLinksReport['notRewritten'] = [];
   for (const oldPath of candidates) {
     if (readable.get(oldPath) !== true) continue;
     const newPath = mapPath(oldPath) ?? oldPath;
-    const text = await input.readText(oldPath);
+    // The sidebar moves and deletes without this tool's locks, so a page can
+    // go between the listing and this read. A page gone has no links to fix;
+    // one that cannot be opened is one more the search did not cover.
+    let text: string;
+    try {
+      text = await input.readText(oldPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException | null)?.code !== 'ENOENT') unsearched = true;
+      continue;
+    }
     // A file that stays put is only touched by a link that names the moved
     // path, so a page that does not mention it is skipped unparsed.
     if (newPath === oldPath && !mayMention(text, srcName)) continue;
@@ -147,7 +171,7 @@ export async function planMoveLinks(input: MoveLinksInput): Promise<MoveLinksPla
   for (const e of kept) {
     const refusal = await input.hookRefusal(e.lockAt, e.path);
     if (refusal === null) allowed.push(e);
-    else notRewritten.push({ path: e.path, reason: refusal, links: e.links.map((l) => l.from) });
+    else notRewritten.push({ path: e.path, reason: refusal.reason, links: refusal.read ? [] : e.links.map((l) => l.from) });
   }
   kept = allowed;
   return { edits: kept, report: reportOf(kept, notRewritten, unsearched) };

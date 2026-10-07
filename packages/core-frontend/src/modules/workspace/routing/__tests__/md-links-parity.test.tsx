@@ -43,6 +43,12 @@ const PAGES: string[] = [
   '- item\n\n    [list paragraph](../B/ListPara.md)\n\n        [list code](../B/ListCode.md)\n\nback [out](../B/Out.md)\n\n    [code again](../B/Code2.md)',
   '1. one\n2. two\n\n   [ordered para](../B/Ord.md)\n\n       [ordered code](../B/OrdCode.md)',
   '> quote\n\n    [code after quote](../B/Q.md)\n\n  [two spaces](../B/Two2.md)',
+  // A fence line four columns in opens or closes nothing (a paragraph's continuation, or still code).
+  'para\n    ~~~\n    [lazy fence](../B/LazyFence.md)\n    ~~~\n\npara\n    ```\n    [tick span](../B/Span.md)\n    ```',
+  '~~~\n    ~~~\n[in fence](../B/InFence.md)\n~~~\n[out of fence](../B/OutFence.md)',
+  '- item\n\n  ~~~\n  [list fence](../B/ListFence.md)\n  ~~~\n\n[after list](../B/AfterList.md)',
+  // Reference definitions inside blockquotes.
+  '> [q1]: ../B/Q1.md "t"\n> > [q2]: <../B/Q 2.md>\n\n[one][q1] [two][q2]',
 ];
 
 /** The destinations react-markdown renders for a page, in document order, as the attribute values. */

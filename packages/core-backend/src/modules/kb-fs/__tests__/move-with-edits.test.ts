@@ -84,8 +84,14 @@ afterEach(async () => {
   await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
-const fsLayer = () =>
-  new LockingFilesystem({ basePath: root, contained: true }, { workflow, workspaceId: WS, branch: 'feature-test', user: USER, kbDirName: KB });
+const fsLayer = (validateWrite?: (p: string, content: unknown) => Promise<void>) =>
+  new LockingFilesystem(
+    { basePath: root, contained: true },
+    { workflow, workspaceId: WS, branch: 'feature-test', user: USER, kbDirName: KB, ...(validateWrite ? { validateWrite } : {}) },
+  );
+
+/** The paths each release kind was called with. */
+const released = (fn: unknown) => (fn as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2] as string).sort();
 
 const edits = () => [
   {
@@ -130,22 +136,79 @@ describe('LockingFilesystem.moveWithEdits', () => {
   });
 
   it('a lock held past the retries changes nothing and names the busy file', async () => {
-    {
-      lockedPaths.add(`${KB}/Index.md`);
-      const head = await git(repo, ['rev-parse', 'HEAD']);
-      // The real retry window: three attempts, two seconds apart.
-      const err = await fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A').catch((e: unknown) => e);
-      expect(err).toBeInstanceOf(MoveLockedError);
-      expect((err as Error).message).toContain(`"${KB}/Index.md" is being edited by Bob`);
-      expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
-      expect((await git(repo, ['status', '--porcelain'])).trim()).toBe('');
-      expect(workflow.commitChanges).not.toHaveBeenCalled();
-      // Every lock taken was given back untouched.
-      expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
-      expect(workflow.releaseLock).not.toHaveBeenCalled();
-      expect(await read('Index.md')).toBe('[one](Projects/A/One.md)\n');
-    }
+    // A file inside the moved folder, locked in the middle of the sorted
+    // order: the locks taken before it must all be given back.
+    lockedPaths.add(`${KB}/Projects/A/Two.md`);
+    const head = await git(repo, ['rev-parse', 'HEAD']);
+    // The real retry window: three attempts, two seconds apart.
+    const err = await fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MoveLockedError);
+    expect((err as Error).message).toContain(`"${KB}/Projects/A/Two.md" is being edited by Bob`);
+    expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
+    expect((await git(repo, ['status', '--porcelain'])).trim()).toBe('');
+    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    // Every lock taken was given back untouched.
+    expect(released(workflow.releaseLockUntouched)).toEqual([`${KB}/Index.md`, `${KB}/Projects/A`, `${KB}/Projects/A/One.md`]);
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(workflow.releaseLock).not.toHaveBeenCalled();
+    expect(await read('Index.md')).toBe('[one](Projects/A/One.md)\n');
   }, 20_000);
+
+  it('locks every file of a moved folder at its old and its new path', async () => {
+    await fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A');
+    const locked = (workflow.acquireLock as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2] as string);
+    for (const name of ['One.md', 'Two.md', 'pic.png']) {
+      expect(locked).toContain(`${KB}/Projects/A/${name}`);
+      expect(locked).toContain(`${KB}/Topics/Deep/A/${name}`);
+    }
+    expect(locked).toEqual([...locked].sort());
+  });
+
+  it('a lock store that throws gives back the locks already held, and changes nothing', async () => {
+    (workflow.acquireLock as ReturnType<typeof vi.fn>).mockImplementation(async (_w: string, _b: string, p: string) => {
+      if (p === `${KB}/Projects/A/One.md`) throw new Error('lock store down');
+      return { acquired: true, lock: { holderName: 'Alice' } };
+    });
+    await expect(
+      fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A'),
+    ).rejects.toThrow('lock store down');
+    expect(released(workflow.releaseLockUntouched)).toEqual([`${KB}/Index.md`, `${KB}/Projects/A`]);
+    expect((await git(repo, ['status', '--porcelain'])).trim()).toBe('');
+  });
+
+  it('every edit is judged again once the locks are held, and a refusal there changes nothing', async () => {
+    const acquire = workflow.acquireLock as ReturnType<typeof vi.fn>;
+    // A validator whose verdict depends on the state under the locks.
+    const validateWrite = vi.fn(async (p: string) => {
+      if (acquire.mock.calls.length > 0 && p.endsWith('Index.md')) throw new Error('refused under lock');
+    });
+    const head = await git(repo, ['rev-parse', 'HEAD']);
+    await expect(
+      fsLayer(validateWrite).moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A'),
+    ).rejects.toThrow('refused under lock');
+    expect(validateWrite.mock.calls.filter((c) => c[0] === `${KB}/Index.md`)).toHaveLength(2);
+    expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
+    expect((await git(repo, ['status', '--porcelain'])).trim()).toBe('');
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(released(workflow.releaseLockUntouched)).toContain(`${KB}/Index.md`);
+  });
+
+  it('an edit whose bytes cannot be put back is released with the discard, not untouched', async () => {
+    (workflow.commitChanges as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      // The restore of Index.md will fail: a folder now sits at its path.
+      await fs.rm(path.join(repo, 'Index.md'));
+      await fs.mkdir(path.join(repo, 'Index.md'));
+      throw new Error('commit exploded');
+    });
+    await expect(
+      fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A'),
+    ).rejects.toThrow('commit exploded');
+    expect(released(workflow.releaseLockNoCommit)).toEqual([`${KB}/Index.md`]);
+    expect(released(workflow.releaseLockUntouched)).not.toContain(`${KB}/Index.md`);
+    // The moved file's edit was put back, and its lock released untouched.
+    expect(await read('Projects/A/One.md')).toContain('../../NodeTypes/Task.md');
+    expect(released(workflow.releaseLockUntouched)).toContain(`${KB}/Projects/A/One.md`);
+  });
 
   it('a check refusal under the locks changes nothing', async () => {
     const head = await git(repo, ['rev-parse', 'HEAD']);

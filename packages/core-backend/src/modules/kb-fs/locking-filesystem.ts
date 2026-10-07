@@ -410,7 +410,8 @@ export class LockingFilesystem extends GitGuardedFilesystem {
    * A move and the link edits it brings, as ONE change: `move_file` with link
    * rewriting on. Where `moveFile` lands a move as two queued single-path
    * commits (a delete, a create), this takes every lock first — both ends of
-   * the move and every file it edits — in deterministic order, renames,
+   * the move, every file a moved folder holds at its old and its new path, and
+   * every file it edits — in deterministic order, renames,
    * writes the edits, and commits the whole set synchronously in one commit,
    * so git sees the move as a rename beside the edits.
    *
@@ -445,12 +446,28 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     if (this.lockContext.validateWrite) {
       for (const e of edits) await this.lockContext.validateWrite(e.path, e.content);
     }
-    const paths = [...new Set([src, dest, ...edits.map((e) => e.lockAt)])].sort();
+    // A folder's files are locked one by one at both ends: a save to one of
+    // them mid-move would otherwise recreate the old path, or ride this
+    // move's commit, whose scope names every one of them.
+    const movedNow = src === dest ? [] : await this.filesBelow(src);
+    const paths = [
+      ...new Set([
+        src,
+        dest,
+        ...movedNow.flatMap((f) => [f, dest + f.slice(src.length)]),
+        ...edits.map((e) => e.lockAt),
+      ]),
+    ].sort();
     const acquired: string[] = [];
+    // Locked paths left holding bytes this move wrote and could not put back:
+    // released with the discard (reset to HEAD), so those bytes cannot ride
+    // the next save's commit as if they were this move's result.
+    const dirtyLeft = new Set<string>();
     const release = async (mode: 'untouched' | 'enqueue'): Promise<void> => {
       for (const p of acquired) {
         try {
           if (mode === 'enqueue') await workflow.releaseLock(workspaceId, branch, p, user);
+          else if (dirtyLeft.has(p)) await workflow.releaseLockNoCommit(workspaceId, branch, p, user);
           else await workflow.releaseLockUntouched(workspaceId, branch, p, user);
         } catch (releaseErr) {
           log.warn(`lock release failed for "${p}" during moveWithEdits:`, { err: releaseErr });
@@ -460,14 +477,21 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     for (const p of paths) {
       let holderName: string | null = null;
       let ok = false;
-      for (let attempt = 0; attempt < ACQUIRE_RETRY_ATTEMPTS; attempt++) {
-        const result = await workflow.acquireLock(workspaceId, branch, p, user);
-        if (result.acquired) {
-          ok = true;
-          break;
+      try {
+        for (let attempt = 0; attempt < ACQUIRE_RETRY_ATTEMPTS; attempt++) {
+          const result = await workflow.acquireLock(workspaceId, branch, p, user);
+          if (result.acquired) {
+            ok = true;
+            break;
+          }
+          holderName = result.lock.holderName;
+          if (attempt < ACQUIRE_RETRY_ATTEMPTS - 1) await sleep(ACQUIRE_RETRY_DELAY_MS);
         }
-        holderName = result.lock.holderName;
-        if (attempt < ACQUIRE_RETRY_ATTEMPTS - 1) await sleep(ACQUIRE_RETRY_DELAY_MS);
+      } catch (err) {
+        // The lock store failing is no reason to keep the locks already held
+        // until their TTL runs out.
+        await release('untouched');
+        throw err;
       }
       if (!ok) {
         await release('untouched');
@@ -475,8 +499,13 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       }
       acquired.push(p);
     }
+    // Judged again under the locks, on the bytes that land: a validator that
+    // reads the current file must see the state each edit replaces.
     try {
       await this.validateResultingWrite(dest, () => this.readFile(src));
+      if (this.lockContext.validateWrite) {
+        for (const e of edits) await this.lockContext.validateWrite(e.path, e.content);
+      }
       await check?.();
     } catch (err) {
       await release('untouched');
@@ -485,14 +514,14 @@ export class LockingFilesystem extends GitGuardedFilesystem {
 
     // Done in this order, and undone in the reverse one.
     let moved = false;
-    const written: { path: string; before: Buffer | null }[] = [];
+    const written: { path: string; lockAt: string; before: Buffer | null }[] = [];
     let scope: string[] = [];
     try {
       await this.moveNoReplace(src, dest);
       moved = true;
       for (const e of edits) {
         const before = await this.readIfExists(e.path);
-        written.push({ path: e.path, before });
+        written.push({ path: e.path, lockAt: e.lockAt, before });
         await super.writeFile(e.path, e.content);
       }
       // The commit names every file at both ends: a folder's files one by one,
@@ -525,6 +554,8 @@ export class LockingFilesystem extends GitGuardedFilesystem {
           }
         } catch (restoreErr) {
           log.warn(`could not restore "${w.path}" after a failed move:`, { err: restoreErr });
+          dirtyLeft.add(w.path);
+          dirtyLeft.add(w.lockAt);
         }
       }
       if (moved) {

@@ -244,4 +244,67 @@ describe('md-links — scanning', () => {
     expect(htmlLinksAffectedByMove(html, { oldPath: OUTSIDE, newPath: OUTSIDE, mapPath: moveOf(PLAN, NEW_PLAN), kbDirName: KB, branch: 'main' }))
       .toEqual(['../Old/Plan.md']);
   });
+
+  it('HTML pages: unquoted attribute values are reported too', () => {
+    const html = '<a href=../Old/Plan.md>p</a> <a class=x href = ../Old/Plan.md#r>q</a>';
+    expect(htmlLinksAffectedByMove(html, { oldPath: OUTSIDE, newPath: OUTSIDE, mapPath: moveOf(PLAN, NEW_PLAN), kbDirName: KB, branch: 'main' }))
+      .toEqual(['../Old/Plan.md', '../Old/Plan.md#r']);
+  });
+});
+
+describe('md-links — container and frontmatter edges', () => {
+  it('a fence-looking line four columns in, inside a paragraph, opens no fence', () => {
+    const input = ['para', '    ~~~', '    [p](../Old/Plan.md)', '    ~~~', ''].join('\n');
+    expect(rewrite(input, OUTSIDE, PLAN, NEW_PLAN).text).toBe(input.replace('../Old/Plan.md', '../New/Deep/Plan.md'));
+    // With backticks the two runs are one inline code span: code, left alone.
+    const ticks = input.split('~~~').join('```');
+    expect(rewrite(ticks, OUTSIDE, PLAN, NEW_PLAN).text).toBe(ticks);
+  });
+
+  it('a fence-looking line four columns in does not close a fence', () => {
+    const input = ['```', '    ```', '[p](../Old/Plan.md)', '```', '[q](../Old/Plan.md)', ''].join('\n');
+    expect(rewrite(input, OUTSIDE, PLAN, NEW_PLAN).text).toBe(['```', '    ```', '[p](../Old/Plan.md)', '```', '[q](../New/Deep/Plan.md)', ''].join('\n'));
+  });
+
+  it('a fence inside a list item still opens and closes at the item’s indent', () => {
+    const input = ['- item', '', '  ```', '  [p](../Old/Plan.md)', '  ```', '', '[q](../Old/Plan.md)', ''].join('\n');
+    expect(rewrite(input, OUTSIDE, PLAN, NEW_PLAN).text).toBe(input.replace('[q](../Old/Plan.md)', '[q](../New/Deep/Plan.md)'));
+  });
+
+  it('a reference definition inside a blockquote is rewritten', () => {
+    const input = '> [ref]: ../Old/Plan.md "t"\n> > [deep]: <../Old/Plan.md>\n';
+    expect(rewrite(input, OUTSIDE, PLAN, NEW_PLAN).text).toBe('> [ref]: ../New/Deep/Plan.md "t"\n> > [deep]: <../New/Deep/Plan.md>\n');
+  });
+
+  it('frontmatter: only a value that is one whole link is rewritten; a link in a prose value is left', () => {
+    const fm = [
+      '---',
+      'nodeType: "[Task](../Old/Plan.md)"',
+      "parent: '[P](../Old/Plan.md)'",
+      'owner: [P](../Old/Plan.md)',
+      'description: "See [P](../Old/Plan.md) for context"',
+      '---',
+      '',
+    ].join('\n');
+    const { text } = rewrite(fm, OUTSIDE, PLAN, NEW_PLAN);
+    expect(text.split('\n')).toEqual([
+      '---',
+      'nodeType: "[Task](../New/Deep/Plan.md)"',
+      "parent: '[P](../New/Deep/Plan.md)'",
+      'owner: [P](../New/Deep/Plan.md)',
+      'description: "See [P](../Old/Plan.md) for context"',
+      '---',
+      '',
+    ]);
+  });
+
+  it('an image under another branch’s app URL is rewritten — the app serves it from this branch — while a link there is left', () => {
+    const { text } = rewrite(
+      `![i](/workspace/other/${PLAN}) [q](/workspace/other/${PLAN})\n`,
+      OUTSIDE,
+      PLAN,
+      NEW_PLAN,
+    );
+    expect(text).toBe(`![i](/workspace/other/${NEW_PLAN}) [q](/workspace/other/${PLAN})\n`);
+  });
 });

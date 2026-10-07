@@ -57,12 +57,16 @@ export function scanMarkdownLinks(text: string): MdLinkSpan[] {
     bodyStart = text.length - fm.body.length;
     const fmStart = text.indexOf('\n') + 1;
     const fmEnd = fmStart + fm.frontmatter.length;
-    // Line by line: a frontmatter value is one line, and a link never spans two.
+    // Line by line: a frontmatter value is one line, and a link never spans
+    // two. Only a value that IS one link counts — what the web app's
+    // frontmatter panel renders as a link (`nodeType` the usual one); a link
+    // written inside a prose value shows as text there, so it is left alone.
     let lineStart = fmStart;
     while (lineStart < fmEnd) {
       const nl = text.indexOf('\n', lineStart);
       const lineEnd = nl === -1 || nl > fmEnd ? fmEnd : nl;
-      scanInline(text, lineStart, lineEnd, true, out);
+      const value = FRONTMATTER_LINK_VALUE_RE.exec(text.slice(lineStart, lineEnd).replace(/\r$/, ''));
+      if (value) scanInline(text, lineStart + value[1].length, lineEnd, true, out);
       lineStart = lineEnd + 1;
     }
   }
@@ -70,8 +74,28 @@ export function scanMarkdownLinks(text: string): MdLinkSpan[] {
   return out;
 }
 
-/** An opening code fence: its character and length. */
-const FENCE_OPEN_RE = /^[ \t]*(?:>[ \t]?)*[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})(.*)$/;
+/**
+ * A frontmatter line whose whole value is one markdown link, quoted or not
+ * (the panel's `FRONTMATTER_LINK_RE`, on the value YAML hands it). Group 1 is
+ * everything before the link.
+ */
+const FRONTMATTER_LINK_VALUE_RE = /^([ \t]*[^\s:#][^:]*:[ \t]+(["']?))\[[^\]]+\]\(.*\)\2[ \t]*$/;
+
+/**
+ * An opening code fence: its character and length. Group 1 is what precedes
+ * the fence on the line — quote and list markers and the fence's own indent —
+ * which may be at most three columns past its container.
+ */
+const FENCE_OPEN_RE = /^((?:[ \t]*>[ \t]?)*[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?)(`{3,}|~{3,})(.*)$/;
+
+/** The fence's own indent: the columns after the last quote or list marker. */
+function fenceIndent(prefix: string, listIndent: number | null): number {
+  const quoted = prefix.lastIndexOf('>');
+  if (quoted >= 0) return indentOf(prefix.slice(quoted + 1).replace(/^[ \t]/, ''));
+  const item = LIST_ITEM_RE.exec(prefix);
+  if (item) return 0;
+  return indentOf(prefix) - (listIndent ?? 0);
+}
 
 /** A list item's marker, with the spaces after it. */
 const LIST_ITEM_RE = /^( *)([-*+]|\d{1,9}[.)])( +|$)/;
@@ -113,9 +137,10 @@ function scanBody(text: string, from: number, out: MdLinkSpan[]): void {
     const blank = line.trim() === '';
     const indent = indentOf(line);
     if (fence) {
-      const close = line.replace(/^[ \t]*(?:>[ \t]?)*[ \t]*/, '');
-      const run = close.match(/^(`+|~+)[ \t]*$/);
-      if (run && run[1][0] === fence.char && run[1].length >= fence.len) {
+      const prefix = /^(?:[ \t]*>[ \t]?)*[ \t]*/.exec(line)![0];
+      const run = line.slice(prefix.length).match(/^(`+|~+)[ \t]*$/);
+      // A closing fence, like an opening one, sits at most three columns in.
+      if (run && run[1][0] === fence.char && run[1].length >= fence.len && fenceIndent(prefix, listIndent) <= 3) {
         fence = null;
         mayOpenCode = true;
       }
@@ -129,14 +154,16 @@ function scanBody(text: string, from: number, out: MdLinkSpan[]): void {
       // A line back at the margin after a blank line has left the list.
       if (listIndent !== null && prevBlank && indent < listIndent) listIndent = null;
       const item: RegExpExecArray | null = indent < (listIndent ?? 0) + 4 ? LIST_ITEM_RE.exec(line) : null;
-      const open = line.match(FENCE_OPEN_RE);
+      const fenceOpen = line.match(FENCE_OPEN_RE);
+      // Four columns in, a fence line is code or a paragraph's continuation.
+      const open = fenceOpen && fenceIndent(fenceOpen[1], listIndent) <= 3 ? fenceOpen : null;
       if (!item && mayOpenCode && indent >= (listIndent ?? 0) + 4) {
         flush();
         indentedCode = true;
-      } else if (open && !(open[1][0] === '`' && open[2].includes('`'))) {
+      } else if (open && !(open[2][0] === '`' && open[3].includes('`'))) {
         // A backtick fence's info string may hold no backtick (that is inline code).
         flush();
-        fence = { char: open[1][0], len: open[1].length };
+        fence = { char: open[2][0], len: open[2].length };
       } else {
         if (item) {
           const gap: number = item[3].length;
@@ -163,8 +190,11 @@ function scanBody(text: string, from: number, out: MdLinkSpan[]): void {
   flush();
 }
 
-/** `[label]: destination "title"` on one line; never a footnote (`[^1]: …`). */
-const DEFINITION_RE = /^( {0,3}\[(?!\^)(?:[^\]\\]|\\.)+\]:[ \t]*)(<[^<>\n]*>|[^\s<][^\s]*)(?=[ \t]|$)/;
+/**
+ * `[label]: destination "title"` on one line, in a blockquote too; never a
+ * footnote (`[^1]: …`).
+ */
+const DEFINITION_RE = /^((?:[ \t]{0,3}>[ \t]?)* {0,3}\[(?!\^)(?:[^\]\\]|\\.)+\]:[ \t]*)(<[^<>\n]*>|[^\s<][^\s]*)(?=[ \t]|$)/;
 
 function matchDefinition(line: string, lineStart: number): MdLinkSpan | null {
   const m = DEFINITION_RE.exec(line);
@@ -328,8 +358,8 @@ function parseInlineDestination(
  */
 export function scanHtmlLinks(text: string): string[] {
   const out: string[] = [];
-  const re = /\b(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
-  for (let m = re.exec(text); m !== null; m = re.exec(text)) out.push(m[1] ?? m[2]);
+  const re = /\b(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) out.push(m[1] ?? m[2] ?? m[3]);
   return out;
 }
 
@@ -536,7 +566,7 @@ export interface RewriteMdLinksOptions {
   /** A workspace path's place after the move, or null when it does not move. */
   mapPath: (path: string) => string | null;
   kbDirName: string | null;
-  /** The branch the move happens on: an app URL naming another branch is left alone. */
+  /** The branch the move happens on: a link (not an image) to another branch's app URL is left alone. */
   branch: string;
 }
 
@@ -551,7 +581,10 @@ export function rewriteMdLinks(text: string, opts: RewriteMdLinksOptions): { tex
   for (const span of scanMarkdownLinks(text)) {
     const image = span.kind === 'image';
     const before = resolveMdLink(span.destination, { basePath: opts.oldPath, kbDirName: opts.kbDirName, image });
-    if (!before || (before.branch !== null && before.branch !== opts.branch)) continue;
+    // A link naming another branch opens that branch, which this move does
+    // not touch. An image does not: the web app serves every image from the
+    // branch the page is read on, whatever branch its URL names.
+    if (!before || (!image && before.branch !== null && before.branch !== opts.branch)) continue;
     const target = opts.mapPath(before.path) ?? before.path;
     const after = resolveMdLink(span.destination, { basePath: opts.newPath, kbDirName: opts.kbDirName, image });
     if (after && after.path === target) continue;
