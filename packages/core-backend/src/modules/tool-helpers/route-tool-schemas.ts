@@ -141,7 +141,18 @@ export function routeToolSchemas(name: string): RouteToolSchemas | undefined {
 export function routeToolSchemasForRequest(requestPath: string): RouteToolSchemas | undefined {
   const path = normalizePath(requestPath);
   const candidates = byLastSegment.get(routeToolName(path)) ?? [];
-  return candidates.find((e) => path === e.path || path.endsWith(e.path) || e.path.endsWith(path));
+  // The route that fits the request BEST wins, not the first one declared: an
+  // exact match, then the longest declared route the path ends with, so
+  // `/api/foo` is never checked against a `/foo` declared before it. A path
+  // shorter than every declaration (a test mounting a route bare) comes last.
+  const exact = candidates.find((e) => path === e.path);
+  if (exact) return exact;
+  const longest = (list: RouteToolSchemas[]): RouteToolSchemas | undefined =>
+    [...list].sort((a, b) => b.path.length - a.path.length)[0];
+  return (
+    longest(candidates.filter((e) => path.endsWith(e.path))) ??
+    longest(candidates.filter((e) => e.path.endsWith(path)))
+  );
 }
 
 /**

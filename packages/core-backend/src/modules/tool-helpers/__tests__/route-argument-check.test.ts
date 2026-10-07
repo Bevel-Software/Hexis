@@ -178,6 +178,46 @@ describe('a call made in the wrong shape', () => {
   });
 });
 
+describe('a call whose URL also carries a query string', () => {
+  it('runs when the body supplies the argument the query string repeats', async () => {
+    declareRouteTool('query_echo', {
+      type: 'object',
+      properties: { branch: { type: 'string' }, limit: { type: 'integer' } },
+      additionalProperties: false,
+    } as never);
+    const base = await mount('query_echo');
+    const res = await fetch(`${base}/api/agent/tools/query_echo?branch=main`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer k' },
+      body: JSON.stringify({ branch: 'main', limit: 2 }),
+    });
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([{ branch: 'main', limit: 2 }]);
+  });
+});
+
+describe('routes that overlap', () => {
+  it('check a request against the route that fits it best, not the one declared first', async () => {
+    toolDef({
+      name: 'short_overlap',
+      description: 'Declared at the shorter route, first.',
+      path: '/overlap_tool',
+      inputs: { type: 'object', properties: { a: { type: 'string' } }, required: ['a'], additionalProperties: false },
+    });
+    toolDef({
+      name: 'overlap_tool',
+      description: 'Declared at the longer route, second.',
+      path: '/api/agent/tools/overlap_tool',
+      inputs: { type: 'object', properties: { b: { type: 'string' } }, required: ['b'], additionalProperties: false },
+    });
+    const base = await mount('overlap_tool');
+    expect((await post(base, 'overlap_tool', { b: 'x' })).status).toBe(200);
+    const res = await post(base, 'overlap_tool', { a: 'x' });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain('The arguments do not match the "overlap_tool" tool.');
+  });
+});
+
 describe('a tool whose route does not end in its name', () => {
   it('is found by its route and checked under its own name', async () => {
     toolDef({

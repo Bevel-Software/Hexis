@@ -971,6 +971,8 @@ describe('write modes and per-path outcomes', () => {
     for (const res of [
       await writeFile(base, { path: `${KB_DIR}/a.md`, content: 'x', mode: 'replace' }),
       await writeFiles(base, { files: [{ path: `${KB_DIR}/a.md`, content: 'x' }], mode: 'replace' }),
+      // An empty batch is no way round it: the mode is judged before the batch is.
+      await writeFiles(base, { files: [], mode: 'bogus' }),
     ]) {
       expect(res.status).toBe(400);
       const body = (await res.json()) as { error: string; code: string };

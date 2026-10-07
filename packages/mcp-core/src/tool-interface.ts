@@ -79,7 +79,11 @@ function placeholder(schema: Dict, depth: number): unknown {
   // A value the schema fixes is shown as that value: `"..."` would be a call
   // the check refuses.
   if (schema.const !== undefined) return schema.const;
-  if (Array.isArray(schema.enum) && schema.enum.length > 0) return schema.enum[0];
+  // The first member the rest of the schema admits, so a sibling constraint
+  // (`minLength`, a range) cannot make the example one the check refuses.
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+    return schema.enum.find((option) => valueMismatch('', schema, option) === null) ?? schema.enum[0];
+  }
   const type = declaredTypes(schema)?.[0];
   if (type === 'number' || type === 'integer') return numberPlaceholder(schema, type === 'integer');
   if (type === 'boolean') return true;
@@ -104,18 +108,33 @@ function placeholder(schema: Dict, depth: number): unknown {
   return '...';
 }
 
-/** A number the schema's range admits: `0`, unless a bound rules it out. */
+/**
+ * A number the schema's range admits: `0`, unless a bound rules it out —
+ * then the nearest value at the lower bound, the upper bound, or between the
+ * two, whichever satisfies EVERY bound (`exclusiveMinimum: 1, maximum: 1.5`
+ * gives `1.5` and `exclusiveMaximum: 1.5` in its place
+ * gives `1.25`, not a `2` the check would refuse). A range nothing satisfies
+ * keeps `0`: the schema is at fault, and no example can fix it.
+ */
 function numberPlaceholder(schema: Dict, integer: boolean): number {
-  const { minimum, maximum, exclusiveMinimum, exclusiveMaximum } = schema;
-  if (typeof minimum === 'number' && minimum > 0) return integer ? Math.ceil(minimum) : minimum;
-  if (typeof exclusiveMinimum === 'number' && exclusiveMinimum >= 0) {
-    return integer ? Math.floor(exclusiveMinimum) + 1 : exclusiveMinimum + 1;
-  }
-  if (typeof maximum === 'number' && maximum < 0) return integer ? Math.floor(maximum) : maximum;
-  if (typeof exclusiveMaximum === 'number' && exclusiveMaximum <= 0) {
-    return integer ? Math.ceil(exclusiveMaximum) - 1 : exclusiveMaximum - 1;
-  }
-  return 0;
+  const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  const minimum = num(schema.minimum);
+  const maximum = num(schema.maximum);
+  const exclusiveMinimum = num(schema.exclusiveMinimum);
+  const exclusiveMaximum = num(schema.exclusiveMaximum);
+  const lows = [minimum, exclusiveMinimum].filter((v): v is number => v !== undefined);
+  const highs = [maximum, exclusiveMaximum].filter((v): v is number => v !== undefined);
+  const low = lows.length > 0 ? Math.max(...lows) : undefined;
+  const high = highs.length > 0 ? Math.min(...highs) : undefined;
+  const candidates = [
+    0,
+    minimum,
+    exclusiveMinimum === undefined ? undefined : exclusiveMinimum + 1,
+    maximum,
+    exclusiveMaximum === undefined ? undefined : exclusiveMaximum - 1,
+    low !== undefined && high !== undefined ? (low + high) / 2 : undefined,
+  ].flatMap((c) => (c === undefined ? [] : integer ? [Math.ceil(c), Math.floor(c)] : [c]));
+  return candidates.find((c) => numericBoundBroken(schema, c) === null) ?? 0;
 }
 
 /**
@@ -440,11 +459,26 @@ function numericBoundBroken(schema: Dict, value: number): string | null {
   return null;
 }
 
-/** Equality as JSON sees it, for `enum` and `const`. */
+/**
+ * Equality as JSON sees it, for `enum` and `const`: arrays in order, objects
+ * by their properties whatever order their keys were written in.
+ */
 function sameJson(a: unknown, b: unknown): boolean {
   if (a === b) return true;
-  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
-  return JSON.stringify(a) === JSON.stringify(b);
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return (
+      Array.isArray(a) &&
+      Array.isArray(b) &&
+      a.length === b.length &&
+      a.every((value, index) => sameJson(value, b[index]))
+    );
+  }
+  if (!isDict(a) || !isDict(b)) return false;
+  const keys = Object.keys(a);
+  return (
+    keys.length === Object.keys(b).length &&
+    keys.every((key) => Object.prototype.hasOwnProperty.call(b, key) && sameJson(a[key], b[key]))
+  );
 }
 
 /** A value as it appears in a refusal: JSON, cut short so one long argument cannot fill the message. */
@@ -453,11 +487,78 @@ function shortJson(value: unknown): string {
   return text.length <= 60 ? text : `${text.slice(0, 59)}…`;
 }
 
-/** A `pattern` compiled once; one this runtime cannot compile is not checked rather than refused. */
+/**
+ * Could this pattern backtrack catastrophically? True for a group that repeats
+ * (`*`, `+`, `{…}`) and itself contains a quantifier or an
+ * alternation — `(a+)+`, `(a|a)*`, `(\w+\s?)*` — and for a backreference.
+ *
+ * JavaScript's matcher backtracks, so such a pattern, which comes from a
+ * schema someone else wrote, could hold the event loop for seconds on one
+ * caller's string. The test is a conservative over-approximation (it flags
+ * some patterns that would in fact be fast); a flagged pattern is simply not
+ * asserted, which is what this module does with any keyword it cannot judge
+ * safely.
+ */
+export function patternMayBacktrack(source: string): boolean {
+  if (/\\[1-9]|\\k</.test(source)) return true;
+  // One frame per open group: did anything inside it repeat or branch?
+  const stack: boolean[] = [];
+  let risky = false; // what the group that just closed held
+  let previousClosedGroup = false;
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    const afterGroup = previousClosedGroup;
+    previousClosedGroup = false;
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === '[') {
+      // A character class is one atom: skip to its closing bracket.
+      for (i++; i < source.length && source[i] !== ']'; i++) if (source[i] === '\\') i++;
+      continue;
+    }
+    if (ch === '(') {
+      stack.push(false);
+      if (source[i + 1] === '?') i++; // `(?:`, `(?=`, `(?<name>`: the `?` is syntax, not a quantifier
+      continue;
+    }
+    if (ch === ')') {
+      risky = stack.pop() ?? false;
+      // What a group holds, the group around it holds too.
+      if (risky && stack.length > 0) stack[stack.length - 1] = true;
+      previousClosedGroup = true;
+      continue;
+    }
+    const quantifier = ch === '*' || ch === '+' || ch === '?' || ch === '{';
+    if (quantifier || ch === '|') {
+      if (stack.length > 0) stack[stack.length - 1] = true;
+      // `?` repeats nothing; any `{…}` count is treated as a repeat, a long
+      // fixed count compounding the backtracking just as `+` does.
+      const repeats = ch === '*' || ch === '+' || ch === '{';
+      if (afterGroup && repeats && risky) return true;
+    }
+    if (ch === '{') {
+      const close = source.indexOf('}', i);
+      if (close > i) i = close;
+    }
+  }
+  return false;
+}
+
+/**
+ * A `pattern` compiled once. One this runtime cannot compile, or one that may
+ * backtrack catastrophically (see {@link patternMayBacktrack}), is not checked
+ * rather than refused.
+ */
 const patterns = new Map<string, RegExp | null>();
 function compiledPattern(source: string): RegExp | null {
   if (!patterns.has(source)) {
     let re: RegExp | null = null;
+    if (patternMayBacktrack(source)) {
+      patterns.set(source, null);
+      return null;
+    }
     try {
       re = new RegExp(source, 'u');
     } catch {

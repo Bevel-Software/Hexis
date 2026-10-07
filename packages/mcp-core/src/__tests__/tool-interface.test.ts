@@ -6,6 +6,7 @@ import {
   callLine,
   compileCheck,
   describeInterface,
+  patternMayBacktrack,
   splitCallLine,
   withCallExample,
 } from '../tool-interface.js';
@@ -156,6 +157,33 @@ describe('callExample, for keys and arrays a bare placeholder would get wrong', 
     };
     expect(callLine('NS.run', inputs)).toBe('Call: NS.run({ mode: "fast", kind: "x" })');
   });
+
+  it('picks the first enum member the rest of the schema admits', () => {
+    const inputs = {
+      type: 'object',
+      properties: { v: { type: 'string', enum: ['', 'ok'], minLength: 1 } },
+      required: ['v'],
+    };
+    expect(callLine('NS.run', inputs)).toBe('Call: NS.run({ v: "ok" })');
+  });
+
+  it('picks a number every bound admits, between the bounds when it must', () => {
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ type: 'number', exclusiveMinimum: 1, maximum: 1.5 }, '1.5'],
+      [{ type: 'number', exclusiveMinimum: 1, exclusiveMaximum: 1.5 }, '1.25'],
+      [{ type: 'integer', minimum: 1 }, '1'],
+      [{ type: 'integer', exclusiveMinimum: 0 }, '1'],
+      [{ type: 'number', maximum: -2 }, '-2'],
+      [{ type: 'integer', minimum: 0, maximum: 10 }, '0'],
+    ];
+    for (const [prop, shown] of cases) {
+      const inputs = { type: 'object', properties: { v: prop }, required: ['v'] };
+      expect(callLine('NS.n', inputs), JSON.stringify(prop)).toBe(`Call: NS.n({ v: ${shown} })`);
+      const compiled = compileCheck(inputs);
+      if (!compiled.checkable) throw new Error(compiled.reason);
+      expect(compiled.check({ v: Number(shown) }), JSON.stringify(prop)).toEqual([]);
+    }
+  });
 });
 
 describe('compileCheck: the constraints a schema declares', () => {
@@ -215,6 +243,25 @@ describe('compileCheck: the constraints a schema declares', () => {
   it('names a nested constraint by its path', () => {
     const inputs = platformTool({ type: 'object', properties: { name: { type: 'string', minLength: 1 } }, required: ['name'] });
     expect(check(inputs, { body: { name: '' } })).toEqual(['"body.name" must be at least 1 character(s) long, but 0 was given.']);
+  });
+
+  it('matches an object in an enum or const whatever order its keys were written in', () => {
+    expect(check(one({ type: 'object', enum: [{ a: 1, b: [1, 2] }] }), { v: { b: [1, 2], a: 1 } })).toEqual([]);
+    expect(check(one({ const: { a: 1, b: 2 } }), { v: { b: 2, a: 1 } })).toEqual([]);
+    expect(check(one({ const: { a: [1, 2] } }), { v: { a: [2, 1] } })).toHaveLength(1);
+    expect(check(one({ const: { a: 1 } }), { v: { a: 1, b: 2 } })).toHaveLength(1);
+  });
+
+  it('does not run a pattern that could backtrack catastrophically, and returns at once', () => {
+    for (const pattern of ['^(a+)+$', '^(a|a)*$', '^(\\w+\\s?)*$', '^((ab)*)+$', '^(a+){2,}$', '^(a)\\1$']) {
+      expect(patternMayBacktrack(pattern), pattern).toBe(true);
+    }
+    for (const pattern of ['^[a-z]+$', '^(?:ab)+$', '^(a+)?$', '^[(+)]*$', '^\\(a+\\)+$', '^a{1,3}b*$']) {
+      expect(patternMayBacktrack(pattern), pattern).toBe(false);
+    }
+    const started = Date.now();
+    expect(check(one({ type: 'string', pattern: '^(a+)+$' }), { v: `${'a'.repeat(40)}!` })).toEqual([]);
+    expect(Date.now() - started).toBeLessThan(100);
   });
 
   it('does not assert `format`, which JSON Schema treats as an annotation', () => {

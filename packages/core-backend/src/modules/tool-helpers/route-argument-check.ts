@@ -69,12 +69,14 @@ function requiresBranch(flat: unknown): boolean {
  * what this recognises, so the refusal can name the mistake instead of listing
  * every argument as missing and leaving the agent to guess why.
  */
-function argumentsCameAsQuery(flat: unknown, query: unknown): boolean {
+function argumentsCameAsQuery(flat: unknown, query: unknown, args: Record<string, unknown>): boolean {
   if (typeof query !== 'object' || query === null) return false;
   const sent = Object.keys(query as Record<string, unknown>);
   if (sent.length === 0) return false;
   const names = new Set(declaredNames(flat));
-  return sent.some((name) => names.has(name));
+  // An argument the body DOES carry was not misplaced, whatever else the URL
+  // holds: only one that reached the route by the query string alone was.
+  return sent.some((name) => names.has(name) && args[name] === undefined);
 }
 
 /**
@@ -98,7 +100,7 @@ export function argumentsRefusal(
   // passed flat reach this route as query parameters and leave the body
   // empty, so a call whose arguments are all optional would otherwise MATCH —
   // as `{}` — and run on defaults, silently dropping what was passed.
-  const cameAsQuery = argumentsCameAsQuery(schemas.flat, query);
+  const cameAsQuery = argumentsCameAsQuery(schemas.flat, query, args);
   // A call that names no branch is answered by the refusal that NAMES it, and
   // that refusal comes first, exactly as it does today. It says what a branch
   // is and what to pass, and it is one message rather than a list; putting a

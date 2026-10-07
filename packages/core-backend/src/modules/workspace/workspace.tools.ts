@@ -2445,8 +2445,10 @@ export function registerWorkspaceTools(
     proposable: true,
     handler: async (a, ctx: ToolContext) => {
       const files = (a.files as Array<{ path: string; content: string }>) ?? [];
-      if (files.length === 0) return { count: 0, files: [] };
+      // The mode is judged before anything else, so an empty batch with a mode
+      // that is not one answers `bad_mode` like any other call would.
       const mode = modeOf(a);
+      if (files.length === 0) return { count: 0, files: [] };
       // The POLICY gate still judges the whole batch: a restricted run is a
       // call that should not have been made at all, not a per-path outcome.
       // The write hook is asked PER PATH, below, so a path it refuses is that
