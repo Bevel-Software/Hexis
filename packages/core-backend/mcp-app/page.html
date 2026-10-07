@@ -173,8 +173,12 @@
           // here depends on them, but a host that sends the first tool result
           // only after the handshake completes needs us to have sent it.
           if (message.id === INITIALIZE_ID) {
-            // A rejected handshake is not advertised as ready.
-            if (message.error || !message.result) return;
+            // A rejected handshake is not advertised as ready — and the
+            // reader is told, rather than left at "Opening the page…".
+            if (message.error || !message.result) {
+              if (!shown) say('The chat app refused to open this page.');
+              return;
+            }
             send({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} });
             if (!shown) say('Opening the page…');
           }

@@ -206,7 +206,8 @@ describe('a writer', () => {
    * stays open with the draft, Save becomes Send proposal, and the reader is
    * told why — never an editor that quietly stopped saving.
    */
-  it('turns Save into Send proposal, keeping the draft, when a heartbeat finds write access withdrawn', async () => {
+  /** Heartbeats captured instead of scheduled, so a test can fire one. */
+  function captureHeartbeats(): Array<() => void> {
     const ticks: Array<() => void> = [];
     const realSetInterval = window.setInterval.bind(window);
     vi.spyOn(window, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
@@ -216,22 +217,63 @@ describe('a writer', () => {
       }
       return realSetInterval(fn, ms);
     }) as typeof window.setInterval);
+    return ticks;
+  }
+
+  const EDITED = '# Thing\n\nWhat it is, edited.\n';
+
+  async function editThenLoseWrite() {
+    const ticks = captureHeartbeats();
     api.loadEmbed.mockResolvedValueOnce(view());
     api.lockEmbed.mockResolvedValue({ acquired: true });
+    api.cancelEmbed.mockResolvedValue(undefined);
     api.heartbeatEmbed.mockRejectedValue(new FakeEmbedApiError(403, 'Forbidden'));
     api.proposeEmbed.mockResolvedValue({ url: 'https://hexis.example/change-requests/3' });
     mount();
     await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     await screen.findByRole('button', { name: 'Save' });
+    // The draft differs from the page, so a reload that dropped it would show.
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: EDITED } });
+    return ticks;
+  }
 
+  /**
+   * Write access withdrawn mid-edit: the heartbeat answers 403. The editor
+   * stays open with the draft, Save becomes Send proposal, and the reader is
+   * told why — never an editor that quietly stopped saving.
+   */
+  it('turns Save into Send proposal, keeping the draft, when a heartbeat finds write access withdrawn', async () => {
+    const ticks = await editThenLoseWrite();
     api.loadEmbed.mockResolvedValueOnce(view({ canWrite: false }));
     ticks.at(-1)!();
 
     expect(await screen.findByText(/You can no longer edit this page directly/)).toBeTruthy();
     const send = await screen.findByRole('button', { name: 'Send proposal' });
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe(EDITED);
     await userEvent.click(send);
-    await waitFor(() => expect(api.proposeEmbed).toHaveBeenCalledWith('tok', PAGE));
+    await waitFor(() => expect(api.proposeEmbed).toHaveBeenCalledWith('tok', EDITED));
     expect(api.saveEmbed).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The same 403 when READ access went too. The no-access screen would strand
+   * the draft, so the editor stays on it with nothing sendable, and says why;
+   * Discard then lands on what the reader may now see.
+   */
+  it('keeps the draft on screen but sends nothing when a heartbeat finds read access withdrawn', async () => {
+    const ticks = await editThenLoseWrite();
+    api.loadEmbed.mockResolvedValue(view({ canRead: false, canWrite: false }));
+    ticks.at(-1)!();
+
+    expect(await screen.findByText(/You no longer have access to this page/)).toBeTruthy();
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe(EDITED);
+    expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Discard' }));
+    expect(await screen.findByText(/You don.t have access to this page/)).toBeTruthy();
+    expect(screen.queryByText(/What it is/)).toBeNull();
+    expect(api.saveEmbed).not.toHaveBeenCalled();
+    expect(api.proposeEmbed).not.toHaveBeenCalled();
   });
 
   it('releases the lock on Discard', async () => {

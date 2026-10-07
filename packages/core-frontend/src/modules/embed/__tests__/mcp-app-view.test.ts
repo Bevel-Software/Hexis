@@ -62,6 +62,8 @@ describe('the MCP App view', () => {
     fromHost({ jsonrpc: '2.0', id, error: { code: -32600, message: 'unsupported' } });
     const sent = host.postMessage.mock.calls.map((c) => (c[0] as { method?: string }).method);
     expect(sent).not.toContain('ui/notifications/initialized');
+    // And the reader is told, rather than left at "Opening the page…".
+    expect(document.getElementById('notice')!.textContent).toBe('The chat app refused to open this page.');
   });
 
   it('frames the embed from a tool result delivered as the CallToolResult itself', () => {

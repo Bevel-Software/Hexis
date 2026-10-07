@@ -167,6 +167,18 @@ describe('fetchMcpApps', () => {
     expect(await fetchMcpApps(config, served)).toBe(served);
   });
 
+  /**
+   * A route that is definitely gone is not transient: keeping the views would
+   * advertise a `ui://` view the deployment no longer serves, and the refresh
+   * is marked applied either way, so nothing would read again.
+   */
+  it.each([404, 410, 403])('drops the views served when a refresh read answers %i', async (status) => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const served = { tools: { open_page: { resourceUri: VIEW_URI } }, resources: [VIEW] };
+    stubFetch({ error: 'gone' }, status);
+    expect(await fetchMcpApps(config, served)).toEqual({ tools: {}, resources: [] });
+  });
+
   it('lets a refresh that reads an empty manifest replace the one served', async () => {
     const served = { tools: { open_page: { resourceUri: VIEW_URI } }, resources: [VIEW] };
     stubFetch({ tools: {}, resources: [] });

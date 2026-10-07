@@ -29,6 +29,11 @@ const HEARTBEAT_MS = 30_000;
 const WRITE_WITHDRAWN =
   'You can no longer edit this page directly. Your changes are still here — send them as a proposal instead.';
 
+/** Said when a heartbeat finds the viewer's READ access withdrawn too. */
+const READ_WITHDRAWN =
+  "You no longer have access to this page, so these changes can't be saved or proposed. " +
+  'Copy anything you want to keep before you discard them.';
+
 function tokenFromUrl(): string {
   return new URLSearchParams(window.location.search).get('token') ?? '';
 }
@@ -97,6 +102,9 @@ export function EmbedView() {
   const [awaitingLink, setAwaitingLink] = useState(false);
   /** Who took the lock while this frame was hidden — null while we hold it. */
   const [lockLost, setLockLost] = useState<string | null>(null);
+  // Read access withdrawn mid-edit. The editor stays open on the draft so
+  // nothing typed vanishes, but nothing can be sent from it.
+  const [accessLost, setAccessLost] = useState(false);
 
   const reload = useCallback(() => {
     if (!token) {
@@ -111,6 +119,7 @@ export function EmbedView() {
         setLoadError(null);
         setMode('read');
         setLockLost(null);
+        setAccessLost(false);
         setSent(null);
         if (next.linked) setAwaitingLink(false);
       })
@@ -132,21 +141,33 @@ export function EmbedView() {
   // a proposal takes no lock, because nothing it does touches the default
   // branch.
   //
-  // A heartbeat refused with 403 means the write access itself was withdrawn
-  // mid-edit. The page is read again — it now offers a proposal, not a save —
-  // and the open editor keeps the draft, so the edits are not lost and the
-  // reader is told why the control changed. Any other failure is left to the
-  // lock's TTL and to Save, which refuses with its own reason.
-  const holdsLock = mode === 'write' && (view?.canWrite ?? false);
+  // A heartbeat refused with 403 means access was withdrawn mid-edit. The page
+  // is read again to learn how much: with read access left it now offers a
+  // proposal, not a save; with none, the view is NOT swapped for the
+  // no-access screen — the editor keeps the draft on screen, nothing can be
+  // sent, and the reader is told why. Either way the edits are not lost. Any
+  // other failure is left to the lock's TTL and to Save, which refuses with
+  // its own reason.
+  const holdsLock = mode === 'write' && (view?.canWrite ?? false) && !accessLost;
   useEffect(() => {
     if (!holdsLock) return;
     const id = window.setInterval(() => {
       heartbeatEmbed(token).catch((err: unknown) => {
         if (!(err instanceof EmbedApiError && err.status === 403)) return;
-        setNotice(WRITE_WITHDRAWN);
         loadEmbed(token)
-          .then((next) => setView(next))
-          .catch(() => undefined);
+          .then((next) => {
+            if (!next.linked || !next.canRead) {
+              setAccessLost(true);
+              setNotice(READ_WITHDRAWN);
+              return;
+            }
+            setNotice(WRITE_WITHDRAWN);
+            setView(next);
+          })
+          .catch((loadErr: unknown) => {
+            // A 401 here is the token running out, which Save reports anyway.
+            setNotice(loadErr instanceof Error ? loadErr.message : 'Your access to this page changed.');
+          });
       });
     }, HEARTBEAT_MS);
     return () => window.clearInterval(id);
@@ -266,6 +287,7 @@ export function EmbedView() {
       if (!view) return;
       // Already on screen beside the editor; the refusal is for the
       // renderer's own save shortcut, which does not see the disabled button.
+      if (accessLost) throw new Error(READ_WITHDRAWN);
       if (view.canWrite && lockLost) throw new Error(lockLostMessage(lockLost));
       setBusy(true);
       setNotice(null);
@@ -285,20 +307,23 @@ export function EmbedView() {
         setBusy(false);
       }
     },
-    [view, token, reload, lockLost],
+    [view, token, reload, lockLost, accessLost],
   );
 
   const onCancel = useCallback(async () => {
     setBusy(true);
     try {
-      if (view?.canWrite) await cancelEmbed(token).catch(() => undefined);
+      if (view?.canWrite && !accessLost) await cancelEmbed(token).catch(() => undefined);
     } finally {
       setBusy(false);
       setMode('read');
       setLockLost(null);
       setNotice(null);
+      // The view on screen predates the withdrawal; read it again so the
+      // reader lands on what they may now see, not on the old content.
+      if (accessLost) reload();
     }
-  }, [view, token]);
+  }, [view, token, accessLost, reload]);
 
   // ── the states that show no content ──────────────────────────────────────
 
@@ -366,7 +391,7 @@ export function EmbedView() {
                 variant="primary"
                 size="tiny"
                 onClick={() => void onSave(draft).catch(() => undefined)}
-                disabled={busy || (view.canWrite && lockLost !== null)}
+                disabled={busy || accessLost || (view.canWrite && lockLost !== null)}
               >
                 {busy ? 'Sending…' : view.canWrite ? 'Save' : 'Send proposal'}
               </Button>

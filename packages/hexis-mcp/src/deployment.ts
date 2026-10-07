@@ -107,6 +107,7 @@ async function getJson(
             // permission answer about a key that verified.
             `${label} denied access (HTTP 403) to this connection key. ` +
             'The key itself is valid — ask a workspace admin for access; minting a new key will not change the answer.',
+      res.status,
     );
   }
   if (!res.ok) {
@@ -518,6 +519,11 @@ export async function callKbTool(
   });
 }
 
+const NO_APPS: McpAppManifest = { tools: {}, resources: [] };
+
+/** Statuses that say the manifest route is definitely not serving this caller. */
+const MANIFEST_GONE = new Set([403, 404, 410]);
+
 /**
  * The deployment's MCP Apps: which of its tools carry a `ui://` view, and the
  * views themselves.
@@ -538,16 +544,20 @@ export async function callKbTool(
  * none: the host would preload a failure and show an empty frame where the
  * text used to be.
  *
- * `previous` is what a FAILED read answers — the manifest already being
- * served, on a catalog refresh. A refresh that hit a deployment mid-redeploy
- * must not turn every view off until the next catalog change: the refresh is
- * marked applied either way, so nothing would read the manifest again. A
- * manifest that READS as empty still replaces it — that is a deployment
- * that stopped serving the view.
+ * `previous` is what a TRANSIENT failure answers — the manifest already
+ * being served, on a catalog refresh. A refresh that hit a deployment
+ * mid-redeploy (a 5xx, a dropped connection, a proxy's error page) must not
+ * turn every view off until the next catalog change: the refresh is marked
+ * applied either way, so nothing would read the manifest again.
+ *
+ * A DEFINITE answer replaces it, though, because the same "applied either
+ * way" would otherwise keep a removed view advertised indefinitely: a
+ * manifest that reads as empty, and a route that answers 404/410 (gone) or
+ * 403 (this identity may not have it), all turn the views off.
  */
 export async function fetchMcpApps(
   config: HexisMcpConfig,
-  previous: McpAppManifest = { tools: {}, resources: [] },
+  previous: McpAppManifest = NO_APPS,
 ): Promise<McpAppManifest> {
   try {
     const body = await getJson(`${config.baseUrl}/api/agent/mcp-app`, {
@@ -578,12 +588,14 @@ export async function fetchMcpApps(
     // "mint a new key" into a silently app-less server.
     if (err instanceof ConnectionKeyRejectedError) throw err;
     const reason = err instanceof Error ? err.message : String(err);
+    const definite = err instanceof DeploymentError && MANIFEST_GONE.has(err.status ?? 0);
+    const kept = definite ? NO_APPS : previous;
     console.error(
       `[hexis-mcp] could not read the deployment's MCP App manifest (${reason}); ` +
-        (previous.resources.length
+        (kept.resources.length
           ? 'keeping the views read before.'
           : 'tools that would render a view will answer with their text instead.'),
     );
-    return previous;
+    return kept;
   }
 }
