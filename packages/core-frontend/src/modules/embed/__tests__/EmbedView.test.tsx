@@ -248,6 +248,8 @@ describe('a writer', () => {
     ticks.at(-1)!();
 
     expect(await screen.findByText(/You can no longer edit this page directly/)).toBeTruthy();
+    // A proposal takes no lock, so the edit lock is released straight away.
+    expect(api.cancelEmbed).toHaveBeenCalledWith('tok');
     const send = await screen.findByRole('button', { name: 'Send proposal' });
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe(EDITED);
     await userEvent.click(send);
@@ -268,8 +270,13 @@ describe('a writer', () => {
     expect(await screen.findByText(/You no longer have access to this page/)).toBeTruthy();
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe(EDITED);
     expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
+    // The lock is let go at once, not left to block other writers until TTL.
+    expect(api.cancelEmbed).toHaveBeenCalledWith('tok');
+    api.cancelEmbed.mockClear();
 
     await userEvent.click(screen.getByRole('button', { name: 'Discard' }));
+    // And Discard releases again regardless — a no-op if it is already free.
+    await waitFor(() => expect(api.cancelEmbed).toHaveBeenCalledWith('tok'));
     expect(await screen.findByText(/You don.t have access to this page/)).toBeTruthy();
     expect(screen.queryByText(/What it is/)).toBeNull();
     expect(api.saveEmbed).not.toHaveBeenCalled();

@@ -154,6 +154,11 @@ export function EmbedView() {
     const id = window.setInterval(() => {
       heartbeatEmbed(token).catch((err: unknown) => {
         if (!(err instanceof EmbedApiError && err.status === 403)) return;
+        // The edit lock goes NOW, whichever access went: nothing from this
+        // editor can be saved any more, and holding it would block every
+        // other writer until the TTL. Releasing needs no access — the
+        // server lets go only of a lock this identity holds.
+        cancelEmbed(token).catch(() => undefined);
         loadEmbed(token)
           .then((next) => {
             if (!next.linked || !next.canRead) {
@@ -313,7 +318,9 @@ export function EmbedView() {
   const onCancel = useCallback(async () => {
     setBusy(true);
     try {
-      if (view?.canWrite && !accessLost) await cancelEmbed(token).catch(() => undefined);
+      // Released even after access was withdrawn (see the heartbeat above):
+      // a second release is a no-op, a skipped one blocks other writers.
+      if (view?.canWrite) await cancelEmbed(token).catch(() => undefined);
     } finally {
       setBusy(false);
       setMode('read');
