@@ -273,7 +273,9 @@ describe('GitService.mergeChangeRequest', () => {
     await runGit(busy, ['push', 'origin', BASE]);
 
     expect(await git.appliedMergeCommitOnTarget(baseWsId, BASE, 7)).toBe(merged.mergeCommit);
-  });
+    // Twenty-five merges are a hundred and fifty git processes; slow on a
+    // loaded Windows runner, so this one gets its own budget.
+  }, 120_000);
 
   it('recognises a merge commit an earlier release wrote with the title unflattened, given the stored title', async () => {
     // Before titles were flattened, a title with a blank line put `(#N)` after

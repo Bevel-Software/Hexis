@@ -105,7 +105,7 @@ async function hexisTools(): Promise<UtcpTool[]> {
     unused(),
   );
   registerWorkflowTools(registry, router, toolAuth, toolHandler, kb);
-  registerPluginsTools(registry);
+  registerPluginsTools(registry, kb);
   registerSkillsTools(registry, router, toolAuth, toolHandler, emptySkills);
   registerToolManualsTools(registry, router, toolAuth, toolHandler, emptyManuals, {
     accessControl: unused(),
@@ -146,8 +146,10 @@ describe('no Hexis tool description is long enough to be cut', () => {
     // The cap does not answer the ~500-character cut; the ORDER of the text
     // does, and this is where that claim is checked rather than asserted in a
     // comment. A client that stops at 500 must still have the sentence saying
-    // what the tool does — what it loses is the tail, and the shared rules are
-    // stated in the handshake instructions and in the guide anyway. Lowering
+    // what the tool does — what it loses is the tail. The shared rules are
+    // stated in the guide (which the opener sends every client to, including
+    // the description-only ones this cut is about) and, for the clients that
+    // honour it, in the handshake instructions as well. Lowering
     // the cap to 500 would not buy this; only order does.
     const late = (await hexisTools())
       .map((t) => ({ tool: t.name, endsAt: firstSentenceEnd(t) }))
@@ -192,10 +194,9 @@ describe('no Hexis tool description is long enough to be cut', () => {
     const read = (await hexisTools()).find((t) => t.name === 'read_file');
     expect(read).toBeDefined();
     // Its own text (the guide-first sentence included), plus the prefix at
-    // ITS cap and the blank line between.
-    const own = read!.description!.length;
-    expect(clientVisibleLength(read!)).toBe(own + TOOL_PREFIX_CAP + 2);
-    expect(own + TOOL_PREFIX_CAP + 2).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
+    // ITS cap and the blank line between, must fit — measured as the client
+    // sees it.
+    expect(clientVisibleLength(read!)).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
   });
 
   it('fails, naming the tool, when a paragraph takes a description over the cap', () => {

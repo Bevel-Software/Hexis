@@ -126,15 +126,33 @@ export const readProcessTable: ProcessTable = async () => {
   }
 };
 
+/**
+ * What a runtime is RUNNING: the first argument of its command line that is
+ * not the runtime itself and not an option — the script or bin path. Only
+ * that token names the program; the arguments after it are the program's
+ * own (`node /tmp/server.js --plugin @openai/codex` runs `/tmp/server.js`,
+ * whatever it was told). Quoted tokens are read as one.
+ */
+function scriptOf(command: string): string | null {
+  const tokens = command.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+  for (const token of tokens.slice(1)) {
+    const bare = token.replace(/^["']|["']$/g, '');
+    if (bare === '' || bare.startsWith('-')) continue;
+    return bare;
+  }
+  return null;
+}
+
 /** The agent a process row is, by the list above, or null for anything else. */
 function agentOf(row: ProcessRow): string | null {
   const program = (row.name.split(/[\\/]/).pop() ?? row.name).replace(/\.(exe|app)$/i, '').trim();
   // On macOS the executable inside a bundle may be generic ("Electron" for
   // VS Code); the bundle's own name says what it is.
   const bundle = /([^\\/]+)\.app(?=[\\/]|$)/i.exec(row.name)?.[1];
+  const script = row.command && RUNTIME.test(program) ? scriptOf(row.command) : null;
   for (const agent of AGENTS) {
     if (agent.program.test(program) || (bundle && agent.program.test(bundle))) return agent.key;
-    if (agent.command && row.command && RUNTIME.test(program) && agent.command.test(row.command)) return agent.key;
+    if (agent.command && script !== null && agent.command.test(script)) return agent.key;
   }
   return null;
 }

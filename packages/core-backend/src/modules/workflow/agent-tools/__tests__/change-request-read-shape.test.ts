@@ -544,8 +544,12 @@ describe('the body a caller is handed is the author\'s, not the machine\'s', () 
     expect(out).not.toContain('Affected owners');
   });
 
-  it('strips the hidden identity markers older bodies carry', () => {
+  it("strips the hidden identity markers older bodies carry, and only those — an author's own HTML comment is prose", () => {
     expect(authorsDescription('<!-- bevel:author:abc123 -->\nMy reason.')).toBe('My reason.');
+    expect(authorsDescription('<!--hexis:access-request-level:write-->\nMy reason.')).toBe('My reason.');
+    expect(authorsDescription('My reason.\n<!-- TODO: ask Mia about the title -->')).toBe(
+      'My reason.\n<!-- TODO: ask Mia about the title -->',
+    );
   });
 
   it('leaves a body that is only the author\'s prose alone', () => {

@@ -55,8 +55,8 @@ export interface ScreenedHiddenTool extends HiddenTool {
  */
 const MAX_REMEMBERED_SCHEMAS = 5000;
 
-/** How many callers' pictures to hold at once — see `screen` for what happens past it. */
-const MAX_REMEMBERED_CALLERS = 2000;
+/** How many callers' pictures to hold at once — see `screen` for what happens past it. Exported for the tests that fill it. */
+export const MAX_REMEMBERED_CALLERS = 2000;
 
 export class ToolSchemaGuard implements HiddenToolSource {
   /** Verdict per distinct schema: `null` means valid, so `undefined` means unchecked. */

@@ -240,7 +240,13 @@ describe('inputSchemaDefect', () => {
    * catches it. A future change to `validateFormats` therefore has to justify
    * itself by behaviour, because by itself it has none.
    */
-  it('would flag nothing more with format assertions on, which is why `pattern` is checked directly', () => {
+  it('flags nothing more with `validateFormats` switched on in a process that registers no formats — the switch alone is inert', () => {
+    // What this pins is the SWITCH, as this process runs it: `ajv` ships no
+    // format implementations of its own, and nothing here registers
+    // `ajv-formats`, so turning assertions on asserts nothing. Registering
+    // the draft formats would be a new dependency and a different guard,
+    // and the module header says why it would still be the wrong one (an AI
+    // client never meta-validates the schema document).
     const badPattern = { type: 'object', properties: { x: { type: 'string', pattern: '[' } } };
     const corpus: Record<string, unknown>[] = [
       badPattern,
