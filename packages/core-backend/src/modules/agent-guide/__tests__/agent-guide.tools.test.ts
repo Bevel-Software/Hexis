@@ -9,7 +9,8 @@ import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import type { ToolContext } from '../../tool-helpers/tool.contract.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
 import { GET_AGENT_GUIDE_TOOL, registerAgentGuideTool } from '../agent-guide.tools.js';
-import type { RenderedGuideSection } from '../agent-guide.js';
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
+import { agentGuideSections, joinGuideSections, type RenderedGuideSection } from '../agent-guide.js';
 
 let server: Server | null = null;
 
@@ -146,5 +147,22 @@ describe('get_agent_guide', () => {
     sectionsNow(SECTIONS);
     const few = (await registry.listExternal()).find((t) => t.name === GET_AGENT_GUIDE_TOOL)!;
     expect(few.description).toContain('`introduction` (Knowledge base)');
+  });
+
+  it('returns the platform\'s HTML views section on its own, and inside the whole guide', async () => {
+    const { call, registry, sectionsNow } = await serve();
+    const platform = await agentGuideSections(DEFAULT_KB_LAYOUT);
+    sectionsNow([...platform]);
+    const html = platform.find((s) => s.id === 'html-views')!;
+    expect(await call({ section: 'html-views' })).toEqual({
+      status: 200,
+      body: { guide: html.body, section: 'html-views', title: 'HTML views' },
+    });
+    const whole = await call();
+    expect(whole.body.guide).toBe(joinGuideSections(platform));
+    expect(String(whole.body.guide)).toContain('## HTML views');
+    // The description lists it, so an agent knows it can ask for it.
+    const def = (await registry.listExternal()).find((t) => t.name === GET_AGENT_GUIDE_TOOL)!;
+    expect(def.description).toContain('`html-views`');
   });
 });

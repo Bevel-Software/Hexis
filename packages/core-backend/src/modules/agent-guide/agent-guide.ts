@@ -91,6 +91,7 @@ export const CORE_SECTION_IDS: readonly string[] = Object.freeze([
   'access-control',
   'skills',
   'tool-manuals',
+  'html-views',
   'conventions',
   'finding-things',
 ]);
