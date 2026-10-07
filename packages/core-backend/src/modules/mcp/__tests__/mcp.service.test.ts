@@ -279,7 +279,9 @@ describe('McpService (UTCP→MCP proxy)', () => {
     const { tools } = await client.listTools();
     for (const name of ['call_tool_chain', 'list_tools', 'tools_info']) {
       const served = tools.find((t) => t.name === name)!;
-      expect(served.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `), name).toBe(true);
+      // Behind its `Call:` line, the first line of every description.
+      expect(served.description!.startsWith(`Call: ${name}(`), name).toBe(true);
+      expect(splitCallLine(served.description!).rest.startsWith(`${GUIDE_FIRST_SENTENCE} `), name).toBe(true);
       expect(served.description!.split(GUIDE_FIRST_SENTENCE), name).toHaveLength(2);
     }
     const chain = tools.find((t) => t.name === 'call_tool_chain')!;

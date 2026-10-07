@@ -43,8 +43,8 @@ export interface ToolDefSpec {
    * Arguments this tool's own handler refuses by name, with a message of its
    * own. The generic argument check its route runs then says nothing about
    * them, so that message is what the caller reads — which is the point of
-   * having written it. `branch` is never reported anyway: it has one named
-   * refusal across the whole surface.
+   * having written it. A missing `branch` needs no entry here: the route
+   * check leaves a call that names no branch to `branch-required`.
    */
   refusesItself?: string[];
 }
@@ -64,7 +64,7 @@ export function toolDef(spec: ToolDefSpec): UtcpTool {
   // being built here: a tool declared with this helper — the platform's own and
   // a deployment's alike — refuses a call whose arguments do not match it on
   // every way in, the REST route included, with no code of its own.
-  const wire = declareRouteTool(spec.name, spec.inputs, spec.refusesItself);
+  const wire = declareRouteTool(spec.name, spec.inputs, spec.refusesItself, spec.path);
   return toolSerializer.validateDict({
     name: spec.name,
     description: spec.description,

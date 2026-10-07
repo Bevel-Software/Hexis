@@ -277,9 +277,11 @@ describe('every description opens with its call', () => {
     const { baseUrl } = await startPlatform();
     const client = await connect(baseUrl);
     const { tools } = await client.listTools();
-    // `read_file` is one of the prefixed four; this catalog has none of them,
-    // so the prefix is exercised directly in the composer's own tests. What
-    // this pins is that nothing in the listing path puts text ahead of the line.
+    // This `McpService` is built without a `toolPrefix`, so no tool here —
+    // `read_file`, one of the prefixed four, included — carries the purpose
+    // prefix; that is exercised in the composer's own tests and in
+    // mcp.service.test.ts. What this pins is that nothing in the listing path
+    // (the guide-first opening included) puts text ahead of the line.
     for (const tool of tools) expect(tool.description?.indexOf('Call: '), tool.name).toBe(0);
   });
 
@@ -470,8 +472,10 @@ describe('a call that matches', () => {
     const res = await client.callTool({ name: 'THIRD_PARTY_search', arguments: { query: 'hello', limit: 2 } });
     expect(res.isError).toBeFalsy();
     expect(platform.searchCalls).toHaveLength(1);
-    // Both arguments arrive, exactly as sent, in the place this tool's own
-    // template puts them. Nothing was added, dropped or renamed on the way.
+    // Both arguments arrive in the place this tool's own template puts them:
+    // the query string, since it names no `body_field` — which is why `limit`
+    // reads back as the string "2" (query-string coercion by the transport,
+    // not by the check). Nothing was added, dropped or renamed on the way.
     expect(platform.searchCalls[0].query).toEqual({ query: 'hello', limit: '2' });
   });
 

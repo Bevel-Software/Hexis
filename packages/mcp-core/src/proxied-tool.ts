@@ -77,7 +77,9 @@ export function toListedTool(tool: ProxiedTool): McpTool | null {
     // called — generated from this tool's own input schema, so the platform's
     // tools, a deployment's and a connected server's all get one and none of
     // them can drift from the shape the tool really takes.
-    description: withCallExample(tool.description, tool.utcpName, tool.inputSchema),
+    // From the schema as it is LISTED (sanitized, local `$ref`s inlined), so
+    // the example and the interface the client is shown agree.
+    description: withCallExample(tool.description, tool.utcpName, inputSchema),
     inputSchema: inputSchema as McpTool['inputSchema'],
   };
 }

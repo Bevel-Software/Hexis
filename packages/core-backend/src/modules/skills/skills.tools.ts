@@ -1,12 +1,14 @@
 import type { Router, RequestHandler } from 'express';
-import type { IToolRegistry, UtcpTool } from '../tool-registry/tool.contract.js';
+import { callLine } from '@bevel-software/platform-mcp-core';
+import type { IToolRegistry, JsonSchema, UtcpTool } from '../tool-registry/tool.contract.js';
 import { TOOL_DESCRIPTION_CAP } from '../tool-registry/description-length.js';
 import { GUIDE_FIRST_SENTENCE } from '../tool-registry/guide-first.js';
 import { ToolError, type ToolContext } from '../tool-helpers/tool.contract.js';
 import { toolDef } from '../tool-helpers/tool-def.js';
-import { declareRouteTool } from '../tool-helpers/route-tool-schemas.js';
+import { bodyEnvelope, declareRouteTool } from '../tool-helpers/route-tool-schemas.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import type { ISkillService } from './skills.contract.js';
+import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.js';
 import type { IAllowedToolsChecker } from './allowed-tools-check.js';
 
 /**
@@ -178,9 +180,15 @@ async function availableSkillsLine(skillService: ISkillService, userEmail: strin
   return `${head}${names.slice(0, shown).join(', ')}${rest(shown)}`;
 }
 
-/** What the fixed part of a description leaves the skills line, with the guide-first sentence counted. */
-function skillsLineBudget(fixed: string): number {
-  return TOOL_DESCRIPTION_CAP - GUIDE_FIRST_SENTENCE.length - 1 - fixed.length;
+/**
+ * What the fixed part of a description leaves the skills line, with the
+ * `Call:` line ahead of everything (and the blank line after it) and the
+ * guide-first sentence counted. The call line is generated from the schema
+ * the tool advertises: its flat `inputs` inside the `body` envelope.
+ */
+function skillsLineBudget(name: string, inputs: JsonSchema, fixed: string): number {
+  const call = callLine(`${EXTERNAL_KB_MANUAL_NAME}.${name}`, bodyEnvelope(inputs)).length + 2;
+  return TOOL_DESCRIPTION_CAP - call - GUIDE_FIRST_SENTENCE.length - 1 - fixed.length;
 }
 
 const LIST_SKILLS_DESCRIPTION =
@@ -197,7 +205,7 @@ async function buildListSkillsDef(skillService: ISkillService, userEmail?: strin
     name: 'list_skills',
     description:
       LIST_SKILLS_DESCRIPTION +
-      (await availableSkillsLine(skillService, userEmail, skillsLineBudget(LIST_SKILLS_DESCRIPTION))),
+      (await availableSkillsLine(skillService, userEmail, skillsLineBudget('list_skills', LIST_SKILLS_INPUTS, LIST_SKILLS_DESCRIPTION))),
     path: '/api/agent/tools/list_skills',
     inputs: LIST_SKILLS_INPUTS,
     outputs: {
@@ -245,7 +253,7 @@ async function buildGetSkillDef(skillService: ISkillService, userEmail?: string)
     name: 'get_skill',
     description:
       GET_SKILL_DESCRIPTION +
-      (await availableSkillsLine(skillService, userEmail, skillsLineBudget(GET_SKILL_DESCRIPTION))),
+      (await availableSkillsLine(skillService, userEmail, skillsLineBudget('get_skill', GET_SKILL_INPUTS, GET_SKILL_DESCRIPTION))),
     path: '/api/agent/tools/get_skill',
     inputs: GET_SKILL_INPUTS,
     outputs: {

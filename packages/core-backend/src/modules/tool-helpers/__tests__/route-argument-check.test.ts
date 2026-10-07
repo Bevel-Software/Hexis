@@ -17,6 +17,9 @@ let server: HttpServer | undefined;
 const calls: Array<Record<string, unknown>> = [];
 
 afterEach(async () => {
+  // A spy on `console.warn` is restored here, not at the end of its test, so
+  // a failing assertion cannot leave warnings silenced for the rest of the file.
+  vi.restoreAllMocks();
   if (server) await new Promise<void>((r) => server!.close(() => r()));
   server = undefined;
   calls.length = 0;
@@ -120,7 +123,6 @@ describe('a tool with nothing to check against', () => {
     const mine = warn.mock.calls.filter((c) => c.join(' ').includes('nobody_declared_me'));
     expect(mine).toHaveLength(1);
     expect(mine[0].join(' ')).toContain('no input schema is declared for its route');
-    warn.mockRestore();
   });
 
   it('is called unchecked when the schema uses a keyword the check cannot reason about', async () => {
@@ -131,7 +133,94 @@ describe('a tool with nothing to check against', () => {
     const mine = warn.mock.calls.filter((c) => c.join(' ').includes('uncheckable_schema'));
     expect(mine).toHaveLength(1);
     expect(mine[0].join(' ')).toContain('anyOf');
-    warn.mockRestore();
+  });
+});
+
+describe('a call made in the wrong shape', () => {
+  it('refuses a flat call to a tool whose arguments are all optional, instead of running it on defaults', async () => {
+    // Over the http protocol a flat call's arguments ride the query string
+    // and the body is empty — which matches an all-optional tool as `{}`.
+    declareRouteTool('all_optional', {
+      type: 'object',
+      properties: { branch: { type: 'string' }, limit: { type: 'integer' } },
+      additionalProperties: false,
+    } as never);
+    const base = await mount('all_optional');
+    const res = await fetch(`${base}/api/agent/tools/all_optional?branch=main`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer k' },
+      body: '{}',
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { kind: string; error: string };
+    expect(body.kind).toBe('arguments-do-not-match');
+    expect(body.error).toContain('This tool takes its arguments under "body", not at the top level.');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses a flat call to a tool that requires a branch the same way, rather than as a missing branch', async () => {
+    declareRouteTool('flat_with_branch', {
+      type: 'object',
+      properties: { branch: { type: 'string' }, path: { type: 'string' } },
+      required: ['branch', 'path'],
+      additionalProperties: false,
+    } as never);
+    const base = await mount('flat_with_branch');
+    const res = await fetch(`${base}/api/agent/tools/flat_with_branch?branch=main&path=a.md`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer k' },
+      body: '{}',
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error.split('\n')[1]).toBe(
+      'This tool takes its arguments under "body", not at the top level.',
+    );
+  });
+});
+
+describe('a tool whose route does not end in its name', () => {
+  it('is found by its route and checked under its own name', async () => {
+    toolDef({
+      name: 'named_apart',
+      description: 'A tool hosted at a route of another name.',
+      path: '/api/things/personal',
+      inputs: { type: 'object', properties: {}, additionalProperties: false },
+    });
+    const toolHandler = createToolHandlerFactory(
+      async (auth: ToolAuth, abortSignal: AbortSignal): Promise<ToolContext> =>
+        ({ user: { id: 'u' }, scope: auth.scope, source: auth.source, abortSignal }) as unknown as ToolContext,
+    );
+    const app = express();
+    app.use(express.json());
+    // Mounted on a router, as the modules mount theirs: the handler sees only
+    // the part of the path below `/api`, and must still find the tool.
+    const router = express.Router();
+    router.post(
+      '/things/personal',
+      (req, _res, next) => {
+        req.toolAuth = { source: 'external', userId: 'u', scope: 'write' };
+        next();
+      },
+      toolHandler(async (args) => {
+        calls.push(args);
+        return { ok: true };
+      }),
+    );
+    app.use('/api', router);
+    server = await new Promise<HttpServer>((r) => {
+      const s = app.listen(0, '127.0.0.1', () => r(s));
+    });
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const res = await fetch(`${base}/api/things/personal`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ stray: 1 }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain('The arguments do not match the "named_apart" tool.');
+    expect(body.error).toContain('"stray" is not an argument of this tool.');
+    expect(calls).toHaveLength(0);
   });
 });
 

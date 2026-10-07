@@ -238,7 +238,7 @@ describe('the example name', () => {
       expect(tool.description, tool.name).not.toContain('(e.g. `hexis.');
     }
     expect(tools.find((t) => t.name === 'list_tools')!.description).toBe(
-      'List every UTCP tool currently registered, in TypeScript-accessible form for use inside `call_tool_chain`.',
+      'Call: list_tools({})\n\nList every UTCP tool currently registered, in TypeScript-accessible form for use inside `call_tool_chain`.',
     );
   });
 

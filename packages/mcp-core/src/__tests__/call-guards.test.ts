@@ -108,23 +108,33 @@ describe('installCallGuards — the argument check', () => {
     expect(callToolStreaming).not.toHaveBeenCalled();
   });
 
-  it('lets a call missing only `branch` through, so the refusal that names it answers', async () => {
+  it('holds a tool that is not hosted here to its own `branch` like any other argument', async () => {
+    // The platform's `branch-required` wording belongs to the platform's
+    // routes, which the guard leaves alone (see below). A connected tool that
+    // happens to declare a required `branch` gets its declaration enforced.
     const { client, callTool } = guardedClient([READ_FILE]);
-    await client.callTool('KB.read_file', { body: { path: 'a.md' } });
-    expect(callTool).toHaveBeenCalledWith('KB.read_file', { body: { path: 'a.md' } });
+    await expect(client.callTool('KB.read_file', { body: { path: 'a.md' } })).rejects.toThrow(
+      /"body\.branch" is required, and was not given\./,
+    );
+    expect(callTool).not.toHaveBeenCalled();
   });
 
   it('calls a tool whose schema cannot be used for checking, and logs the reason once', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const odd = utcpTool('NS.odd_schema_for_log_test', { anyOf: [{ type: 'object' }, { type: 'string' }] });
-    const { client, callTool } = guardedClient([odd]);
-    await client.callTool(odd.name, { whatever: true });
-    await client.callTool(odd.name, { whatever: true });
-    expect(callTool).toHaveBeenCalledTimes(2);
-    const mine = warn.mock.calls.filter((c) => String(c[0]).includes('odd_schema_for_log_test'));
-    expect(mine).toHaveLength(1);
-    expect(String(mine[0][0])).toContain('anyOf');
-    warn.mockRestore();
+    // Restored whatever happens below, so a failing assertion cannot leave
+    // `console.warn` silenced for every test after this one.
+    try {
+      const odd = utcpTool('NS.odd_schema_for_log_test', { anyOf: [{ type: 'object' }, { type: 'string' }] });
+      const { client, callTool } = guardedClient([odd]);
+      await client.callTool(odd.name, { whatever: true });
+      await client.callTool(odd.name, { whatever: true });
+      expect(callTool).toHaveBeenCalledTimes(2);
+      const mine = warn.mock.calls.filter((c) => String(c[0]).includes('odd_schema_for_log_test'));
+      expect(mine).toHaveLength(1);
+      expect(String(mine[0][0])).toContain('anyOf');
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('leaves a tool it has never heard of to the client\'s own not-found answer', async () => {

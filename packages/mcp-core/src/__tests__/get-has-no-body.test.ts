@@ -97,17 +97,27 @@ describe('a GET tool sends no request body', () => {
     });
     expect(await registerManual(client, manual)).toEqual({ ok: true });
 
+    // Both ways a tool is called: the plain call, and the streaming one the
+    // MCP dispatch (`dispatchToolCall`) really uses.
     await client.callTool('NS.search', { query: 'hello', body: { wrapped: 'arguments' } });
+    // Drained: the request is what is under test, not the answer.
+    const chunks: unknown[] = [];
+    for await (const chunk of client.callToolStreaming('NS.search', { query: 'hello', body: { wrapped: 'arguments' } })) {
+      chunks.push(chunk);
+    }
+    expect(chunks).toHaveLength(1);
 
-    expect(seen).toHaveLength(1);
-    expect(seen[0].method).toBe('GET');
-    expect(seen[0].body).toBe('');
-    expect(seen[0].hadContentLength).toBe(false);
-    // Not dropped — the argument travels as a query parameter, like every
-    // other argument of a GET tool.
-    expect(seen[0].query.query).toBe('hello');
-    expect(JSON.stringify(seen[0].query)).toMatch(/body/);
-    expect(JSON.stringify(seen[0].query)).toMatch(/arguments/);
+    expect(seen).toHaveLength(2);
+    for (const request of seen) {
+      expect(request.method).toBe('GET');
+      expect(request.body).toBe('');
+      expect(request.hadContentLength).toBe(false);
+      // Not dropped — the argument travels as a query parameter, like every
+      // other argument of a GET tool.
+      expect(request.query.query).toBe('hello');
+      expect(JSON.stringify(request.query)).toMatch(/body/);
+      expect(JSON.stringify(request.query)).toMatch(/arguments/);
+    }
   });
 });
 

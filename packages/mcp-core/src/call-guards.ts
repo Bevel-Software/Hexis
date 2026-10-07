@@ -89,6 +89,7 @@ interface RepositoryTool {
   name: string;
   description?: string;
   inputs?: unknown;
+  outputs?: unknown;
   tool_call_template?: { call_template_type?: unknown; url?: unknown };
 }
 
@@ -170,50 +171,67 @@ export async function argumentRefusal(
  * slip past them. Checking twice is free — the check is pure and compiled once.
  */
 export function installCallGuards(client: CodeModeUtcpClient): void {
-  // A client with no call methods cannot call a tool, so there is nothing to
+  // Each call method is guarded on its own: a client with only one of them
+  // can still call tools through it, and that one path is checked all the
+  // same. A client with neither cannot call a tool, so there is nothing to
   // guard. (A test double that only registers manuals is exactly that.)
-  if (typeof client.callTool !== 'function' || typeof client.callToolStreaming !== 'function') return;
-  if ((client.callTool as unknown as Record<symbol, unknown>)[GUARDED] === true) return;
+  const hasCallTool = typeof client.callTool === 'function';
+  const hasStreaming = typeof client.callToolStreaming === 'function';
+  if (!hasCallTool && !hasStreaming) return;
 
-  const callTool = client.callTool.bind(client);
-  const callToolStreaming = client.callToolStreaming.bind(client);
-
-  const protocolOf = async (toolName: string): Promise<string | undefined> => {
-    const tool = (await client.config.tool_repository.getTool(toolName)) as RepositoryTool | undefined;
-    const type = tool?.tool_call_template?.call_template_type;
-    return typeof type === 'string' ? type : undefined;
-  };
+  const repositoryTool = async (toolName: string): Promise<RepositoryTool | undefined> =>
+    (await client.config.tool_repository.getTool(toolName)) as RepositoryTool | undefined;
 
   const guardResult = async (toolName: string, value: unknown): Promise<void> => {
     if (typeof value !== 'string') return;
     const short = pageInsteadOfJson(value);
     if (!short) return;
-    if (!HTTP_PROTOCOLS.has((await protocolOf(toolName)) ?? '')) return;
+    const tool = await repositoryTool(toolName);
+    const type = tool?.tool_call_template?.call_template_type;
+    if (!HTTP_PROTOCOLS.has(typeof type === 'string' ? type : '')) return;
+    // A tool that DECLARES a string answer may answer with markup: by the
+    // time the value is here the transport has decoded it, and a JSON string
+    // that holds a page looks exactly like a page. Only a tool that promised
+    // structured data is held to it.
+    if (declaresStringOutput(tool?.outputs)) return;
     const bare = toolName.includes('.') ? toolName.slice(toolName.lastIndexOf('.') + 1) : toolName;
     throw new NotJsonError(`The "${bare}" tool answered with a page, not JSON: ${short}`);
   };
 
-  const guarded = async function guardedCallTool(toolName: string, toolArgs: Record<string, unknown>) {
-    const refusal = await argumentRefusal(client, toolName, toolArgs);
-    if (refusal) throw new ArgumentsDoNotMatchError(refusal);
-    const result = await callTool(toolName, toolArgs);
-    await guardResult(toolName, result);
-    return result;
-  };
-  (guarded as unknown as Record<symbol, unknown>)[GUARDED] = true;
-  client.callTool = guarded as typeof client.callTool;
+  if (hasCallTool && (client.callTool as unknown as Record<symbol, unknown>)[GUARDED] !== true) {
+    const callTool = client.callTool.bind(client);
+    const guarded = async function guardedCallTool(toolName: string, toolArgs: Record<string, unknown>) {
+      const refusal = await argumentRefusal(client, toolName, toolArgs);
+      if (refusal) throw new ArgumentsDoNotMatchError(refusal);
+      const result = await callTool(toolName, toolArgs);
+      await guardResult(toolName, result);
+      return result;
+    };
+    (guarded as unknown as Record<symbol, unknown>)[GUARDED] = true;
+    client.callTool = guarded as typeof client.callTool;
+  }
 
-  const guardedStreaming = async function* guardedCallToolStreaming(
-    toolName: string,
-    toolArgs: Record<string, unknown>,
-  ): AsyncGenerator<unknown, void, unknown> {
-    const refusal = await argumentRefusal(client, toolName, toolArgs);
-    if (refusal) throw new ArgumentsDoNotMatchError(refusal);
-    for await (const chunk of callToolStreaming(toolName, toolArgs)) {
-      await guardResult(toolName, chunk);
-      yield chunk;
-    }
-  };
-  (guardedStreaming as unknown as Record<symbol, unknown>)[GUARDED] = true;
-  client.callToolStreaming = guardedStreaming as typeof client.callToolStreaming;
+  if (hasStreaming && (client.callToolStreaming as unknown as Record<symbol, unknown>)[GUARDED] !== true) {
+    const callToolStreaming = client.callToolStreaming.bind(client);
+    const guardedStreaming = async function* guardedCallToolStreaming(
+      toolName: string,
+      toolArgs: Record<string, unknown>,
+    ): AsyncGenerator<unknown, void, unknown> {
+      const refusal = await argumentRefusal(client, toolName, toolArgs);
+      if (refusal) throw new ArgumentsDoNotMatchError(refusal);
+      for await (const chunk of callToolStreaming(toolName, toolArgs)) {
+        await guardResult(toolName, chunk);
+        yield chunk;
+      }
+    };
+    (guardedStreaming as unknown as Record<symbol, unknown>)[GUARDED] = true;
+    client.callToolStreaming = guardedStreaming as typeof client.callToolStreaming;
+  }
+}
+
+/** Does this output schema say the tool answers with a string? */
+function declaresStringOutput(outputs: unknown): boolean {
+  if (typeof outputs !== 'object' || outputs === null) return false;
+  const type = (outputs as { type?: unknown }).type;
+  return type === 'string' || (Array.isArray(type) && type.includes('string'));
 }

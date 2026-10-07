@@ -1,4 +1,7 @@
+import { logger } from '../../shared/logging.js';
 import type { JsonSchema } from '../tool-registry/tool.contract.js';
+
+const log = logger('tools');
 
 /**
  * What a route-hosted tool declared about its own arguments, so the route that
@@ -10,12 +13,17 @@ import type { JsonSchema } from '../tool-registry/tool.contract.js';
  * tool exactly as it does today and its route refuses a call that does not
  * match, with no code of its own.
  *
- * Keyed by TOOL NAME, which is also the last segment of the route each tool
- * hosts (`/api/agent/tools/<name>`) and is unique across the catalog — so the
+ * Keyed by the ROUTE the tool is hosted at (its `toolDef` `path`), so the
  * handler finds the schema from the request path alone, without every module
- * having to hand it over a second time.
+ * having to hand it over a second time — and a tool whose route does not end
+ * in its name (`my_plugin` is `POST /api/plugins/personal`) is found all
+ * the same. Also readable by tool name, for the tests.
  */
 export interface RouteToolSchemas {
+  /** The tool's name: what the refusal calls it. */
+  name: string;
+  /** The route it is hosted at, e.g. `/api/agent/tools/grep`. */
+  path: string;
   /**
    * The LOGICAL (flat) schema: what the handler receives as `args`, and what a
    * script calling `POST /api/agent/tools/<name>` sends as its JSON body. The
@@ -38,8 +46,25 @@ export interface RouteToolSchemas {
   refusesItself: ReadonlySet<string>;
 }
 
-/** Tool name → what it declared. One catalog per process, so one map. */
-const declared = new Map<string, RouteToolSchemas>();
+/**
+ * What every route-hosted tool declared, by the last segment of its route and
+ * then by the whole route. Process-wide, because the declarations are made by
+ * CODE — a module's or a deployment's `toolDef` — which is the same for every
+ * tenant a process serves: two tenants mount the same tools with the same
+ * arguments. A route re-declared with DIFFERENT arguments would break that, so
+ * it is logged (once per route) rather than passing silently.
+ */
+const byLastSegment = new Map<string, RouteToolSchemas[]>();
+/** Tool name → its declaration. */
+const byName = new Map<string, RouteToolSchemas>();
+/** Routes already reported as re-declared with other arguments. */
+const conflicting = new Set<string>();
+
+/** A route path as declarations and requests are compared: no query, no trailing slash. */
+function normalizePath(path: string): string {
+  const withoutQuery = path.split('?')[0] ?? '';
+  return withoutQuery.length > 1 ? withoutQuery.replace(/\/+$/, '') : withoutQuery;
+}
 
 /** Does this flat input schema require any argument at all? */
 function requiresAnything(inputs: JsonSchema): boolean {
@@ -58,7 +83,7 @@ function requiresAnything(inputs: JsonSchema): boolean {
  * would make the schema disagree with the tool, and a check must never refuse a
  * call the tool accepts.
  */
-function bodyEnvelope(inputs: JsonSchema): JsonSchema {
+export function bodyEnvelope(inputs: JsonSchema): JsonSchema {
   return {
     type: 'object',
     properties: { body: inputs },
@@ -84,15 +109,39 @@ export function declareRouteTool(
   name: string,
   inputs: JsonSchema,
   refusesItself: readonly string[] = [],
+  path = `/api/agent/tools/${name}`,
 ): JsonSchema {
   const wire = bodyEnvelope(inputs);
-  if (name) declared.set(name, { flat: inputs, wire, refusesItself: new Set(refusesItself) });
+  if (!name) return wire;
+  const route = normalizePath(path);
+  const entry: RouteToolSchemas = { name, path: route, flat: inputs, wire, refusesItself: new Set(refusesItself) };
+  const segment = routeToolName(route);
+  const same = (byLastSegment.get(segment) ?? []).filter((e) => e.path !== route);
+  const previous = (byLastSegment.get(segment) ?? []).find((e) => e.path === route);
+  if (previous && !conflicting.has(route) && JSON.stringify(previous.flat) !== JSON.stringify(inputs)) {
+    conflicting.add(route);
+    log.warn(`the route "${route}" was declared again with other arguments; calls are checked against the latest.`);
+  }
+  byLastSegment.set(segment, [...same, entry]);
+  byName.set(name, entry);
   return wire;
 }
 
 /** What the tool named `name` takes, or `undefined` when nothing declared it. */
 export function routeToolSchemas(name: string): RouteToolSchemas | undefined {
-  return declared.get(name);
+  return byName.get(name);
+}
+
+/**
+ * What the tool hosted at the route a request arrived on takes, or
+ * `undefined` when no tool is declared there. `requestPath` is the request's
+ * WHOLE path (`req.originalUrl`): it ends with the declared route whatever
+ * the app is mounted under — a tenant's loopback prefix included.
+ */
+export function routeToolSchemasForRequest(requestPath: string): RouteToolSchemas | undefined {
+  const path = normalizePath(requestPath);
+  const candidates = byLastSegment.get(routeToolName(path)) ?? [];
+  return candidates.find((e) => path === e.path || path.endsWith(e.path) || e.path.endsWith(path));
 }
 
 /**

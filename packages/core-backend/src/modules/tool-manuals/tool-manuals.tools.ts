@@ -85,13 +85,14 @@ export function registerToolManualsTools(
     // answers and the four things an agent cannot read off a field.
     //
     // It sits a few characters under `TOOL_DESCRIPTION_CAP` WITH the guide-first
-    // sentence the registry puts in front of it (`tool-registry/guide-first.ts`),
+    // sentence the registry puts in front of it (`tool-registry/guide-first.ts`)
+    // and the `Call:` line generated ahead of everything,
     // which is why every sentence here is the short form: the `hiddenTools`
     // clause and that opener both came out of the same budget, and what a
     // hidden tool's entry CONTAINS is on the field below rather than here.
     description:
-      'Configuration status of every `.tool` the current user can access: what each tool needs set up and what is ' +
-      'already configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER: a `.tool` it cannot ' +
+      'Configuration status of every `.tool` the current user can access: what each needs set up and what is ' +
+      'configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER: a `.tool` it cannot ' +
       'READ is absent, and every flag is the caller\'s own. ' +
       'Secret VALUES are never returned and can never be set through a tool: an admin enters them in the tool ' +
       'editor; users sign in on /connect. ' +
@@ -102,7 +103,7 @@ export function registerToolManualsTools(
       'The listing is the RELEASED catalog, built from the default branch only: a server or `.tool` you declared on a ' +
       'draft is not listed, callable or signed-in-able until it is merged. Pass `branch` (the draft you wrote the ' +
       'declaration on) and `onBranchOnly` names every tool declared there that the default branch does not serve ' +
-      'yet — open a change request and ask the user to merge it in the app to activate it.',
+      'yet — open a change request and ask the user to merge it.',
     path: '/api/agent/tools/list_tool_setup',
     inputs: {
       type: 'object',

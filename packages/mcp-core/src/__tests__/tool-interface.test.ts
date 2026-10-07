@@ -130,6 +130,98 @@ describe('describeInterface', () => {
   });
 });
 
+describe('callExample, for keys and arrays a bare placeholder would get wrong', () => {
+  it('quotes a required key that is not an identifier', () => {
+    const inputs = { type: 'object', properties: { 'odd-key': { type: 'string' } }, required: ['odd-key'] };
+    expect(callLine('NS.odd', inputs)).toBe('Call: NS.odd({ "odd-key": "..." })');
+  });
+
+  it('shows an array that must not be empty with one element, so the example satisfies its schema', () => {
+    const inputs = {
+      type: 'object',
+      properties: { tool_names: { type: 'array', items: { type: 'string' }, minItems: 1 } },
+      required: ['tool_names'],
+    };
+    expect(callLine('tools_info', inputs)).toBe('Call: tools_info({ tool_names: ["..."] })');
+    const compiled = compileCheck(inputs);
+    if (!compiled.checkable) throw new Error(compiled.reason);
+    expect(compiled.check({ tool_names: ['...'] })).toEqual([]);
+  });
+
+  it('shows a value the schema fixes as that value', () => {
+    const inputs = {
+      type: 'object',
+      properties: { mode: { type: 'string', enum: ['fast', 'slow'] }, kind: { const: 'x' } },
+      required: ['mode', 'kind'],
+    };
+    expect(callLine('NS.run', inputs)).toBe('Call: NS.run({ mode: "fast", kind: "x" })');
+  });
+});
+
+describe('compileCheck: the constraints a schema declares', () => {
+  const check = (inputs: unknown, args: Record<string, unknown>) => {
+    const compiled = compileCheck(inputs);
+    if (!compiled.checkable) throw new Error(`expected a checkable schema: ${compiled.reason}`);
+    return compiled.check(args);
+  };
+  const one = (prop: Record<string, unknown>) => ({ type: 'object', properties: { v: prop } });
+
+  it('refuses a string shorter or longer than declared, and one that misses its pattern', () => {
+    expect(check(one({ type: 'string', minLength: 1 }), { v: '' })).toEqual([
+      '"v" must be at least 1 character(s) long, but 0 was given.',
+    ]);
+    expect(check(one({ type: 'string', maxLength: 2 }), { v: 'abc' })).toEqual([
+      '"v" must be at most 2 character(s) long, but 3 was given.',
+    ]);
+    expect(check(one({ type: 'string', pattern: '^[a-z]+$' }), { v: 'A1' })).toEqual([
+      '"v" must match the pattern ^[a-z]+$, but "A1" was given.',
+    ]);
+    expect(check(one({ type: 'string', minLength: 1, maxLength: 3, pattern: '^[a-z]+$' }), { v: 'ab' })).toEqual([]);
+  });
+
+  it('refuses a value outside its enum or const', () => {
+    expect(check(one({ type: 'string', enum: ['a', 'b'] }), { v: 'c' })).toEqual([
+      '"v" must be one of "a", "b", but "c" was given.',
+    ]);
+    expect(check(one({ const: 3 }), { v: 4 })).toEqual(['"v" must be 3, but 4 was given.']);
+    expect(check(one({ type: 'string', enum: ['a', 'b'] }), { v: 'b' })).toEqual([]);
+  });
+
+  it('refuses a number outside its range', () => {
+    expect(check(one({ type: 'integer', minimum: 1 }), { v: 0 })).toEqual(['"v" must be at least 1, but 0 was given.']);
+    expect(check(one({ type: 'number', maximum: 1 }), { v: 1.5 })).toEqual(['"v" must be at most 1, but 1.5 was given.']);
+    expect(check(one({ type: 'number', exclusiveMinimum: 0 }), { v: 0 })).toEqual([
+      '"v" must be greater than 0, but 0 was given.',
+    ]);
+    expect(check(one({ type: 'integer', minimum: 1, maximum: 10 }), { v: 10 })).toEqual([]);
+  });
+
+  it('refuses an array of the wrong length, and an item that does not match its schema', () => {
+    expect(check(one({ type: 'array', minItems: 1 }), { v: [] })).toEqual([
+      '"v" must hold at least 1 item(s), but 0 was given.',
+    ]);
+    expect(check(one({ type: 'array', maxItems: 1 }), { v: [1, 2] })).toEqual([
+      '"v" must hold at most 1 item(s), but 2 was given.',
+    ]);
+    expect(check(one({ type: 'array', items: { type: 'string' } }), { v: ['a', 2] })).toEqual([
+      '"v[1]" must be string, but integer was given.',
+    ]);
+    expect(check(one({ type: 'array', items: { type: 'string', minLength: 1 } }), { v: ['a', ''] })).toEqual([
+      '"v[1]" must be at least 1 character(s) long, but 0 was given.',
+    ]);
+    expect(check(one({ type: 'array', items: { type: 'string' }, minItems: 1 }), { v: ['a'] })).toEqual([]);
+  });
+
+  it('names a nested constraint by its path', () => {
+    const inputs = platformTool({ type: 'object', properties: { name: { type: 'string', minLength: 1 } }, required: ['name'] });
+    expect(check(inputs, { body: { name: '' } })).toEqual(['"body.name" must be at least 1 character(s) long, but 0 was given.']);
+  });
+
+  it('does not assert `format`, which JSON Schema treats as an annotation', () => {
+    expect(check(one({ type: 'string', format: 'email' }), { v: 'not an email' })).toEqual([]);
+  });
+});
+
 describe('compileCheck', () => {
   const check = (inputs: unknown, args: Record<string, unknown>) => {
     const compiled = compileCheck(inputs);
@@ -161,16 +253,16 @@ describe('compileCheck', () => {
     ]);
   });
 
-  it('leaves a missing `branch` to the refusal that names it', () => {
-    expect(check(platformTool(READ_FILE_INPUTS), { body: { path: 'a.md' } })).toEqual([]);
-  });
-
-  it('says nothing about a `branch` of the wrong shape either — that refusal catches them all', () => {
-    // `branch-required` answers the empty string, the null, the number and the
-    // `["main"]` that stringifies back into a real branch name with ONE message.
-    for (const branch of ['', null, 42, ['main'], { name: 'main' }]) {
-      expect(check(platformTool(READ_FILE_INPUTS), { body: { path: 'a.md', branch } }), String(branch)).toEqual([]);
-    }
+  it('treats an argument named `branch` like any other: a connected tool declares its own', () => {
+    // The platform's `branch-required` refusal is applied by the platform's
+    // routes (`route-argument-check.ts`), not here: a connected server whose
+    // tool happens to name an argument `branch` gets its declaration enforced.
+    expect(check(platformTool(READ_FILE_INPUTS), { body: { path: 'a.md' } })).toEqual([
+      '"body.branch" is required, and was not given.',
+    ]);
+    expect(check(platformTool(READ_FILE_INPUTS), { body: { path: 'a.md', branch: 42 } })).toEqual([
+      '"body.branch" must be string, but integer was given.',
+    ]);
   });
 
   it('names the argument, the type expected and the type given', () => {

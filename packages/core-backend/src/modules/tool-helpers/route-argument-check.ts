@@ -8,7 +8,7 @@ import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.j
 import { branchProvided } from '../../shared/domain-errors.js';
 import { logger } from '../../shared/logging.js';
 import { ToolError } from './tool.contract.js';
-import { routeToolSchemas } from './route-tool-schemas.js';
+import { routeToolName, routeToolSchemasForRequest } from './route-tool-schemas.js';
 
 const log = logger('tools');
 
@@ -85,31 +85,37 @@ function argumentsCameAsQuery(flat: unknown, query: unknown): boolean {
  * mistake it exists to report.
  */
 export function argumentsRefusal(
-  toolName: string,
+  requestPath: string,
   args: Record<string, unknown>,
   query?: unknown,
 ): ToolError | null {
-  const schemas = routeToolSchemas(toolName);
-  if (!schemas) return noteUnchecked(toolName, 'no input schema is declared for its route');
+  const schemas = routeToolSchemasForRequest(requestPath);
+  if (!schemas) return noteUnchecked(routeToolName(requestPath), 'no input schema is declared for its route');
+  const toolName = schemas.name;
+  const check = checkFor(schemas.flat);
+  if (!check.checkable) return noteUnchecked(toolName, check.reason);
+  // The shape first, before anything may wave the call through: arguments
+  // passed flat reach this route as query parameters and leave the body
+  // empty, so a call whose arguments are all optional would otherwise MATCH —
+  // as `{}` — and run on defaults, silently dropping what was passed.
+  const cameAsQuery = argumentsCameAsQuery(schemas.flat, query);
   // A call that names no branch is answered by the refusal that NAMES it, and
   // that refusal comes first, exactly as it does today. It says what a branch
   // is and what to pass, and it is one message rather than a list; putting a
   // second fault ahead of it would replace an answer the caller can act on
   // with one it has to read twice. Whatever else is wrong with such a call is
   // reported on the next one, which at least names its workspace.
-  if (requiresBranch(schemas.flat) && !branchProvided(args.branch)) return null;
-  const check = checkFor(schemas.flat);
-  if (!check.checkable) return noteUnchecked(toolName, check.reason);
+  if (!cameAsQuery && requiresBranch(schemas.flat) && !branchProvided(args.branch)) return null;
   // A mismatch about an argument the tool refuses itself is dropped, so the
   // tool's own message — which says what that argument is FOR — is the one the
   // caller reads. Every mismatch line opens with the argument it is about.
   const mismatches = check
     .check(args)
     .filter((line) => !schemas.refusesItself.has(/^"([^".]+)"/.exec(line)?.[1] ?? ''));
-  if (mismatches.length === 0) return null;
   // The shape first, when that is what went wrong: the lines below (every
   // required argument missing) are its symptoms, not the mistake.
-  if (argumentsCameAsQuery(schemas.flat, query)) mismatches.unshift(ARGS_UNDER_BODY_LINE);
+  if (cameAsQuery) mismatches.unshift(ARGS_UNDER_BODY_LINE);
+  if (mismatches.length === 0) return null;
   // The namespace of the example is the one manual the whole catalog is served
   // as, so the line matches the `Call:` line at the top of this tool's own
   // description. A connection that renames the manual (the local stdio server

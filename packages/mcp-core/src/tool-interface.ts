@@ -76,10 +76,22 @@ function declaredTypes(schema: Dict): string[] | undefined {
 
 /** The placeholder value a type takes in the call example. */
 function placeholder(schema: Dict, depth: number): unknown {
+  // A value the schema fixes is shown as that value: `"..."` would be a call
+  // the check refuses.
+  if (schema.const !== undefined) return schema.const;
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) return schema.enum[0];
   const type = declaredTypes(schema)?.[0];
-  if (type === 'number' || type === 'integer') return 0;
+  if (type === 'number' || type === 'integer') return numberPlaceholder(schema, type === 'integer');
   if (type === 'boolean') return true;
-  if (type === 'array') return [];
+  if (type === 'array') {
+    // An array that must not be empty is shown with one element, so the
+    // example satisfies its own schema (`tools_info` takes `tool_names`
+    // with at least one name). Otherwise empty, the shortest array that works.
+    const minItems = typeof schema.minItems === 'number' ? schema.minItems : 0;
+    if (minItems < 1) return [];
+    const items = isDict(schema.items) ? schema.items : {};
+    return Array.from({ length: minItems }, () => placeholder(items, depth));
+  }
   if (type === 'object') {
     // An object whose own required arguments are known is shown with them, so
     // the `{ body: { branch, path } }` envelope is spelled out rather than
@@ -90,6 +102,20 @@ function placeholder(schema: Dict, depth: number): unknown {
   // overwhelming majority of such arguments are strings, and a `"..."` reads
   // as "put a value here" in a way `null` does not.
   return '...';
+}
+
+/** A number the schema's range admits: `0`, unless a bound rules it out. */
+function numberPlaceholder(schema: Dict, integer: boolean): number {
+  const { minimum, maximum, exclusiveMinimum, exclusiveMaximum } = schema;
+  if (typeof minimum === 'number' && minimum > 0) return integer ? Math.ceil(minimum) : minimum;
+  if (typeof exclusiveMinimum === 'number' && exclusiveMinimum >= 0) {
+    return integer ? Math.floor(exclusiveMinimum) + 1 : exclusiveMinimum + 1;
+  }
+  if (typeof maximum === 'number' && maximum < 0) return integer ? Math.floor(maximum) : maximum;
+  if (typeof exclusiveMaximum === 'number' && exclusiveMaximum <= 0) {
+    return integer ? Math.ceil(exclusiveMaximum) - 1 : exclusiveMaximum - 1;
+  }
+  return 0;
 }
 
 /**
@@ -112,16 +138,22 @@ export function exampleArguments(inputs: unknown, depth = 1): Dict {
   return args;
 }
 
+/** A key as JavaScript source: bare when it is an identifier, quoted (and escaped) when it is not, e.g. `"odd-key"`. */
+function renderKey(key: string): string {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? key : JSON.stringify(key);
+}
+
 /**
  * The placeholder tree as source an agent can paste: object keys bare, strings
  * double-quoted, one space inside the braces. Every value here was produced by
- * {@link placeholder}, so there is nothing to escape.
+ * {@link placeholder}; strings and keys that are not identifiers are quoted as
+ * JSON, so a value taken from an `enum` is escaped like any other.
  */
 function render(value: unknown): string {
-  if (typeof value === 'string') return `"${value}"`;
-  if (Array.isArray(value)) return '[]';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (Array.isArray(value)) return value.length === 0 ? '[]' : `[${value.map(render).join(', ')}]`;
   if (isDict(value)) {
-    const entries = Object.entries(value).map(([k, v]) => `${k}: ${render(v)}`);
+    const entries = Object.entries(value).map(([k, v]) => `${renderKey(k)}: ${render(v)}`);
     return entries.length === 0 ? '{}' : `{ ${entries.join(', ')} }`;
   }
   return String(value);
@@ -249,22 +281,6 @@ export type CompiledCheck =
   | { checkable: false; reason: string }
   | { checkable: true; check: (args: Dict) => string[] };
 
-/**
- * The one argument this check says NOTHING about: `branch` has its own named
- * refusal at the boundary (`branch-required`), and that refusal says more than
- * any generic mismatch would — it catches the empty string, the `null`, the
- * number, the `["main"]` that stringifies back into a real branch name, and the
- * literal `"undefined"` a client produces by interpolating a variable it never
- * set, all with one message. So nothing about `branch` is reported here: not
- * its absence, not its type. A call whose only fault is its `branch` reaches
- * that refusal and gets its existing wording.
- *
- * A tool may name further arguments it refuses itself; that is the tool's own
- * declaration, applied where the check is run (see `refusesItself` on
- * `ToolDefSpec`), not a list kept here.
- */
-const SELF_REFUSED = new Set(['branch']);
-
 /** A value's JSON type, as the schema's vocabulary names it. */
 function jsonTypeOf(value: unknown): string {
   if (value === null) return 'null';
@@ -327,7 +343,6 @@ export function compileCheck(inputs: unknown): CompiledCheck {
       mismatches.push(BODY_AT_TOP_LEVEL_LINE);
     }
     for (const name of required) {
-      if (SELF_REFUSED.has(name)) continue;
       if (args[name] === undefined) mismatches.push(`"${name}" is required, and was not given.`);
     }
     if (closed) {
@@ -338,17 +353,13 @@ export function compileCheck(inputs: unknown): CompiledCheck {
       }
     }
     for (const [name, raw] of Object.entries(properties)) {
-      if (SELF_REFUSED.has(name)) continue;
       const value = args[name];
       if (value === undefined) continue;
       const prop = isDict(raw) ? raw : {};
-      if (unsupportedKeyword(prop)) continue; // not ours to judge
-      const expected = declaredTypes(prop);
-      if (expected && !typeMatches(expected, value)) {
-        mismatches.push(
-          `"${name}" must be ${expected.join(' or ')}, but ${jsonTypeOf(value)} was given.`,
-        );
-        continue; // a wrong type cannot also be walked for its own arguments
+      const wrong = valueMismatch(name, prop, value);
+      if (wrong) {
+        mismatches.push(wrong);
+        continue; // a wrong value cannot also be walked for its own arguments
       }
       const inner = nested.get(name);
       if (inner?.checkable && isDict(value)) {
@@ -358,6 +369,107 @@ export function compileCheck(inputs: unknown): CompiledCheck {
     return mismatches;
   };
   return { checkable: true, check };
+}
+
+/**
+ * What is wrong with one argument's VALUE, or `null`: its type first, then
+ * the constraints the schema puts on a value of that type — `enum`/`const`,
+ * a string's length and `pattern`, a number's range, an array's length and
+ * each of its `items`. A call that breaks a declared constraint does not match
+ * the schema any more than one of the wrong type does, and is refused the same
+ * way rather than reaching the tool.
+ *
+ * `format` is an annotation (JSON Schema does not require it to be asserted)
+ * and is not checked; neither is a keyword this module does not know. A
+ * subschema using a combinator is not ours to judge and passes as it is.
+ */
+function valueMismatch(name: string, schema: Dict, value: unknown): string | null {
+  if (unsupportedKeyword(schema)) return null;
+  const expected = declaredTypes(schema);
+  if (expected && !typeMatches(expected, value)) {
+    return `"${name}" must be ${expected.join(' or ')}, but ${jsonTypeOf(value)} was given.`;
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.some((option) => sameJson(option, value))) {
+    return `"${name}" must be one of ${schema.enum.map((o) => JSON.stringify(o)).join(', ')}, but ${shortJson(value)} was given.`;
+  }
+  if (schema.const !== undefined && !sameJson(schema.const, value)) {
+    return `"${name}" must be ${JSON.stringify(schema.const)}, but ${shortJson(value)} was given.`;
+  }
+  if (typeof value === 'string') {
+    // Length in code points, as JSON Schema counts it, not UTF-16 units.
+    const length = [...value].length;
+    if (typeof schema.minLength === 'number' && length < schema.minLength) {
+      return `"${name}" must be at least ${schema.minLength} character(s) long, but ${length} was given.`;
+    }
+    if (typeof schema.maxLength === 'number' && length > schema.maxLength) {
+      return `"${name}" must be at most ${schema.maxLength} character(s) long, but ${length} was given.`;
+    }
+    const pattern = typeof schema.pattern === 'string' ? compiledPattern(schema.pattern) : null;
+    if (pattern && !pattern.test(value)) {
+      return `"${name}" must match the pattern ${schema.pattern as string}, but ${shortJson(value)} was given.`;
+    }
+  }
+  if (typeof value === 'number') {
+    const bound = numericBoundBroken(schema, value);
+    if (bound) return `"${name}" must be ${bound}, but ${value} was given.`;
+  }
+  if (Array.isArray(value)) {
+    if (typeof schema.minItems === 'number' && value.length < schema.minItems) {
+      return `"${name}" must hold at least ${schema.minItems} item(s), but ${value.length} was given.`;
+    }
+    if (typeof schema.maxItems === 'number' && value.length > schema.maxItems) {
+      return `"${name}" must hold at most ${schema.maxItems} item(s), but ${value.length} was given.`;
+    }
+    if (isDict(schema.items)) {
+      for (let i = 0; i < value.length; i++) {
+        const wrong = valueMismatch(`${name}[${i}]`, schema.items, value[i]);
+        if (wrong) return wrong; // the first bad item is enough to correct the call
+      }
+    }
+  }
+  return null;
+}
+
+/** The numeric bound `value` breaks, phrased for a refusal, or `null`. */
+function numericBoundBroken(schema: Dict, value: number): string | null {
+  const { minimum, maximum, exclusiveMinimum, exclusiveMaximum } = schema;
+  if (typeof minimum === 'number' && value < minimum) return `at least ${minimum}`;
+  if (typeof maximum === 'number' && value > maximum) return `at most ${maximum}`;
+  if (typeof exclusiveMinimum === 'number' && value <= exclusiveMinimum) return `greater than ${exclusiveMinimum}`;
+  if (typeof exclusiveMaximum === 'number' && value >= exclusiveMaximum) return `less than ${exclusiveMaximum}`;
+  return null;
+}
+
+/** Equality as JSON sees it, for `enum` and `const`. */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** A value as it appears in a refusal: JSON, cut short so one long argument cannot fill the message. */
+function shortJson(value: unknown): string {
+  const text = JSON.stringify(value) ?? String(value);
+  return text.length <= 60 ? text : `${text.slice(0, 59)}…`;
+}
+
+/** A `pattern` compiled once; one this runtime cannot compile is not checked rather than refused. */
+const patterns = new Map<string, RegExp | null>();
+function compiledPattern(source: string): RegExp | null {
+  if (!patterns.has(source)) {
+    let re: RegExp | null = null;
+    try {
+      re = new RegExp(source, 'u');
+    } catch {
+      try {
+        re = new RegExp(source);
+      } catch {
+        re = null;
+      }
+    }
+    patterns.set(source, re);
+  }
+  return patterns.get(source) ?? null;
 }
 
 /** A nested mismatch, named by its path (`"body.path" is required…`). */

@@ -1,3 +1,4 @@
+import { callLine } from '@bevel-software/platform-mcp-core';
 import express from 'express';
 import { describe, expect, it } from 'vitest';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
@@ -46,7 +47,10 @@ describe('the skill tools name the available skills within the description cap',
     // than guessed, so the names below are sized to fill it EXACTLY.
     const probe = await served([skill('x')]);
     const fixed = probe.list.description!.slice(GUIDE_FIRST_SENTENCE.length + 1, probe.list.description!.indexOf('Currently available skills: '));
-    const budget = TOOL_DESCRIPTION_CAP - GUIDE_FIRST_SENTENCE.length - 1 - fixed.length;
+    // And the `Call:` line a client is handed ahead of all of it, with the
+    // blank line after it: the example counts toward the cap too.
+    const call = callLine(`KNOWLEDGE_BASE.list_skills`, probe.list.inputs).length + 2;
+    const budget = TOOL_DESCRIPTION_CAP - call - GUIDE_FIRST_SENTENCE.length - 1 - fixed.length;
     const head = 'Currently available skills: '.length;
     // Twenty-one names, the LAST one short — shorter than the ", and 1 more…"
     // tail a cut before it would carry — and the first one sized so the

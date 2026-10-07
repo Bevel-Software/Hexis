@@ -77,7 +77,9 @@ export type MeasuredTool = Pick<UtcpTool, 'name' | 'description'> & { inputs?: u
 function splitServedCallLine(tool: MeasuredTool): { callChars: number; rest: string } {
   const { call, rest } = splitCallLine(tool.description ?? '');
   const line = call ?? callLine(`${EXTERNAL_KB_MANUAL_NAME}.${tool.name}`, tool.inputs);
-  return { callChars: line.length + 2, rest };
+  // The blank line after it only when something follows it.
+  const followed = rest !== '' || PREFIXED_TOOLS.has(tool.name);
+  return { callChars: line.length + (followed ? 2 : 0), rest };
 }
 
 /**

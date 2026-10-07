@@ -7,7 +7,6 @@ import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import type { ResolveToolContext } from './tool-context.js';
 import { argumentsRefusal } from './route-argument-check.js';
-import { routeToolName } from './route-tool-schemas.js';
 import { alwaysWritable, READ_ONLY_CODE, refuseWriteTool, type IWriteAccess } from '../write-access/write-access.js';
 import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
 
@@ -88,7 +87,9 @@ export function createToolHandlerFactory(resolve: ResolveToolContext, writeAcces
       // specific refusals each tool makes for itself (a missing `branch`,
       // above all) are left to the handler and keep their own wording — this
       // reports what the SCHEMA alone can settle.
-      const mismatch = argumentsRefusal(routeToolName(req.path), args, req.query);
+      // The WHOLE path: a module mounts its routes on a router, which sees only
+      // the part below its mount point.
+      const mismatch = argumentsRefusal(req.originalUrl, args, req.query);
       if (mismatch) {
         res.status(mismatch.status).json({ ...mismatch.details, error: mismatch.message });
         return;

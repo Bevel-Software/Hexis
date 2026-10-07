@@ -11,6 +11,7 @@ import {
   chainExample,
   type ChainExampleTool,
   runToolChain,
+  withCallExample,
 } from '@bevel-software/platform-mcp-core';
 import type { SpillStore } from '../workspace/spill-store.js';
 import { utcpNameToTsInterfaceName, findToolByName, AmbiguousToolNameError } from './code-mode-names.js';
@@ -177,7 +178,16 @@ export function createToolsInfoTool(client: CodeModeUtcpClient) {
         try {
           const found = await findToolByName(client, name);
           if (found) {
-            interfaces.push(client.toolToTypeScriptInterface(found.tool));
+            // With its `Call:` line, as on the MCP surface (`meta-tools.ts`):
+            // the chain's description tells the agent to call each tool as
+            // that line shows, and this is where it reads the tool. The
+            // repository's tool is not ours to edit, so a copy carries it.
+            interfaces.push(
+              client.toolToTypeScriptInterface({
+                ...found.tool,
+                description: withCallExample(found.tool.description, found.utcpName, found.tool.inputs),
+              }),
+            );
           } else {
             notFound.push(name);
           }
