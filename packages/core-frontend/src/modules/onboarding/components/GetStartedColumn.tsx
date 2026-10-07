@@ -1,14 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Check, X } from 'lucide-react';
+import { Check, Copy, X } from 'lucide-react';
 import {
   KNOWLEDGE_BASE_DIR,
   currentKbLayout,
   isPersonalPluginDir,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
-import { Button, IconButton } from '../../../shared/components';
+import { Button, IconButton, buttonClasses } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
+import { copyToClipboard } from '../../../lib/clipboard';
 import { useAdmin } from '../../admin/state/admin.context';
 import { listAccounts } from '../../auth/services/account.api';
 import { listPlugins, type PluginSummary } from '../../library/services/plugins.api';
@@ -19,6 +20,8 @@ import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
 import { useFileNav } from '../../workspace/routing/kb-routes';
 import { useOnboarding, useSetupChecklist } from '../state/onboarding';
+import { useAgentConnection } from '../state/agent-connection';
+import { FIRST_PAGE_PROMPT, chatGptPromptUrl, claudePromptUrl } from '../first-page-prompt';
 import { useInviteDialog } from '../state/invite-dialog.context';
 import { WELCOME_PATH } from '../paths';
 
@@ -31,12 +34,21 @@ const GUIDE_FILE = 'How to get started.md';
  */
 const NEW_PAGE_CONTENT = '# Untitled\n\n';
 
+interface SetupAction {
+  label: string;
+  onClick(): void;
+  primary?: boolean;
+  disabled?: boolean;
+}
+
 interface SetupItem {
   id: string;
   title: string;
   done: boolean;
   hint?: string;
-  action?: { label: string; onClick(): void; primary?: boolean; disabled?: boolean };
+  action?: SetupAction;
+  /** Anything the step offers beyond one button, under it. */
+  extra?: ReactNode;
   /** Why the step's action just failed, said on the step itself. */
   error?: string | null;
 }
@@ -176,6 +188,22 @@ export function GetStartedColumn() {
   const { openWorkspacePath } = useFileNav();
   const invite = useInviteDialog();
 
+  /**
+   * Whether the person's agent has reached the platform — asked ONCE here
+   * (the welcome page is the one that polls), so someone who connected
+   * without ever opening that page still gets the tick. Connecting is what
+   * the onboarding asked for, so it concludes it too: the pill goes. Once
+   * per mount, for the reason the welcome page gives.
+   */
+  const agent = useAgentConnection({ enabled: !checklist.dismissed });
+  const concluded = useRef(false);
+  const { showPill, markDone } = onboarding;
+  useEffect(() => {
+    if (!agent.connected || !showPill || concluded.current) return;
+    concluded.current = true;
+    markDone();
+  }, [agent.connected, showPill, markDone]);
+
   const onWelcome = pathname === WELCOME_PATH;
   const askServer = isAdmin && !checklist.dismissed;
   const plugin = useTeamPluginExists(askServer, isLibraryLocation(pathname) ? pathname : '');
@@ -227,7 +255,7 @@ export function GetStartedColumn() {
   items.push({
     id: 'agent',
     title: 'Connect your agent',
-    done: !onboarding.showPill,
+    done: !showPill || agent.connected,
     hint: 'So it can read and write this knowledge base.',
     action: { label: 'Connect', onClick: () => navigate(WELCOME_PATH), primary: true },
   });
@@ -246,18 +274,34 @@ export function GetStartedColumn() {
       },
     });
   }
+  const newPageAction: SetupAction | undefined = knowledgeRoot
+    ? {
+        label: newPage.busy ? 'Creating…' : 'New page',
+        onClick: () => void createFirstPage(),
+        disabled: newPage.busy,
+      }
+    : undefined;
+  /**
+   * With an agent connected, the quickest first page is one it writes: a new
+   * chat with the request already typed, and the tick arrives by itself when
+   * the page lands in the tree. Before then that button would open a chat
+   * that cannot reach this knowledge base, so the step says what connecting
+   * would add instead.
+   */
   items.push({
     id: 'page',
     title: 'Write your first page',
     done: knowledgeRoot !== null && guidePath !== null && hasOwnContent(findEntry(tree, knowledgeRoot), guidePath),
-    hint: 'Start one here, or drop files into the file tree.',
-    action: knowledgeRoot
+    ...(agent.connected
       ? {
-          label: newPage.busy ? 'Creating…' : 'New page',
-          onClick: () => void createFirstPage(),
-          disabled: newPage.busy,
+          hint: 'Have your agent write it, or start one here.',
+          extra: <FirstPagePromptActions newPage={newPageAction} />,
         }
-      : undefined,
+      : {
+          hint: 'Start one here, or drop files into the file tree.',
+          action: newPageAction,
+          extra: <span className="text-meta text-ink-faint">Connect your agent and it can write pages for you.</span>,
+        }),
     error: newPage.error,
   });
   if (isAdmin) {
@@ -338,7 +382,7 @@ export function GetStartedColumn() {
                 {item.title}
                 {item.done && <span className="sr-only"> (done)</span>}
               </div>
-              {!item.done && (item.hint || item.action) && (
+              {!item.done && (item.hint || item.action || item.extra) && (
                 <div className="mt-1 grid justify-items-start gap-2 text-detail text-ink-muted">
                   {item.hint && <span>{item.hint}</span>}
                   {item.action && (
@@ -351,6 +395,7 @@ export function GetStartedColumn() {
                       {item.action.label}
                     </Button>
                   )}
+                  {item.extra}
                   {item.error && (
                     <span role="alert" className="text-danger">
                       {item.error}
@@ -363,5 +408,82 @@ export function GetStartedColumn() {
         ))}
       </ul>
     </aside>
+  );
+}
+
+/**
+ * "Ask Claude to write it", and the quieter ways to the same prompt.
+ *
+ * Real links rather than buttons that call `window.open`: a new tab is what
+ * they are, so they should say so to the browser — middle-click, "copy link",
+ * and the status-bar preview of where they go all work. ChatGPT is a quiet
+ * second because the step is phrased for one agent, and copying is there for
+ * every other client, which has no link to prefill.
+ *
+ * Copying answers on the button itself and in a live region; there is no
+ * toast to fall back on out here (toasts speak inside the Library only).
+ */
+function FirstPagePromptActions({ newPage }: { newPage?: SetupAction }) {
+  const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
+  const resetTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(resetTimer.current), []);
+
+  async function copy() {
+    const ok = await copyToClipboard(FIRST_PAGE_PROMPT);
+    window.clearTimeout(resetTimer.current);
+    setCopied(ok ? 'ok' : 'fail');
+    resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
+  }
+
+  return (
+    <div className="grid justify-items-start gap-1.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <a
+          href={claudePromptUrl(FIRST_PAGE_PROMPT)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={buttonClasses({ variant: 'primary', size: 'sm' })}
+        >
+          Ask Claude to write it
+        </a>
+        {newPage && (
+          <Button size="sm" variant="outline" onClick={newPage.onClick} disabled={newPage.disabled}>
+            {newPage.label}
+          </Button>
+        )}
+      </div>
+      <div className="flex items-center gap-1 text-meta">
+        <a
+          href={chatGptPromptUrl(FIRST_PAGE_PROMPT)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-ink-muted transition-colors hover:text-ink"
+        >
+          Open in ChatGPT
+        </a>
+        <span aria-hidden className="text-ink-faint">
+          ·
+        </span>
+        <Button
+          size="tiny"
+          variant="quiet"
+          onClick={() => void copy()}
+          leadingIcon={
+            copied === 'ok' ? (
+              <Check size={12} aria-hidden className="text-ok" />
+            ) : copied === 'fail' ? (
+              <X size={12} aria-hidden className="text-danger" />
+            ) : (
+              <Copy size={12} aria-hidden />
+            )
+          }
+        >
+          Copy prompt
+        </Button>
+        <span role="status" aria-live="polite" className="sr-only">
+          {copied === 'ok' ? 'Prompt copied' : copied === 'fail' ? 'Couldn’t copy the prompt' : ''}
+        </span>
+      </div>
+    </div>
   );
 }

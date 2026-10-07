@@ -14,6 +14,8 @@ import { resetOnboardingForTests } from '../state/onboarding';
 import { WELCOME_PATH } from '../paths';
 import type { AccountSummary } from '../../auth/services/account.api';
 import type { PluginSummary } from '../../library/services/plugins.api';
+import type { AgentConnection } from '../services/agent-connection.api';
+import { FIRST_PAGE_PROMPT, chatGptPromptUrl, claudePromptUrl } from '../first-page-prompt';
 
 /**
  * The "Get set up" column: every tick is derived from state the app already
@@ -21,13 +23,18 @@ import type { PluginSummary } from '../../library/services/plugins.api';
  * out of the way — on the welcome page, when narrow, when done, when closed.
  */
 
-const { listAccountsMock, listPluginsMock, openWorkspacePathMock } = vi.hoisted(() => ({
-  listAccountsMock: vi.fn<() => Promise<AccountSummary[]>>(),
-  listPluginsMock: vi.fn<() => Promise<PluginSummary[]>>(),
-  openWorkspacePathMock: vi.fn<(path: string, options?: { edit?: boolean }) => void>(),
-}));
+const { listAccountsMock, listPluginsMock, openWorkspacePathMock, fetchAgentConnectionMock, authFetchMock } =
+  vi.hoisted(() => ({
+    listAccountsMock: vi.fn<() => Promise<AccountSummary[]>>(),
+    listPluginsMock: vi.fn<() => Promise<PluginSummary[]>>(),
+    openWorkspacePathMock: vi.fn<(path: string, options?: { edit?: boolean }) => void>(),
+    fetchAgentConnectionMock: vi.fn<() => Promise<AgentConnection>>(),
+    // The onboarding write (`markDone`) is the only thing that reaches it.
+    authFetchMock: vi.fn(async () => ({ ok: true, status: 200 }) as Response),
+  }));
 
-vi.mock('../../../lib/api', () => ({ authFetch: vi.fn() }));
+vi.mock('../../../lib/api', () => ({ authFetch: authFetchMock }));
+vi.mock('../services/agent-connection.api', () => ({ fetchAgentConnection: fetchAgentConnectionMock }));
 vi.mock('../../auth/services/account.api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../auth/services/account.api')>()),
   listAccounts: listAccountsMock,
@@ -180,7 +187,13 @@ beforeEach(() => {
   listAccountsMock.mockReset().mockResolvedValue([account('juan@bevel.software')]);
   listPluginsMock.mockReset().mockResolvedValue([]);
   openWorkspacePathMock.mockReset();
+  fetchAgentConnectionMock.mockReset().mockResolvedValue({ connected: false });
+  authFetchMock.mockClear();
 });
+
+/** Calls to the onboarding write — the one `markDone` makes. */
+const doneWrites = () =>
+  authFetchMock.mock.calls.filter((c) => (c as unknown[])[0] === '/api/auth/onboarding-done').length;
 
 describe('GetStartedColumn: what a member sees', () => {
   it('lists the four member steps, hides the admin-only ones, and asks the server nothing', () => {
@@ -292,6 +305,106 @@ describe('GetStartedColumn: what a member sees', () => {
     expect(within(row('Write your first page')!).getByRole('button', { name: 'New page' })).toBeEnabled();
     expect(openWorkspacePathMock).not.toHaveBeenCalled();
     expect(isDone('Write your first page')).toBe(false);
+  });
+});
+
+/**
+ * The agent-connection answer, asked once: it ticks "Connect your agent" for
+ * someone who connected without ever opening the welcome page (and concludes
+ * the onboarding for them), and it is what puts the one-click prompt on
+ * "Write your first page".
+ */
+describe('GetStartedColumn: a connected agent', () => {
+  it('ticks "Connect your agent" from the endpoint, and concludes the onboarding once', async () => {
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+    mount();
+    await waitFor(() => expect(isDone('Connect your agent')).toBe(true));
+    expect(doneWrites()).toBe(1);
+    await act(async () => {});
+    expect(doneWrites()).toBe(1);
+  });
+
+  it('asks once, not on a timer', async () => {
+    vi.useFakeTimers();
+    try {
+      mount();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
+      expect(isDone('Connect your agent')).toBe(false);
+      expect(doneWrites()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not conclude again for an account the server already concluded', async () => {
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+    mount({ onboardingDone: true });
+    await waitFor(() => expect(row('Write your first page')).not.toBeNull());
+    await act(async () => {});
+    expect(doneWrites()).toBe(0);
+  });
+
+  it('asks nothing once the column was closed', async () => {
+    window.localStorage.setItem('bevel.onboarding.setupDismissed.juan@bevel.software', '1');
+    mount();
+    await act(async () => {});
+    expect(fetchAgentConnectionMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the one-click prompt out of "Write your first page" until an agent is connected', async () => {
+    mount();
+    await act(async () => {});
+    const page = row('Write your first page')!;
+    expect(within(page).queryByRole('link', { name: 'Ask Claude to write it' })).not.toBeInTheDocument();
+    expect(within(page).queryByRole('link', { name: 'Open in ChatGPT' })).not.toBeInTheDocument();
+    expect(within(page).queryByRole('button', { name: 'Copy prompt' })).not.toBeInTheDocument();
+    expect(within(page).getByRole('button', { name: 'New page' })).toBeInTheDocument();
+    expect(within(page).getByText('Connect your agent and it can write pages for you.')).toBeInTheDocument();
+  });
+
+  it('offers "Ask Claude to write it" first once connected, keeping New page beside it', async () => {
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+    mount();
+    const ask = await within(row('Write your first page')!).findByRole('link', { name: 'Ask Claude to write it' });
+    expect(ask).toHaveAttribute('href', claudePromptUrl(FIRST_PAGE_PROMPT));
+    expect(ask).toHaveAttribute('target', '_blank');
+    expect(ask).toHaveAttribute('rel', 'noopener noreferrer');
+
+    const page = row('Write your first page')!;
+    const chatGpt = within(page).getByRole('link', { name: 'Open in ChatGPT' });
+    expect(chatGpt).toHaveAttribute('href', chatGptPromptUrl(FIRST_PAGE_PROMPT));
+    expect(chatGpt).toHaveAttribute('target', '_blank');
+    expect(chatGpt).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(within(page).getByRole('button', { name: 'New page' })).toBeInTheDocument();
+    expect(within(page).queryByText('Connect your agent and it can write pages for you.')).not.toBeInTheDocument();
+  });
+
+  it('copies the prompt and says so', async () => {
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    try {
+      mount();
+      const copy = await within(row('Write your first page')!).findByRole('button', { name: 'Copy prompt' });
+      await userEvent.click(copy);
+      expect(writeText).toHaveBeenCalledWith(FIRST_PAGE_PROMPT);
+      expect(within(row('Write your first page')!).getByRole('status')).toHaveTextContent('Prompt copied');
+    } finally {
+      if (original) Object.defineProperty(navigator, 'clipboard', original);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+
+  it('ticks the page step by itself when the agent’s page lands, whoever wrote it', async () => {
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+    mount({ files: [...STARTER_TREE, `${KB}/KnowledgeBase/About us.md`] });
+    await waitFor(() => expect(isDone('Connect your agent')).toBe(true));
+    expect(isDone('Write your first page')).toBe(true);
+    expect(screen.queryByRole('link', { name: 'Ask Claude to write it' })).not.toBeInTheDocument();
   });
 });
 
