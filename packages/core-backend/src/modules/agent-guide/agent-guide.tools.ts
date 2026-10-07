@@ -43,13 +43,24 @@ export function registerAgentGuideTool(
       "` at the KB root, after the knowledge base's own " +
       AGENT_GUIDE_FILE +
       ` when it has one. Sections: ${sectionList}.`;
-    // Every id, always: an id a client cut off the end is a section an agent
-    // cannot ask for. The titles are the part that gives way — a distribution
-    // that adds enough sections to push the description past the cap gets the
-    // ids alone, which is what the `section` argument takes anyway.
+    // The description stays under the cap WHATEVER a distribution adds, in
+    // three steps: every id with its title; every id alone; as many ids as
+    // fit and a count of the rest. An id a client cut off the end would be a
+    // section an agent cannot ask for — so nothing is ever cut: the one
+    // complete list of sections is `sections` on the whole-guide response,
+    // which the description names when it cannot carry them all itself.
     const titled = describe(list.map((s) => `\`${s.id}\` (${s.title})`).join(', '));
-    const description =
-      titled.length <= TOOL_DESCRIPTION_CAP ? titled : describe(list.map((s) => `\`${s.id}\``).join(', '));
+    const ids = list.map((s) => `\`${s.id}\``);
+    const counted = (shown: number) =>
+      describe(
+        shown === 0
+          ? `${ids.length}, named under \`sections\` in the whole-guide response`
+          : [...ids.slice(0, shown), `and ${ids.length - shown} more, all named under \`sections\` in the whole-guide response`].join(', '),
+      );
+    let description = titled.length <= TOOL_DESCRIPTION_CAP ? titled : describe(ids.join(', '));
+    for (let shown = ids.length; description.length > TOOL_DESCRIPTION_CAP && shown > 0; shown--) {
+      description = counted(shown - 1);
+    }
     return toolDef({
       name: GET_AGENT_GUIDE_TOOL,
       description,
@@ -61,7 +72,7 @@ export function registerAgentGuideTool(
             type: 'string',
             description:
               'Optional: the id of one section to read instead of the whole guide (the ids are listed in this ' +
-              'description). Omit it for the whole guide.',
+              'description, and every one under `sections` in the whole-guide response). Omit it for the whole guide.',
           },
         },
         additionalProperties: false,
@@ -70,6 +81,15 @@ export function registerAgentGuideTool(
         type: 'object',
         properties: {
           guide: { type: 'string', description: 'The guide, or the one section asked for, as markdown.' },
+          sections: {
+            type: 'array',
+            description: 'Without `section`: every section of the guide, in order, by id and heading — the complete list.',
+            items: {
+              type: 'object',
+              properties: { id: { type: 'string' }, title: { type: 'string' } },
+              required: ['id', 'title'],
+            },
+          },
           section: { type: 'string', description: 'With `section`: the id of the section returned.' },
           title: { type: 'string', description: 'With `section`: its heading.' },
         },
@@ -87,7 +107,7 @@ export function registerAgentGuideTool(
     toolHandler(async (args) => {
       const list = await sections();
       const wanted = typeof args.section === 'string' ? args.section.trim() : '';
-      if (!wanted) return { guide: joinGuideSections(list) };
+      if (!wanted) return { guide: joinGuideSections(list), sections: list.map((s) => ({ id: s.id, title: s.title })) };
       const one = list.find((s) => s.id === wanted);
       if (!one) {
         throw new ToolError(

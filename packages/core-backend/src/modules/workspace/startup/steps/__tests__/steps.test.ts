@@ -905,10 +905,14 @@ describe('buildSeedTree', () => {
     const stale = path.join(root, 'custom-template-stale-guide');
     await fs.cp(TEMPLATE_DIR, stale, { recursive: true });
     await fs.writeFile(path.join(stale, 'AGENTS.md'), MANAGED_GUIDE_COPY, 'utf8');
+    // Under a name a deployment once gave the guide, too: the copy is known
+    // by its header, under any root Markdown name, as the first start knows it.
+    await fs.writeFile(path.join(stale, 'OLD-GUIDE.md'), MANAGED_GUIDE_COPY, 'utf8');
     const staleDest = path.join(root, 'seed-dest-stale-guide');
     await fs.mkdir(staleDest, { recursive: true });
     await buildSeedTree(new NodeFs(), stale, [], ['admin@example.com'], kbContext)(staleDest);
     expect(await exists(staleDest, 'AGENTS.md')).toBe(false);
+    expect(await exists(staleDest, 'OLD-GUIDE.md')).toBe(false);
 
     // A template whose root AGENTS.md is the organisation's own text is content,
     // and is seeded as the content it is.

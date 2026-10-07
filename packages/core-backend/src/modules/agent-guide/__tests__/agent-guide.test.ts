@@ -142,10 +142,19 @@ describe('the guide is composed from the platform\'s sections', () => {
     expect(seen).toEqual(['Docs', 'AGENTS.md']);
   });
 
-  it('refuses a hook that drops the shared file rules, which every file tool points at', async () => {
+  it('refuses a hook that drops or empties the shared file rules, which every file tool points at', async () => {
     await expect(
       composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => sections.filter((s) => s.id !== WORKING_WITH_FILES_SECTION_ID)),
     ).rejects.toThrow(/dropped the "working-with-files" section/);
+    // Handing it back with nothing in it is the same loss: judged on the
+    // text that would be served, so whitespace counts as nothing.
+    for (const body of ['', '  \n\n']) {
+      await expect(
+        composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) =>
+          sections.map((s) => (s.id === WORKING_WITH_FILES_SECTION_ID ? { id: s.id, body } : s)),
+        ),
+      ).rejects.toThrow(/emptied the "working-with-files" section/);
+    }
     // Replacing it under the same id is the hook's right.
     const replaced = await composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) =>
       sections.map((s) => (s.id === WORKING_WITH_FILES_SECTION_ID ? { id: s.id, body: '## Working with files\n\nOurs.\n' } : s)),

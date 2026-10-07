@@ -4207,6 +4207,25 @@ describe('agent read/write hooks', () => {
     expect(writes).toEqual([]);
   });
 
+  it("file_stat at the guide's name tells the read hook once when it reads the organisation's own file, and never for the guide alone", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    record();
+    // Nothing of the organisation's there: the guide is everyone's and no
+    // file is read, so the hook hears nothing.
+    expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads).toEqual([]);
+    // The organisation's own file: telling it from a stale copy reads it,
+    // and the hook hears of that read exactly once — as it does of a read_file.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`]);
+    // A stale copy of the guide is read to be recognised, so it is heard of too.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Knowledge base\n\n> **This file is managed by the platform.** Stale.\n');
+    expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`, `${KB_DIR}/AGENTS.md`]);
+  });
+
   it('the read hook covers list_files, file_stat, grep, delete_file and delete_folder', async () => {
     const base = await start();
     record();

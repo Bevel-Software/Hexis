@@ -1,6 +1,5 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { LEGACY_AGENTS_FILE } from '@bevel-software/platform-shared';
 import type { IFsProbe, ITreeWalker } from '../../../../shared/fs.contract.js';
 import type { KbContext } from '../../../../shared/kb-context.js';
 import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
@@ -147,10 +146,12 @@ class KbSeedTree {
     // code (see `modules/agent-guide`). A template that still carries one at
     // the root — a distribution's own, forked while the guide was a file — is
     // not seeded, or the first start would remove what the seed just wrote.
-    // Recognised by the platform's own header, so a template whose root
-    // `AGENTS.md` is the organisation's own text is seeded as the content it
-    // is.
-    if (relDir === '' && (name === LEGACY_AGENTS_FILE || name === this.kb.layout.agentsFile)) {
+    // Recognised by the platform's own header under ANY root Markdown name —
+    // the guide was written under a name a deployment chose, and a template
+    // forked then still carries it there — so a template whose root `.md` is
+    // the organisation's own text is seeded as the content it is. The same
+    // judgement the first start makes when it retires copies.
+    if (relDir === '' && name.endsWith('.md')) {
       // Judged the way the copy below judges: a binary under the name is
       // spotted from its first bytes and never read whole.
       const source = await this.templates.pathOf(name);

@@ -64,8 +64,10 @@ export const TOOL_PREFIX_LINE = "This organisation's knowledge base. Search it b
  * `header` field carries and what the card shows as fixed and not editable;
  * the admin's preamble follows it.
  *
- * A FUNCTION of the layout, because the shared rules name the guide by the
- * name a deployment saved for it, which is a deployment setting.
+ * A FUNCTION of the layout, because the shared rules name the platform files
+ * by the root names a deployment chose (`Skills/`, `Plugins/`), which are
+ * deployment settings. The guide's name is not one of them: it is `AGENTS.md`
+ * everywhere.
  */
 export function platformInstructions(layout: KbLayout): string {
   return `${PLATFORM_HEADER}\n\n${sharedFileRulesSection(layout)}`;

@@ -4,7 +4,10 @@ Each plugin folder holds `*.tool` files — reusable **tool manuals** that let a
 the skills that use it. The same integration may exist in several plugins as
 separate files (`Everyone/…/serper.tool` and `Finance/…/serper.tool`), each
 with its own credentials and access rule — a plugin is a folder, not a registry
-of unique names. Remember: `.tool` files are for `http` and `inline` manuals
+of unique names. The manual's **id** is, though: two files that resolve to
+the same id (an explicit `id`, else `name`, else the file name) collide and
+the second is refused, so give each copy its own `id` (`serper_everyone`,
+`serper_finance`). Remember: `.tool` files are for `http` and `inline` manuals
 only; MCP servers belong in `mcp.json`.
 
 A `.tool` file is JSON or YAML. Its `type` decides how tools are discovered:

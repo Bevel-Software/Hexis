@@ -165,14 +165,15 @@ describe('no Hexis tool description is long enough to be cut', () => {
     // The sentence is in the description the registry lists, so the catalog
     // measured here is the catalog a client gets, sentence included.
     const tools = await hexisTools();
-    const opened = tools.filter((t) => t.description?.startsWith(`${GUIDE_FIRST_SENTENCE} `));
+    // ONE predicate for both halves, so no description falls between them: a
+    // tool whose own description is empty is served the sentence alone.
+    const opensWithGuide = (t: UtcpTool) => t.description?.startsWith(GUIDE_FIRST_SENTENCE) === true;
+    const opened = tools.filter(opensWithGuide);
     expect(opened.length).toBeGreaterThan(0);
     // The guide's own tool is the one exception: it is what the sentence
     // points at, and it is in the catalog measured here so the cap holds on
     // it too (see the first test).
-    expect(tools.filter((t) => !t.description?.startsWith(GUIDE_FIRST_SENTENCE)).map((t) => t.name)).toEqual([
-      GET_AGENT_GUIDE_TOOL,
-    ]);
+    expect(tools.filter((t) => !opensWithGuide(t)).map((t) => t.name)).toEqual([GET_AGENT_GUIDE_TOOL]);
     for (const tool of opened) {
       expect(clientVisibleLength(tool), tool.name).toBeLessThanOrEqual(TOOL_DESCRIPTION_CAP);
     }

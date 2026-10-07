@@ -223,11 +223,10 @@ function platformFileList(layout: KbLayout): string {
  * organisation's own conventions file comes with it, and to read both first.
  *
  * The guide is read by name at the repository root, where coding agents look
- * for an `AGENTS.md` by convention, and `get_agent_guide` returns it alone. A
- * deployment that once gave the guide a name of its own still answers to that
- * name, so the rule names it when it differs. `CLAUDE.md` is named as a
- * fallback because a knowledge base seeded before the rename may still carry
- * one its people edited.
+ * for an `AGENTS.md` by convention, and `get_agent_guide` returns it alone.
+ * One name on every deployment, so the rule takes no layout. `CLAUDE.md` is
+ * named as a fallback because a knowledge base seeded before the rename may
+ * still carry one its people edited.
  */
 function conventionsRule(): string {
   return (
