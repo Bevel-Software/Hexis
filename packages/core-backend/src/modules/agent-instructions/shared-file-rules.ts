@@ -174,12 +174,11 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
         'A folder moved or deleted takes its own along, in one change. delete_file deletes a nested `access.md` for ' +
         "whoever may write it (its folder then follows its parent's rules) and refuses `.bevelignore`; the repository " +
         "root's `access.md` and `roles.yaml` are deleted by nobody: \"<name> is the repository's own file and cannot be " +
-        'deleted." A platform folder (the root ' +
-        `or a reserved one such as \`${layout.knowledgeBaseDir}/\`), git metadata, and creating a platform file or folder ` +
-        'at a destination are refused, and so is a path through a symbolic link: links are never followed. On a ' +
-        'protected branch you must be able to write all a call touches — for a folder, every file under it, at its old ' +
-        'and new path. ' +
-        'file_stat reports `managed`, `movable` and `deletable` before the call.',
+        'deleted." A platform folder (the root, or a reserved one like ' +
+        `\`${layout.knowledgeBaseDir}/\`), git metadata, and making a platform file or folder at a destination are ` +
+        'refused; so is a path that is or crosses a symlink: links are never followed or removed. On a protected ' +
+        'branch you must be able to write all a call touches — for a folder, every file under it, at its old and new ' +
+        'path. file_stat reports `managed`, `movable` and `deletable` up front.',
     },
     {
       id: 'refused-for-permissions',

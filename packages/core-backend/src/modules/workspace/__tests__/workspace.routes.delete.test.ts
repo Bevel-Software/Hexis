@@ -15,6 +15,7 @@ import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
 import type { WorkspaceService } from '../workspace.service.js';
+import { AccessDeniedError } from '../../access-model/access-errors.js';
 
 const stubCreatorAccess: ICreatorAccess = {
   planForCreate: async () => null,
@@ -46,6 +47,8 @@ interface Harness {
   repoDir: string;
   /** Exposed so a test can assert the PATH the route handed the service. */
   deleteFileMock: ReturnType<typeof vi.fn>;
+  /** Exposed so a test can make the write gate inside it refuse. */
+  acquireLockMock: ReturnType<typeof vi.fn>;
 }
 
 async function makeHarness(): Promise<Harness> {
@@ -125,6 +128,7 @@ async function makeHarness(): Promise<Harness> {
     workspaceDir,
     repoDir: path.join(workspaceDir, KB),
     deleteFileMock: workspaceServiceMock.deleteFile as unknown as ReturnType<typeof vi.fn>,
+    acquireLockMock: workflowServiceMock.acquireLock as unknown as ReturnType<typeof vi.fn>,
   };
 }
 
@@ -264,6 +268,42 @@ describe('DELETE /workspace/:id/file — the repository\'s own files', () => {
       expect(res.status).toBe(200);
       expect(h.deleteFileMock).toHaveBeenCalledWith(WORKSPACE_ID, `${KB}/${p}`);
       expect(await exists(path.join(h.repoDir, p))).toBe(false);
+    }
+  });
+
+  it('refuses a nested access.md with the ordinary write refusal when the caller may not write it', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.repoDir, 'Team'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'Team/access.md'), '---\nwrite: Admin\n---\n', 'utf-8');
+    // The write gate lives inside `acquireLock`; it refuses as it does for any file.
+    const refusal = new AccessDeniedError({ path: 'Team/access.md', eligibleRoles: ['Admin'], eligibleUsers: [] });
+    h.acquireLockMock.mockRejectedValueOnce(refusal);
+
+    const res = await del(h.baseUrl, 'Team/access.md');
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe(refusal.message);
+    expect(body.error).not.toContain('platform file');
+    expect(body.error).not.toContain("repository's own file");
+    expect(h.deleteFileMock).not.toHaveBeenCalled();
+    expect(await exists(path.join(h.repoDir, 'Team/access.md'))).toBe(true);
+  });
+
+  it.each([KB, `${KB}/`])('refuses the repository root as a folder (%j) and leaves its own files', async (p) => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.repoDir, 'Team'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'access.md'), 'x', 'utf-8');
+    await fs.writeFile(path.join(h.repoDir, 'roles.yaml'), 'x', 'utf-8');
+    await fs.writeFile(path.join(h.repoDir, 'Team/notes.md'), 'n', 'utf-8');
+
+    const res = await del(h.baseUrl, p);
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'The repository root is a platform folder and cannot be moved or deleted.' });
+    expect(h.deleteFileMock).not.toHaveBeenCalled();
+    for (const f of ['access.md', 'roles.yaml', 'Team/notes.md']) {
+      expect(await exists(path.join(h.repoDir, f))).toBe(true);
     }
   });
 });
