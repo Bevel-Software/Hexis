@@ -48,12 +48,17 @@ describe('the skill tools name the available skills within the description cap',
     const fixed = probe.list.description!.slice(GUIDE_FIRST_SENTENCE.length + 1, probe.list.description!.indexOf('Currently available skills: '));
     const budget = TOOL_DESCRIPTION_CAP - GUIDE_FIRST_SENTENCE.length - 1 - fixed.length;
     const head = 'Currently available skills: '.length;
-    // Twenty-one names, the last one sized so the complete line is the budget to the character.
+    // Twenty-one names, the LAST one short — shorter than the ", and 1 more…"
+    // tail a cut before it would carry — and the first one sized so the
+    // complete line is the budget to the character. A cut-then-count loop
+    // stops at twenty names here (prefix plus tail is over budget) though the
+    // complete line fits.
     const count = 21;
     const base = Math.floor((budget - head - 1 - (count - 1) * 2 - count * 2) / count); // chars inside the backticks
     const names = Array.from({ length: count }, (_, i) => `n${i}`.padEnd(base, 'x'));
+    names[count - 1] = 'z';
     const slack = budget - (head + names.reduce((n, name) => n + name.length + 2, 0) + (count - 1) * 2 + 1);
-    names[count - 1] = names[count - 1] + 'y'.repeat(slack);
+    names[0] = names[0] + 'y'.repeat(slack);
     const { list } = await served(names.map(skill));
     const line = list.description!.slice(list.description!.indexOf('Currently available skills: '));
     expect(line.length).toBe(budget);
